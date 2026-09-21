@@ -39,7 +39,7 @@
              resolve to this property's value while testcontainers-core/jdbc resolve to Helidon's,
              producing a mixed-version Testcontainers classpath (unsupported; caused flaky
              GenericContainer port-wait timeouts against containers that were demonstrably up). -->
-        <testcontainers.version>1.21.4</testcontainers.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
         <!-- JUnit 6 (Jupiter + Platform move together; one BOM). The import below wins over the
              5.12.2 that Helidon's own `version.lib.junit` names — `mvn dependency:tree` shows
              6.1.3 for every org.junit artifact in every module, none left on 5.x. Surefire (3.1.0,
