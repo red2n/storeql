@@ -28,7 +28,7 @@ dependencies:
   # there — see lib/core/storage/app_storage.dart for why.
   shared_preferences: ^2.3.2
   # file picking (web + mobile + desktop)
-  file_picker: ^11.0.2
+  file_picker: ^13.1.0
   # pure-Dart image codecs — used ONLY by the non-web half of
   # lib/shared/util/image_compress.dart to downscale/re-encode owner-uploaded product
   # photos before upload. Web uses the browser's canvas encoder instead and never
