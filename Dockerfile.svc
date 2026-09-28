@@ -14,7 +14,7 @@
 # move to something the image actually has in the same commit, and the stack has to be brought up and
 # swept afterwards. Dependabot #41 did the bump alone; the application ran on 25.0.4 — Helidon booted,
 # Flyway migrated, the probes answered — and the stack still would not start.
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:24-jre
 
 ARG SVC_PATH
 ARG SVC_JAR
