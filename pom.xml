@@ -58,7 +58,7 @@
              from Helidon's parent) takes junit-platform-launcher at the engine's version, so no
              launcher is declared here. -->
         <junit.version>6.1.3</junit.version>
-        <lettuce.version>6.5.1.RELEASE</lettuce.version>
+        <lettuce.version>7.8.0.RELEASE</lettuce.version>
         <pdfbox.version>3.0.8</pdfbox.version>
         <verapdf.version>1.30.2</verapdf.version>
         <storeql.version>0.1.0-SNAPSHOT</storeql.version>
