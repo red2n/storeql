@@ -1,21 +1,30 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
 import '../../core/format.dart';
+import '../../core/ids.dart';
 import '../../core/network/api_error.dart';
 import '../../shared/util/file_download.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
+import 'providers/staff_names.dart';
 import 'post_journal_dialog.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../shared/util/short_ref.dart';
+import '../../shared/util/status_labels.dart';
+import '../../core/theme.dart';
+import '../../shared/widgets/empty_state.dart';
+import '../../shared/widgets/scrollable_table.dart';
+import '../../core/spacing.dart';
 
 enum _ReportType {
   sales,
   salesByDay,
+  salesByCategory,
   onHand,
   supplyDemand,
   movements,
@@ -45,9 +54,20 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
   _ReportType _selected = _ReportType.onHand;
 
   @override
+  void initState() {
+    super.initState();
+    // Staff named by one report stay named while the screen lives. A report
+    // reloads for a new period, grouping or report, and its rows unmount
+    // while it does; held here, the names outlive that, so a row never drops
+    // back to an id for a round trip and iam-svc is asked about each person
+    // once.
+    ref.listenManual(staffNameCacheProvider, (_, _) {});
+  }
+
+  @override
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, bc) {
-      final wide = bc.maxWidth >= 800;
+      final wide = bc.maxWidth >= AppBreakpoints.rail;
 
       if (wide) {
         // Side-by-side: report list on left, content on right
@@ -67,38 +87,114 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
       }
 
       // Mobile: top tabs
+      final gutter = context.pageGutter;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+            padding: EdgeInsetsDirectional.fromSTEB(gutter, gutter, gutter, 0),
             child: Text('Reports',
-                style: Theme.of(context).textTheme.headlineMedium),
+                style: context.isCompact
+                    ? Theme.of(context).textTheme.headlineSmall
+                    : Theme.of(context).textTheme.headlineMedium),
           ),
-          const SizedBox(height: 16),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Row(
-              children: _ReportType.values
-                  .map((r) => Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(_reportLabel(r)),
-                          avatar: Icon(_reportIcon(r), size: 16),
-                          selected: _selected == r,
-                          onSelected: (_) =>
-                              setState(() => _selected = r),
-                        ),
-                      ))
-                  .toList(),
-            ),
+          const SizedBox(height: AppSpacing.lg),
+          _ReportChips(
+            selected: _selected,
+            onSelect: (r) => setState(() => _selected = r),
           ),
-          const SizedBox(height: 16),
           Expanded(child: _ReportContent(type: _selected)),
         ],
       );
     });
+  }
+}
+
+/// The reports as a sideways-scrolling row of chips, for widths without room
+/// for the sidebar. The selected one is always scrolled into view — when the
+/// screen opens (On-Hand Inventory is fourth, past a phone's right edge) and
+/// whenever the selection changes — so the row never hides which report the
+/// page below is showing.
+class _ReportChips extends StatefulWidget {
+  final _ReportType selected;
+  final ValueChanged<_ReportType> onSelect;
+
+  const _ReportChips({required this.selected, required this.onSelect});
+
+  @override
+  State<_ReportChips> createState() => _ReportChipsState();
+}
+
+class _ReportChipsState extends State<_ReportChips> {
+  final _scroll = ScrollController();
+  final _keys = {for (final r in _ReportType.values) r: GlobalKey()};
+
+  @override
+  void initState() {
+    super.initState();
+    _revealSelected(animate: false);
+  }
+
+  @override
+  void didUpdateWidget(_ReportChips old) {
+    super.didUpdateWidget(old);
+    if (old.selected != widget.selected) _revealSelected(animate: true);
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// Centres the selected chip in the row, as far as the row can scroll. Only
+  /// this row moves: `Scrollable.ensureVisible` would scroll every scrollable
+  /// around it too.
+  void _revealSelected({required bool animate}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final chip = _keys[widget.selected]?.currentContext?.findRenderObject();
+      if (chip == null || !chip.attached) return;
+      final viewport = RenderAbstractViewport.maybeOf(chip);
+      if (viewport == null) return;
+      final position = _scroll.position;
+      final target = viewport
+          .getOffsetToReveal(chip, 0.5)
+          .offset
+          .clamp(position.minScrollExtent, position.maxScrollExtent);
+      if ((target - position.pixels).abs() < 1) return;
+      if (animate && !MediaQuery.disableAnimationsOf(context)) {
+        _scroll.animateTo(target,
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOutCubic);
+      } else {
+        _scroll.jumpTo(target);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      controller: _scroll,
+      scrollDirection: Axis.horizontal,
+      padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
+      child: Row(
+        children: [
+          for (final r in _ReportType.values)
+            Padding(
+              key: _keys[r],
+              padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
+              child: ChoiceChip(
+                label: Text(_reportLabel(r)),
+                avatar: Icon(_reportIcon(r), size: 16),
+                selected: widget.selected == r,
+                onSelected: (_) => widget.onSelect(r),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 
@@ -143,8 +239,8 @@ class _ReportSidebar extends StatelessWidget {
                   selectedColor: cs.onSecondaryContainer,
                   iconColor: cs.onSurfaceVariant,
                   textColor: cs.onSurfaceVariant,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8)),
+                  shape: const RoundedRectangleBorder(
+                      borderRadius: AppRadius.chip),
                   leading: Icon(_reportIcon(r)),
                   title: Text(_reportLabel(r),
                       style: TextStyle(
@@ -172,6 +268,8 @@ class _ReportContent extends ConsumerWidget {
         return _SalesReport();
       case _ReportType.salesByDay:
         return _SalesByDayReport();
+      case _ReportType.salesByCategory:
+        return _SalesByCategoryReport();
       case _ReportType.onHand:
         return _OnHandReport();
       case _ReportType.supplyDemand:
@@ -209,7 +307,16 @@ class _ReportContent extends ConsumerWidget {
 }
 
 /// Shared header (title + subtitle + refresh + optional export) used by table reports.
+///
+/// Inset by the page gutter, like the summary, filters and table under it, so
+/// their edges line up. Where the header is narrow — a phone — the text takes
+/// the whole width and the actions go on the line below it, as the shared
+/// page header does; beside the text they would squeeze the title and the
+/// description onto two lines each.
 class _ReportHeader extends StatelessWidget {
+  /// Narrower than this, the actions go under the text.
+  static const double _stackBelow = 480;
+
   final String title;
   final String subtitle;
   final VoidCallback onRefresh;
@@ -223,40 +330,63 @@ class _ReportHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final gutter = context.pageGutter;
+    final text = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(title,
+            style: theme.textTheme.titleLarge
+                ?.copyWith(fontWeight: FontWeight.bold)),
+        Text(subtitle,
+            style: theme.textTheme.bodyMedium
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+      ],
+    );
+    final actions = [
+      if (onExportCsv != null)
+        TextButton.icon(
+          onPressed: onExportCsv,
+          icon: const Icon(Icons.download_outlined, size: 18),
+          label: const Text('Export CSV'),
+        ),
+      IconButton(
+          icon: const Icon(Icons.refresh),
+          tooltip: 'Refresh',
+          onPressed: onRefresh),
+    ];
     return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
-                    style: Theme.of(context)
-                        .textTheme
-                        .titleLarge
-                        ?.copyWith(fontWeight: FontWeight.bold)),
-                Text(subtitle,
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodyMedium
-                        ?.copyWith(color: cs.outline)),
-              ],
-            ),
-          ),
-          if (onExportCsv != null)
-            TextButton.icon(
-              onPressed: onExportCsv,
-              icon: const Icon(Icons.download_outlined, size: 18),
-              label: const Text('Export CSV'),
-            ),
-          IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: 'Refresh',
-              onPressed: onRefresh),
-        ],
-      ),
+      padding: EdgeInsetsDirectional.fromSTEB(gutter, gutter, gutter, AppSpacing.lg),
+      child: LayoutBuilder(builder: (context, constraints) {
+        final largeText =
+            MediaQuery.textScalerOf(context).scale(16) > 16 * 1.3;
+        final stacked = constraints.maxWidth < _stackBelow ||
+            (largeText && constraints.maxWidth < AppBreakpoints.expanded);
+        if (stacked) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              text,
+              const SizedBox(height: AppSpacing.sm),
+              Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: actions,
+              ),
+            ],
+          );
+        }
+        return Row(
+          children: [
+            Expanded(child: text),
+            const SizedBox(width: AppSpacing.lg),
+            ...actions,
+          ],
+        );
+      }),
     );
   }
 }
@@ -293,7 +423,7 @@ class _DateRangeBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final range = ref.watch(reportDateRangeProvider);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
       child: Wrap(
         spacing: 12,
         runSpacing: 8,
@@ -302,12 +432,12 @@ class _DateRangeBar extends ConsumerWidget {
           OutlinedButton.icon(
             onPressed: () => _pick(context, ref, isFrom: true),
             icon: const Icon(Icons.event_outlined, size: 18),
-            label: Text('From: ${range.from ?? '—'}'),
+            label: Text('From: ${_day(range.from)}'),
           ),
           OutlinedButton.icon(
             onPressed: () => _pick(context, ref, isFrom: false),
             icon: const Icon(Icons.event_outlined, size: 18),
-            label: Text('To: ${range.to ?? '—'}'),
+            label: Text('To: ${_day(range.to)}'),
           ),
           TextButton(
             onPressed: () {
@@ -336,10 +466,142 @@ String _csvEscape(Object? v) {
   return s;
 }
 
-String _short(String s, [int n = 8]) =>
-    s.length > n ? '${s.substring(0, n)}…' : s;
+/// A store in a report's table by its name; the end of its id only while the
+/// stores load, or for one no longer listed.
+class _StoreName extends ConsumerWidget {
+  const _StoreName(this.storeId);
+  final String storeId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final stores = ref.watch(storesProvider).value ?? const <StoreInfo>[];
+    for (final s in stores) {
+      if (s.id == storeId) return Text(s.name);
+    }
+    return Text('…${shortRef(storeId)}', style: _idStyle);
+  }
+}
+
+/// A variant in a report's table by its product's name, its SKU under it.
+/// Every row asks with the same [keys] — the table's variants — so the names
+/// are read once for the table.
+class _VariantName extends ConsumerWidget {
+  const _VariantName(this.variantId, {required this.keys});
+  final String variantId;
+  final Iterable<String> keys;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final labels = _variantLabels(ref, keys);
+    final sku = variantSku(variantId, labels);
+    if (!labels.containsKey(variantId)) {
+      return Text(variantDisplayName(variantId, labels), style: _idStyle);
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(variantDisplayName(variantId, labels)),
+        if (sku.isNotEmpty)
+          Text(sku, style: Theme.of(context).textTheme.bodySmall),
+      ],
+    );
+  }
+}
+
+/// A member of staff in a report's table by their login email (iam-svc's);
+/// the end of their id only while iam-svc has not named them, or will not (a
+/// login gone from the business, a viewer without a management role). Every
+/// row asks with the same [keys], the table's staff, and the names land in
+/// the screen's [StaffNameCache], so each person is asked about once.
+///
+/// A bucket that is nobody is said in words, and never sent to iam-svc, which
+/// refuses a whole request for one id that is not a UUIDv7: `SYSTEM` (stock
+/// the platform moved itself) and `UNATTRIBUTED` (a journal entry naming no
+/// one).
+class _StaffName extends ConsumerWidget {
+  const _StaffName(this.userId, {required this.keys});
+  final String userId;
+  final Iterable<String> keys;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final nobody = switch (userId) {
+      'SYSTEM' => 'System',
+      'UNATTRIBUTED' => 'Unattributed',
+      _ => null,
+    };
+    if (nobody != null) {
+      return Text(nobody,
+          style: TextStyle(
+              fontStyle: FontStyle.italic,
+              color: Theme.of(context).colorScheme.outline));
+    }
+    final email = ref.watch(staffNameCacheProvider)[userId];
+    if (email != null) return Text(email);
+    final names = ref.read(staffNameCacheProvider.notifier);
+    Future.microtask(() => names.resolve(keys.where(isV7)));
+    return Text('…${shortRef(userId)}', style: _idStyle);
+  }
+}
+
+/// What a grouped report's row is about, in words: a store or a product by
+/// name, a reason in words, a staff member by their login, a rate code, a
+/// month or an age band as sent.
+class _GroupName extends StatelessWidget {
+  const _GroupName({
+    required this.grouping,
+    required this.groupKey,
+    required this.keys,
+  });
+  final String grouping;
+  final String groupKey;
+
+  /// Every key in the table, so a product table reads its names once.
+  final Iterable<String> keys;
+
+  @override
+  Widget build(BuildContext context) => switch (grouping) {
+        'STORE' => _StoreName(groupKey),
+        'VARIANT' => _VariantName(groupKey, keys: keys),
+        'REASON' => Text(humanizeCode(groupKey)),
+        'ACTOR' => _StaffName(groupKey, keys: keys),
+        _ => Text(groupKey),
+      };
+}
 
 const _idStyle = TextStyle(fontFamily: 'monospace', fontSize: 12);
+
+/// A report's day, as a date (`26 Aug 2026`), read as written — the API's
+/// `2026-08-26` stays the 26th in any time zone; '—' when none is chosen.
+String _day(String? iso) {
+  if (iso == null || iso.isEmpty) return '—';
+  final d = DateTime.tryParse(iso);
+  return d == null ? iso : AppFormat.dateOf(d);
+}
+
+/// ` · 26 Aug 2026 → 25 Sept 2026` after a report's caption, or nothing when
+/// no period is chosen.
+String _period(ReportDateRange range) =>
+    range.from == null ? '' : ' · ${_day(range.from)} → ${_day(range.to)}';
+
+/// An amount as money: in the row's own [currency] where it has one, else the
+/// business's home currency (the caller's `home`). Grouped, with its symbol.
+String _money(num v, String? currency) => AppFormat.money(v, currencyCode: currency);
+
+/// A tender method in words: `GIFT_CARD` → *Gift card*.
+String _methodWords(String method) => switch (method.toUpperCase()) {
+      'CASH' => 'Cash',
+      'CARD' => 'Card',
+      'GIFT_CARD' => 'Gift card',
+      'STORE_CREDIT' => 'Store credit',
+      'UPI' => 'UPI',
+      'WALLET' => 'Wallet',
+      'LOYALTY' => 'Loyalty points',
+      'VOUCHER' => 'Voucher',
+      _ => humanizeCode(method),
+    };
 
 class _SupplyDemandReport extends ConsumerWidget {
   @override
@@ -378,11 +640,11 @@ class _SupplyDemandReport extends ConsumerWidget {
                   },
           ),
           if (rows.isEmpty)
-            const Expanded(child: Center(child: Text('No netting data yet.')))
+            const Expanded(child: EmptyState(title: 'No netting data yet.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -397,9 +659,9 @@ class _SupplyDemandReport extends ConsumerWidget {
                     ],
                     rows: rows
                         .map((r) => DataRow(cells: [
-                              DataCell(Text(_short(r.storeId), style: _idStyle)),
+                              DataCell(_StoreName(r.storeId)),
                               DataCell(
-                                  Text(_short(r.variantId, 16), style: _idStyle)),
+                                  _VariantName(r.variantId, keys: rows.map((x) => x.variantId))),
                               DataCell(Text(r.onHand.toStringAsFixed(0))),
                               DataCell(
                                   Text(r.supplyInTransit.toStringAsFixed(0))),
@@ -434,7 +696,7 @@ class _SalesReport extends ConsumerWidget {
           _ReportHeader(
             title: 'Sales Revenue',
             subtitle:
-                'Gross / refunded / net revenue by currency${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                'Gross / refunded / net revenue by currency${_period(range)}',
             onRefresh: () => ref.invalidate(salesSummaryReportProvider),
             onExportCsv: rows.isEmpty
                 ? null
@@ -456,11 +718,11 @@ class _SalesReport extends ConsumerWidget {
           const _DateRangeBar(),
           const SizedBox(height: 12),
           if (rows.isEmpty)
-            const Expanded(child: Center(child: Text('No sales yet.')))
+            const Expanded(child: EmptyState(title: 'No sales yet.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -477,9 +739,9 @@ class _SalesReport extends ConsumerWidget {
                         .map((r) => DataRow(cells: [
                               DataCell(Text(r.currency)),
                               DataCell(Text('${r.orders}')),
-                              DataCell(Text(r.gross.toStringAsFixed(2))),
-                              DataCell(Text(r.refunded.toStringAsFixed(2))),
-                              DataCell(Text(r.net.toStringAsFixed(2),
+                              DataCell(Text(_money(r.gross, r.currency))),
+                              DataCell(Text(_money(r.refunded, r.currency))),
+                              DataCell(Text(_money(r.net, r.currency),
                                   style: const TextStyle(
                                       fontWeight: FontWeight.bold))),
                             ]))
@@ -513,7 +775,7 @@ class _SalesByDayReport extends ConsumerWidget {
           _ReportHeader(
             title: 'Sales by Day',
             subtitle:
-                'Daily revenue buckets${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                'Daily revenue buckets${_period(range)}',
             onRefresh: () => ref.invalidate(salesByDayReportProvider),
             onExportCsv: rows.isEmpty
                 ? null
@@ -537,11 +799,11 @@ class _SalesByDayReport extends ConsumerWidget {
           const SizedBox(height: 12),
           if (rows.isEmpty)
             const Expanded(
-                child: Center(child: Text('No daily sales in this range.')))
+                child: EmptyState(title: 'No daily sales in this range.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -560,9 +822,9 @@ class _SalesByDayReport extends ConsumerWidget {
                               DataCell(Text(r.day)),
                               DataCell(Text(r.currency)),
                               DataCell(Text('${r.orders}')),
-                              DataCell(Text(r.gross.toStringAsFixed(2))),
-                              DataCell(Text(r.refunded.toStringAsFixed(2))),
-                              DataCell(Text(r.net.toStringAsFixed(2),
+                              DataCell(Text(_money(r.gross, r.currency))),
+                              DataCell(Text(_money(r.refunded, r.currency))),
+                              DataCell(Text(_money(r.net, r.currency),
                                   style: const TextStyle(
                                       fontWeight: FontWeight.bold))),
                             ]))
@@ -573,6 +835,147 @@ class _SalesByDayReport extends ConsumerWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// What each category took (19.x). The server groups; the catalogue names.
+class _SalesByCategoryReport extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cs = Theme.of(context).colorScheme;
+    final range = ref.watch(reportDateRangeProvider);
+    final level = ref.watch(salesByCategoryLevelProvider);
+    final async = ref.watch(salesByCategoryReportProvider);
+    final names = ref.watch(categoriesProvider).maybeWhen(
+          data: (cats) => {for (final c in cats) c.id: c.name},
+          orElse: () => const <String, String>{},
+        );
+    // A category's name, or null for one the catalogue does not list (still
+    // loading, or retired since the sale): that row shows the end of its id,
+    // marked as one, and the CSV leaves the name blank beside the id.
+    String? nameOf(SalesCategoryRow r) =>
+        r.categoryId == null ? 'Uncategorised' : names[r.categoryId];
+    return async.when(
+      loading: () => const LoadingView(label: 'Loading sales by category…'),
+      error: (e, _) => ErrorView(
+        message:
+            friendlyError(e, fallback: 'Could not load sales by category.'),
+        onRetry: () => ref.invalidate(salesByCategoryReportProvider),
+      ),
+      data: (rows) {
+        final unplaced = rows.any((r) => r.categoryId == null);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _ReportHeader(
+              title: 'Sales by Category',
+              subtitle:
+                  '${level == 'top' ? 'Rolled up to the top of the tree' : "By the product's own category"}'
+                  '${_period(range)}',
+              onRefresh: () => ref.invalidate(salesByCategoryReportProvider),
+              onExportCsv: rows.isEmpty
+                  ? null
+                  : () {
+                      final buf = StringBuffer(
+                          'category,categoryId,currency,orders,units,gross,share\n');
+                      for (final r in rows) {
+                        buf.writeln([
+                          _csvEscape(nameOf(r)),
+                          _csvEscape(r.categoryId ?? ''),
+                          _csvEscape(r.currency),
+                          r.orders,
+                          r.units,
+                          r.gross,
+                          r.share,
+                        ].join(','));
+                      }
+                      _downloadCsv('sales-by-category-$level.csv', buf.toString());
+                    },
+            ),
+            const _DateRangeBar(),
+            Padding(
+              padding: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 4, context.pageGutter, 0),
+              child: SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'leaf', label: Text('Own category')),
+                  ButtonSegment(value: 'top', label: Text('Top level')),
+                ],
+                selected: {level},
+                onSelectionChanged: (s) => ref
+                    .read(salesByCategoryLevelProvider.notifier)
+                    .state = s.first,
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (rows.isEmpty)
+              const Expanded(
+                  child: EmptyState(title: 'No sale lines in this range.'))
+            else
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (unplaced)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(
+                            'Uncategorised is lines the catalogue cannot place: a product with no '
+                            'category, or a variant the catalogue has not announced yet. '
+                            'Re-announcing the catalogue from Products places them.',
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(color: cs.onSurfaceVariant),
+                          ),
+                        ),
+                      Card(
+                        child: DataTable(
+                          headingRowColor:
+                              WidgetStatePropertyAll(cs.surfaceContainerHigh),
+                          columnSpacing: 24,
+                          columns: const [
+                            DataColumn(label: Text('Category')),
+                            DataColumn(label: Text('Currency')),
+                            DataColumn(label: Text('Orders'), numeric: true),
+                            DataColumn(label: Text('Units'), numeric: true),
+                            DataColumn(label: Text('Gross'), numeric: true),
+                            DataColumn(label: Text('Share %'), numeric: true),
+                          ],
+                          rows: rows
+                              .map((r) => DataRow(cells: [
+                                    DataCell(nameOf(r) == null
+                                        ? Text('…${shortRef(r.categoryId!)}',
+                                            style: _idStyle)
+                                        : Text(nameOf(r)!,
+                                            style: r.categoryId == null
+                                                ? TextStyle(
+                                                    fontStyle: FontStyle.italic,
+                                                    color: cs.onSurfaceVariant)
+                                                : null)),
+                                    DataCell(Text(r.currency)),
+                                    DataCell(Text('${r.orders}')),
+                                    DataCell(Text(r.units.toStringAsFixed(
+                                        r.units == r.units.roundToDouble()
+                                            ? 0
+                                            : 3))),
+                                    DataCell(Text(_money(r.gross, r.currency),
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.bold))),
+                                    DataCell(Text(r.share.toStringAsFixed(2))),
+                                  ]))
+                              .toList(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }
@@ -614,11 +1017,11 @@ class _MovementStatsReport extends ConsumerWidget {
                   },
           ),
           if (rows.isEmpty)
-            const Expanded(child: Center(child: Text('No movement data yet.')))
+            const Expanded(child: EmptyState(title: 'No movement data yet.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -634,9 +1037,9 @@ class _MovementStatsReport extends ConsumerWidget {
                     ],
                     rows: rows
                         .map((r) => DataRow(cells: [
-                              DataCell(Text(_short(r.storeId), style: _idStyle)),
+                              DataCell(_StoreName(r.storeId)),
                               DataCell(
-                                  Text(_short(r.variantId, 16), style: _idStyle)),
+                                  _VariantName(r.variantId, keys: rows.map((x) => x.variantId))),
                               DataCell(Text(r.bucket, style: _idStyle)),
                               DataCell(Text(r.totalIn.toStringAsFixed(0))),
                               DataCell(Text(r.totalOut.toStringAsFixed(0))),
@@ -653,11 +1056,34 @@ class _MovementStatsReport extends ConsumerWidget {
   }
 }
 
+/// Up to this many variant ids go into one call to product-svc's resolve
+/// endpoint, which reads no more than 200.
+const _resolveChunk = 200;
+
+/// Product name and SKU for each of [variantIds], asked for in chunks the
+/// resolve endpoint accepts. What has not arrived yet (or is unknown) is simply
+/// missing from the map, and the caller shows a short id until it is.
+Map<String, VariantLabel> _variantLabels(
+    WidgetRef ref, Iterable<String> variantIds) {
+  final ids = variantIdsKey(variantIds);
+  if (ids.isEmpty) return const {};
+  final all = ids.split(',');
+  final labels = <String, VariantLabel>{};
+  for (var i = 0; i < all.length; i += _resolveChunk) {
+    final chunk = all.sublist(
+        i, i + _resolveChunk > all.length ? all.length : i + _resolveChunk);
+    labels.addAll(
+        ref.watch(variantLabelsProvider(chunk.join(','))).value ?? const {});
+  }
+  return labels;
+}
+
 class _OnHandReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reportAsync = ref.watch(onHandReportProvider);
     final cs = Theme.of(context).colorScheme;
+    final gutter = context.pageGutter;
 
     return reportAsync.when(
       loading: () => const LoadingView(label: 'Loading on-hand report…'),
@@ -667,6 +1093,15 @@ class _OnHandReport extends ConsumerWidget {
       ),
       data: (rows) {
         final grandTotal = rows.fold<double>(0, (s, r) => s + r.onHand);
+        // A row is a product in a store: one stocked in two stores is two
+        // rows but one SKU of the range.
+        final skus = rows.map((r) => r.variantId).toSet().length;
+        final storeNames = {
+          for (final s in ref.watch(storesProvider).value ?? const <StoreInfo>[])
+            s.id: s.name,
+        };
+        final labels = _variantLabels(ref, rows.map((r) => r.variantId));
+        String storeName(String id) => storeNames[id] ?? '…${shortRef(id)}';
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -677,12 +1112,15 @@ class _OnHandReport extends ConsumerWidget {
               onExportCsv: rows.isEmpty
                   ? null
                   : () {
-                      final buf =
-                          StringBuffer('storeId,variantId,onHand\n');
+                      final buf = StringBuffer(
+                          'storeId,store,variantId,product,sku,onHand\n');
                       for (final r in rows) {
                         buf.writeln([
                           _csvEscape(r.storeId),
+                          _csvEscape(storeNames[r.storeId]),
                           _csvEscape(r.variantId),
+                          _csvEscape(labels[r.variantId]?.productName),
+                          _csvEscape(labels[r.variantId]?.sku),
                           r.onHand,
                         ].join(','));
                       }
@@ -691,59 +1129,57 @@ class _OnHandReport extends ConsumerWidget {
             ),
             // Summary chip
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
+              padding: EdgeInsetsDirectional.symmetric(horizontal: gutter),
               child: Chip(
                 avatar: const Icon(Icons.inventory_2_outlined, size: 16),
-                label: Text(
-                    '${rows.length} SKUs · ${grandTotal.toStringAsFixed(0)} units total'),
+                label: Text('$skus ${skus == 1 ? 'SKU' : 'SKUs'} · '
+                    '${grandTotal.toStringAsFixed(0)} units total'),
                 backgroundColor: cs.primaryContainer,
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             if (rows.isEmpty)
-              Expanded(
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.bar_chart, size: 64, color: cs.outlineVariant),
-                      const SizedBox(height: 16),
-                      const Text('No inventory data yet.'),
-                      const SizedBox(height: 8),
-                      const Text('Receive stock to see the report.'),
-                    ],
-                  ),
+              const Expanded(
+                child: EmptyState(
+                  icon: Icons.bar_chart,
+                  title: 'No inventory data yet.',
+                  message: 'Receive stock to see the report.',
                 ),
               )
             else
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: EdgeInsetsDirectional.fromSTEB(
+                      gutter, 0, gutter, AppSpacing.lg),
                   child: Card(
-                    child: DataTable(
-                      headingRowColor:
-                          WidgetStatePropertyAll(cs.surfaceContainerHigh),
-                      columnSpacing: 24,
-                      columns: const [
-                        DataColumn(label: Text('Store')),
-                        DataColumn(label: Text('Variant ID')),
-                        DataColumn(label: Text('On-Hand'), numeric: true),
-                      ],
-                      rows: rows
-                          .map((r) => DataRow(cells: [
-                                DataCell(Text(
-                                  shortRef(r.storeId),
-                                  style: const TextStyle(
-                                      fontFamily: 'monospace', fontSize: 12),
-                                )),
-                                DataCell(Text(
-                                  r.variantId.length > 16 ? '…${shortRef(r.variantId, length: 16)}' : r.variantId,
-                                  style: const TextStyle(
-                                      fontFamily: 'monospace', fontSize: 12),
-                                )),
-                                DataCell(Text(r.onHand.toStringAsFixed(0))),
-                              ]))
-                          .toList(),
+                    clipBehavior: Clip.antiAlias,
+                    child: ScrollableTable(
+                      child: DataTable(
+                        headingRowColor:
+                            WidgetStatePropertyAll(cs.surfaceContainerHigh),
+                        columnSpacing: AppSpacing.xl,
+                        columns: const [
+                          DataColumn(label: Text('Store')),
+                          DataColumn(label: Text('Product')),
+                          DataColumn(label: Text('On hand'), numeric: true),
+                        ],
+                        rows: rows.map((r) {
+                          final sku = variantSku(r.variantId, labels);
+                          return DataRow(cells: [
+                            DataCell(Text(storeName(r.storeId))),
+                            // The product by name, its SKU after it in grey.
+                            DataCell(Text.rich(TextSpan(children: [
+                              TextSpan(
+                                  text: variantDisplayName(r.variantId, labels)),
+                              if (sku.isNotEmpty)
+                                TextSpan(
+                                    text: ' · $sku',
+                                    style: TextStyle(color: cs.onSurfaceVariant)),
+                            ]))),
+                            DataCell(Text(r.onHand.toStringAsFixed(0))),
+                          ]);
+                        }).toList(),
+                      ),
                     ),
                   ),
                 ),
@@ -761,6 +1197,8 @@ String _reportLabel(_ReportType r) {
       return 'Sales Revenue';
     case _ReportType.salesByDay:
       return 'Sales by Day';
+    case _ReportType.salesByCategory:
+      return 'Sales by Category';
     case _ReportType.onHand:
       return 'On-Hand Inventory';
     case _ReportType.supplyDemand:
@@ -802,6 +1240,8 @@ IconData _reportIcon(_ReportType r) {
       return Icons.payments_outlined;
     case _ReportType.salesByDay:
       return Icons.calendar_view_day_outlined;
+    case _ReportType.salesByCategory:
+      return Icons.category_outlined;
     case _ReportType.onHand:
       return Icons.inventory_2_outlined;
     case _ReportType.supplyDemand:
@@ -854,7 +1294,7 @@ class _GroupingBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final selected = ref.watch(provider);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 0, 24, 4),
+      padding: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 0, context.pageGutter, 4),
       child: Wrap(
         spacing: 8,
         runSpacing: 8,
@@ -910,11 +1350,11 @@ class _LowStockReport extends ConsumerWidget {
           ),
           if (rows.isEmpty)
             const Expanded(
-                child: Center(child: Text('Nothing is below its reorder level.')))
+                child: EmptyState(title: 'Nothing is below its reorder level.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -933,8 +1373,8 @@ class _LowStockReport extends ConsumerWidget {
                     ],
                     rows: rows
                         .map((r) => DataRow(cells: [
-                              DataCell(Text(_short(r.storeId), style: _idStyle)),
-                              DataCell(Text(_short(r.variantId), style: _idStyle)),
+                              DataCell(_StoreName(r.storeId)),
+                              DataCell(_VariantName(r.variantId, keys: rows.map((x) => x.variantId))),
                               DataCell(Chip(
                                 label: Text(r.signal,
                                     style: const TextStyle(fontSize: 11)),
@@ -961,6 +1401,8 @@ class _LowStockReport extends ConsumerWidget {
 class _ValuationReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final async = ref.watch(valuationReportProvider);
     return async.when(
@@ -972,18 +1414,21 @@ class _ValuationReport extends ConsumerWidget {
       data: (rows) {
         final totalValue = rows.fold<double>(0, (s, r) => s + r.value);
         final totalUnvalued = rows.fold<double>(0, (s, r) => s + r.unvaluedQty);
+        final totalConsignmentQty = rows.fold<double>(0, (s, r) => s + r.consignmentQty);
+        final totalConsignmentValue = rows.fold<double>(0, (s, r) => s + r.consignmentValue);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _ReportHeader(
               title: 'Stock Valuation',
-              subtitle: 'What the holding is worth on its configured cost basis',
+              subtitle:
+                  "What the business's own holding is worth on its configured cost basis; consignment stock, the supplier's until it sells, is shown apart",
               onRefresh: () => ref.invalidate(valuationReportProvider),
               onExportCsv: rows.isEmpty
                   ? null
                   : () {
                       final buf = StringBuffer(
-                          'groupKey,method,onHandQty,unvaluedQty,value\n');
+                          'groupKey,method,onHandQty,unvaluedQty,value,consignmentQty,consignmentValue\n');
                       for (final r in rows) {
                         buf.writeln([
                           _csvEscape(r.groupKey),
@@ -991,6 +1436,8 @@ class _ValuationReport extends ConsumerWidget {
                           r.onHandQty,
                           r.unvaluedQty,
                           r.value,
+                          r.consignmentQty,
+                          r.consignmentValue,
                         ].join(','));
                       }
                       _downloadCsv('valuation.csv', buf.toString());
@@ -1005,7 +1452,7 @@ class _ValuationReport extends ConsumerWidget {
             // the one number this report exists to get right.
             if (totalUnvalued > 0)
               Padding(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+                padding: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 8, context.pageGutter, 0),
                 child: Row(children: [
                   Icon(Icons.info_outline, size: 16, color: cs.outline),
                   const SizedBox(width: 8),
@@ -1020,11 +1467,11 @@ class _ValuationReport extends ConsumerWidget {
               ),
             const SizedBox(height: 8),
             if (rows.isEmpty)
-              const Expanded(child: Center(child: Text('No stock to value.')))
+              const Expanded(child: EmptyState(title: 'No stock to value.'))
             else
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                   child: Card(
                     child: DataTable(
                       headingRowColor:
@@ -1036,18 +1483,30 @@ class _ValuationReport extends ConsumerWidget {
                         DataColumn(label: Text('On hand'), numeric: true),
                         DataColumn(label: Text('Uncosted'), numeric: true),
                         DataColumn(label: Text('Value'), numeric: true),
+                        DataColumn(label: Text('On consignment'), numeric: true),
+                        DataColumn(label: Text("Suppliers' value"), numeric: true),
                       ],
                       rows: [
                         ...rows.map((r) => DataRow(cells: [
-                              DataCell(Text(_short(r.groupKey), style: _idStyle)),
-                              DataCell(Text(r.method)),
+                              DataCell(_GroupName(grouping: ref.watch(valuationGroupingProvider), groupKey: r.groupKey, keys: rows.map((x) => x.groupKey))),
+                              DataCell(Text(humanizeCode(r.method))),
                               DataCell(Text(r.onHandQty.toStringAsFixed(0))),
                               DataCell(Text(r.unvaluedQty.toStringAsFixed(0),
                                   style: TextStyle(
                                       color: r.unvaluedQty > 0
                                           ? cs.outline
                                           : null))),
-                              DataCell(Text(r.value.toStringAsFixed(2))),
+                              DataCell(Text(_money(r.value, home))),
+                              DataCell(Text(r.consignmentQty.toStringAsFixed(0),
+                                  style: TextStyle(
+                                      color: r.consignmentQty > 0
+                                          ? null
+                                          : cs.outline))),
+                              DataCell(Text(_money(r.consignmentValue, home),
+                                  style: TextStyle(
+                                      color: r.consignmentValue > 0
+                                          ? null
+                                          : cs.outline))),
                             ])),
                         DataRow(cells: [
                           const DataCell(Text('Total',
@@ -1055,7 +1514,11 @@ class _ValuationReport extends ConsumerWidget {
                           const DataCell(Text('')),
                           const DataCell(Text('')),
                           DataCell(Text(totalUnvalued.toStringAsFixed(0))),
-                          DataCell(Text(totalValue.toStringAsFixed(2),
+                          DataCell(Text(_money(totalValue, home),
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.bold))),
+                          DataCell(Text(totalConsignmentQty.toStringAsFixed(0))),
+                          DataCell(Text(_money(totalConsignmentValue, home),
                               style:
                                   const TextStyle(fontWeight: FontWeight.bold))),
                         ]),
@@ -1089,7 +1552,7 @@ class _ShrinkageReport extends ConsumerWidget {
           _ReportHeader(
             title: 'Shrinkage',
             subtitle:
-                'Stock written off and found${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                'Stock written off and found${_period(range)}',
             onRefresh: () => ref.invalidate(shrinkageReportProvider),
             onExportCsv: rows.isEmpty
                 ? null
@@ -1120,11 +1583,11 @@ class _ShrinkageReport extends ConsumerWidget {
           const SizedBox(height: 12),
           if (rows.isEmpty)
             const Expanded(
-                child: Center(child: Text('No stock adjustments in this range.')))
+                child: EmptyState(title: 'No stock adjustments in this range.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -1142,7 +1605,7 @@ class _ShrinkageReport extends ConsumerWidget {
                     ],
                     rows: rows
                         .map((r) => DataRow(cells: [
-                              DataCell(Text(_short(r.groupKey, 18))),
+                              DataCell(_GroupName(grouping: ref.watch(shrinkageGroupingProvider), groupKey: r.groupKey, keys: rows.map((x) => x.groupKey))),
                               DataCell(Text(r.qtyWrittenOff.toStringAsFixed(0),
                                   style: TextStyle(
                                       color: r.qtyWrittenOff > 0
@@ -1168,6 +1631,8 @@ class _ShrinkageReport extends ConsumerWidget {
 class _TaxSummaryReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final async = ref.watch(taxSummaryReportProvider);
     return async.when(
@@ -1182,7 +1647,7 @@ class _TaxSummaryReport extends ConsumerWidget {
           _ReportHeader(
             title: 'Tax Summary',
             subtitle:
-                'Reconciles to VAT return boxes 1 and 6${report.periodFrom != null ? ' · ${report.periodFrom!.split('T').first} → ${report.periodTo!.split('T').first}' : ''}',
+                'Reconciles to VAT return boxes 1 and 6${report.periodFrom != null ? ' · ${_day(report.periodFrom)} → ${_day(report.periodTo)}' : ''}',
             onRefresh: () => ref.invalidate(taxSummaryReportProvider),
             onExportCsv: report.rows.isEmpty
                 ? null
@@ -1216,19 +1681,19 @@ class _TaxSummaryReport extends ConsumerWidget {
           // is the one thing it must not be on the screen a return is filed from.
           if (report.boxOneDisagrees)
             Container(
-              margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+              margin: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: cs.errorContainer,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: AppRadius.chip,
               ),
               child: Row(children: [
                 Icon(Icons.warning_amber_outlined, color: cs.onErrorContainer),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Box 1 (${report.totals.outputVat.toStringAsFixed(2)}) does not match total VAT '
-                    '(${report.totals.vatAmount.toStringAsFixed(2)}): a line marked exempt is carrying VAT. '
+                    'Box 1 (${_money(report.totals.outputVat, home)}) does not match total VAT '
+                    '(${_money(report.totals.vatAmount, home)}): a line marked exempt is carrying VAT. '
                     'Check the rows below before filing.',
                     style: TextStyle(color: cs.onErrorContainer, fontSize: 13),
                   ),
@@ -1238,11 +1703,11 @@ class _TaxSummaryReport extends ConsumerWidget {
           const SizedBox(height: 12),
           if (report.rows.isEmpty)
             const Expanded(
-                child: Center(child: Text('No tax transactions in this range.')))
+                child: EmptyState(title: 'No tax transactions in this range.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -1258,7 +1723,7 @@ class _TaxSummaryReport extends ConsumerWidget {
                     rows: [
                       ...report.rows.map((r) => DataRow(cells: [
                             DataCell(Row(children: [
-                              Text(_short(r.groupKey, 18)),
+                              _GroupName(grouping: ref.watch(taxGroupingProvider), groupKey: r.groupKey, keys: report.rows.map((x) => x.groupKey)),
                               if (r.exempt) ...[
                                 const SizedBox(width: 6),
                                 const Chip(
@@ -1269,22 +1734,22 @@ class _TaxSummaryReport extends ConsumerWidget {
                                 ),
                               ],
                             ])),
-                            DataCell(Text(r.netAmount.toStringAsFixed(2))),
-                            DataCell(Text(r.vatAmount.toStringAsFixed(2))),
-                            DataCell(Text(r.grossAmount.toStringAsFixed(2))),
+                            DataCell(Text(_money(r.netAmount, home))),
+                            DataCell(Text(_money(r.vatAmount, home))),
+                            DataCell(Text(_money(r.grossAmount, home))),
                             DataCell(Text('${r.transactions}')),
                           ])),
                       DataRow(cells: [
                         const DataCell(Text('Total (Box 6 / Box 1)',
                             style: TextStyle(fontWeight: FontWeight.bold))),
-                        DataCell(Text(report.totals.netAmount.toStringAsFixed(2),
+                        DataCell(Text(_money(report.totals.netAmount, home),
                             style:
                                 const TextStyle(fontWeight: FontWeight.bold))),
-                        DataCell(Text(report.totals.outputVat.toStringAsFixed(2),
+                        DataCell(Text(_money(report.totals.outputVat, home),
                             style:
                                 const TextStyle(fontWeight: FontWeight.bold))),
                         DataCell(
-                            Text(report.totals.grossAmount.toStringAsFixed(2))),
+                            Text(_money(report.totals.grossAmount, home))),
                         DataCell(Text('${report.totals.transactions}')),
                       ]),
                     ],
@@ -1303,6 +1768,8 @@ class _TaxSummaryReport extends ConsumerWidget {
 class _ExceptionReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(exceptionReportProvider);
@@ -1318,7 +1785,7 @@ class _ExceptionReport extends ConsumerWidget {
           _ReportHeader(
             title: 'Staff Exceptions',
             subtitle:
-                'Discounts, voids and no-sales${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                'Discounts, voids and no-sales${_period(range)}',
             onRefresh: () => ref.invalidate(exceptionReportProvider),
             onExportCsv: report.rows.isEmpty
                 ? null
@@ -1349,11 +1816,11 @@ class _ExceptionReport extends ConsumerWidget {
           // looks like evidence.
           if (!report.journalCoverage && report.rows.isNotEmpty)
             Container(
-              margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+              margin: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: cs.tertiaryContainer,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: AppRadius.chip,
               ),
               child: Row(children: [
                 Icon(Icons.info_outline, color: cs.onTertiaryContainer),
@@ -1372,11 +1839,11 @@ class _ExceptionReport extends ConsumerWidget {
           const SizedBox(height: 12),
           if (report.rows.isEmpty)
             const Expanded(
-                child: Center(child: Text('No staff exceptions in this range.')))
+                child: EmptyState(title: 'No staff exceptions in this range.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -1401,9 +1868,9 @@ class _ExceptionReport extends ConsumerWidget {
                             ? Text('Unattributed',
                                 style: TextStyle(
                                     fontStyle: FontStyle.italic, color: cs.outline))
-                            : Text(_short(r.groupKey), style: _idStyle)),
+                            : _GroupName(grouping: ref.watch(exceptionGroupingProvider), groupKey: r.groupKey, keys: report.rows.map((x) => x.groupKey))),
                         DataCell(Text('${r.discounts}')),
-                        DataCell(Text(r.discountAmount.toStringAsFixed(2))),
+                        DataCell(Text(_money(r.discountAmount, home))),
                         DataCell(Text('${r.voids}')),
                         DataCell(Text('${r.noSales}')),
                         DataCell(Text('${r.sales}')),
@@ -1433,6 +1900,8 @@ class _ExceptionReport extends ConsumerWidget {
 class _SalesByHourReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(salesByHourReportProvider);
@@ -1453,7 +1922,7 @@ class _SalesByHourReport extends ConsumerWidget {
             _ReportHeader(
               title: 'Sales by Hour',
               subtitle:
-                  'When the shop is actually busy, on your local clock${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                  'When the shop is actually busy, on your local clock${_period(range)}',
               onRefresh: () => ref.invalidate(salesByHourReportProvider),
               onExportCsv: rows.isEmpty
                   ? null
@@ -1484,11 +1953,11 @@ class _SalesByHourReport extends ConsumerWidget {
             const SizedBox(height: 12),
             if (rows.isEmpty)
               const Expanded(
-                  child: Center(child: Text('No sales in this range.')))
+                  child: EmptyState(title: 'No sales in this range.'))
             else
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                   child: Card(
                     child: DataTable(
                       headingRowColor:
@@ -1506,9 +1975,9 @@ class _SalesByHourReport extends ConsumerWidget {
                         return DataRow(cells: [
                           DataCell(Text(_hourLabel(r.hourOfDay))),
                           DataCell(Text('${r.orders}')),
-                          DataCell(Text(r.grossAmount.toStringAsFixed(2))),
-                          DataCell(Text(r.discountAmount.toStringAsFixed(2))),
-                          DataCell(Text(r.averageBasket.toStringAsFixed(2))),
+                          DataCell(Text(_money(r.grossAmount, home))),
+                          DataCell(Text(_money(r.discountAmount, home))),
+                          DataCell(Text(_money(r.averageBasket, home))),
                           DataCell(SizedBox(
                             width: 90,
                             child: LinearProgressIndicator(
@@ -1526,7 +1995,7 @@ class _SalesByHourReport extends ConsumerWidget {
             // difference between "we were shut" and "nobody came".
             if (rows.isNotEmpty && rows.length < 24)
               Padding(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+                padding: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 8, context.pageGutter, 16),
                 child: Text(
                   'Hours with no sales are not listed — ${24 - rows.length} of the 24 are absent '
                   'from this range rather than shown as zero.',
@@ -1549,6 +2018,8 @@ String _hourLabel(int hour) {
 class _SalesByStaffReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(salesByStaffReportProvider);
@@ -1564,7 +2035,7 @@ class _SalesByStaffReport extends ConsumerWidget {
           _ReportHeader(
             title: 'Sales by Staff',
             subtitle:
-                'What each cashier rang up${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                'What each cashier rang up${_period(range)}',
             onRefresh: () => ref.invalidate(salesByStaffReportProvider),
             onExportCsv: rows.isEmpty
                 ? null
@@ -1589,11 +2060,11 @@ class _SalesByStaffReport extends ConsumerWidget {
           // against Sales Revenue and finding it short is looking at the online
           // orders, which have no cashier to attribute.
           Container(
-            margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+            margin: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: cs.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: AppRadius.chip,
             ),
             child: Row(children: [
               Icon(Icons.storefront_outlined, size: 18, color: cs.outline),
@@ -1610,12 +2081,11 @@ class _SalesByStaffReport extends ConsumerWidget {
           const SizedBox(height: 12),
           if (rows.isEmpty)
             const Expanded(
-                child: Center(
-                    child: Text('No journalled sales in this range.')))
+                child: EmptyState(title: 'No journalled sales in this range.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -1639,12 +2109,12 @@ class _SalesByStaffReport extends ConsumerWidget {
                                 style: TextStyle(
                                     fontStyle: FontStyle.italic,
                                     color: cs.outline))
-                            : Text(_short(r.groupKey), style: _idStyle)),
+                            : _GroupName(grouping: 'ACTOR', groupKey: r.groupKey, keys: rows.map((x) => x.groupKey))),
                         DataCell(Text('${r.sales}')),
-                        DataCell(Text(r.grossAmount.toStringAsFixed(2))),
+                        DataCell(Text(_money(r.grossAmount, home))),
                         DataCell(Text(
-                            r.averageBasket?.toStringAsFixed(2) ?? '—')),
-                        DataCell(Text(r.discountAmount.toStringAsFixed(2))),
+                            r.averageBasket == null ? '—' : _money(r.averageBasket!, home))),
+                        DataCell(Text(_money(r.discountAmount, home))),
                         DataCell(Text(
                           r.discountRate == null
                               ? '—'
@@ -1667,6 +2137,8 @@ class _SalesByStaffReport extends ConsumerWidget {
 class _TenderMixReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(tenderMixReportProvider);
@@ -1684,7 +2156,7 @@ class _TenderMixReport extends ConsumerWidget {
             _ReportHeader(
               title: 'Tender Mix',
               subtitle:
-                  'How the take split across payment methods${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                  'How the take split across payment methods${_period(range)}',
               onRefresh: () => ref.invalidate(tenderMixReportProvider),
               onExportCsv: rows.isEmpty
                   ? null
@@ -1711,11 +2183,11 @@ class _TenderMixReport extends ConsumerWidget {
             // the one a manager can act on today.
             if (failures > 0)
               Container(
-                margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                margin: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: cs.tertiaryContainer,
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: AppRadius.chip,
                 ),
                 child: Row(children: [
                   Icon(Icons.error_outline, color: cs.onTertiaryContainer),
@@ -1734,11 +2206,11 @@ class _TenderMixReport extends ConsumerWidget {
             const SizedBox(height: 12),
             if (rows.isEmpty)
               const Expanded(
-                  child: Center(child: Text('No tenders in this range.')))
+                  child: EmptyState(title: 'No tenders in this range.'))
             else
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                   child: Card(
                     child: DataTable(
                       headingRowColor:
@@ -1755,16 +2227,16 @@ class _TenderMixReport extends ConsumerWidget {
                       ],
                       rows: rows.map((r) {
                         return DataRow(cells: [
-                          DataCell(Text(r.method)),
-                          DataCell(Text(r.capturedAmount.toStringAsFixed(2))),
+                          DataCell(Text(_methodWords(r.method))),
+                          DataCell(Text(_money(r.capturedAmount, home))),
                           DataCell(Text('${r.capturedCount}')),
-                          DataCell(Text(r.refundedAmount.toStringAsFixed(2))),
+                          DataCell(Text(_money(r.refundedAmount, home))),
                           DataCell(Text(
                             '${r.failedCount}',
                             style: TextStyle(
                                 color: r.failedCount > 0 ? cs.error : null),
                           )),
-                          DataCell(Text(r.netAmount.toStringAsFixed(2))),
+                          DataCell(Text(_money(r.netAmount, home))),
                           DataCell(Text(
                             r.shareOfNet == null
                                 ? '—'
@@ -1789,6 +2261,8 @@ class _TenderMixReport extends ConsumerWidget {
 class _StockTurnReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(stockTurnReportProvider);
@@ -1807,7 +2281,7 @@ class _StockTurnReport extends ConsumerWidget {
             _ReportHeader(
               title: 'Stock Turn',
               subtitle:
-                  'How many times the holding sold through over ${report.windowDays} day${report.windowDays == 1 ? '' : 's'}${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                  'How many times the holding sold through over ${report.windowDays} day${report.windowDays == 1 ? '' : 's'}${_period(range)}',
               onRefresh: () => ref.invalidate(stockTurnReportProvider),
               onExportCsv: report.rows.isEmpty
                   ? null
@@ -1866,10 +2340,10 @@ class _StockTurnReport extends ConsumerWidget {
               rows: [
                 for (final r in report.rows)
                   DataRow(cells: [
-                    DataCell(Text(_short(r.groupKey), style: _idStyle)),
-                    DataCell(Text(r.cogs.toStringAsFixed(2))),
-                    DataCell(Text(r.openingValue.toStringAsFixed(2))),
-                    DataCell(Text(r.closingValue.toStringAsFixed(2))),
+                    DataCell(_GroupName(grouping: ref.watch(stockTurnGroupingProvider), groupKey: r.groupKey, keys: report.rows.map((x) => x.groupKey))),
+                    DataCell(Text(_money(r.cogs, home))),
+                    DataCell(Text(_money(r.openingValue, home))),
+                    DataCell(Text(_money(r.closingValue, home))),
                     DataCell(Text(
                       // A dash, not a zero: nothing to turn is not the
                       // same finding as turning it zero times.
@@ -1891,6 +2365,8 @@ class _StockTurnReport extends ConsumerWidget {
 class _GrossMarginReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(grossMarginReportProvider);
@@ -1907,10 +2383,11 @@ class _GrossMarginReport extends ConsumerWidget {
         final margin = total((r) => r.grossMargin);
         final unpriced = total((r) => r.unpricedSaleQty);
         final uncosted = total((r) => r.uncostedSaleQty);
-        // No currency code: inventory-svc stores the amounts order-svc sent
-        // and never learns the tenant's currency, so they are shown as plain
-        // amounts rather than guessed into one (SJ-D53).
-        String amount(double v) => AppFormat.money(v);
+        // The report carries no currency code (inventory-svc stores the
+        // amounts order-svc sent), so they are shown in the business's own
+        // home currency, read from tenant-svc — never a platform default
+        // (SJ-D53).
+        String amount(double v) => _money(v, home);
         final share = revenue > 0
             ? ' (${(margin * 100 / revenue).toStringAsFixed(1)}%)'
             : '';
@@ -1920,7 +2397,7 @@ class _GrossMarginReport extends ConsumerWidget {
             _ReportHeader(
               title: 'Gross Margin',
               subtitle:
-                  'What sales earned against what they cost over ${report.windowDays} day${report.windowDays == 1 ? '' : 's'} · margin ${amount(margin)}$share${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                  'What sales earned against what they cost over ${report.windowDays} day${report.windowDays == 1 ? '' : 's'} · margin ${amount(margin)}$share${_period(range)}',
               onRefresh: () => ref.invalidate(grossMarginReportProvider),
               onExportCsv: report.rows.isEmpty
                   ? null
@@ -1988,7 +2465,7 @@ class _GrossMarginReport extends ConsumerWidget {
               rows: [
                 for (final r in report.rows)
                   DataRow(cells: [
-                    DataCell(Text(_short(r.groupKey), style: _idStyle)),
+                    DataCell(_GroupName(grouping: ref.watch(grossMarginGroupingProvider), groupKey: r.groupKey, keys: report.rows.map((x) => x.groupKey))),
                     DataCell(Text(amount(r.revenue))),
                     DataCell(Text(amount(r.cogs))),
                     DataCell(Text(
@@ -2017,6 +2494,8 @@ class _GrossMarginReport extends ConsumerWidget {
 class _DeadStockReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final async = ref.watch(deadStockReportProvider);
     return async.when(
@@ -2033,7 +2512,7 @@ class _DeadStockReport extends ConsumerWidget {
             _ReportHeader(
               title: 'Dead Stock',
               subtitle:
-                  'Stock aged by how long since it last sold · ${atRisk.toStringAsFixed(2)} at risk',
+                  'Stock aged by how long since it last sold · ${_money(atRisk, home)} at risk',
               onRefresh: () => ref.invalidate(deadStockReportProvider),
               onExportCsv: rows.isEmpty
                   ? null
@@ -2065,11 +2544,11 @@ class _DeadStockReport extends ConsumerWidget {
             const SizedBox(height: 12),
             if (rows.isEmpty)
               const Expanded(
-                  child: Center(child: Text('No stock on hand.')))
+                  child: EmptyState(title: 'No stock on hand.'))
             else
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                   child: Card(
                     child: DataTable(
                       headingRowColor:
@@ -2085,9 +2564,9 @@ class _DeadStockReport extends ConsumerWidget {
                       rows: rows.map((r) {
                         final old = (r.daysSinceLastSale ?? 0) > 90;
                         return DataRow(cells: [
-                          DataCell(Text(_short(r.groupKey), style: _idStyle)),
+                          DataCell(_GroupName(grouping: ref.watch(deadStockGroupingProvider), groupKey: r.groupKey, keys: rows.map((x) => x.groupKey))),
                           DataCell(Text(r.onHandQty.toStringAsFixed(3))),
-                          DataCell(Text(r.value.toStringAsFixed(2))),
+                          DataCell(Text(_money(r.value, home))),
                           DataCell(Text(
                             '${r.daysSinceLastSale ?? '—'}',
                             style: TextStyle(
@@ -2137,7 +2616,7 @@ class _ReportTable extends StatelessWidget {
     }
     return Expanded(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
+        padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
         child: Card(
           child: DataTable(
             headingRowColor: WidgetStatePropertyAll(
@@ -2161,11 +2640,11 @@ class _Caveat extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Container(
-      margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+      margin: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: cs.tertiaryContainer,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: AppRadius.chip,
       ),
       child: Row(children: [
         Icon(icon, color: cs.onTertiaryContainer),
@@ -2195,10 +2674,12 @@ class _SalesClearingCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final async = ref.watch(salesClearingProvider);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+      padding: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
       child: async.when(
         loading: () => const LinearProgressIndicator(),
         error: (e, _) => Text(
@@ -2234,7 +2715,7 @@ class _SalesClearingCard extends ConsumerWidget {
                       if (o.firstPosted != null) 'since ${o.firstPosted}',
                     ].join(' · ')),
                     trailing: Text(
-                      o.balance.toStringAsFixed(2),
+                      _money(o.balance, home),
                       style: const TextStyle(fontFamily: 'monospace'),
                     ),
                   ),
@@ -2250,6 +2731,8 @@ class _SalesClearingCard extends ConsumerWidget {
 class _TrialBalanceReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Amounts in the business's home currency: the report carries none.
+    final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(trialBalanceProvider);
@@ -2265,7 +2748,7 @@ class _TrialBalanceReport extends ConsumerWidget {
           _ReportHeader(
             title: 'Trial Balance',
             subtitle:
-                'Debits, credits and balance per nominal code${range.from != null ? ' · ${range.from} → ${range.to}' : ''}',
+                'Debits, credits and balance per nominal code${_period(range)}',
             onRefresh: () => ref.invalidate(trialBalanceProvider),
             onExportCsv: report.rows.isEmpty
                 ? null
@@ -2288,7 +2771,7 @@ class _TrialBalanceReport extends ConsumerWidget {
             children: [
               const Expanded(child: _DateRangeBar()),
               Padding(
-                padding: const EdgeInsets.only(right: 24),
+                padding: EdgeInsetsDirectional.only(end: context.pageGutter),
                 child: FilledButton.tonalIcon(
                   key: const Key('post-journal'),
                   onPressed: () => showDialog<bool>(
@@ -2308,11 +2791,11 @@ class _TrialBalanceReport extends ConsumerWidget {
           // a figure.
           if (!report.balanced)
             Container(
-              margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+              margin: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: cs.errorContainer,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: AppRadius.chip,
               ),
               child: Row(children: [
                 Icon(Icons.warning_amber_outlined, color: cs.onErrorContainer),
@@ -2320,8 +2803,8 @@ class _TrialBalanceReport extends ConsumerWidget {
                 Expanded(
                   child: Text(
                     'The ledger does not balance over this range: debits '
-                    '${report.totalDebit.toStringAsFixed(2)} against credits '
-                    '${report.totalCredit.toStringAsFixed(2)}. Every posting the '
+                    '${_money(report.totalDebit, home)} against credits '
+                    '${_money(report.totalCredit, home)}. Every posting the '
                     'service writes balances, so this is a fault to investigate '
                     'before these figures are used.',
                     style: TextStyle(color: cs.onErrorContainer, fontSize: 13),
@@ -2333,11 +2816,11 @@ class _TrialBalanceReport extends ConsumerWidget {
           const SizedBox(height: 12),
           if (report.rows.isEmpty)
             const Expanded(
-                child: Center(child: Text('Nothing was posted in this range.')))
+                child: EmptyState(title: 'Nothing was posted in this range.'))
           else
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
                 child: Card(
                   child: DataTable(
                     headingRowColor:
@@ -2356,10 +2839,10 @@ class _TrialBalanceReport extends ConsumerWidget {
                                 style:
                                     const TextStyle(fontFamily: 'monospace'))),
                             DataCell(Text(r.nominalName)),
-                            DataCell(Text(r.debit.toStringAsFixed(2))),
-                            DataCell(Text(r.credit.toStringAsFixed(2))),
+                            DataCell(Text(_money(r.debit, home))),
+                            DataCell(Text(_money(r.credit, home))),
                             DataCell(Text(
-                              r.balance.toStringAsFixed(2),
+                              _money(r.balance, home),
                               style: TextStyle(
                                   color: r.balance < 0 ? cs.outline : null),
                             )),
@@ -2368,15 +2851,14 @@ class _TrialBalanceReport extends ConsumerWidget {
                         const DataCell(Text('Total',
                             style: TextStyle(fontWeight: FontWeight.bold))),
                         const DataCell(Text('')),
-                        DataCell(Text(report.totalDebit.toStringAsFixed(2),
+                        DataCell(Text(_money(report.totalDebit, home),
                             style:
                                 const TextStyle(fontWeight: FontWeight.bold))),
-                        DataCell(Text(report.totalCredit.toStringAsFixed(2),
+                        DataCell(Text(_money(report.totalCredit, home),
                             style:
                                 const TextStyle(fontWeight: FontWeight.bold))),
                         DataCell(Text(
-                            (report.totalDebit - report.totalCredit)
-                                .toStringAsFixed(2),
+                            _money(report.totalDebit - report.totalCredit, home),
                             style:
                                 const TextStyle(fontWeight: FontWeight.bold))),
                       ]),
@@ -2408,8 +2890,7 @@ class _DeferredRevenueReport extends ConsumerWidget {
       ),
       data: (d) {
         final est = d.estimates;
-        String money(double v) =>
-            '${est?.currency ?? ''} ${v.toStringAsFixed(2)}'.trim();
+        String money(double v) => _money(v, est?.currency);
         return ListView(
           padding: const EdgeInsets.only(bottom: 24),
           children: [
@@ -2419,7 +2900,7 @@ class _DeferredRevenueReport extends ConsumerWidget {
               onRefresh: () => ref.invalidate(deferredRevenueProvider),
             ),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
+              padding: EdgeInsetsDirectional.symmetric(horizontal: context.pageGutter),
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: FilledButton.tonalIcon(
@@ -2444,7 +2925,7 @@ class _DeferredRevenueReport extends ConsumerWidget {
               )
             else
               _FigureCard(title: 'Estimates', rows: [
-                ('A point is worth', '${est.currency} ${est.pointValue}'),
+                ('A point is worth', AppFormat.money(est.pointValue, currencyCode: est.currency, maxDecimals: 4)),
                 ('Points never spent', '${est.pointsBreakagePct}%'),
                 ('Gift card value never claimed', '${est.giftCardBreakagePct}%'),
                 ('Why', est.reason),
@@ -2476,7 +2957,7 @@ class _FigureCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+      padding: EdgeInsetsDirectional.fromSTEB(context.pageGutter, 12, context.pageGutter, 0),
       child: Card(
         child: Padding(
           padding: const EdgeInsets.all(12),

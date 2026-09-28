@@ -89,13 +89,29 @@ spec:
             - pg_stat_statements.track=all
             - -c
             - log_min_duration_statement=200
+            # WAL archiving into the backups claim, for point-in-time recovery (16-backup.yaml): a
+            # segment is closed and archived at least every 300 seconds — the data at risk.
+            - -c
+            - archive_mode=on
+            - -c
+            - archive_command=test ! -f /backups/wal/%f && cp %p /backups/wal/%f
+            - -c
+            - archive_timeout=300
           volumeMounts:
             - { name: pgdata, mountPath: /var/lib/postgresql/data }
+            - { name: backups, mountPath: /backups }
             # Per-service roles + GRANTs (golden rule #1 hardening) — runs once against a
             # fresh volume only, same as docker-entrypoint-initdb.d in docker-compose.yml.
             - name: init-roles
               mountPath: /docker-entrypoint-initdb.d/01-roles.sql
               subPath: 01-roles.sql
+              readOnly: true
+            # A fresh volume also gets the pg_hba line the backup job's base backups need (the
+            # replication protocol from another pod); an existing volume gets it from the init
+            # container below. Both idempotent on the marker word.
+            - name: init-hba
+              mountPath: /docker-entrypoint-initdb.d/02-replication-hba.sh
+              subPath: 02-replication-hba.sh
               readOnly: true
           readinessProbe:
             exec: { command: ["pg_isready", "-U", "storeql"] }
@@ -112,9 +128,33 @@ spec:
           resources:
             requests: { cpu: "1", memory: 2Gi }
             limits: { cpu: "2", memory: 3Gi }
+      initContainers:
+        # The backups claim's directories owned by postgres, and the replication line in an existing
+        # volume's pg_hba.conf, before the server starts. Same uid as the server, no privileges.
+        - name: prepare-backups
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /backups/wal /backups/dumps /backups/base /backups/metrics
+              HBA=/var/lib/postgresql/data/pg_hba.conf
+              if [ -f "$HBA" ] && ! grep -q storeql-backup "$HBA"; then
+                printf 'host replication all all scram-sha-256 # storeql-backup: base backups for point-in-time recovery\n' >> "$HBA"
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql/data }
+            - { name: backups, mountPath: /backups }
       volumes:
         - name: init-roles
           secret: { secretName: storeql-postgres-init, items: [{ key: 01-roles.sql, path: 01-roles.sql }] }
+        - name: init-hba
+          configMap: { name: storeql-postgres-init-hba, defaultMode: 0755 }
+        - { name: backups, persistentVolumeClaim: { claimName: storeql-backups } }
   volumeClaimTemplates:
     - metadata: { name: pgdata }
       spec:

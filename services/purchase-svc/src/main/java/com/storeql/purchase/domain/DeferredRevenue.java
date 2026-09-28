@@ -164,7 +164,8 @@ public final class DeferredRevenue {
         LedgerPosting.of(
             src.tenantId(),
             src.date(),
-            (fromSale ? "Loyalty points earned on sale " : "Loyalty points awarded, ") + src.ref(),
+            (fromSale ? "Loyalty points earned on sale " : "Loyalty points awarded, ")
+                + Handle.of(src.ref()),
             Domain.SOURCE_LOYALTY_DEFERRAL,
             src.ref(),
             src.storeId());
@@ -227,6 +228,21 @@ public final class DeferredRevenue {
   }
 
   /** Posts a release, and sweeps what is left to breakage when no points remain outstanding. */
+  /**
+   * Points that died under the programme's expiry rule (13.x): they leave the pool as a lapse, and
+   * once nothing is outstanding whatever deferred income is left is breakage — the point the
+   * estimate was made for.
+   */
+  public static PointsOutcome expired(Source src, Settings s, PointsPool pool, BigDecimal points) {
+    if (points == null || points.signum() <= 0) return new PointsOutcome(pool, List.of());
+    BigDecimal matched = points.min(pool.outstanding());
+    return close(
+        src,
+        new PointsPool(pool.outstanding().subtract(matched), pool.deferred(), pool.unmatched()),
+        BigDecimal.ZERO,
+        "Loyalty points expired, ");
+  }
+
   private static PointsOutcome close(
       Source src, PointsPool after, BigDecimal release, String description) {
     BigDecimal breakage = after.outstanding().signum() == 0 ? after.deferred() : BigDecimal.ZERO;
@@ -239,7 +255,7 @@ public final class DeferredRevenue {
         LedgerPosting.of(
                 src.tenantId(),
                 src.date(),
-                description + src.ref(),
+                description + Handle.of(src.ref()),
                 Domain.SOURCE_LOYALTY_RELEASE,
                 src.ref(),
                 src.storeId())
@@ -333,7 +349,7 @@ public final class DeferredRevenue {
             src.tenantId(),
             src.date(),
             (reversed ? "Gift card breakage reversed on sale " : "Gift card breakage on sale ")
-                + src.ref(),
+                + Handle.of(src.ref()),
             Domain.SOURCE_GIFT_CARD_BREAKAGE,
             src.ref(),
             src.storeId());

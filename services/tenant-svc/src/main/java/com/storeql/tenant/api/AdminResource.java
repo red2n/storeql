@@ -347,13 +347,20 @@ public class AdminResource {
   /**
    * Cursor-paginated list of the tenant's staff assignments.
    *
+   * <p>A store-held caller sees only assignments at their own stores and business-wide ones; an
+   * owner, a business-wide manager or the platform admin sees every assignment, as before — {@link
+   * com.storeql.web.TenantContext#storeIds()} decides which, never a request parameter.
+   *
    * @param after cursor from the previous page's {@code meta.nextCursor}, or {@code null} to start
    * @param limit page size, 1..100; clamped when absent or out of range
    * @return the page of assignments, with the next cursor in {@code meta}
    */
   @Operation(
       summary = "List staff assignments",
-      description = "Cursor-paginated: ?after=<meta.nextCursor>&limit=1-100.")
+      description =
+          "Cursor-paginated: ?after=<meta.nextCursor>&limit=1-100. A caller held to one or more"
+              + " stores sees only assignments at those stores and business-wide ones; an owner or"
+              + " a business-wide manager sees every assignment.")
   @APIResponse(
       responseCode = "200",
       description = "The page of assignments, with the next cursor in {@code meta}")
@@ -361,7 +368,8 @@ public class AdminResource {
   @Path("/staff")
   public ApiResponse<List<StaffResponse>> listStaff(
       @QueryParam("after") String after, @QueryParam("limit") Integer limit) {
-    var page = service.listStaff(ctx.requireTenantId(), after, Cursor.clampLimit(limit));
+    var page =
+        service.listStaff(ctx.requireTenantId(), ctx.storeIds(), after, Cursor.clampLimit(limit));
     return ApiResponse.ok(
         page.items().stream().map(Mappers::toStaff).toList(),
         new ApiResponse.Meta(ctx.requestId(), page.nextCursor()));

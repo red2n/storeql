@@ -72,6 +72,13 @@ public class OrderPaymentGuard {
         && !order.loginId().equals(callerId.toString())) {
       throw ApiException.notFound("PAYMENT_ORDER_NOT_FOUND", "order " + orderId + " not found");
     }
+    // A part of a split checkout is paid with its checkout, once (order orchestration): paying one
+    // part alone would confirm it and leave the others to lapse.
+    if (order.groupId() != null) {
+      throw ApiException.conflict(
+          "PAYMENT_ORDER_IN_GROUP",
+          "order " + orderId + " is part of checkout " + order.groupId() + "; pay the checkout");
+    }
     if (order.total().compareTo(amount) != 0) {
       throw ApiException.badRequest(
           "PAYMENT_AMOUNT_MISMATCH",
@@ -83,6 +90,43 @@ public class OrderPaymentGuard {
     // arbitrary store and corrupt that store's Z-report and reporting.
     UUID storeId = order.storeId() == null ? null : Ids.parse(order.storeId());
     return new VerifiedOrder(order, storeId);
+  }
+
+  /**
+   * Verifies a payment claim for a split checkout (order orchestration): the checkout is the
+   * caller's, every part is still awaiting payment, and the amount is the checkout's total — the
+   * parts' totals added up. The same checks as one order's, made of the whole.
+   *
+   * @throws ApiException 404 {@code PAYMENT_GROUP_NOT_FOUND} when there is no such checkout or it
+   *     is not the caller's; 409 {@code PAYMENT_ORDER_NOT_PAYABLE} when a part is not awaiting
+   *     payment; 400 {@code PAYMENT_GROUP_AMOUNT_MISMATCH} when the amount is not the total
+   */
+  public OrderClient.GroupInfo verifyGroupClaim(
+      UUID tenantId, UUID groupId, BigDecimal amount, TenantContext ctx) {
+    OrderClient.GroupInfo group = orderClient.getGroup(tenantId, groupId);
+    UUID callerId = ctx.userId();
+    if (callerId != null
+        && group.loginId() != null
+        && !group.loginId().equals(callerId.toString())) {
+      throw ApiException.notFound("PAYMENT_GROUP_NOT_FOUND", "checkout " + groupId + " not found");
+    }
+    for (OrderClient.GroupPart part : group.parts()) {
+      if (!"PENDING".equalsIgnoreCase(part.status())) {
+        throw ApiException.conflict(
+            "PAYMENT_ORDER_NOT_PAYABLE",
+            "order "
+                + part.orderId()
+                + " of the checkout is not awaiting payment (status: "
+                + part.status()
+                + ")");
+      }
+    }
+    if (group.total().compareTo(amount) != 0) {
+      throw ApiException.badRequest(
+          "PAYMENT_GROUP_AMOUNT_MISMATCH",
+          "tendered amount " + amount + " does not match the checkout's total " + group.total());
+    }
+    return group;
   }
 
   /**

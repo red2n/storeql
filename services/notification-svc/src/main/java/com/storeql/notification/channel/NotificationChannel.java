@@ -15,6 +15,20 @@ public interface NotificationChannel {
   String name();
 
   /**
+   * Whether this channel can deliver to the recipient at all: an email channel reaches an email
+   * address, not a store's id that a store alert is addressed to. Every channel but email reaches
+   * whatever it is given.
+   */
+  default boolean reaches(String recipient) {
+    return true;
+  }
+
+  /** The channel that actually carries a message to this recipient, as the log records it. */
+  default String nameFor(String recipient) {
+    return name();
+  }
+
+  /**
    * Deliver the message. {@code tenantId} is required (not just carried for the audit record):
    * channels backed by a shared broker (e.g. {@link MqttChannel}) scope the topic by it so one
    * tenant's devices can never receive another tenant's push. Throws on failure so the caller can

@@ -160,9 +160,10 @@ void main() {
       expect(line.originalPrice, 2.99);
       expect(line.name, 'Greek yoghurt 500g');
       expect(find.byKey(const Key('reduced-md-1')), findsOneWidget);
-      expect(find.text('was 2.99'), findsOneWidget);
+      // Money reads as the back office writes it: the symbol, not the code.
+      expect(find.text('was £2.99'), findsOneWidget);
       expect(find.text('REDUCED'), findsOneWidget);
-      expect(find.text('GBP 2.24'), findsWidgets);
+      expect(find.text('£2.24'), findsWidgets);
       // The sticker was asked about; the catalogue was not.
       expect(
         till.requests.any(
@@ -192,7 +193,7 @@ void main() {
       expect(line.unitPrice, 1.80);
       expect(line.originalPrice, isNull,
           reason: 'the list price is not a prior price pricing-svc proved');
-      expect(find.text('was 2.99'), findsNothing);
+      expect(find.text('was £2.99'), findsNothing);
       expect(find.text('REDUCED'), findsNothing);
       expect(find.text('MARKDOWN'), findsOneWidget);
     },

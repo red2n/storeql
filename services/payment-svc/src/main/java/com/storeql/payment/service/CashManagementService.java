@@ -25,7 +25,8 @@ import java.util.UUID;
  * Till sessions and their X/Z reports — the cash-drawer side of POS.
  *
  * <p>Every entry point resolves the session first and asserts the caller has access to its store,
- * so a cashier cannot read or close another store's till.
+ * so a cashier cannot read or close another store's till; the current-till lookup checks the store
+ * it is named before it looks.
  */
 @ApplicationScoped
 public class CashManagementService {
@@ -72,6 +73,29 @@ public class CashManagementService {
    */
   public TillSessionResponse getSession(UUID tenantId, UUID sessionId, TenantContext ctx) {
     return toSessionResponse(requireSession(tenantId, sessionId, ctx));
+  }
+
+  /**
+   * The caller's own open till at a store: the session they opened there and have not closed. The
+   * store is checked first, so a store the caller does not keep is refused before it is looked at.
+   *
+   * @param tenantId owning tenant
+   * @param storeId the store the caller is at
+   * @param openedBy the caller, whose session it must be
+   * @param ctx caller context, checked for access to the store
+   * @return the open session, the latest opened should there be more than one
+   * @throws ApiException {@code STORE_ACCESS_DENIED} (403) for a store the caller does not keep;
+   *     {@code TILL_SESSION_NOT_OPEN} (404) when the caller has no open till there
+   */
+  public TillSessionResponse currentSession(
+      UUID tenantId, UUID storeId, UUID openedBy, TenantContext ctx) {
+    ctx.requireStoreAccess(storeId);
+    return repo.findOpenSession(tenantId, storeId, openedBy)
+        .map(CashManagementService::toSessionResponse)
+        .orElseThrow(
+            () ->
+                ApiException.notFound(
+                    "TILL_SESSION_NOT_OPEN", "You have no open till session at this store"));
   }
 
   /**

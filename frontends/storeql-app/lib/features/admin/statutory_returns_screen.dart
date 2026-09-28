@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../core/theme.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 
 // ---------------------------------------------------------------------------
 // Statutory returns (07.14): what this business owes each authority, when each
@@ -173,6 +177,31 @@ class StatutoryCalendar {
 
 const _statutoryPath = '/${ApiConstants.tenant}/admin/tenant/statutory-returns';
 
+/// How a filing went, in the words the record dialog offers — the list shows
+/// the same words, never the provider's code.
+const _providerWords = {
+  'MANUAL': 'By hand, on the portal',
+  'HMRC_MTD': 'HMRC Making Tax Digital',
+  'SIMULATED': 'Simulated — nothing left the building',
+};
+
+String _providerLabel(String code) => _providerWords[code] ?? humanizeCode(code);
+
+/// Where in the app a return's export is made, from the service and path
+/// tenant-svc names: the route and what the button says. Null for an export
+/// the app has no screen for yet — that one is described, never printed as a
+/// service name and an API path.
+({String route, String label})? _exportScreen(String? service, String? path) {
+  final p = path ?? '';
+  if (service == ApiConstants.pricing && p.contains('vat-return')) {
+    return (route: '/admin/pricing?tab=vat-return', label: 'Export from Pricing › VAT Return');
+  }
+  if (service == ApiConstants.order && p.contains('fiscal-receipts')) {
+    return (route: '/admin/sales?tab=receipts', label: 'Export from Sales tools › Receipts');
+  }
+  return null;
+}
+
 final statutoryCalendarProvider =
     FutureProvider.autoDispose<StatutoryCalendar>((ref) async {
   final resp = await ref.read(apiClientProvider).dio.get(_statutoryPath);
@@ -184,22 +213,22 @@ class StatutoryReturnsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
     final calendar = ref.watch(statutoryCalendarProvider);
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      // 16 on a phone, 24 from tablet width.
+      padding: context.pagePadding,
       children: [
-        Text('Statutory returns', style: theme.textTheme.headlineMedium),
-        const SizedBox(height: 4),
-        Text(
-          'What this business owes each authority, when each falls due, and the '
-          'evidence that it went. Dates are worked out from the instrument every '
-          'time this is opened, so a rule change moves them. The platform never '
-          'files for you — recording a filing records that you did.',
-          style: theme.textTheme.bodyMedium
-              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        const PageHeader(
+          title: 'Statutory returns',
+          subtitle:
+              'What this business owes each authority, when each falls due, and '
+              'the evidence that it went. Dates are worked out from the '
+              'instrument every time this is opened, so a rule change moves '
+              'them. The platform never files for you — recording a filing '
+              'records that you did.',
+          // The list is already inset by the page padding.
+          padding: EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
         ),
-        const SizedBox(height: AppSpacing.lg),
         calendar.when(
           loading: () => const LoadingView(label: 'Working out what is due…'),
           error: (e, _) => ErrorView(
@@ -294,7 +323,7 @@ class _Outstanding extends StatelessWidget {
               ),
             if (outstanding.length > 8)
               Padding(
-                padding: const EdgeInsets.only(top: AppSpacing.xs),
+                padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
                 child: Text('and ${outstanding.length - 8} more below.',
                     style: theme.textTheme.bodySmall),
               ),
@@ -321,22 +350,26 @@ class _ReturnCard extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
+            // A Wrap: where the name and the law do not fit on one line — a
+            // phone, large text — the law goes under the name rather than
+            // squeezing it to a word per line.
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.xs,
               children: [
-                Expanded(
-                    child: Text(head.name, style: theme.textTheme.titleMedium)),
-                Chip(
-                  label: Text(head.scopeKind == 'REGIME'
-                      ? '${head.scope} law'
-                      : 'National law'),
-                ),
+                Text(head.name, style: theme.textTheme.titleMedium),
+                StatusBadge(head.scopeKind == 'REGIME'
+                    ? '${head.scope} law'
+                    : 'National law'),
               ],
             ),
             const SizedBox(height: AppSpacing.xs),
             Text(head.citation, style: theme.textTheme.bodySmall),
             if (head.exportService == null)
               Padding(
-                padding: const EdgeInsets.only(top: AppSpacing.xs),
+                padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
                 child: Text(
                   'The platform cannot produce this one. It has to be prepared '
                   'outside StoreQL — record it here once it has gone.',
@@ -345,13 +378,9 @@ class _ReturnCard extends ConsumerWidget {
                 ),
               )
             else
-              Padding(
-                padding: const EdgeInsets.only(top: AppSpacing.xs),
-                child: Text(
-                  'Export: ${head.exportService} ${head.exportPath}',
-                  style: theme.textTheme.bodySmall,
-                ),
-              ),
+              _ExportLink(
+                  returnCode: head.returnCode,
+                  screen: _exportScreen(head.exportService, head.exportPath)),
             const Divider(),
             for (final o in periods.take(13))
               ListTile(
@@ -384,7 +413,8 @@ class _ReturnCard extends ConsumerWidget {
     final filing = o.filing;
     if (filing != null) {
       final receipt = filing.reference == null ? '' : ' · ${filing.reference}';
-      return 'Filed ${AppFormat.date(filing.filedAt)} by ${filing.provider}$receipt';
+      return 'Filed ${AppFormat.date(filing.filedAt)} · '
+          '${_providerLabel(filing.provider)}$receipt';
     }
     return o.overdue
         ? 'Was due ${AppFormat.date(o.dueOn)}'
@@ -401,25 +431,96 @@ class _ReturnCard extends ConsumerWidget {
   }
 }
 
+/// Where a return's export is made: a button to that screen, or — where the
+/// app has no screen for it — a line saying the platform makes it.
+class _ExportLink extends StatelessWidget {
+  const _ExportLink({required this.returnCode, required this.screen});
+
+  final String returnCode;
+  final ({String route, String label})? screen;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final target = screen;
+    if (target == null) {
+      return Padding(
+        padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
+        child: Text(
+          'The platform produces this export; it has no screen here yet.',
+          style: theme.textTheme.bodySmall,
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
+      child: Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: TextButton.icon(
+          key: Key('statutory-export-$returnCode'),
+          onPressed: () => context.go(target.route),
+          icon: const Icon(Icons.open_in_new, size: 18),
+          label: Text(target.label),
+        ),
+      ),
+    );
+  }
+}
+
+/// A period's state in words. *Overdue* carries the strong `error` fill and an
+/// icon: the outstanding card is itself `errorContainer`, where a container
+/// badge would lose its edge and read as plain text.
 class _StateChip extends StatelessWidget {
   const _StateChip({required this.state});
   final String state;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final (label, colour) = switch (state) {
-      'FILED' => ('Filed', scheme.primaryContainer),
-      'OVERDUE' => ('Overdue', scheme.errorContainer),
-      'DUE' => ('Due', scheme.tertiaryContainer),
-      _ => ('Not due yet', scheme.surfaceContainerHighest),
+    final key = Key('statutory-state-$state');
+    if (state == 'OVERDUE') {
+      final scheme = Theme.of(context).colorScheme;
+      return Container(
+        key: key,
+        // At least 24 tall, growing with large text: the house badge's size.
+        constraints: const BoxConstraints(minHeight: 24),
+        padding: const EdgeInsetsDirectional.fromSTEB(6, 2, 8, 2),
+        decoration: BoxDecoration(
+          color: scheme.error,
+          borderRadius: AppRadius.badge,
+        ),
+        child: Center(
+          widthFactor: 1,
+          heightFactor: 1,
+          child: Text.rich(
+            TextSpan(children: [
+              WidgetSpan(
+                alignment: PlaceholderAlignment.middle,
+                child: Padding(
+                  padding: const EdgeInsetsDirectional.only(end: 4),
+                  child: Icon(Icons.error_outline, size: 14, color: scheme.onError),
+                ),
+              ),
+              const TextSpan(text: 'Overdue'),
+            ]),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12,
+              height: 16 / 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+              color: scheme.onError,
+            ),
+          ),
+        ),
+      );
+    }
+    final (label, tone) = switch (state) {
+      'FILED' => ('Filed', StatusTone.success),
+      'DUE' => ('Due', StatusTone.warning),
+      _ => ('Not due yet', StatusTone.neutral),
     };
-    return Chip(
-      key: Key('statutory-state-$state'),
-      label: Text(label),
-      backgroundColor: colour,
-      visualDensity: VisualDensity.compact,
-    );
+    return StatusBadge(label, key: key, tone: tone);
   }
 }
 
@@ -515,14 +616,9 @@ class _RecordFilingDialogState extends ConsumerState<_RecordFilingDialog> {
                 // longest option is a sentence, and the dialog is 420 wide.
                 isExpanded: true,
                 decoration: const InputDecoration(labelText: 'How it went'),
-                items: const [
-                  DropdownMenuItem(
-                      value: 'MANUAL', child: Text('By hand, on the portal')),
-                  DropdownMenuItem(
-                      value: 'HMRC_MTD', child: Text('HMRC Making Tax Digital')),
-                  DropdownMenuItem(
-                      value: 'SIMULATED',
-                      child: Text('Simulated — nothing left the building')),
+                items: [
+                  for (final e in _providerWords.entries)
+                    DropdownMenuItem(value: e.key, child: Text(e.value)),
                 ],
                 onChanged: (v) => setState(() => _provider = v ?? 'MANUAL'),
               ),
@@ -555,7 +651,7 @@ class _RecordFilingDialogState extends ConsumerState<_RecordFilingDialog> {
               ),
               if (_error != null)
                 Padding(
-                  padding: const EdgeInsets.only(top: AppSpacing.sm),
+                  padding: const EdgeInsetsDirectional.only(top: AppSpacing.sm),
                   child: Text(_error!,
                       style: TextStyle(
                           color: Theme.of(context).colorScheme.error)),

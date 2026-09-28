@@ -1,12 +1,14 @@
 package com.storeql.inventory.dto;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 
 /** Request/response DTOs for inventory-svc. No tenant_id in requests — it comes from context. */
@@ -26,7 +28,19 @@ public final class Dtos {
       @Schema(description = "Unit cost of this batch.") BigDecimal costPrice,
       @Schema(description = "ISO expiry date, if perishable.") String expiryDate,
       String grade,
-      @Schema(description = "UUID of the zone the batch is placed in.") String zoneId) {}
+      @Schema(description = "UUID of the zone the batch is placed in.") String zoneId,
+      @Schema(
+              description =
+                  "OWNED (the default) or CONSIGNMENT: stock the supplier still owns until it"
+                      + " sells, valued apart and owed to the supplier as it sells.")
+          String ownership,
+      @Schema(description = "The supplier that owns a CONSIGNMENT batch; required for one.")
+          String supplierId,
+      @Schema(
+              description =
+                  "DUTY_PAID (the default) or DUTY_SUSPENDED: excise goods received into bond at an"
+                      + " approved store — on hand, never available until released.")
+          String dutyStatus) {}
 
   @Schema(name = "BatchReceiveItem", description = "One line of a bulk receive request.")
   public record BatchReceiveItem(
@@ -89,8 +103,10 @@ public final class Dtos {
       @Schema(description = "UUID of the product variant.") String variantId,
       @Schema(description = "Total physical quantity in stock.") BigDecimal onHand,
       @Schema(description = "Quantity currently held by open reservations.") BigDecimal reserved,
-      @Schema(description = "onHand minus reserved; the sellable quantity.")
-          BigDecimal available) {}
+      @Schema(description = "onHand minus what is in bond minus reserved; the sellable quantity.")
+          BigDecimal available,
+      @Schema(description = "How much of onHand sits in bond with its duty suspended.")
+          BigDecimal inBond) {}
 
   @Schema(name = "LevelSummaryResponse", description = "Aggregate stock-level KPI counts.")
   public record LevelSummaryResponse(
@@ -112,7 +128,12 @@ public final class Dtos {
       @Schema(description = "e.g. AVAILABLE, QUARANTINE, HOLD, REJECTED.") String materialStatus,
       String materialStatusReason,
       String grade,
-      @Schema(description = "UUID of the zone the batch is placed in.") String zoneId) {}
+      @Schema(description = "UUID of the zone the batch is placed in.") String zoneId,
+      @Schema(description = "OWNED, or CONSIGNMENT when the supplier still owns it.")
+          String ownership,
+      @Schema(description = "The owning supplier of a CONSIGNMENT batch.") String ownerSupplierId,
+      @Schema(description = "DUTY_PAID, or DUTY_SUSPENDED while the batch sits in bond.")
+          String dutyStatus) {}
 
   @Schema(name = "ReservationResponse", description = "A hold placed against available stock.")
   public record ReservationResponse(
@@ -123,7 +144,9 @@ public final class Dtos {
       @Schema(description = "UUID of the order this reservation is for.") String orderId,
       @Schema(description = "HELD, CONSUMED, or RELEASED.") String status,
       @Schema(description = "Instant after which the hold auto-expires.") String expiresAt,
-      String createdAt) {}
+      String createdAt,
+      @Schema(description = "STOCK, or DROPSHIP when the supplier fulfils it and nothing is held.")
+          String fulfilment) {}
 
   @Schema(
       name = "LowStockRowResponse",
@@ -155,8 +178,193 @@ public final class Dtos {
                   "How much of onHandQty carries no cost and is excluded from value. Reported"
                       + " rather than valued at zero, which would understate the holding.")
           BigDecimal unvaluedQty,
-      @Schema(description = "Money value of the quantity that could be costed.")
-          BigDecimal value) {}
+      @Schema(
+              description =
+                  "Money value of the quantity that could be costed and that the business owns."
+                      + " Consignment stock is not its asset and is reported apart.")
+          BigDecimal value,
+      @Schema(description = "How much of onHandQty the supplier still owns (consignment).")
+          BigDecimal consignmentQty,
+      @Schema(
+              description =
+                  "What the consignment holding is worth at the cost the supplier will be owed.")
+          BigDecimal consignmentValue,
+      @Schema(description = "How much of onHandQty is held in bond with its duty suspended.")
+          BigDecimal dutySuspendedQty,
+      @Schema(
+              description =
+                  "The duty that stock would crystallise on release, at the variants' rates.")
+          BigDecimal dutyPotential) {}
+
+  // ── Bonded and duty-suspended stock ─────────────────────────────────────────
+
+  @Schema(name = "BondApprovalRequest")
+  public record BondApprovalRequest(
+      @Schema(description = "The revenue's approval number for the warehouse.") @NotBlank
+          String approvalNumber,
+      @Schema(description = "EXCISE or CUSTOMS.") @NotBlank String regime) {}
+
+  @Schema(name = "BondApprovalResponse")
+  public record BondApprovalResponse(
+      String storeId,
+      String approvalNumber,
+      String regime,
+      boolean active,
+      String createdAt,
+      String endedAt) {}
+
+  @Schema(name = "DutyRateRequest")
+  public record DutyRateRequest(
+      @Schema(description = "The duty one unit crystallises on release, in the home currency.")
+          @NotNull
+          @PositiveOrZero
+          BigDecimal dutyPerUnit,
+      @Schema(description = "How the figure was arrived at.") String note) {}
+
+  @Schema(name = "DutyRateResponse")
+  public record DutyRateResponse(
+      String variantId, BigDecimal dutyPerUnit, String currency, String note, String updatedAt) {}
+
+  @Schema(name = "BondReleaseRequest")
+  public record BondReleaseRequest(
+      @NotBlank String storeId,
+      @NotBlank String variantId,
+      @NotNull @Positive BigDecimal qty,
+      @Schema(description = "The return or warrant this release belongs to.") String reference) {}
+
+  @Schema(name = "BondReleaseResponse")
+  public record BondReleaseResponse(
+      String id,
+      String storeId,
+      String variantId,
+      BigDecimal qty,
+      BigDecimal dutyPerUnit,
+      BigDecimal dutyAmount,
+      String currency,
+      String reference,
+      String releasedAt) {}
+
+  @Schema(name = "BondReleasesResponse", description = "The releases of a period and their duty.")
+  public record BondReleasesResponse(
+      List<BondReleaseResponse> releases, BigDecimal totalDuty, String currency) {}
+
+  // ── Fresh yield, preparation and butchery loss ─────────────────────────────
+
+  @Schema(name = "YieldOutputSpecRequest", description = "One cut a primal is expected to yield.")
+  public record YieldOutputSpecRequest(
+      @NotBlank String variantId,
+      @Schema(description = "The cut's expected share of the input quantity, in percent.")
+          @NotNull
+          @Positive
+          BigDecimal expectedPct,
+      @Schema(
+              description =
+                  "The relative share of the primal's cost this cut carries; the expected share"
+                      + " when unsaid, so cost follows weight.")
+          BigDecimal costShare,
+      @Schema(
+              description =
+                  "The cut's own shelf life from the day it is made; unsaid keeps the primal's date.")
+          Integer shelfLifeDays) {}
+
+  @Schema(name = "YieldTemplateRequest", description = "What a primal should break into.")
+  public record YieldTemplateRequest(
+      @NotBlank String name,
+      @NotBlank String inputVariantId,
+      @Schema(description = "The unit the shares are read in (kg, each); a label for people.")
+          String unit,
+      String notes,
+      @NotNull @Valid List<YieldOutputSpecRequest> outputs) {}
+
+  @Schema(name = "YieldOutputSpecResponse")
+  public record YieldOutputSpecResponse(
+      String variantId, BigDecimal expectedPct, BigDecimal costShare, Integer shelfLifeDays) {}
+
+  @Schema(name = "YieldTemplateResponse")
+  public record YieldTemplateResponse(
+      String id,
+      String name,
+      String inputVariantId,
+      String unit,
+      String notes,
+      boolean active,
+      @Schema(description = "What the cuts' shares leave: the loss expected, in percent.")
+          BigDecimal expectedLossPct,
+      List<YieldOutputSpecResponse> outputs,
+      String createdAt) {}
+
+  @Schema(name = "YieldRunOutputRequest", description = "What came out of one cut.")
+  public record YieldRunOutputRequest(
+      @NotBlank String variantId, @NotNull @DecimalMin("0") BigDecimal qty) {}
+
+  @Schema(name = "YieldRunRequest", description = "A breakdown made at a store.")
+  public record YieldRunRequest(
+      @NotBlank String storeId,
+      @NotBlank String templateId,
+      @Schema(description = "How much of the primal went in.") @NotNull @Positive
+          BigDecimal inputQty,
+      @Schema(description = "What came out, per cut; a cut left out came to nothing.")
+          @NotNull
+          @Valid
+          List<YieldRunOutputRequest> outputs,
+      @Schema(description = "The docket or the day's sheet this breakdown belongs to.")
+          String reference,
+      String notes) {}
+
+  @Schema(name = "YieldRunOutputResponse")
+  public record YieldRunOutputResponse(
+      String variantId,
+      BigDecimal qty,
+      BigDecimal expectedQty,
+      @Schema(
+              description =
+                  "The cut's cost per unit, the primal's cost apportioned; null when the primal had none.")
+          BigDecimal unitCost,
+      @Schema(description = "The batch the cut became; null when nothing came out.")
+          String batchId) {}
+
+  @Schema(name = "YieldRunResponse")
+  public record YieldRunResponse(
+      String id,
+      String storeId,
+      String templateId,
+      String templateName,
+      String inputVariantId,
+      BigDecimal inputQty,
+      BigDecimal inputCost,
+      BigDecimal outputQty,
+      BigDecimal lossQty,
+      BigDecimal lossPct,
+      BigDecimal expectedLossQty,
+      @Schema(description = "Loss less expected loss: positive when more was lost than expected.")
+          BigDecimal lossVariance,
+      @Schema(description = "The loss at the primal's unit cost: what the bin took.")
+          BigDecimal lossAtCost,
+      String reference,
+      String notes,
+      String recordedAt,
+      List<YieldRunOutputResponse> outputs) {}
+
+  @Schema(name = "YieldTotalsResponse", description = "A period's breakdowns added up.")
+  public record YieldTotalsResponse(
+      int runs,
+      BigDecimal inputQty,
+      BigDecimal outputQty,
+      BigDecimal lossQty,
+      BigDecimal expectedLossQty,
+      BigDecimal lossAtCost) {}
+
+  @Schema(name = "YieldRunsResponse", description = "The butchery-loss report.")
+  public record YieldRunsResponse(List<YieldRunResponse> runs, YieldTotalsResponse totals) {}
+
+  @Schema(name = "BondStockResponse", description = "What sits in bond and the duty it carries.")
+  public record BondStockResponse(
+      String storeId,
+      String variantId,
+      BigDecimal qty,
+      @Schema(description = "The variant's duty per unit; null when none is set.")
+          BigDecimal dutyPerUnit,
+      BigDecimal dutyPotential) {}
 
   @Schema(
       name = "ShrinkageRowResponse",
@@ -407,7 +615,11 @@ public final class Dtos {
       BigDecimal requestedQty,
       @Schema(description = "Quantity actually shipped.") BigDecimal shippedQty,
       @Schema(description = "Quantity actually received at the destination store.")
-          BigDecimal receivedQty) {}
+          BigDecimal receivedQty,
+      @Schema(
+              description =
+                  "Why a replenishment proposal asked for this quantity; null when a person did.")
+          String reason) {}
 
   @Schema(
       name = "TransferOrderResponse",
@@ -417,11 +629,22 @@ public final class Dtos {
       @Schema(description = "UUID of the sending store.") String fromStoreId,
       @Schema(description = "UUID of the receiving store.") String toStoreId,
       String transferType,
-      @Schema(description = "PENDING, SHIPPED, RECEIVED, or CANCELLED.") String status,
+      @Schema(
+              description =
+                  "DRAFT (proposed, to be released), PENDING, SHIPPED, RECEIVED, or CANCELLED.")
+          String status,
       String notes,
       String createdAt,
       String shippedAt,
       String receivedAt,
+      @Schema(description = "MANUAL, or PROPOSAL when a warehouse's replenishment run raised it.")
+          String source,
+      @Schema(description = "The replenishment run that proposed it, or null.")
+          String proposalRunId,
+      @Schema(description = "A cross-dock transfer's purchase order, or null.")
+          String purchaseOrderId,
+      @Schema(description = "A cross-dock transfer's goods receipt, or null.")
+          String goodsReceiptId,
       List<TransferOrderLineResponse> lines) {}
 
   // ── Lot Genealogy (Gap #11) ──────────────────────────────────────────────
@@ -1035,12 +1258,50 @@ public final class Dtos {
       String completedAt,
       List<PhysicalInventoryTagResponse> tags) {}
 
-  /** Public storefront stock signal: whether a variant is buyable at a store (no quantities). */
+  /**
+   * Public storefront stock signal: whether a variant is buyable at a store. No quantities are
+   * exposed above a business's own configured threshold — {@code onlyLeft} is the one deliberate
+   * exception, and only ever at or below it.
+   */
   @Schema(
       name = "AvailabilityResponse",
-      description = "Public in-stock/out-of-stock signal for a variant; no quantities exposed.")
+      description =
+          "Public in-stock/out-of-stock signal for a variant; no quantities exposed above a"
+              + " business's own low-stock threshold.")
   public record AvailabilityResponse(
-      @Schema(description = "UUID of the product variant.") String variantId, boolean inStock) {}
+      @Schema(description = "UUID of the product variant.") String variantId,
+      boolean inStock,
+      @Schema(
+              description =
+                  "True when the supplier ships it per order: available with none on the shelf.")
+          boolean dropship,
+      @Schema(
+              description =
+                  "The whole units left at the store named on the read, when a business has set a"
+                      + " threshold and 0 < available <= threshold; null otherwise — no threshold"
+                      + " set, above the threshold, out of stock, dropship, no store named, or a"
+                      + " fractional (weighed) quantity. Never a count above the threshold.")
+          Integer onlyLeft) {}
+
+  // ── "Only N left" on the storefront ────────────────────────────────────
+
+  @Schema(
+      name = "StorefrontStockSettingsRequest",
+      description =
+          "The business-wide low-stock threshold shown to shoppers as \"only N left\"; null"
+              + " switches the feature off.")
+  public record StorefrontStockSettingsRequest(
+      @Schema(description = "1..1000, or null to switch the feature off.")
+          Integer lowStockThreshold) {}
+
+  @Schema(
+      name = "StorefrontStockSettingsResponse",
+      description = "The business's current \"only N left\" setting.")
+  public record StorefrontStockSettingsResponse(
+      @Schema(description = "1..1000, or null while the feature is off.") Integer lowStockThreshold,
+      @Schema(description = "When it was last changed; null if never.") String updatedAt,
+      @Schema(description = "UUID of the staff member who last changed it; null if never.")
+          String updatedBy) {}
 
   // ── Gross margin and GMROI (19.7) ─────────────────────────────────────────────
 
@@ -1073,4 +1334,104 @@ public final class Dtos {
       @Schema(description = "False when archived movements make the average holding a floor.")
           boolean historyComplete,
       int windowDays) {}
+
+  // ── Demand forecast (06.x) ───────────────────────────────────────────────────
+
+  @Schema(name = "ForecastRunRequest")
+  public record ForecastRunRequest(
+      @NotBlank String storeId,
+      @Schema(description = "One variant, or omitted for every variant with history at the store.")
+          String variantId,
+      @Schema(description = "Days to forecast, 1 to 365; 28 when omitted.") Integer horizonDays) {}
+
+  @Schema(name = "ForecastRunResponse")
+  public record ForecastRunResponse(
+      String storeId,
+      @Schema(description = "Variants forecast in this run.") int variants,
+      @Schema(description = "How many took each method: MEAN, SES, CROSTON_SBA.")
+          Map<String, Integer> byMethod,
+      @Schema(description = "Mean MAPE over the forecasts that could compute one; null when none.")
+          BigDecimal meanMape,
+      int horizonDays,
+      String computedAt,
+      @Schema(description = "Variants that live fourteen days or fewer, by their batches.")
+          int fresh,
+      @Schema(description = "Variants with a year's shape: thirteen months seen, twelve indices.")
+          int seasonal,
+      @Schema(description = "Variants a promotion will run on within the horizon.") int promoted) {}
+
+  @Schema(name = "ForecastPoint")
+  public record ForecastPointResponse(String day, BigDecimal qty) {}
+
+  @Schema(name = "Forecast")
+  public record ForecastResponse(
+      String id,
+      String storeId,
+      String variantId,
+      @Schema(description = "MEAN, SES (smoothing with a weekday profile) or CROSTON_SBA.")
+          String method,
+      @Schema(description = "Demand on fewer than three days in four: Croston's case.")
+          boolean intermittent,
+      @Schema(description = "The smoothing constant the hold-out chose; null for MEAN.")
+          BigDecimal alpha,
+      @Schema(description = "Expected demand per day before the weekday profile.") BigDecimal level,
+      @Schema(description = "Seven multipliers, Monday first; empty when none.")
+          List<BigDecimal> weekdayProfile,
+      String historyFrom,
+      String historyTo,
+      int historyDays,
+      int horizonDays,
+      @Schema(description = "The first forecast day.") String fromDay,
+      @Schema(description = "Expected demand over the next seven days.") BigDecimal next7,
+      @Schema(description = "Expected demand over the next twenty-eight days.") BigDecimal next28,
+      @Schema(description = "Days of history the forecast was tested against.") int holdoutDays,
+      @Schema(
+              description =
+                  "Mean absolute percentage error over hold-out days with demand; null when none had any.")
+          BigDecimal mape,
+      @Schema(
+              description =
+                  "Forecast minus actual over the hold-out, as a percentage of actual; negative means under-forecast.")
+          BigDecimal bias,
+      @Schema(
+              description =
+                  "Mean absolute scaled error against a naive one-day-back forecast; under 1 beats it.")
+          BigDecimal mase,
+      @Schema(
+              description =
+                  "One expected quantity per day from fromDay; only on the single forecast.")
+          List<ForecastPointResponse> points,
+      String computedAt,
+      @Schema(description = "Lives fourteen days or fewer, by the median of its dated batches.")
+          boolean fresh,
+      @Schema(
+              description =
+                  "Median days from receipt to expiry over the dated batches; null when the item keeps.")
+          Integer shelfLifeDays,
+      @Schema(
+              description =
+                  "Percent of what was received that went out of date unsold (past-date stock plus"
+                      + " EXPIRY write-offs); null when nothing sold or wasted.")
+          BigDecimal wasteRatePct,
+      @Schema(
+              description =
+                  "The shelf life, the longest cover an order should be given; null when the item keeps.")
+          Integer maxCoverDays,
+      @Schema(
+              description =
+                  "Twelve monthly indices, January first, from the days no promotion ran; empty under"
+                      + " thirteen months of history.")
+          List<BigDecimal> seasonalIndices,
+      @Schema(
+              description =
+                  "What a promotion does to the item: promoted-day demand over ordinary, 1 to 10;"
+                      + " null when none could be measured.")
+          BigDecimal uplift,
+      @Schema(
+              description =
+                  "ITEM from its own promotions, STORE pooled across the store's; null with no uplift.")
+          String upliftSource,
+      @Schema(description = "History days a promotion ran on.") int promotedHistoryDays,
+      @Schema(description = "Horizon days a promotion will run on, each forecast at the uplift.")
+          int promotedAheadDays) {}
 }

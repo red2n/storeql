@@ -2,10 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../admin/providers/admin_providers.dart';
 
 // ---------------------------------------------------------------------------
 // The platform's own billing (21.9).
@@ -42,8 +46,9 @@ class PlatformProfile {
         vatNumber: j['vatNumber'] as String?,
       );
 
+  /// The terms, under the legal name the card already shows as its title.
   String get says =>
-      '$legalName · $country · $invoicePrefix-… · $paymentTermsDays days · '
+      '$country · $invoicePrefix-… · $paymentTermsDays days · '
       '${(taxRate * 100).toStringAsFixed(2)}%';
 }
 
@@ -53,12 +58,22 @@ class DunningStage {
   final String? nextStep;
   final int daysOverdue;
 
-  const DunningStage({required this.stage, required this.nextStep, required this.daysOverdue});
+  /// Whose invoice it is. A receivable says so itself; this is the fallback for a receivables
+  /// answer that does not (a tenant-svc from before it did).
+  final String? tenantId;
+
+  const DunningStage({
+    required this.stage,
+    required this.nextStep,
+    required this.daysOverdue,
+    this.tenantId,
+  });
 
   factory DunningStage.fromJson(Map<String, dynamic> j) => DunningStage(
         stage: j['stage'] as String?,
         nextStep: j['nextStep'] as String?,
         daysOverdue: (j['daysOverdue'] as num?)?.toInt() ?? 0,
+        tenantId: j['tenantId'] as String?,
       );
 
   /// A reminder reads as one; the two that matter read as themselves.
@@ -92,6 +107,10 @@ class Receivable {
   final num? outstanding;
   final String? taxTreatment;
 
+  /// Whose invoice it is, so every row can name the business — not only the overdue ones the
+  /// dunning list knows about.
+  final String? tenantId;
+
   const Receivable({
     required this.id,
     required this.number,
@@ -101,6 +120,7 @@ class Receivable {
     required this.totalAmount,
     required this.outstanding,
     required this.taxTreatment,
+    this.tenantId,
   });
 
   factory Receivable.fromJson(Map<String, dynamic> j) => Receivable(
@@ -112,13 +132,17 @@ class Receivable {
         totalAmount: j['totalAmount'] as num?,
         outstanding: j['outstanding'] as num?,
         taxTreatment: j['taxTreatment'] as String?,
+        tenantId: j['tenantId'] as String?,
       );
 
-  /// Overdue against today, which is the only question a receivables list answers.
+  /// Overdue against today, which is the only question a receivables list answers. A due date is a
+  /// day, not an instant: an invoice due today is not overdue until the day is out, which is how
+  /// the dunning run counts it too.
   bool overdueOn(DateTime day) {
-    if (dueDate == null) return false;
-    final due = DateTime.tryParse(dueDate!);
-    return due != null && day.isAfter(due);
+    final due = dueDate == null ? null : DateTime.tryParse(dueDate!);
+    if (due == null) return false;
+    return DateTime(day.year, day.month, day.day)
+        .isAfter(DateTime(due.year, due.month, due.day));
   }
 }
 
@@ -127,12 +151,24 @@ class PlatformBilling {
   final PlatformProfile? profile;
   final List<Receivable> owed;
 
-  /// The dunning stage per invoice id. Absent for an invoice nothing has been done about yet.
+  /// The dunning stage per invoice id: one for every overdue invoice, its stage null until it has
+  /// been chased. Absent for an invoice not yet due, and when dunning cannot be read.
   final Map<String, DunningStage> stages;
 
   const PlatformBilling({required this.profile, required this.owed, required this.stages});
 
-  num get totalOwed => owed.fold<num>(0, (sum, r) => sum + (r.outstanding ?? 0));
+  /// What is still owed, one total per currency in the order they first appear —
+  /// `£354.00 · €120.00`. Pounds and euros do not add up to one figure.
+  String get owedSays {
+    final totals = <String, num>{};
+    for (final r in owed) {
+      final code = r.currency ?? '';
+      totals[code] = (totals[code] ?? 0) + (r.outstanding ?? 0);
+    }
+    return [
+      for (final e in totals.entries) AppFormat.money(e.value, currencyCode: e.key),
+    ].join(' · ');
+  }
 
   int get suspendedCount => stages.values.where((s) => s.suspended).length;
 }
@@ -172,48 +208,103 @@ final platformBillingProvider = FutureProvider.autoDispose<PlatformBilling>((ref
   );
 });
 
+/// The business each receivable is owed by, by name: every tenant id the
+/// receivables carry (and the overdue list's, as a fallback), looked up in the
+/// platform's tenant list and — for a business past its first page — asked
+/// for one by one (`GET /platform/tenants/{id}`). An id nobody can name is
+/// left out: the row then shows its invoice number alone, never an id.
+final receivableTenantNamesProvider =
+    FutureProvider.autoDispose<Map<String, String>>((ref) async {
+  final billing = await ref.watch(platformBillingProvider.future);
+  final ids = <String>{
+    for (final r in billing.owed) ?r.tenantId,
+    for (final s in billing.stages.values) ?s.tenantId,
+  };
+  final names = <String, String>{};
+  if (ids.isEmpty) return names;
+  try {
+    for (final t in await ref.watch(allTenantsProvider.future)) {
+      if (ids.contains(t.id)) names[t.id] = t.name;
+    }
+  } on Object {
+    // The list is best effort; each business can still be asked for alone.
+  }
+  final dio = ref.read(apiClientProvider).dio;
+  await Future.wait([
+    for (final id in ids.where((id) => !names.containsKey(id)))
+      () async {
+        try {
+          final resp = await dio.get('/${ApiConstants.tenant}/platform/tenants/$id');
+          final data = resp.data is Map ? resp.data['data'] : null;
+          final name = data is Map ? data['name'] : null;
+          if (name is String && name.trim().isNotEmpty) names[id] = name.trim();
+        } on Object {
+          // Unknown or unreadable: the row keeps its invoice number.
+        }
+      }(),
+  ]);
+  return names;
+});
+
 class PlatformBillingScreen extends ConsumerWidget {
   const PlatformBillingScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final billing = ref.watch(platformBillingProvider);
+    // Each receivable names its business by id; the platform's tenants turn that into the name an
+    // operator rings, whichever page of the list the business is on. Best effort: without it a row
+    // still shows its invoice.
+    final tenantNames =
+        ref.watch(receivableTenantNamesProvider).value ?? const <String, String>{};
     final text = Theme.of(context).textTheme;
     final cs = Theme.of(context).colorScheme;
-    void refresh() => ref.invalidate(platformBillingProvider);
+    final gutter = context.pageGutter;
+    void refresh() {
+      ref.invalidate(platformBillingProvider);
+      ref.invalidate(allTenantsProvider);
+      ref.invalidate(receivableTenantNamesProvider);
+    }
 
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text('Billing', style: text.headlineSmall)),
-              IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'What the platform invoices as, and what is still owed.',
-            style: text.bodyMedium?.copyWith(color: cs.outline),
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: billing.when(
-              loading: () => const LoadingView(label: 'Loading the books…'),
-              error: (e, _) => ErrorView(
-                message: friendlyError(e, fallback: 'Could not load the billing details.'),
-                onRetry: refresh,
-              ),
-              data: (b) => ListView(
+    // Pull to refresh keeps its spinner until the books have been read again.
+    Future<void> pullToRefresh() async {
+      refresh();
+      try {
+        await ref.read(platformBillingProvider.future);
+      } on Object {
+        // A failed read replaces the list with the error view and its retry.
+      }
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        PageHeader(
+          title: 'Billing',
+          subtitle: 'What the platform invoices as, and what is still owed.',
+          actions: [
+            IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
+          ],
+        ),
+        Expanded(
+          child: billing.when(
+            loading: () => const LoadingView(label: 'Loading the books…'),
+            error: (e, _) => ErrorView(
+              message: friendlyError(e, fallback: 'Could not load the billing details.'),
+              onRetry: refresh,
+            ),
+            data: (b) => RefreshIndicator.adaptive(
+              onRefresh: pullToRefresh,
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, gutter),
                 children: [
                   if (b.profile == null)
                     Card(
                       key: const Key('profile-unset'),
                       color: cs.errorContainer,
                       child: Padding(
-                        padding: const EdgeInsets.all(16),
+                        padding: AppSpacing.cardPadding,
                         child: Text(
                           'The platform has not said who it invoices as, so nothing can be billed. '
                           'An invoice with no seller is not an invoice anywhere it trades.',
@@ -232,27 +323,39 @@ class PlatformBillingScreen extends ConsumerWidget {
                             : Text('VAT ${b.profile!.vatNumber}', style: text.bodySmall),
                       ),
                     ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: AppSpacing.lg),
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Expanded(child: Text('Owed', style: text.titleMedium)),
-                      if (b.suspendedCount > 0)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 12),
-                          child: Text(
-                            key: const Key('suspended-count'),
-                            '${b.suspendedCount} suspended',
-                            style: text.bodyMedium?.copyWith(color: cs.error),
-                          ),
+                      Text('Owed', style: text.titleMedium),
+                      const SizedBox(width: AppSpacing.lg),
+                      // The suspended count and a total per currency. On a phone, or with several
+                      // currencies, they wrap under one another rather than run off the edge.
+                      Expanded(
+                        child: Wrap(
+                          alignment: WrapAlignment.end,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: AppSpacing.md,
+                          runSpacing: AppSpacing.xs,
+                          children: [
+                            if (b.suspendedCount > 0)
+                              Text(
+                                key: const Key('suspended-count'),
+                                '${b.suspendedCount} suspended',
+                                style: text.bodyMedium?.copyWith(color: cs.error),
+                              ),
+                            Text(
+                              key: const Key('total-owed'),
+                              b.owed.isEmpty ? 'nothing' : b.owedSays,
+                              textAlign: TextAlign.end,
+                              style: text.titleMedium,
+                            ),
+                          ],
                         ),
-                      Text(
-                        key: const Key('total-owed'),
-                        b.owed.isEmpty ? 'nothing' : b.totalOwed.toStringAsFixed(2),
-                        style: text.titleMedium,
                       ),
                     ],
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: AppSpacing.sm),
                   if (b.owed.isEmpty)
                     Text(
                       key: const Key('owed-none'),
@@ -261,13 +364,20 @@ class PlatformBillingScreen extends ConsumerWidget {
                     )
                   else
                     for (final r in b.owed)
-                      _ReceivableRow(receivable: r, stage: b.stages[r.id]),
+                      _ReceivableRow(
+                        receivable: r,
+                        stage: b.stages[r.id],
+                        // The invoice's own business first; the overdue list's as a fallback; and
+                        // with neither known, the row is its invoice number alone.
+                        tenantName: tenantNames[r.tenantId] ??
+                            tenantNames[b.stages[r.id]?.tenantId],
+                      ),
                 ],
               ),
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -276,7 +386,11 @@ class _ReceivableRow extends StatelessWidget {
   final Receivable receivable;
   final DunningStage? stage;
 
-  const _ReceivableRow({required this.receivable, this.stage});
+  /// Who owes it, when the console knows the business. Unknown, the row shows its number alone —
+  /// never the business's id.
+  final String? tenantName;
+
+  const _ReceivableRow({required this.receivable, this.stage, this.tenantName});
 
   @override
   Widget build(BuildContext context) {
@@ -285,6 +399,7 @@ class _ReceivableRow extends StatelessWidget {
     final r = receivable;
     final overdue = r.overdueOn(DateTime.now());
     final suspended = stage?.suspended == true;
+    final due = AppFormat.date(r.dueDate);
     return ListTile(
       key: Key('owed-${r.number}'),
       dense: true,
@@ -300,7 +415,9 @@ class _ReceivableRow extends StatelessWidget {
       title: Text(r.number, style: text.bodyLarge),
       subtitle: Text(
         [
-          if (overdue) 'Overdue since ${r.dueDate}' else 'Due ${r.dueDate ?? '—'}',
+          // Who to call, first.
+          ?tenantName,
+          if (overdue) 'Overdue since $due' else 'Due ${due.isEmpty ? '—' : due}',
           // What has been done, and what is coming. An operator who can see "suspended next" can act
           // before a customer telephones to say the till has stopped working.
           ?stage?.stageSays,
@@ -308,7 +425,10 @@ class _ReceivableRow extends StatelessWidget {
         ].join(' · '),
         style: text.bodySmall?.copyWith(color: suspended || overdue ? cs.error : cs.outline),
       ),
-      trailing: Text('${r.currency ?? ''} ${r.outstanding ?? 0}', style: text.bodyLarge),
+      trailing: Text(
+        AppFormat.money(r.outstanding ?? 0, currencyCode: r.currency),
+        style: text.titleSmall?.copyWith(color: cs.onSurface),
+      ),
     );
   }
 }

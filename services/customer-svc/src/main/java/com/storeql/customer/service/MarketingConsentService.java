@@ -12,6 +12,8 @@ import com.storeql.service.CapabilityTokens;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,7 +23,9 @@ import java.util.UUID;
 
 /**
  * Marketing consent, preferences and the unsubscribe link (PECR reg.22/23, UK GDPR art.7(1) and
- * art.21(3)).
+ * art.21(3)), gated by the MARKETING purpose (DPDP Act s.6): {@link PrivacyService} decides whether
+ * that purpose currently permits a channel; this class enforces it everywhere a channel can be
+ * switched on.
  *
  * <p>Kept apart from {@link CustomerService} because it answers a different question. That one is
  * about who a person is to the shop; this one is about what the shop is allowed to send them, which
@@ -33,8 +37,16 @@ import java.util.UUID;
 @ApplicationScoped
 public class MarketingConsentService {
 
+  private static final Logger LOG = System.getLogger(MarketingConsentService.class.getName());
+
   /** Hard cap on the evidence trail an export or a screen reads at once. */
   private static final int CONSENT_LOG_LIMIT = 1000;
+
+  /** The most channels one batch of the start-up reconciliation corrects at a time. */
+  private static final int RECONCILE_BATCH = 500;
+
+  /** The most tenants one reconciliation run looks at; generous, and a safety bound. */
+  private static final int MAX_TENANTS_PER_RECONCILE_RUN = 10_000;
 
   private static final Set<String> CHANNELS =
       Set.of(
@@ -44,6 +56,7 @@ public class MarketingConsentService {
           MarketingPreference.CHANNEL_POST);
 
   @Inject CustomerRepository repo;
+  @Inject PrivacyService privacy;
 
   /**
    * What this shop may currently send one person.
@@ -80,7 +93,9 @@ public class MarketingConsentService {
    * @param actorId the staff member acting, or {@code null} when the customer did it themselves
    * @return the preferences as they now stand
    * @throws ApiException {@code MARKETING_CHANNEL_UNKNOWN} (400) for a channel that is not one of
-   *     EMAIL, SMS, PHONE, POST; {@code CUSTOMER_ANONYMIZED} (409) for an erased customer
+   *     EMAIL, SMS, PHONE, POST; {@code CUSTOMER_ANONYMIZED} (409) for an erased customer; {@code
+   *     MARKETING_PURPOSE_NOT_GRANTED} (409) for a channel being switched on while the MARKETING
+   *     purpose gate refuses it — nothing in the request is applied when this is thrown
    */
   public List<MarketingPreference> setPreferences(
       UUID tenantId,
@@ -97,6 +112,9 @@ public class MarketingConsentService {
     }
     Instant now = Instant.now();
     List<MarketingConsentEntry> entries = new ArrayList<>();
+    // Computed at most once per call, and only if a channel is actually being switched on — a
+    // request that only withdraws channels never needs the purpose gate at all.
+    Boolean blocked = null;
     for (MarketingChannelChoice choice : req.channels()) {
       String channel = choice.channel().trim().toUpperCase(Locale.ROOT);
       if (!CHANNELS.contains(channel)) {
@@ -104,6 +122,17 @@ public class MarketingConsentService {
             "MARKETING_CHANNEL_UNKNOWN", "unknown marketing channel: " + choice.channel());
       }
       boolean granted = Boolean.TRUE.equals(choice.granted());
+      if (granted) {
+        if (blocked == null) {
+          blocked = purposeGateBlocks(tenantId, customer.id());
+        }
+        if (blocked) {
+          throw ApiException.conflict(
+              "MARKETING_PURPOSE_NOT_GRANTED",
+              "the MARKETING purpose is not granted, so no channel may be switched on until it"
+                  + " is");
+        }
+      }
       entries.add(
           new MarketingConsentEntry(
               Ids.newId(),
@@ -119,6 +148,30 @@ public class MarketingConsentService {
     }
     repo.recordConsent(entries);
     return repo.listPreferences(tenantId, customer.id());
+  }
+
+  /**
+   * Whether the MARKETING purpose gate refuses a channel right now, never throwing: a business
+   * whose country or jurisdiction rules cannot be read right now cannot demonstrate the purpose
+   * stands granted, so this refuses exactly as it does when the purpose is genuinely unanswered —
+   * <em>silence is not consent</em>, applied to the gate's own availability, not only to the
+   * person's answer.
+   *
+   * @param tenantId owning tenant
+   * @param customerId the person a channel would be switched on, or sent to
+   * @return {@code true} when the gate refuses; never throws
+   */
+  public boolean purposeGateBlocks(UUID tenantId, UUID customerId) {
+    try {
+      return privacy.marketingChannelBlocked(tenantId, customerId);
+    } catch (ApiException e) {
+      LOG.log(
+          Level.WARNING,
+          "marketing purpose gate unreadable for tenant {0}: {1}",
+          tenantId,
+          e.getMessage());
+      return true;
+    }
   }
 
   private static String basisOf(String requested) {
@@ -169,6 +222,13 @@ public class MarketingConsentService {
     if (!pref.granted()) {
       return new MarketingAllowanceResponse(
           false, MarketingPreference.BASIS_NONE, "the customer has opted out", null);
+    }
+    // Re-checked live, not only at grant time: a channel granted lawfully before the
+    // business came under a per-purpose consent law is not lawful to send on once it does, and
+    // the cascade above already covers a purpose withdrawn since — this is the rest of it.
+    if (purposeGateBlocks(tenantId, customerId)) {
+      return new MarketingAllowanceResponse(
+          false, MarketingPreference.BASIS_NONE, "the MARKETING purpose is not granted", null);
     }
     String token = mintToken();
     repo.storeUnsubscribeToken(tenantId, customerId, hash(token));
@@ -240,5 +300,30 @@ public class MarketingConsentService {
 
   private static String hash(String token) {
     return CapabilityTokens.hash(token);
+  }
+
+  // ── start-up reconciliation ────────────────────────────────────────
+
+  /**
+   * Fixes every customer, across every tenant, whose MARKETING purpose stands withdrawn but who
+   * still has a channel recorded as granted — predating this rule, or from a gap before the cascade
+   * covered every path. Tenant by tenant (every write below it is tenant-scoped, {@code tenant_id}
+   * first), and within a tenant in batches, so one very large table is never read or held in memory
+   * at once; idempotent, so calling this twice in a row does the second time as nothing (each batch
+   * stops finding a row once it is fixed).
+   *
+   * @return how many channels were switched off in total
+   */
+  public int reconcilePurposeWithdrawals() {
+    int total = 0;
+    for (UUID tenantId :
+        repo.distinctTenantsNeedingMarketingReconciliation(MAX_TENANTS_PER_RECONCILE_RUN)) {
+      int fixed;
+      do {
+        fixed = repo.reconcileMarketingPurposeWithdrawalsBatchForTenant(tenantId, RECONCILE_BATCH);
+        total += fixed;
+      } while (fixed == RECONCILE_BATCH);
+    }
+    return total;
   }
 }

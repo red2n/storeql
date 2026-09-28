@@ -67,7 +67,7 @@ export default function ({ admin }) {
   expect(plan('POST', `/${draft.id}/prices`, { currency: 'GBP', amount: 1, effectiveFrom: 'soon' }), '[-] a price takes effect on a date', 400, 'PLAN_PRICE_DATE_INVALID');
 
   const keys = data(call('GET', `${PLANS}/entitlement-keys`, { token: root }));
-  truthy('[+] the keys on offer are the ones something actually enforces', (keys.entitlements || []).map((e) => e.key).sort().join(',') === 'feature.storefront,products.max,staff.max,stores.max', keys);
+  truthy('[+] the keys on offer are the ones something actually enforces', (keys.entitlements || []).map((e) => e.key).sort().join(',') === 'documents.mb.max,feature.storefront,images.mb.max,products.max,requests.per-minute,staff.max,stores.max', keys);
 
   // ── a business lands on the default plan ─────────────────────────────────────────────────────────
   const small = sell(`SMALL-${tag}`, [

@@ -31,6 +31,7 @@ import com.storeql.tenant.mapper.Mappers;
 import com.storeql.tenant.repo.TenantRepository;
 import com.storeql.web.ApiException;
 import com.storeql.web.Cursor;
+import com.storeql.web.Parsing;
 import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -71,8 +72,27 @@ public class TenantService {
    * ownerUserId). Also publishes UserRoleGranted to ensure the creator has OWNER role (flow guard:
    * user has no tenant claim in JWT yet, so they need role update before they can access admin
    * endpoints).
+   *
+   * @param ownerEmail the address the owner signed up with, or null when the gateway stamped none:
+   *     where the business's billing notices go until it names another (21.12)
    */
-  public Tenant createTenant(UUID ownerUserId, CreateTenantRequest req) {
+  public Tenant createTenant(UUID ownerUserId, String ownerEmail, CreateTenantRequest req) {
+    // One login, one business (21.13): a token carries one tenant, and a second signup on the same
+    // login would be a second trial as much as a second shop. A second site is a store of the one.
+    repo.findByOwner(ownerUserId)
+        .ifPresent(
+            owned -> {
+              throw ApiException.conflict(
+                  "TENANT_ALREADY_OWNED",
+                  "This login already owns "
+                      + owned.name()
+                      + "; add a store to it, or sign up with another login");
+            });
+    if (req.planId() != null && !req.planId().isBlank()) {
+      // Checked before the business exists: a plan that cannot be chosen must not leave a business
+      // behind on no plan.
+      plans.requireChoosable(Parsing.uuid(req.planId(), "planId"));
+    }
     UUID tenantId = Ids.newId();
     Instant nowTenant = Instant.now();
     var tenant =
@@ -90,6 +110,8 @@ public class TenantService {
             null,
             null,
             null,
+            null,
+            Tenant.MODE_LIVE,
             null);
     var event =
         new OutboxRow(
@@ -103,14 +125,18 @@ public class TenantService {
 
     // A business signs up on whatever the platform sells by default (21.8). Best effort: one on no
     // plan is unrestricted, so failing to place it is safe where failing to create it is not.
-    plans.putOnDefaultPlan(tenantId);
+    if (req.planId() != null && !req.planId().isBlank()) {
+      plans.putOnPlan(tenantId, Parsing.uuid(req.planId(), "planId"));
+    } else {
+      plans.putOnDefaultPlan(tenantId);
+    }
 
     // And signing up is subscribing (21.9): the plan it landed on decides what it owes and when.
     // Best effort for the same reason, and with one more: a business that exists and is not billed
     // is a commercial problem somebody can fix afterwards, where a sign-up that fails because the
     // platform has not filled in its own VAT details is a customer lost at the door.
     try {
-      subscriptions.start(tenantId, java.time.LocalDate.now(), ownerUserId);
+      subscriptions.start(tenantId, java.time.LocalDate.now(), ownerUserId, ownerEmail);
     } catch (RuntimeException e) {
       LOG.log(
           System.Logger.Level.WARNING,
@@ -137,13 +163,14 @@ public class TenantService {
    * Combined onboarding: create tenant + first store in one shot. The tenantId is generated here so
    * the store call never needs it from the JWT — avoids the Kafka async race entirely.
    */
-  public TenantWithStore onboard(UUID ownerUserId, OnboardRequest req) {
+  public TenantWithStore onboard(UUID ownerUserId, String ownerEmail, OnboardRequest req) {
     // Checked before the tenant exists: a refused zone must not leave a business with no store.
     requireTimezone(req.storeTimezone());
     // 1. create tenant (generates tenantId internally)
     CreateTenantRequest tenantReq =
-        new CreateTenantRequest(req.businessName(), req.legalName(), req.country(), req.currency());
-    Tenant tenant = createTenant(ownerUserId, tenantReq);
+        new CreateTenantRequest(
+            req.businessName(), req.legalName(), req.country(), req.currency(), req.planId());
+    Tenant tenant = createTenant(ownerUserId, ownerEmail, tenantReq);
 
     // 2. create the first store using the freshly generated tenantId — no JWT needed
     CreateStoreRequest storeReq =
@@ -160,6 +187,7 @@ public class TenantService {
             null,
             null,
             req.storeTimezone(),
+            null,
             null,
             null,
             null);
@@ -222,12 +250,31 @@ public class TenantService {
     return trimmed;
   }
 
+  /**
+   * The store's type, upper-cased: STORE when none is given.
+   *
+   * @throws ApiException 400 {@code TENANT_STORE_TYPE_INVALID} for anything but STORE, WAREHOUSE or
+   *     DARK_STORE
+   */
+  static String storeType(String requested) {
+    if (requested == null || requested.isBlank()) return Store.TYPE_STORE;
+    String type = requested.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!Store.TYPES.contains(type)) {
+      throw ApiException.badRequest(
+          "TENANT_STORE_TYPE_INVALID",
+          "a store is a STORE, a WAREHOUSE or a DARK_STORE; got " + requested);
+    }
+    return type;
+  }
+
   private StoreWithZone createStoreInternal(
       UUID tenantId, CreateStoreRequest req, boolean isDefault) {
+    // A shop or a warehouse, nothing else: depot / DC replenishment reads the type to know which
+    // stores may serve shops.
+    String type = storeType(req.type());
     // What the business is sold decides how many stores it may open (21.8).
     plans.requireRoomForAnotherStore(tenantId);
     UUID storeId = Ids.newId();
-    String type = req.type() == null || req.type().isBlank() ? Store.TYPE_STORE : req.type();
     Instant nowStore = Instant.now();
     var store =
         new Store(
@@ -250,6 +297,7 @@ public class TenantService {
             isDefault,
             req.showPrices() == null || req.showPrices(),
             normalizePaymentMethods(req.enabledPaymentMethods(), Store.DEFAULT_PAYMENT_METHODS),
+            normalizeTillPhone(req.tillPhone(), Store.DEFAULT_TILL_PHONE),
             nowStore,
             nowStore);
 
@@ -291,7 +339,7 @@ public class TenantService {
             "storeql.tenant.store-status-changed",
             tenantId,
             storeId,
-            Events.storeStatusChanged(tenantId, storeId, store.status()));
+            Events.storeStatusChanged(tenantId, storeId, store.status(), store.type()));
 
     return repo.createStoreWithDefaultZone(
         store, defaultZone, List.of(storeEvent, zoneEvent, statusEvent));
@@ -720,7 +768,7 @@ public class TenantService {
    * each call site because dunning (21.12) writes the status itself and then announces it, and two
    * copies of the announcement would drift on what it says.
    */
-  private static OutboxRow tenantStatusEvent(UUID tenantId, String status) {
+  static OutboxRow tenantStatusEvent(UUID tenantId, String status) {
     return new OutboxRow(
         "TenantStatusChanged",
         "storeql.tenant.tenant-status-changed",
@@ -844,12 +892,13 @@ public class TenantService {
    *
    * @param tenantId owning tenant
    * @param storeId the store to update
-   * @param req the replacement details; null {@code showPrices}/{@code enabledPaymentMethods} keep
-   *     the current values
+   * @param req the replacement details; null {@code showPrices}/{@code
+   *     enabledPaymentMethods}/{@code tillPhone} keep the current values
    * @return the updated store
    * @throws ApiException {@code STORE_NOT_FOUND} (404) when it does not exist in this tenant;
    *     {@code STORE_PAYMENT_METHOD_INVALID} or {@code STORE_PAYMENT_METHODS_EMPTY} (400) when the
-   *     tender list is unusable
+   *     tender list is unusable; {@code STORE_TILL_PHONE_INVALID} (400) for a till choice that is
+   *     none of the three
    */
   public Store updateStore(UUID tenantId, UUID storeId, UpdateStoreRequest req) {
     Store existing = getStore(tenantId, storeId);
@@ -872,7 +921,25 @@ public class TenantService {
         req.businessHours(),
         // keep current value when the client omits the flag
         req.showPrices() == null ? existing.showPrices() : req.showPrices(),
-        normalizePaymentMethods(req.enabledPaymentMethods(), existing.enabledPaymentMethods()));
+        normalizePaymentMethods(req.enabledPaymentMethods(), existing.enabledPaymentMethods()),
+        normalizeTillPhone(req.tillPhone(), existing.tillPhone()));
+  }
+
+  /**
+   * What the store's till asks for the customer's phone (a phone at the till), read the way it was
+   * meant ({@code null} keeps {@code fallback}).
+   *
+   * @throws ApiException 400 {@code STORE_TILL_PHONE_INVALID} for anything but REQUIRED, OPTIONAL
+   *     or OFF
+   */
+  private static String normalizeTillPhone(String tillPhone, String fallback) {
+    if (tillPhone == null) return fallback;
+    String upper = tillPhone.strip().toUpperCase(Locale.ROOT);
+    if (!Store.TILL_PHONE.contains(upper))
+      throw ApiException.badRequest(
+          "STORE_TILL_PHONE_INVALID",
+          "tillPhone must be one of " + Store.TILL_PHONE + " — got: " + tillPhone);
+    return upper;
   }
 
   /**
@@ -915,7 +982,7 @@ public class TenantService {
    *     {@code INVALID_STATUS} (400) when the status is not a known one
    */
   public Store patchStoreStatus(UUID tenantId, UUID storeId, PatchStatusRequest req) {
-    getStore(tenantId, storeId);
+    Store existing = getStore(tenantId, storeId);
     String status = req.status().toUpperCase(Locale.ROOT);
     if (!Store.STATUSES.contains(status)) {
       throw ApiException.badRequest("INVALID_STATUS", "status must be one of " + Store.STATUSES);
@@ -927,7 +994,7 @@ public class TenantService {
             "storeql.tenant.store-status-changed",
             tenantId,
             storeId,
-            Events.storeStatusChanged(tenantId, storeId, status));
+            Events.storeStatusChanged(tenantId, storeId, status, existing.type()));
     return repo.updateStoreStatusWithOutbox(tenantId, storeId, status, event);
   }
 
@@ -976,13 +1043,19 @@ public class TenantService {
     return repo.updateZoneStatus(tenantId, zoneId, req.status());
   }
 
-  /** Cursor-paginated staff assignments (admin list). */
+  /**
+   * Cursor-paginated staff assignments (admin list), scoped by the caller's stores: a store-held
+   * caller sees assignments at their stores and the business-wide ones only; an owner, a
+   * business-wide manager or the platform admin ({@code storeIds} empty) sees every assignment, as
+   * before.
+   */
   public Cursor.Page<com.storeql.tenant.domain.Domain.StaffAssignment> listStaff(
-      UUID tenantId, String after, int limit) {
+      UUID tenantId, Set<UUID> storeIds, String after, int limit) {
     Cursor.CreatedAtId key = Cursor.decodeCreatedAtId(after);
     var rows =
         repo.listStaff(
             tenantId,
+            storeIds,
             key == null ? null : key.createdAt(),
             key == null ? null : key.id(),
             limit + 1);

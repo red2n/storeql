@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/reference/iso_reference.dart';
 import '../../core/format.dart';
 import '../../core/network/api_error.dart';
 import '../admin/providers/admin_providers.dart';
@@ -297,8 +298,8 @@ class _AgeVerificationDialogState extends State<AgeVerificationDialog> {
                 style: text.titleMedium),
             const SizedBox(height: 4),
             Text(check.storePolicy
-                ? 'Store policy in ${check.country} — stricter than the legal minimum.'
-                : 'Legal minimum in ${check.country}.'),
+                ? 'Store policy in ${countryInSentence(check.country)} — stricter than the legal minimum.'
+                : 'Legal minimum in ${countryInSentence(check.country)}.'),
             if (check.bornBefore != null) ...[
               const SizedBox(height: 12),
               Text('And born before ${AppFormat.date(check.bornBeforeIso)}.',

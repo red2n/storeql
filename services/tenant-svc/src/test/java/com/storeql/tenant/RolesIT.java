@@ -2,8 +2,10 @@ package com.storeql.tenant;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
@@ -21,6 +23,7 @@ import java.io.StringReader;
 import java.sql.DriverManager;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -56,7 +59,8 @@ class RolesIT {
             "/onboarding/tenants",
             "{\"businessName\":\"" + name + "\",\"country\":\"GB\",\"currency\":\"GBP\"}",
             null,
-            OWNER,
+            // A login owns one business (21.13), so each business here has its own owner.
+            Ids.newId().toString(),
             null);
     assertThat(t.getStatus(), is(201));
     String tenantId = data(t.readEntity(String.class)).getString("id");
@@ -124,7 +128,8 @@ class RolesIT {
     assertThat(listed.getJsonObject(0).getString("code"), is("OWNER"));
     assertThat(listed.getJsonObject(0).getBoolean("custom"), is(false));
     assertThat(listed.getJsonObject(1).getString("code"), is("MANAGER"));
-    assertThat(listed.getJsonObject(1).getJsonArray("permissions").size(), is(12));
+    // The permissions catalogue common-web publishes: thirteen since stock.transfer (SJ-D73).
+    assertThat(listed.getJsonObject(1).getJsonArray("permissions").size(), is(13));
     assertThat(listed.getJsonObject(3).getString("code"), is("CASHIER"));
     assertThat(
         listed.getJsonObject(3).getJsonArray("permissions").toString(),
@@ -160,7 +165,7 @@ class RolesIT {
                         .readEntity(String.class)))
             .readObject()
             .getJsonArray("data");
-    assertThat(catalogue.size(), is(12));
+    assertThat(catalogue.size(), is(13));
     boolean sawNoSale = false;
     for (JsonValue v : catalogue) {
       JsonObject p = v.asJsonObject();
@@ -387,7 +392,114 @@ class RolesIT {
     assertThat(conflicts, is(n - 1));
   }
 
+  @Test
+  @DisplayName("GET /admin/staff is scoped by the caller's stores, cursor pagination included")
+  void staffListingIsScopedByTheCallersStores() {
+    String[] ts = tenantWithStore("Scoped Staff Ltd");
+    String tenant = ts[0];
+    String s1 = ts[1];
+    String s2 = addStore(tenant, "Second");
+
+    String atS1a = Ids.newId().toString();
+    String atS1b = Ids.newId().toString();
+    String atS2 = Ids.newId().toString();
+    assign(tenant, atS1a, s1, "CASHIER");
+    assign(tenant, atS1b, s1, "STOREKEEPER");
+    assign(tenant, atS2, s2, "CASHIER");
+
+    // A manager held to S1 only: never S2's assignment, even walked across pages of one.
+    Response page1 = getScoped("/admin/staff?limit=1", tenant, "MANAGER", s1);
+    String page1Body = page1.readEntity(String.class);
+    assertThat(page1Body, page1.getStatus(), is(200));
+    String cursor = nextCursor(page1Body);
+    assertThat("a first page of one leaves a second", cursor, not(nullValue()));
+    List<String> seenAtS1 = new ArrayList<>();
+    seenAtS1.add(data(page1Body).getString("userId"));
+
+    Response page2 = getScoped("/admin/staff?limit=1&after=" + cursor, tenant, "MANAGER", s1);
+    String page2Body = page2.readEntity(String.class);
+    assertThat(page2Body, page2.getStatus(), is(200));
+    seenAtS1.add(data(page2Body).getString("userId"));
+    assertThat("only the two of ours at S1: no third page", nextCursor(page2Body), is(nullValue()));
+
+    assertThat(new TreeSet<>(seenAtS1), is(new TreeSet<>(List.of(atS1a, atS1b))));
+    assertThat(seenAtS1, not(hasItem(atS2)));
+
+    // The owner sees every assignment, S2's included.
+    String all = get("/admin/staff", tenant, "OWNER", null).readEntity(String.class);
+    assertThat(all, containsString(atS1a));
+    assertThat(all, containsString(atS1b));
+    assertThat(all, containsString(atS2));
+
+    // Another business's owner, even naming our S1 as their own store scope, names none of ours.
+    String rival = tenantWithStore("Rival Scoped Ltd")[0];
+    Response rivalTry = getScoped("/admin/staff", rival, "OWNER", s1);
+    String rivalBody = rivalTry.readEntity(String.class);
+    assertThat(rivalBody, rivalTry.getStatus(), is(200));
+    assertThat(rivalBody, not(containsString(atS1a)));
+    assertThat(rivalBody, not(containsString(atS1b)));
+    assertThat(rivalBody, not(containsString(atS2)));
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────────────
+
+  /** A second store on an existing tenant, its id. */
+  private String addStore(String tenant, String name) {
+    Response s =
+        post(
+            "/admin/stores",
+            "{\"name\":\""
+                + name
+                + "\",\"code\":\"S-"
+                + Ids.newId().toString().substring(0, 8)
+                + "\",\"line1\":\"2 High St\",\"country\":\"GB\",\"city\":\"London\",\"postcode\":\"E1"
+                + " 6AN\",\"timezone\":\"Europe/London\"}",
+            tenant,
+            OWNER,
+            "OWNER");
+    String body = s.readEntity(String.class);
+    assertThat(body, s.getStatus(), is(201));
+    return data(body).getString("id");
+  }
+
+  private void assign(String tenant, String userId, String storeId, String role) {
+    Response r =
+        post(
+            "/admin/staff",
+            "{\"userId\":\""
+                + userId
+                + "\",\"storeId\":\""
+                + storeId
+                + "\",\"role\":\""
+                + role
+                + "\"}",
+            tenant,
+            OWNER,
+            "OWNER");
+    assertThat(r.readEntity(String.class), r.getStatus(), is(201));
+  }
+
+  /** As {@link #get}, with the caller held to one store ({@code X-Store-Ids}). */
+  private Response getScoped(String pathAndQuery, String tenant, String roles, String storeId) {
+    WebTarget t = com.storeql.test.WebTargets.at(target, pathAndQuery);
+    return t.request()
+        .header("X-User-Id", OWNER)
+        .header("X-Tenant-Id", tenant)
+        .header("X-Roles", roles)
+        .header("X-Store-Ids", storeId)
+        .get();
+  }
+
+  /** {@code meta.nextCursor}, or null when the envelope carries none or it is JSON null. */
+  private static String nextCursor(String body) {
+    JsonObject meta;
+    try (var reader = Json.createReader(new StringReader(body))) {
+      meta = reader.readObject().getJsonObject("meta");
+    }
+    return meta != null && meta.containsKey("nextCursor") && !meta.isNull("nextCursor")
+        ? meta.getString("nextCursor")
+        : null;
+  }
 
   private void assertRefused(String tenant, String json, int status) {
     assertThat(post("/admin/roles", json, tenant, OWNER, "OWNER").getStatus(), is(status));

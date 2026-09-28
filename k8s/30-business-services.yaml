@@ -69,6 +69,8 @@ spec:
             # storeql.sso.insecure-hosts stays unset here: a provider is HTTPS on the internet.
             # - { name: STOREQL_SSO_CALLBACK_URL, value: "https://api.<your-domain>/api/iam-svc/auth/sso/callback" }
             # - { name: STOREQL_SSO_RETURN_ORIGINS, value: "https://app.<your-domain>" }
+            # The link in a password-reset email opens the web app: set it to the app's own host.
+            # - { name: STOREQL_PLATFORM_WEB_URL, value: "https://app.<your-domain>" }
           startupProbe:
             httpGet: { path: /health/started, port: 8080 }
             periodSeconds: 5
@@ -712,6 +714,17 @@ spec:
               valueFrom: { secretKeyRef: { name: storeql-postgres, key: NOTIFICATION_DB_PASSWORD } }
             - { name: JAVA_TOOL_OPTIONS, value: "-Xms128m -Xmx384m -XX:+UseG1GC" }
             - { name: STOREQL_ADVERTISE_HOST, value: "notification-svc" }
+            # Email: a password reset goes by email only, so a deployment with no mail service
+            # cannot deliver one (it is logged NOT_SENT). Set the channel to email and point SMTP at
+            # your provider; keep its username and password in a Secret.
+            # - { name: STOREQL_NOTIFICATION_CHANNEL, value: "email" }
+            # - { name: STOREQL_NOTIFICATION_SMTP_HOST, value: "smtp.<your-provider>" }
+            # - { name: STOREQL_NOTIFICATION_SMTP_PORT, value: "587" }
+            # - { name: STOREQL_NOTIFICATION_FROM, value: "no-reply@<your-domain>" }
+            # - name: STOREQL_NOTIFICATION_SMTP_USERNAME
+            #   valueFrom: { secretKeyRef: { name: storeql-smtp, key: username } }
+            # - name: STOREQL_NOTIFICATION_SMTP_PASSWORD
+            #   valueFrom: { secretKeyRef: { name: storeql-smtp, key: password } }
           startupProbe:
             httpGet: { path: /health/started, port: 8080 }
             periodSeconds: 5

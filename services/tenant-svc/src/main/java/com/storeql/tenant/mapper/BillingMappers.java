@@ -119,6 +119,7 @@ public final class BillingMappers {
   public static BillingDtos.InvoiceResponse toDto(Invoice i) {
     return new BillingDtos.InvoiceResponse(
         i.id().toString(),
+        i.tenantId().toString(),
         i.number(),
         i.kind(),
         i.status(),

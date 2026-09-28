@@ -4,11 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/device.dart';
 import '../../core/spacing.dart';
 import 'storefront_providers.dart';
+import '../../core/theme.dart';
 
 // ── Shared bottom-sheet chrome ────────────────────────────────────────────────
 
 const _sheetShape = RoundedRectangleBorder(
-  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+  borderRadius: AppRadius.sheet,
 );
 
 // ── 1. Gender picker ──────────────────────────────────────────────────────────

@@ -63,10 +63,12 @@ public abstract class TenantDataSpec {
   }
 
   /**
-   * How a table left out of the export is tied to its tenant for erasure, when it has no {@code
-   * tenant_id} column: login tokens hanging off a staff user, say. A left-out table with a {@code
+   * How a table with no {@code tenant_id} column is tied to its tenant for erasure: login tokens
+   * hanging off a staff user, say, left out of the export. A left-out table with a {@code
    * tenant_id} is erased by it without being named here; platform reference data, with neither, is
-   * not the tenant's and is not erased.
+   * not the tenant's and is not erased. An exported table named here is erased by this predicate
+   * rather than its export one — iam-svc's sandbox pair is the live business's to export and goes
+   * with either business when erased; named for a table with a {@code tenant_id}, it is a problem.
    *
    * @return table name to a predicate with one {@code ?} for the tenant
    */

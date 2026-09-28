@@ -5,11 +5,14 @@ import com.storeql.reporting.domain.Domain.InventoryProjection;
 import com.storeql.reporting.domain.Domain.LabourDayStat;
 import com.storeql.reporting.domain.Domain.MovementStat;
 import com.storeql.reporting.domain.Domain.OpenSupplyLine;
+import com.storeql.reporting.domain.Domain.SaleLine;
+import com.storeql.reporting.domain.Domain.SalesCategoryStat;
 import com.storeql.reporting.domain.Domain.SalesDayStat;
 import com.storeql.reporting.domain.Domain.SalesSummary;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.math.BigDecimal;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -17,6 +20,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -218,6 +222,9 @@ public class ReportingRepository extends BaseJdbcRepository {
    * Record a confirmed order as a sales fact. Naturally idempotent: {@code (tenant_id, order_id)}
    * is the primary key and OrderConfirmed is emitted once per order, so a redelivered event is a
    * no-op via {@code ON CONFLICT DO NOTHING}. Returns true if a row was inserted.
+   *
+   * <p>A void already heard for the order (it can arrive first: the consumer reads its topics in no
+   * particular order) marks the fact as it lands, so the sale is never counted.
    */
   public boolean recordSaleOnce(
       UUID tenantId,
@@ -226,15 +233,19 @@ public class ReportingRepository extends BaseJdbcRepository {
       String channel,
       UUID customerId,
       BigDecimal gross,
-      String currency) {
+      String currency,
+      List<SaleLine> lines) {
     return inTx(
         c -> {
+          lockSale(c, tenantId, orderId);
           try (var ps =
               c.prepareStatement(
                   "INSERT INTO sales_facts"
                       + " (tenant_id, order_id, store_id, channel, customer_id, gross_amount,"
-                      + "  currency)"
-                      + " VALUES (?,?,?,?,?,?,?)"
+                      + "  currency, voided_at)"
+                      + " VALUES (?,?,?,?,?,?,?,"
+                      + "  (SELECT v.voided_at FROM sales_voids v"
+                      + "   WHERE v.tenant_id = ? AND v.order_id = ?))"
                       + " ON CONFLICT (tenant_id, order_id) DO NOTHING")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, orderId);
@@ -243,10 +254,228 @@ public class ReportingRepository extends BaseJdbcRepository {
             ps.setObject(5, customerId);
             ps.setBigDecimal(6, gross);
             ps.setString(7, currency);
-            return ps.executeUpdate() > 0;
+            ps.setObject(8, tenantId);
+            ps.setObject(9, orderId);
+            if (ps.executeUpdate() == 0) {
+              return false; // seen before: its lines are already here
+            }
           }
+          // The lines land with the sale, in the same transaction and at the same instant (now()
+          // is the transaction's), so a report by day and a report by category agree.
+          if (!lines.isEmpty()) {
+            try (var ps =
+                c.prepareStatement(
+                    "INSERT INTO sales_line_facts"
+                        + " (tenant_id, order_id, line_no, variant_id, store_id, channel, qty,"
+                        + "  unit_price, line_total, currency, confirmed_at)"
+                        + " VALUES (?,?,?,?,?,?,?,?,?,?,now())")) {
+              int lineNo = 0;
+              for (SaleLine line : lines) {
+                ps.setObject(1, tenantId);
+                ps.setObject(2, orderId);
+                ps.setInt(3, ++lineNo);
+                ps.setObject(4, line.variantId());
+                ps.setObject(5, storeId);
+                ps.setString(6, channel);
+                ps.setBigDecimal(7, line.qty());
+                ps.setBigDecimal(8, line.unitPrice());
+                ps.setBigDecimal(9, line.lineTotal());
+                ps.setString(10, currency);
+                ps.addBatch();
+              }
+              ps.executeBatch();
+            }
+          }
+          return true;
         },
         "record sale");
+  }
+
+  /**
+   * Void a sale, deduped on the {@code OrderVoided} event's id: the fact is marked with the moment
+   * the void was heard and left out of every sales report from then on — never deleted, so the row
+   * and its lines stay. The first void heard for an order stands; a later one changes nothing. A
+   * void for an order not yet projected is kept, and marks the sale when its {@code OrderConfirmed}
+   * lands. The mark and both writes commit in one transaction.
+   *
+   * <p>Scoped by the tenant first, so another business's void naming the same order id touches only
+   * its own rows.
+   *
+   * @return false when the event was already processed
+   */
+  public boolean voidSaleOnce(UUID eventId, String consumer, UUID tenantId, UUID orderId) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, eventId, consumer)) {
+            return false;
+          }
+          lockSale(c, tenantId, orderId);
+          try (var ps =
+              c.prepareStatement(
+                  "INSERT INTO sales_voids (tenant_id, order_id, event_id, voided_at)"
+                      + " VALUES (?,?,?,now())"
+                      + " ON CONFLICT (tenant_id, order_id) DO NOTHING")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, orderId);
+            ps.setObject(3, eventId);
+            ps.executeUpdate();
+          }
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE sales_facts SET voided_at ="
+                      + " (SELECT v.voided_at FROM sales_voids v"
+                      + "  WHERE v.tenant_id = ? AND v.order_id = ?)"
+                      + " WHERE tenant_id = ? AND order_id = ? AND voided_at IS NULL")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, orderId);
+            ps.setObject(3, tenantId);
+            ps.setObject(4, orderId);
+            ps.executeUpdate();
+          }
+          return true;
+        },
+        "void sale");
+  }
+
+  /**
+   * Orders a sale's projection and its void. Without it, a void and its sale handled at the same
+   * moment by two consumers could each miss the other's uncommitted row, and the sale would land
+   * unmarked; with it, whichever commits second sees the first.
+   */
+  private static void lockSale(Connection c, UUID tenantId, UUID orderId) throws SQLException {
+    try (var ps = c.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")) {
+      ps.setString(1, "sale|" + tenantId + "|" + orderId);
+      ps.execute();
+    }
+  }
+
+  // ── The catalogue projection: where each variant sits ─────────────────────
+
+  /**
+   * The catalogue's word on a product: its category path (leaf first, root last) and the variants
+   * it named. A later word replaces an earlier one; an earlier word redelivered late changes
+   * nothing, so the order events arrive in cannot move a product back.
+   */
+  public void upsertProductCategory(
+      UUID tenantId,
+      UUID productId,
+      List<UUID> categoryPath,
+      List<UUID> variantIds,
+      Instant announcedAt) {
+    inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "INSERT INTO catalogue_products"
+                      + " (tenant_id, product_id, category_path, announced_at)"
+                      + " VALUES (?,?,?,?)"
+                      + " ON CONFLICT (tenant_id, product_id) DO UPDATE SET"
+                      + " category_path = EXCLUDED.category_path,"
+                      + " announced_at = EXCLUDED.announced_at"
+                      + " WHERE catalogue_products.announced_at <= EXCLUDED.announced_at")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, productId);
+            ps.setArray(3, c.createArrayOf("uuid", categoryPath.toArray(new UUID[0])));
+            ps.setObject(4, OffsetDateTime.ofInstant(announcedAt, ZoneOffset.UTC));
+            ps.executeUpdate();
+          }
+          upsertVariants(c, tenantId, productId, variantIds);
+          return null;
+        },
+        "project product category");
+  }
+
+  /** A variant created after its product was announced: tied to the product it belongs to. */
+  public void upsertVariantProduct(UUID tenantId, UUID variantId, UUID productId) {
+    inTx(
+        c -> {
+          upsertVariants(c, tenantId, productId, List.of(variantId));
+          return null;
+        },
+        "project variant");
+  }
+
+  private static void upsertVariants(
+      Connection c, UUID tenantId, UUID productId, List<UUID> variantIds) throws SQLException {
+    if (variantIds.isEmpty()) {
+      return;
+    }
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO catalogue_variants (tenant_id, variant_id, product_id) VALUES (?,?,?)"
+                + " ON CONFLICT (tenant_id, variant_id) DO UPDATE SET product_id = EXCLUDED.product_id")) {
+      for (UUID variantId : variantIds) {
+        ps.setObject(1, tenantId);
+        ps.setObject(2, variantId);
+        ps.setObject(3, productId);
+        ps.addBatch();
+      }
+      ps.executeBatch();
+    }
+  }
+
+  /**
+   * What each category took, from the sale lines and the catalogue projection: the leaf category,
+   * or its top-level ancestor when {@code top}. Lines whose variant is unknown to the projection,
+   * or whose product has no category, group under a null category rather than vanish — takings the
+   * report cannot place are still takings. The lines of a voided sale are left out.
+   */
+  public List<SalesCategoryStat> salesByCategory(
+      UUID tenantId, Instant from, Instant to, UUID storeId, String channel, boolean top) {
+    StringBuilder sb =
+        new StringBuilder(
+            "SELECT CASE WHEN ? THEN cp.category_path[array_length(cp.category_path, 1)]"
+                + " ELSE cp.category_path[1] END AS category_id,"
+                + " l.currency, COUNT(DISTINCT l.order_id) AS orders,"
+                + " COALESCE(SUM(l.qty), 0) AS units, COALESCE(SUM(l.line_total), 0) AS gross"
+                + " FROM sales_line_facts l"
+                + " LEFT JOIN catalogue_variants cv"
+                + " ON cv.tenant_id = l.tenant_id AND cv.variant_id = l.variant_id"
+                + " LEFT JOIN catalogue_products cp"
+                + " ON cp.tenant_id = cv.tenant_id AND cp.product_id = cv.product_id"
+                + " WHERE l.tenant_id = ?"
+                + " AND NOT EXISTS (SELECT 1 FROM sales_facts f"
+                + "  WHERE f.tenant_id = l.tenant_id AND f.order_id = l.order_id"
+                + "  AND f.voided_at IS NOT NULL)");
+    List<Object> params = new ArrayList<>();
+    params.add(top);
+    params.add(tenantId);
+    if (from != null) {
+      sb.append(" AND l.confirmed_at >= ?");
+      params.add(OffsetDateTime.ofInstant(from, ZoneOffset.UTC));
+    }
+    if (to != null) {
+      sb.append(" AND l.confirmed_at < ?");
+      params.add(OffsetDateTime.ofInstant(to, ZoneOffset.UTC));
+    }
+    if (storeId != null) {
+      sb.append(" AND l.store_id = ?");
+      params.add(storeId);
+    }
+    if (channel != null) {
+      sb.append(" AND l.channel = ?");
+      params.add(channel);
+    }
+    sb.append(" GROUP BY 1, l.currency ORDER BY gross DESC, l.currency, category_id LIMIT ?");
+    params.add(REPORTING_SAFETY_CAP);
+    return query(
+        sb.toString(),
+        ps -> {
+          for (int i = 0; i < params.size(); i++) {
+            ps.setObject(i + 1, params.get(i));
+          }
+        },
+        ReportingRepository::mapSalesCategory,
+        "sales by category");
+  }
+
+  private static SalesCategoryStat mapSalesCategory(ResultSet rs) throws SQLException {
+    return new SalesCategoryStat(
+        rs.getObject("category_id", UUID.class),
+        rs.getString("currency"),
+        rs.getLong("orders"),
+        rs.getBigDecimal("units"),
+        rs.getBigDecimal("gross"));
   }
 
   /**
@@ -275,7 +504,7 @@ public class ReportingRepository extends BaseJdbcRepository {
         "apply sales refund");
   }
 
-  /** Sales totals grouped by currency over the window/filters. */
+  /** Sales totals grouped by currency over the window/filters; a voided sale is left out. */
   public List<SalesSummary> salesSummary(
       UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {
     StringBuilder sb =
@@ -283,7 +512,7 @@ public class ReportingRepository extends BaseJdbcRepository {
             "SELECT currency, COUNT(*) AS orders,"
                 + " COALESCE(SUM(gross_amount),0) AS gross,"
                 + " COALESCE(SUM(refunded_amount),0) AS refunded"
-                + " FROM sales_facts WHERE tenant_id = ?");
+                + " FROM sales_facts WHERE tenant_id = ? AND voided_at IS NULL");
     appendSalesFilters(sb, from, to, storeId, channel);
     sb.append(" GROUP BY currency ORDER BY currency");
     return query(
@@ -293,7 +522,10 @@ public class ReportingRepository extends BaseJdbcRepository {
         "sales summary");
   }
 
-  /** Sales totals bucketed by day (and currency) over the window/filters, newest first. */
+  /**
+   * Sales totals bucketed by day (and currency) over the window/filters, newest first; a voided
+   * sale is left out.
+   */
   public List<SalesDayStat> salesByDay(
       UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {
     StringBuilder sb =
@@ -301,7 +533,7 @@ public class ReportingRepository extends BaseJdbcRepository {
             "SELECT date_trunc('day', confirmed_at) AS day, currency, COUNT(*) AS orders,"
                 + " COALESCE(SUM(gross_amount),0) AS gross,"
                 + " COALESCE(SUM(refunded_amount),0) AS refunded"
-                + " FROM sales_facts WHERE tenant_id = ?");
+                + " FROM sales_facts WHERE tenant_id = ? AND voided_at IS NULL");
     appendSalesFilters(sb, from, to, storeId, channel);
     sb.append(" GROUP BY day, currency ORDER BY day DESC, currency LIMIT ?");
     return query(
@@ -440,7 +672,8 @@ public class ReportingRepository extends BaseJdbcRepository {
    * <p>A full outer join in spirit: a day with takings and no hours recorded is as real as a day
    * with hours and no sales, and both are worth seeing. The currency comes from the sales, because
    * that is what the shop took; labour in another currency is summed apart and its minutes still
-   * counted, so the hours are never lost even where the money cannot be added up.
+   * counted, so the hours are never lost even where the money cannot be added up. A voided sale is
+   * not takings.
    */
   public List<LabourDayStat> labourByDay(UUID tenantId, Instant from, Instant to, UUID storeId) {
     String sql =
@@ -451,6 +684,7 @@ public class ReportingRepository extends BaseJdbcRepository {
                    COALESCE(SUM(refunded_amount),0) AS refunded
             FROM sales_facts
             WHERE tenant_id = ? AND confirmed_at >= ? AND confirmed_at < ?
+              AND voided_at IS NULL
               AND (?::uuid IS NULL OR store_id = ?)
             GROUP BY 1, 2
         ),

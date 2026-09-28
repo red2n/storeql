@@ -5,6 +5,7 @@ import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'price_reductions_tab.dart';
@@ -134,7 +135,7 @@ class _ShelfLabelsTabState extends ConsumerState<ShelfLabelsTab> {
     final canAdd =
         _variantId != null && !_ids.contains(_variantId) && _ids.length < _maxLabels;
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: context.pagePadding,
       children: [
         Text('Shelf-edge labels', style: theme.textTheme.titleMedium),
         const SizedBox(height: 4),
@@ -320,7 +321,7 @@ class UnitPricingGapsTab extends ConsumerWidget {
                 .value ??
             const {};
         return ListView(
-          padding: const EdgeInsets.all(16),
+          padding: context.pagePadding,
           children: [
             Text(
               g.required

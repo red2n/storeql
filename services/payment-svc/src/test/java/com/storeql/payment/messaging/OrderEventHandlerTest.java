@@ -30,6 +30,8 @@ class OrderEventHandlerTest {
     UUID tenantId;
     UUID orderId;
     BigDecimal amount;
+    String reason;
+    String kind;
 
     @Override
     public void refundForOrderEvent(
@@ -38,13 +40,16 @@ class OrderEventHandlerTest {
         UUID tenantId,
         UUID orderId,
         BigDecimal requestedAmount,
-        String reason) {
+        String reason,
+        String kind) {
       this.calls++;
       this.eventId = eventId;
       this.consumer = consumer;
       this.tenantId = tenantId;
       this.orderId = orderId;
       this.amount = requestedAmount;
+      this.reason = reason;
+      this.kind = kind;
     }
   }
 
@@ -86,6 +91,7 @@ class OrderEventHandlerTest {
     assertEquals(TENANT, service.tenantId);
     assertEquals(ORDER, service.orderId);
     assertEquals(new BigDecimal("25.00"), service.amount);
+    assertNull(service.kind, "a return's refund moves the order's status");
   }
 
   @Test
@@ -133,6 +139,56 @@ class OrderEventHandlerTest {
     handler.handle("{not valid json");
 
     assertEquals(0, service.calls);
+  }
+
+  // ── substitutions for out-of-stock online lines ────────────────────────────
+
+  private static String lineEvent(String type, String refundAmount) {
+    return "{\"eventId\":\""
+        + EVENT
+        + "\",\"eventType\":\""
+        + type
+        + "\",\"occurredAt\":\"2026-09-25T10:00:00Z\",\"tenantId\":\""
+        + TENANT
+        + "\",\"orderId\":\""
+        + ORDER
+        + "\",\"storeId\":\""
+        + Ids.newId()
+        + "\",\"customerId\":null,\"loginId\":null,\"currency\":\"GBP\",\"orderTotal\":10.00,"
+        + "\"channel\":\"ONLINE\",\"fulfilmentType\":\"DELIVERY\",\"variantId\":\""
+        + Ids.newId()
+        + "\",\"fromVariantId\":\""
+        + Ids.newId()
+        + "\",\"toVariantId\":\""
+        + Ids.newId()
+        + "\",\"variantName\":\"Apples\",\"qty\":1,\"chargedAmount\":8.00,\"refundAmount\":"
+        + refundAmount
+        + "}";
+  }
+
+  /**
+   * A line closed short refunds what the shopper paid for it, and a cheaper substitute the
+   * difference — each marked an adjustment so order-svc keeps the order's status; a substitute
+   * charged the same refunds nothing.
+   */
+  @Test
+  void aLineClosedShortOrSubstitutedRefundsTheDifferenceAsAnAdjustment() {
+    handler.handle(lineEvent("OrderLineShortClosed", "10.00"));
+    assertEquals(1, service.calls);
+    assertEquals(EVENT, service.eventId);
+    assertEquals(new BigDecimal("10.00"), service.amount);
+    assertEquals("Line closed short", service.reason);
+    assertEquals(OrderEventHandler.ADJUSTMENT_KIND, service.kind);
+
+    handler.handle(lineEvent("OrderLineSubstituted", "2.00"));
+    assertEquals(2, service.calls);
+    assertEquals(new BigDecimal("2.00"), service.amount);
+    assertEquals("Line substituted", service.reason);
+    assertEquals(OrderEventHandler.ADJUSTMENT_KIND, service.kind);
+
+    handler.handle(lineEvent("OrderLineSubstituted", "0.00"));
+    handler.handle(lineEvent("OrderLineShortClosed", "0"));
+    assertEquals(2, service.calls, "nothing to give back, nothing refunded");
   }
 
   // ── container deposit refunds (09.16) ──────────────────────────────

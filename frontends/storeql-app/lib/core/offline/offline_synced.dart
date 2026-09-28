@@ -36,9 +36,10 @@ class SyncedSale {
     this.fiscalNumber,
   });
 
-  /// The same short reference the offline receipt was printed with.
+  /// The same short reference the offline receipt was printed with
+  /// ([OfflineSale.reference]): the id's tail, in capitals.
   String get reference =>
-      id.length > 6 ? id.substring(id.length - 6) : id.toUpperCase();
+      (id.length > 6 ? id.substring(id.length - 6) : id).toUpperCase();
 
   SyncedSale withNumber(String? number) => SyncedSale(
         id: id,

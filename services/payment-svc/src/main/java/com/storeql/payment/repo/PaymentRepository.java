@@ -41,30 +41,63 @@ public class PaymentRepository extends BaseOutboxRepository {
               return existing;
             }
           }
-          try (var ps =
-              c.prepareStatement(
-                  "INSERT INTO payment_tenders"
-                      + " (id, tenant_id, order_id, amount, method, reference,"
-                      + "  idempotency_key, status, notes, created_at, store_id)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
-            ps.setObject(1, t.id());
-            ps.setObject(2, t.tenantId());
-            ps.setObject(3, t.orderId());
-            ps.setBigDecimal(4, t.amount());
-            ps.setString(5, t.method());
-            ps.setString(6, t.reference());
-            ps.setString(7, t.idempotencyKey());
-            ps.setString(8, t.status());
-            ps.setString(9, t.notes());
-            // pgjdbc cannot infer a SQL type for a raw java.time.Instant.
-            ps.setObject(10, t.createdAt().atOffset(java.time.ZoneOffset.UTC));
-            ps.setObject(11, t.storeId());
-            ps.executeUpdate();
-          }
+          insertTenderTx(c, t);
           insertOutbox(c, event);
           return t;
         },
         "create payment tender");
+  }
+
+  private static void insertTenderTx(java.sql.Connection c, PaymentTender t)
+      throws java.sql.SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO payment_tenders"
+                + " (id, tenant_id, order_id, amount, method, reference,"
+                + "  idempotency_key, status, notes, created_at, store_id)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, t.id());
+      ps.setObject(2, t.tenantId());
+      ps.setObject(3, t.orderId());
+      ps.setBigDecimal(4, t.amount());
+      ps.setString(5, t.method());
+      ps.setString(6, t.reference());
+      ps.setString(7, t.idempotencyKey());
+      ps.setString(8, t.status());
+      ps.setString(9, t.notes());
+      // pgjdbc cannot infer a SQL type for a raw java.time.Instant.
+      ps.setObject(10, t.createdAt().atOffset(java.time.ZoneOffset.UTC));
+      ps.setObject(11, t.storeId());
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Captures several tenders on one transaction, each with its event: one payment for a split
+   * checkout, a tender per part (order orchestration). A tender whose key was captured already is
+   * replayed rather than taken twice, so a retried payment returns what the first took.
+   */
+  public List<PaymentTender> createTenders(List<PaymentTender> tenders, List<OutboxRow> events) {
+    return inTx(
+        c -> {
+          List<PaymentTender> out = new java.util.ArrayList<>();
+          for (int i = 0; i < tenders.size(); i++) {
+            PaymentTender t = tenders.get(i);
+            PaymentTender existing =
+                t.idempotencyKey() == null
+                    ? null
+                    : findTenderByKeyTx(c, t.tenantId(), t.idempotencyKey());
+            if (existing != null) {
+              out.add(existing);
+              continue;
+            }
+            insertTenderTx(c, t);
+            insertOutbox(c, events.get(i));
+            out.add(t);
+          }
+          return out;
+        },
+        "create payment tenders");
   }
 
   /**

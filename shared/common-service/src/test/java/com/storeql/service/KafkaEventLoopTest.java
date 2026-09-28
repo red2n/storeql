@@ -37,6 +37,21 @@ class KafkaEventLoopTest {
   }
 
   @Test
+  void aLoopMayStartAtTheLatestOffsetAndRefusesAnUnknownReset() {
+    // A projection of live events starts at the latest offset; a typo is refused up front rather
+    // than read as a default the author did not choose.
+    org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+        () ->
+            new KafkaEventLoop(
+                "latest-loop", "localhost:9092", "g", List.of("t"), "latest", (t, v) -> {}));
+    org.junit.jupiter.api.Assertions.assertThrows(
+        org.apache.kafka.common.config.ConfigException.class,
+        () ->
+            new KafkaEventLoop(
+                "odd-loop", "localhost:9092", "g", List.of("t"), "sideways", (t, v) -> {}));
+  }
+
+  @Test
   void attemptCountIncreasesOnRepeatedFailuresOfTheSameOffset() throws Exception {
     KafkaEventLoop loop = newLoop();
     var tp = new TopicPartition("some-topic", 0);

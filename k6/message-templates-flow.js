@@ -47,7 +47,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   expect(catalogue, '[+] the owner reads the messages the business sends', 200);
   const order = list(catalogue).find((m) => m.type === 'ORDER_CONFIRMED') || {};
   const recall = list(catalogue).find((m) => m.type === 'RECALL_NOTICE') || {};
-  truthy('[+] ten messages, to customers, staff and suppliers', list(catalogue).length === 10 && ['CUSTOMER', 'STAFF', 'SUPPLIER'].every((a) => list(catalogue).some((m) => m.audience === a)), list(catalogue).map((m) => m.type));
+  truthy('[+] eighteen messages, to customers, staff and suppliers — the platform\'s two billing notices and its two trial notices among them', list(catalogue).length === 18 && ['CUSTOMER', 'STAFF', 'SUPPLIER'].every((a) => list(catalogue).some((m) => m.audience === a)) && ['TRIAL_ENDING', 'TRIAL_ENDED'].every((t) => list(catalogue).some((m) => m.type === t)), list(catalogue).map((m) => m.type));
   truthy('[+] an order confirmation goes by email and push, and names its values', (order.forms || []).map((f) => f.form).join() === 'EMAIL,PUSH' && ['order', 'total', 'shop'].every((n) => (order.variables || []).some((v) => v.name === n)), order);
   truthy("[+] a recall notice by email keeps the law's six parts", ((recall.forms || []).find((f) => f.form === 'EMAIL') || {}).required.length === 6, recall.forms);
   truthy('[+] nothing written yet', list(catalogue).every((m) => m.forms.every((f) => f.written.length === 0)));

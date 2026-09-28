@@ -4,12 +4,14 @@ import com.storeql.ids.Ids;
 import com.storeql.pricing.domain.Domain;
 import com.storeql.pricing.domain.Domain.BasketLine;
 import com.storeql.pricing.domain.Domain.CustomerVatStatus;
+import com.storeql.pricing.domain.Domain.DisplayPrice;
 import com.storeql.pricing.domain.Domain.PriceList;
 import com.storeql.pricing.domain.Domain.PriceListItem;
 import com.storeql.pricing.domain.Domain.PriceOverride;
 import com.storeql.pricing.domain.Domain.ProductVatCategory;
 import com.storeql.pricing.domain.Domain.Promotion;
 import com.storeql.pricing.domain.Domain.PromotionItem;
+import com.storeql.pricing.domain.Domain.PromotionWindow;
 import com.storeql.pricing.domain.Domain.ResolvedPrice;
 import com.storeql.pricing.domain.Domain.TaxGrouping;
 import com.storeql.pricing.domain.Domain.TaxSummary;
@@ -46,8 +48,10 @@ import jakarta.inject.Inject;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** Business logic for pricing-svc. Controllers call this; no HTTP types here. */
@@ -55,7 +59,9 @@ import java.util.UUID;
 public class PricingService {
 
   @Inject PricingRepository repo;
+  @Inject com.storeql.pricing.repo.RepricingRepository zones;
   @Inject com.storeql.service.TenantProfiles profiles;
+  @Inject com.storeql.service.FxRates fx;
   @Inject com.storeql.service.Jurisdictions jurisdictions;
   @Inject AppliedPriceService appliedPrices;
   @Inject PromotionEngine engine;
@@ -285,6 +291,12 @@ public class PricingService {
    * @return the created price list
    */
   public PriceList createPriceList(CreatePriceListRequest req, TenantContext ctx) {
+    // 03.x: a list bound to a price zone prices that zone's stores and no other.
+    UUID zoneId = Parsing.optionalUuid(req.zoneId(), "zoneId");
+    if (zoneId != null && zones.findZone(ctx.tenantId(), zoneId).isEmpty()) {
+      throw ApiException.badRequest(
+          "PRICING_ZONE_UNKNOWN", "price zone " + req.zoneId() + " is not one of this business's");
+    }
     PriceList pl =
         new PriceList(
             Ids.newId(),
@@ -295,7 +307,8 @@ public class PricingService {
             Parsing.instant(req.effectiveFrom(), "effectiveFrom"),
             req.effectiveTo() != null ? Parsing.instant(req.effectiveTo(), "effectiveTo") : null,
             true,
-            Instant.now());
+            Instant.now(),
+            zoneId);
     return repo.createPriceList(pl);
   }
 
@@ -456,7 +469,73 @@ public class PricingService {
       boolean withPromotions,
       Instant at,
       boolean withPriorPrice) {
-    return price(tenantId, req, withPromotions, at, withPriorPrice, false);
+    return displayed(
+        tenantId, price(tenantId, req, withPromotions, at, withPriorPrice, false), req);
+  }
+
+  /**
+   * The price in the display currency asked for (03.x), at the business's rate — shown beside the
+   * price, never in its place. The price's own currency converts to itself.
+   *
+   * @throws ApiException {@code 400 FX_RATE_MISSING} when the business keeps no rate for it
+   */
+  private ResolvedPrice displayed(UUID tenantId, ResolvedPrice rp, ResolvePriceRequest req) {
+    String wanted = displayCurrency(req.displayCurrency());
+    if (wanted == null) return rp;
+    return rp.withDisplay(
+        new DisplayPrice(
+            wanted,
+            fxRateFor(tenantId, rp.currency(), wanted),
+            convertForDisplay(tenantId, rp.unitPrice(), rp.currency(), wanted),
+            convertForDisplay(tenantId, rp.totalWithVat(), rp.currency(), wanted)));
+  }
+
+  static String displayCurrency(String requested) {
+    if (requested == null || requested.isBlank()) return null;
+    String code = requested.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!com.storeql.service.Fx.isCurrency(code)) {
+      throw ApiException.badRequest(
+          "FX_CURRENCY_INVALID", "displayCurrency must be an ISO 4217 code, e.g. USD");
+    }
+    return code;
+  }
+
+  private BigDecimal fxRateFor(UUID tenantId, String from, String to) {
+    if (from.equals(to)) return BigDecimal.ONE;
+    return fx.rate(tenantId, to).map(r -> r.rate()).orElseThrow(() -> noRate(from, to));
+  }
+
+  private BigDecimal convertForDisplay(UUID tenantId, BigDecimal amount, String from, String to) {
+    if (amount == null || from.equals(to)) return amount;
+    return fx.fromHome(tenantId, amount, to)
+        .map(c -> c.amount())
+        .orElseThrow(() -> noRate(from, to));
+  }
+
+  private static ApiException noRate(String from, String to) {
+    return ApiException.badRequest(
+        "FX_RATE_MISSING",
+        "the business keeps no exchange rate for " + to + "; prices are in " + from);
+  }
+
+  /**
+   * The currencies a shop can show prices in — its own first, then those it keeps a rate for — with
+   * the rates, so a client can show a figure it already holds in the shop's currency.
+   */
+  public com.storeql.pricing.dto.Dtos.CurrenciesResponse currencies(UUID tenantId) {
+    java.util.Optional<com.storeql.service.FxRates.Table> table = fx.table(tenantId);
+    if (table.isEmpty()) {
+      String home = profiles.requireCurrency(tenantId);
+      return new com.storeql.pricing.dto.Dtos.CurrenciesResponse(
+          home, java.util.List.of(home), java.util.List.of());
+    }
+    java.util.List<com.storeql.pricing.dto.Dtos.DisplayRateResponse> rates =
+        table.get().rates().values().stream()
+            .sorted(java.util.Comparator.comparing(com.storeql.service.Fx.Rate::currency))
+            .map(r -> new com.storeql.pricing.dto.Dtos.DisplayRateResponse(r.currency(), r.rate()))
+            .toList();
+    return new com.storeql.pricing.dto.Dtos.CurrenciesResponse(
+        table.get().home(), fx.currencies(tenantId), rates);
   }
 
   /**
@@ -487,11 +566,17 @@ public class PricingService {
     // SJ-D55: a quantity tier is a volume price, never a reason a fraction of a unit has no price.
     // A weighed line arrives as its weight (0.375 kg), and the list price's minimum quantity is 1,
     // so a fraction is matched as one; a list holding only a bulk tier still refuses a single item.
+    // 03.x: the store decides which price list answers — its price zone's, or the tenant-wide one.
+    UUID storeId =
+        req.storeId() == null || req.storeId().isBlank()
+            ? null
+            : Parsing.uuid(req.storeId(), "storeId");
     PriceListItem baseItem =
         (asRecorded
                 ? repo.resolveBasePriceAsOf(
-                    tenantId, variantId, channel, qty.max(BigDecimal.ONE), at)
-                : repo.resolveBasePrice(tenantId, variantId, channel, qty.max(BigDecimal.ONE), at))
+                    tenantId, variantId, channel, qty.max(BigDecimal.ONE), at, storeId)
+                : repo.resolveBasePrice(
+                    tenantId, variantId, channel, qty.max(BigDecimal.ONE), at, storeId))
             .orElseThrow(
                 () ->
                     ApiException.notFound(
@@ -506,10 +591,6 @@ public class PricingService {
     // convenience: this endpoint answers "what does this item cost" for a product page, and
     // showing a spend-threshold price against one item advertises a total the shopper will not be
     // charged. The checkout path calls quoteBasket, where the threshold can actually be tested.
-    UUID storeId =
-        req.storeId() == null || req.storeId().isBlank()
-            ? null
-            : Parsing.uuid(req.storeId(), "storeId");
     List<Promotion> candidates =
         (withPromotions
                 ? (asRecorded
@@ -697,6 +778,7 @@ public class PricingService {
             m.storeId() == null ? null : m.storeId().toString(),
             PriceList.CHANNEL_POS,
             BigDecimal.ONE,
+            null,
             null);
     BigDecimal regular;
     try {
@@ -771,7 +853,7 @@ public class PricingService {
     List<com.storeql.pricing.domain.Domain.ShelfLabel> out = new java.util.ArrayList<>();
     for (String id : variantIds.stream().distinct().toList()) {
       UUID variantId = Parsing.uuid(id, "variantIds");
-      var regularReq = new ResolvePriceRequest(id, storeId, channel, BigDecimal.ONE, null);
+      var regularReq = new ResolvePriceRequest(id, storeId, channel, BigDecimal.ONE, null, null);
       ResolvedPrice regular;
       try {
         regular = resolve(regularReq, ctx, false);
@@ -948,7 +1030,8 @@ public class PricingService {
       } else {
         var baseItem =
             // SJ-D55: a fraction of a unit is matched against the tiers as one.
-            repo.resolveBasePrice(tenantId, variantId, channel, qty.max(BigDecimal.ONE))
+            repo.resolveBasePrice(
+                    tenantId, variantId, channel, qty.max(BigDecimal.ONE), Instant.now(), storeId)
                 .orElseThrow(
                     () ->
                         ApiException.notFound(
@@ -1107,6 +1190,20 @@ public class PricingService {
               d.promotionId(), d.promotionName(), d.variantId(), d.amount()));
     }
 
+    String basketCurrency =
+        currency != null ? currency : profiles.requireCurrency(ctx.requireTenantId());
+    String wanted = displayCurrency(req.displayCurrency());
+    com.storeql.pricing.dto.Dtos.DisplayBasketResponse display = null;
+    if (wanted != null) {
+      display =
+          new com.storeql.pricing.dto.Dtos.DisplayBasketResponse(
+              wanted,
+              fxRateFor(tenantId, basketCurrency, wanted),
+              convertForDisplay(tenantId, subtotal, basketCurrency, wanted),
+              convertForDisplay(tenantId, totalDiscount, basketCurrency, wanted),
+              convertForDisplay(tenantId, vatTotal, basketCurrency, wanted),
+              convertForDisplay(tenantId, total, basketCurrency, wanted));
+    }
     return new QuoteBasketResponse(
         lineResponses,
         subtotal,
@@ -1114,9 +1211,10 @@ public class PricingService {
         basketDiscount,
         vatTotal,
         total,
-        currency != null ? currency : profiles.requireCurrency(ctx.requireTenantId()),
+        basketCurrency,
         appliedResponses,
-        outcome.rejectedCoupons());
+        outcome.rejectedCoupons(),
+        display);
   }
 
   /**
@@ -1344,6 +1442,52 @@ public class PricingService {
    */
   public List<Promotion> listActivePromotions(TenantContext ctx) {
     return repo.findAllActivePromotions(ctx.tenantId());
+  }
+
+  /**
+   * The promotions that touch a store since {@code from}, as windows in time for the demand
+   * forecast in inventory-svc (06.x): each with its scope resolved to variants, and a promotion
+   * that is off now ending when it was switched off rather than on its end date. A promotion whose
+   * window closed before {@code from} is left out.
+   *
+   * @param ctx caller context; supplies the tenant
+   * @param storeId the store
+   * @param from the first moment of interest
+   * @return the windows, earliest start first
+   */
+  public List<PromotionWindow> promotionWindows(TenantContext ctx, UUID storeId, Instant from) {
+    UUID tenantId = ctx.tenantId();
+    List<Promotion> promotions = repo.findPromotionsTouching(tenantId, storeId, from);
+    List<UUID> ids = promotions.stream().map(Promotion::id).toList();
+    Map<UUID, Set<UUID>> scopes = repo.findPromotionVariantScopes(tenantId, ids);
+    Map<UUID, Instant> switchedOff = repo.findLastSwitchOff(tenantId, ids);
+    List<PromotionWindow> out = new ArrayList<>();
+    for (Promotion p : promotions) {
+      Instant endsAt = p.endsAt();
+      Instant off = p.active() ? null : switchedOff.get(p.id());
+      if (off != null && (endsAt == null || off.isBefore(endsAt))) {
+        endsAt = off;
+      }
+      if (endsAt != null && endsAt.isBefore(from)) {
+        continue;
+      }
+      // Absent from the scopes means unscoped, which the engine reads as everything.
+      Set<UUID> variants = scopes.get(p.id());
+      out.add(
+          new PromotionWindow(
+              p.id(),
+              p.storeId(),
+              p.name(),
+              p.type(),
+              p.value(),
+              p.channel(),
+              p.active(),
+              p.startsAt(),
+              endsAt,
+              variants == null ? Set.of() : variants,
+              variants == null));
+    }
+    return out;
   }
 
   /**

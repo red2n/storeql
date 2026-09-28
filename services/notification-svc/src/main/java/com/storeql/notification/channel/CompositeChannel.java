@@ -39,11 +39,26 @@ public final class CompositeChannel implements NotificationChannel {
    *
    * @throws RuntimeException whatever the external channel raises, so the caller retries
    */
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The external channel's name when it reaches the recipient, else the in-app one: a store
+   * alert on an email deployment is delivered in-app only, and the log says so.
+   */
+  @Override
+  public String nameFor(String recipient) {
+    return external.reaches(recipient) ? external.name() : inApp.name();
+  }
+
   @Override
   public void send(UUID tenantId, String recipient, String subject, String body) {
     // In-app first (no-op + debug log); never blocks external delivery.
     inApp.send(tenantId, recipient, subject, body);
-    external.send(tenantId, recipient, subject, body);
+    // Only where the external channel can reach: a recipient it cannot address (a store's id to
+    // an email server) is the in-app feed's alone, never a failure that loses the alert.
+    if (external.reaches(recipient)) {
+      external.send(tenantId, recipient, subject, body);
+    }
   }
 
   /** For {@link NotificationChannelProducer}'s shutdown disposer only. */

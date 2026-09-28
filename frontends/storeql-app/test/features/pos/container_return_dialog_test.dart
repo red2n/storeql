@@ -94,18 +94,18 @@ void main() {
   testWidgets('the scheme prices the empties as they are typed, and the refund is posted once',
       (tester) async {
     final server = await _open(tester);
-    expect(find.textContaining('EUR 0.25 back on each container'), findsOneWidget);
+    expect(find.textContaining('€0.25 back on each container'), findsOneWidget);
     await tester.enterText(find.byKey(const Key('return-volume-0')), '500');
     await tester.enterText(find.byKey(const Key('return-count-0')), '2');
     await tester.pumpAndSettle();
-    expect(find.text('Pay back EUR 0.50'), findsOneWidget);
+    expect(find.text('Pay back €0.50'), findsOneWidget);
 
     await tester.tap(find.text('Another kind'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const Key('return-volume-1')), '330');
     await tester.enterText(find.byKey(const Key('return-count-1')), '1');
     await tester.pumpAndSettle();
-    expect(find.text('Pay back EUR 0.75'), findsOneWidget);
+    expect(find.text('Pay back €0.75'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('return-refund')));
     await tester.pumpAndSettle();
@@ -123,7 +123,7 @@ void main() {
     await tester.enterText(find.byKey(const Key('return-volume-0')), '5000');
     await tester.enterText(find.byKey(const Key('return-count-0')), '4');
     await tester.pumpAndSettle();
-    expect(find.text('Pay back EUR 0.00'), findsOneWidget);
+    expect(find.text('Pay back €0.00'), findsOneWidget);
   });
 
   testWidgets('a store with no scheme in force pays nothing back', (tester) async {

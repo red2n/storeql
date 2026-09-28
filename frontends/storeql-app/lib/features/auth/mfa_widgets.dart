@@ -1,9 +1,73 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr/qr.dart';
 
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
 import 'mfa_api.dart';
+
+/// Copies [text] and says so on the button itself: *Copied*, with a tick, for
+/// two seconds. A copy that happens silently leaves the person wondering
+/// whether it did — and a snack bar is no answer here, because on the
+/// security screen these widgets sit in a dialog, whose scrim covers the
+/// page's snack bars.
+///
+/// With a [label] it is a labelled button (*Copy all*); without, an icon
+/// button named by [tooltip] that shows the word while it confirms.
+class _CopyButton extends StatefulWidget {
+  const _CopyButton({required this.text, this.label, this.tooltip});
+
+  final String text;
+  final String? label;
+  final String? tooltip;
+
+  @override
+  State<_CopyButton> createState() => _CopyButtonState();
+}
+
+class _CopyButtonState extends State<_CopyButton> {
+  Timer? _timer;
+  bool _copied = false;
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.text));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _timer?.cancel();
+    _timer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = widget.label;
+    // A live region, so a screen reader says *Copied* when it appears.
+    return Semantics(
+      liveRegion: true,
+      child: label == null && !_copied
+          ? IconButton(
+              tooltip: widget.tooltip,
+              icon: const Icon(Icons.copy_outlined),
+              onPressed: _copy,
+            )
+          : TextButton.icon(
+              icon: Icon(_copied ? Icons.check : Icons.copy_outlined),
+              label: Text(_copied ? 'Copied' : label!),
+              onPressed: _copy,
+            ),
+    );
+  }
+}
 
 /// A QR code, painted from the encoder's modules: what an authenticator app scans.
 class QrView extends StatelessWidget {
@@ -12,6 +76,11 @@ class QrView extends StatelessWidget {
 
   const QrView({super.key, required this.data, this.size = 200});
 
+  /// The side to draw at: 200 where there is room, 160 in a short window (a
+  /// laptop's 800), where the set-up's steps would otherwise run below the
+  /// fold. Both scan from a phone at arm's length.
+  static double sideFor(BuildContext context) => MediaQuery.sizeOf(context).height < 900 ? 160 : 200;
+
   @override
   Widget build(BuildContext context) {
     final image = QrImage(QrCode(payload: QrPayload.fromString(data)));
@@ -19,8 +88,9 @@ class QrView extends StatelessWidget {
       label: 'QR code for an authenticator app',
       image: true,
       child: Container(
+        // Scanners need black on white, whatever the theme (UI-GUIDE §7.1).
         color: Colors.white,
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppSpacing.md),
         child: CustomPaint(size: Size.square(size), painter: _QrPainter(image)),
       ),
     );
@@ -116,7 +186,7 @@ class _TotpSetupState extends State<TotpSetup> {
     final text = Theme.of(context).textTheme;
     if (enrolment == null) {
       return _error == null
-          ? const Center(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator()))
+          ? const Center(child: Padding(padding: EdgeInsets.all(AppSpacing.xl), child: CircularProgressIndicator()))
           : Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error));
     }
     return Column(
@@ -124,11 +194,11 @@ class _TotpSetupState extends State<TotpSetup> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text('1. Scan this with an authenticator app', style: text.titleSmall),
-        const SizedBox(height: 12),
-        Center(child: QrView(data: enrolment.otpauthUri)),
-        const SizedBox(height: 12),
+        const SizedBox(height: AppSpacing.md),
+        Center(child: QrView(data: enrolment.otpauthUri, size: QrView.sideFor(context))),
+        const SizedBox(height: AppSpacing.md),
         Text('Or type this key into the app:', style: text.bodySmall),
-        const SizedBox(height: 4),
+        const SizedBox(height: AppSpacing.xs),
         Row(
           children: [
             Expanded(
@@ -138,22 +208,18 @@ class _TotpSetupState extends State<TotpSetup> {
                 style: text.bodyMedium?.copyWith(fontFamily: 'monospace', letterSpacing: 1.2),
               ),
             ),
-            IconButton(
-              tooltip: 'Copy the key',
-              icon: const Icon(Icons.copy_outlined),
-              onPressed: () => Clipboard.setData(ClipboardData(text: enrolment.secret)),
-            ),
+            _CopyButton(text: enrolment.secret, tooltip: 'Copy the key'),
           ],
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: AppSpacing.lg),
         Text('2. Enter the six-digit code it shows', style: text.titleSmall),
-        const SizedBox(height: 8),
+        const SizedBox(height: AppSpacing.sm),
         CodeField(controller: _code, onSubmitted: _busy ? null : _confirm),
         if (_error != null) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: AppSpacing.sm),
           Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
         ],
-        const SizedBox(height: 16),
+        const SizedBox(height: AppSpacing.lg),
         FilledButton(
           key: const Key('totp-confirm'),
           onPressed: _busy ? null : _confirm,
@@ -221,33 +287,29 @@ class _RecoveryCodesPanelState extends State<RecoveryCodesPanel> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text('Keep these recovery codes', style: text.titleMedium),
-        const SizedBox(height: 8),
+        const SizedBox(height: AppSpacing.sm),
         Text(
           'Each one signs you in once if you lose your phone. They are shown only now: '
           'print them or keep them in a password manager, not beside your password.',
           style: text.bodyMedium,
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: AppSpacing.lg),
         Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(color: cs.surfaceContainerHighest, borderRadius: BorderRadius.circular(8)),
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          decoration: BoxDecoration(color: cs.surfaceContainerHighest, borderRadius: AppRadius.chip),
           child: Wrap(
-            spacing: 24,
-            runSpacing: 8,
+            spacing: AppSpacing.xl,
+            runSpacing: AppSpacing.sm,
             children: [
               for (final code in widget.codes)
                 SelectableText(code, style: text.bodyLarge?.copyWith(fontFamily: 'monospace')),
             ],
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: AppSpacing.sm),
         Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            icon: const Icon(Icons.copy_outlined),
-            label: const Text('Copy all'),
-            onPressed: () => Clipboard.setData(ClipboardData(text: widget.codes.join('\n'))),
-          ),
+          alignment: AlignmentDirectional.centerStart,
+          child: _CopyButton(text: widget.codes.join('\n'), label: 'Copy all'),
         ),
         CheckboxListTile(
           key: const Key('recovery-kept'),

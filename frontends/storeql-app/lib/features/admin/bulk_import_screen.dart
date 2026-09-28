@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import 'providers/admin_providers.dart';
 
@@ -241,10 +242,13 @@ class _BulkImportScreenState extends ConsumerState<BulkImportScreen> {
     final cs = Theme.of(context).colorScheme;
     final storesAsync = ref.watch(storesProvider);
 
+    // The page's gutter, and a width the form reads at, centred: a
+    // ConstrainedBox in a scroll view was handed the full width and did
+    // nothing on a desktop.
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 760),
+      padding: context.pagePadding,
+      child: ContentBounds(
+        maxWidth: 760,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [

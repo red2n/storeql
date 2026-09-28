@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/statutory_returns_screen.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // The statutory calendar (07.14): what is outstanding, what each period says,
 // and what recording a filing sends.
@@ -56,8 +58,9 @@ class _Tenant implements HttpClientAdapter {
   }
 }
 
-Future<_Tenant> _pump(WidgetTester tester, void Function(_Tenant) setUp) async {
-  tester.view.physicalSize = const Size(1200, 2200);
+Future<_Tenant> _pump(WidgetTester tester, void Function(_Tenant) setUp,
+    {Size size = const Size(1200, 2200)}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -77,7 +80,7 @@ Future<_Tenant> _pump(WidgetTester tester, void Function(_Tenant) setUp) async {
 /// first version of this helper nested ternaries inside an interpolation and produced JSON that did
 /// not parse, which showed up as three unrelated-looking widget failures.
 String _period(String code, String start, String due, String state,
-    {String? filingId, String? reference}) {
+    {String? filingId, String? reference, String provider = 'MANUAL'}) {
   final saft = code == 'SAFT_PT';
   return jsonEncode({
     'returnCode': code,
@@ -97,7 +100,7 @@ String _period(String code, String start, String due, String state,
         'id': filingId,
         'returnCode': code,
         'periodStart': start,
-        'provider': 'MANUAL',
+        'provider': provider,
         'stands': true,
         'filedAt': '2026-09-04T10:00:00Z',
         'reference': reference,
@@ -106,6 +109,12 @@ String _period(String code, String start, String due, String state,
 }
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
   setUpAll(initializeDateFormatting);
 
   testWidgets('what is outstanding comes first, and an overdue one is named as overdue',
@@ -141,6 +150,132 @@ void main() {
     expect(find.byKey(const Key('statutory-nothing-outstanding')), findsOneWidget);
     expect(find.textContaining('AT-778812'), findsOneWidget);
     expect(find.text('Filed'), findsWidgets);
+    // How it went, in the record dialog's own words.
+    expect(find.textContaining('By hand, on the portal'), findsOneWidget);
+    expect(find.textContaining('MANUAL'), findsNothing);
+  });
+
+  testWidgets('a filing names how it went in words, never the provider code',
+      (tester) async {
+    await _pump(
+        tester,
+        (t) => t.body = '{"data":{"asOf":"2026-09-18","obligations":['
+            '${_period('SAFT_PT', '2026-08-01', '2026-09-05', 'FILED', filingId: '01a0-1', provider: 'HMRC_MTD')}'
+            '],"outstanding":[]}}');
+
+    expect(find.textContaining('HMRC Making Tax Digital'), findsOneWidget);
+    expect(find.textContaining('HMRC_MTD'), findsNothing);
+  });
+
+  testWidgets('an overdue return keeps a strong fill inside the red outstanding card',
+      (tester) async {
+    await _pump(
+        tester,
+        (t) => t.body = '{"data":{"asOf":"2026-09-18","obligations":['
+            '${_period('SAFT_PT', '2026-08-01', '2026-09-05', 'OVERDUE')}'
+            '],"outstanding":['
+            '${_period('SAFT_PT', '2026-08-01', '2026-09-05', 'OVERDUE')}'
+            ']}}');
+
+    final badge = find.descendant(
+        of: find.byKey(const Key('statutory-outstanding')),
+        matching: find.byKey(const Key('statutory-state-OVERDUE')));
+    expect(badge, findsOneWidget);
+    final scheme = Theme.of(tester.element(badge)).colorScheme;
+    final card = tester.widget<Card>(find.byKey(const Key('statutory-outstanding')));
+    final fill = (tester.widget<Container>(badge).decoration as BoxDecoration).color;
+    // errorContainer on errorContainer loses its edge and reads as plain text.
+    expect(fill, scheme.error);
+    expect(fill, isNot(card.color));
+    expect(find.descendant(of: badge, matching: find.byIcon(Icons.error_outline)),
+        findsOneWidget);
+  });
+
+  testWidgets('the VAT return\'s export is a button to the screen that makes it',
+      (tester) async {
+    final tenant = _Tenant()
+      ..body = '{"data":{"asOf":"2026-09-18","obligations":[${jsonEncode({
+        'returnCode': 'VAT_RETURN_UK',
+        'name': 'VAT return (Making Tax Digital)',
+        'scopeKind': 'COUNTRY',
+        'scope': 'GB',
+        'frequency': 'QUARTERLY',
+        'periodStart': '2026-04-01',
+        'periodEnd': '2026-07-01',
+        'dueOn': '2026-08-07',
+        'state': 'DUE',
+        'citation': 'VATA 1994 sch.11 para.2',
+        'exportService': 'pricing-svc',
+        'exportPath': '/admin/vat-return',
+      })}],"outstanding":[]}}';
+    final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = tenant;
+    tester.view.physicalSize = const Size(1200, 2200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final router = GoRouter(
+      initialLocation: '/admin/statutory-returns',
+      routes: [
+        GoRoute(
+            path: '/admin/statutory-returns',
+            builder: (_, _) => const Scaffold(body: StatutoryReturnsScreen())),
+        GoRoute(
+            path: '/admin/pricing',
+            builder: (_, state) => Scaffold(
+                body: Text('Pricing screen · ${state.uri.queryParameters['tab']}'))),
+      ],
+    );
+    addTearDown(router.dispose);
+    await tester.pumpWidget(ProviderScope(
+      overrides: <Override>[apiClientProvider.overrideWithValue(_FakeApiClient(dio))],
+      child: MaterialApp.router(routerConfig: router),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('pricing-svc'), findsNothing);
+    expect(find.textContaining('/admin/vat-return'), findsNothing);
+    await tester.tap(find.text('Export from Pricing › VAT Return'));
+    await tester.pumpAndSettle();
+    // Straight to the VAT Return tab, not Pricing's first.
+    expect(find.text('Pricing screen · vat-return'), findsOneWidget);
+  });
+
+  testWidgets('on a phone at 200% text an overdue period still lays out',
+      (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await _pump(
+        tester,
+        (t) => t.body = '{"data":{"asOf":"2026-09-18","obligations":['
+            '${_period('SAFT_PT', '2026-08-01', '2026-09-05', 'OVERDUE')},'
+            '${_period('SAFT_PT', '2026-07-01', '2026-08-05', 'FILED', filingId: '01a0-2', provider: 'SIMULATED', reference: 'AT-1')}'
+            '],"outstanding":['
+            '${_period('SAFT_PT', '2026-08-01', '2026-09-05', 'OVERDUE')}'
+            ']}}',
+        size: const Size(390, 844));
+    expect(tester.takeException(), isNull);
+    // Scroll the whole calendar through, so every row is laid out once.
+    await tester.scrollUntilVisible(
+        find.byKey(const Key('statutory-period-SAFT_PT-2026-07-01')), 300,
+        scrollable: find
+            .descendant(of: find.byType(ListView), matching: find.byType(Scrollable))
+            .first);
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('Simulated — nothing left the building'), findsOneWidget);
+  });
+
+  testWidgets('on a phone the page is inset 16, not 24', (tester) async {
+    await _pump(
+        tester,
+        (t) => t.body = '{"data":{"asOf":"2026-09-18","obligations":['
+            '${_period('SAFT_PT', '2026-08-01', '2026-09-05', 'DUE')}'
+            '],"outstanding":[]}}',
+        size: const Size(390, 844));
+
+    expect(tester.takeException(), isNull);
+    expect(tester.getTopLeft(find.text('Statutory returns')).dx, 16);
+    expect(tester.getTopLeft(find.byKey(const Key('statutory-nothing-outstanding'))).dx,
+        16);
   });
 
   testWidgets('a return the platform cannot produce says so, rather than looking like one it can',
@@ -152,7 +287,9 @@ void main() {
             '${_period('EC_SALES_LIST', '2026-08-01', '2026-09-20', 'DUE')}'
             '],"outstanding":[]}}');
 
-    expect(find.textContaining('Export: order-svc'), findsOneWidget);
+    // Where the export is made, as a place in the app — not a service and a path.
+    expect(find.text('Export from Sales tools › Receipts'), findsOneWidget);
+    expect(find.textContaining('order-svc'), findsNothing);
     expect(find.textContaining('The platform cannot produce this one'), findsOneWidget);
     expect(find.text('EU law'), findsOneWidget);
     expect(find.text('National law'), findsOneWidget);

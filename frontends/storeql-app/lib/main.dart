@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart' show Intl;
 import 'core/auth/sso.dart';
 import 'core/l10n/app_locales.dart';
 import 'core/router.dart';
@@ -37,9 +38,11 @@ class ShelfApp extends ConsumerWidget {
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
       themeMode: ThemeMode.system,
-      // UK-first: en_GB is the resolution fallback (first in supported); otherwise
-      // the device locale is honoured among the UK's main community languages.
-      // Urdu/Arabic resolve to RTL automatically.
+      // No country assumed: English resolves to the device's own region when
+      // intl has it (AppLocales.englishRegions) and to plain English
+      // otherwise; a device already in one of the app's other shipped
+      // languages keeps it, whatever its region. Urdu/Arabic resolve to RTL
+      // automatically.
       supportedLocales: AppLocales.supported,
       localizationsDelegates: const [
         AppLocalizations.delegate,
@@ -48,12 +51,12 @@ class ShelfApp extends ConsumerWidget {
         GlobalCupertinoLocalizations.delegate,
       ],
       localeResolutionCallback: (locale, supported) {
-        if (locale != null) {
-          for (final s in supported) {
-            if (s.languageCode == locale.languageCode) return s;
-          }
-        }
-        return AppLocales.fallback;
+        final resolved = AppLocales.resolve(locale, supported);
+        // AppFormat writes money, counts and dates in the language the app
+        // runs in. Set here, before anything is formatted, so no stray
+        // formatter can pin intl to the system's en_US instead.
+        Intl.defaultLocale = AppLocales.intlName(resolved);
+        return resolved;
       },
       routerConfig: router,
       debugShowCheckedModeBanner: false,

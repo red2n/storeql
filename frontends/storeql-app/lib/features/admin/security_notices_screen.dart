@@ -130,7 +130,7 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
     final theme = Theme.of(context);
     final notices = ref.watch(securityNoticesProvider);
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      padding: context.pagePadding,
       children: [
         Text('Security notices', style: theme.textTheme.headlineMedium),
         const SizedBox(height: 4),
@@ -154,9 +154,15 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
           data: (list) => list.isEmpty
               ? const Text(
                   'The platform has sent this business no security notices.')
+              // The theme gives a Card no margin, so the gap is put here.
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [for (final n in list) _notice(context, n)],
+                  children: [
+                    for (var i = 0; i < list.length; i++) ...[
+                      if (i > 0) const SizedBox(height: AppSpacing.md),
+                      _notice(context, list[i]),
+                    ],
+                  ],
                 ),
         ),
       ],
@@ -193,7 +199,7 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
               Text(
                 n.regime == 'DPDP'
                     ? "Your own duties under India's DPDP Act"
-                        '${n.binding ? '' : ' (from ${n.bindsFrom})'}'
+                        '${n.binding ? '' : ' (from ${AppFormat.date(n.bindsFrom)})'}'
                     : 'Your own duties under the GDPR',
                 key: Key('duties-${n.id}'),
                 style: theme.textTheme.titleSmall,
@@ -216,24 +222,78 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
         : d.dueAt != null
             ? '${overdue ? 'Overdue: was due' : 'Due'} ${AppFormat.dateTime(d.dueAt)}'
             : 'Without delay';
-    return ListTile(
+    // The deadline is what to act on, so it has a line of its own in the
+    // title's size — in the error colour once it has passed — and the rule and
+    // its citation sit under it in the small grey.
+    final titleStyle = theme.textTheme.titleSmall;
+    final text = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(_dutyLabels[d.duty] ?? d.duty, style: titleStyle),
+        const SizedBox(height: AppSpacing.xs),
+        Text(
+          when,
+          key: Key('due-${n.id}-${d.duty}'),
+          style: titleStyle?.copyWith(
+            color: overdue
+                ? cs.error
+                : d.done
+                    ? cs.onSurfaceVariant
+                    : cs.onSurface,
+          ),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        Text(
+          '${d.summary} — ${d.citation}',
+          style:
+              theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+        ),
+      ],
+    );
+    final action = d.done
+        ? null
+        : TextButton(
+            key: Key('record-${n.id}-${d.duty}'),
+            onPressed: _busy.contains(n.id) ? null : () => _record(n, d),
+            child: Text(
+                _tellingDuties.contains(d.duty) ? 'Tell customers' : 'Record'),
+          );
+    return Padding(
       key: Key('duty-${n.id}-${d.duty}'),
-      dense: true,
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        d.done ? Icons.task_alt : Icons.radio_button_unchecked,
-        color: d.done ? null : (overdue ? cs.error : null),
-      ),
-      title: Text(_dutyLabels[d.duty] ?? d.duty),
-      subtitle: Text('$when\n${d.summary} — ${d.citation}'),
-      isThreeLine: true,
-      trailing: d.done
-          ? null
-          : TextButton(
-              key: Key('record-${n.id}-${d.duty}'),
-              onPressed: _busy.contains(n.id) ? null : () => _record(n, d),
-              child: Text(_tellingDuties.contains(d.duty) ? 'Tell customers' : 'Record'),
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+      child: LayoutBuilder(builder: (context, constraints) {
+        // Beside the text where there is room; under it on a phone or with
+        // large text, where a button at the end would leave the words no width.
+        final largeText =
+            MediaQuery.textScalerOf(context).scale(16) > 16 * 1.3;
+        final stacked = constraints.maxWidth < 480 ||
+            (largeText && constraints.maxWidth < AppBreakpoints.expanded);
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              d.done ? Icons.task_alt : Icons.radio_button_unchecked,
+              color: d.done ? null : (overdue ? cs.error : null),
             ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  text,
+                  if (stacked && action != null) action,
+                ],
+              ),
+            ),
+            if (!stacked && action != null) ...[
+              const SizedBox(width: AppSpacing.md),
+              action,
+            ],
+          ],
+        );
+      }),
     );
   }
 

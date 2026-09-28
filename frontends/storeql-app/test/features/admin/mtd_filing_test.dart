@@ -4,9 +4,11 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/pricing_screen.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // Making Tax Digital (18.5): the digital link from the VAT return on the screen
 // to HMRC. The manager registers the number, sees the periods HMRC expects,
@@ -94,6 +96,13 @@ Future<_Server> _pump(WidgetTester tester, {bool registered = true}) async {
 }
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  setUpAll(initializeDateFormatting);
   testWidgets(
     'an unregistered business is told to register, and the simulator is what is on offer',
     (tester) async {
@@ -143,11 +152,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('VAT number 123456782'), findsOneWidget);
       expect(
-        find.textContaining('26A2 · 2026-04-01 → 2026-06-30'),
+        find.textContaining('26A2 · 1 Apr 2026 → 30 Jun 2026'),
         findsOneWidget,
       );
       expect(find.text('Filed'), findsOneWidget);
-      expect(find.textContaining('Open · due 2026-11-07'), findsOneWidget);
+      expect(find.textContaining('Open · due 7 Nov 2026'), findsOneWidget);
       expect(
         find.byKey(const Key('mtd-file-26A2')),
         findsNothing,

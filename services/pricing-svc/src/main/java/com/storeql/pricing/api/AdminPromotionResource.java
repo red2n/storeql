@@ -6,6 +6,7 @@ import com.storeql.pricing.dto.Dtos.CreatePromotionRequest;
 import com.storeql.pricing.dto.Dtos.SetActiveRequest;
 import com.storeql.pricing.mapper.Mappers;
 import com.storeql.pricing.service.PricingService;
+import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
@@ -17,8 +18,15 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
+import java.util.List;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
@@ -47,6 +55,11 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 @Tag(name = "Promotions")
 public class AdminPromotionResource {
 
+  /**
+   * How far back the windows reach when the caller names no day: two years, the forecast's read.
+   */
+  private static final long DEFAULT_WINDOW_DAYS = 730;
+
   @Inject PricingService svc;
   @Inject TenantContext ctx;
 
@@ -60,6 +73,51 @@ public class AdminPromotionResource {
    * @return {@code 201} with the created promotion
    * @throws com.storeql.web.ApiException {@code 400} when the shape does not match the type
    */
+  /**
+   * The promotions that touch a store, as windows in time — what inventory-svc reads for the demand
+   * forecast (06.x): the store's own and the business-wide ones since {@code from}, each with its
+   * scope resolved to variants, a switched-off one ending when it was switched off.
+   *
+   * @param store the store; required
+   * @param from the first day of interest, {@code yyyy-MM-dd}; two years back when absent
+   * @return {@code 200} with the windows, earliest start first
+   * @throws com.storeql.web.ApiException {@code 400 STORE_REQUIRED} without a store, {@code 400
+   *     PRICING_INVALID_DATE} when {@code from} is not a date
+   */
+  @Operation(
+      summary = "Promotion windows for a store",
+      description =
+          "Every promotion touching the store since `from` (two years back by default) as a window"
+              + " in time: its scope resolved to variant ids (or `allVariants`), and its end — the"
+              + " end date, or the moment it was switched off if that came first. Read by"
+              + " inventory-svc for the demand forecast's promotional uplift (06.x); staff-readable.")
+  @APIResponse(responseCode = "200", description = "The windows, earliest start first")
+  @APIResponse(responseCode = "400", description = "No store, or `from` is not a date")
+  @GET
+  @Path("/windows")
+  public Response windows(@QueryParam("store") UUID store, @QueryParam("from") String from) {
+    if (store == null) {
+      throw ApiException.badRequest("STORE_REQUIRED", "store is required");
+    }
+    Instant since;
+    if (from == null || from.isBlank()) {
+      since = Instant.now().minus(Duration.ofDays(DEFAULT_WINDOW_DAYS));
+    } else {
+      try {
+        since = LocalDate.parse(from).atStartOfDay().toInstant(ZoneOffset.UTC);
+      } catch (DateTimeParseException e) {
+        throw new ApiException(
+            400, "PRICING_INVALID_DATE", "from must be a date, yyyy-MM-dd", List.of(), e);
+      }
+    }
+    return Response.ok(
+            ApiResponse.ok(
+                svc.promotionWindows(ctx, store, since).stream()
+                    .map(w -> Mappers.toDto(w))
+                    .toList()))
+        .build();
+  }
+
   @Operation(
       summary = "Create a promotion",
       description =

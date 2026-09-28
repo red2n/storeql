@@ -32,13 +32,19 @@ class DeferredRevenueConsumer extends BaseKafkaConsumer {
 
   @Inject
   @ConfigProperty(
+      name = "storeql.kafka.topics.loyalty-expired",
+      defaultValue = "storeql.customer.loyalty-expired")
+  String loyaltyExpired;
+
+  @Inject
+  @ConfigProperty(
       name = "storeql.kafka.topics.gift-card-loaded",
       defaultValue = "storeql.order.gift-card-loaded")
   String giftCardLoaded;
 
   @Override
   protected List<String> topics() {
-    return List.of(loyaltyEarned, loyaltyRedeemed, loyaltyAdjusted, giftCardLoaded);
+    return List.of(loyaltyEarned, loyaltyRedeemed, loyaltyAdjusted, loyaltyExpired, giftCardLoaded);
   }
 
   @Override

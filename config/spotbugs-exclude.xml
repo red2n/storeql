@@ -57,6 +57,16 @@
     </Match>
 
     <!--
+      Fulfilment is what one handover did (wave picking): a record nested in OrderRepository whose
+      lines are replaced by List.copyOf(...) in its compact constructor, so the accessor returns an
+      immutable list — the same pattern as the einvoice model above, in a repo class.
+    -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+        <Class name="com.storeql.order.repo.OrderRepository$Fulfilment"/>
+    </Match>
+
+    <!--
       The EN 16931 model (07.13/18.9) is a tree of records in shared/einvoice, outside the
       dto/domain/service packages matched above. Every List component is replaced in the record's
       compact constructor by List.copyOf(...) (or List.of() when absent), so an accessor returns an

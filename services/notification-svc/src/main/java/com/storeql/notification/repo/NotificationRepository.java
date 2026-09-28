@@ -8,7 +8,9 @@ import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
@@ -134,7 +136,7 @@ public class NotificationRepository extends BaseJdbcRepository {
   }
 
   /**
-   * Records a send, with what it was written in (13.x).
+   * Records a send, with what it was written in.
    *
    * @param language the language the message was written in; null when not known
    * @param template {@code default}, or the business's version, e.g. {@code v3}
@@ -198,6 +200,27 @@ public class NotificationRepository extends BaseJdbcRepository {
             + " redacted_at = now()"
             + " WHERE tenant_id IS NULL AND subject_id = ? AND redacted_at IS NULL",
         userId);
+  }
+
+  /**
+   * Deletes password-reset rows older than the cutoff: a platform rule, not any business's
+   * retention schedule — the row belongs to no tenant, so no tenant's own period ever reaches it,
+   * and there is no hold to check (nobody's account can keep this one back). Called by {@link
+   * com.storeql.notification.service.RetentionPurgeService} on its own daily sweep, once, never per
+   * tenant.
+   */
+  public int purgePasswordResetsBefore(Instant cutoff) {
+    return inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "DELETE FROM notification_log WHERE type = 'PASSWORD_RESET' AND tenant_id IS"
+                      + " NULL AND created_at < ?")) {
+            ps.setObject(1, cutoff.atOffset(ZoneOffset.UTC));
+            return ps.executeUpdate();
+          }
+        },
+        "purge password reset log");
   }
 
   private int redact(String sql, UUID... params) {

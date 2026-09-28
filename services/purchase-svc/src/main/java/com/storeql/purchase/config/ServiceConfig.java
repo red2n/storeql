@@ -53,12 +53,10 @@ public class ServiceConfig extends BaseServiceConfig {
    * CURRENCY:ROLE:amount} entries. {@code UNLIMITED} is accepted in place of an amount.
    *
    * <p><b>Currency is part of the key, and that is the whole design.</b> A ceiling of 5000 means
-   * nothing on its own: against JPY it is roughly £25, against KWD roughly £13,000. StoreQL has no
-   * FX handling — the readiness review lists it as absent — so there is nothing to convert with,
-   * and a single-currency ceiling silently applied to another currency is SJ-D18's inverted sign
-   * with money attached: it either blocks every Japanese order or waves through 160 times the
-   * intended authority, and which one you get depends on nothing but where the tenant happens to
-   * buy.
+   * nothing on its own: against JPY it is roughly £25, against KWD roughly £13,000. A
+   * single-currency ceiling silently applied to another currency is SJ-D18's inverted sign with
+   * money attached: it either blocks every Japanese order or waves through 160 times the intended
+   * authority, and which one you get depends on nothing but where the tenant happens to buy.
    *
    * <p>Empty by default, which leaves approval <b>off</b> and submission behaving exactly as it did
    * before this feature — a deliberate choice, because turning mandatory approval on for every

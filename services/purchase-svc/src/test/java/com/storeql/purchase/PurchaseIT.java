@@ -430,10 +430,25 @@ class PurchaseIT {
     assertThat(ledgerBody, containsString("1100"));
     assertThat(ledgerBody, containsString("2200"));
     assertThat(ledgerBody, containsString("2100"));
+    // Read in the accounting package and on the Integrations screen: each invoice is named by "#"
+    // and the last eight of its id, as every screen names a document — never by the whole id.
+    String arHandle = "#" + arId.substring(arId.length() - 8);
+    String apHandle = "#" + apId.substring(apId.length() - 8);
+    assertThat(
+        ledgerBody, containsString("\"description\":\"Intercompany AR invoice " + arHandle + "\""));
+    assertThat(
+        ledgerBody, containsString("\"description\":\"Intercompany AP invoice " + apHandle + "\""));
+    assertThat(ledgerBody, not(containsString("invoice " + arId)));
+    assertThat(ledgerBody, not(containsString("invoice " + apId)));
 
     // Settle AR invoice → DR 1200 Bank / CR 1100 Debtors
     Response settleRes = post("/intercompany-invoices/" + arId + "/settle", "{}", T);
     assertThat(settleRes.getStatus(), is(200));
+    String settled = get("/nominal-ledger", T).readEntity(String.class);
+    assertThat(
+        settled,
+        containsString("\"description\":\"Settlement of intercompany invoice " + arHandle + "\""));
+    assertThat(settled, not(containsString("invoice " + arId)));
 
     // Settle again → 409 (already settled)
     Response settle2 = post("/intercompany-invoices/" + arId + "/settle", "{}", T);

@@ -2,14 +2,24 @@ package com.storeql.customer.mapper;
 
 import com.storeql.customer.domain.Domain.Customer;
 import com.storeql.customer.domain.Domain.CustomerAddress;
+import com.storeql.customer.domain.Domain.ExpiringSoon;
+import com.storeql.customer.domain.Domain.ExpiryRun;
 import com.storeql.customer.domain.Domain.LoyaltyAccount;
 import com.storeql.customer.domain.Domain.LoyaltyLedgerEntry;
+import com.storeql.customer.domain.Domain.LoyaltyView;
 import com.storeql.customer.domain.Domain.StoreCreditAccount;
+import com.storeql.customer.domain.LoyaltyProgramme;
 import com.storeql.customer.dto.Dtos.AddressResponse;
 import com.storeql.customer.dto.Dtos.CustomerResponse;
+import com.storeql.customer.dto.Dtos.ExpiringSoonResponse;
+import com.storeql.customer.dto.Dtos.ExpiryRunResponse;
 import com.storeql.customer.dto.Dtos.LoyaltyAccountResponse;
 import com.storeql.customer.dto.Dtos.LoyaltyLedgerEntryResponse;
+import com.storeql.customer.dto.Dtos.LoyaltyProgrammeResponse;
+import com.storeql.customer.dto.Dtos.NextTierResponse;
 import com.storeql.customer.dto.Dtos.StoreCreditAccountResponse;
+import com.storeql.customer.dto.Dtos.TierResponse;
+import java.math.BigDecimal;
 import java.time.Instant;
 
 /** Domain → DTO conversion. Never expose domain records directly over HTTP. */
@@ -37,7 +47,8 @@ public final class Mappers {
         ts(c.gdprConsentAt()),
         ts(c.createdAt()),
         ts(c.updatedAt()),
-        c.preferredLanguage());
+        c.preferredLanguage(),
+        c.phoneE164());
   }
 
   /**
@@ -68,8 +79,50 @@ public final class Mappers {
    * @return its API representation: balance, lifetime points and tier
    */
   public static LoyaltyAccountResponse toLoyalty(LoyaltyAccount la) {
+    return toLoyalty(new LoyaltyView(la, LoyaltyProgramme.defaults(la.tenantId()), null));
+  }
+
+  /** A customer's loyalty under the business's programme: tier, next tier, multiplier, expiry. */
+  public static LoyaltyAccountResponse toLoyalty(LoyaltyView v) {
+    LoyaltyAccount la = v.account();
+    LoyaltyProgramme p = v.programme();
+    BigDecimal qualifying = la.qualifyingPoints() == null ? BigDecimal.ZERO : la.qualifyingPoints();
+    NextTierResponse next =
+        p.nextTier(qualifying)
+            .map(
+                t ->
+                    new NextTierResponse(
+                        t.name(), t.threshold(), t.threshold().subtract(qualifying)))
+            .orElse(null);
+    ExpiringSoon soon = v.expiringSoon();
     return new LoyaltyAccountResponse(
-        la.customerId().toString(), la.pointsBalance(), la.lifetimePoints(), la.tier());
+        la.customerId().toString(),
+        la.pointsBalance(),
+        la.lifetimePoints(),
+        la.tier(),
+        la.tierSince() == null ? null : la.tierSince().toString(),
+        qualifying,
+        p.multiplierFor(la.tier()),
+        next,
+        soon == null ? null : new ExpiringSoonResponse(soon.points(), soon.on().toString()),
+        p.expiryMonths());
+  }
+
+  public static LoyaltyProgrammeResponse toProgramme(LoyaltyProgramme p) {
+    return new LoyaltyProgrammeResponse(
+        p.expiryMonths(),
+        p.qualifyingMonths(),
+        p.tiers().stream()
+            .map(t -> new TierResponse(t.name(), t.threshold(), t.multiplier()))
+            .toList(),
+        p.reason(),
+        p.setBy() == null ? null : p.setBy().toString(),
+        p.setAt() == null ? null : p.setAt().toString(),
+        p.isDefault());
+  }
+
+  public static ExpiryRunResponse toExpiryRun(ExpiryRun r) {
+    return new ExpiryRunResponse(r.customers(), r.points(), r.retiered());
   }
 
   /**

@@ -216,6 +216,11 @@ public final class BillingDtos {
   @Schema(name = "Invoice")
   public record InvoiceResponse(
       String id,
+      @Schema(
+              description =
+                  "The business the invoice was sent to, so the platform's receivables can name"
+                      + " whose each one is. On a business's own answers it is always its own id.")
+          String tenantId,
       @Schema(description = "Gapless within its year.") String number,
       @Schema(
               description =

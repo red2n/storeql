@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import '../../core/format.dart';
 
 import '../../core/constants.dart';
 
@@ -142,7 +143,7 @@ class _MeasuredQuantityDialogState extends State<MeasuredQuantityDialog> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(widget.itemName, style: const TextStyle(fontWeight: FontWeight.bold)),
-          Text('${widget.currency} ${widget.unitPrice.toStringAsFixed(2)} / $u'),
+          Text('${AppFormat.money(widget.unitPrice, currencyCode: widget.currency)} / $u'),
           const SizedBox(height: 12),
           TextField(
             controller: _ctrl,
@@ -159,7 +160,7 @@ class _MeasuredQuantityDialogState extends State<MeasuredQuantityDialog> {
           Text(
             v == null
                 ? ' '
-                : 'Line price: ${widget.currency} ${(v * widget.unitPrice).toStringAsFixed(2)}',
+                : 'Line price: ${AppFormat.money(v * widget.unitPrice, currencyCode: widget.currency)}',
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 8),

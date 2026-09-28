@@ -68,6 +68,35 @@ public class PasswordPolicy {
 
   private record CachedRange(Set<String> breachedSuffixes, Instant expiresAt) {}
 
+  /**
+   * The fewest characters a password may have.
+   *
+   * @return {@code storeql.iam.password.min-length}, 15 unless overridden
+   */
+  public int minLength() {
+    return minLength;
+  }
+
+  /**
+   * The most characters a password may have.
+   *
+   * @return {@code storeql.iam.password.max-length}, 128 unless overridden
+   */
+  public int maxLength() {
+    return maxLength;
+  }
+
+  /**
+   * Whether a password is screened against known data breaches before it is accepted — what {@code
+   * GET /auth/password-policy} publishes as {@code breachScreened}, so a person is never refused by
+   * a rule the page did not show them.
+   *
+   * @return {@code storeql.iam.password.breach-check.enabled}, true unless overridden
+   */
+  public boolean breachCheckEnabled() {
+    return breachCheck;
+  }
+
   /** For tests and callers outside CDI. */
   static PasswordPolicy of(int minLength, int maxLength, boolean breachCheck, String breachUrl) {
     PasswordPolicy p = new PasswordPolicy();

@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/auth/passkeys.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
 import 'mfa_widgets.dart';
 
 /// The second step of a sign-in (20.12): the password was right, and the login
@@ -51,20 +53,20 @@ class _SecondFactorScreenState extends ConsumerState<SecondFactorScreen> {
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: context.pagePadding,
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 420),
             child: Card(
               child: Padding(
-                padding: const EdgeInsets.all(32),
+                padding: const EdgeInsets.all(AppSpacing.xxl),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Icon(Icons.verified_user_outlined, size: 48, color: cs.primary),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: AppSpacing.md),
                     Text('One more step', style: text.headlineSmall, textAlign: TextAlign.center),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: AppSpacing.xs),
                     Text(
                       recovery
                           ? 'Enter one of your recovery codes. Each works once.'
@@ -72,34 +74,36 @@ class _SecondFactorScreenState extends ConsumerState<SecondFactorScreen> {
                       style: text.bodyMedium?.copyWith(color: cs.outline),
                       textAlign: TextAlign.center,
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: AppSpacing.xl),
                     if (owed.error != null) ...[
                       Container(
                         key: const Key('mfa-error'),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        decoration: BoxDecoration(color: cs.errorContainer, borderRadius: BorderRadius.circular(8)),
+                        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+                        decoration: BoxDecoration(color: cs.errorContainer, borderRadius: AppRadius.chip),
                         child: Text(owed.error!, style: TextStyle(color: cs.onErrorContainer)),
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: AppSpacing.lg),
                     ],
+                    // One filled button per card: *Sign in* is it, so the
+                    // passkey — offered first — is tonal.
                     if (hasPasskey) ...[
-                      FilledButton.icon(
+                      FilledButton.tonalIcon(
                         key: const Key('mfa-passkey'),
                         icon: const Icon(Icons.fingerprint),
                         label: const Text('Use a passkey'),
                         onPressed: _busy ? null : () => _run((n) => n.answerWithPasskey()),
                       ),
                       if (hasTotp || hasRecovery) ...[
-                        const SizedBox(height: 16),
+                        const SizedBox(height: AppSpacing.lg),
                         Row(children: [
                           const Expanded(child: Divider()),
                           Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
                             child: Text('or', style: text.bodySmall),
                           ),
                           const Expanded(child: Divider()),
                         ]),
-                        const SizedBox(height: 16),
+                        const SizedBox(height: AppSpacing.lg),
                       ],
                     ],
                     if (hasTotp || hasRecovery) ...[
@@ -108,7 +112,7 @@ class _SecondFactorScreenState extends ConsumerState<SecondFactorScreen> {
                         recovery: recovery,
                         onSubmitted: _busy ? null : () => _submit(recovery),
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: AppSpacing.lg),
                       FilledButton(
                         key: const Key('mfa-submit'),
                         onPressed: _busy ? null : () => _submit(recovery),

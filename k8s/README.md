@@ -168,6 +168,19 @@ Platform admin login: `https://app.storeql.com/#/platform/login`.
   is left at `"false"` — flip it to `"true"` once you've actually seeded inventory for
   your tenants, or every online checkout will 409 on stock.
 
+## Backups
+
+`16-backup.yaml` is a CronJob of the `storeql-backup` image at 02:30 UTC daily (`nightly`: a dump, and
+a base backup when one is due): a dump from one snapshot with its manifest, encrypted to the age public key in the `storeql-backup` secret
+(`kubectl -n storeql create secret generic storeql-backup --from-literal=STOREQL_BACKUP_RECIPIENT=age1...`;
+without it the job says aloud that backups are plain), a base backup once a week, retention, and
+metrics for the alerts. The Postgres StatefulSet archives its WAL into the same `storeql-backups`
+claim (`10-postgres.yaml`: `archive_mode`, `archive_command`, `archive_timeout=300`) and an init
+container prepares the claim's directories and the `pg_hba.conf` line the base backup's replication
+connection needs. Put the claim's StorageClass on another disk than `pgdata`'s, or add a copy to object
+storage to the job. Restoring is the same image with `restore <artefact>` against a fresh Postgres, or
+`pitr <base-dir> <time>` as a pod of its own — [docs/BACKUP-AND-RESTORE.md](../docs/BACKUP-AND-RESTORE.md).
+
 ## Hardening
 
 - **Pod Security Standards, restricted:** the `storeql` namespace enforces (and warns and audits at) the restricted profile. Every workload sets a pod `securityContext` — `runAsNonRoot`, a numeric `runAsUser`/`runAsGroup` (the platform's own images run as 10001; the web shell as nginx's 101; each infrastructure image as its own user, with `fsGroup` where it owns a volume) and the `RuntimeDefault` seccomp profile — and every container drops all capabilities and refuses privilege escalation. The platform's own images and the exporters run on a read-only root filesystem with `/tmp` (and, for the web shell, nginx's rendered config and cache) as emptyDirs.

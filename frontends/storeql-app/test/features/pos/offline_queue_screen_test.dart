@@ -2,6 +2,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:storeql_app/core/format.dart';
 import 'package:storeql_app/core/offline/offline_queue.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/core/offline/offline_sale.dart';
@@ -125,6 +127,8 @@ Future<OfflineQueueNotifier> _pump(WidgetTester tester, List<OfflineSale> sales,
 }
 
 void main() {
+  setUpAll(initializeDateFormatting);
+
   testWidgets('an empty queue says so rather than showing a blank pane',
       (tester) async {
     await _pump(tester, const []);
@@ -141,7 +145,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Everything is synced'), findsOneWidget);
-    expect(find.text('Sale #999999  ·  GBP 8.75'), findsOneWidget);
+    expect(find.text('Sale #999999  ·  £8.75'), findsOneWidget);
     expect(find.text('Receipt no. GB-A-2026-000007'), findsOneWidget);
     // One bounded server-side wait, on the till-readable path.
     expect(server.requests.single.path, endsWith('/fiscal-receipt'));
@@ -171,7 +175,7 @@ void main() {
       (tester) async {
     await _pump(tester, [_sale()]);
 
-    expect(find.text('Sale #123456  ·  GBP 12.50'), findsOneWidget);
+    expect(find.text('Sale #123456  ·  £12.50'), findsOneWidget);
     expect(find.textContaining('3 items'), findsOneWidget);
     expect(find.text('1 sale not yet on the server'), findsOneWidget);
     // Still in line: a spinner, and no way to throw it away.
@@ -213,5 +217,48 @@ void main() {
     await tester.pumpAndSettle();
     expect(notifier.state, isEmpty);
     expect(find.text('Everything is synced'), findsOneWidget);
+  });
+
+  testWidgets('a reference reads in capitals, as order references do',
+      (tester) async {
+    await _pump(tester, [_sale(id: '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d5e')]);
+
+    expect(find.text('Sale #3C4D5E  ·  £12.50'), findsOneWidget);
+    expect(find.textContaining('#3c4d5e'), findsNothing);
+  });
+
+  testWidgets('a synced sale shows the reference its receipt was printed with',
+      (tester) async {
+    await _pump(tester, const [],
+        synced: [_synced(id: '01a0c830-0e7a-7b3c-9d2e-5f1a2b7c41ae')],
+        server: _ReceiptServer(number: 'GB-A-2026-000009'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sale #7C41AE  ·  £8.75'), findsOneWidget,
+        reason: 'the offline receipt printed OfflineSale.reference: capitals');
+  });
+
+  testWidgets('the capture time is written like every other date and time',
+      (tester) async {
+    await _pump(tester, [_sale()]);
+
+    final at = DateTime.utc(2026, 9, 8, 11, 30).toIso8601String();
+    expect(find.textContaining(AppFormat.dateTime(at)), findsOneWidget);
+    expect(find.textContaining('2026-09-08'), findsNothing,
+        reason: 'no hand-built ISO date');
+  });
+
+  testWidgets('the status is a MaterialBanner, with Sync now as its action',
+      (tester) async {
+    await _pump(tester, [_sale()]);
+
+    final banner = find.byType(MaterialBanner);
+    expect(banner, findsOneWidget);
+    expect(
+        find.descendant(
+            of: banner, matching: find.text('1 sale not yet on the server')),
+        findsOneWidget);
+    expect(find.descendant(of: banner, matching: find.text('Sync now')),
+        findsOneWidget);
   });
 }

@@ -69,6 +69,11 @@ public final class MessagesTestSupport {
           public Optional<String> name(UUID tenantId) {
             return Optional.ofNullable(name);
           }
+
+          @Override
+          public boolean sandbox(UUID tenantId) {
+            return false;
+          }
         };
     return m;
   }

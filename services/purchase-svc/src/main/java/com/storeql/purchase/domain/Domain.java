@@ -64,6 +64,16 @@ public final class Domain {
   public static final String SOURCE_JOURNAL = "JOURNAL";
   public static final String SOURCE_SUPPLIER_PAYMENT = "SUPPLIER_PAYMENT";
   public static final String SOURCE_SALE = "SALE";
+
+  /** A consignment sale: what the supplier is owed the moment its stock sold. */
+  public static final String SOURCE_CONSIGNMENT_SALE = "CONSIGNMENT_SALE";
+
+  /** A dropship order delivered to the customer: goods the business never held, now owed. */
+  public static final String SOURCE_DROPSHIP_DELIVERY = "DROPSHIP_DELIVERY";
+
+  /** Duty-suspended goods released from bond: the duty now owed to the revenue. */
+  public static final String SOURCE_DUTY_RELEASE = "DUTY_RELEASE";
+
   public static final String SOURCE_SALE_TENDER = "SALE_TENDER";
   public static final String SOURCE_SALE_REFUND = "SALE_REFUND";
   // Chargebacks (11.9): the acquirer taking a card payment back, and how the argument ended.
@@ -90,6 +100,26 @@ public final class Domain {
   public static final String CODE_STORE_CREDIT_LIABILITY = "2320";
   public static final String NAME_STORE_CREDIT_LIABILITY = "Store Credit Liability";
   public static final String CODE_SALES = "4010";
+
+  /** Cost of goods sold that were the supplier's until they sold (consignment). */
+  public static final String CODE_CONSIGNMENT_PURCHASES = "5010";
+
+  public static final String NAME_CONSIGNMENT_PURCHASES = "Purchases - Consignment";
+
+  /** Cost of goods a supplier shipped straight to the customer (dropship). */
+  public static final String CODE_DROPSHIP_PURCHASES = "5020";
+
+  public static final String NAME_DROPSHIP_PURCHASES = "Purchases - Dropship";
+
+  /** Excise duty crystallised on releases from bond. */
+  public static final String CODE_EXCISE_DUTY = "5030";
+
+  public static final String NAME_EXCISE_DUTY = "Excise Duty";
+
+  /** Excise duty owed to the revenue and not yet paid. */
+  public static final String CODE_DUTY_PAYABLE = "2140";
+
+  public static final String NAME_DUTY_PAYABLE = "Excise Duty Payable";
   public static final String NAME_SALES = "Sales";
   public static final String CODE_DEFERRED_LOYALTY = "2330";
   public static final String NAME_DEFERRED_LOYALTY = "Deferred Income - Loyalty Points";
@@ -177,7 +207,12 @@ public final class Domain {
       Instant bankDetailsChangedAt,
       UUID bankDetailsChangedBy,
       String einvoiceScheme,
-      String einvoiceId) {
+      String einvoiceId,
+      /**
+       * The supplier's quoted lead time in days: the promise a delivery is measured against when
+       * the order named no date. Null when the supplier has never quoted one.
+       */
+      Integer leadTimeDays) {
 
     /** The bank details as one validated value. */
     public BankAccount.Details bank() {
@@ -212,7 +247,8 @@ public final class Domain {
           bankDetailsChangedAt,
           bankDetailsChangedBy,
           scheme,
-          identifier);
+          identifier,
+          leadTimeDays);
     }
   }
 
@@ -263,7 +299,418 @@ public final class Domain {
       String closedReason,
       UUID createdBy,
       UUID approvedBy,
-      Instant approvedAt) {}
+      Instant approvedAt,
+      /** MANUAL, or PROPOSAL when a proposal run raised it (06.x). */
+      String source,
+      /**
+       * Home units per one unit of the order's currency, as used at submission (03.x); null until
+       * then.
+       */
+      BigDecimal fxRate,
+      /** The net translated into the home currency at fxRate; null without a translation. */
+      BigDecimal totalNetHome,
+      /** The home currency the translation was into; null without one. */
+      String homeCurrency,
+      /**
+       * Whose the goods will be on arrival: OWNED (the business's, the default) or CONSIGNMENT (the
+       * supplier's until they sell — nothing is owed at the door, the sale is owed).
+       */
+      String ownership,
+      /** For a DROPSHIP order: the sale it fulfils (order-svc's order, referenced), else null. */
+      UUID salesOrderId,
+      /** For a DROPSHIP order: the customer the supplier ships to, as the order said. */
+      String shipTo,
+      /**
+       * DUTY_PAID (the default), or DUTY_SUSPENDED for excise goods arriving into bond: the receipt
+       * tells inventory-svc so, and the duty is owed only when they are released to home use.
+       */
+      String dutyStatus) {
+
+    /** An order for duty-paid goods of the given ownership, a dropship order possibly. */
+    public PurchaseOrder(
+        UUID id,
+        UUID tenantId,
+        UUID supplierId,
+        UUID storeId,
+        String status,
+        String currency,
+        BigDecimal totalNet,
+        BigDecimal totalVat,
+        BigDecimal totalGross,
+        LocalDate expectedDelivery,
+        Instant createdAt,
+        Instant updatedAt,
+        Instant cancelledAt,
+        String cancelledReason,
+        Instant closedAt,
+        String closedReason,
+        UUID createdBy,
+        UUID approvedBy,
+        Instant approvedAt,
+        String source,
+        BigDecimal fxRate,
+        BigDecimal totalNetHome,
+        String homeCurrency,
+        String ownership,
+        UUID salesOrderId,
+        String shipTo) {
+      this(
+          id,
+          tenantId,
+          supplierId,
+          storeId,
+          status,
+          currency,
+          totalNet,
+          totalVat,
+          totalGross,
+          expectedDelivery,
+          createdAt,
+          updatedAt,
+          cancelledAt,
+          cancelledReason,
+          closedAt,
+          closedReason,
+          createdBy,
+          approvedBy,
+          approvedAt,
+          source,
+          fxRate,
+          totalNetHome,
+          homeCurrency,
+          ownership,
+          salesOrderId,
+          shipTo,
+          PO_DUTY_PAID);
+    }
+
+    /** The same order, its goods arriving with the given duty status. */
+    public PurchaseOrder withDutyStatus(String duty) {
+      return new PurchaseOrder(
+          id,
+          tenantId,
+          supplierId,
+          storeId,
+          status,
+          currency,
+          totalNet,
+          totalVat,
+          totalGross,
+          expectedDelivery,
+          createdAt,
+          updatedAt,
+          cancelledAt,
+          cancelledReason,
+          closedAt,
+          closedReason,
+          createdBy,
+          approvedBy,
+          approvedAt,
+          source,
+          fxRate,
+          totalNetHome,
+          homeCurrency,
+          ownership,
+          salesOrderId,
+          shipTo,
+          duty);
+    }
+
+    /** An order for goods the business will own, with a translation possibly recorded. */
+    public PurchaseOrder(
+        UUID id,
+        UUID tenantId,
+        UUID supplierId,
+        UUID storeId,
+        String status,
+        String currency,
+        BigDecimal totalNet,
+        BigDecimal totalVat,
+        BigDecimal totalGross,
+        LocalDate expectedDelivery,
+        Instant createdAt,
+        Instant updatedAt,
+        Instant cancelledAt,
+        String cancelledReason,
+        Instant closedAt,
+        String closedReason,
+        UUID createdBy,
+        UUID approvedBy,
+        Instant approvedAt,
+        String source,
+        BigDecimal fxRate,
+        BigDecimal totalNetHome,
+        String homeCurrency) {
+      this(
+          id,
+          tenantId,
+          supplierId,
+          storeId,
+          status,
+          currency,
+          totalNet,
+          totalVat,
+          totalGross,
+          expectedDelivery,
+          createdAt,
+          updatedAt,
+          cancelledAt,
+          cancelledReason,
+          closedAt,
+          closedReason,
+          createdBy,
+          approvedBy,
+          approvedAt,
+          source,
+          fxRate,
+          totalNetHome,
+          homeCurrency,
+          PO_OWNERSHIP_OWNED,
+          null,
+          null);
+    }
+
+    /** The same order, for goods of the given ownership. */
+    public PurchaseOrder withOwnership(String owned) {
+      return new PurchaseOrder(
+          id,
+          tenantId,
+          supplierId,
+          storeId,
+          status,
+          currency,
+          totalNet,
+          totalVat,
+          totalGross,
+          expectedDelivery,
+          createdAt,
+          updatedAt,
+          cancelledAt,
+          cancelledReason,
+          closedAt,
+          closedReason,
+          createdBy,
+          approvedBy,
+          approvedAt,
+          source,
+          fxRate,
+          totalNetHome,
+          homeCurrency,
+          owned,
+          salesOrderId,
+          shipTo,
+          dutyStatus);
+    }
+
+    /** The same order, fulfilling a sale by dropship: shipped by the supplier to the customer. */
+    public PurchaseOrder withDropship(UUID sale, String customer) {
+      return new PurchaseOrder(
+          id,
+          tenantId,
+          supplierId,
+          storeId,
+          status,
+          currency,
+          totalNet,
+          totalVat,
+          totalGross,
+          expectedDelivery,
+          createdAt,
+          updatedAt,
+          cancelledAt,
+          cancelledReason,
+          closedAt,
+          closedReason,
+          createdBy,
+          approvedBy,
+          approvedAt,
+          source,
+          fxRate,
+          totalNetHome,
+          homeCurrency,
+          ownership,
+          sale,
+          customer,
+          dutyStatus);
+    }
+
+    /** Whether the supplier ships this order to the customer: stock the business never holds. */
+    public boolean dropship() {
+      return PO_SOURCE_DROPSHIP.equals(source);
+    }
+
+    /** Whether the supplier keeps ownership of the goods until they sell. */
+    public boolean consigned() {
+      return PO_OWNERSHIP_CONSIGNMENT.equals(ownership);
+    }
+
+    /**
+     * How a person names this order — "PO #" and the id's handle, exactly as the procurement screen
+     * shows it — for text people read: a journal's description in the accounting package and on the
+     * Integrations screen. An order has no separate number, so this is its number; like any handle
+     * it is not a key, and the posting's source reference still carries the id.
+     */
+    public String reference() {
+      return Handle.purchaseOrder(id);
+    }
+
+    /** An order with no translation recorded yet. */
+    public PurchaseOrder(
+        UUID id,
+        UUID tenantId,
+        UUID supplierId,
+        UUID storeId,
+        String status,
+        String currency,
+        BigDecimal totalNet,
+        BigDecimal totalVat,
+        BigDecimal totalGross,
+        LocalDate expectedDelivery,
+        Instant createdAt,
+        Instant updatedAt,
+        Instant cancelledAt,
+        String cancelledReason,
+        Instant closedAt,
+        String closedReason,
+        UUID createdBy,
+        UUID approvedBy,
+        Instant approvedAt,
+        String source) {
+      this(
+          id,
+          tenantId,
+          supplierId,
+          storeId,
+          status,
+          currency,
+          totalNet,
+          totalVat,
+          totalGross,
+          expectedDelivery,
+          createdAt,
+          updatedAt,
+          cancelledAt,
+          cancelledReason,
+          closedAt,
+          closedReason,
+          createdBy,
+          approvedBy,
+          approvedAt,
+          source,
+          null,
+          null,
+          null);
+    }
+  }
+
+  public static final String PO_SOURCE_MANUAL = "MANUAL";
+  public static final String PO_SOURCE_PROPOSAL = "PROPOSAL";
+
+  /** Raised from a confirmed sale for a supplier that ships to the customer (dropship). */
+  public static final String PO_SOURCE_DROPSHIP = "DROPSHIP";
+
+  /** Raised by an RFQ award, at the price the supplier quoted. */
+  public static final String PO_SOURCE_RFQ = "RFQ";
+
+  /** Which supplier fulfils a variant per order, at what cost; one live per variant. */
+  public record DropshipArrangement(
+      UUID id,
+      UUID tenantId,
+      UUID variantId,
+      UUID supplierId,
+      BigDecimal unitCost,
+      String vatCode,
+      boolean active,
+      UUID createdBy,
+      Instant createdAt,
+      Instant endedAt) {}
+
+  /** The business will own the goods on arrival. */
+  public static final String PO_OWNERSHIP_OWNED = "OWNED";
+
+  /** The supplier owns the goods until they sell (consignment, sale or return). */
+  public static final String PO_OWNERSHIP_CONSIGNMENT = "CONSIGNMENT";
+
+  /** The goods arrive with the duty paid. */
+  public static final String PO_DUTY_PAID = "DUTY_PAID";
+
+  /** Excise goods arriving into bond: the duty is owed only on release to home use. */
+  public static final String PO_DUTY_SUSPENDED = "DUTY_SUSPENDED";
+
+  /** A release from bond as inventory-svc announced it: the duty now owed to the revenue. */
+  public record DutyRelease(
+      UUID id,
+      UUID tenantId,
+      UUID eventId,
+      UUID releaseId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      BigDecimal dutyPerUnit,
+      BigDecimal dutyAmount,
+      String currency,
+      String reference,
+      LocalDate releasedOn,
+      Instant recordedAt) {}
+
+  /** A sale drawn from a supplier's consignment stock, as inventory-svc announced it. */
+  public record ConsignmentSale(
+      UUID id,
+      UUID tenantId,
+      UUID eventId,
+      UUID supplierId,
+      UUID storeId,
+      UUID variantId,
+      UUID batchId,
+      UUID orderId,
+      BigDecimal qty,
+      BigDecimal unitCost,
+      BigDecimal amount,
+      String currency,
+      LocalDate soldOn,
+      UUID settlementId,
+      Instant recordedAt) {
+
+    public boolean settled() {
+      return settlementId != null;
+    }
+  }
+
+  /** One statement of a supplier's consignment sales over a period, for it to invoice against. */
+  public record ConsignmentSettlement(
+      UUID id,
+      UUID tenantId,
+      UUID supplierId,
+      String reference,
+      LocalDate periodFrom,
+      LocalDate periodTo,
+      String currency,
+      BigDecimal total,
+      int salesCount,
+      UUID createdBy,
+      Instant createdAt) {}
+
+  /** An item a proposal run could not judge, and why. */
+  public record SkippedItem(UUID variantId, String reason) {}
+
+  /** One proposal run: what it looked at, what it raised, what it skipped (06.x). */
+  public record ProposalRun(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID ranBy,
+      Instant ranAt,
+      int coverDays,
+      int considered,
+      int ordersRaised,
+      int linesRaised,
+      List<UUID> orderIds,
+      List<SkippedItem> skipped) {
+    public ProposalRun {
+      orderIds = List.copyOf(orderIds);
+      skipped = List.copyOf(skipped);
+    }
+  }
 
   // ── Purchase order approval (spend authority) ─────────────────────────────────
 
@@ -328,6 +775,18 @@ public final class Domain {
     }
   }
 
+  /** Part of a warehouse order's line allocated to a shop the warehouse serves (cross-docking). */
+  public record LineAllocation(
+      UUID id,
+      UUID tenantId,
+      UUID poId,
+      UUID poLineId,
+      UUID variantId,
+      UUID storeId,
+      BigDecimal qty,
+      UUID createdBy,
+      Instant createdAt) {}
+
   public record PurchaseOrderLine(
       UUID id,
       UUID tenantId,
@@ -336,7 +795,11 @@ public final class Domain {
       BigDecimal qty,
       BigDecimal unitPrice,
       String vatCode,
-      Instant createdAt) {}
+      Instant createdAt,
+      /**
+       * The proposal's arithmetic for this line, in the buyer's words; null when a person typed it.
+       */
+      String proposalReason) {}
 
   // ── Goods Receipt (GRN) ───────────────────────────────────────────────────────
   public record GoodsReceipt(
@@ -561,6 +1024,9 @@ public final class Domain {
     public static final String EARNED = "EARNED";
     public static final String REDEEMED = "REDEEMED";
     public static final String ADJUSTED = "ADJUSTED";
+
+    /** Points that died under the programme's expiry rule (13.x): a lapse, announced. */
+    public static final String EXPIRED = "EXPIRED";
   }
 
   /** A gift card issued or reloaded, as order-svc announced it (17.11). */

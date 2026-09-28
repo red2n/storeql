@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 
+import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -17,6 +18,7 @@ import java.sql.DriverManager;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -42,7 +44,14 @@ class OnboardingIT {
     System.setProperty("storeql.kafka.enabled", "false");
   }
 
-  private static final String OWNER = "01a090ae-611e-702c-a97b-d1b8025478e1";
+  // A login owns one business (21.13): every test signs up a fresh owner.
+  private String owner;
+
+  @BeforeEach
+  void freshOwner() {
+    owner = Ids.newId().toString();
+  }
+
   private static final String TENANT_B = "01a090ae-611e-7037-a4b7-c854f0266ace";
 
   @Inject WebTarget target;
@@ -68,11 +77,11 @@ class OnboardingIT {
             "/onboarding/tenants",
             "{\"businessName\":\"Acme\",\"country\":\"in\",\"currency\":\"inr\"}",
             "X-User-Id",
-            OWNER);
+            owner);
     assertThat(tenantResp.getStatus(), is(201));
     String tenantId = field(tenantResp.readEntity(String.class), "id");
 
-    // create first store → default + auto DEFAULT zone (caller has OWNER by now — see RBAC filter)
+    // create first store → default + auto DEFAULT zone (caller has owner by now — see RBAC filter)
     Response storeResp =
         post(
             "/onboarding/stores",
@@ -80,7 +89,7 @@ class OnboardingIT {
             "X-Tenant-Id",
             tenantId,
             "X-User-Id",
-            OWNER,
+            owner,
             "X-Roles",
             "OWNER");
     assertThat(storeResp.getStatus(), is(201));
@@ -106,7 +115,7 @@ class OnboardingIT {
             "X-Tenant-Id",
             tenantId,
             "X-User-Id",
-            OWNER,
+            owner,
             "X-Roles",
             "OWNER");
     assertThat(dup.getStatus(), is(409));
@@ -117,7 +126,7 @@ class OnboardingIT {
             .path("/onboarding/status")
             .request()
             .header("X-Tenant-Id", tenantId)
-            .header("X-User-Id", OWNER)
+            .header("X-User-Id", owner)
             .header("X-Roles", "OWNER")
             .get(String.class);
     assertThat(status, containsString("\"hasDefaultStore\":true"));
@@ -136,7 +145,7 @@ class OnboardingIT {
             "/onboarding/tenants",
             "{\"businessName\":\"Announce Ltd\",\"country\":\"gb\",\"currency\":\"gbp\"}",
             "X-User-Id",
-            OWNER);
+            owner);
     String tenantId = field(t.readEntity(String.class), "id");
     Response first =
         post(
@@ -145,7 +154,7 @@ class OnboardingIT {
             "X-Tenant-Id",
             tenantId,
             "X-User-Id",
-            OWNER,
+            owner,
             "X-Roles",
             "OWNER");
     Response second =
@@ -169,6 +178,261 @@ class OnboardingIT {
     }
   }
 
+  @Test
+  void aStoreIsAShopOrAWarehouseAndNothingElse() {
+    // Depot / DC replenishment reads the type to know which stores may serve shops: a type it
+    // cannot read would be a warehouse nobody could use, or a shop that quietly serves others.
+    Response t =
+        post(
+            "/onboarding/tenants",
+            "{\"businessName\":\"Depot Ltd\",\"country\":\"gb\",\"currency\":\"gbp\"}",
+            "X-User-Id",
+            owner);
+    String tenantId = field(t.readEntity(String.class), "id");
+    assertThat(
+        post(
+                "/onboarding/stores",
+                "{\"name\":\"First\",\"code\":\"FIRST\",\"timezone\":\"Europe/London\"}",
+                "X-Tenant-Id",
+                tenantId,
+                "X-User-Id",
+                owner,
+                "X-Roles",
+                "OWNER")
+            .getStatus(),
+        is(201));
+    Response depot =
+        post(
+            "/admin/stores",
+            "{\"name\":\"Depot\",\"code\":\"DC1\",\"type\":\"warehouse\","
+                + "\"timezone\":\"Europe/London\"}",
+            "X-Tenant-Id",
+            tenantId,
+            "X-Roles",
+            "OWNER");
+    String body = depot.readEntity(String.class);
+    assertThat(body, depot.getStatus(), is(201));
+    assertThat(body, containsString("\"type\":\"WAREHOUSE\""));
+    // A dark store is a third kind (ship-from-store and dark-store picking): the storefront lists
+    // it
+    // with the shops, delivery-only — no collection is offered there; a shop offers collection.
+    Response dark =
+        post(
+            "/admin/stores",
+            "{\"name\":\"Online hub\",\"code\":\"DARK1\",\"type\":\"dark_store\","
+                + "\"timezone\":\"Europe/London\"}",
+            "X-Tenant-Id",
+            tenantId,
+            "X-Roles",
+            "OWNER");
+    String darkBody = dark.readEntity(String.class);
+    assertThat(darkBody, dark.getStatus(), is(201));
+    assertThat(darkBody, containsString("\"type\":\"DARK_STORE\""));
+    String darkId = field(darkBody, "id");
+    Response storefront =
+        target.path("/storefront/stores").request().header("X-Tenant-Id", tenantId).get();
+    String listed = storefront.readEntity(String.class);
+    assertThat(listed, storefront.getStatus(), is(200));
+    var stores = jakarta.json.Json.createReader(new java.io.StringReader(listed)).readObject();
+    java.util.Map<String, jakarta.json.JsonObject> byId = new java.util.HashMap<>();
+    for (var v : stores.getJsonArray("data"))
+      byId.put(v.asJsonObject().getString("storeId"), v.asJsonObject());
+    assertThat(listed, byId.get(darkId).getString("type"), is("DARK_STORE"));
+    assertThat(listed, byId.get(darkId).getBoolean("pickupOffered"), is(false));
+    var shop =
+        byId.values().stream()
+            .filter(o -> "STORE".equals(o.getString("type")))
+            .findFirst()
+            .orElseThrow();
+    assertThat(listed, shop.getBoolean("pickupOffered"), is(true));
+    // Another business's storefront lists none of these stores, dark or not.
+    String rival =
+        field(
+            post(
+                    "/onboarding/tenants",
+                    "{\"businessName\":\"Rival Ltd\",\"country\":\"gb\",\"currency\":\"gbp\"}",
+                    "X-User-Id",
+                    Ids.newId().toString())
+                .readEntity(String.class),
+            "id");
+    String rivalListed =
+        target
+            .path("/storefront/stores")
+            .request()
+            .header("X-Tenant-Id", rival)
+            .get()
+            .readEntity(String.class);
+    assertThat(rivalListed, not(containsString(darkId)));
+    Response odd =
+        post(
+            "/admin/stores",
+            "{\"name\":\"Odd\",\"code\":\"ODD\",\"type\":\"SHED\","
+                + "\"timezone\":\"Europe/London\"}",
+            "X-Tenant-Id",
+            tenantId,
+            "X-Roles",
+            "OWNER");
+    String oddBody = odd.readEntity(String.class);
+    assertThat(oddBody, odd.getStatus(), is(400));
+    assertThat(oddBody, containsString("TENANT_STORE_TYPE_INVALID"));
+  }
+
+  /**
+   * The storefront names the business — the European Accessibility Act's service provider, whose
+   * accessibility statement the shop shows — never one of its stores and never another business.
+   * The name is the tenant's legal name, else the name it signed up with, and it is always the
+   * tenant whose storefront is asked (the resolved storefront header), whatever store is named.
+   */
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "The storefront names its own business (legal name, else name) and never another's")
+  void theStorefrontNamesItsOwnBusinessAndNeverAnother() {
+    String suffix = Ids.newId().toString().substring(24);
+    String ourName = "Harbour Foods " + suffix;
+    String ourLegal = "Harbour Foods Trading Ltd " + suffix;
+    String ours =
+        field(
+            post(
+                    "/onboarding/tenants",
+                    "{\"businessName\":\""
+                        + ourName
+                        + "\",\"legalName\":\""
+                        + ourLegal
+                        + "\",\"country\":\"gb\",\"currency\":\"gbp\"}",
+                    "X-User-Id",
+                    owner)
+                .readEntity(String.class),
+            "id");
+    String ourStore =
+        storeIn(
+            ours,
+            owner,
+            "/onboarding/stores",
+            "{\"name\":\"Quay Street\",\"code\":\"QUAY\",\"timezone\":\"Europe/London\"}");
+    String ourSecond =
+        storeIn(
+            ours,
+            owner,
+            "/admin/stores",
+            "{\"name\":\"Online hub\",\"code\":\"HUB\",\"type\":\"dark_store\","
+                + "\"timezone\":\"Europe/London\"}");
+
+    String rivalOwner = Ids.newId().toString();
+    String rivalName = "Quayside Grocers " + suffix;
+    String rival =
+        field(
+            post(
+                    "/onboarding/tenants",
+                    "{\"businessName\":\""
+                        + rivalName
+                        + "\",\"country\":\"gb\",\"currency\":\"gbp\"}",
+                    "X-User-Id",
+                    rivalOwner)
+                .readEntity(String.class),
+            "id");
+    String rivalStore =
+        storeIn(
+            rival,
+            rivalOwner,
+            "/onboarding/stores",
+            "{\"name\":\"Rival Main\",\"code\":\"RMAIN\",\"timezone\":\"Europe/London\"}");
+
+    // Our storefront: every store it lists names the business by its legal name — not the store.
+    var listed = storefrontStores(ours);
+    assertThat(listed.toString(), listed.size(), is(2));
+    for (var s : listed.getValuesAs(jakarta.json.JsonObject.class)) {
+      assertThat(listed.toString(), s.getString("businessName"), is(ourLegal));
+      assertThat(listed.toString(), s.getString("storeName"), not(ourLegal));
+    }
+    assertThat(
+        storefrontConfig(ours, ourStore, 200).getJsonObject("data").getString("businessName"),
+        is(ourLegal));
+    assertThat(
+        storefrontConfig(ours, ourSecond, 200).getJsonObject("data").getString("businessName"),
+        is(ourLegal));
+
+    // The rival's storefront answers its own name (it has no legal name, so its name), never ours.
+    var rivalListed = storefrontStores(rival);
+    assertThat(rivalListed.toString(), rivalListed.size(), is(1));
+    assertThat(rivalListed.getJsonObject(0).getString("businessName"), is(rivalName));
+    assertThat(rivalListed.toString(), not(containsString("Harbour")));
+    assertThat(
+        storefrontConfig(rival, rivalStore, 200).getJsonObject("data").getString("businessName"),
+        is(rivalName));
+
+    // Naming the other business's store never borrows its name: the store is not found there.
+    String theirsAskedOfUs = storefrontConfig(rival, ourStore, 404).toString();
+    assertThat(theirsAskedOfUs, containsString("STORE_NOT_FOUND"));
+    assertThat(theirsAskedOfUs, not(containsString("Harbour")));
+    String oursAskedOfThem = storefrontConfig(ours, rivalStore, 404).toString();
+    assertThat(oursAskedOfThem, not(containsString("Quayside")));
+
+    // No storefront named, or one nobody owns: no business is named at all.
+    Response anonymous = target.path("/storefront/stores").request().get();
+    String anonymousBody = anonymous.readEntity(String.class);
+    assertThat(anonymousBody, anonymous.getStatus(), is(401));
+    assertThat(anonymousBody, not(containsString("Harbour")));
+    Response nobody =
+        target
+            .path("/storefront/stores")
+            .request()
+            .header("X-Tenant-Id", Ids.newId().toString())
+            .get();
+    String nobodyBody = nobody.readEntity(String.class);
+    assertThat(nobodyBody, nobody.getStatus(), is(404));
+    assertThat(nobodyBody, not(containsString("Harbour")));
+
+    // A legal name cleared to blank falls back to the business's name, read as it stands now.
+    Response cleared =
+        target
+            .path("/admin/tenant")
+            .request(MediaType.APPLICATION_JSON)
+            .header("X-Tenant-Id", ours)
+            .header("X-User-Id", owner)
+            .header("X-Roles", "OWNER")
+            .put(
+                Entity.entity(
+                    "{\"businessName\":\"" + ourName + "\",\"legalName\":\"  \"}",
+                    MediaType.APPLICATION_JSON));
+    assertThat(cleared.readEntity(String.class), cleared.getStatus(), is(200));
+    for (var s : storefrontStores(ours).getValuesAs(jakarta.json.JsonObject.class)) {
+      assertThat(s.getString("businessName"), is(ourName));
+    }
+    assertThat(
+        storefrontConfig(ours, ourStore, 200).getJsonObject("data").getString("businessName"),
+        is(ourName));
+    assertThat(storefrontStores(rival).getJsonObject(0).getString("businessName"), is(rivalName));
+  }
+
+  private String storeIn(String tenant, String by, String path, String json) {
+    Response r = post(path, json, "X-Tenant-Id", tenant, "X-User-Id", by, "X-Roles", "OWNER");
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(201));
+    return field(body, "id");
+  }
+
+  private jakarta.json.JsonArray storefrontStores(String tenant) {
+    Response r = target.path("/storefront/stores").request().header("X-Tenant-Id", tenant).get();
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(200));
+    return jakarta.json.Json.createReader(new java.io.StringReader(body))
+        .readObject()
+        .getJsonArray("data");
+  }
+
+  private jakarta.json.JsonObject storefrontConfig(String tenant, String store, int status) {
+    Response r =
+        target
+            .path("/storefront/config")
+            .queryParam("store", store)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .get();
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return jakarta.json.Json.createReader(new java.io.StringReader(body)).readObject();
+  }
+
   /**
    * Regression test for the tenant-ownership check in TenantService#createDefaultStore /
    * #onboardingStatus: the gateway's onboarding carve-out (JwtAuthFilter#isOnboarding) forwards a
@@ -184,7 +448,7 @@ class OnboardingIT {
             "/onboarding/tenants",
             "{\"businessName\":\"VictimCo\",\"country\":\"in\",\"currency\":\"inr\"}",
             "X-User-Id",
-            OWNER);
+            owner);
     String tenantId = field(t.readEntity(String.class), "id");
 
     String attacker = "01a090ae-611e-7056-8f30-ecdbb48160eb";
@@ -220,7 +484,7 @@ class OnboardingIT {
             "X-Tenant-Id",
             tenantId,
             "X-User-Id",
-            OWNER,
+            owner,
             "X-Roles",
             "OWNER");
     assertThat(ownerStore.getStatus(), is(201));
@@ -246,7 +510,7 @@ class OnboardingIT {
             "/onboarding/tenants",
             "{\"businessName\":\"IsoCo\",\"country\":\"in\",\"currency\":\"inr\"}",
             "X-User-Id",
-            OWNER);
+            owner);
     String tenantA = field(t.readEntity(String.class), "id");
     post(
         "/onboarding/stores",
@@ -254,7 +518,7 @@ class OnboardingIT {
         "X-Tenant-Id",
         tenantA,
         "X-User-Id",
-        OWNER,
+        owner,
         "X-Roles",
         "OWNER");
 
@@ -280,7 +544,7 @@ class OnboardingIT {
             "storeName":"London HQ","storeCode":"LDN","storeCity":"London","storeCountry":"gb",\
             "storeTimezone":"Europe/London"}""",
             "X-User-Id",
-            OWNER);
+            owner);
     assertThat(resp.getStatus(), is(201));
     String body = resp.readEntity(String.class);
     assertThat(body, containsString("\"name\":\"OneShot Co\""));
@@ -296,7 +560,7 @@ class OnboardingIT {
             "/onboarding/tenants",
             "{\"businessName\":\"StaffCo\",\"country\":\"in\",\"currency\":\"inr\"}",
             "X-User-Id",
-            OWNER);
+            owner);
     String tenantId = field(tr.readEntity(String.class), "id");
 
     Response sr =
@@ -306,7 +570,7 @@ class OnboardingIT {
             "X-Tenant-Id",
             tenantId,
             "X-User-Id",
-            OWNER,
+            owner,
             "X-Roles",
             "OWNER");
     String storeId = field(sr.readEntity(String.class), "id");
@@ -357,7 +621,7 @@ class OnboardingIT {
             "/onboarding/tenants",
             "{\"businessName\":\"PageCo\",\"country\":\"in\",\"currency\":\"inr\"}",
             "X-User-Id",
-            OWNER);
+            owner);
     String tenantId = field(tr.readEntity(String.class), "id");
 
     // 5 stores: the first via onboarding (default), the rest via the admin endpoint.
@@ -367,7 +631,7 @@ class OnboardingIT {
         "X-Tenant-Id",
         tenantId,
         "X-User-Id",
-        OWNER,
+        owner,
         "X-Roles",
         "OWNER");
     for (int i = 2; i <= 5; i++) {
@@ -436,7 +700,7 @@ class OnboardingIT {
             "/onboarding/tenants",
             "{\"businessName\":\"Replay Ltd\",\"country\":\"gb\",\"currency\":\"gbp\"}",
             "X-User-Id",
-            OWNER);
+            owner);
     assertThat(created.getStatus(), is(201));
     String tenantId = field(created.readEntity(String.class), "id");
 
@@ -467,7 +731,7 @@ class OnboardingIT {
     assertThat(lastCurrencyEvent(tenantId), containsString("\"currency\":\"GBP\""));
   }
 
-  /** Cross-tenant reach, so it is PLATFORM_ADMIN only — an OWNER must not be able to run it. */
+  /** Cross-tenant reach, so it is PLATFORM_ADMIN only — an owner must not be able to run it. */
   @Test
   void republishCurrencyIsPlatformAdminOnly() {
     Response asOwner =

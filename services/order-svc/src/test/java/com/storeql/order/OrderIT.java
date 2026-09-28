@@ -1817,6 +1817,30 @@ class OrderIT {
   }
 
   @Test
+  @DisplayName("A wave's handover is applied once per dedupe id, on the handover's own transaction")
+  void aWaveHandoverIsAppliedOncePerDedupeId() {
+    // A wave picked at the store hands the order over through the same path as the button, once
+    // per event-derived id: the dedupe mark rides the handover's own transaction, so told twice
+    // the service hands over once, and what is left is exactly what a person can still hand over.
+    UUID order = placeOnlinePickup(5);
+    assertThat(post("/orders/" + order + "/confirm", "{}", T).getStatus(), is(200));
+    UUID dedupe = Ids.newId();
+    var two =
+        new com.storeql.order.dto.Dtos.FulfilRequest(
+            List.of(new com.storeql.order.dto.Dtos.FulfilLine(V, new BigDecimal("2"))));
+    assertThat(
+        orderService.fulfilOrderOnce(dedupe, "test/wave", Ids.parse(T), order, two), is(true));
+    assertThat(
+        orderService.fulfilOrderOnce(dedupe, "test/wave", Ids.parse(T), order, two), is(false));
+    // Two handed over, once: four more is too many, three is exactly what is left.
+    Response tooMany = post("/orders/" + order + "/fulfil", fulfilBody(V, "4"), T);
+    assertThat(tooMany.getStatus(), is(409));
+    assertThat(
+        tooMany.readEntity(String.class), containsString("ORDER_FULFIL_QTY_EXCEEDS_OUTSTANDING"));
+    assertThat(post("/orders/" + order + "/fulfil", fulfilBody(V, "3"), T).getStatus(), is(200));
+  }
+
+  @Test
   @DisplayName(
       "A part-fulfilled order cannot be cancelled, and returns are capped by what was handed over")
   void partFulfilledOrderKeepsItsGoodsHonest() {

@@ -109,6 +109,7 @@ void main() {
 
       // No currency or price amount should appear anywhere
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
       expect(find.textContaining('0.00'), findsNothing);
 
       // Total row must NOT be visible
@@ -259,7 +260,7 @@ void main() {
         overrides: [
           _configOverride(showPrices: false),
           storefrontAvailabilityProvider
-              .overrideWith((ref) async => {'v1': true}),
+              .overrideWith((ref) async => {'v1': const StockInfo(inStock: true)}),
           productFirstVariantProvider('p1').overrideWith(
             (ref) async => const StoreVariant(id: 'v1', sku: 'SKU-001'),
           ),
@@ -269,6 +270,7 @@ void main() {
 
       // Catalog mode: no price text, but add-to-cart icon present
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
       expect(find.byIcon(Icons.add_shopping_cart), findsOneWidget);
     });
   });

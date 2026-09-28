@@ -18,14 +18,21 @@ VatRate _rate(String code) => VatRate.fromJson({
       'effectiveFrom': '2020-01-01T00:00:00Z',
     });
 
-Future<void> _pump(WidgetTester tester, List<Override> overrides, VoidCallback onAdd) async {
-  tester.view.physicalSize = const Size(1200, 800);
+Future<void> _pump(WidgetTester tester, List<Override> overrides, VoidCallback onAdd,
+    {Size size = const Size(1200, 800), double textScale = 1}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(ProviderScope(
     overrides: overrides,
-    child: MaterialApp(home: Scaffold(body: StandardVatBanner(onAdd: onAdd))),
+    child: MaterialApp(
+      home: MediaQuery(
+        data: MediaQueryData(size: size, textScaler: TextScaler.linear(textScale)),
+        // Scrolls, as the page does at large text: the banner's height is the page's to give.
+        child: Scaffold(body: SingleChildScrollView(child: StandardVatBanner(onAdd: onAdd))),
+      ),
+    ),
   ));
   await tester.pump();
 }
@@ -78,5 +85,51 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.byKey(const Key('standard-vat-missing')), findsNothing);
+  });
+
+  group('on a 390px phone', () {
+    const phone = Size(390, 844);
+    final missing = [vatRatesProvider.overrideWith((ref) async => [_rate('T5')])];
+
+    testWidgets('the button goes under the message, which keeps the width', (tester) async {
+      await _pump(tester, missing, () {}, size: phone);
+      await tester.pump();
+      final message = find.textContaining('no price can be quoted');
+      final button = find.byKey(const Key('standard-vat-add'));
+      // In one row the message was squeezed to about 105px and ran to eleven lines.
+      expect(tester.getSize(message).width, greaterThan(250));
+      expect(tester.getTopLeft(button).dy, greaterThanOrEqualTo(tester.getBottomLeft(message).dy));
+      // Inset by the phone's gutter, like the page title above it.
+      expect(tester.getTopLeft(find.byKey(const Key('standard-vat-missing'))).dx, 16);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('at 200% text nothing overflows', (tester) async {
+      await _pump(tester, missing, () {}, size: phone, textScale: 2);
+      await tester.pump();
+      expect(find.byKey(const Key('standard-vat-add')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  testWidgets('on a tablet at 200% text the button goes under the message, which keeps the width',
+      (tester) async {
+    await _pump(tester, [vatRatesProvider.overrideWith((ref) async => [_rate('T5')])], () {},
+        size: const Size(700, 1000), textScale: 2);
+    await tester.pump();
+    final message = find.textContaining('no price can be quoted');
+    final button = find.byKey(const Key('standard-vat-add'));
+    expect(tester.getTopLeft(button).dy, greaterThanOrEqualTo(tester.getBottomLeft(message).dy));
+    expect(tester.getSize(message).width, greaterThan(250));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('from tablet width it stays one row, inset by the 24px gutter', (tester) async {
+    await _pump(tester, [vatRatesProvider.overrideWith((ref) async => [_rate('T5')])], () {});
+    await tester.pump();
+    final message = find.textContaining('no price can be quoted');
+    final button = find.byKey(const Key('standard-vat-add'));
+    expect(tester.getTopLeft(button).dx, greaterThan(tester.getTopRight(message).dx));
+    expect(tester.getTopLeft(find.byKey(const Key('standard-vat-missing'))).dx, 24);
   });
 }

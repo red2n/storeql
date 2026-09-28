@@ -26,6 +26,19 @@ import java.util.UUID;
 @ApplicationScoped
 public class SupplierEInvoiceRepository extends BaseOutboxRepository {
 
+  /** What the business's e-invoice documents weigh, in bytes (21.11). */
+  public long documentBytes(UUID tenantId) {
+    return query(
+            "SELECT COALESCE(SUM(octet_length(document)), 0) AS total FROM supplier_einvoices"
+                + " WHERE tenant_id = ?",
+            ps -> ps.setObject(1, tenantId),
+            rs -> rs.getLong("total"),
+            "measure e-invoice documents")
+        .stream()
+        .findFirst()
+        .orElse(0L);
+  }
+
   static final String COLUMNS =
       "id,tenant_id,received_at,received_by,channel,content_type,container,syntax,embedded_filename,"
           + "document_sha256,customization_id,type_code,invoice_number,issue_date,currency,seller_name,"

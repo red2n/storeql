@@ -4,7 +4,9 @@ import java.math.BigDecimal;
 import java.text.NumberFormat;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.FormatStyle;
 import java.util.ArrayList;
@@ -23,7 +25,7 @@ import java.util.function.Function;
  */
 public final class Values {
 
-  private sealed interface V permits Text, Money, Num, Day, Moment, Flag, Items {}
+  private sealed interface V permits Text, Money, Num, Day, Moment, Flag, Items, Window {}
 
   private record Text(String value) implements V {}
 
@@ -38,6 +40,10 @@ public final class Values {
   private record Flag(boolean value) implements V {}
 
   private record Items(List<Values> items) implements V {}
+
+  /** A delivery or collection window, in the zone it was set in — never UTC. */
+  private record Window(boolean delivery, Instant startsAt, Instant endsAt, ZoneId zone)
+      implements V {}
 
   private final Map<String, V> given = new LinkedHashMap<>();
 
@@ -80,6 +86,27 @@ public final class Values {
     return this;
   }
 
+  /**
+   * A delivery or collection window (delivery and collection slots): absent unless every part is
+   * known and {@code timeZone} is a real IANA id, so a slotless order or an unreadable zone leaves
+   * the template's {@code {{#name}}} section out rather than guessing UTC or a made-up time.
+   *
+   * @param delivery true for a delivery window, false for a collection one — which word it renders
+   * @param timeZone the store's own IANA zone, as the event carried it
+   */
+  public Values window(
+      String name, boolean delivery, Instant startsAt, Instant endsAt, String timeZone) {
+    if (startsAt == null || endsAt == null || timeZone == null) return this;
+    ZoneId zone;
+    try {
+      zone = ZoneId.of(timeZone);
+    } catch (RuntimeException e) {
+      return this;
+    }
+    given.put(name, new Window(delivery, startsAt, endsAt, zone));
+    return this;
+  }
+
   /** Whether a name has a value at all. */
   public boolean has(String name) {
     return given.containsKey(name);
@@ -106,6 +133,7 @@ public final class Values {
           DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale).format(d.value());
       case Moment m -> moment(m.value(), locale);
       case Items items -> listed(items.items(), locale);
+      case Window w -> window(w, locale);
     };
   }
 
@@ -149,12 +177,33 @@ public final class Values {
     return f.format(value);
   }
 
-  /** A moment in UTC — the only zone a message about a store's event can be sure of. */
-  static String moment(Instant value, Locale locale) {
+  /**
+   * A moment in UTC — the only zone a message about a store's event can be sure of, written as UTC
+   * with the offset stated so the reader, whose own zone is unknown, is never left guessing.
+   * Public: also used directly by the platform's own words that sit outside the Catalogue (the
+   * password reset's password reset), which write "when" the same way every other message does.
+   */
+  public static String moment(Instant value, Locale locale) {
     var at = value.atOffset(ZoneOffset.UTC);
     return DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale).format(at)
         + ", "
         + DateTimeFormatter.ofPattern("HH:mm").format(at)
         + " UTC";
+  }
+
+  /**
+   * A delivery or collection window, in the store's own zone: the weekday and date write the way
+   * the reader's language writes them — {@code Saturday 27 September} in English, {@code sobota 27
+   * września} in Polish — the same as every other date here; "Delivery"/"Collection" is the
+   * platform's own English word, like every other default a business has not put in its own words.
+   */
+  private static String window(Window w, Locale locale) {
+    ZonedDateTime start = w.startsAt().atZone(w.zone());
+    ZonedDateTime end = w.endsAt().atZone(w.zone());
+    String label = w.delivery() ? "Delivery" : "Collection";
+    String date = DateTimeFormatter.ofPattern("EEEE d MMMM", locale).format(start);
+    String from = DateTimeFormatter.ofPattern("HH:mm", locale).format(start);
+    String to = DateTimeFormatter.ofPattern("HH:mm", locale).format(end);
+    return label + ": " + date + ", " + from + "–" + to;
   }
 }

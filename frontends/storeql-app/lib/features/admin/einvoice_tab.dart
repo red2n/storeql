@@ -7,12 +7,15 @@ import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/theme.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'einvoice_providers.dart';
 import 'einvoice_transport_dialog.dart';
 import 'procurement_providers.dart';
-import 'providers/admin_providers.dart' show TenantInfo, tenantInfoProvider;
+import 'providers/admin_providers.dart'
+    show TenantInfo, tenantInfoProvider, VariantLabel, variantLabelsProvider, variantIdsKey, variantDisplayName;
+import '../../shared/util/short_ref.dart';
 
 // ── E-invoices received (07.13) ──────────────────────────────────────────────
 //
@@ -121,7 +124,8 @@ class EInvoicesTab extends ConsumerWidget {
                 ...list.where((e) => !e.open),
               ];
               return ListView.separated(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 88),
+                padding: EdgeInsetsDirectional.fromSTEB(context.pageGutter, AppSpacing.sm,
+                    context.pageGutter, AppSpacing.fabClearance),
                 itemCount: sorted.length,
                 separatorBuilder: (_, _) => const SizedBox(height: 8),
                 itemBuilder: (_, i) => _EInvoiceCard(sorted[i]),
@@ -150,7 +154,8 @@ class _ReceivingAddress extends ConsumerWidget {
     };
     final vat = tenant.vatNumber ?? '';
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: EdgeInsetsDirectional.fromSTEB(
+          context.pageGutter, AppSpacing.md, context.pageGutter, 0),
       child: Card(
         margin: EdgeInsets.zero,
         child: Column(children: [
@@ -401,7 +406,7 @@ class _StatusChip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: color.withAlpha(30),
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: AppRadius.badge,
       ),
       child: Text(
         eInvoiceStatusLabel(status),
@@ -426,7 +431,7 @@ class _EInvoiceCard extends StatelessWidget {
       inv.sellerName ?? 'Unnamed seller',
       if (inv.payableAmount != null)
         AppFormat.money(inv.payableAmount!, currencyCode: inv.currency),
-      if (inv.issueDate != null) inv.issueDate!,
+      if (inv.issueDate != null) AppFormat.date(inv.issueDate),
       inv.container == 'PDF' ? '${inv.syntax} in a PDF' : inv.syntax,
       if (inv.arrivedBy != null) inv.arrivedBy!,
     ].join(' · ');
@@ -471,8 +476,6 @@ class _EInvoiceCard extends StatelessWidget {
 String _qty(double q) =>
     q == q.roundToDouble() ? q.toInt().toString() : q.toString();
 
-String _short(String s, [int n = 8]) =>
-    s.length > n ? '${s.substring(0, n)}…' : s;
 
 /// A name to save the original under: the supplier wrote the invoice number,
 /// so nothing in it may reach the file system as a path.
@@ -706,7 +709,7 @@ class _EInvoiceDialogState extends ConsumerState<EInvoiceDialog> {
             Text(
               [
                 inv.container == 'PDF' ? '${inv.syntax} in a PDF' : inv.syntax,
-                if (inv.issueDate != null) 'issued ${inv.issueDate}',
+                if (inv.issueDate != null) 'issued ${AppFormat.date(inv.issueDate)}',
                 if (inv.arrivedBy != null) inv.arrivedBy!,
                 if (inv.deliveryRef != null) 'ref ${inv.deliveryRef}',
               ].join(' · '),
@@ -848,6 +851,12 @@ class _EInvoiceDialogState extends ConsumerState<EInvoiceDialog> {
     final poLines = poId == null || inv.creditNote
         ? const <PurchaseOrderLine>[]
         : ref.watch(purchaseOrderLinesProvider(poId)).value ?? const [];
+    // The order's lines by their product's name; the end of an id only while
+    // the names load.
+    final lineNames = ref
+            .watch(variantLabelsProvider(variantIdsKey(poLines.map((p) => p.variantId))))
+            .value ??
+        const <String, VariantLabel>{};
     final returns = poId == null || !inv.creditNote
         ? const <VendorReturn>[]
         : [
@@ -896,7 +905,7 @@ class _EInvoiceDialogState extends ConsumerState<EInvoiceDialog> {
                 DropdownMenuItem(
                   value: o.id,
                   child: Text(
-                    'PO ${_short(o.id)} · ${o.status} · '
+                    'PO …${shortRef(o.id)} · ${purchaseOrderStatus(o.status).$1} · '
                     '${AppFormat.money(o.totalGross, currencyCode: o.currency)}',
                   ),
                 ),
@@ -966,7 +975,7 @@ class _EInvoiceDialogState extends ConsumerState<EInvoiceDialog> {
                           DropdownMenuItem(
                             value: p.id,
                             child: Text(
-                              '${i + 1}. ${_short(p.variantId, 14)} · '
+                              '${i + 1}. ${variantDisplayName(p.variantId, lineNames)} · '
                               '${_qty(p.qty)} × '
                               '${AppFormat.money(p.unitPrice, currencyCode: inv.currency)}',
                             ),

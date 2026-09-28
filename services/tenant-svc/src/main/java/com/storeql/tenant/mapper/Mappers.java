@@ -56,7 +56,9 @@ public final class Mappers {
         t.vatNumber(),
         t.einvoiceScheme(),
         t.einvoiceId(),
-        t.deactivatedReason());
+        t.deactivatedReason(),
+        t.mode() == null ? Tenant.MODE_LIVE : t.mode(),
+        t.sandboxOf() == null ? null : t.sandboxOf().toString());
   }
 
   /**
@@ -85,6 +87,7 @@ public final class Mappers {
         s.businessHours(),
         s.showPrices(),
         paymentMethodsList(s.enabledPaymentMethods()),
+        s.tillPhone(),
         ts(s.createdAt()),
         ts(s.updatedAt()));
   }

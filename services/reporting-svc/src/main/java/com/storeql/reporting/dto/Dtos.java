@@ -90,6 +90,28 @@ public final class Dtos {
   @Schema(name = "SalesByDayReport", description = "Daily sales revenue buckets, newest day first.")
   public record SalesByDayReport(List<SalesDayRow> rows) {}
 
+  @Schema(name = "SalesCategoryRow")
+  public record SalesCategoryRow(
+      @Schema(
+              description =
+                  "The category: the product's own (level=leaf) or its top-level ancestor"
+                      + " (level=top). Absent for lines whose product has no category, or whose"
+                      + " variant the catalogue has not announced.")
+          String categoryId,
+      String currency,
+      @Schema(description = "Confirmed orders with at least one line in the category.") long orders,
+      @Schema(description = "Units sold, summed over the lines.") BigDecimal units,
+      @Schema(description = "Line revenue before refunds.") BigDecimal gross,
+      @Schema(description = "Percent of this currency's gross in the report, two decimals.")
+          BigDecimal share) {}
+
+  @Schema(
+      name = "SalesByCategoryReport",
+      description =
+          "What each category took over the range, largest first; names come from the catalogue.")
+  public record SalesByCategoryReport(
+      @Schema(description = "leaf or top") String level, List<SalesCategoryRow> rows) {}
+
   @Schema(
       name = "LabourDayRow",
       description = "What a day took, and what the hours that earned it cost.")

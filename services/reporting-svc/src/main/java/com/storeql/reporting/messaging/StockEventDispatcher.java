@@ -5,9 +5,7 @@ import com.storeql.reporting.repo.ReportingRepository;
 import com.storeql.reporting.service.ReportingService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
-import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.math.BigDecimal;
@@ -23,7 +21,7 @@ import java.util.UUID;
  * failures propagate so the consumer loop redelivers instead of losing the event.
  */
 @ApplicationScoped
-class StockEventDispatcher {
+class StockEventDispatcher extends JsonEventDispatcher {
 
   private static final Logger LOG = System.getLogger(StockEventDispatcher.class.getName());
   private static final String CONSUMER = "reporting-svc/stock-events";
@@ -31,39 +29,28 @@ class StockEventDispatcher {
   @Inject ReportingService service;
   @Inject ReportingRepository repo;
 
-  void dispatch(String topic, String json) {
-    JsonObject obj;
-    UUID eventId;
-    try (var reader = Json.createReader(new StringReader(json))) {
-      obj = reader.readObject();
-      eventId = Ids.parse(obj.getString("eventId"));
-    } catch (RuntimeException e) {
-      LOG.log(Level.WARNING, "Malformed stock event on {0} skipped: {1}", topic, e.getMessage());
-      return;
-    }
+  StockEventDispatcher() {
+    super("stock");
+  }
 
-    try {
-      switch (topic) {
-        case "storeql.inventory.stock-received" ->
-            applyDelta(eventId, obj, qty(obj), "StockReceived");
-        case "storeql.inventory.stock-deducted" -> handleDeducted(eventId, obj);
-        case "storeql.inventory.stock-adjusted" ->
-            applyDelta(eventId, obj, new BigDecimal(obj.get("delta").toString()), "StockAdjusted");
-        case "storeql.inventory.transfer-order-shipped" -> handleTransferShipped(eventId, obj);
-        case "storeql.inventory.transfer-order-received" ->
-            // delete-by-event is naturally idempotent — no dedupe mark needed
-            service.applyTransferReceived(eventId);
-        default -> LOG.log(Level.WARNING, "Unknown topic {0} — ignored", topic);
+  @Override
+  protected boolean route(String topic, JsonObject obj) {
+    UUID eventId = Ids.parse(obj.getString("eventId"));
+    switch (topic) {
+      case "storeql.inventory.stock-received" ->
+          applyDelta(eventId, obj, qty(obj), "StockReceived");
+      case "storeql.inventory.stock-deducted" -> handleDeducted(eventId, obj);
+      case "storeql.inventory.stock-adjusted" ->
+          applyDelta(eventId, obj, new BigDecimal(obj.get("delta").toString()), "StockAdjusted");
+      case "storeql.inventory.transfer-order-shipped" -> handleTransferShipped(eventId, obj);
+      case "storeql.inventory.transfer-order-received" ->
+          // delete-by-event is naturally idempotent — no dedupe mark needed
+          service.applyTransferReceived(eventId);
+      default -> {
+        return false;
       }
-    } catch (RuntimeException e) {
-      // A field missing from the payload throws the same shapes on every redelivery — skip
-      // those; anything else (DB down etc.) propagates so the record is retried.
-      if (isMalformed(e)) {
-        LOG.log(Level.WARNING, "Malformed stock event on {0} skipped: {1}", topic, e.getMessage());
-        return;
-      }
-      throw e;
     }
+    return true;
   }
 
   private void applyDelta(UUID eventId, JsonObject obj, BigDecimal delta, String eventType) {
@@ -97,12 +84,5 @@ class StockEventDispatcher {
 
   private static BigDecimal qty(JsonObject obj) {
     return new BigDecimal(obj.get("qty").toString());
-  }
-
-  private static boolean isMalformed(RuntimeException e) {
-    return e instanceof NullPointerException
-        || e instanceof IllegalArgumentException
-        || e instanceof ClassCastException
-        || e instanceof jakarta.json.JsonException;
   }
 }

@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
+import '../../core/format.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import 'storefront_providers.dart';
-
-final _day = DateFormat('d MMM yyyy');
 
 String _remedyWord(String remedy) => switch (remedy) {
   'REFUND' => 'a refund',
@@ -12,6 +11,15 @@ String _remedyWord(String remedy) => switch (remedy) {
   'REPAIR' => 'a repair',
   _ => remedy.toLowerCase(),
 };
+
+/// A recalled line in words — the product, its lot and its best-before date,
+/// the date written the way every other date in the app is, so the sentence
+/// never mixes `2026-10-01` with *12 Sept 2026*.
+String _describeLine(RecallNoticeLine l) => [
+      l.productName ?? 'the product',
+      if (l.batchNo != null) 'lot ${l.batchNo}',
+      if (l.expiryDate != null) 'best before ${AppFormat.date(l.expiryDate)}',
+    ].join(', ');
 
 /// The shopper's product safety recalls (05.10), above their orders: the
 /// notice as the shop wrote it — headline first, the product and its lot, the
@@ -22,15 +30,24 @@ class RecallNoticesSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(myRecallNoticesProvider);
+    // The page's gutter, and the reading width of the orders under it.
+    final gutter = context.pageGutter;
+    final padding =
+        EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.lg, gutter, 0);
     // A failed load says so: a shopper must never read "no recalls" off an
     // error, which is the one thing this section must not get wrong.
     if (async.hasError) {
       return Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-        child: Text(
-          "Your safety recalls couldn't be checked. ${friendlyError(async.error!)}",
-          key: const Key('recall-notices-error'),
-          style: TextStyle(color: Theme.of(context).colorScheme.error),
+        padding: padding,
+        child: ContentBounds.form(
+          child: SizedBox(
+            width: double.infinity,
+            child: Text(
+              "Your safety recalls couldn't be checked. ${friendlyError(async.error!)}",
+              key: const Key('recall-notices-error'),
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
         ),
       );
     }
@@ -40,8 +57,8 @@ class RecallNoticesSection extends ConsumerWidget {
       children: [
         for (final n in notices)
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-            child: RecallNoticeCard(notice: n),
+            padding: padding,
+            child: ContentBounds.form(child: RecallNoticeCard(notice: n)),
           ),
       ],
     );
@@ -82,9 +99,12 @@ class _RecallNoticeCardState extends ConsumerState<RecallNoticeCard> {
         noticeId: _notice.id,
         remedy: remedy,
       );
+      // The shopper may have left the page while the choice was on its way.
+      if (!mounted) return;
       setState(() => _notice = updated);
       ref.invalidate(myRecallNoticesProvider);
     } catch (e) {
+      if (!mounted) return;
       setState(() => _error = friendlyError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -97,6 +117,12 @@ class _RecallNoticeCardState extends ConsumerState<RecallNoticeCard> {
     final cs = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     final contact = [n.contactPhone, n.contactUrl].whereType<String>().join(' · ');
+    // The card's own error roles: a remedy is the action this red card asks
+    // for, so its buttons belong to it rather than to the sage secondary.
+    final remedyStyle = FilledButton.styleFrom(
+      backgroundColor: cs.error,
+      foregroundColor: cs.onError,
+    );
     return Card(
       key: Key('recall-notice-${n.id}'),
       color: cs.errorContainer,
@@ -125,8 +151,10 @@ class _RecallNoticeCardState extends ConsumerState<RecallNoticeCard> {
             ),
             const SizedBox(height: 8),
             Text(
-              n.lines.map((l) => l.describe()).join('; ') +
-                  (n.soldAt == null ? '' : ' — bought ${_day.format(n.soldAt!)}'),
+              n.lines.map(_describeLine).join('; ') +
+                  (n.soldAt == null
+                      ? ''
+                      : ' — bought ${AppFormat.date(n.soldAt!.toIso8601String())}'),
               style: TextStyle(
                 color: cs.onErrorContainer,
                 fontWeight: FontWeight.w600,
@@ -174,11 +202,13 @@ class _RecallNoticeCardState extends ConsumerState<RecallNoticeCard> {
               ),
               const SizedBox(height: 4),
               Wrap(
-                spacing: 8,
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
                 children: [
                   for (final r in n.remedies)
-                    FilledButton.tonal(
+                    FilledButton(
                       key: Key('recall-choose-$r'),
+                      style: remedyStyle,
                       onPressed: _busy ? null : () => _choose(r),
                       child: Text('I want ${_remedyWord(r)}'),
                     ),

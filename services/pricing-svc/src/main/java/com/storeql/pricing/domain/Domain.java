@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** Pure domain records — no HTTP, no persistence annotations. */
@@ -72,7 +73,32 @@ public final class Domain {
       Instant effectiveFrom,
       Instant effectiveTo,
       boolean active,
-      Instant createdAt) {
+      Instant createdAt,
+      UUID zoneId) {
+
+    /** A tenant-wide list, bound to no price zone: what every store falls back to (03.x). */
+    public PriceList(
+        UUID id,
+        UUID tenantId,
+        String name,
+        String channel,
+        String currency,
+        Instant effectiveFrom,
+        Instant effectiveTo,
+        boolean active,
+        Instant createdAt) {
+      this(
+          id,
+          tenantId,
+          name,
+          channel,
+          currency,
+          effectiveFrom,
+          effectiveTo,
+          active,
+          createdAt,
+          null);
+    }
 
     public static final String CHANNEL_ALL = "ALL";
     public static final String CHANNEL_ONLINE = "ONLINE";
@@ -228,6 +254,30 @@ public final class Domain {
   }
 
   /**
+   * A promotion as a window in time over some items at some store, as inventory-svc reads it for
+   * the demand forecast (06.x): {@code endsAt} is the promotion's end date, or the moment it was
+   * switched off when that came first and it is off now; {@code variantIds} is its scope resolved
+   * to variants, empty with {@code allVariants} when it applies to everything.
+   */
+  public record PromotionWindow(
+      UUID promotionId,
+      UUID storeId,
+      String name,
+      String type,
+      BigDecimal value,
+      String channel,
+      boolean active,
+      Instant startsAt,
+      Instant endsAt,
+      Set<UUID> variantIds,
+      boolean allVariants) {
+
+    public PromotionWindow {
+      variantIds = Set.copyOf(variantIds);
+    }
+  }
+
+  /**
    * POSLog-compatible tax capture per order line. Records the tax point date per s.6 VATA 1994
    * (basic tax point = time of supply). Feeds HMRC MTD VAT return boxes 1 and 6.
    */
@@ -277,7 +327,63 @@ public final class Domain {
       UnitPrice unitPricing,
       boolean unitPriceRequired,
       PriorPrice priorPrice,
-      boolean priorPriceRequired) {}
+      boolean priorPriceRequired,
+      DisplayPrice display) {
+
+    /** A price with no display currency asked for. */
+    public ResolvedPrice(
+        UUID variantId,
+        BigDecimal unitPrice,
+        String vatCode,
+        BigDecimal vatRate,
+        BigDecimal vatAmount,
+        BigDecimal totalWithVat,
+        String currency,
+        UUID priceListId,
+        String promotionApplied,
+        UnitPrice unitPricing,
+        boolean unitPriceRequired,
+        PriorPrice priorPrice,
+        boolean priorPriceRequired) {
+      this(
+          variantId,
+          unitPrice,
+          vatCode,
+          vatRate,
+          vatAmount,
+          totalWithVat,
+          currency,
+          priceListId,
+          promotionApplied,
+          unitPricing,
+          unitPriceRequired,
+          priorPrice,
+          priorPriceRequired,
+          null);
+    }
+
+    public ResolvedPrice withDisplay(DisplayPrice d) {
+      return new ResolvedPrice(
+          variantId,
+          unitPrice,
+          vatCode,
+          vatRate,
+          vatAmount,
+          totalWithVat,
+          currency,
+          priceListId,
+          promotionApplied,
+          unitPricing,
+          unitPriceRequired,
+          priorPrice,
+          priorPriceRequired,
+          d);
+    }
+  }
+
+  /** The same price in another currency at the business's rate (03.x): shown, never charged. */
+  public record DisplayPrice(
+      String currency, BigDecimal rate, BigDecimal unitPrice, BigDecimal totalWithVat) {}
 
   /**
    * HMRC MTD VAT return. Boxes per VAT Notice 700 s.17: 1=output VAT, 2=EU acquisitions VAT
@@ -671,4 +777,72 @@ public final class Domain {
       String currency,
       PriorPrice prior,
       boolean required) {}
+
+  // ── Price zones and competitor-driven repricing (03.x) ─────────────────────
+
+  /** A group of stores that price alike; a price list bound to it beats the tenant-wide list. */
+  public record PriceZone(
+      UUID id,
+      UUID tenantId,
+      String name,
+      String description,
+      List<UUID> storeIds,
+      Instant createdAt) {}
+
+  /** What a rival charged for a variant on a day, as seen; append-only. */
+  public record CompetitorPrice(
+      UUID id,
+      UUID tenantId,
+      UUID variantId,
+      String competitor,
+      BigDecimal price,
+      String currency,
+      UUID zoneId,
+      LocalDate observedOn,
+      String source,
+      UUID recordedBy,
+      Instant recordedAt) {
+
+    public static final String SOURCE_MANUAL = "MANUAL";
+    public static final String SOURCE_IMPORT = "IMPORT";
+  }
+
+  /** How one price list answers its rivals; the zone is the list's. */
+  public record RepricingRule(
+      UUID id,
+      UUID tenantId,
+      String name,
+      UUID priceListId,
+      UUID zoneId,
+      Repricing.Rule rule,
+      boolean active,
+      Instant createdAt) {}
+
+  /** What a run proposed for one variant, and what became of it. */
+  public record RepricingProposal(
+      UUID id,
+      UUID tenantId,
+      UUID ruleId,
+      UUID priceListId,
+      UUID zoneId,
+      UUID variantId,
+      BigDecimal currentPrice,
+      String competitor,
+      BigDecimal competitorPrice,
+      LocalDate observedOn,
+      BigDecimal proposedPrice,
+      String currency,
+      String status,
+      Instant proposedAt,
+      Instant decidedAt,
+      UUID decidedBy) {
+
+    public static final String PROPOSED = "PROPOSED";
+    public static final String APPLIED = "APPLIED";
+    public static final String DISMISSED = "DISMISSED";
+  }
+
+  /** One run of a rule: how many priced variants had a fresh rival price, how many moved. */
+  public record RepricingRun(
+      UUID ruleId, int examined, int proposed, List<RepricingProposal> proposals) {}
 }

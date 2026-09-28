@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,14 +8,20 @@ import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 import '../../core/format.dart';
+import '../../core/input_mode.dart';
+import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import 'providers/admin_providers.dart';
 import 'providers/orders_pagination.dart';
 import 'sales_invoices_dialog.dart';
 import '../../shared/util/short_ref.dart';
+import '../../shared/util/slot_label.dart';
 import 'package:storeql_app/core/ids.dart';
 
 /// The body of a cancel. The reason is optional, and the server takes "no
@@ -63,6 +71,9 @@ class _AdminOrdersScreenState extends ConsumerState<AdminOrdersScreen> {
 
   OrdersFilter get _filter => OrdersFilter(_channel, _status);
 
+  Future<void> _refresh() =>
+      ref.read(ordersPaginationProvider(_filter).notifier).refresh();
+
   /// Fetch the next page once the user scrolls within 300px of the bottom.
   void _onScroll() {
     if (_scrollController.position.pixels >=
@@ -82,205 +93,147 @@ class _AdminOrdersScreenState extends ConsumerState<AdminOrdersScreen> {
     // Invoices to business buyers are management's too (18.9): the same filter refuses
     // everyone else.
     final management = auth is AuthAuthenticated && auth.isManager;
+    final gutter = context.pageGutter;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Header
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-          child: Row(
-            children: [
-              Text('Orders', style: Theme.of(context).textTheme.headlineMedium),
-              const Spacer(),
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                tooltip: 'Refresh',
-                onPressed: () =>
-                    ref.read(ordersPaginationProvider(_filter).notifier).refresh(),
-              ),
+    return ContentBounds(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          PageHeader(
+            title: 'Orders',
+            actions: [
+              // Touch screens pull to refresh — the list and its empty state
+              // alike — so a phone doesn't give a lone icon a row of its own
+              // under the title; a mouse can't pull, so it gets the button.
+              if (pointerFirst)
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Refresh',
+                  onPressed: _refresh,
+                ),
             ],
           ),
-        ),
 
-        // Filter bar — scrollable on mobile
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
-          child: Row(
-            children: [
-              // Channel chips
-              ...(_channels.map((c) => Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: FilterChip(
-                      label: Text(c == 'ALL' ? 'All channels' : c),
-                      selected: _channel == c,
-                      onSelected: (_) => setState(() => _channel = c),
-                      avatar: c == 'POS'
-                          ? const Icon(Icons.point_of_sale, size: 14)
-                          : c == 'ONLINE'
-                              ? const Icon(Icons.shopping_bag_outlined, size: 14)
-                              : null,
-                    ),
-                  ))),
-              const SizedBox(width: 8),
-              const VerticalDivider(width: 1, indent: 4, endIndent: 4),
-              const SizedBox(width: 8),
-              // Status chips
-              ...(_statuses.map((s) => Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: FilterChip(
-                      label: Text(s == 'ALL' ? 'All statuses' : s),
-                      selected: _status == s,
-                      onSelected: (_) => setState(() => _status = s),
-                    ),
-                  ))),
-            ],
+          // Filter bar — scrolls sideways when the chips don't fit
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: EdgeInsetsDirectional.symmetric(horizontal: gutter),
+            child: Row(
+              children: [
+                // Channel chips
+                ...(_channels.map((c) => Padding(
+                      padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
+                      child: FilterChip(
+                        label: Text(c == 'ALL' ? 'All channels' : channelLabel(c)),
+                        selected: _channel == c,
+                        onSelected: (_) => setState(() => _channel = c),
+                        avatar: c == 'POS'
+                            ? const Icon(Icons.point_of_sale, size: 14)
+                            : c == 'ONLINE'
+                                ? const Icon(Icons.shopping_bag_outlined, size: 14)
+                                : null,
+                      ),
+                    ))),
+                // A divider in a sideways-scrolling Row gets no height of its own
+                // and paints nothing, so it is given one.
+                const SizedBox(height: 24, child: VerticalDivider(width: 16)),
+                const SizedBox(width: AppSpacing.sm),
+                // Status chips
+                ...(_statuses.map((s) => Padding(
+                      padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
+                      child: FilterChip(
+                        label: Text(s == 'ALL' ? 'All statuses' : orderStatusLabel(s)),
+                        selected: _status == s,
+                        onSelected: (_) => setState(() => _status = s),
+                      ),
+                    ))),
+              ],
+            ),
           ),
-        ),
-        const SizedBox(height: 16),
+          const SizedBox(height: AppSpacing.sm),
 
-        // Orders list
-        Expanded(
-          child: Builder(builder: (context) {
-            if (page.isLoadingInitial) {
-              return const LoadingView(label: 'Loading orders…');
-            }
-            if (page.error != null && page.orders.isEmpty) {
-              return ErrorView(
-                message: 'Could not load orders.\n${page.error}',
-                onRetry: () =>
-                    ref.read(ordersPaginationProvider(_filter).notifier).refresh(),
-              );
-            }
-            final orders = page.orders;
-            if (orders.isEmpty) {
+          // Orders list
+          Expanded(
+            child: Builder(builder: (context) {
+              if (page.isLoadingInitial) {
+                return const LoadingView(label: 'Loading orders…');
+              }
+              if (page.error != null && page.orders.isEmpty) {
+                return ErrorView(
+                  message: friendlyError(page.error!,
+                      fallback: 'Could not load orders.'),
+                  onRetry: _refresh,
+                );
+              }
+              final orders = page.orders;
+              if (orders.isEmpty) {
                 final hasFilter = _channel != 'ALL' || _status != 'ALL';
-                return Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.receipt_long_outlined,
-                          size: 64,
-                          color: Theme.of(context).colorScheme.outlineVariant),
-                      const SizedBox(height: 16),
-                      Text(
-                        hasFilter ? 'No matching orders' : 'No orders yet',
-                        style: Theme.of(context).textTheme.titleMedium,
+                // Pullable too, so a touch screen can look again for new
+                // orders without a refresh button.
+                return LayoutBuilder(
+                  builder: (context, bc) => RefreshIndicator.adaptive(
+                    onRefresh: _refresh,
+                    child: SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(minHeight: bc.maxHeight),
+                        child: EmptyState(
+                          icon: Icons.receipt_long_outlined,
+                          title:
+                              hasFilter ? 'No matching orders' : 'No orders yet',
+                          message: hasFilter
+                              ? 'Try changing the channel or status filter.'
+                              : 'Orders placed by customers will appear here.',
+                        ),
                       ),
-                      const SizedBox(height: 6),
-                      Text(
-                        hasFilter
-                            ? 'Try changing the channel or status filter.'
-                            : 'Orders placed by customers will appear here.',
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.outline),
-                      ),
-                    ],
+                    ),
                   ),
                 );
               }
               return LayoutBuilder(builder: (context, bc) {
-                final wide = bc.maxWidth >= 700;
-                return ListView.separated(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  itemCount:
-                      orders.length + (page.hasMore || page.isLoadingMore ? 1 : 0),
-                  separatorBuilder: (_, _) => const SizedBox(height: 4),
-                  itemBuilder: (context, i) {
-                    if (i >= orders.length) {
-                      return const Padding(
-                        padding: EdgeInsets.all(16),
-                        child: Center(child: CircularProgressIndicator()),
-                      );
-                    }
-                    final o = orders[i];
-                    return Card(
-                      child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 8),
-                        leading: CircleAvatar(
-                          backgroundColor: o.channel == 'POS'
-                              ? Theme.of(context).colorScheme.primaryContainer
-                              : context.status.info,
-                          child: Icon(
-                            o.channel == 'POS'
-                                ? Icons.point_of_sale
-                                : Icons.shopping_bag_outlined,
-                            size: 18,
-                            color: o.channel == 'POS'
-                                ? Theme.of(context).colorScheme.onPrimaryContainer
-                                : context.status.onInfo,
+                final compact =
+                    AppBreakpoints.classOf(bc.maxWidth) == WindowClass.compact;
+                return RefreshIndicator.adaptive(
+                  onRefresh: _refresh,
+                  child: ListView.separated(
+                    controller: _scrollController,
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: EdgeInsetsDirectional.fromSTEB(
+                        gutter, AppSpacing.sm, gutter, AppSpacing.xl),
+                    itemCount:
+                        orders.length + (page.hasMore || page.isLoadingMore ? 1 : 0),
+                    separatorBuilder: (_, _) =>
+                        const SizedBox(height: AppSpacing.xs),
+                    itemBuilder: (context, i) {
+                      if (i >= orders.length) {
+                        return const Padding(
+                          padding: EdgeInsets.all(AppSpacing.lg),
+                          child: Center(child: CircularProgressIndicator()),
+                        );
+                      }
+                      final o = orders[i];
+                      return Card(
+                        child: _OrderTile(
+                          order: o,
+                          compact: compact,
+                          menu: OrderActionsMenu(
+                            status: o.status,
+                            channel: o.channel,
+                            paymentMethod: o.paymentMethod,
+                            canVoid: canVoid,
+                            canInvoice: management,
+                            onAction: (a) => _action(o, a),
                           ),
                         ),
-                        title: Row(
-                          children: [
-                            Text(
-                              '#${shortRef(o.id)}',
-                              style: const TextStyle(fontFamily: 'monospace'),
-                            ),
-                            const SizedBox(width: 8),
-                            _ChannelBadge(o.channel),
-                            if (o.paymentMethod != null) ...[
-                              const SizedBox(width: 6),
-                              _PaymentMethodBadge(
-                                  o.paymentMethod!, o.fulfilmentType),
-                            ],
-                          ],
-                        ),
-                        subtitle: Text(AppFormat.dateTime(o.createdAt)),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (wide) ...[
-                              _StatusBadge(o.status),
-                              const SizedBox(width: 16),
-                              SizedBox(
-                                width: 90,
-                                child: Text(
-                                  AppFormat.money(o.total, currencyCode: o.currency),
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .titleSmall
-                                      ?.copyWith(fontWeight: FontWeight.bold),
-                                  textAlign: TextAlign.end,
-                                ),
-                              ),
-                            ] else
-                              Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  _StatusBadge(o.status),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                      AppFormat.money(o.total, currencyCode: o.currency),
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .titleSmall
-                                          ?.copyWith(
-                                              fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                            OrderActionsMenu(
-                              status: o.status,
-                              channel: o.channel,
-                              paymentMethod: o.paymentMethod,
-                              canVoid: canVoid,
-                              canInvoice: management,
-                              onAction: (a) => _action(o, a),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
+                      );
+                    },
+                  ),
                 );
               });
-          }),
-        ),
-      ],
+            }),
+          ),
+        ],
+      ),
     );
   }
 
@@ -543,7 +496,7 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text(
-                'Return recorded · ${order.currency} ${refundAmount.toStringAsFixed(2)} '
+                'Return recorded · ${AppFormat.money(refundAmount, currencyCode: order.currency)} '
                 '${_method == 'STORE_CREDIT' ? 'as store credit' : 'refunded'}'
                 '${refundNote ?? ''}')),
       );
@@ -618,22 +571,22 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                 children: [
                   if (_error != null) ...[
                     Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(AppSpacing.md),
                       decoration: BoxDecoration(
                         color: cs.errorContainer,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: AppRadius.chip,
                       ),
                       child: Text(_error!,
                           style: TextStyle(color: cs.onErrorContainer)),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: AppSpacing.md),
                   ],
                   // Existing returns (if any).
                   returnsAsync.maybeWhen(
                     data: (returns) => returns.isEmpty
                         ? const SizedBox.shrink()
                         : Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.md),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -643,8 +596,8 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                                         .labelLarge),
                                 for (final r in returns)
                                   Text(
-                                    '· ${order.currency} ${r.refundAmount.toStringAsFixed(2)} '
-                                    'via ${r.refundMethod} (${r.status})',
+                                    '· ${AppFormat.money(r.refundAmount, currencyCode: order.currency)} '
+                                    'via ${humanizeCode(r.refundMethod)} (${humanizeCode(r.status)})',
                                     style: TextStyle(
                                         fontSize: 12, color: cs.outline),
                                   ),
@@ -656,7 +609,7 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                   ),
                   Text('Select quantities to return',
                       style: Theme.of(context).textTheme.labelLarge),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: AppSpacing.sm),
                   for (final line in order.items)
                     _ReturnLineRow(
                       line: line,
@@ -667,7 +620,7 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                       onChanged: (v) =>
                           setState(() => _returnQty[line.variantId] = v),
                     ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: AppSpacing.md),
                   TextField(
                     controller: _reasonCtrl,
                     decoration: const InputDecoration(
@@ -675,23 +628,23 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                       hintText: 'e.g. damaged, wrong size',
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: AppSpacing.md),
                   DropdownButtonFormField<String>(
                     initialValue: _method,
                     decoration: const InputDecoration(labelText: 'Refund method'),
                     items: _methods
                         .map((m) => DropdownMenuItem(
-                            value: m, child: Text(m.replaceAll('_', ' '))))
+                            value: m, child: Text(humanizeCode(m))))
                         .toList(),
                     onChanged: (v) => setState(() => _method = v!),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: AppSpacing.lg),
                   Row(
                     children: [
                       Text('Refund total',
                           style: Theme.of(context).textTheme.titleMedium),
                       const Spacer(),
-                      Text('${order.currency} ${preview.toStringAsFixed(2)}',
+                      Text(AppFormat.money(preview, currencyCode: order.currency),
                           style: Theme.of(context)
                               .textTheme
                               .titleMedium
@@ -749,7 +702,7 @@ class _ReturnLineRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final maxQty = line.qty.toInt();
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsetsDirectional.symmetric(vertical: AppSpacing.xs),
       child: Row(
         children: [
           Expanded(
@@ -760,7 +713,7 @@ class _ReturnLineRow extends StatelessWidget {
                     style: const TextStyle(
                         fontWeight: FontWeight.w600, fontSize: 13)),
                 Text(
-                    '${sku.isNotEmpty ? '$sku · ' : ''}ordered $maxQty · $currency ${line.unitPrice.toStringAsFixed(2)}',
+                    '${sku.isNotEmpty ? '$sku · ' : ''}ordered $maxQty · ${AppFormat.money(line.unitPrice, currencyCode: currency)}',
                     style: TextStyle(
                         fontSize: 11,
                         color: Theme.of(context).colorScheme.outline)),
@@ -787,6 +740,9 @@ class _ReturnLineRow extends StatelessWidget {
 /// The per-order actions. Which appear is decided by the order's status and
 /// channel — and, for the void, by who is looking: it is offered on a till
 /// sale that is still standing, to an owner or manager only.
+///
+/// Each label is Flexible, so at large text it wraps inside the menu rather
+/// than running off its edge.
 class OrderActionsMenu extends StatelessWidget {
   final String status;
   final String channel;
@@ -815,8 +771,8 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'price',
           child: Row(children: [
             Icon(Icons.sell_outlined, size: 18),
-            SizedBox(width: 8),
-            Text('Price order'),
+            SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Price order')),
           ])));
     }
     if (s == 'PENDING') {
@@ -824,8 +780,8 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'confirm',
           child: Row(children: [
             Icon(Icons.check_circle_outline, size: 18),
-            SizedBox(width: 8),
-            Text('Confirm'),
+            SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Confirm')),
           ])));
     }
     if (s == 'CONFIRMED' || s == 'PARTIALLY_FULFILLED') {
@@ -833,8 +789,8 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'fulfil',
           child: Row(children: [
             Icon(Icons.local_shipping_outlined, size: 18),
-            SizedBox(width: 8),
-            Text('Mark fulfilled'),
+            SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Mark fulfilled')),
           ])));
     }
     // COD / pay-at-pickup settlement: record the tender when the goods change hands. Shown for
@@ -845,8 +801,8 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'collect',
           child: Row(children: [
             Icon(Icons.point_of_sale_outlined, size: 18),
-            SizedBox(width: 8),
-            Text('Collect payment'),
+            SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Collect payment')),
           ])));
     }
     if (s == 'PENDING' || s == 'CONFIRMED') {
@@ -855,8 +811,8 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'cancel',
           child: Row(children: [
             Icon(Icons.cancel_outlined, size: 18, color: cs.error),
-            const SizedBox(width: 8),
-            Text('Cancel', style: TextStyle(color: cs.error)),
+            const SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Cancel', style: TextStyle(color: cs.error))),
           ])));
     }
     // A till sale that is still standing can be voided from here (09.13): the stock goes
@@ -869,8 +825,8 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'void',
           child: Row(children: [
             Icon(Icons.block_outlined, size: 18, color: cs.error),
-            const SizedBox(width: 8),
-            Text('Void sale', style: TextStyle(color: cs.error)),
+            const SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Void sale', style: TextStyle(color: cs.error))),
           ])));
     }
     // Returns are allowed on orders that weren't cancelled/voided.
@@ -879,8 +835,8 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'return',
           child: Row(children: [
             Icon(Icons.assignment_return_outlined, size: 18),
-            SizedBox(width: 8),
-            Text('Return / Refund'),
+            SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Return / Refund')),
           ])));
     }
     // A completed sale to a business has an invoice, or can be given one (18.9). A
@@ -898,19 +854,19 @@ class OrderActionsMenu extends StatelessWidget {
           value: 'invoices',
           child: Row(children: [
             Icon(Icons.receipt_long_outlined, size: 18),
-            SizedBox(width: 8),
-            Text('Invoices'),
+            SizedBox(width: AppSpacing.sm),
+            Flexible(child: Text('Invoices')),
           ])));
     }
     items.add(const PopupMenuItem(
         value: 'receipt',
         child: Row(children: [
           Icon(Icons.receipt_outlined, size: 18),
-          SizedBox(width: 8),
-          Text('Print receipt'),
+          SizedBox(width: AppSpacing.sm),
+          Flexible(child: Text('Print receipt')),
         ])));
     if (items.isEmpty) {
-      return const SizedBox(width: 8);
+      return const SizedBox(width: AppSpacing.sm);
     }
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_vert),
@@ -921,104 +877,198 @@ class OrderActionsMenu extends StatelessWidget {
   }
 }
 
-class _ChannelBadge extends StatelessWidget {
-  final String channel;
-  const _ChannelBadge(this.channel);
+/// One order in the list. On a phone the reference and the total share the
+/// first line, the date goes under them and the badges get a line of their
+/// own, so the text is never squeezed beside a trailing column. Wider, the
+/// badges follow the reference and the status and total sit at the end.
+class _OrderTile extends StatelessWidget {
+  final OrderSummary order;
+  final bool compact;
+
+  /// The order's actions (⋮), always last on the row.
+  final Widget menu;
+
+  const _OrderTile({
+    required this.order,
+    required this.compact,
+    required this.menu,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final Color base =
-        channel == 'POS' ? cs.onPrimaryContainer : context.status.info;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: base.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: base.withValues(alpha: 0.4)),
-      ),
-      child: Text(
-        channel,
-        style: TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.bold,
-          color: base,
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final o = order;
+    final pos = o.channel == 'POS';
+    final number = Text(
+      '#${shortRef(o.id)}',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontFamily: 'monospace'),
+    );
+    final total = Text(
+      AppFormat.money(o.total, currencyCode: o.currency),
+      style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+      textAlign: TextAlign.end,
+    );
+    final channelWords = channelLabel(o.channel);
+    final channel = channelWords.isEmpty ? null : StatusBadge(channelWords);
+    final method = o.paymentMethod;
+    final payment = method == null
+        ? null
+        : StatusBadge(_paymentLabel(method, o.fulfilmentType));
+    final slot = o.slot;
+    // The window this order holds (delivery-and-collection-slots), worded
+    // with which kind it is, in the store's own local date and clock — never
+    // converted on the device.
+    final placed = Text(slot == null
+        ? AppFormat.dateTime(o.createdAt)
+        : '${AppFormat.dateTime(o.createdAt)}\n${slotWindowLabel(fulfilmentType: o.fulfilmentType, date: slot.date, startTime: slot.startTime, endTime: slot.endTime)}');
+
+    return ListTile(
+      contentPadding: const EdgeInsetsDirectional.symmetric(
+          horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+      titleAlignment: compact ? ListTileTitleAlignment.top : null,
+      leading: CircleAvatar(
+        backgroundColor:
+            pos ? cs.primaryContainer : context.status.infoContainer,
+        child: Icon(
+          pos ? Icons.point_of_sale : Icons.shopping_bag_outlined,
+          size: 18,
+          color: pos ? cs.onPrimaryContainer : context.status.onInfoContainer,
         ),
       ),
+      title: compact
+          ? Row(
+              children: [
+                Expanded(child: number),
+                const SizedBox(width: AppSpacing.sm),
+                total,
+              ],
+            )
+          : Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.xs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [number, ?channel, ?payment],
+            ),
+      subtitle: compact
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                placed,
+                const SizedBox(height: AppSpacing.sm),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: AppSpacing.xs,
+                  children: [StatusBadge.order(o.status), ?channel, ?payment],
+                ),
+              ],
+            )
+          : placed,
+      trailing: compact
+          ? menu
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                StatusBadge.order(o.status),
+                const SizedBox(width: AppSpacing.lg),
+                // Totals line up in a column, and a long one still fits.
+                ConstrainedBox(
+                  constraints: const BoxConstraints(minWidth: 90),
+                  child: total,
+                ),
+                menu,
+              ],
+            ),
     );
   }
 }
 
-class _StatusBadge extends StatelessWidget {
-  final String status;
-  const _StatusBadge(this.status);
+/// How the customer said they'd pay, in words, with cash read by fulfilment:
+/// *Cash on delivery*, *Cash at pickup*; the other tenders as themselves.
+String _paymentLabel(String method, String fulfilmentType) =>
+    method.toUpperCase() == 'CASH'
+        ? switch (fulfilmentType.toUpperCase()) {
+            'DELIVERY' => 'Cash on delivery',
+            'PICKUP' => 'Cash at pickup',
+            _ => 'Cash',
+          }
+        : _tenderLabel(method);
+
+/// A tender in a word — *Cash*, *Card*, *UPI*, *Wallet* — the same words the
+/// order list's payment badge uses, for where the money changes hands.
+String _tenderLabel(String method) => switch (method.toUpperCase()) {
+      'CASH' => 'Cash',
+      'CARD' => 'Card',
+      'UPI' => 'UPI',
+      'WALLET' => 'Wallet',
+      _ => humanizeCode(method),
+    };
+
+/// How a tender reads at the end of "£42.30 collected …": *in cash*, *by card*.
+String _collectedBy(String method) => switch (method.toUpperCase()) {
+      'CASH' => 'in cash',
+      'UPI' => 'by UPI',
+      _ => 'by ${_tenderLabel(method).toLowerCase()}',
+    };
+
+/// The tenders a pay-later order can be settled in at handover.
+const _collectMethods = ['CASH', 'CARD', 'UPI', 'WALLET'];
+
+/// The tender a pay-later order is settled in, in words. Across when the four
+/// words each keep a line of their own — a phone's dialog at normal text —
+/// and stacked when they would not, so *Wallet* never breaks mid-word.
+///
+/// It measures its room with a LayoutBuilder, so it sits under the dialog's
+/// fixed-width box: an AlertDialog sizes itself by intrinsics, which a
+/// LayoutBuilder cannot answer (hence no `scrollable: true` on that dialog).
+class _TenderChoice extends StatelessWidget {
+  final String selected;
+  final ValueChanged<String> onChanged;
+  const _TenderChoice({required this.selected, required this.onChanged});
+
+  /// Each segment's inset either side of its word.
+  static const _inset = AppSpacing.sm;
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    Color bg;
-    Color fg;
-    switch (status.toUpperCase()) {
-      case 'PLACED':
-      case 'AWAITING_PRICE':
-        bg = context.status.info;
-        fg = context.status.onInfo;
-        break;
-      case 'CONFIRMED':
-        bg = cs.secondaryContainer;
-        fg = cs.onSecondaryContainer;
-        break;
-      case 'FULFILLED':
-      case 'PARTIALLY_FULFILLED':
-        bg = cs.tertiaryContainer;
-        fg = cs.onTertiaryContainer;
-        break;
-      case 'CANCELLED':
-      case 'VOIDED':
-        bg = cs.errorContainer;
-        fg = cs.onErrorContainer;
-        break;
-      default:
-        bg = cs.surfaceContainerHighest;
-        fg = cs.onSurfaceVariant;
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration:
-          BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
-      child: Text(status,
-          style: TextStyle(
-              fontSize: 11, fontWeight: FontWeight.w600, color: fg)),
-    );
-  }
-}
-
-/// How the customer said they'd pay, contextualised by fulfilment: CASH + DELIVERY reads
-/// "COD", CASH + PICKUP reads "Cash at pickup", online tenders read as themselves.
-class _PaymentMethodBadge extends StatelessWidget {
-  final String method;
-  final String fulfilmentType;
-  const _PaymentMethodBadge(this.method, this.fulfilmentType);
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final m = method.toUpperCase();
-    final label = m == 'CASH'
-        ? (fulfilmentType.toUpperCase() == 'DELIVERY' ? 'COD' : 'CASH')
-        : m;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: cs.secondaryContainer,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Text(label,
-          style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: cs.onSecondaryContainer)),
-    );
+    final style = Theme.of(context).textTheme.labelLarge;
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    return LayoutBuilder(builder: (context, bc) {
+      var widest = 0.0;
+      for (final m in _collectMethods) {
+        final painter = TextPainter(
+          text: TextSpan(text: _tenderLabel(m), style: style),
+          textDirection: direction,
+          textScaler: scaler,
+        )..layout();
+        widest = math.max(widest, painter.width);
+        painter.dispose();
+      }
+      // The word, its inset either side and a hairline border, four times.
+      final across =
+          (widest + 2 * _inset + 2) * _collectMethods.length <= bc.maxWidth;
+      return SegmentedButton<String>(
+        key: const Key('collect-method'),
+        direction: across ? Axis.horizontal : Axis.vertical,
+        segments: [
+          for (final m in _collectMethods)
+            ButtonSegment(value: m, label: Text(_tenderLabel(m))),
+        ],
+        // The selected segment is filled; a tick as well would take a word's
+        // room on a phone.
+        showSelectedIcon: false,
+        style: const ButtonStyle(
+          padding: WidgetStatePropertyAll(
+              EdgeInsetsDirectional.symmetric(horizontal: _inset)),
+        ),
+        selected: {selected},
+        onSelectionChanged: (s) => onChanged(s.first),
+      );
+    });
   }
 }
 
@@ -1045,9 +1095,7 @@ class _CollectPaymentDialogState extends ConsumerState<_CollectPaymentDialog> {
   void initState() {
     super.initState();
     final declared = widget.order.paymentMethod?.toUpperCase();
-    _method = const ['CASH', 'CARD', 'UPI', 'WALLET'].contains(declared)
-        ? declared!
-        : 'CASH';
+    _method = _collectMethods.contains(declared) ? declared! : 'CASH';
     _loadPaid();
   }
 
@@ -1097,7 +1145,8 @@ class _CollectPaymentDialogState extends ConsumerState<_CollectPaymentDialog> {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(
-              '${AppFormat.money(outstanding, currencyCode: widget.order.currency)} collected by $_method.')));
+              '${AppFormat.money(outstanding, currencyCode: widget.order.currency)} '
+              'collected ${_collectedBy(_method)}.')));
     } catch (e) {
       setState(() {
         _submitting = false;
@@ -1120,52 +1169,49 @@ class _CollectPaymentDialogState extends ConsumerState<_CollectPaymentDialog> {
         child: paid == null
             ? const SizedBox(
                 height: 80, child: Center(child: CircularProgressIndicator()))
-            : Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_error != null) ...[
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: cs.errorContainer,
-                        borderRadius: BorderRadius.circular(8),
+            // Scrolls when large text makes it taller than the screen.
+            : SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_error != null) ...[
+                      Container(
+                        padding: const EdgeInsets.all(AppSpacing.md),
+                        decoration: BoxDecoration(
+                          color: cs.errorContainer,
+                          borderRadius: AppRadius.chip,
+                        ),
+                        child: Text(_error!,
+                            style: TextStyle(color: cs.onErrorContainer)),
                       ),
-                      child: Text(_error!,
-                          style: TextStyle(color: cs.onErrorContainer)),
-                    ),
-                    const SizedBox(height: 12),
+                      const SizedBox(height: AppSpacing.md),
+                    ],
+                    Text('Order total: '
+                        '${AppFormat.money(o.total, currencyCode: o.currency)}'),
+                    if (paid > 0)
+                      Text('Already collected: '
+                          '${AppFormat.money(paid, currencyCode: o.currency)}'),
+                    const SizedBox(height: AppSpacing.sm),
+                    if (outstanding! <= 0)
+                      Row(children: [
+                        Icon(Icons.check_circle_outline, color: cs.primary),
+                        const SizedBox(width: AppSpacing.sm),
+                        const Expanded(
+                            child: Text('This order is already paid in full.')),
+                      ])
+                    else ...[
+                      Text(
+                          'Outstanding: ${AppFormat.money(outstanding, currencyCode: o.currency)}',
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: AppSpacing.md),
+                      _TenderChoice(
+                        selected: _method,
+                        onChanged: (m) => setState(() => _method = m),
+                      ),
+                    ],
                   ],
-                  Text('Order total: '
-                      '${AppFormat.money(o.total, currencyCode: o.currency)}'),
-                  if (paid > 0)
-                    Text('Already collected: '
-                        '${AppFormat.money(paid, currencyCode: o.currency)}'),
-                  const SizedBox(height: 8),
-                  if (outstanding! <= 0)
-                    Row(children: [
-                      Icon(Icons.check_circle_outline, color: cs.primary),
-                      const SizedBox(width: 8),
-                      const Text('This order is already paid in full.'),
-                    ])
-                  else ...[
-                    Text(
-                        'Outstanding: ${AppFormat.money(outstanding, currencyCode: o.currency)}',
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 12),
-                    SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(value: 'CASH', label: Text('CASH')),
-                        ButtonSegment(value: 'CARD', label: Text('CARD')),
-                        ButtonSegment(value: 'UPI', label: Text('UPI')),
-                        ButtonSegment(value: 'WALLET', label: Text('WALLET')),
-                      ],
-                      selected: {_method},
-                      onSelectionChanged: (s) =>
-                          setState(() => _method = s.first),
-                    ),
-                  ],
-                ],
+                ),
               ),
       ),
       actions: [
@@ -1185,6 +1231,44 @@ class _CollectPaymentDialogState extends ConsumerState<_CollectPaymentDialog> {
                 : const Icon(Icons.point_of_sale_outlined),
             label: Text(
                 'Collect ${AppFormat.money(outstanding, currencyCode: o.currency)}'),
+          ),
+      ],
+    );
+  }
+}
+
+/// The product names and SKUs for an order's lines, resolved by product-svc;
+/// empty while the order or the names load, or when they can't be read — the
+/// lines then fall back to a short handle ([variantDisplayName]).
+Map<String, VariantLabel> _lineLabels(WidgetRef ref, OrderDetail? order) {
+  if (order == null) return const {};
+  return ref
+          .watch(variantLabelsProvider(
+              variantIdsKey(order.items.map((l) => l.variantId))))
+          .value ??
+      const <String, VariantLabel>{};
+}
+
+/// One order line as a person reads it: the product's name, then a quieter
+/// line under it (SKU, what is outstanding) when there is one.
+class _LineName extends StatelessWidget {
+  final String name;
+  final String detail;
+  const _LineName({required this.name, this.detail = ''});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(name, style: theme.textTheme.titleSmall),
+        if (detail.isNotEmpty)
+          Text(
+            detail,
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
       ],
     );
@@ -1220,7 +1304,8 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
 
   String _fmt(double v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
 
-  Future<void> _submit(List<OrderLine> lines) async {
+  Future<void> _submit(
+      List<OrderLine> lines, Map<String, VariantLabel> labels) async {
     final outstanding = lines.where((l) => l.remainingQty > 0).toList();
     final chosen = <Map<String, dynamic>>[];
     var everything = true;
@@ -1231,7 +1316,8 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
         return;
       }
       if (v > l.remainingQty) {
-        setState(() => _error = 'Only ${_fmt(l.remainingQty)} outstanding on ${shortRef(l.variantId)}.');
+        setState(() => _error = 'Only ${_fmt(l.remainingQty)} outstanding on '
+            '${variantDisplayName(l.variantId, labels)}.');
         return;
       }
       if (v != l.remainingQty) everything = false;
@@ -1255,7 +1341,7 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
       if (!mounted) return;
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(everything ? 'Order fulfilled.' : 'Part of the order handed over.')));
+          content: Text(everything ? 'Order picked and packed.' : 'Part of the order picked.')));
     } catch (e) {
       setState(() {
         _saving = false;
@@ -1267,8 +1353,13 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
   @override
   Widget build(BuildContext context) {
     final detail = ref.watch(orderDetailProvider(widget.orderId));
+    // Each line by its product's name (and SKU), as the Return dialog shows
+    // them; a short handle only while the names load or for one not found.
+    final labels = _lineLabels(ref, detail.value);
     return AlertDialog(
-      title: const Text('Hand over'),
+      // Picked and packed, not handed over: the handover to the shopper or the carrier is its
+      // own step on the Fulfilment screen (ship-from-store and dark-store picking).
+      title: const Text('Picked & packed'),
       content: SizedBox(
         width: 460,
         child: detail.when(
@@ -1282,23 +1373,31 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
             for (final l in outstanding) {
               _qty.putIfAbsent(l.variantId, () => TextEditingController(text: _fmt(l.remainingQty)));
             }
-            return Column(
+            // Scrolls: at large text on a phone the lines and their fields
+            // outgrow the dialog.
+            return SingleChildScrollView(
+              child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text('How much of each line goes to the customer now. '
-                    'Leave the outstanding quantities to hand over everything.'),
-                const SizedBox(height: 12),
-                if (outstanding.isEmpty) const Text('Every line has been handed over.'),
+                const Text('How much of each line is picked and packed now. '
+                    'Leave the outstanding quantities to pick everything.'),
+                const SizedBox(height: AppSpacing.md),
+                if (outstanding.isEmpty) const Text('Every line is picked.'),
                 for (final l in outstanding)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.sm),
                     child: Row(children: [
                       Expanded(
-                        child: Text(
-                          '${shortRef(l.variantId)} · ${_fmt(l.remainingQty)} of ${_fmt(l.qty)} outstanding',
+                        child: _LineName(
+                          name: variantDisplayName(l.variantId, labels),
+                          detail: [
+                            variantSku(l.variantId, labels),
+                            '${_fmt(l.remainingQty)} of ${_fmt(l.qty)} outstanding',
+                          ].where((p) => p.isNotEmpty).join(' · '),
                         ),
                       ),
+                      const SizedBox(width: AppSpacing.sm),
                       SizedBox(
                         width: 90,
                         child: TextField(
@@ -1311,10 +1410,11 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
                     ]),
                   ),
                 if (_error != null) ...[
-                  const SizedBox(height: 8),
+                  const SizedBox(height: AppSpacing.sm),
                   Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                 ],
               ],
+            ),
             );
           },
         ),
@@ -1322,8 +1422,10 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         FilledButton(
-          onPressed: _saving || !detail.hasValue ? null : () => _submit(detail.value!.items),
-          child: const Text('Hand over'),
+          onPressed: _saving || !detail.hasValue
+              ? null
+              : () => _submit(detail.value!.items, labels),
+          child: const Text('Picked & packed'),
         ),
       ],
     );
@@ -1402,6 +1504,9 @@ class _PriceOrderDialogState extends ConsumerState<PriceOrderDialog> {
   @override
   Widget build(BuildContext context) {
     final detail = ref.watch(orderDetailProvider(widget.orderId));
+    // Each line by its product's name, so the manager prices what they can
+    // recognise rather than a fragment of an id.
+    final labels = _lineLabels(ref, detail.value);
     return AlertDialog(
       title: const Text('Price order'),
       content: SizedBox(
@@ -1416,18 +1521,27 @@ class _PriceOrderDialogState extends ConsumerState<PriceOrderDialog> {
             for (final l in d.items) {
               _price.putIfAbsent(l.variantId, () => TextEditingController());
             }
-            return Column(
+            // Scrolls: at large text on a phone the lines and their fields
+            // outgrow the dialog.
+            return SingleChildScrollView(
+              child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text('Placed at the till without prices. Give each line its unit price in '
                     '${widget.currency}; the totals follow.'),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 for (final l in d.items)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.sm),
                     child: Row(children: [
-                      Expanded(child: Text('${shortRef(l.variantId)} × ${_fmt(l.qty)}')),
+                      Expanded(
+                        child: _LineName(
+                          name: '${variantDisplayName(l.variantId, labels)} × ${_fmt(l.qty)}',
+                          detail: variantSku(l.variantId, labels),
+                        ),
+                      ),
+                      const SizedBox(width: AppSpacing.sm),
                       SizedBox(
                         width: 110,
                         child: TextField(
@@ -1446,10 +1560,11 @@ class _PriceOrderDialogState extends ConsumerState<PriceOrderDialog> {
                   decoration: const InputDecoration(labelText: 'VAT on the order'),
                 ),
                 if (_error != null) ...[
-                  const SizedBox(height: 8),
+                  const SizedBox(height: AppSpacing.sm),
                   Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                 ],
               ],
+            ),
             );
           },
         ),
@@ -1532,7 +1647,7 @@ class _VoidSaleDialogState extends ConsumerState<VoidSaleDialog> {
             const Text('The sale is cancelled after the fact: anything handed over goes back '
                 'into stock, and the receipt keeps its number, marked void with this reason. '
                 'This cannot be undone.'),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               key: const Key('void-reason'),
               controller: _reasonCtrl,
@@ -1545,7 +1660,7 @@ class _VoidSaleDialogState extends ConsumerState<VoidSaleDialog> {
               ),
             ),
             if (_error != null) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               Text(_error!, style: TextStyle(color: cs.error)),
             ],
           ],

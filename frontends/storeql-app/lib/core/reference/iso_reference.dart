@@ -309,3 +309,23 @@ const List<String> ianaTimezones = [
   'Europe/Zurich',
   'Pacific/Auckland',
 ];
+
+/// The name of the country [code] names (`FR` → *France*); a code this list
+/// does not know yet stays as it came.
+String countryName(String code) =>
+    isoCountries[code.trim().toUpperCase()]?.$1 ?? code;
+
+/// The country a code names, as it reads after "in": *the United Kingdom*,
+/// *France*. A code this list does not know yet stays as it came.
+String countryInSentence(String code) {
+  final name = isoCountries[code.trim().toUpperCase()]?.$1;
+  if (name == null) return code;
+  const withThe = {
+    'United Kingdom',
+    'United States',
+    'United Arab Emirates',
+    'Netherlands',
+    'Philippines',
+  };
+  return withThe.contains(name) ? 'the $name' : name;
+}

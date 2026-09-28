@@ -5,6 +5,7 @@ import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
@@ -111,7 +112,7 @@ class _PriceReductionsTabState extends ConsumerState<PriceReductionsTab> {
     final theme = Theme.of(context);
     final reductions = ref.watch(priceReductionsProvider(_channel));
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: context.pagePadding,
       children: [
         Text('Reductions on offer', style: theme.textTheme.titleMedium),
         const SizedBox(height: 4),

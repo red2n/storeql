@@ -55,12 +55,11 @@ class NotificationIT {
   }
 
   private Response get(String path, String tenant) {
-    return target
-        .path(path)
-        .request()
-        .header("X-Tenant-Id", tenant)
-        .header("X-Roles", "OWNER")
-        .get();
+    return getAs(path, tenant, "OWNER");
+  }
+
+  private Response getAs(String path, String tenant, String role) {
+    return target.path(path).request().header("X-Tenant-Id", tenant).header("X-Roles", role).get();
   }
 
   @Test
@@ -77,6 +76,39 @@ class NotificationIT {
     Response r2 = get("/admin/notifications/shortage-alerts", OTHER);
     assertThat(r1.getStatus(), is(200));
     assertThat(r2.getStatus(), is(200));
+  }
+
+  /**
+   * The password reset row belongs to no business ({@code tenant_id IS NULL}), so every
+   * tenant-scoped read of the notification log — every role, either business — finds nothing of it,
+   * even naming the address it went to.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName(
+      "Another business's staff of every role — and this one's — never read the reset row")
+  void thePasswordResetRowIsInvisibleToEveryRoleOfEveryBusiness() {
+    UUID event = Ids.newId();
+    notifications.recordNotification(
+        null,
+        null,
+        event,
+        "PASSWORD_RESET",
+        "EMAIL",
+        "forgetful@example.com",
+        "Reset your password",
+        "Shopper account: [link removed]",
+        "SENT",
+        "en",
+        null);
+    assertThat(notifications.alreadyNotified(event, "PASSWORD_RESET"), is(true));
+
+    for (String tenant : new String[] {T, OTHER}) {
+      for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+        String body = getAs("/admin/notifications", tenant, role).readEntity(String.class);
+        assertThat(tenant + "/" + role, body.contains("forgetful@example.com"), is(false));
+        assertThat(tenant + "/" + role, body.contains("PASSWORD_RESET"), is(false));
+      }
+    }
   }
 
   /** N1: a delivered notification is recorded, and a redelivered event is a no-op. */
@@ -192,6 +224,36 @@ class NotificationIT {
     assertThat(logged(welcome, "WELCOME")[0], is("[erased]"));
     // The shop holds its own records and erases them on its own request.
     assertThat(logged(shopMessage, "ORDER_CONFIRMATION")[0], is("leaving@example.com"));
+  }
+
+  /**
+   * {@code PasswordResetRequestedHandler} records the shopper login's own id as {@code subject_id},
+   * so deleting that account erases the reset row through the very same path as the welcome email —
+   * no separate erasure-by-recipient path was added.
+   */
+  @Test
+  void deletingAnAccountErasesItsPasswordResetRowToo() {
+    UUID user = Ids.newId();
+    UUID reset = Ids.newId();
+    notifications.recordNotification(
+        null,
+        user,
+        reset,
+        "PASSWORD_RESET",
+        "EMAIL",
+        "leaving@example.com",
+        "Reset your password",
+        "Shopper account: [link removed]",
+        "SENT",
+        "en",
+        null);
+
+    assertThat(erasure.accountDeleted(user), is(1));
+
+    String[] row = logged(reset, "PASSWORD_RESET");
+    assertThat(row[0], is("[erased]"));
+    assertThat(row[1], is("[erased]"));
+    assertThat(row[2], is(""));
   }
 
   @Test

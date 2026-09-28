@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window colour while Flutter starts in dark mode; matches AppTheme.dark surface. -->
+    <color name="launch_background">#161513</color>
+</resources>

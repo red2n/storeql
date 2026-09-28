@@ -136,6 +136,47 @@ public class Entitlements {
    *
    * @param what what is counted, in the plural, as a person would say it
    */
+  /**
+   * Refuses when what a business would hold in bytes exceeds a plan's cap in megabytes (21.11).
+   *
+   * <p>A cap on bytes is "would this fit", not "how many are there": the check is on the total the
+   * write would leave behind, so a file that fits exactly is taken and the one that does not is
+   * refused before a byte of it is stored. The cap is in MB because that is how a plan is sold; a
+   * MB is 1,048,576 bytes here, which is what the disk it lands on counts in.
+   *
+   * @param key a limit key whose value is megabytes, e.g. {@link #IMAGES_MB_MAX}
+   * @param what what is capped, for the refusal: "MB of product images"
+   * @param bytesAfter what the business would hold once this write is in, in bytes
+   * @throws ApiException 409 {@code PLAN_LIMIT_REACHED} when it would not fit
+   */
+  public void requireBytesWithin(UUID tenantId, String key, String what, LongSupplier bytesAfter) {
+    OptionalLong ceiling = limit(tenantId, key);
+    if (ceiling.isEmpty()) return;
+    long limitMb = ceiling.getAsLong();
+    long after = bytesAfter.getAsLong();
+    if (after <= limitMb * MB) return;
+    throw ApiException.conflict(
+        "PLAN_LIMIT_REACHED",
+        "This plan allows "
+            + limitMb
+            + " "
+            + what
+            + " and this would make "
+            + megabytes(after)
+            + "; a larger plan is needed, or room made first");
+  }
+
+  static final long MB = 1024L * 1024L;
+
+  /** Bytes as a person reads them: {@code 5.3 MB}, one decimal, never "5.0000". */
+  static String megabytes(long bytes) {
+    return new java.math.BigDecimal(bytes)
+            .divide(new java.math.BigDecimal(MB), 1, java.math.RoundingMode.HALF_UP)
+            .stripTrailingZeros()
+            .toPlainString()
+        + " MB";
+  }
+
   public static ApiException limitReached(long limit, String what, long have) {
     return ApiException.conflict(
         "PLAN_LIMIT_REACHED",
@@ -195,8 +236,24 @@ public class Entitlements {
   public static final String PRODUCTS_MAX = "products.max";
   public static final String FEATURE_STOREFRONT = "feature.storefront";
 
+  /** API requests a minute, across every login and the online shop; the gateway enforces it. */
+  public static final String REQUESTS_PER_MINUTE = "requests.per-minute";
+
+  /** Megabytes of product images; product-svc enforces it. */
+  public static final String IMAGES_MB_MAX = "images.mb.max";
+
+  /** Megabytes of supplier e-invoice documents kept; purchase-svc enforces it. */
+  public static final String DOCUMENTS_MB_MAX = "documents.mb.max";
+
   /** Every key, for a service that wants to check its own against the platform's. */
   public static List<String> keys() {
-    return List.of(STORES_MAX, STAFF_MAX, PRODUCTS_MAX, FEATURE_STOREFRONT);
+    return List.of(
+        STORES_MAX,
+        STAFF_MAX,
+        PRODUCTS_MAX,
+        FEATURE_STOREFRONT,
+        REQUESTS_PER_MINUTE,
+        IMAGES_MB_MAX,
+        DOCUMENTS_MB_MAX);
   }
 }

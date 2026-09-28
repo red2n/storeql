@@ -2,7 +2,9 @@ package com.storeql.tenant;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 
 import com.storeql.ids.Ids;
@@ -18,7 +20,11 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -49,6 +55,185 @@ class DunningIT {
   @AfterAll
   static void stopDb() {
     PG.stop();
+  }
+
+  // ── the notice itself (SJ-D68) ─────────────────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "Each reminder is a notice to the business's billing address, carrying a link that pays")
+  void aReminderIsANoticeToTheBillingAddressWithALinkThatPays() throws Exception {
+    sellerIs();
+    planOnSale("NOTICE-" + Ids.newId().toString().substring(28));
+    Answer policy =
+        platform(
+            "PUT",
+            DUNNING + "/policy",
+            "{\"enabled\":true,\"reminderDays\":[1,2],\"suspendAfterDays\":3,"
+                + "\"uncollectibleAfterDays\":30}");
+    assertThat(policy.text(), policy.status(), is(200));
+    String tenant = onboard("Noticed");
+    JsonObject invoice = onlyInvoice(tenant);
+    String id = invoice.getString("id");
+    LocalDate due = LocalDate.parse(invoice.getString("dueDate"));
+
+    // Where it goes: the owner's sign-up address, until the business names another.
+    Answer renamed =
+        owner(
+            "PUT",
+            "/admin/tenant/billing/details",
+            "{\"country\":\"IE\",\"billingEmail\":\"accounts@noticed.example\"}",
+            tenant);
+    assertThat(renamed.text(), renamed.status(), is(200));
+
+    Answer run = platform("POST", DUNNING + "/run?asOf=" + due.plusDays(1), null);
+    assertThat(run.text(), run.status(), is(200));
+    List<String> notices = notices(tenant);
+    assertThat("one reminder, one notice", notices, hasSize(1));
+    String payload = notices.get(0);
+    assertThat(payload, containsString("\"eventType\":\"DunningNoticeIssued\""));
+    assertThat(payload, containsString("\"step\":\"REMINDER_1\""));
+    assertThat(
+        payload, containsString("\"invoiceNumber\":\"" + invoice.getString("number") + "\""));
+    assertThat(payload, containsString("\"recipient\":\"accounts@noticed.example\""));
+    assertThat(payload, containsString("\"platform\":\"StoreQL Platform Ltd\""));
+    assertThat(
+        "what is left on it, VAT included",
+        payload,
+        containsString(
+            "\"amountDue\":"
+                + invoice.getJsonNumber("totalAmount").bigDecimalValue().toPlainString()));
+    assertThat(
+        "when the service goes unless paid",
+        payload,
+        containsString("\"suspendOn\":\"" + due.plusDays(3) + "\""));
+    assertThat(payload, containsString("\"payUrl\":\"http://localhost:8088/#/pay/"));
+
+    // A run that runs again owes nothing more: the step, the link and the notice are one claim.
+    assertThat(platform("POST", DUNNING + "/run?asOf=" + due.plusDays(1), null).status(), is(200));
+    assertThat(notices(tenant), hasSize(1));
+    assertThat(steps(id), is(List.of("REMINDER_1")));
+
+    // The second reminder replaces the link: the newest notice is the one to act on.
+    String first = tokenIn(payload);
+    assertThat(platform("POST", DUNNING + "/run?asOf=" + due.plusDays(2), null).status(), is(200));
+    List<String> two = notices(tenant);
+    assertThat(two, hasSize(2));
+    assertThat(two.get(1), containsString("\"step\":\"REMINDER_2\""));
+    assertThat(
+        "an older notice's link no longer pays",
+        call("POST", "/billing/pay/" + first, null, null, null).status(),
+        is(404));
+
+    // The link in the notice pays, with no sign-in, and is then spent.
+    String token = tokenIn(two.get(1));
+    Answer paid = call("POST", "/billing/pay/" + token, null, null, null);
+    assertThat(paid.text(), paid.status(), is(200));
+    assertThat(paid.data().getString("status"), is("PAID"));
+    assertThat(call("POST", "/billing/pay/" + token, null, null, null).status(), is(404));
+    assertThat(steps(id), hasItem("RESOLVED"));
+  }
+
+  @Test
+  @DisplayName("The suspension is a notice too, with the way back in it")
+  void theSuspensionIsANoticeWithTheWayBackInIt() throws Exception {
+    sellerIs();
+    planOnSale("NOTICE-S-" + Ids.newId().toString().substring(28));
+    assertThat(
+        platform(
+                "PUT",
+                DUNNING + "/policy",
+                "{\"enabled\":true,\"reminderDays\":[1],\"suspendAfterDays\":2,"
+                    + "\"uncollectibleAfterDays\":30}")
+            .status(),
+        is(200));
+    String tenant = onboard("Cut off");
+    JsonObject invoice = onlyInvoice(tenant);
+    LocalDate due = LocalDate.parse(invoice.getString("dueDate"));
+
+    assertThat(platform("POST", DUNNING + "/run?asOf=" + due.plusDays(2), null).status(), is(200));
+    assertThat(steps(invoice.getString("id")), is(List.of("REMINDER_1", "SUSPENDED")));
+    assertThat(tenantStatus(tenant), is("INACTIVE"));
+    List<String> notices = notices(tenant);
+    assertThat(notices, hasSize(2));
+    String suspension = notices.get(1);
+    assertThat(suspension, containsString("\"step\":\"SUSPENDED\""));
+    assertThat("nothing left to warn of", suspension, containsString("\"suspendOn\":null"));
+    assertThat(
+        "to the owner's sign-up address, since the business named no other",
+        suspension,
+        containsString("\"recipient\":\"" + TenantOnboarding.ownerEmail("Cut off") + "\""));
+
+    // The link in the suspension notice is the way back: paying brings the business back.
+    Answer paid = call("POST", "/billing/pay/" + tokenIn(suspension), null, null, null);
+    assertThat(paid.text(), paid.status(), is(200));
+    assertThat(tenantStatus(tenant), is("ACTIVE"));
+  }
+
+  @Test
+  @DisplayName("A business with no billing address is named by the run, never chased in silence")
+  void aBusinessWithNoAddressIsNamedNotChasedInSilence() throws Exception {
+    sellerIs();
+    planOnSale("NOTICE-N-" + Ids.newId().toString().substring(28));
+    assertThat(
+        platform(
+                "PUT",
+                DUNNING + "/policy",
+                "{\"enabled\":true,\"reminderDays\":[1],\"suspendAfterDays\":2,"
+                    + "\"uncollectibleAfterDays\":30}")
+            .status(),
+        is(200));
+    String tenant = onboard("Unreachable");
+    JsonObject invoice = onlyInvoice(tenant);
+    LocalDate due = LocalDate.parse(invoice.getString("dueDate"));
+    clearBillingEmail(tenant);
+
+    // Well past suspension, and still: nothing is taken away from a business nobody could tell.
+    Answer run = platform("POST", DUNNING + "/run?asOf=" + due.plusDays(5), null);
+    assertThat(run.text(), run.status(), is(200));
+    assertThat("named, by tenant", run.text(), containsString("\"tenantId\":\"" + tenant + "\""));
+    assertThat(run.text(), containsString("no billing email"));
+    assertThat(steps(invoice.getString("id")), is(empty()));
+    assertThat(notices(tenant), is(empty()));
+    assertThat(tenantStatus(tenant), is("ACTIVE"));
+  }
+
+  /** Every notice queued for a business, oldest first, as the event notification-svc will read. */
+  private static List<String> notices(String tenant) throws Exception {
+    List<String> out = new ArrayList<>();
+    try (Connection c = PG.dataSource().getConnection()) {
+      c.setSchema("tenant");
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "SELECT payload FROM outbox WHERE tenant_id = ?::uuid"
+                  + " AND event_type = 'DunningNoticeIssued' ORDER BY created_at, id")) {
+        ps.setString(1, tenant);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) out.add(rs.getString(1));
+        }
+      }
+    }
+    return out;
+  }
+
+  private static void clearBillingEmail(String tenant) throws Exception {
+    try (Connection c = PG.dataSource().getConnection()) {
+      c.setSchema("tenant");
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "UPDATE subscriptions SET billing_email = NULL WHERE tenant_id = ?::uuid")) {
+        ps.setString(1, tenant);
+        assertThat(ps.executeUpdate(), is(1));
+      }
+    }
+  }
+
+  /** The token in a notice's pay link. */
+  private static String tokenIn(String payload) {
+    java.util.regex.Matcher m =
+        java.util.regex.Pattern.compile("\"payUrl\":\"[^\"]*/#/pay/([^\"]+)\"").matcher(payload);
+    assertThat("the notice carries a pay link", m.find(), is(true));
+    return m.group(1);
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

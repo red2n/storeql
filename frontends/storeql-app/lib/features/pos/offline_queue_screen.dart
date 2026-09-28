@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/format.dart';
 import '../../core/offline/offline_queue.dart';
 import '../../core/offline/offline_sale.dart';
 import '../../core/offline/offline_synced.dart';
+import '../../core/spacing.dart';
+import '../../shared/widgets/empty_state.dart';
 
 /// Sales the till took but the server has not accepted yet.
 ///
@@ -18,26 +21,16 @@ class OfflineQueueScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final sales = ref.watch(offlineQueueProvider);
     final synced = ref.watch(offlineSyncedProvider);
-    final cs = Theme.of(context).colorScheme;
 
     if (sales.isEmpty) {
       return Column(
         children: [
-          Expanded(
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.cloud_done_outlined, size: 48, color: cs.outline),
-                  const SizedBox(height: 12),
-                  Text('Everything is synced',
-                      style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 4),
-                  Text('Sales taken while offline appear here until the server has them.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: cs.outline)),
-                ],
-              ),
+          const Expanded(
+            child: EmptyState(
+              icon: Icons.cloud_done_outlined,
+              title: 'Everything is synced',
+              message:
+                  'Sales taken while offline appear here until the server has them.',
             ),
           ),
           if (synced.isNotEmpty) _SyncedSection(synced: synced),
@@ -48,28 +41,7 @@ class OfflineQueueScreen extends ConsumerWidget {
     final waiting = sales.where((s) => s.status == OfflineSaleStatus.pending).length;
     return Column(
       children: [
-        Material(
-          color: cs.surfaceContainerHighest,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '${sales.length} sale${sales.length == 1 ? '' : 's'} not yet on the server'
-                    '${waiting < sales.length ? ' · ${sales.length - waiting} need attention' : ''}',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                ),
-                FilledButton.tonalIcon(
-                  onPressed: () => ref.read(offlineQueueProvider.notifier).sync(),
-                  icon: const Icon(Icons.sync, size: 18),
-                  label: const Text('Sync now'),
-                ),
-              ],
-            ),
-          ),
-        ),
+        _QueueBanner(total: sales.length, attention: sales.length - waiting),
         Expanded(
           child: ListView.separated(
             itemCount: sales.length,
@@ -78,6 +50,47 @@ class OfflineQueueScreen extends ConsumerWidget {
           ),
         ),
         if (synced.isNotEmpty) _SyncedSection(synced: synced),
+      ],
+    );
+  }
+}
+
+/// The queue's standing message: how many sales the server does not have yet,
+/// how many of those need a person, and *Sync now*. A persistent message with
+/// an action is a [MaterialBanner] (UI-GUIDE §7.1); it turns to the error
+/// container while a sale the server refused is waiting for someone.
+class _QueueBanner extends ConsumerWidget {
+  const _QueueBanner({required this.total, required this.attention});
+
+  final int total;
+
+  /// Sales the server refused outright, parked for a person.
+  final int attention;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cs = Theme.of(context).colorScheme;
+    final alarm = attention > 0;
+    final ink = alarm ? cs.onErrorContainer : cs.onSurface;
+    return MaterialBanner(
+      backgroundColor: alarm ? cs.errorContainer : cs.surfaceContainerHigh,
+      padding: EdgeInsetsDirectional.fromSTEB(
+          context.pageGutter, AppSpacing.md, AppSpacing.sm, AppSpacing.xs),
+      leading: Icon(
+        alarm ? Icons.error_outline : Icons.cloud_off_outlined,
+        color: alarm ? cs.onErrorContainer : cs.onSurfaceVariant,
+      ),
+      content: Text(
+        '$total sale${total == 1 ? '' : 's'} not yet on the server'
+        '${alarm ? ' · $attention need attention' : ''}',
+        style: TextStyle(color: ink, fontWeight: FontWeight.w600),
+      ),
+      actions: [
+        FilledButton.tonalIcon(
+          onPressed: () => ref.read(offlineQueueProvider.notifier).sync(),
+          icon: const Icon(Icons.sync, size: 18),
+          label: const Text('Sync now'),
+        ),
       ],
     );
   }
@@ -101,11 +114,13 @@ class _SyncedSection extends StatelessWidget {
           Material(
             color: cs.surfaceContainerHigh,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+              padding: EdgeInsetsDirectional.symmetric(
+                  horizontal: context.pageGutter, vertical: AppSpacing.md),
               child: Row(
                 children: [
-                  Icon(Icons.receipt_long_outlined, size: 18, color: cs.outline),
-                  const SizedBox(width: 8),
+                  Icon(Icons.receipt_long_outlined,
+                      size: 18, color: cs.onSurfaceVariant),
+                  const SizedBox(width: AppSpacing.sm),
                   const Expanded(
                     child: Text(
                       'Synced · receipt numbers issued on replay',
@@ -140,16 +155,17 @@ class _SyncedTile extends ConsumerWidget {
     final number = ref.watch(syncedFiscalNumberProvider(sale.id));
     return ListTile(
       dense: true,
-      leading: Icon(Icons.cloud_done_outlined, color: cs.outline),
+      leading: Icon(Icons.cloud_done_outlined, color: cs.onSurfaceVariant),
+      // In capitals, as the offline receipt was printed (SyncedSale.reference).
       title: Text('Sale #${sale.reference}  ·  '
-          '${sale.currency} ${sale.total.toStringAsFixed(2)}'),
+          '${AppFormat.money(sale.total, currencyCode: sale.currency)}'),
       subtitle: number.when(
         loading: () => const Text('Looking up the receipt number…'),
         error: (_, _) => Text('Receipt number not available yet — check again.',
-            style: TextStyle(color: cs.outline)),
+            style: TextStyle(color: cs.onSurfaceVariant)),
         data: (n) => n == null
             ? Text('Receipt number not issued yet — check again shortly.',
-                style: TextStyle(color: cs.outline))
+                style: TextStyle(color: cs.onSurfaceVariant))
             : Text('Receipt no. $n',
                 style: TextStyle(
                     color: cs.primary, fontWeight: FontWeight.w600)),
@@ -175,25 +191,23 @@ class _SaleTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
     final failed = sale.status == OfflineSaleStatus.failed;
-    final at = sale.capturedAt.toLocal();
-    String two(int n) => n.toString().padLeft(2, '0');
+    final at = AppFormat.dateTime(sale.capturedAt.toUtc().toIso8601String());
 
     return ListTile(
       leading: Icon(
         failed ? Icons.error_outline : Icons.schedule,
-        color: failed ? cs.error : cs.outline,
+        color: failed ? cs.error : cs.onSurfaceVariant,
       ),
       title: Text('Sale #${sale.reference}  ·  '
-          '${sale.currency} ${sale.total.toStringAsFixed(2)}'),
+          '${AppFormat.money(sale.total, currencyCode: sale.currency)}'),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('${sale.itemCount} item${sale.itemCount == 1 ? '' : 's'} · '
-              '${at.year}-${two(at.month)}-${two(at.day)} ${two(at.hour)}:${two(at.minute)}'
+          Text('${sale.itemCount} item${sale.itemCount == 1 ? '' : 's'} · $at'
               '${sale.attempts > 0 ? ' · ${sale.attempts} attempt${sale.attempts == 1 ? '' : 's'}' : ''}'),
           if (sale.lastError != null)
             Text(sale.lastError!,
-                style: TextStyle(color: failed ? cs.error : cs.outline)),
+                style: TextStyle(color: failed ? cs.error : cs.onSurfaceVariant)),
         ],
       ),
       isThreeLine: sale.lastError != null,
@@ -236,8 +250,10 @@ class _SaleTile extends ConsumerWidget {
               onPressed: () => Navigator.pop(ctx, false),
               child: const Text('Keep')),
           FilledButton(
+            // The error pair: its label in onError, not onPrimary.
             style: FilledButton.styleFrom(
-                backgroundColor: Theme.of(ctx).colorScheme.error),
+                backgroundColor: Theme.of(ctx).colorScheme.error,
+                foregroundColor: Theme.of(ctx).colorScheme.onError),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Discard'),
           ),

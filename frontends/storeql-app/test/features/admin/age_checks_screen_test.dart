@@ -3,7 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
+import 'package:storeql_app/core/spacing.dart';
+import 'package:storeql_app/core/theme.dart';
 import 'package:storeql_app/features/admin/age_checks_screen.dart';
 import 'package:storeql_app/features/pos/pos_age_check.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
@@ -50,8 +53,12 @@ class _Server implements HttpClientAdapter {
   }
 }
 
-Future<_Server> _pump(WidgetTester tester, {bool empty = false}) async {
-  tester.view.physicalSize = const Size(1100, 1400);
+Future<_Server> _pump(WidgetTester tester,
+    {bool empty = false,
+    ThemeData? theme,
+    Size size = const Size(1100, 1400),
+    double textScale = 1}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
   final server = _Server()..empty = empty;
@@ -63,13 +70,25 @@ Future<_Server> _pump(WidgetTester tester, {bool empty = false}) async {
             StoreInfo(id: 's1', name: 'High Street', code: 'HS', type: 'STORE', status: 'ACTIVE', country: 'GB'),
           ]),
     ],
-    child: const MaterialApp(home: Scaffold(body: AgeChecksScreen())),
+    child: MaterialApp(
+      theme: theme,
+      home: MediaQuery.withClampedTextScaling(
+        minScaleFactor: textScale,
+        maxScaleFactor: textScale,
+        child: const Scaffold(body: AgeChecksScreen()),
+      ),
+    ),
   ));
   await tester.pumpAndSettle();
   return server;
 }
 
+Rect _cardAround(WidgetTester tester, String label) => tester.getRect(
+    find.ancestor(of: find.text(label), matching: find.byType(Card)).first);
+
 void main() {
+  setUpAll(initializeDateFormatting);
+
   testWidgets('the counts and the refusals with their reasons are shown', (tester) async {
     await _pump(tester);
     expect(find.text('5'), findsOneWidget);
@@ -78,6 +97,51 @@ void main() {
     expect(find.textContaining('Refused — No ID shown'), findsOneWidget);
     expect(find.textContaining('Sale went ahead — PASS card'), findsOneWidget);
     expect(find.textContaining('(store policy)'), findsOneWidget);
+    // The country in words, never its code.
+    expect(find.textContaining('18+ in the United Kingdom'), findsNWidgets(2));
+    expect(find.textContaining('in GB'), findsNothing);
+  });
+
+  testWidgets('the three count cards stand apart, never edge to edge', (tester) async {
+    // The app's theme gives cards no margin of their own, so any gap is the screen's.
+    await _pump(tester, theme: AppTheme.light);
+    final checks = _cardAround(tester, 'Checks');
+    final passed = _cardAround(tester, 'Sales went ahead');
+    final refused = _cardAround(tester, 'Refused');
+    expect(passed.left - checks.right, greaterThanOrEqualTo(AppSpacing.sm));
+    expect(refused.left - passed.right, greaterThanOrEqualTo(AppSpacing.sm));
+  });
+
+  for (final (name, theme) in [('light', AppTheme.light), ('dark', AppTheme.dark)]) {
+    testWidgets('a sale that went ahead is drawn in the success colour ($name)', (tester) async {
+      await _pump(tester, theme: theme);
+      final ctx = tester.element(find.byType(AgeChecksScreen));
+      final pass = tester.widget<Icon>(find.byIcon(Icons.check_circle_outline));
+      expect(pass.color, ctx.status.success);
+      expect(pass.color, isNot(theme.colorScheme.primary));
+      // A refusal stays in the error colour.
+      expect(tester.widget<Icon>(find.byIcon(Icons.block)).color, theme.colorScheme.error);
+    });
+  }
+
+  testWidgets('each check says its outcome once, in words, not again in capitals', (tester) async {
+    await _pump(tester);
+    expect(find.text('REFUSED'), findsNothing);
+    expect(find.text('PASSED'), findsNothing);
+    expect(find.textContaining('Refused — No ID shown'), findsOneWidget);
+    expect(find.textContaining('Sale went ahead — PASS card'), findsOneWidget);
+  });
+
+  testWidgets('on a phone the page sits 16 in from the edge', (tester) async {
+    await _pump(tester, size: const Size(390, 1400));
+    expect(tester.getTopLeft(find.text('Age checks')).dx, AppSpacing.lg);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('on a phone with text at 200% nothing overflows', (tester) async {
+    await _pump(tester, theme: AppTheme.light, size: const Size(390, 844), textScale: 2);
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('age-checks-store')), findsOneWidget);
   });
 
   testWidgets('an empty period says what an empty register means', (tester) async {

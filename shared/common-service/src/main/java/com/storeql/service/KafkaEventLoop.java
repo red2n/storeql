@@ -51,6 +51,7 @@ public final class KafkaEventLoop implements AutoCloseable {
   private final String bootstrap;
   private final Handler handler;
   private final KafkaConsumer<String, String> consumer;
+  private final String offsetReset;
   private final ScheduledExecutorService scheduler;
   private volatile boolean running;
 
@@ -75,7 +76,27 @@ public final class KafkaEventLoop implements AutoCloseable {
    */
   public KafkaEventLoop(
       String name, String bootstrap, String groupId, List<String> topics, Handler handler) {
+    this(name, bootstrap, groupId, topics, "earliest", handler);
+  }
+
+  /**
+   * As above, saying where the group starts when it has no committed offset: {@code "earliest"}
+   * (the default — a new consumer must not miss what was published before it existed) or {@code
+   * "latest"} for a projection of live events that must not replay retained history when it is
+   * first deployed.
+   *
+   * @param offsetReset {@code "earliest"}, {@code "latest"} or {@code "none"}; anything else is
+   *     refused by the Kafka client at construction
+   */
+  public KafkaEventLoop(
+      String name,
+      String bootstrap,
+      String groupId,
+      List<String> topics,
+      String offsetReset,
+      Handler handler) {
     this.name = name;
+    this.offsetReset = offsetReset;
     this.bootstrap = bootstrap;
     this.handler = handler;
     Properties props = new Properties();
@@ -83,7 +104,7 @@ public final class KafkaEventLoop implements AutoCloseable {
     props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
     props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
     props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-    props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+    props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, offsetReset);
     // Manual commit: auto-commit would ack records whose handler failed (lost events).
     props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
     this.consumer = new KafkaConsumer<>(props);
@@ -101,6 +122,11 @@ public final class KafkaEventLoop implements AutoCloseable {
    * Starts polling on a dedicated daemon thread, ticking every 2 seconds. Idempotent to call only
    * once per instance — call {@link #close()} and construct a new loop to restart.
    */
+  /** Where this loop's group starts with no committed offset: what it was built with. */
+  String offsetReset() {
+    return offsetReset;
+  }
+
   public void start() {
     running = true;
     scheduler.scheduleWithFixedDelay(this::pollQuietly, 2, 2, TimeUnit.SECONDS);

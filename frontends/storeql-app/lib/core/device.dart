@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 
 // dart:io is unavailable on web; all Platform.* calls are guarded by !kIsWeb
 import 'dart:io' show Platform;
+import 'spacing.dart';
 
 typedef DeviceInfo = ({String platform, String formFactor});
 
@@ -33,7 +34,7 @@ class DeviceInfoCapture {
         (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
     if (isNativeDesktop) {
       formFactor = 'desktop';
-    } else if (screenSize.width >= 600) {
+    } else if (screenSize.width >= AppBreakpoints.medium) {
       formFactor = 'tablet';
     } else {
       formFactor = 'phone';

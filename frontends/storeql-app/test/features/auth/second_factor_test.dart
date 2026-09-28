@@ -5,9 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/auth/passkeys.dart';
+import 'package:storeql_app/core/format.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/mfa_policy_dialog.dart';
 import 'package:storeql_app/features/auth/second_factor_screen.dart';
@@ -125,6 +127,7 @@ void main() {
   late Map<String, String> stored;
   final realPasskeys = passkeys;
 
+  setUpAll(initializeDateFormatting);
   setUp(() {
     TestWidgetsFlutterBinding.ensureInitialized();
     stored = _secureStorage();
@@ -321,7 +324,9 @@ void main() {
 
     expect(find.byKey(const Key('mfa-required')), findsOneWidget);
     expect(find.text('Office laptop'), findsOneWidget);
-    expect(find.text('Last used 2026-09-16'), findsOneWidget);
+    // A date as a person reads it (the design system's SignIn card), not the ISO string.
+    expect(find.text('Last used ${AppFormat.date('2026-09-16T08:00:00Z')}'), findsOneWidget);
+    expect(find.textContaining('2026-09-16'), findsNothing);
     expect(find.textContaining('7 left'), findsOneWidget);
     expect(find.byKey(const Key('passkey-add')), findsNothing, reason: 'this device cannot make one');
 

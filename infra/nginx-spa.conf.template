@@ -82,6 +82,23 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # The gateway's own health, for the platform console's Overview. A bundle built with the relative
+    # /api asks this origin for /health (gatewayHealthUri drops the /api and adds /health); without
+    # this the SPA fallback below answers with index.html, and the Overview can only say the health is
+    # not readable here. It reaches the gateway exactly as /api/ does. The gateway answers /health
+    # from Helidon's health observer, outside JAX-RS and so outside its token check: public, and the
+    # same document the API host already serves. Exactly this path: the probes under it
+    # (/health/live, /ready, /started) are for the orchestrator, not the browser.
+    location = /health {
+        proxy_pass http://gateway:8080/health;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     # RFC 9116: the vulnerability disclosure contact. The gateway publishes it from configuration
     # (storeql.gateway.security-txt.*) and answers 404 when a deployment has not configured one, so
     # a stale or invented contact is never served from here.

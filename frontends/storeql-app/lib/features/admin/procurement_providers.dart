@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
+import '../../shared/util/status_labels.dart';
 import '../../core/network/api_client.dart';
 
 // ── Models ───────────────────────────────────────────────────────────────────
@@ -12,6 +13,10 @@ class Supplier {
   final String? countryCode;
   final String? currency;
   final int paymentTermsDays;
+
+  /// The supplier's quoted lead time in days: the promise a delivery is
+  /// measured against when an order names no date.
+  final int? leadTimeDays;
 
   /// Where remittance advice is emailed when a payment run pays it (17.10).
   final String? remittanceEmail;
@@ -39,6 +44,7 @@ class Supplier {
     this.countryCode,
     this.currency,
     required this.paymentTermsDays,
+    this.leadTimeDays,
     this.remittanceEmail,
     this.bankAccountName,
     this.bankSortCode,
@@ -59,6 +65,7 @@ class Supplier {
     countryCode: j['countryCode'] as String?,
     currency: j['currency'] as String?,
     paymentTermsDays: (j['paymentTermsDays'] as num?)?.toInt() ?? 0,
+    leadTimeDays: (j['leadTimeDays'] as num?)?.toInt(),
     remittanceEmail: j['remittanceEmail'] as String?,
     bankAccountName: j['bankAccountName'] as String?,
     bankSortCode: j['bankSortCode'] as String?,
@@ -83,6 +90,18 @@ class PurchaseOrder {
   final double totalGross;
   final String? expectedDelivery;
   final String createdAt;
+  /// MANUAL, or PROPOSAL when a proposal run raised it (06.x).
+  final String source;
+
+  /// OWNED, or CONSIGNMENT when the supplier owns the goods until they sell.
+  final String ownership;
+
+  /// For a DROPSHIP order: the sale it fulfils and the customer the supplier ships to.
+  final String? salesOrderId;
+  final String? shipTo;
+
+  /// DUTY_PAID, or DUTY_SUSPENDED when the goods arrive into bond.
+  final String dutyStatus;
 
   const PurchaseOrder({
     required this.id,
@@ -95,6 +114,11 @@ class PurchaseOrder {
     required this.totalGross,
     this.expectedDelivery,
     required this.createdAt,
+    this.source = 'MANUAL',
+    this.ownership = 'OWNED',
+    this.salesOrderId,
+    this.shipTo,
+    this.dutyStatus = 'DUTY_PAID',
   });
 
   factory PurchaseOrder.fromJson(Map<String, dynamic> j) => PurchaseOrder(
@@ -108,6 +132,11 @@ class PurchaseOrder {
     totalGross: (j['totalGross'] as num?)?.toDouble() ?? 0,
     expectedDelivery: j['expectedDelivery'] as String?,
     createdAt: j['createdAt'] as String? ?? '',
+    source: j['source'] as String? ?? 'MANUAL',
+    ownership: j['ownership'] as String? ?? 'OWNED',
+    salesOrderId: j['salesOrderId'] as String?,
+    shipTo: j['shipTo'] as String?,
+    dutyStatus: j['dutyStatus'] as String? ?? 'DUTY_PAID',
   );
 }
 
@@ -117,6 +146,8 @@ class PurchaseOrderLine {
   final double qty;
   final double unitPrice;
   final String? vatCode;
+  /// The proposal's arithmetic for this line; null on a line a person typed.
+  final String? proposalReason;
 
   const PurchaseOrderLine({
     required this.id,
@@ -124,6 +155,7 @@ class PurchaseOrderLine {
     required this.qty,
     required this.unitPrice,
     this.vatCode,
+    this.proposalReason,
   });
 
   factory PurchaseOrderLine.fromJson(Map<String, dynamic> j) =>
@@ -133,6 +165,7 @@ class PurchaseOrderLine {
         qty: (j['qty'] as num?)?.toDouble() ?? 0,
         unitPrice: (j['unitPrice'] as num?)?.toDouble() ?? 0,
         vatCode: j['vatCode'] as String?,
+        proposalReason: j['proposalReason'] as String?,
       );
 }
 
@@ -771,3 +804,48 @@ final payingAccountsProvider = FutureProvider.autoDispose<List<PayingAccount>>((
       .map((e) => PayingAccount.fromJson(e as Map<String, dynamic>))
       .toList();
 });
+
+/// Part of a warehouse order's line allocated to a shop it serves (cross-docking).
+class LineAllocation {
+  final String poLineId;
+  final String storeId;
+  final double qty;
+  const LineAllocation({required this.poLineId, required this.storeId, required this.qty});
+  factory LineAllocation.fromJson(Map<String, dynamic> j) => LineAllocation(
+        poLineId: j['poLineId'] as String? ?? '',
+        storeId: j['storeId'] as String? ?? '',
+        qty: (j['qty'] as num?)?.toDouble() ?? 0,
+      );
+}
+
+/// A warehouse order's cross-dock allocations, every line.
+final purchaseOrderAllocationsProvider =
+    FutureProvider.autoDispose.family<List<LineAllocation>, String>((ref, poId) async {
+  final resp = await ref.read(apiClientProvider).dio.get(
+        '/${ApiConstants.purchase}/purchase-orders/$poId/allocations',
+      );
+  return ((resp.data['data'] as List?) ?? const [])
+      .map((e) => LineAllocation.fromJson(e as Map<String, dynamic>))
+      .toList();
+});
+
+/// A purchase order's status in words, and the tone it is shown in: the same
+/// on the order list, the order and the e-invoice matching dialog.
+(String, StatusTone) purchaseOrderStatus(String status) =>
+    switch (status.toUpperCase()) {
+      'DRAFT' => ('Draft', StatusTone.neutral),
+      // Amber for the same reason PARTIALLY_RECEIVED is: this is a state
+      // somebody has to act on, not one to observe. Blue would read as "on its
+      // way" when it means "stopped".
+      'PENDING_APPROVAL' => ('Pending approval', StatusTone.warning),
+      'SUBMITTED' => ('Submitted', StatusTone.info),
+      // Something is still owed, and that is a state a buyer is meant to act
+      // on rather than merely observe.
+      'PARTIALLY_RECEIVED' => ('Part received', StatusTone.warning),
+      'RECEIVED' => ('Received', StatusTone.success),
+      // Short-closed: part arrived and the rest never will.
+      'CLOSED' => ('Closed short', StatusTone.neutral),
+      // Grey, not amber: nothing is left for anyone to do.
+      'CANCELLED' => ('Cancelled', StatusTone.neutral),
+      _ => (humanizeCode(status), StatusTone.neutral),
+    };

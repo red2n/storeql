@@ -19,8 +19,8 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * A business putting its messages in its own words (13.x): what there is to write, the words each
- * message goes out in now, a new version saved, a version retired, a draft previewed, and how the
+ * A business putting its messages in its own words: what there is to write, the words each message
+ * goes out in now, a new version saved, a version retired, a draft previewed, and how the
  * business's messages are signed and in what language they go when the reader's is not known.
  *
  * <p>A template is judged before it is kept, never when a message is due: it must parse, use only
@@ -32,6 +32,14 @@ import java.util.stream.Collectors;
 public class MessageTemplateService {
 
   private static final int HISTORY = 20;
+
+  /**
+   * The platform's own neutral stand-in for a preview or a check when the business's currency
+   * cannot be read — never a country's currency, and never a literal like the GBP the sample used
+   * to hard-code. Not a real ISO 4217 code, so the amount is written out followed by this code
+   * rather than a guessed symbol for a currency nobody named.
+   */
+  private static final String NEUTRAL_CURRENCY = "XYZ";
 
   @Inject TemplateRepository repo;
   @Inject Messages messages;
@@ -178,7 +186,11 @@ public class MessageTemplateService {
     String subject = spec.form().hasSubject() ? nz(req.subject()) : spec.subject();
     String body = nz(req.body());
     List<Problem> problems = check(tenantId, t, spec, lang, subject, body);
-    var scope = t.sample().get().text("shop", signOff(tenantId)).in(locale(lang, tenantId));
+    var scope =
+        t.sample()
+            .apply(currency(tenantId))
+            .text("shop", signOff(tenantId))
+            .in(locale(lang, tenantId));
     String renderedSubject = written(subject, scope, true);
     String renderedBody = written(body, scope, false);
     return new TemplateDtos.Preview(
@@ -272,7 +284,11 @@ public class MessageTemplateService {
                       .collect(Collectors.joining("; ")),
               missing));
     }
-    var scope = t.sample().get().text("shop", signOff(tenantId)).in(locale(language, tenantId));
+    var scope =
+        t.sample()
+            .apply(currency(tenantId))
+            .text("shop", signOff(tenantId))
+            .in(locale(language, tenantId));
     String writtenSubject = s.render(scope).strip();
     String writtenBody = b.render(scope).stripTrailing();
     if (spec.form().hasSubject() && writtenSubject.length() > spec.form().subjectMax) {
@@ -312,6 +328,15 @@ public class MessageTemplateService {
 
   private Locale locale(String language, UUID tenantId) {
     return messages.locale(language, tenantId);
+  }
+
+  /**
+   * What a sample's money values are shown in — the business's own home currency, or the platform's
+   * neutral stand-in when it cannot be read. Never a country is assumed from the business's
+   * language or the caller's own currency.
+   */
+  private String currency(UUID tenantId) {
+    return businesses.currency(tenantId).orElse(NEUTRAL_CURRENCY);
   }
 
   private static Catalogue.MessageType type(String key) {

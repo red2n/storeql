@@ -266,6 +266,19 @@ public class CartService {
     repo.markCheckedOutByCustomerAndStore(tenantId, customerId, storeId);
   }
 
+  /**
+   * Marks the shopper's active cart checked out once their online order is placed, whichever store
+   * the order went to: a delivery resolves to the store serving the postcode and may be split
+   * across several (order orchestration), none of which need be the store the cart was filled at.
+   * Idempotent: every part of a split announces itself, and the first closes the cart.
+   *
+   * @param loginId the shopper's login, which is what holds a cart
+   */
+  public void onOnlineOrderPlaced(UUID tenantId, UUID loginId) {
+    if (loginId == null) return; // a guest checkout has no server-side cart
+    repo.markCheckedOutByCustomer(tenantId, loginId);
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   private void guardTenantAndStore(UUID tenantId, UUID storeId) {

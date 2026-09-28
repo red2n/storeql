@@ -12,6 +12,10 @@
 // link in every notice is the whole capability, pays one named invoice, and a link for an invoice
 // already settled opens nothing.
 //
+// The notice itself is real (SJ-D68): each reminder, and the suspension, is an email to the address on
+// the subscription — the owner's from sign-up (SJ-D72) — naming the invoice and the sum, in the
+// platform's name, carrying the link; the newest notice's link is the one that pays.
+//
 //   k6/run.sh dunning-flow
 import { Counter } from 'k6/metrics';
 import { ALL_CHECKS_PASS, call, data, expect, must, onboardTenant, platformAdmin, poll, truthy, uniq } from './lib/storeql.js';
@@ -85,6 +89,13 @@ export default function ({ admin }) {
   const day = (n) => { const d = new Date(`${first.dueDate}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
   const overdue = (asOf) => (data(dun('GET', `/overdue?asOf=${asOf}&limit=100`)) || []).find((o) => o.number === first.number);
   const stages = (id) => (data(dun('GET', `/invoices/${id}/events`)) || []).map((e) => e.step);
+  // The notices the business was sent, as its owner reads them on the log; the link in each.
+  const notices = () => (data(call('GET', `/api/notification-svc/admin/notifications?recipient=${encodeURIComponent(shop.owner.email)}&limit=50`, { token: owner })) || []).filter((n) => (n.body || '').includes(first.number));
+  const linkIn = (n) => { const m = ((n && n.body) || '').match(/\/#\/pay\/([A-Za-z0-9_-]+)/); return m ? m[1] : null; };
+  const noticesOfType = (type, n) => { let got = []; poll(30, () => { got = notices().filter((x) => x.type === type); return got.length >= n; }); return got; };
+  // A day as the notice writes it for an English reader: "25 September 2026".
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const written = (iso) => { const [y, m, d] = iso.split('-'); return `${Number(d)} ${MONTHS[Number(m) - 1]} ${y}`; };
 
   // ── one reminder at a time, and only what is earned ─────────────────────────────────────────────
   expect(dun('POST', '/run?asOf=' + day(0)), '[+] on the day it is due nothing is chased', 200);
@@ -93,6 +104,12 @@ export default function ({ admin }) {
   const one = dun('POST', '/run?asOf=' + day(1));
   expect(one, '[+] a day late earns the first notice', 200);
   truthy('[+] exactly the first, not the lot', stages(first.id).join(',') === 'REMINDER_1', stages(first.id));
+  const reminders = noticesOfType('INVOICE_OVERDUE', 1);
+  truthy('[+] and the notice is sent — to the owner\'s sign-up address, naming the invoice and the sum (SJ-D68)', reminders.length === 1 && reminders[0].subject.includes(first.number) && reminders[0].body.includes(Number(first.totalAmount).toFixed(2)), reminders.map((n) => n.subject));
+  truthy('[+] in the platform\'s name, not the business\'s own', reminders.length === 1 && reminders[0].body.includes(`— StoreQL Dunning ${tag} Ltd`), reminders[0] && reminders[0].body);
+  truthy('[+] saying when the service goes if it stays unpaid', reminders.length === 1 && reminders[0].body.includes(`still unpaid on ${written(day(3))}, your service will be interrupted`), reminders[0] && reminders[0].body);
+  const firstLink = linkIn(reminders[0]);
+  truthy('[+] and carrying a link that pays without a sign-in', !!firstLink, reminders[0] && reminders[0].body);
   truthy('[+] and the list says how late it is and what is coming', (() => { const o = overdue(day(1)); return o && o.daysOverdue === 1 && o.stage === 'REMINDER_1' && o.nextStep === 'REMINDER_2'; })(), overdue(day(1)));
 
   expect(dun('POST', '/run?asOf=' + day(1)), '[+] running again is safe', 200);
@@ -101,6 +118,8 @@ export default function ({ admin }) {
   // ── a run that has not run for days owes every notice that was missed ───────────────────────────
   expect(dun('POST', '/run?asOf=' + day(2)), '[+] the second notice on its day', 200);
   truthy('[+] both, in order', stages(first.id).join(',') === 'REMINDER_1,REMINDER_2', stages(first.id));
+  truthy('[+] and both were sent, once each', noticesOfType('INVOICE_OVERDUE', 2).length === 2, notices().map((n) => n.type));
+  expect(call('POST', `/api/tenant-svc/billing/pay/${firstLink}`), '[-] the first notice\'s link no longer pays: the newest notice is the one to act on', 404, 'PAY_LINK_INVALID');
 
   // ── the service is interrupted, and the storefront closes ───────────────────────────────────────
   expect(dun('POST', '/run?asOf=' + day(3)), '[+] at three days the platform is taken away', 200);
@@ -121,6 +140,9 @@ export default function ({ admin }) {
 
   const back = data(call('GET', `${PLATFORM}/tenants/${shop.tenantId}`, { token: root }));
   truthy('[+] paying up brings the business back, and clears the reason', back.status === 'ACTIVE' && !back.deactivatedReason, back);
+  // Back in, the owner can read what was sent while the door was shut: the suspension had its own notice.
+  const cut = noticesOfType('SERVICE_SUSPENDED', 1);
+  truthy('[+] the suspension was a notice too, with the way back in it', cut.length === 1 && cut[0].body.includes('interrupted') && !!linkIn(cut[0]), cut.map((n) => n.subject));
 
   // ── the check this whole row rests on ───────────────────────────────────────────────────────────
   // An administrator's decision is not an argument money can win.

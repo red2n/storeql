@@ -1,15 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
-import 'package:intl/intl.dart';
 
 import '../../core/constants.dart';
+import '../../core/reference/iso_reference.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../core/theme.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
 import '../pos/pos_age_check.dart' show AgeVerificationDialog, ageIdTypes, ageRefusalReasons;
 import 'providers/admin_providers.dart';
 
@@ -183,7 +186,8 @@ class AgeChecksScreen extends ConsumerWidget {
     final summary = ref.watch(ageCheckSummaryProvider);
     final register = ref.watch(ageCheckRegisterProvider);
     final theme = Theme.of(context);
-    final dateFmt = DateFormat.yMMMd();
+    // A day of the picker, in the app's own date format.
+    String day(DateTime d) => AppFormat.date(d.toIso8601String());
 
     Future<void> pickRange() async {
       final picked = await showDateRangePicker(
@@ -201,33 +205,37 @@ class AgeChecksScreen extends ConsumerWidget {
     }
 
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      // 16 on a phone, 24 from tablet width up.
+      padding: context.pagePadding,
       children: [
-        Text('Age checks', style: theme.textTheme.headlineMedium),
-        const SizedBox(height: 4),
-        Text(
-          'Every age check the till made, pass or refusal — the record that '
-          'shows the shop was checking. Nothing here can be edited.',
-          style: theme.textTheme.bodyMedium
-              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        const PageHeader(
+          title: 'Age checks',
+          subtitle: 'Every age check the till made, pass or refusal — the record '
+              'that shows the shop was checking. Nothing here can be edited.',
+          padding: EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
         ),
-        const SizedBox(height: AppSpacing.lg),
         Wrap(
-          spacing: 12,
-          runSpacing: 8,
+          spacing: AppSpacing.md,
+          runSpacing: AppSpacing.sm,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             SizedBox(
               width: 260,
               child: DropdownButtonFormField<String?>(
                 key: const Key('age-checks-store'),
+                // The chosen store ellipsizes rather than overflowing the
+                // field with a long name or large text.
+                isExpanded: true,
                 initialValue: filter.storeId,
                 decoration: const InputDecoration(labelText: 'Store'),
                 items: [
                   const DropdownMenuItem<String?>(
-                      value: null, child: Text('All stores')),
+                      value: null,
+                      child: Text('All stores', overflow: TextOverflow.ellipsis)),
                   for (final s in stores.value ?? const [])
-                    DropdownMenuItem<String?>(value: s.id, child: Text(s.name)),
+                    DropdownMenuItem<String?>(
+                        value: s.id,
+                        child: Text(s.name, overflow: TextOverflow.ellipsis)),
                 ],
                 onChanged: (v) => ref.read(ageCheckFilterProvider.notifier).state =
                     filter.copyWith(storeId: v),
@@ -236,8 +244,7 @@ class AgeChecksScreen extends ConsumerWidget {
             OutlinedButton.icon(
               onPressed: pickRange,
               icon: const Icon(Icons.date_range),
-              label: Text(
-                  '${dateFmt.format(filter.from)} – ${dateFmt.format(filter.to)}'),
+              label: Text('${day(filter.from)} – ${day(filter.to)}'),
             ),
             SegmentedButton<String?>(
               segments: const [
@@ -263,7 +270,7 @@ class AgeChecksScreen extends ConsumerWidget {
         ),
         const SizedBox(height: AppSpacing.lg),
         Text('Register', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 8),
+        const SizedBox(height: AppSpacing.sm),
         register.when(
           loading: () => const LoadingView(label: 'Loading the register…'),
           error: (e, _) => ErrorView(
@@ -271,19 +278,19 @@ class AgeChecksScreen extends ConsumerWidget {
             onRetry: () => ref.invalidate(ageCheckRegisterProvider),
           ),
           data: (rows) => rows.isEmpty
-              ? Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 24),
-                  child: Text(
-                    'No checks in this period. A shop that sells restricted '
-                    'items and has never refused anyone has not been checking.',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant),
-                  ),
+              ? const EmptyState(
+                  icon: Icons.verified_user_outlined,
+                  title: 'No checks in this period',
+                  message: 'A shop that sells restricted items and has never '
+                      'refused anyone has not been checking.',
                 )
               : Card(
                   child: Column(
                     children: [
                       for (final r in rows)
+                        // The outcome is said once, in the subtitle's words;
+                        // the icon only helps the eye scan the list — green
+                        // for a sale that went ahead, red for a refusal.
                         ListTile(
                           leading: Icon(
                             r.refused
@@ -291,31 +298,22 @@ class AgeChecksScreen extends ConsumerWidget {
                                 : Icons.check_circle_outline,
                             color: r.refused
                                 ? theme.colorScheme.error
-                                : theme.colorScheme.primary,
+                                : context.status.success,
                           ),
                           title: Text(
                             '${AgeVerificationDialog.categoryLabel(r.category)} · '
-                            '${r.minimumAge}+ in ${r.country}'
+                            '${r.minimumAge}+ in ${countryInSentence(r.country)}'
                             '${r.storePolicy ? ' (store policy)' : ''}'
                             '${r.bornBefore != null ? ' · born before ${AppFormat.date(r.bornBefore)}${r.bornBeforeStorePolicy ? ' (store policy)' : ''}' : ''}',
                           ),
                           subtitle: Text([
                             if (r.checkedAt != null)
-                              DateFormat.yMMMd().add_Hm().format(r.checkedAt!.toLocal()),
+                              AppFormat.dateTime(r.checkedAt!.toIso8601String()),
                             r.refused
                                 ? 'Refused — ${ageRefusalReasons[r.reason] ?? r.reason ?? ''}'
                                 : 'Sale went ahead'
                                     '${r.idType != null ? ' — ${ageIdTypes[r.idType] ?? r.idType}' : ''}',
                           ].join(' · ')),
-                          trailing: Text(
-                            r.refused ? 'REFUSED' : 'PASSED',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              color: r.refused
-                                  ? theme.colorScheme.error
-                                  : theme.colorScheme.primary,
-                            ),
-                          ),
                         ),
                     ],
                   ),
@@ -337,7 +335,7 @@ class _SummaryCards extends StatelessWidget {
     Widget stat(String label, String value, {Color? color}) => Expanded(
           child: Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: AppSpacing.cardPadding,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -353,16 +351,26 @@ class _SummaryCards extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(children: [
-          stat('Checks', '${summary.total}'),
-          stat('Sales went ahead', '${summary.passed}'),
-          stat('Refused', '${summary.refused}', color: theme.colorScheme.error),
-        ]),
+        // The theme's cards have no margin of their own, so the gap is here.
+        // Stretched to one height, so a label that wraps on a phone does not
+        // leave its neighbours short.
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              stat('Checks', '${summary.total}'),
+              const SizedBox(width: AppSpacing.md),
+              stat('Sales went ahead', '${summary.passed}'),
+              const SizedBox(width: AppSpacing.md),
+              stat('Refused', '${summary.refused}', color: theme.colorScheme.error),
+            ],
+          ),
+        ),
         if (summary.refusedByReason.isNotEmpty) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: AppSpacing.sm),
           Wrap(
-            spacing: 8,
-            runSpacing: 6,
+            spacing: AppSpacing.sm,
+            runSpacing: AppSpacing.xs,
             children: [
               for (final e in summary.refusedByReason.entries)
                 Chip(

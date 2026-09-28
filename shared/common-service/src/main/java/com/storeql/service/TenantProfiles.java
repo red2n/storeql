@@ -63,7 +63,14 @@ public class TenantProfiles {
   private static final Pattern COUNTRY = Pattern.compile("[A-Z]{2}");
 
   /** What a service needs to know about the tenant it is acting for. */
-  public record Profile(UUID tenantId, String currency, String country) {}
+  /**
+   * What tenant-svc says of a business.
+   *
+   * @param sandbox whether it is a sandbox (22.8): a stand-in for a live business where nothing is
+   *     real — no message leaves it and no money moves. False for a live business, and for a
+   *     profile from before sandboxes existed.
+   */
+  public record Profile(UUID tenantId, String currency, String country, boolean sandbox) {}
 
   private record Cached(Profile profile, Instant expiresAt) {}
 
@@ -74,17 +81,146 @@ public class TenantProfiles {
    *
    * @param ids every store of the tenant
    * @param countries the upper-cased country of each store that records one
+   * @param warehouses the stores of type WAREHOUSE: stock-only sites that serve shops (depot / DC
+   *     replenishment); every other store is a shop
+   * @param dark the stores of type DARK_STORE: shops with no shop floor, which fill online orders
+   *     for delivery only — no collection is offered there and no till opens (ship-from-store and
+   *     dark-store picking)
+   * @param zones the IANA time zone id of each store that records one (delivery and collection
+   *     slots): a store's own hours and windows are set and shown in this zone, never a platform
+   *     default — no zone is assumed for a store that records none
+   * @param tillPhones what each store's till asks for a phone (a phone at the till): {@code
+   *     REQUIRED}, {@code OPTIONAL} or {@code OFF}, for each store that records one of the three
    */
-  public record Stores(Set<UUID> ids, Map<UUID, String> countries) {
+  public record Stores(
+      Set<UUID> ids,
+      Map<UUID, String> countries,
+      Set<UUID> warehouses,
+      Map<UUID, Point> points,
+      Set<UUID> dark,
+      Map<UUID, String> zones,
+      Map<UUID, String> tillPhones) {
+
+    /** What a store's till may ask for a phone; tenant-svc's {@code stores.till_phone}. */
+    public static final Set<String> TILL_PHONE = Set.of("REQUIRED", "OPTIONAL", "OFF");
+
+    public Stores {
+      ids = Set.copyOf(ids);
+      countries = Map.copyOf(countries);
+      warehouses = Set.copyOf(warehouses);
+      points = Map.copyOf(points);
+      dark = Set.copyOf(dark);
+      zones = Map.copyOf(zones);
+      tillPhones = Map.copyOf(tillPhones);
+    }
+
+    /** As before a till's phone choice was read: no store records one. */
+    public Stores(
+        Set<UUID> ids,
+        Map<UUID, String> countries,
+        Set<UUID> warehouses,
+        Map<UUID, Point> points,
+        Set<UUID> dark,
+        Map<UUID, String> zones) {
+      this(ids, countries, warehouses, points, dark, zones, Map.of());
+    }
+
+    /** As before time zones were read: no store records one. */
+    public Stores(
+        Set<UUID> ids,
+        Map<UUID, String> countries,
+        Set<UUID> warehouses,
+        Map<UUID, Point> points,
+        Set<UUID> dark) {
+      this(ids, countries, warehouses, points, dark, Map.of());
+    }
+
+    /** As before dark stores were read: no store is one. */
+    public Stores(
+        Set<UUID> ids, Map<UUID, String> countries, Set<UUID> warehouses, Map<UUID, Point> points) {
+      this(ids, countries, warehouses, points, Set.of(), Map.of());
+    }
+
+    /** As before warehouses were read: no store is one. */
+    public Stores(Set<UUID> ids, Map<UUID, String> countries) {
+      this(ids, countries, Set.of(), Map.of(), Set.of(), Map.of());
+    }
+
+    /** As before coordinates were read. */
+    public Stores(Set<UUID> ids, Map<UUID, String> countries, Set<UUID> warehouses) {
+      this(ids, countries, warehouses, Map.of(), Set.of(), Map.of());
+    }
+
+    /**
+     * Whether the store is one of the tenant's dark stores: it fills online orders for delivery and
+     * offers no collection and no till.
+     */
+    public boolean isDark(UUID storeId) {
+      return storeId != null && dark.contains(storeId);
+    }
+
+    /** Where the store is, or null when it records no coordinates. */
+    public Point where(UUID storeId) {
+      return storeId == null ? null : points.get(storeId);
+    }
 
     /** Whether the store is one of the tenant's. */
     public boolean has(UUID storeId) {
       return storeId != null && ids.contains(storeId);
     }
+
+    /** Whether the store is one of the tenant's warehouses. */
+    public boolean isWarehouse(UUID storeId) {
+      return storeId != null && warehouses.contains(storeId);
+    }
+
+    /**
+     * The store's own IANA time zone (delivery and collection slots), or {@code null} when the
+     * store is unknown, records none, or what it records is not a zone {@link java.time.ZoneId} can
+     * resolve — never a guess, since a window set or shown in the wrong zone is wrong by hours, not
+     * by nothing.
+     *
+     * @param storeId the store
+     * @return the zone, or {@code null}
+     */
+    public java.time.ZoneId zoneOf(UUID storeId) {
+      if (storeId == null) return null;
+      String tz = zones.get(storeId);
+      if (tz == null || tz.isBlank()) return null;
+      try {
+        return java.time.ZoneId.of(tz);
+      } catch (RuntimeException e) {
+        return null;
+      }
+    }
+
+    /**
+     * What the store's till asks for a phone (a phone at the till): {@code REQUIRED}, {@code
+     * OPTIONAL} or {@code OFF}, or {@code null} when the store is unknown or records none of the
+     * three. What a {@code null} means is the caller's to say; order-svc takes it for {@code
+     * OPTIONAL}, so a store it cannot read never refuses a sale.
+     *
+     * @param storeId the store
+     * @return the choice, or {@code null}
+     */
+    public String tillPhoneOf(UUID storeId) {
+      return storeId == null ? null : tillPhones.get(storeId);
+    }
   }
 
+  /** A store's latitude and longitude, in degrees. */
+  public record Point(double lat, double lng) {}
+
   /** One page of {@code GET /admin/stores}. */
-  record StorePage(List<UUID> ids, Map<UUID, String> countries, String nextCursor) {}
+  record StorePage(
+      List<UUID> ids,
+      Map<UUID, String> countries,
+      Set<UUID> warehouses,
+      Map<UUID, Point> points,
+      Set<UUID> dark,
+      Map<UUID, String> zones,
+      Map<UUID, String> tillPhones,
+      String nextCursor) {}
 
   private record CachedStores(Stores stores, Instant readAt) {}
 
@@ -124,7 +260,7 @@ public class TenantProfiles {
   }
 
   /** For tests: a fetch function standing in for tenant-svc, and a clock to age the cache with. */
-  static TenantProfiles forTest(Function<UUID, Optional<String>> fetch, Clock clock) {
+  public static TenantProfiles forTest(Function<UUID, Optional<String>> fetch, Clock clock) {
     TenantProfiles p = new TenantProfiles();
     p.fetch = fetch;
     p.clock = clock;
@@ -176,6 +312,11 @@ public class TenantProfiles {
   private Optional<Stores> readStores(UUID tenantId) {
     Set<UUID> ids = new HashSet<>();
     Map<UUID, String> countries = new HashMap<>();
+    Set<UUID> warehouses = new HashSet<>();
+    Map<UUID, Point> points = new HashMap<>();
+    Set<UUID> dark = new HashSet<>();
+    Map<UUID, String> zones = new HashMap<>();
+    Map<UUID, String> tillPhones = new HashMap<>();
     String after = null;
     for (int page = 0; page < MAX_STORE_PAGES; page++) {
       Optional<StorePage> read =
@@ -183,8 +324,13 @@ public class TenantProfiles {
       if (read.isEmpty()) return Optional.empty();
       ids.addAll(read.get().ids());
       countries.putAll(read.get().countries());
+      warehouses.addAll(read.get().warehouses());
+      points.putAll(read.get().points());
+      dark.addAll(read.get().dark());
+      zones.putAll(read.get().zones());
+      tillPhones.putAll(read.get().tillPhones());
       if (read.get().nextCursor() == null) {
-        return Optional.of(new Stores(Set.copyOf(ids), Map.copyOf(countries)));
+        return Optional.of(new Stores(ids, countries, warehouses, points, dark, zones, tillPhones));
       }
       after = read.get().nextCursor();
     }
@@ -195,7 +341,9 @@ public class TenantProfiles {
   /**
    * Reads one page of {@code GET /admin/stores}: each store's id and, when it records one, its
    * country, upper-cased but not otherwise judged — a country the rules cannot read is refused
-   * where the rules are asked, not quietly dropped here.
+   * where the rules are asked, not quietly dropped here. {@code timezone} is kept verbatim (an IANA
+   * zone id, e.g. {@code "Europe/Warsaw"}); {@link Stores#zoneOf} is where an unreadable one is
+   * turned into "none" rather than this parse.
    */
   static Optional<StorePage> parseStores(String body) {
     try (JsonReader reader = Json.createReader(new StringReader(body))) {
@@ -203,15 +351,48 @@ public class TenantProfiles {
       if (!root.containsKey("data") || root.isNull("data")) return Optional.empty();
       List<UUID> ids = new ArrayList<>();
       Map<UUID, String> countries = new HashMap<>();
+      Set<UUID> warehouses = new HashSet<>();
+      Map<UUID, Point> points = new HashMap<>();
+      Set<UUID> dark = new HashSet<>();
+      Map<UUID, String> zones = new HashMap<>();
+      Map<UUID, String> tillPhones = new HashMap<>();
       for (JsonValue value : root.getJsonArray("data")) {
         JsonObject store = value.asJsonObject();
         UUID id = Ids.parse(store.getString("id"));
         ids.add(id);
+        String type =
+            store.containsKey("type") && !store.isNull("type")
+                ? upper(store.getString("type"))
+                : null;
+        if ("WAREHOUSE".equals(type)) warehouses.add(id);
+        if ("DARK_STORE".equals(type)) dark.add(id);
+        if (store.containsKey("geoLat")
+            && !store.isNull("geoLat")
+            && store.containsKey("geoLng")
+            && !store.isNull("geoLng")) {
+          points.put(
+              id,
+              new Point(
+                  store.getJsonNumber("geoLat").doubleValue(),
+                  store.getJsonNumber("geoLng").doubleValue()));
+        }
         String country =
             store.containsKey("country") && !store.isNull("country")
                 ? upper(store.getString("country"))
                 : null;
         if (country != null && !country.isEmpty()) countries.put(id, country);
+        if (store.containsKey("timezone")
+            && !store.isNull("timezone")
+            && store.get("timezone").getValueType() == jakarta.json.JsonValue.ValueType.STRING) {
+          String tz = store.getString("timezone").strip();
+          if (!tz.isEmpty()) zones.put(id, tz);
+        }
+        if (store.containsKey("tillPhone")
+            && !store.isNull("tillPhone")
+            && store.get("tillPhone").getValueType() == jakarta.json.JsonValue.ValueType.STRING) {
+          String ask = upper(store.getString("tillPhone"));
+          if (Stores.TILL_PHONE.contains(ask)) tillPhones.put(id, ask);
+        }
       }
       JsonObject meta =
           root.containsKey("meta") && !root.isNull("meta") ? root.getJsonObject("meta") : null;
@@ -223,6 +404,11 @@ public class TenantProfiles {
           new StorePage(
               List.copyOf(ids),
               Map.copyOf(countries),
+              Set.copyOf(warehouses),
+              Map.copyOf(points),
+              Set.copyOf(dark),
+              Map.copyOf(zones),
+              Map.copyOf(tillPhones),
               next == null || next.isBlank() ? null : next));
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "unreadable page of stores: {0}", e.getMessage());
@@ -338,6 +524,16 @@ public class TenantProfiles {
    *
    * @throws ApiException 503 {@code TENANT_PROFILE_UNAVAILABLE} when it cannot be read
    */
+  /**
+   * Whether the business is a sandbox (22.8). False when its profile cannot be read: a business
+   * whose nature is unknown is treated as live, so an outage never makes a real business behave as
+   * a sandbox — the callers that must not act on a sandbox read the profile for other reasons first
+   * and fail closed there.
+   */
+  public boolean isSandbox(UUID tenantId) {
+    return find(tenantId).map(Profile::sandbox).orElse(false);
+  }
+
   public String requireCurrency(UUID tenantId) {
     return require(tenantId).currency();
   }
@@ -421,7 +617,8 @@ public class TenantProfiles {
       String country = upper(data.getString("country", null));
       if (currency == null || !CURRENCY.matcher(currency).matches()) return Optional.empty();
       if (country == null || !COUNTRY.matcher(country).matches()) return Optional.empty();
-      return Optional.of(new Profile(tenantId, currency, country));
+      String mode = upper(data.getString("mode", null));
+      return Optional.of(new Profile(tenantId, currency, country, "SANDBOX".equals(mode)));
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "malformed tenant profile for {0}: {1}", tenantId, e.getMessage());
       return Optional.empty();

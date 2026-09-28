@@ -2,10 +2,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../core/auth/password_policy.dart';
+import '../../core/format.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/adaptive_nav_shell.dart';
 import 'storefront_providers.dart';
 import 'survey_widgets.dart';
+import '../../core/theme.dart';
 
 const _destinations = [
   AdaptiveNavDestination(
@@ -70,6 +74,7 @@ class StorefrontShell extends ConsumerWidget {
       actions: suspended
           ? const []
           : [
+              const CurrencyPicker(),
               const _AccountAction(),
               Padding(
                 padding: const EdgeInsets.only(right: 8),
@@ -90,8 +95,14 @@ class StorefrontShell extends ConsumerWidget {
               children: [
                 Expanded(child: child),
                 // Sticky cart bar — a constant, low-friction path to checkout
-                // while browsing. Hidden on the cart screen (it has its own CTA).
-                if (!currentLocation.startsWith('/store/cart')) const _CartBar(),
+                // while browsing. Hidden on the cart screen (it has its own CTA),
+                // and on a product page on a phone, where the page's own Add bar
+                // sits above it and the two would stack over the bottom bar (the
+                // cart stays one tap away in the app bar and the bottom bar).
+                if (!currentLocation.startsWith('/store/cart') &&
+                    !(context.isCompact &&
+                        currentLocation.startsWith('/store/products/')))
+                  const _CartBar(),
               ],
             ),
     );
@@ -140,6 +151,7 @@ class _CartBar extends ConsumerWidget {
     final count = cart.fold<int>(0, (s, l) => s + l.qty);
     final total = cart.fold<double>(0, (s, l) => s + l.lineTotal);
     final currency = cart.first.currency;
+    final money = AppFormat.money(total, currencyCode: currency);
 
     return Material(
       color: cs.primary,
@@ -149,7 +161,7 @@ class _CartBar extends ConsumerWidget {
         child: Semantics(
           button: true,
           label: showPrices
-              ? '$count item${count == 1 ? '' : 's'} in the cart, $currency ${total.toStringAsFixed(2)}. View cart'
+              ? '$count item${count == 1 ? '' : 's'} in the cart, $money. View cart'
               : '$count item${count == 1 ? '' : 's'} in the cart. View cart',
           excludeSemantics: true,
           onTap: () => context.go('/store/cart'),
@@ -168,7 +180,7 @@ class _CartBar extends ConsumerWidget {
                   Expanded(
                     child: Text(
                       showPrices
-                          ? '$currency ${total.toStringAsFixed(2)}'
+                          ? money
                           : '$count item${count == 1 ? '' : 's'}',
                       style: TextStyle(
                         color: cs.onPrimary,
@@ -201,6 +213,42 @@ class _CartBar extends ConsumerWidget {
 
 /// App-bar account button: shows the signed-in email (with sign-out) or a
 /// "Sign in" entry point to the customer auth dialog.
+/// The currency the shopper sees prices in (03.x): the shop's own and every
+/// currency it keeps a rate for. Shown only when there is a choice; prices are
+/// always charged in the shop's own currency, and the menu says so.
+class CurrencyPicker extends ConsumerWidget {
+  const CurrencyPicker({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final shop = ref.watch(storefrontCurrenciesProvider).value;
+    if (shop == null || shop.currencies.length < 2) return const SizedBox.shrink();
+    final chosen = ref.watch(displayCurrencyProvider) ?? shop.home;
+    return PopupMenuButton<String>(
+      key: const Key('currency-picker'),
+      tooltip: 'Show prices in another currency',
+      initialValue: chosen,
+      onSelected: (c) =>
+          ref.read(displayCurrencyProvider.notifier).state = c == shop.home ? null : c,
+      itemBuilder: (_) => [
+        for (final c in shop.currencies)
+          PopupMenuItem(
+            value: c,
+            child: Text(c == shop.home ? '$c (you pay in $c)' : '$c, shown at the shop\'s rate'),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.currency_exchange_outlined, size: 18),
+          const SizedBox(width: 4),
+          Text(chosen, key: const Key('currency-picker-value')),
+        ]),
+      ),
+    );
+  }
+}
+
 class _AccountAction extends ConsumerWidget {
   const _AccountAction();
 
@@ -348,7 +396,7 @@ class _DeleteAccountDialogState extends ConsumerState<_DeleteAccountDialog> {
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                     color: cs.errorContainer,
-                    borderRadius: BorderRadius.circular(8)),
+                    borderRadius: AppRadius.chip),
                 child:
                     Text(_error!, style: TextStyle(color: cs.onErrorContainer)),
               ),
@@ -452,6 +500,8 @@ class _StorefrontAuthDialogState extends ConsumerState<StorefrontAuthDialog> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // Only in sign-up mode: signing in never touches the policy endpoint.
+    final policy = _register ? watchPasswordPolicy(ref) : PasswordPolicy.fallback;
     return AlertDialog(
       title: Text(_register ? 'Create account' : 'Sign in'),
       content: SizedBox(
@@ -467,7 +517,7 @@ class _StorefrontAuthDialogState extends ConsumerState<StorefrontAuthDialog> {
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                       color: cs.errorContainer,
-                      borderRadius: BorderRadius.circular(8)),
+                      borderRadius: AppRadius.chip),
                   child: Text(_error!,
                       style: TextStyle(color: cs.onErrorContainer)),
                 ),
@@ -485,11 +535,42 @@ class _StorefrontAuthDialogState extends ConsumerState<StorefrontAuthDialog> {
               TextFormField(
                 controller: _passwordCtrl,
                 obscureText: true,
-                decoration: const InputDecoration(
-                    labelText: 'Password', prefixIcon: Icon(Icons.lock_outline)),
-                validator: (v) =>
-                    v == null || v.length < 15 ? 'At least 15 characters — a phrase of a few words is easiest' : null,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  // The published policy's rule, before it is typed — never
+                  // learned only from a refusal.
+                  helperText: _register ? passwordRuleText(policy) : null,
+                  helperMaxLines: 2,
+                  errorMaxLines: 2,
+                ),
+                // A sign-in asks only that a password is typed — the server says
+                // whether it is the right one; a new password is held to the
+                // published policy before anything is sent.
+                validator: (v) => v == null || v.isEmpty
+                    ? 'Enter your password'
+                    : _register
+                        ? passwordLengthProblemPlain(v, policy)
+                        : null,
               ),
+              if (!_register) ...[
+                Align(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: TextButton(
+                    key: const Key('forgot-password'),
+                    onPressed: _loading
+                        ? null
+                        : () {
+                            Navigator.pop(context);
+                            // Named, so the forgot-password page can lead a
+                            // shopper back to the shop rather than to staff
+                            // sign-in once they're done.
+                            context.go('/forgot-password?from=storefront');
+                          },
+                    child: const Text('Forgot password?'),
+                  ),
+                ),
+              ],
               if (_register) ...[
                 const SizedBox(height: 12),
                 TextFormField(

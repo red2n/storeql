@@ -57,6 +57,26 @@ class OrderFulfilledRevenueTest {
     service = new RecordingService();
     handler = new OrderEventHandler();
     handler.service = service;
+    // No wave picked these lines: the ordinary path runs, and the projection is not consulted.
+    handler.waves =
+        new com.storeql.inventory.service.WaveService() {
+          @Override
+          public BigDecimal pickedByWave(
+              UUID dedupeId,
+              String consumerName,
+              UUID tenantId,
+              UUID storeId,
+              UUID variantId,
+              BigDecimal qty,
+              UUID orderId,
+              BigDecimal netAmount) {
+            return BigDecimal.ZERO;
+          }
+
+          @Override
+          public void fulfilledByHand(
+              UUID tenantId, UUID orderId, UUID variantId, BigDecimal qty) {}
+        };
   }
 
   private void fulfil(String netAmountJson) {

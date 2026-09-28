@@ -4,13 +4,19 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/util/image_compress.dart';
 import '../../shared/widgets/barcode_scanner_sheet.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/scrollable_table.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
 import 'providers/products_pagination.dart';
 import 'variant_compliance_dialog.dart';
@@ -26,14 +32,35 @@ class _ProductsScreenState extends ConsumerState<ProductsScreen> {
   String _search = '';
   String? _categoryFilter;
 
+  /// Holds the search text, so it survives the filters moving between the
+  /// phone layout and the wide one.
+  final _searchCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  /// Reloads the first page of products and the categories: the Refresh
+  /// button, and a pull on the phone list.
+  Future<void> _refresh() {
+    final reload =
+        ref.read(productsPaginationProvider(_categoryFilter).notifier).refresh();
+    ref.invalidate(categoriesProvider);
+    return reload;
+  }
+
   @override
   Widget build(BuildContext context) {
     final page = ref.watch(productsPaginationProvider(_categoryFilter));
     final catsAsync = ref.watch(categoriesProvider);
-    final cs = Theme.of(context).colorScheme;
+    // One inset for the title, the filters and the table or list under them.
+    final gutter = context.pageGutter;
 
     final cats = catsAsync.value ?? [];
     final catById = {for (var c in cats) c.id: c};
+    final loaded = page.products.length;
 
     return Scaffold(
       floatingActionButton: FloatingActionButton.extended(
@@ -46,41 +73,25 @@ class _ProductsScreenState extends ConsumerState<ProductsScreen> {
       children: [
         // Header
         Padding(
-          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+          padding: EdgeInsetsDirectional.fromSTEB(
+              gutter, gutter, gutter, AppSpacing.lg),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Online products listed before EU product safety law was enforced here (01.12).
               const MissingSafetyBanner(),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text('Products',
-                        style: Theme.of(context).textTheme.headlineMedium),
-                  ),
-                  if (!page.isLoadingInitial && page.error == null)
-                    Chip(
-                      // "+" signals more exist beyond what's loaded so far — page.products.length
-                      // alone isn't the tenant's true total once results span more than one page.
-                      label: Text(
-                          '${page.products.length}${page.hasMore ? '+' : ''} products'),
-                      backgroundColor: cs.secondaryContainer,
-                    ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              OverflowBar(
-                spacing: 8,
-                overflowSpacing: 8,
-                overflowAlignment: OverflowBarAlignment.start,
-                children: [
+              PageHeader(
+                title: 'Products',
+                // "+" signals more exist beyond what's loaded so far — the loaded count
+                // alone isn't the tenant's true total once results span more than one page.
+                subtitle: page.isLoadingInitial || page.error != null
+                    ? null
+                    : '$loaded${page.hasMore ? '+' : ''} '
+                        '${loaded == 1 && !page.hasMore ? 'product' : 'products'}',
+                padding: EdgeInsets.zero,
+                actions: [
                   OutlinedButton.icon(
-                    onPressed: () {
-                      ref
-                          .read(productsPaginationProvider(_categoryFilter).notifier)
-                          .refresh();
-                      ref.invalidate(categoriesProvider);
-                    },
+                    onPressed: _refresh,
                     icon: const Icon(Icons.refresh),
                     label: const Text('Refresh'),
                   ),
@@ -90,33 +101,61 @@ class _ProductsScreenState extends ConsumerState<ProductsScreen> {
           ),
         ),
 
-        // Filters
+        // Filters: on a phone the search takes the whole width and the
+        // category sits under it, so neither squeezes the other.
         Padding(
-          padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
-          child: Row(
-            children: [
-              Expanded(
-                child: SearchBar(
-                  hintText: 'Search products…',
-                  leading: const Icon(Icons.search),
-                  onChanged: (v) => setState(() => _search = v.trim()),
-                ),
-              ),
-              const SizedBox(width: 12),
-              if (cats.isNotEmpty)
-                DropdownButton<String?>(
-                  value: _categoryFilter,
-                  hint: const Text('All categories'),
-                  underline: const SizedBox.shrink(),
-                  items: [
-                    const DropdownMenuItem(value: null, child: Text('All categories')),
-                    ...cats.where((c) => c.status.toUpperCase() == 'ACTIVE').map((c) =>
-                        DropdownMenuItem(value: c.id, child: Text(c.name))),
+          padding:
+              EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, AppSpacing.md),
+          child: LayoutBuilder(builder: (context, constraints) {
+            final search = SearchBar(
+              controller: _searchCtrl,
+              hintText: 'Search products…',
+              leading: const Icon(Icons.search),
+              onChanged: (v) => setState(() => _search = v.trim()),
+            );
+            final category = cats.isEmpty
+                ? null
+                : DropdownButton<String?>(
+                    value: _categoryFilter,
+                    isExpanded: true,
+                    hint: const Text('All categories'),
+                    underline: const SizedBox.shrink(),
+                    items: [
+                      const DropdownMenuItem(
+                          value: null, child: Text('All categories')),
+                      ...cats
+                          .where((c) => c.status.toUpperCase() == 'ACTIVE')
+                          .map((c) => DropdownMenuItem(
+                              value: c.id,
+                              child: Text(c.name,
+                                  overflow: TextOverflow.ellipsis))),
+                    ],
+                    onChanged: (v) => setState(() => _categoryFilter = v),
+                  );
+            if (AppBreakpoints.classOf(constraints.maxWidth) ==
+                WindowClass.compact) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  search,
+                  if (category != null) ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    category,
                   ],
-                  onChanged: (v) => setState(() => _categoryFilter = v),
-                ),
-            ],
-          ),
+                ],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: search),
+                if (category != null) ...[
+                  const SizedBox(width: AppSpacing.md),
+                  SizedBox(width: 240, child: category),
+                ],
+              ],
+            );
+          }),
         ),
 
         // List
@@ -143,47 +182,50 @@ class _ProductsScreenState extends ConsumerState<ProductsScreen> {
                     .toList();
 
             if (filtered.isEmpty) {
-              return Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.inventory_2_outlined,
-                        size: 64, color: cs.outlineVariant),
-                    const SizedBox(height: 16),
-                    Text(
-                      page.products.isEmpty
-                          ? 'No products yet'
-                          : 'No products match the filter',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 8),
-                    if (page.products.isEmpty)
-                      OutlinedButton.icon(
+              return EmptyState(
+                icon: Icons.inventory_2_outlined,
+                title: page.products.isEmpty
+                    ? 'No products yet'
+                    : 'No products match the filter',
+                action: page.products.isEmpty
+                    ? OutlinedButton.icon(
                         onPressed: () =>
                             _showCreateDialog(context, ref, cats),
                         icon: const Icon(Icons.add),
                         label: const Text('New Product'),
                       )
-                    else
-                      TextButton(
+                    : TextButton(
                         onPressed: () => setState(() {
                           _search = '';
+                          _searchCtrl.clear();
                           _categoryFilter = null;
                         }),
                         child: const Text('Clear filter'),
                       ),
-                  ],
-                ),
               );
             }
 
-            return Column(
-              children: [
-                Expanded(
-                  child: LayoutBuilder(builder: (context, bc) {
-                    final wide = bc.maxWidth >= 700;
-                    if (wide) {
-                      return _WideTable(
+            final Widget? loadMore = page.hasMore || page.isLoadingMore
+                ? (page.isLoadingMore
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : OutlinedButton(
+                        onPressed: () => ref
+                            .read(productsPaginationProvider(_categoryFilter)
+                                .notifier)
+                            .loadMore(),
+                        child: const Text('Load more'),
+                      ))
+                : null;
+
+            return LayoutBuilder(builder: (context, bc) {
+              if (AppBreakpoints.classOf(bc.maxWidth) != WindowClass.compact) {
+                return Column(
+                  children: [
+                    Expanded(
+                      child: _WideTable(
                         products: filtered,
                         catById: catById,
                         onViewVariants: (p) =>
@@ -193,38 +235,30 @@ class _ProductsScreenState extends ConsumerState<ProductsScreen> {
                         onImage: (p) => _manageImage(context, ref, p),
                         onDelist: (p) => _delist(context, ref, p),
                         onLifecycle: (p, move) => _lifecycle(context, ref, p, move),
-                      );
-                    }
-                    return _NarrowList(
-                      products: filtered,
-                      catById: catById,
-                      onViewVariants: (p) =>
-                          _showVariantsDialog(context, ref, p),
-                      onAssortment: (p) => _showAssortmentDialog(context, ref, p),
-                      onImage: (p) => _manageImage(context, ref, p),
-                      onDelist: (p) => _delist(context, ref, p),
-                        onLifecycle: (p, move) => _lifecycle(context, ref, p, move),
-                    );
-                  }),
-                ),
-                if (page.hasMore || page.isLoadingMore)
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: page.isLoadingMore
-                        ? const SizedBox(
-                            height: 20,
-                            width: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2))
-                        : OutlinedButton(
-                            onPressed: () => ref
-                                .read(productsPaginationProvider(_categoryFilter)
-                                    .notifier)
-                                .loadMore(),
-                            child: const Text('Load more'),
-                          ),
-                  ),
-              ],
-            );
+                      ),
+                    ),
+                    // The band under the table holds Load more and keeps the
+                    // New Product button clear of the table's last rows.
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(
+                          minHeight: AppSpacing.fabClearance),
+                      child: Center(child: loadMore),
+                    ),
+                  ],
+                );
+              }
+              return _NarrowList(
+                products: filtered,
+                catById: catById,
+                footer: loadMore,
+                onRefresh: _refresh,
+                onViewVariants: (p) => _showVariantsDialog(context, ref, p),
+                onAssortment: (p) => _showAssortmentDialog(context, ref, p),
+                onImage: (p) => _manageImage(context, ref, p),
+                onDelist: (p) => _delist(context, ref, p),
+                onLifecycle: (p, move) => _lifecycle(context, ref, p, move),
+              );
+            });
           }),
         ),
       ],
@@ -448,84 +482,86 @@ class _WideTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return LayoutBuilder(
-      builder: (context, bc) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Card(
-          clipBehavior: Clip.antiAlias,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minWidth: bc.maxWidth - 32),
-              child: DataTable(
-                headingRowColor:
-                    WidgetStatePropertyAll(cs.surfaceContainerHigh),
-                columnSpacing: 24,
-                columns: const [
-                  DataColumn(label: Text('Product')),
-                  DataColumn(label: Text('Category')),
-                  DataColumn(label: Text('Online')),
-                  DataColumn(label: Text('POS')),
-                  DataColumn(label: Text('Status')),
-                  DataColumn(label: Text('')),
-                ],
-                rows: products.map((p) {
-                  final active = p.status.toUpperCase() == 'ACTIVE';
-                  final catName = p.categoryId != null
-                      ? (catById[p.categoryId]?.name ?? '—')
-                      : '—';
-                  return DataRow(cells: [
-                    DataCell(Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(p.name,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold)),
-                        if (p.description != null && p.description!.isNotEmpty)
-                          Text(
-                            p.description!.length > 40
-                                ? '${p.description!.substring(0, 40)}…'
-                                : p.description!,
-                            style: TextStyle(
-                                fontSize: 11, color: cs.outline),
-                          ),
-                      ],
-                    )),
-                    DataCell(Text(catName,
-                        style: TextStyle(
-                            fontSize: 12, color: cs.outline))),
-                    DataCell(Icon(
-                      p.sellableOnline
-                          ? Icons.check_circle_outline
-                          : Icons.remove_circle_outline,
-                      size: 18,
-                      color: p.sellableOnline
-                          ? context.status.success
-                          : cs.outlineVariant,
-                    )),
-                    DataCell(Icon(
-                      p.sellablePos
-                          ? Icons.check_circle_outline
-                          : Icons.remove_circle_outline,
-                      size: 18,
-                      color: p.sellablePos
-                          ? context.status.success
-                          : cs.outlineVariant,
-                    )),
-                    DataCell(_StatusChip(active: active, label: p.lifecycleLabel)),
-                    DataCell(_ProductActions(
-                      p: p,
-                      onViewVariants: onViewVariants,
-                      onAssortment: onAssortment,
-                      onImage: onImage,
-                      onDelist: onDelist,
-                      onLifecycle: onLifecycle,
-                    )),
-                  ]);
-                }).toList(),
-              ),
-            ),
+    return Padding(
+      // The page gutter, so the table's edges line up with the title and filters.
+      padding: EdgeInsets.symmetric(horizontal: context.pageGutter),
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        // Scrolls both ways inside the card, so every row (including the ones
+        // Load more adds) and every column can be reached.
+        child: ScrollableTable(
+          child: DataTable(
+            headingRowColor: WidgetStatePropertyAll(cs.surfaceContainerHigh),
+            columnSpacing: 24,
+            // Rows grow with their text (two lines per product, larger text
+            // sizes) instead of clipping at the default 48.
+            dataRowMaxHeight: double.infinity,
+            columns: const [
+              DataColumn(label: Text('Product')),
+              DataColumn(label: Text('Category')),
+              DataColumn(label: Text('Online')),
+              DataColumn(label: Text('POS')),
+              DataColumn(label: Text('Status')),
+              DataColumn(label: Text('')),
+            ],
+            rows: products.map((p) {
+              final catName = p.categoryId != null
+                  ? (catById[p.categoryId]?.name ?? '—')
+                  : '—';
+              return DataRow(cells: [
+                // Capped, so one long name wraps instead of widening the
+                // column until the whole table scrolls sideways on desktop.
+                DataCell(ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 280),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(p.name,
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      if (p.description != null && p.description!.isNotEmpty)
+                        Text(
+                          p.description!.length > 40
+                              ? '${p.description!.substring(0, 40)}…'
+                              : p.description!,
+                          style: TextStyle(fontSize: 11, color: cs.outline),
+                        ),
+                    ],
+                  ),
+                )),
+                DataCell(Text(catName,
+                    style: TextStyle(fontSize: 12, color: cs.outline))),
+                // Not sold here: onSurfaceVariant, which reads in both themes
+                // (outlineVariant is a divider colour, under 3:1).
+                DataCell(Icon(
+                  p.sellableOnline
+                      ? Icons.check_circle_outline
+                      : Icons.remove_circle_outline,
+                  size: 18,
+                  color: p.sellableOnline
+                      ? context.status.success
+                      : cs.onSurfaceVariant,
+                )),
+                DataCell(Icon(
+                  p.sellablePos
+                      ? Icons.check_circle_outline
+                      : Icons.remove_circle_outline,
+                  size: 18,
+                  color: p.sellablePos
+                      ? context.status.success
+                      : cs.onSurfaceVariant,
+                )),
+                DataCell(_LifecycleBadge(status: p.status)),
+                DataCell(_ProductActions(
+                  p: p,
+                  onViewVariants: onViewVariants,
+                  onAssortment: onAssortment,
+                  onImage: onImage,
+                  onDelist: onDelist,
+                  onLifecycle: onLifecycle,
+                )),
+              ]);
+            }).toList(),
           ),
         ),
       ),
@@ -632,6 +668,10 @@ class _ProductActions extends StatelessWidget {
 class _NarrowList extends StatelessWidget {
   final List<ProductInfo> products;
   final Map<String, CategoryInfo> catById;
+
+  /// Load more (or its spinner) after the last row; null once all are loaded.
+  final Widget? footer;
+  final Future<void> Function() onRefresh;
   final void Function(ProductInfo) onViewVariants;
   final void Function(ProductInfo) onAssortment;
   final void Function(ProductInfo) onImage;
@@ -641,6 +681,8 @@ class _NarrowList extends StatelessWidget {
   const _NarrowList({
     required this.products,
     required this.catById,
+    required this.footer,
+    required this.onRefresh,
     required this.onViewVariants,
     required this.onAssortment,
     required this.onImage,
@@ -650,74 +692,92 @@ class _NarrowList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: products.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 4),
-      itemBuilder: (context, i) {
-        final p = products[i];
-        final cs = Theme.of(context).colorScheme;
-        final active = p.status.toUpperCase() == 'ACTIVE';
-        final catName =
-            p.categoryId != null ? (catById[p.categoryId]?.name ?? '—') : '—';
-        return Card(
-          child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: cs.primaryContainer,
-              child: Text(
-                p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: cs.onPrimaryContainer),
+    final gutter = context.pageGutter;
+    return RefreshIndicator.adaptive(
+      onRefresh: onRefresh,
+      child: ListView.separated(
+        // Scrollable even when short, so a pull always refreshes.
+        physics: const AlwaysScrollableScrollPhysics(),
+        // The bottom inset keeps the New Product button clear of the last row
+        // and of Load more.
+        padding: EdgeInsetsDirectional.fromSTEB(
+            gutter, AppSpacing.sm, gutter, AppSpacing.fabClearance),
+        itemCount: products.length + (footer == null ? 0 : 1),
+        separatorBuilder: (_, _) => const SizedBox(height: 4),
+        itemBuilder: (context, i) {
+          if (i == products.length) {
+            return Padding(
+              padding: const EdgeInsets.all(AppSpacing.md),
+              child: Center(child: footer),
+            );
+          }
+          final p = products[i];
+          final cs = Theme.of(context).colorScheme;
+          final catName =
+              p.categoryId != null ? (catById[p.categoryId]?.name ?? '—') : '—';
+          return Card(
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: cs.primaryContainer,
+                child: Text(
+                  p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: cs.onPrimaryContainer),
+                ),
+              ),
+              title: Text(p.name,
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              // The state sits under the name rather than beside it, so the
+              // name keeps most of a phone's width.
+              subtitle: Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.xs,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(catName,
+                      style: TextStyle(fontSize: 12, color: cs.outline)),
+                  _LifecycleBadge(status: p.status),
+                ],
+              ),
+              trailing: _ProductActions(
+                p: p,
+                onViewVariants: onViewVariants,
+                onAssortment: onAssortment,
+                onImage: onImage,
+                onDelist: onDelist,
+                onLifecycle: onLifecycle,
               ),
             ),
-            title: Text(p.name,
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text(catName,
-                style: TextStyle(fontSize: 12, color: cs.outline)),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _StatusChip(active: active, label: p.lifecycleLabel),
-                _ProductActions(
-                      p: p,
-                      onViewVariants: onViewVariants,
-                      onAssortment: onAssortment,
-                      onImage: onImage,
-                      onDelist: onDelist,
-                      onLifecycle: onLifecycle,
-                    ),
-              ],
-            ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }
 
-// ── Status chip ───────────────────────────────────────────────────────────────
+// ── Lifecycle badge ───────────────────────────────────────────────────────────
 
-class _StatusChip extends StatelessWidget {
-  final bool active;
-  final String label;
-  const _StatusChip({required this.active, required this.label});
+/// A product's lifecycle state in words, each state in its own tone: a new
+/// line waits to launch (info), a line on sale is good (success), one being
+/// run down needs a look (warning), and a delisted one is closed (neutral).
+class _LifecycleBadge extends StatelessWidget {
+  final String status;
+  const _LifecycleBadge({required this.status});
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: active ? cs.secondaryContainer : cs.errorContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(label,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-            color: active ? cs.onSecondaryContainer : cs.onErrorContainer,
-          )),
+    final tone = switch (status.toUpperCase()) {
+      'NEW_LINE' => StatusTone.info,
+      'ACTIVE' => StatusTone.success,
+      'DISCONTINUED' => StatusTone.warning,
+      'DELISTED' => StatusTone.neutral,
+      _ => null,
+    };
+    // A state this screen does not know yet still reads as words.
+    return StatusBadge(
+      tone == null ? humanizeCode(status) : lifecycleLabelOf(status),
+      tone: tone ?? StatusTone.neutral,
     );
   }
 }
@@ -765,7 +825,7 @@ class _ProductDialogState extends State<_ProductDialog> {
         widget.cats.where((c) => c.status.toUpperCase() == 'ACTIVE').toList();
 
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      shape: const RoundedRectangleBorder(borderRadius: AppRadius.card),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 480),
         child: Padding(
@@ -788,7 +848,7 @@ class _ProductDialogState extends State<_ProductDialog> {
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: cs.errorContainer,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: AppRadius.chip,
                       ),
                       child: Text(_error!,
                           style: TextStyle(color: cs.onErrorContainer)),
@@ -859,7 +919,7 @@ class _ProductDialogState extends State<_ProductDialog> {
                     subtitle: Text(_newLine
                         ? (_launchOn == null
                             ? 'Hidden from the shop and refused at the till until launched.'
-                            : 'Goes on sale ${_launchOn!.toIso8601String().substring(0, 10)} — launch it that day.')
+                            : 'Goes on sale ${AppFormat.date(_launchOn!.toIso8601String())} — launch it that day.')
                         : 'On sale as soon as it is priced and stocked.'),
                     value: _newLine,
                     onChanged: (v) => setState(() => _newLine = v ?? false),
@@ -881,7 +941,7 @@ class _ProductDialogState extends State<_ProductDialog> {
                         icon: const Icon(Icons.event),
                         label: Text(_launchOn == null
                             ? 'Launch day'
-                            : 'Launch day: ${_launchOn!.toIso8601String().substring(0, 10)}'),
+                            : 'Launch day: ${AppFormat.date(_launchOn!.toIso8601String())}'),
                       ),
                     ),
                   ExpansionTile(
@@ -983,10 +1043,12 @@ class _VariantsDialogState extends ConsumerState<_VariantsDialog> {
     final variantsAsync =
         ref.watch(productVariantsProvider(widget.product.id));
     final pricesAsync = ref.watch(variantPricesProvider);
+    final currency = ref.watch(tenantInfoProvider).value?.currency;
+    final compact = context.isCompact;
     final cs = Theme.of(context).colorScheme;
 
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      shape: const RoundedRectangleBorder(borderRadius: AppRadius.card),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 560, maxHeight: 600),
         child: Padding(
@@ -1053,6 +1115,22 @@ class _VariantsDialogState extends ConsumerState<_VariantsDialog> {
                       children: [
                         ...variants.map((v) {
                           final price = pricesAsync.value?[v.id];
+                          // The default price list is in the business's own
+                          // currency.
+                          final priceText = Text(
+                            price != null
+                                ? AppFormat.money(price, currencyCode: currency)
+                                : 'No price',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: price != null ? cs.primary : cs.outline,
+                            ),
+                          );
+                          void compliance() => showDialog<bool>(
+                                context: context,
+                                builder: (_) =>
+                                    VariantComplianceDialog(variant: v),
+                              );
                           return Card(
                             child: ListTile(
                               leading: const Icon(Icons.label_outline),
@@ -1060,56 +1138,72 @@ class _VariantsDialogState extends ConsumerState<_VariantsDialog> {
                                   style: const TextStyle(
                                       fontFamily: 'monospace',
                                       fontWeight: FontWeight.bold)),
-                              subtitle: Row(
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  _StatusChip(
-                                    active: v.status.toUpperCase() == 'ACTIVE',
-                                    label: v.status,
+                                  Row(
+                                    children: [
+                                      // Active or Inactive, in words.
+                                      StatusBadge(
+                                        humanizeCode(v.status),
+                                        tone: v.status.toUpperCase() == 'ACTIVE'
+                                            ? StatusTone.success
+                                            : StatusTone.neutral,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          [
+                                            if (v.barcode != null)
+                                              'EAN: ${v.barcode}',
+                                            if (v.unit != null) v.unit!,
+                                          ].join('  ·  '),
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontSize: 12),
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      [
-                                        if (v.barcode != null)
-                                          'EAN: ${v.barcode}',
-                                        if (v.unit != null) v.unit!,
-                                      ].join('  ·  '),
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontSize: 12),
-                                    ),
-                                  ),
+                                  // On a phone the price goes under the SKU and
+                                  // the two actions into one menu, so the SKU
+                                  // keeps the width.
+                                  if (compact) priceText,
                                 ],
                               ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    price != null
-                                        ? price.toStringAsFixed(2)
-                                        : 'No price',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: price != null
-                                          ? cs.primary
-                                          : cs.outline,
+                              trailing: compact
+                                  ? PopupMenuButton<String>(
+                                      tooltip: 'Price, allergens and origin',
+                                      onSelected: (a) => a == 'price'
+                                          ? _setPrice(v, price)
+                                          : compliance(),
+                                      itemBuilder: (_) => const [
+                                        PopupMenuItem(
+                                            value: 'price',
+                                            child: Text('Set price')),
+                                        PopupMenuItem(
+                                            value: 'compliance',
+                                            child:
+                                                Text('Allergens and origin')),
+                                      ],
+                                    )
+                                  : Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        priceText,
+                                        IconButton(
+                                          icon: const Icon(
+                                              Icons.price_change_outlined),
+                                          tooltip: 'Set price',
+                                          onPressed: () => _setPrice(v, price),
+                                        ),
+                                        IconButton(
+                                          icon:
+                                              const Icon(Icons.no_food_outlined),
+                                          tooltip: 'Allergens and origin',
+                                          onPressed: compliance,
+                                        ),
+                                      ],
                                     ),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.price_change_outlined),
-                                    tooltip: 'Set price',
-                                    onPressed: () => _setPrice(v, price),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.no_food_outlined),
-                                    tooltip: 'Allergens and origin',
-                                    onPressed: () => showDialog<bool>(
-                                      context: context,
-                                      builder: (_) =>
-                                          VariantComplianceDialog(variant: v),
-                                    ),
-                                  ),
-                                ],
-                              ),
                             ),
                           );
                         }),
@@ -1147,7 +1241,7 @@ class _VariantsDialogState extends ConsumerState<_VariantsDialog> {
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
                       color: cs.errorContainer,
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: AppRadius.chip,
                     ),
                     child: Text(_saveError!,
                         style:
@@ -1439,14 +1533,14 @@ class _AssortmentDialogState extends ConsumerState<_AssortmentDialog> {
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: cs.errorContainer,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: AppRadius.chip,
                       ),
                       child: Text(_error!,
                           style: TextStyle(color: cs.onErrorContainer)),
                     ),
                     const SizedBox(height: 12),
                   ],
-                  SwitchListTile(
+                  SwitchListTile.adaptive(
                     contentPadding: EdgeInsets.zero,
                     value: _allStores,
                     onChanged: (v) => setState(() => _allStores = v),

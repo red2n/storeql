@@ -4,6 +4,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.Concurrency;
@@ -22,6 +23,7 @@ import java.io.StringReader;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterAll;
@@ -83,6 +85,12 @@ class BillingIT {
    * trap as WebClient folding a {@code ?} into the path.
    */
   private Answer call(String method, String path, String json, String tenant, String roles) {
+    return call(method, path, json, tenant, roles, null);
+  }
+
+  /** One call, as staff who name the stores they work in. */
+  private Answer call(
+      String method, String path, String json, String tenant, String roles, String stores) {
     WebTarget t = target;
     int q = path.indexOf('?');
     if (q < 0) {
@@ -100,6 +108,7 @@ class BillingIT {
     Invocation.Builder b = t.request(MediaType.APPLICATION_JSON).header("X-User-Id", Ids.newId());
     if (tenant != null) b = b.header("X-Tenant-Id", tenant);
     if (roles != null) b = b.header("X-Roles", roles);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
     Entity<String> body = Entity.entity(json == null ? "{}" : json, MediaType.APPLICATION_JSON);
     Response r =
         switch (method) {
@@ -172,6 +181,20 @@ class BillingIT {
 
   private String onboard(String name) {
     return TenantOnboarding.onboard(target, name, "IE", "EUR");
+  }
+
+  /** A store of the business's own, so another business's staff can name its id. */
+  private String storeOf(String tenantId) {
+    Answer store =
+        owner(
+            "POST",
+            "/admin/stores",
+            "{\"name\":\"Front shop\",\"code\":\"FS-"
+                + Ids.newId()
+                + "\",\"country\":\"IE\",\"timezone\":\"Europe/Dublin\"}",
+            tenantId);
+    assertThat(store.text(), store.status(), is(201));
+    return store.data().getString("id");
   }
 
   private List<JsonObject> invoicesOf(String tenantId) {
@@ -390,10 +413,41 @@ class BillingIT {
     assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
     String shop = onboard("German buyer");
 
+    // Notices go to the owner's sign-up address until the business names another (SJ-D72).
+    assertThat(
+        owner("GET", MINE, null, shop)
+            .data()
+            .getJsonObject("subscription")
+            .getString("billingEmail"),
+        is(TenantOnboarding.ownerEmail("German buyer")));
+
     // It moves its billing address to Germany. Its VAT number, if it has one, is unchecked.
     Answer moved =
         owner("PUT", MINE + "/details", "{\"country\":\"DE\",\"name\":\"Weinhaus\"}", shop);
     assertThat(moved.text(), moved.status(), is(200));
+    assertThat(
+        "an update that says nothing about the address leaves it standing",
+        moved.data().getJsonObject("subscription").getString("billingEmail"),
+        is(TenantOnboarding.ownerEmail("German buyer")));
+    Answer renamed =
+        owner(
+            "PUT",
+            MINE + "/details",
+            "{\"country\":\"DE\",\"billingEmail\":\"accounts@weinhaus.example\"}",
+            shop);
+    assertThat(renamed.text(), renamed.status(), is(200));
+    assertThat(
+        "the address the business names is the one kept — it used to be dropped (SJ-D72)",
+        renamed.data().getJsonObject("subscription").getString("billingEmail"),
+        is("accounts@weinhaus.example"));
+    assertThat(
+        owner(
+                "PUT",
+                MINE + "/details",
+                "{\"country\":\"DE\",\"billingEmail\":\"not an address\"}",
+                shop)
+            .status(),
+        is(400));
     assertThat(
         "an unchecked number is treated as no number",
         moved.data().getJsonObject("subscription").getJsonObject("buyer").getBoolean("vatChecked"),
@@ -517,5 +571,113 @@ class BillingIT {
         "and the platform's own run is not a business's to trigger",
         owner("POST", BILLING + "/run", null, mine).status(),
         is(403));
+  }
+
+  @Test
+  @DisplayName("The receivables name every invoice's business, and only the platform reads them")
+  void theReceivablesNameEachBusiness() {
+    // The platform console's receivables are every business's invoices on one screen. A row that
+    // does not say whose it is cannot be chased, so each names its business — and a business's own
+    // answers carry the same field, which is only ever its own id.
+    sellerIs("IE", "0.2300");
+    String plan = sellablePlan("IT-OWED-" + Ids.newId().toString().substring(0, 8), "10.00");
+    assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
+    String mine = onboard("Owes the platform");
+    String theirs = onboard("Also owes the platform");
+    String myStore = storeOf(mine);
+    JsonObject myInvoice = invoicesOf(mine).get(0);
+    String myInvoiceId = myInvoice.getString("id");
+    String theirInvoiceId = invoicesOf(theirs).get(0).getString("id");
+
+    Answer owed = platform("GET", BILLING + "/receivables?limit=100", null);
+    assertThat(owed.text(), owed.status(), is(200));
+    List<JsonObject> rows = owed.list();
+    assertThat("there is something owed", rows.size(), greaterThan(0));
+    for (JsonObject row : rows) {
+      assertThat("every row names its business: " + row, row.containsKey("tenantId"), is(true));
+      // A real business id, in the one form ids take here — not a blank or a placeholder.
+      assertThat(Ids.parse(row.getString("tenantId")).toString(), is(row.getString("tenantId")));
+    }
+    Map<String, String> businessOf =
+        rows.stream()
+            .collect(
+                Collectors.toMap(
+                    r -> r.getString("id"), r -> r.getString("tenantId"), (a, b) -> a));
+    assertThat(
+        "our invoice is owed: " + owed.text(), businessOf.containsKey(myInvoiceId), is(true));
+    assertThat("and named as ours", businessOf.get(myInvoiceId), is(mine));
+    assertThat("theirs is named as theirs", businessOf.get(theirInvoiceId), is(theirs));
+
+    // A business's own answers are unchanged apart from the field, which is its own id.
+    for (String business : List.of(mine, theirs)) {
+      for (JsonObject own : invoicesOf(business)) {
+        assertThat(
+            "an own invoice names its own business", own.getString("tenantId"), is(business));
+      }
+    }
+    Answer file = owner("GET", MINE + "/invoices/" + myInvoiceId, null, mine);
+    assertThat(file.text(), file.status(), is(200));
+    assertThat(file.data().getJsonObject("invoice").getString("tenantId"), is(mine));
+
+    // Another business's staff of every role, even naming our store, read none of it and change
+    // none of it.
+    for (String role : List.of("OWNER", "MANAGER", "CASHIER", "STOREKEEPER")) {
+      Answer everybodys =
+          call("GET", BILLING + "/receivables?limit=100", null, theirs, role, myStore);
+      assertThat(role + " does not read the receivables", everybodys.status(), is(403));
+      assertThat(everybodys.text(), not(containsString(mine)));
+      assertThat(everybodys.text(), not(containsString(myInvoiceId)));
+
+      Answer ours = call("GET", MINE + "/invoices/" + myInvoiceId, null, theirs, role, myStore);
+      assertThat(
+          role + " does not open our invoice",
+          ours.status(),
+          is(Set.of("OWNER", "MANAGER").contains(role) ? 404 : 403));
+      assertThat(ours.text(), not(containsString(mine)));
+
+      Answer theirList = call("GET", MINE + "/invoices?limit=100", null, theirs, role, myStore);
+      if (Set.of("OWNER", "MANAGER").contains(role)) {
+        assertThat(theirList.text(), theirList.status(), is(200));
+        for (JsonObject own : theirList.list()) {
+          assertThat(
+              role + " sees only its own business's invoices",
+              own.getString("tenantId"),
+              is(theirs));
+        }
+      } else {
+        assertThat(role + " does not read what the business pays", theirList.status(), is(403));
+      }
+      assertThat(theirList.text(), not(containsString(mine)));
+      assertThat(theirList.text(), not(containsString(myInvoiceId)));
+
+      Answer pushed =
+          call(
+              "PUT",
+              BILLING + "/invoices/" + myInvoiceId + "/due-date",
+              "{\"dueDate\":\"" + java.time.LocalDate.now().plusYears(1) + "\",\"reason\":\"x\"}",
+              theirs,
+              role,
+              myStore);
+      assertThat(role + " does not move our due date", pushed.status(), is(403));
+      Answer settled =
+          call(
+              "POST",
+              BILLING + "/invoices/" + myInvoiceId + "/payments",
+              "{\"amount\":1.00,\"method\":\"BANK_TRANSFER\"}",
+              theirs,
+              role,
+              myStore);
+      assertThat(role + " does not pay our invoice down", settled.status(), is(403));
+    }
+
+    JsonObject after =
+        owner("GET", MINE + "/invoices/" + myInvoiceId, null, mine).data().getJsonObject("invoice");
+    assertThat(
+        "our invoice is as it was", after.getString("dueDate"), is(myInvoice.getString("dueDate")));
+    assertThat(after.getString("status"), is("OPEN"));
+    assertThat(
+        new BigDecimal(after.get("outstanding").toString()),
+        is(new BigDecimal(myInvoice.get("outstanding").toString())));
+    assertThat(after.getString("tenantId"), is(mine));
   }
 }

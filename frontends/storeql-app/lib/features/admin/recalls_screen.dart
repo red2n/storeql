@@ -1,20 +1,23 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
+import '../../core/format.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
 import 'recall_providers.dart';
 import 'widgets/variant_picker.dart';
 import '../../shared/util/short_ref.dart';
+import '../../core/theme.dart';
 
-final _day = DateFormat('d MMM yyyy');
 final _isoDate = RegExp(r'^\d{4}-\d{2}-\d{2}$');
 
 String _qty(double v) =>
@@ -40,54 +43,44 @@ class RecallsScreen extends ConsumerWidget {
     final status = ref.watch(recallStatusFilterProvider);
     final async = ref.watch(recallsProvider(status));
 
+    final gutter = context.pageGutter;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            AppSpacing.xl,
-            AppSpacing.xl,
-            AppSpacing.xl,
+        PageHeader(
+          title: 'Recalls',
+          padding: EdgeInsetsDirectional.fromSTEB(
+            gutter,
+            gutter,
+            gutter,
             AppSpacing.md,
           ),
-          child: Wrap(
-            spacing: AppSpacing.lg,
-            runSpacing: AppSpacing.sm,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(
-                'Recalls',
-                style: Theme.of(context).textTheme.headlineMedium,
+          actions: [
+            if (isManager)
+              FilledButton.icon(
+                key: const Key('recall-open'),
+                icon: const Icon(Icons.report_outlined),
+                label: const Text('Open a recall'),
+                onPressed: () async {
+                  final opened = await showDialog<RecallDetail>(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (_) => const _OpenRecallDialog(),
+                  );
+                  if (opened == null || !context.mounted) return;
+                  ref.invalidate(recallsProvider);
+                  await _showDetail(context, opened.id);
+                },
               ),
-              SegmentedButton<String?>(
-                segments: [
-                  for (final e in _filters.entries)
-                    ButtonSegment(value: e.key, label: Text(e.value)),
-                ],
-                selected: {status},
-                onSelectionChanged: (s) =>
-                    ref.read(recallStatusFilterProvider.notifier).state =
-                        s.first,
-              ),
-              if (isManager)
-                FilledButton.icon(
-                  key: const Key('recall-open'),
-                  icon: const Icon(Icons.report_outlined),
-                  label: const Text('Open a recall'),
-                  onPressed: () async {
-                    final opened = await showDialog<RecallDetail>(
-                      context: context,
-                      barrierDismissible: false,
-                      builder: (_) => const _OpenRecallDialog(),
-                    );
-                    if (opened == null || !context.mounted) return;
-                    ref.invalidate(recallsProvider);
-                    await _showDetail(context, opened.id);
-                  },
-                ),
-            ],
-          ),
+          ],
         ),
+        _StatusFilter(
+          filters: _filters,
+          selected: status,
+          onSelected: (s) =>
+              ref.read(recallStatusFilterProvider.notifier).state = s,
+        ),
+        const SizedBox(height: AppSpacing.sm),
         Expanded(child: _list(context, ref, async, status)),
       ],
     );
@@ -114,18 +107,19 @@ class RecallsScreen extends ConsumerWidget {
     if (!async.hasValue) return const LoadingView(label: 'Loading recalls…');
     final recalls = async.value!;
     if (recalls.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.xl),
-          child: Text(
-            status == 'OPEN' ? 'No open recalls.' : 'No recalls here.',
-            textAlign: TextAlign.center,
-          ),
-        ),
+      return EmptyState(
+        icon: Icons.verified_outlined,
+        title: status == 'OPEN' ? 'No open recalls.' : 'No recalls here.',
       );
     }
+    final gutter = context.pageGutter;
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+      padding: EdgeInsetsDirectional.fromSTEB(
+        gutter,
+        0,
+        gutter,
+        AppSpacing.lg,
+      ),
       itemCount: recalls.length,
       separatorBuilder: (_, _) => const Divider(height: 1),
       itemBuilder: (_, i) => _RecallTile(recall: recalls[i]),
@@ -133,11 +127,95 @@ class RecallsScreen extends ConsumerWidget {
   }
 }
 
+/// The list's status filter. From tablet width it is one segmented button; on
+/// a phone its four equal segments would split *Open* and *Cancelled*
+/// mid-word, so it is a row of chips there that scrolls sideways if the words
+/// need more than the width.
+class _StatusFilter extends StatelessWidget {
+  final Map<String?, String> filters;
+  final String? selected;
+  final ValueChanged<String?> onSelected;
+
+  const _StatusFilter({
+    required this.filters,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final gutter = context.pageGutter;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The segments share the width equally, so at large text a label
+        // breaks mid-word (Ope/n, Cancelle/d) up to desktop width: chips
+        // then, as on a phone, by the rule PageHeader keeps.
+        final largeText =
+            MediaQuery.textScalerOf(context).scale(16) > 16 * 1.3;
+        if (AppBreakpoints.classOf(constraints.maxWidth) !=
+                WindowClass.compact &&
+            !largeText) {
+          return Padding(
+            padding: EdgeInsetsDirectional.symmetric(horizontal: gutter),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: SegmentedButton<String?>(
+                segments: [
+                  for (final e in filters.entries)
+                    ButtonSegment(value: e.key, label: Text(e.value)),
+                ],
+                selected: {selected},
+                onSelectionChanged: (s) => onSelected(s.first),
+              ),
+            ),
+          );
+        }
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: EdgeInsetsDirectional.symmetric(horizontal: gutter),
+          child: Row(
+            children: [
+              for (final e in filters.entries)
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(
+                    end: AppSpacing.sm,
+                  ),
+                  child: ChoiceChip(
+                    label: Text(e.value),
+                    selected: selected == e.key,
+                    onSelected: (_) => onSelected(e.key),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Where a recall came from, in words: the same on the form and the detail.
+const recallSourceLabels = {
+  'SUPPLIER': 'Supplier',
+  'FSA': 'Food Standards Agency',
+  'FSS': 'Food Standards Scotland',
+  'INTERNAL': 'Our own',
+  'OTHER': 'Other',
+};
+
 Future<void> _showDetail(BuildContext context, String recallId) =>
     showDialog<void>(
       context: context,
       builder: (_) => _RecallDetailDialog(recallId: recallId),
     );
+
+/// A recall's status in words.
+String _recallStatusLabel(String status) => switch (status) {
+  'OPEN' => 'Open',
+  'CLOSED' => 'Closed',
+  'CANCELLED' => 'Cancelled',
+  _ => humanizeCode(status),
+};
 
 class _KindBadge extends StatelessWidget {
   final String kind;
@@ -145,17 +223,23 @@ class _KindBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
     final recall = kind == 'RECALL';
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      padding: const EdgeInsetsDirectional.symmetric(
+        horizontal: AppSpacing.sm,
+        vertical: 2,
+      ),
       decoration: BoxDecoration(
         color: recall ? cs.errorContainer : cs.tertiaryContainer,
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: AppRadius.badge,
       ),
+      // Its own size, like every status badge: without one it inherits the
+      // size of whatever it sits beside — a list tile's 16px title.
       child: Text(
         recall ? 'Recall' : 'Withdrawal',
-        style: TextStyle(
+        style: theme.textTheme.labelMedium?.copyWith(
           color: recall ? cs.onErrorContainer : cs.onTertiaryContainer,
           fontWeight: FontWeight.w600,
         ),
@@ -170,12 +254,23 @@ class _RecallTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final cs = Theme.of(context).colorScheme;
-    final progress = recall.status != 'OPEN'
-        ? recall.status == 'CLOSED'
-              ? 'Closed'
-              : 'Cancelled'
-        : recall.storesOutstanding > 0
+    final open = recall.status == 'OPEN';
+    final toAct = open && recall.storesOutstanding > 0;
+    // Where the recall stands, in words beside its kind: a store still to act
+    // is the one state that asks for something, so it is the loud one.
+    final badge = toAct
+        ? const StatusBadge(
+            'Stores to act',
+            tone: StatusTone.error,
+            icon: Icons.pending_actions,
+          )
+        : StatusBadge(
+            _recallStatusLabel(recall.status),
+            tone: open ? StatusTone.info : StatusTone.neutral,
+          );
+    final progress = !open
+        ? null
+        : toAct
         ? '${recall.storesOutstanding} of ${recall.storesAffected} stores still to act'
         : recall.storesAffected == 0
         ? 'No stock held'
@@ -184,6 +279,7 @@ class _RecallTile extends ConsumerWidget {
       contentPadding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
       title: Wrap(
         spacing: AppSpacing.sm,
+        runSpacing: AppSpacing.xs,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Text(
@@ -191,16 +287,18 @@ class _RecallTile extends ConsumerWidget {
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
           _KindBadge(recall.kind),
+          badge,
         ],
       ),
       subtitle: Text(
-        '${hazardLabel(recall.hazard)} · opened '
-        '${recall.openedAt == null ? '-' : _day.format(recall.openedAt!)} · '
-        '${_qty(recall.qtyHeld)} held · $progress',
+        [
+          hazardLabel(recall.hazard),
+          'opened ${recall.openedAt == null ? '-' : AppFormat.dateOf(recall.openedAt!)}',
+          '${_qty(recall.qtyHeld)} held',
+          ?progress,
+        ].join(' · '),
       ),
-      trailing: recall.status == 'OPEN' && recall.storesOutstanding > 0
-          ? Icon(Icons.pending_actions, color: cs.error)
-          : const Icon(Icons.chevron_right),
+      trailing: const Icon(Icons.chevron_right),
       onTap: () => _showDetail(context, recall.id),
     );
   }
@@ -300,12 +398,7 @@ class _RecallDetailDialog extends ConsumerWidget {
                 children: [
                   Text(r.reference, style: text.headlineSmall),
                   _KindBadge(r.kind),
-                  if (!r.isOpen)
-                    Chip(
-                      label: Text(
-                        r.status == 'CLOSED' ? 'Closed' : 'Cancelled',
-                      ),
-                    ),
+                  if (!r.isOpen) StatusBadge(_recallStatusLabel(r.status)),
                 ],
               ),
             ),
@@ -320,9 +413,9 @@ class _RecallDetailDialog extends ConsumerWidget {
           child: ListView(
             children: [
               Text(
-                '${hazardLabel(r.hazard)} · from ${r.source}'
+                '${hazardLabel(r.hazard)} · from ${recallSourceLabels[r.source] ?? humanizeCode(r.source)}'
                 '${r.sourceReference == null ? '' : ' ${r.sourceReference}'}'
-                '${r.openedAt == null ? '' : ' · opened ${_day.format(r.openedAt!)}'}',
+                '${r.openedAt == null ? '' : ' · opened ${AppFormat.dateOf(r.openedAt!)}'}',
               ),
               const SizedBox(height: AppSpacing.sm),
               Text(r.reason),
@@ -356,7 +449,7 @@ class _RecallDetailDialog extends ConsumerWidget {
                   'Buyers may choose ${remediesLabel(r.remedies)}'
                   '${r.singleRemedyReason == null ? '' : ' — ${r.singleRemedyReason}'}'
                   '. Contact: ${[r.contactPhone, r.contactUrl].whereType<String>().join(' · ')}'
-                  '${r.soldFrom == null ? '' : ' · sales from ${r.soldFrom}'}',
+                  '${r.soldFrom == null ? '' : ' · sales from ${AppFormat.date(r.soldFrom)}'}',
                   key: const Key('recall-offer'),
                 ),
               ],
@@ -601,7 +694,7 @@ class _BuyersSection extends ConsumerWidget {
               contentPadding: EdgeInsets.zero,
               title: Text(
                 'Order …${shortRef(n.orderId)} · ${storeName(n.storeId)}'
-                '${n.soldAt == null ? '' : ' · ${_day.format(n.soldAt!)}'}',
+                '${n.soldAt == null ? '' : ' · ${AppFormat.dateOf(n.soldAt!)}'}',
               ),
               subtitle: Text(
                 '${n.lines.map((l) => l.describe()).join('; ')} · '
@@ -740,7 +833,7 @@ class _StoreSection extends ConsumerWidget {
                       child: Text(
                         '${variantDisplayName(b.variantId, labels)} · '
                         '${b.batchNo == null ? 'no lot' : 'lot ${b.batchNo}'}'
-                        '${b.expiryDate == null ? '' : ' · ${b.expiryDate}'} · '
+                        '${b.expiryDate == null ? '' : ' · ${AppFormat.date(b.expiryDate)}'} · '
                         '${_qty(b.qtyAtQuarantine)} · '
                         '${b.released ? 'released: ${b.releaseReason ?? ''}' : _matchLabel(b.match)}'
                         '${b.quarantinedOn == 'ARRIVAL' ? ' · held on arrival' : ''}',
@@ -1060,13 +1153,7 @@ class _OpenRecallDialogState extends ConsumerState<_OpenRecallDialog> {
     'QUALITY',
     'OTHER',
   ];
-  static const _sources = {
-    'SUPPLIER': 'Supplier',
-    'FSA': 'Food Standards Agency',
-    'FSS': 'Food Standards Scotland',
-    'INTERNAL': 'Our own',
-    'OTHER': 'Other',
-  };
+  static const _sources = recallSourceLabels;
 
   @override
   void dispose() {

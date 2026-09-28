@@ -2,12 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
+import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../shared/util/short_ref.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
 
 // ---------------------------------------------------------------------------
@@ -163,14 +170,91 @@ final dueChangesProvider =
   ];
 });
 
+/// Product id → name for the lines the due range changes are about, keyed by
+/// a [variantIdsKey]-style csv. product-svc has no batch read for products, so
+/// each is read on its own — a due list is short. A product that cannot be
+/// read is left out, and its row falls back to a short reference.
+final rangeProductNamesProvider =
+    FutureProvider.autoDispose.family<Map<String, String>, String>(
+        (ref, idsCsv) async {
+  if (idsCsv.isEmpty) return const {};
+  final dio = ref.read(apiClientProvider).dio;
+  final names = <String, String>{};
+  await Future.wait(idsCsv.split(',').map((id) async {
+    try {
+      final resp = await dio.get('/${ApiConstants.product}/admin/products/$id');
+      final data = resp.data is Map ? resp.data['data'] : null;
+      final name = data is Map ? data['name'] as String? : null;
+      if (name != null && name.isNotEmpty) names[id] = name;
+    } catch (_) {
+      // Unreadable: the row names it by a short reference instead.
+    }
+  }));
+  return names;
+});
+
+/// A count of units as people say it: `52`, not the ledger's `52.000`. A part
+/// unit keeps its fraction (`2.5`), and thousands are grouped for the locale.
+String _units(String quantity) {
+  final n = num.tryParse(quantity);
+  return n == null ? quantity : _count(n);
+}
+
+/// Grouped in the app's locale, a part unit keeping its fraction.
+String _count(num n) => AppFormat.count(n);
+
+/// A tab's list: its lead-in (the explanation, a button) spaced 16 apart, then
+/// its cards 8 apart. The theme's cards have no margin, so without the gap
+/// their outlines would sit on each other.
+class _CardList extends StatelessWidget {
+  const _CardList({required this.lead, required this.cards});
+
+  final List<Widget> lead;
+  final List<Widget> cards;
+
+  @override
+  Widget build(BuildContext context) {
+    final children = [...lead, ...cards];
+    return ListView.separated(
+      padding: context.pagePadding,
+      itemCount: children.length,
+      separatorBuilder: (_, i) =>
+          SizedBox(height: i < lead.length ? AppSpacing.lg : AppSpacing.sm),
+      itemBuilder: (_, i) => children[i],
+    );
+  }
+}
+
+/// A tab's opening paragraph, in the quieter text colour.
+class _Explainer extends StatelessWidget {
+  const _Explainer(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Text(
+      text,
+      style: theme.textTheme.bodyMedium
+          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+    );
+  }
+}
+
 /// Shelf space and range for one store.
 class ShelfSpaceScreen extends ConsumerWidget {
   const ShelfSpaceScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
     final storesAsync = ref.watch(storesProvider);
+    final auth = ref.watch(authNotifierProvider).value;
+    final isManager = auth is AuthAuthenticated && auth.isManager;
+    // A store-bound storekeeper sees only the stores they work in, which is
+    // also all the shelf-gap report will let them read.
+    final allowedStores =
+        auth is AuthAuthenticated ? auth.storeIds : const <String>[];
 
     if (storesAsync.hasError) {
       return ErrorView(
@@ -181,58 +265,82 @@ class ShelfSpaceScreen extends ConsumerWidget {
     if (!storesAsync.hasValue) {
       return const LoadingView(label: 'Loading stores…');
     }
-    final stores = storesAsync.value!;
+    final stores = storesAsync.value!
+        .where((s) => allowedStores.isEmpty || allowedStores.contains(s.id))
+        .toList();
     if (stores.isEmpty) {
-      return const Center(child: Text('Add a store before planning its shelves.'));
+      return const EmptyState(
+        icon: Icons.store_outlined,
+        title: 'Add a store before planning its shelves.',
+      );
     }
     final chosen = ref.watch(shelfSpaceStoreProvider);
     final storeId = stores.any((s) => s.id == chosen) ? chosen! : stores.first.id;
+    final gutter = context.pageGutter;
+
+    // A storekeeper works to the gaps only: shelving and range are a buyer's
+    // decisions, read from management-only endpoints the router already
+    // keeps a storekeeper's other pages off.
+    final tabs = [
+      const Tab(text: 'Gaps to fill'),
+      if (isManager) const Tab(text: 'Shelving'),
+      if (isManager) const Tab(text: 'Range'),
+    ];
+    final views = [
+      _GapsTab(storeId: storeId),
+      if (isManager) _FixturesTab(storeId: storeId),
+      if (isManager) const _RangeTab(),
+    ];
 
     return DefaultTabController(
-      length: 3,
+      key: ValueKey(isManager),
+      length: tabs.length,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                AppSpacing.xl, AppSpacing.xl, AppSpacing.xl, 0),
-            child: Wrap(
-              spacing: AppSpacing.lg,
-              runSpacing: AppSpacing.sm,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text('Shelf space', style: theme.textTheme.headlineMedium),
-                if (stores.length > 1)
-                  DropdownButton<String>(
+          PageHeader(
+            title: 'Shelf space',
+            subtitle: stores.length > 1 ? null : stores.first.name,
+            actions: [
+              if (stores.length > 1)
+                // A field, like every other picker: the theme draws its
+                // outline in both brightnesses, where a bare DropdownButton
+                // draws Flutter's fixed grey underline.
+                SizedBox(
+                  width: 280,
+                  child: DropdownButtonFormField<String>(
                     key: const Key('shelf-store'),
-                    isExpanded: false,
-                    value: storeId,
+                    initialValue: storeId,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Store',
+                      prefixIcon: Icon(Icons.store_outlined),
+                    ),
                     items: [
                       for (final s in stores)
-                        DropdownMenuItem(value: s.id, child: Text(s.name)),
+                        DropdownMenuItem(
+                          value: s.id,
+                          child: Text(s.name, overflow: TextOverflow.ellipsis),
+                        ),
                     ],
                     onChanged: (v) =>
                         ref.read(shelfSpaceStoreProvider.notifier).state = v,
-                  )
-                else
-                  Text(stores.first.name, style: theme.textTheme.titleMedium),
-              ],
-            ),
-          ),
-          const TabBar(
-            isScrollable: true,
-            tabs: [
-              Tab(text: 'Gaps to fill'),
-              Tab(text: 'Shelving'),
-              Tab(text: 'Range'),
+                  ),
+                ),
             ],
           ),
+          // Start-aligned, with each label at the page gutter under the title,
+          // rather than at Material's 52px scrollable offset.
+          TabBar(
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            padding: EdgeInsetsDirectional.only(start: gutter - AppSpacing.lg),
+            labelPadding:
+                const EdgeInsetsDirectional.symmetric(horizontal: AppSpacing.lg),
+            tabs: tabs,
+          ),
           Expanded(
-            child: TabBarView(children: [
-              _GapsTab(storeId: storeId),
-              _FixturesTab(storeId: storeId),
-              const _RangeTab(),
-            ]),
+            child: TabBarView(children: views),
           ),
         ],
       ),
@@ -256,28 +364,32 @@ class _GapsTab extends ConsumerWidget {
       ),
       data: (rows) {
         if (rows.isEmpty) {
-          return const Padding(
-            padding: EdgeInsets.all(AppSpacing.xl),
-            child: Text(
-              'No shelf plans for this store yet. Until a layout is published, '
-              'replenishment is driven from reorder levels alone — which say '
-              'whether stock will run out, not whether the bay looks full.',
-              key: Key('gaps-empty'),
-            ),
+          return const EmptyState(
+            key: Key('gaps-empty'),
+            icon: Icons.shelves,
+            title: 'No shelf plans for this store yet',
+            message: 'Until a layout is published, replenishment is driven '
+                'from reorder levels alone — which say whether stock will run '
+                'out, not whether the bay looks full.',
           );
         }
-        return ListView(
-          padding: const EdgeInsets.all(AppSpacing.xl),
-          children: [
-            Text(
+        // The report carries variant ids; product-svc names them. A short
+        // reference stands in only while a name is unknown.
+        final labels = ref
+                .watch(variantLabelsProvider(
+                    variantIdsKey(rows.map((r) => r.variantId))))
+                .value ??
+            const <String, VariantLabel>{};
+        return _CardList(
+          lead: const [
+            _Explainer(
               'What it would take to fill each bay: the shelf\'s capacity against '
               'stock that is not already held for somebody\'s order. A line below '
               'its presentation minimum looks picked over now, whatever the '
               'reorder level says.',
-              style: theme.textTheme.bodyMedium
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
-            const SizedBox(height: AppSpacing.lg),
+          ],
+          cards: [
             for (final r in rows)
               Card(
                 child: ListTile(
@@ -286,23 +398,38 @@ class _GapsTab extends ConsumerWidget {
                     r.belowMinimum ? Icons.warning_amber : Icons.shelves,
                     color: r.belowMinimum ? theme.colorScheme.error : null,
                   ),
-                  title: Text('${r.gap} to fill  ·  shelf holds ${r.capacity}'),
-                  subtitle: Text(
-                    '${r.available} available  ·  looks picked over below '
-                    '${r.minPresentation}',
+                  title: Text(_lineName(r.variantId, labels)),
+                  // The badge sits under the counts, not in the trailing slot,
+                  // so the text keeps the row's width on a phone.
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('${_units(r.gap)} to fill  ·  '
+                          'shelf holds ${_count(r.capacity)}'),
+                      Text('${_units(r.available)} available  ·  looks picked '
+                          'over below ${_count(r.minPresentation)}'),
+                      if (r.belowMinimum)
+                        const Padding(
+                          padding: EdgeInsetsDirectional.only(top: AppSpacing.xs),
+                          child: StatusBadge('Below minimum',
+                              tone: StatusTone.warning),
+                        ),
+                    ],
                   ),
-                  trailing: r.belowMinimum
-                      ? Chip(
-                          label: const Text('Below minimum'),
-                          backgroundColor: theme.colorScheme.errorContainer,
-                        )
-                      : null,
                 ),
               ),
           ],
         );
       },
     );
+  }
+
+  /// The product and its SKU (a variant's own name), e.g. *Oat milk 1L · OAT-1L*.
+  static String _lineName(String variantId, Map<String, VariantLabel> labels) {
+    final name = variantDisplayName(variantId, labels);
+    final sku = variantSku(variantId, labels);
+    return sku.isEmpty ? name : '$name  ·  $sku';
   }
 }
 
@@ -312,7 +439,6 @@ class _FixturesTab extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
     final async = ref.watch(fixturesProvider(storeId));
     return async.when(
       loading: () => const LoadingView(label: 'Loading shelving…'),
@@ -322,25 +448,21 @@ class _FixturesTab extends ConsumerWidget {
       ),
       data: (rows) {
         if (rows.isEmpty) {
-          return const Padding(
-            padding: EdgeInsets.all(AppSpacing.xl),
-            child: Text(
-              'No shelving recorded for this store yet.',
-              key: Key('fixtures-empty'),
-            ),
+          return const EmptyState(
+            key: Key('fixtures-empty'),
+            icon: Icons.shelves,
+            title: 'No shelving recorded for this store yet',
           );
         }
-        return ListView(
-          padding: const EdgeInsets.all(AppSpacing.xl),
-          children: [
-            Text(
+        return _CardList(
+          lead: const [
+            _Explainer(
               'The furniture a layout is drawn for. Its shelves and their width '
               'are what make a plan checkable: facings times a line\'s width '
               'either fits or does not.',
-              style: theme.textTheme.bodyMedium
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
-            const SizedBox(height: AppSpacing.lg),
+          ],
+          cards: [
             for (final f in rows)
               Card(
                 child: ListTile(
@@ -351,9 +473,7 @@ class _FixturesTab extends ConsumerWidget {
                     '${f.shelfCount} shelves of ${f.shelfWidthMm}mm  ·  '
                     '${f.totalWidthMm}mm in all',
                   ),
-                  trailing: f.active
-                      ? null
-                      : const Chip(label: Text('Retired')),
+                  trailing: f.active ? null : const StatusBadge('Retired'),
                 ),
               ),
           ],
@@ -375,7 +495,6 @@ class _RangeTabState extends ConsumerState<_RangeTab> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final async = ref.watch(dueChangesProvider);
     return async.when(
       loading: () => const LoadingView(label: 'Loading range changes…'),
@@ -383,48 +502,71 @@ class _RangeTabState extends ConsumerState<_RangeTab> {
         message: friendlyError(e, fallback: 'Could not load the range changes.'),
         onRetry: () => ref.invalidate(dueChangesProvider),
       ),
-      data: (rows) => ListView(
-        padding: const EdgeInsets.all(AppSpacing.xl),
-        children: [
-          Text(
-            'Range decisions that have reached their day and have not been put '
-            'into effect yet. Each one says who decided it and why — applying is '
-            'a separate step, so a range can be planned weeks ahead.',
-            style: theme.textTheme.bodyMedium
-                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: AppSpacing.lg),
-          if (rows.isEmpty)
-            const Card(
-              key: Key('range-empty'),
-              child: Padding(
-                padding: EdgeInsets.all(AppSpacing.lg),
-                child: Text('Nothing is waiting: every dated change is in force.'),
+      data: (rows) {
+        // A range change is about a product; product-svc names it.
+        final names = ref
+                .watch(rangeProductNamesProvider(
+                    variantIdsKey(rows.map((c) => c.productId))))
+                .value ??
+            const <String, String>{};
+        const explainer = _Explainer(
+          'Range decisions that have reached their day and have not been put '
+          'into effect yet. Each one says who decided it and why — applying is '
+          'a separate step, so a range can be planned weeks ahead.',
+        );
+        if (rows.isEmpty) {
+          return const _CardList(
+            lead: [explainer],
+            cards: [
+              Card(
+                key: Key('range-empty'),
+                child: Padding(
+                  padding: AppSpacing.cardPadding,
+                  child:
+                      Text('Nothing is waiting: every dated change is in force.'),
+                ),
               ),
-            )
-          else ...[
-            FilledButton.icon(
-              key: const Key('range-apply'),
-              onPressed: _applying ? null : _apply,
-              icon: const Icon(Icons.playlist_add_check),
-              label: Text('Apply ${rows.length} due change'
-                  '${rows.length == 1 ? '' : 's'}'),
+            ],
+          );
+        }
+        return _CardList(
+          lead: [
+            explainer,
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: FilledButton.icon(
+                key: const Key('range-apply'),
+                onPressed: _applying ? null : _apply,
+                icon: const Icon(Icons.playlist_add_check),
+                label: Text('Apply ${rows.length} due change'
+                    '${rows.length == 1 ? '' : 's'}'),
+              ),
             ),
-            const SizedBox(height: AppSpacing.lg),
+          ],
+          cards: [
             for (final c in rows)
               Card(
                 child: ListTile(
                   key: Key('change-${c.id}'),
-                  leading: Icon(c.delisting ? Icons.remove_circle_outline
+                  leading: Icon(c.delisting
+                      ? Icons.remove_circle_outline
                       : Icons.add_circle_outline),
-                  title: Text('${c.delisting ? 'De-list' : 'List'}'
-                      '  ·  due ${c.effectiveFrom}'),
-                  subtitle: Text(c.reason),
+                  title: Text(names[c.productId] ??
+                      'Product ${shortRef(c.productId)}'),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('${c.delisting ? 'De-list' : 'List'}'
+                          '  ·  due ${AppFormat.date(c.effectiveFrom)}'),
+                      Text(c.reason),
+                    ],
+                  ),
                 ),
               ),
           ],
-        ],
-      ),
+        );
+      },
     );
   }
 

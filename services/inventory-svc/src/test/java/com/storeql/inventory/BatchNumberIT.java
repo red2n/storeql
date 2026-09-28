@@ -250,8 +250,9 @@ class BatchNumberIT {
     created(
         post(
             "/admin/inventory/receive",
-            "{\"storeId\":\"%s\",\"variantId\":\"%s\",\"qty\":%s,\"batchNo\":\"SUPPLIER-1\"}"
-                .formatted(store, variant, qty)));
+            // No lot: stock that has one carries it when it moves (SJ-D71, LotProvenanceIT), and
+            // the system number is for stock that has none.
+            "{\"storeId\":\"%s\",\"variantId\":\"%s\",\"qty\":%s}".formatted(store, variant, qty)));
   }
 
   private String createMoveOrder(String store, UUID variant, String qty) {

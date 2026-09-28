@@ -4,11 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/password_policy.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../shared/widgets/adaptive_nav_shell.dart';
 import 'providers/admin_providers.dart';
+import '../../core/theme.dart';
+import '../../core/spacing.dart';
 
 class _AdminNavItem {
   final AdaptiveNavDestination destination;
@@ -16,13 +19,28 @@ class _AdminNavItem {
   /// When true, shown to storekeeper-only users (warehouse-focused shell).
   final bool storekeeperVisible;
 
+  /// When true, shown to the owner only: the page is the owner's alone, and a
+  /// manager sent there would find nothing but a line saying so.
+  final bool ownerOnly;
+
   const _AdminNavItem({
     required this.destination,
     required this.route,
     this.storekeeperVisible = false,
+    this.ownerOnly = false,
   });
 }
 
+/// The pages a storekeeper-only login is offered: each must be one the router
+/// lets them open (`storekeeperAdminAllowed`), which is one whose reads the
+/// services open to any member of staff.
+List<String> get storekeeperAdminRoutes =>
+    [for (final i in _navItems) if (i.storekeeperVisible) i.route];
+
+/// Grouped by what a manager is doing — selling, looking after stock, keeping
+/// the shop legal, the money, the business itself, its data — and listed under
+/// those headings (AdaptiveNavShell's sectioned layout), not as one flat run of
+/// 31. Keep each section's items together; give every item its own icon.
 const _navItems = [
   _AdminNavItem(
     destination: AdaptiveNavDestination(
@@ -32,11 +50,61 @@ const _navItems = [
     ),
     route: '/admin/dashboard',
   ),
+  // ── Sell ──
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Orders',
+      icon: Icons.receipt_long_outlined,
+      selectedIcon: Icons.receipt_long,
+      section: 'Sell',
+    ),
+    route: '/admin/orders',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Fulfilment',
+      icon: Icons.outbox_outlined,
+      selectedIcon: Icons.outbox,
+      section: 'Sell',
+    ),
+    route: '/admin/fulfilment',
+    // Picking, packing and the handover are the storekeeper's work too.
+    storekeeperVisible: true,
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Customers',
+      icon: Icons.groups_outlined,
+      selectedIcon: Icons.groups,
+      section: 'Sell',
+    ),
+    route: '/admin/customers',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Sales',
+      icon: Icons.card_giftcard_outlined,
+      selectedIcon: Icons.card_giftcard,
+      section: 'Sell',
+    ),
+    route: '/admin/sales',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Messages',
+      icon: Icons.mail_outline,
+      selectedIcon: Icons.mail,
+      section: 'Sell',
+    ),
+    route: '/admin/messages',
+  ),
+  // ── Products & stock ──
   _AdminNavItem(
     destination: AdaptiveNavDestination(
       label: 'Catalog',
       icon: Icons.inventory_2_outlined,
       selectedIcon: Icons.inventory_2,
+      section: 'Products & stock',
     ),
     route: '/admin/catalog',
   ),
@@ -45,15 +113,49 @@ const _navItems = [
       label: 'Inventory',
       icon: Icons.warehouse_outlined,
       selectedIcon: Icons.warehouse,
+      section: 'Products & stock',
     ),
     route: '/admin/inventory',
     storekeeperVisible: true,
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
+      label: 'Pricing',
+      icon: Icons.sell_outlined,
+      selectedIcon: Icons.sell,
+      section: 'Products & stock',
+    ),
+    route: '/admin/pricing',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Procurement',
+      icon: Icons.local_shipping_outlined,
+      selectedIcon: Icons.local_shipping,
+      section: 'Products & stock',
+    ),
+    route: '/admin/procurement',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Shelf space',
+      icon: Icons.shelves,
+      selectedIcon: Icons.shelves,
+      section: 'Products & stock',
+    ),
+    route: '/admin/shelf-space',
+    // The shelf-gap report is now a staff read: a
+    // storekeeper sees the Gaps tab only, at their own stores; Shelving and
+    // Range stay management-only inside the screen itself.
+    storekeeperVisible: true,
+  ),
+  // ── Safety & compliance ──
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
       label: 'Food safety',
       icon: Icons.health_and_safety_outlined,
       selectedIcon: Icons.health_and_safety,
+      section: 'Safety & compliance',
     ),
     route: '/admin/food-safety',
     storekeeperVisible: true,
@@ -63,6 +165,7 @@ const _navItems = [
       label: 'Recalls',
       icon: Icons.report_outlined,
       selectedIcon: Icons.report,
+      section: 'Safety & compliance',
     ),
     route: '/admin/recalls',
     storekeeperVisible: true,
@@ -71,16 +174,18 @@ const _navItems = [
     destination: AdaptiveNavDestination(
       label: 'Age checks',
       icon: Icons.badge_outlined,
-      selectedIcon: Icons.report,
+      selectedIcon: Icons.badge,
+      section: 'Safety & compliance',
     ),
     route: '/admin/age-checks',
-    storekeeperVisible: true,
+    // Management-only: the register reads /admin/pos/age-checks.
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
       label: 'Legal obligations',
       icon: Icons.gavel_outlined,
       selectedIcon: Icons.gavel,
+      section: 'Safety & compliance',
     ),
     route: '/admin/obligations',
     storekeeperVisible: true,
@@ -90,33 +195,26 @@ const _navItems = [
       label: 'Statutory returns',
       icon: Icons.event_note_outlined,
       selectedIcon: Icons.event_note,
+      section: 'Safety & compliance',
     ),
     route: '/admin/statutory-returns',
   ),
+  // ── Money ──
   _AdminNavItem(
     destination: AdaptiveNavDestination(
-      label: 'Chargebacks',
-      icon: Icons.report_gmailerrorred_outlined,
-      selectedIcon: Icons.report_gmailerrorred,
+      label: 'Reports',
+      icon: Icons.bar_chart_outlined,
+      selectedIcon: Icons.bar_chart,
+      section: 'Money',
     ),
-    route: '/admin/disputes',
-    storekeeperVisible: false,
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Shelf space',
-      icon: Icons.shelves,
-      selectedIcon: Icons.shelves,
-    ),
-    route: '/admin/shelf-space',
-    // A storekeeper fills the shelves, so the gaps are their morning's work.
-    storekeeperVisible: true,
+    route: '/admin/reports',
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
       label: 'Card machines',
       icon: Icons.point_of_sale_outlined,
       selectedIcon: Icons.point_of_sale,
+      section: 'Money',
     ),
     route: '/admin/terminals',
     storekeeperVisible: false,
@@ -126,26 +224,19 @@ const _navItems = [
       label: 'Card settlements',
       icon: Icons.account_balance_outlined,
       selectedIcon: Icons.account_balance,
+      section: 'Money',
     ),
     route: '/admin/settlements',
     storekeeperVisible: false,
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
-      label: 'Plan',
-      icon: Icons.sell_outlined,
-      selectedIcon: Icons.sell,
+      label: 'Chargebacks',
+      icon: Icons.credit_card_off_outlined,
+      selectedIcon: Icons.credit_card_off,
+      section: 'Money',
     ),
-    route: '/admin/plan',
-    storekeeperVisible: false,
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Billing',
-      icon: Icons.receipt_long_outlined,
-      selectedIcon: Icons.receipt_long,
-    ),
-    route: '/admin/billing',
+    route: '/admin/disputes',
     storekeeperVisible: false,
   ),
   _AdminNavItem(
@@ -153,15 +244,86 @@ const _navItems = [
       label: 'Container deposits',
       icon: Icons.recycling_outlined,
       selectedIcon: Icons.recycling,
+      section: 'Money',
     ),
     route: '/admin/deposits',
     storekeeperVisible: false,
+  ),
+  // ── Business ──
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Stores',
+      icon: Icons.store_outlined,
+      selectedIcon: Icons.store,
+      section: 'Business',
+    ),
+    route: '/admin/stores',
+    storekeeperVisible: true,
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Staff',
+      icon: Icons.people_outline,
+      selectedIcon: Icons.people,
+      section: 'Business',
+    ),
+    route: '/admin/staff',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Plan',
+      icon: Icons.workspace_premium_outlined,
+      selectedIcon: Icons.workspace_premium,
+      section: 'Business',
+    ),
+    route: '/admin/plan',
+    storekeeperVisible: false,
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Integrations',
+      icon: Icons.vpn_key_outlined,
+      selectedIcon: Icons.vpn_key,
+      section: 'Business',
+    ),
+    route: '/admin/integrations',
+    storekeeperVisible: false,
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Billing',
+      icon: Icons.request_quote_outlined,
+      selectedIcon: Icons.request_quote,
+      section: 'Business',
+    ),
+    route: '/admin/billing',
+    storekeeperVisible: false,
+  ),
+  // ── Data & security ──
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Audit',
+      icon: Icons.manage_search_outlined,
+      selectedIcon: Icons.manage_search,
+      section: 'Data & security',
+    ),
+    route: '/admin/audit',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Privacy',
+      icon: Icons.privacy_tip_outlined,
+      selectedIcon: Icons.privacy_tip,
+      section: 'Data & security',
+    ),
+    route: '/admin/privacy',
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
       label: 'Data retention',
       icon: Icons.auto_delete_outlined,
       selectedIcon: Icons.auto_delete,
+      section: 'Data & security',
     ),
     route: '/admin/retention',
   ),
@@ -170,105 +332,20 @@ const _navItems = [
       label: 'Data export',
       icon: Icons.move_up_outlined,
       selectedIcon: Icons.move_up,
+      section: 'Data & security',
     ),
     route: '/admin/tenant-data',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Privacy',
-      icon: Icons.privacy_tip_outlined,
-      selectedIcon: Icons.privacy_tip,
-    ),
-    route: '/admin/privacy',
+    // Taking the data out, bringing it in and giving notice are the owner's.
+    ownerOnly: true,
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
       label: 'Security notices',
       icon: Icons.shield_outlined,
       selectedIcon: Icons.shield,
+      section: 'Data & security',
     ),
     route: '/admin/security-notices',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Stores',
-      icon: Icons.store_outlined,
-      selectedIcon: Icons.store,
-    ),
-    route: '/admin/stores',
-    storekeeperVisible: true,
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Orders',
-      icon: Icons.receipt_long_outlined,
-      selectedIcon: Icons.receipt_long,
-    ),
-    route: '/admin/orders',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Procurement',
-      icon: Icons.local_shipping_outlined,
-      selectedIcon: Icons.local_shipping,
-    ),
-    route: '/admin/procurement',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Pricing',
-      icon: Icons.sell_outlined,
-      selectedIcon: Icons.sell,
-    ),
-    route: '/admin/pricing',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Reports',
-      icon: Icons.bar_chart_outlined,
-      selectedIcon: Icons.bar_chart,
-    ),
-    route: '/admin/reports',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Audit',
-      icon: Icons.manage_search_outlined,
-      selectedIcon: Icons.manage_search,
-    ),
-    route: '/admin/audit',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Customers',
-      icon: Icons.groups_outlined,
-      selectedIcon: Icons.groups,
-    ),
-    route: '/admin/customers',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Sales',
-      icon: Icons.card_giftcard_outlined,
-      selectedIcon: Icons.card_giftcard,
-    ),
-    route: '/admin/sales',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Staff',
-      icon: Icons.people_outline,
-      selectedIcon: Icons.people,
-    ),
-    route: '/admin/staff',
-  ),
-  _AdminNavItem(
-    destination: AdaptiveNavDestination(
-      label: 'Messages',
-      icon: Icons.mail_outline,
-      selectedIcon: Icons.mail,
-    ),
-    route: '/admin/messages',
   ),
 ];
 
@@ -290,10 +367,14 @@ class AdminShell extends ConsumerWidget {
     final storekeeperOnly = auth is AuthAuthenticated &&
         auth.isStorekeeper &&
         !auth.isManager;
+    final inSandbox = auth is AuthAuthenticated && auth.sandbox;
+    final owner =
+        auth is AuthAuthenticated && auth.roles.contains(UserRoles.owner);
 
-    final items = storekeeperOnly
-        ? _navItems.where((i) => i.storekeeperVisible).toList()
-        : _navItems;
+    final items = _navItems
+        .where((i) => !storekeeperOnly || i.storekeeperVisible)
+        .where((i) => owner || !i.ownerOnly)
+        .toList();
     final routes = items.map((i) => i.route).toList();
     final destinations = items.map((i) => i.destination).toList();
 
@@ -345,7 +426,43 @@ class AdminShell extends ConsumerWidget {
           ],
         ),
       ],
-      child: child,
+      child: inSandbox
+          ? Column(children: [const _SandboxBanner(), Expanded(child: child)])
+          : child,
+    );
+  }
+}
+
+/// Where the owner is (22.8): in the sandbox, where nothing is real, with the
+/// way back to the live business one tap away.
+class _SandboxBanner extends ConsumerWidget {
+  const _SandboxBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cs = Theme.of(context).colorScheme;
+    // A persistent message with one action: a MaterialBanner (§7.1), in the
+    // tertiary container so it reads apart from alerts and errors.
+    return MaterialBanner(
+      key: const Key('sandbox-banner'),
+      backgroundColor: cs.tertiaryContainer,
+      padding: const EdgeInsetsDirectional.fromSTEB(
+          AppSpacing.lg, AppSpacing.sm, AppSpacing.sm, AppSpacing.sm),
+      leadingPadding: const EdgeInsetsDirectional.only(end: AppSpacing.md),
+      leading: Icon(Icons.science_outlined, color: cs.onTertiaryContainer),
+      content: Text(
+        'Sandbox — nothing here is real: no message leaves it, no money moves, nothing is billed.',
+        style: TextStyle(color: cs.onTertiaryContainer),
+      ),
+      actions: [
+        TextButton(
+          key: const Key('sandbox-leave'),
+          style: TextButton.styleFrom(foregroundColor: cs.onTertiaryContainer),
+          onPressed: () =>
+              ref.read(authNotifierProvider.notifier).leaveSandbox(),
+          child: const Text('Back to live'),
+        ),
+      ],
     );
   }
 }
@@ -396,9 +513,15 @@ class _ChangePasswordDialogState extends ConsumerState<ChangePasswordDialog> {
       setState(() {
         _loading = false;
         final status = e is DioException ? e.response?.statusCode : null;
-        _error = (status == 401 || status == 400)
+        // iam-svc answers 401 for a wrong current password, 400 for a policy
+        // refusal of the new one (PASSWORD_TOO_SHORT/TOO_LONG/IS_IDENTITY/
+        // BREACHED) — the same words the field's own rule already used, not
+        // "Current password is incorrect." for both.
+        final policy = ref.read(passwordPolicyProvider).value ?? PasswordPolicy.fallback;
+        _error = status == 401
             ? 'Current password is incorrect.'
-            : friendlyError(e, fallback: 'Could not change password.');
+            : passwordPolicyRefusal(apiErrorCode(e), policy) ??
+                friendlyError(e, fallback: 'Could not change password.');
       });
     }
   }
@@ -406,6 +529,7 @@ class _ChangePasswordDialogState extends ConsumerState<ChangePasswordDialog> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final policy = watchPasswordPolicy(ref);
     return AlertDialog(
       title: const Text('Change password'),
       content: SizedBox(
@@ -421,7 +545,7 @@ class _ChangePasswordDialogState extends ConsumerState<ChangePasswordDialog> {
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                       color: cs.errorContainer,
-                      borderRadius: BorderRadius.circular(8)),
+                      borderRadius: AppRadius.chip),
                   child: Text(_error!,
                       style: TextStyle(color: cs.onErrorContainer)),
                 ),
@@ -437,12 +561,18 @@ class _ChangePasswordDialogState extends ConsumerState<ChangePasswordDialog> {
               ),
               const SizedBox(height: 12),
               TextFormField(
+                key: const Key('change-password-new'),
                 controller: _newCtrl,
                 obscureText: true,
-                decoration: const InputDecoration(
-                    labelText: 'New password (15 characters or more)'),
-                validator: (v) =>
-                    v == null || v.length < 15 ? 'At least 15 characters — a phrase of a few words is easiest' : null,
+                decoration: InputDecoration(
+                  labelText: 'New password',
+                  // The published policy's rule, before it is typed — never
+                  // learned only from a refusal.
+                  helperText: passwordRuleText(policy),
+                  helperMaxLines: 2,
+                  errorMaxLines: 2,
+                ),
+                validator: (v) => passwordLengthProblemPlain(v, policy),
               ),
             ],
           ),

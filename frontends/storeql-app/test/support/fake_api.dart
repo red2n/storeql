@@ -11,11 +11,13 @@ class FakeApiClient implements ApiClient {
   FakeApiClient(this.dio);
 }
 
-/// A login holding one role in tenant `t`.
+/// A login holding one role in tenant `t`; in the business's sandbox when
+/// `sandbox` is set (22.8).
 class RoleAuth extends AuthNotifier {
   final String role;
+  final bool sandbox;
 
-  RoleAuth(this.role);
+  RoleAuth(this.role, {this.sandbox = false});
 
   @override
   Future<AuthState> build() async => AuthAuthenticated(
@@ -24,6 +26,7 @@ class RoleAuth extends AuthNotifier {
         userId: 'u',
         tenantId: 't',
         roles: [role],
+        sandbox: sandbox,
       );
 }
 

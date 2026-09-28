@@ -346,8 +346,9 @@ public class PricingRepository extends BaseOutboxRepository {
           try (var ps =
               c.prepareStatement(
                   "INSERT INTO price_lists"
-                      + " (id,tenant_id,name,channel,currency,effective_from,effective_to,active)"
-                      + " VALUES (?,?,?,?,?,?,?,?)")) {
+                      + " (id,tenant_id,name,channel,currency,effective_from,effective_to,active,"
+                      + " zone_id)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, pl.id());
             ps.setObject(2, pl.tenantId());
             ps.setString(3, pl.name());
@@ -356,6 +357,7 @@ public class PricingRepository extends BaseOutboxRepository {
             ps.setObject(6, toOdt(pl.effectiveFrom()));
             ps.setObject(7, toOdt(pl.effectiveTo()));
             ps.setBoolean(8, pl.active());
+            ps.setObject(9, pl.zoneId());
             ps.executeUpdate();
           } catch (SQLException sqle) {
             if (UNIQUE_VIOLATION.equals(sqle.getSQLState()))
@@ -392,7 +394,7 @@ public class PricingRepository extends BaseOutboxRepository {
     StringBuilder sql =
         new StringBuilder(
             "SELECT id,tenant_id,name,channel,currency,effective_from,effective_to,active,"
-                + "created_at FROM price_lists WHERE tenant_id=?");
+                + "created_at,zone_id FROM price_lists WHERE tenant_id=?");
     if (afterCreatedAt != null && afterId != null) sql.append(" AND (created_at, id) > (?, ?)");
     sql.append(" ORDER BY created_at, id LIMIT ?");
     return query(
@@ -420,8 +422,8 @@ public class PricingRepository extends BaseOutboxRepository {
   public Optional<PriceList> findPriceList(UUID tenantId, UUID id) {
     var list =
         query(
-            "SELECT id,tenant_id,name,channel,currency,effective_from,effective_to,active,created_at"
-                + " FROM price_lists WHERE tenant_id=? AND id=?",
+            "SELECT id,tenant_id,name,channel,currency,effective_from,effective_to,active,created_at,"
+                + " zone_id FROM price_lists WHERE tenant_id=? AND id=?",
             ps -> {
               ps.setObject(1, tenantId);
               ps.setObject(2, id);
@@ -442,7 +444,8 @@ public class PricingRepository extends BaseOutboxRepository {
         rs.getObject("effective_from", OffsetDateTime.class).toInstant(),
         effTo != null ? effTo.toInstant() : null,
         rs.getBoolean("active"),
-        rs.getObject("created_at", OffsetDateTime.class).toInstant());
+        rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+        rs.getObject("zone_id", UUID.class));
   }
 
   // ── Price List Items ──────────────────────────────────────────────────────
@@ -457,57 +460,66 @@ public class PricingRepository extends BaseOutboxRepository {
   public PriceListItem upsertPriceListItem(PriceListItem item, OutboxRow event) {
     return inTx(
         c -> {
-          // 03.12: an item priced before its history was kept starts it with the price it stood at.
-          try (var ps =
-              c.prepareStatement(
-                  "SELECT pli.id, pli.price, pli.updated_at FROM price_list_items pli"
-                      + " WHERE pli.tenant_id = ? AND pli.price_list_id = ? AND pli.variant_id = ?"
-                      + " AND pli.min_qty = ? AND NOT EXISTS (SELECT 1 FROM price_list_item_prices v"
-                      + " WHERE v.tenant_id = pli.tenant_id AND v.price_list_item_id = pli.id)"
-                      + " FOR UPDATE OF pli")) {
-            ps.setObject(1, item.tenantId());
-            ps.setObject(2, item.priceListId());
-            ps.setObject(3, item.variantId());
-            ps.setBigDecimal(4, item.minQty());
-            try (var rs = ps.executeQuery()) {
-              if (rs.next()) {
-                insertItemPriceTx(
-                    c,
-                    item.tenantId(),
-                    rs.getObject("id", UUID.class),
-                    rs.getBigDecimal("price"),
-                    rs.getObject("updated_at", OffsetDateTime.class));
-              }
-            }
-          }
-          UUID itemId;
-          try (var ps =
-              c.prepareStatement(
-                  "INSERT INTO price_list_items"
-                      + " (id,tenant_id,price_list_id,variant_id,price,min_qty)"
-                      + " VALUES (?,?,?,?,?,?)"
-                      + " ON CONFLICT (tenant_id,price_list_id,variant_id,min_qty)"
-                      + " DO UPDATE SET price=EXCLUDED.price, updated_at=now()"
-                      + " RETURNING id")) {
-            ps.setObject(1, item.id());
-            ps.setObject(2, item.tenantId());
-            ps.setObject(3, item.priceListId());
-            ps.setObject(4, item.variantId());
-            ps.setBigDecimal(5, item.price());
-            ps.setBigDecimal(6, item.minQty());
-            try (var rs = ps.executeQuery()) {
-              rs.next();
-              itemId = rs.getObject("id", UUID.class);
-            }
-          }
-          // Stamped once the row is locked, so two writers' prices are ordered as they committed.
-          insertItemPriceTx(c, item.tenantId(), itemId, item.price(), null);
+          writePriceListItemTx(c, item);
           insertOutbox(c, event);
-          com.storeql.pricing.repo.AppliedPriceRepository.enqueue(
-              c, item.tenantId(), item.variantId(), null, "PRICE_SET");
           return item;
         },
         "upsert price list item");
+  }
+
+  /**
+   * The item write on a caller's transaction: the price, its history row and the evaluation the
+   * applied-price ledger owes. Shared with a repricing proposal's apply (03.x), which decides the
+   * proposal and moves the price atomically; the caller adds the outbox event.
+   */
+  static void writePriceListItemTx(java.sql.Connection c, PriceListItem item) throws SQLException {
+    // 03.12: an item priced before its history was kept starts it with the price it stood at.
+    try (var ps =
+        c.prepareStatement(
+            "SELECT pli.id, pli.price, pli.updated_at FROM price_list_items pli"
+                + " WHERE pli.tenant_id = ? AND pli.price_list_id = ? AND pli.variant_id = ?"
+                + " AND pli.min_qty = ? AND NOT EXISTS (SELECT 1 FROM price_list_item_prices v"
+                + " WHERE v.tenant_id = pli.tenant_id AND v.price_list_item_id = pli.id)"
+                + " FOR UPDATE OF pli")) {
+      ps.setObject(1, item.tenantId());
+      ps.setObject(2, item.priceListId());
+      ps.setObject(3, item.variantId());
+      ps.setBigDecimal(4, item.minQty());
+      try (var rs = ps.executeQuery()) {
+        if (rs.next()) {
+          insertItemPriceTx(
+              c,
+              item.tenantId(),
+              rs.getObject("id", UUID.class),
+              rs.getBigDecimal("price"),
+              rs.getObject("updated_at", OffsetDateTime.class));
+        }
+      }
+    }
+    UUID itemId;
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO price_list_items"
+                + " (id,tenant_id,price_list_id,variant_id,price,min_qty)"
+                + " VALUES (?,?,?,?,?,?)"
+                + " ON CONFLICT (tenant_id,price_list_id,variant_id,min_qty)"
+                + " DO UPDATE SET price=EXCLUDED.price, updated_at=now()"
+                + " RETURNING id")) {
+      ps.setObject(1, item.id());
+      ps.setObject(2, item.tenantId());
+      ps.setObject(3, item.priceListId());
+      ps.setObject(4, item.variantId());
+      ps.setBigDecimal(5, item.price());
+      ps.setBigDecimal(6, item.minQty());
+      try (var rs = ps.executeQuery()) {
+        if (!rs.next()) throw new SQLException("price list item upsert returned no row");
+        itemId = rs.getObject("id", UUID.class);
+      }
+    }
+    // Stamped once the row is locked, so two writers' prices are ordered as they committed.
+    insertItemPriceTx(c, item.tenantId(), itemId, item.price(), null);
+    com.storeql.pricing.repo.AppliedPriceRepository.enqueue(
+        c, item.tenantId(), item.variantId(), null, "PRICE_SET");
   }
 
   /** Appends a price to a list item's history, from {@code validFrom} or, when null, from now. */
@@ -570,7 +582,16 @@ public class PricingRepository extends BaseOutboxRepository {
    */
   public Optional<PriceListItem> resolveBasePrice(
       UUID tenantId, UUID variantId, String channel, BigDecimal qty, Instant at) {
-    return basePrice(tenantId, variantId, channel, qty, at, false);
+    return basePrice(tenantId, variantId, channel, qty, at, false, null);
+  }
+
+  /**
+   * The base price at a store (03.x): a price list bound to the store's price zone beats the
+   * tenant-wide list; a store in no zone, or no store, gets the tenant-wide list alone.
+   */
+  public Optional<PriceListItem> resolveBasePrice(
+      UUID tenantId, UUID variantId, String channel, BigDecimal qty, Instant at, UUID storeId) {
+    return basePrice(tenantId, variantId, channel, qty, at, false, storeId);
   }
 
   /**
@@ -579,11 +600,23 @@ public class PricingRepository extends BaseOutboxRepository {
    */
   public Optional<PriceListItem> resolveBasePriceAsOf(
       UUID tenantId, UUID variantId, String channel, BigDecimal qty, Instant at) {
-    return basePrice(tenantId, variantId, channel, qty, at, true);
+    return basePrice(tenantId, variantId, channel, qty, at, true, null);
+  }
+
+  /** As {@link #resolveBasePrice(UUID, UUID, String, BigDecimal, Instant, UUID)}, as recorded. */
+  public Optional<PriceListItem> resolveBasePriceAsOf(
+      UUID tenantId, UUID variantId, String channel, BigDecimal qty, Instant at, UUID storeId) {
+    return basePrice(tenantId, variantId, channel, qty, at, true, storeId);
   }
 
   private Optional<PriceListItem> basePrice(
-      UUID tenantId, UUID variantId, String channel, BigDecimal qty, Instant at, boolean asOf) {
+      UUID tenantId,
+      UUID variantId,
+      String channel,
+      BigDecimal qty,
+      Instant at,
+      boolean asOf,
+      UUID storeId) {
     String price = asOf ? "h.price" : "pli.price";
     var list =
         query(
@@ -596,6 +629,12 @@ public class PricingRepository extends BaseOutboxRepository {
                 + " WHERE pli.tenant_id = ?"
                 + "   AND pli.variant_id = ?"
                 + "   AND (pl.channel = ? OR pl.channel = 'ALL')"
+                // 03.x: the store's zone's list, or the tenant-wide one; never another zone's.
+                + (storeId == null
+                    ? "   AND pl.zone_id IS NULL"
+                    : "   AND (pl.zone_id IS NULL OR pl.zone_id IN (SELECT z.zone_id"
+                        + " FROM price_zone_stores z WHERE z.tenant_id = pli.tenant_id"
+                        + " AND z.store_id = ?))")
                 + (asOf
                     ? "   AND "
                         + activeAsOf("pl", "PRICE_LIST")
@@ -604,7 +643,7 @@ public class PricingRepository extends BaseOutboxRepository {
                 + "   AND pl.effective_from <= ?"
                 + "   AND (pl.effective_to IS NULL OR pl.effective_to > ?)"
                 + "   AND pli.min_qty <= ?"
-                + " ORDER BY pli.min_qty DESC, "
+                + " ORDER BY (pl.zone_id IS NULL), pli.min_qty DESC, "
                 + price
                 + " ASC"
                 + " LIMIT 1",
@@ -614,6 +653,7 @@ public class PricingRepository extends BaseOutboxRepository {
               ps.setObject(i++, tenantId);
               ps.setObject(i++, variantId);
               ps.setString(i++, channel);
+              if (storeId != null) ps.setObject(i++, storeId);
               if (asOf) {
                 for (int k = 0; k < 4; k++) ps.setObject(i++, toOdt(at));
               }
@@ -1077,6 +1117,65 @@ public class PricingRepository extends BaseOutboxRepository {
         ps -> ps.setObject(1, tenantId),
         this::mapPromotion,
         "list active promotions");
+  }
+
+  /**
+   * The promotions that touch a store on or after {@code from}: the store's own and the
+   * business-wide ones, on or off, whose end date had not passed by then. A promotion switched off
+   * before {@code from} still appears here; the service reads the switch and drops it.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param storeId the store
+   * @param from the first moment of interest
+   * @return the promotions, earliest start first
+   */
+  public List<Promotion> findPromotionsTouching(UUID tenantId, UUID storeId, Instant from) {
+    return query(
+        "SELECT id,tenant_id,store_id,name,type,value,min_order_amount,"
+            + "  channel,active,starts_at,ends_at,created_at,priority,exclusive,coupon_code,"
+            + "  max_redemptions,max_per_customer,buy_qty,get_qty,get_discount_pct"
+            + " FROM promotions WHERE tenant_id=? AND (store_id IS NULL OR store_id=?)"
+            + " AND (ends_at IS NULL OR ends_at >= ?)"
+            + " ORDER BY starts_at ASC, id ASC",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, storeId);
+          ps.setObject(3, toOdt(from));
+        },
+        this::mapPromotion,
+        "find promotions touching a store");
+  }
+
+  /**
+   * When each of these promotions was last switched off, for those that ever were.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param promotionIds the promotions to ask about
+   * @return promotion id to the moment of its latest switch-off
+   */
+  public Map<UUID, Instant> findLastSwitchOff(UUID tenantId, List<UUID> promotionIds) {
+    if (promotionIds.isEmpty()) return Map.of();
+    String placeholders = String.join(",", java.util.Collections.nCopies(promotionIds.size(), "?"));
+    Map<UUID, Instant> out = new java.util.HashMap<>();
+    query(
+        "SELECT subject_id, MAX(changed_at) AS changed_at FROM promotion_status_changes"
+            + " WHERE tenant_id = ? AND subject_type = 'PROMOTION' AND active = FALSE"
+            + " AND subject_id IN ("
+            + placeholders
+            + ") GROUP BY subject_id",
+        ps -> {
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          for (UUID id : promotionIds) ps.setObject(i++, id);
+        },
+        rs -> {
+          out.put(
+              rs.getObject("subject_id", UUID.class),
+              rs.getObject("changed_at", OffsetDateTime.class).toInstant());
+          return null;
+        },
+        "find last switch-off");
+    return out;
   }
 
   /**

@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 
 // Withdrawals and recalls. Opening one takes every pack in scope off sale at
@@ -480,11 +481,11 @@ String describeScope(RecallScopeLine line) {
   final parts = <String>[
     if (line.batchNo != null) 'Lot ${line.batchNo}',
     if (line.expiryFrom != null && line.expiryTo != null)
-      'dated ${line.expiryFrom} to ${line.expiryTo}'
+      'dated ${AppFormat.date(line.expiryFrom)} to ${AppFormat.date(line.expiryTo)}'
     else if (line.expiryFrom != null)
-      'dated ${line.expiryFrom} or later'
+      'dated ${AppFormat.date(line.expiryFrom)} or later'
     else if (line.expiryTo != null)
-      'dated ${line.expiryTo} or earlier',
+      'dated ${AppFormat.date(line.expiryTo)} or earlier',
   ];
   return parts.join(', ');
 }

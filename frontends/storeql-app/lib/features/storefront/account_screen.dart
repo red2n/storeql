@@ -3,8 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/l10n/message_languages.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'storefront_providers.dart';
 import 'storefront_shell.dart' show StorefrontAuthDialog;
 
@@ -124,6 +128,68 @@ final myCustomerProvider = FutureProvider.autoDispose<MyCustomer?>((ref) async {
 
 /// The shopper's address book at this shop; empty when signed out or when the
 /// shop holds no record yet.
+/// The shopper's points under this shop's programme (13.x): balance, tier, the
+/// way up, the multiplier, and the warning they are owed about points dying.
+class MyLoyalty {
+  final double pointsBalance;
+  final String tier;
+  final double multiplier;
+  final String? nextTierName;
+  final double? pointsToGo;
+  final double? expiringPoints;
+  final String? expiringOn;
+  final int? expiryMonths;
+
+  const MyLoyalty({
+    required this.pointsBalance,
+    required this.tier,
+    this.multiplier = 1,
+    this.nextTierName,
+    this.pointsToGo,
+    this.expiringPoints,
+    this.expiringOn,
+    this.expiryMonths,
+  });
+
+  factory MyLoyalty.fromJson(Map<String, dynamic> j) {
+    final next = j['nextTier'] is Map<String, dynamic> ? j['nextTier'] as Map<String, dynamic> : null;
+    final soon =
+        j['expiringSoon'] is Map<String, dynamic> ? j['expiringSoon'] as Map<String, dynamic> : null;
+    return MyLoyalty(
+      pointsBalance: (j['pointsBalance'] as num?)?.toDouble() ?? 0,
+      tier: j['tier'] as String? ?? '',
+      multiplier: (j['multiplier'] as num?)?.toDouble() ?? 1,
+      nextTierName: next?['name'] as String?,
+      pointsToGo: (next?['pointsToGo'] as num?)?.toDouble(),
+      expiringPoints: (soon?['points'] as num?)?.toDouble(),
+      expiringOn: (soon?['on'] as String?)?.substring(0, 10),
+      expiryMonths: (j['expiryMonths'] as num?)?.toInt(),
+    );
+  }
+
+  static String pts(double v) => '${trim(v)} pts';
+
+  /// `1.5`, `2`, `1.25` — never a trailing zero.
+  static String trim(double v) => v == v.roundToDouble()
+      ? v.toStringAsFixed(0)
+      : v.toStringAsFixed(2).replaceFirst(RegExp(r'0+$'), '');
+}
+
+/// The shopper's own loyalty; null before the shop holds a record of them.
+final myLoyaltyProvider = FutureProvider.autoDispose<MyLoyalty?>((ref) async {
+  final auth = ref.watch(storefrontAuthProvider);
+  if (!auth.isSignedIn) return null;
+  final dio = ref.watch(storefrontDioProvider);
+  try {
+    final resp = await dio.get('/${ApiConstants.customer}/customers/me/loyalty');
+    final data = resp.data is Map ? resp.data['data'] : null;
+    return data is Map<String, dynamic> ? MyLoyalty.fromJson(data) : null;
+  } on DioException catch (e) {
+    if (e.response?.statusCode == 404) return null;
+    rethrow;
+  }
+});
+
 final myAddressesProvider = FutureProvider.autoDispose<List<SavedAddress>>((ref) async {
   final auth = ref.watch(storefrontAuthProvider);
   if (!auth.isSignedIn) return const [];
@@ -154,6 +220,7 @@ class _StorefrontAccountScreenState extends ConsumerState<StorefrontAccountScree
   void _refresh() {
     ref.invalidate(myCustomerProvider);
     ref.invalidate(myAddressesProvider);
+    ref.invalidate(myLoyaltyProvider);
   }
 
   void _say(String text) {
@@ -256,121 +323,214 @@ class _StorefrontAccountScreenState extends ConsumerState<StorefrontAccountScree
     if (!auth.isSignedIn) return const _SignInFirst();
     final customer = ref.watch(myCustomerProvider);
     final addresses = ref.watch(myAddressesProvider);
+    final loyalty = ref.watch(myLoyaltyProvider);
     final theme = Theme.of(context);
 
     return RefreshIndicator(
       onRefresh: () async => _refresh(),
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Text('My account', style: theme.textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text(
-            'What this shop holds about you, and the addresses you keep here. '
-            'Each shop keeps its own record of you.',
-            style: theme.textTheme.bodyMedium
-                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 12),
-          customer.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24),
-              child: Center(child: CircularProgressIndicator()),
+      // A single column of fields and addresses: a form's width on a big screen, not 1200px.
+      child: ContentBounds.form(
+        child: ListView(
+          padding: context.pagePadding,
+          children: [
+            Text('My account', style: theme.textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(
+              'What this shop holds about you, and the addresses you keep here. '
+              'Each shop keeps its own record of you.',
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
-            error: (e, _) => _InlineError(
-              message: friendlyError(e, fallback: 'Could not load your account.'),
-              onRetry: _refresh,
-            ),
-            data: (c) => c == null
-                ? _NoRecordCard(busy: _busy, onClaim: _claim)
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      ProfileCard(
-                        key: ValueKey('profile-${c.id}'),
-                        customer: c,
-                        busy: _busy,
-                        onSave: _saveProfile,
-                      ),
-                      const SizedBox(height: 24),
-                      Row(
-                        children: [
-                          Expanded(
-                              child: Text('My addresses', style: theme.textTheme.titleLarge)),
-                          FilledButton.tonalIcon(
-                            key: const Key('account-add-address'),
-                            onPressed: _busy ? null : _addAddress,
-                            icon: const Icon(Icons.add_location_alt_outlined),
-                            label: const Text('Add address'),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      addresses.when(
-                        loading: () => const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 24),
-                          child: Center(child: CircularProgressIndicator()),
+            const SizedBox(height: 12),
+            customer.when(
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+              error: (e, _) => _InlineError(
+                message: friendlyError(e, fallback: 'Could not load your account.'),
+                onRetry: _refresh,
+              ),
+              data: (c) => c == null
+                  ? _NoRecordCard(busy: _busy, onClaim: _claim)
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        ProfileCard(
+                          key: ValueKey('profile-${c.id}'),
+                          customer: c,
+                          busy: _busy,
+                          onSave: _saveProfile,
                         ),
-                        error: (e, _) => _InlineError(
-                          message: friendlyError(e, fallback: 'Could not load your addresses.'),
-                          onRetry: _refresh,
-                        ),
-                        data: (rows) => rows.isEmpty
-                            ? Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 16),
-                                child: Text(
-                                  'No addresses yet. Save one here and checkout will offer it.',
-                                  style: theme.textTheme.bodyMedium?.copyWith(
-                                      color: theme.colorScheme.onSurfaceVariant),
+                        // My points (13.x): shown once the shop holds a record of the shopper.
+                        loyalty.maybeWhen(
+                          data: (l) => l == null
+                              ? const SizedBox.shrink()
+                              : Padding(
+                                  padding: const EdgeInsets.only(top: 24),
+                                  child: LoyaltyCard(loyalty: l),
                                 ),
-                              )
-                            : Card(
-                                child: Column(
-                                  children: [
-                                    for (final a in rows)
-                                      ListTile(
-                                        leading: Icon(a.type == 'WORK'
-                                            ? Icons.work_outline
-                                            : Icons.home_outlined),
-                                        title: Text(a.oneLine),
-                                        subtitle: Text(addressTypes[a.type] ?? a.type),
-                                        trailing: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            if (a.isDefault)
-                                              const Chip(
-                                                  label: Text('Default'),
-                                                  visualDensity: VisualDensity.compact),
-                                            PopupMenuButton<String>(
-                                              key: Key('address-menu-${a.id}'),
-                                              tooltip: 'Address actions',
-                                              onSelected: (v) => switch (v) {
-                                                'edit' => _editAddress(a),
-                                                'default' => _makeDefault(a),
-                                                _ => _removeAddress(a),
-                                              },
-                                              itemBuilder: (_) => [
-                                                const PopupMenuItem(
-                                                    value: 'edit', child: Text('Edit')),
-                                                if (!a.isDefault)
-                                                  const PopupMenuItem(
-                                                      value: 'default',
-                                                      child: Text('Make default')),
-                                                const PopupMenuItem(
-                                                    value: 'remove', child: Text('Remove')),
+                          orElse: () => const SizedBox.shrink(),
+                        ),
+                        const SizedBox(height: AppSpacing.xl),
+                        // The button shares the heading's line while both fit, and goes under it
+                        // on a phone with large text rather than running off the edge.
+                        Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: AppSpacing.sm,
+                          runSpacing: AppSpacing.sm,
+                          children: [
+                            Text('My addresses', style: theme.textTheme.titleLarge),
+                            FilledButton.tonalIcon(
+                              key: const Key('account-add-address'),
+                              onPressed: _busy ? null : _addAddress,
+                              icon: const Icon(Icons.add_location_alt_outlined),
+                              label: const Text('Add address'),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: AppSpacing.sm),
+                        addresses.when(
+                          loading: () => const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 24),
+                            child: Center(child: CircularProgressIndicator()),
+                          ),
+                          error: (e, _) => _InlineError(
+                            message: friendlyError(e, fallback: 'Could not load your addresses.'),
+                            onRetry: _refresh,
+                          ),
+                          data: (rows) => rows.isEmpty
+                              ? Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 16),
+                                  child: Text(
+                                    'No addresses yet. Save one here and checkout will offer it.',
+                                    style: theme.textTheme.bodyMedium?.copyWith(
+                                        color: theme.colorScheme.onSurfaceVariant),
+                                  ),
+                                )
+                              : Card(
+                                  child: Column(
+                                    children: [
+                                      for (final a in rows)
+                                        ListTile(
+                                          leading: Icon(a.type == 'WORK'
+                                              ? Icons.work_outline
+                                              : Icons.home_outlined),
+                                          title: Text(a.oneLine),
+                                          // Default is said beside the type, so on a phone the
+                                          // address keeps the row but for the menu.
+                                          subtitle: Padding(
+                                            padding: const EdgeInsetsDirectional.only(
+                                                top: AppSpacing.xs),
+                                            child: Wrap(
+                                              spacing: AppSpacing.sm,
+                                              runSpacing: AppSpacing.xs,
+                                              crossAxisAlignment: WrapCrossAlignment.center,
+                                              children: [
+                                                Text(addressTypes[a.type] ?? humanizeCode(a.type)),
+                                                if (a.isDefault)
+                                                  const StatusBadge('Default',
+                                                      tone: StatusTone.accent),
                                               ],
                                             ),
-                                          ],
+                                          ),
+                                          trailing: PopupMenuButton<String>(
+                                            key: Key('address-menu-${a.id}'),
+                                            tooltip: 'Address actions',
+                                            onSelected: (v) => switch (v) {
+                                              'edit' => _editAddress(a),
+                                              'default' => _makeDefault(a),
+                                              _ => _removeAddress(a),
+                                            },
+                                            itemBuilder: (_) => [
+                                              const PopupMenuItem(
+                                                  value: 'edit', child: Text('Edit')),
+                                              if (!a.isDefault)
+                                                const PopupMenuItem(
+                                                    value: 'default',
+                                                    child: Text('Make default')),
+                                              const PopupMenuItem(
+                                                  value: 'remove', child: Text('Remove')),
+                                            ],
+                                          ),
                                         ),
-                                      ),
-                                  ],
+                                    ],
+                                  ),
                                 ),
-                              ),
-                      ),
-                    ],
-                  ),
-          ),
-        ],
+                        ),
+                      ],
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// My points: the balance and tier under this shop's programme, the way up, the
+/// benefit, and the warning a customer is owed about points that will die.
+class LoyaltyCard extends StatelessWidget {
+  const LoyaltyCard({super.key, required this.loyalty});
+  final MyLoyalty loyalty;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final l = loyalty;
+    return Card(
+      key: const Key('my-loyalty'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Icon(Icons.stars_outlined, color: cs.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Text('My points', style: theme.textTheme.titleLarge),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                    color: cs.secondaryContainer, borderRadius: AppRadius.badge),
+                child: Text(l.tier,
+                    key: const Key('my-loyalty-tier'),
+                    style: TextStyle(
+                        fontWeight: FontWeight.w600, color: cs.onSecondaryContainer)),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            Text(MyLoyalty.pts(l.pointsBalance),
+                key: const Key('my-loyalty-balance'),
+                style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            Text(
+              [
+                if (l.multiplier != 1)
+                  'Your tier earns ×${MyLoyalty.trim(l.multiplier)} on every purchase.',
+                if (l.nextTierName != null && l.pointsToGo != null)
+                  '${l.nextTierName} is ${MyLoyalty.pts(l.pointsToGo!)} away.',
+                if (l.nextTierName == null) 'You are at the top of the ladder.',
+                if (l.expiryMonths != null)
+                  'Points live ${l.expiryMonths} months from the day you earn them.',
+              ].join(' '),
+              style: theme.textTheme.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
+            ),
+            if (l.expiringPoints != null && l.expiringOn != null) ...[
+              const SizedBox(height: 8),
+              Row(children: [
+                Icon(Icons.hourglass_bottom_outlined, size: 16, color: context.status.warning),
+                const SizedBox(width: 6),
+                Text('${MyLoyalty.pts(l.expiringPoints!)} expire on ${AppFormat.date(l.expiringOn)}.',
+                    key: const Key('my-loyalty-expiring'),
+                    style: TextStyle(color: context.status.warning, fontWeight: FontWeight.w600)),
+              ]),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -393,30 +553,75 @@ class _ProfileCardState extends State<ProfileCard> {
   late final _first = TextEditingController(text: widget.customer.firstName);
   late final _last = TextEditingController(text: widget.customer.lastName);
   late final _phone = TextEditingController(text: widget.customer.phone ?? '');
-  late final _dob = TextEditingController(text: widget.customer.dob ?? '');
   late String _language = widget.customer.preferredLanguage ?? '';
+
+  /// The date of birth as the server keeps it (`1990-05-14`), or null for none. Kept as it came
+  /// until the shopper picks another, so a value the calendar cannot read is never lost on save.
+  late String? _dob = _blankToNull(widget.customer.dob);
+
+  /// What the field shows: the date in words (*14 May 1990*), never the ISO the server keeps.
+  late final _dobShown = TextEditingController(text: _shown(_dob));
+
+  static String? _blankToNull(String? v) =>
+      v == null || v.trim().isEmpty ? null : v.trim();
+
+  static String _shown(String? iso) => iso == null ? '' : AppFormat.date(iso);
+
+  /// A calendar day as the server takes it: `1990-05-20`.
+  static String _isoDay(DateTime d) => '${d.year.toString().padLeft(4, '0')}-'
+      '${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  void _setDob(String? iso) => setState(() {
+        _dob = iso;
+        _dobShown.text = _shown(iso);
+      });
+
+  /// A birthday is chosen, not typed: the calendar opens on the years, the long way round to one,
+  /// and offers no day after today.
+  Future<void> _pickDob() async {
+    final today = DateUtils.dateOnly(DateTime.now());
+    final first = DateTime(1900);
+    final held = _dob == null ? null : DateTime.tryParse(_dob!);
+    final initial = held != null && !held.isAfter(today) && !held.isBefore(first)
+        ? DateUtils.dateOnly(held)
+        : DateTime(today.year - 30, today.month, today.day);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: first,
+      lastDate: today,
+      initialDatePickerMode: DatePickerMode.year,
+      helpText: 'Date of birth',
+      fieldLabelText: 'Date of birth',
+    );
+    if (picked == null || !mounted) return;
+    _setDob(_isoDay(picked));
+  }
 
   @override
   void dispose() {
     _first.dispose();
     _last.dispose();
     _phone.dispose();
-    _dob.dispose();
+    _dobShown.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Fields sit a 12px gap apart: with no counter row under them they would touch outline to
+    // outline.
+    const gap = SizedBox(height: AppSpacing.md);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: AppSpacing.cardPadding,
         child: Form(
           key: _form,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text('My details', style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.md),
               TextFormField(
                 key: const Key('profile-first'),
                 controller: _first,
@@ -424,6 +629,7 @@ class _ProfileCardState extends State<ProfileCard> {
                 decoration: const InputDecoration(labelText: 'First name', counterText: ''),
                 validator: (v) => (v ?? '').trim().isEmpty ? 'Required' : null,
               ),
+              gap,
               TextFormField(
                 key: const Key('profile-last'),
                 controller: _last,
@@ -431,6 +637,7 @@ class _ProfileCardState extends State<ProfileCard> {
                 decoration: const InputDecoration(labelText: 'Last name', counterText: ''),
                 validator: (v) => (v ?? '').trim().isEmpty ? 'Required' : null,
               ),
+              gap,
               TextFormField(
                 key: const Key('profile-phone'),
                 controller: _phone,
@@ -438,28 +645,46 @@ class _ProfileCardState extends State<ProfileCard> {
                 keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(labelText: 'Phone', counterText: ''),
               ),
+              gap,
               TextFormField(
                 key: const Key('profile-dob'),
-                controller: _dob,
-                maxLength: 10,
-                keyboardType: TextInputType.datetime,
-                decoration: const InputDecoration(
-                  labelText: 'Date of birth (YYYY-MM-DD)',
-                  counterText: '',
+                controller: _dobShown,
+                readOnly: true,
+                onTap: widget.busy ? null : _pickDob,
+                decoration: InputDecoration(
+                  labelText: 'Date of birth',
+                  hintText: 'Not given',
                   helperText: 'Under 18, a parent or guardian consents for you.',
+                  helperMaxLines: 2,
+                  suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_dob != null)
+                        IconButton(
+                          tooltip: 'Clear date of birth',
+                          icon: const Icon(Icons.close),
+                          onPressed: widget.busy ? null : () => _setDob(null),
+                        ),
+                      // The way in from a keyboard: a read-only field takes no Enter.
+                      IconButton(
+                        key: const Key('profile-dob-pick'),
+                        tooltip: 'Choose date of birth',
+                        icon: const Icon(Icons.calendar_today_outlined),
+                        onPressed: widget.busy ? null : _pickDob,
+                      ),
+                    ],
+                  ),
                 ),
-                validator: (v) {
-                  final t = (v ?? '').trim();
-                  if (t.isEmpty) return null;
-                  return RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(t) ? null : 'YYYY-MM-DD';
-                },
               ),
+              gap,
               DropdownButtonFormField<String>(
                 key: const Key('profile-language'),
                 initialValue: _language,
+                isExpanded: true,
                 decoration: const InputDecoration(
                   labelText: 'Messages in',
                   helperText: 'The language of the emails and texts this shop sends you, where it has written them.',
+                  helperMaxLines: 3,
                 ),
                 items: [
                   const DropdownMenuItem(value: '', child: Text("The shop's language")),
@@ -469,18 +694,19 @@ class _ProfileCardState extends State<ProfileCard> {
                 ],
                 onChanged: widget.busy ? null : (v) => setState(() => _language = v ?? ''),
               ),
-              const SizedBox(height: 8),
+              gap,
               TextField(
                 enabled: false,
                 controller: TextEditingController(text: widget.customer.email),
                 decoration: const InputDecoration(
                   labelText: 'Email',
                   helperText: 'Your email is your sign-in and cannot be changed here.',
+                  helperMaxLines: 2,
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               Align(
-                alignment: Alignment.centerRight,
+                alignment: AlignmentDirectional.centerEnd,
                 child: FilledButton(
                   key: const Key('profile-save'),
                   onPressed: widget.busy
@@ -488,12 +714,11 @@ class _ProfileCardState extends State<ProfileCard> {
                       : () {
                           if (!(_form.currentState?.validate() ?? false)) return;
                           final phone = _phone.text.trim();
-                          final dob = _dob.text.trim();
                           widget.onSave({
                             'firstName': _first.text.trim(),
                             'lastName': _last.text.trim(),
                             'phone': phone.isEmpty ? null : phone,
-                            'dob': dob.isEmpty ? null : dob,
+                            'dob': _dob,
                             // Empty is the shop's own language: the server clears the choice.
                             'preferredLanguage': _language,
                           });
@@ -618,7 +843,7 @@ class _AddressDialogState extends State<AddressDialog> {
                     ),
                   ),
                 ]),
-                SwitchListTile(
+                SwitchListTile.adaptive(
                   key: const Key('address-default'),
                   contentPadding: EdgeInsets.zero,
                   value: _default,

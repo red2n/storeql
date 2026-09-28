@@ -26,6 +26,7 @@ public final class TenantSvcStub implements AutoCloseable {
   private final Map<String, java.util.List<String>> stores = new ConcurrentHashMap<>();
   private final java.util.Map<String, String> retention =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final Map<String, java.util.List<String>> fxRates = new ConcurrentHashMap<>();
 
   /** Percentage of net each business's people earn, for the commission rating route. */
   private final Map<String, String> commissionPercent = new ConcurrentHashMap<>();
@@ -49,6 +50,30 @@ public final class TenantSvcStub implements AutoCloseable {
   public static TenantSvcStub start() {
     HttpServer server = JsonStub.serve("tenant-svc-stub");
     TenantSvcStub stub = new TenantSvcStub(server);
+    // What a plan allows the business (21.8, 21.11), as Entitlements reads it: the grants of the
+    // limits given with withLimit, and an empty list — unrestricted — for a business given none.
+    // The JDK server routes by the longest matching context, so this wins over /admin/tenant.
+    server.createContext(
+        "/admin/tenant/plan/limits",
+        exchange -> {
+          stub.requests.incrementAndGet();
+          String tenant = exchange.getRequestHeaders().getFirst("X-Tenant-Id");
+          java.util.Map<String, Long> limits =
+              tenant == null
+                  ? java.util.Map.of()
+                  : stub.limits.getOrDefault(tenant, java.util.Map.of());
+          StringBuilder grants = new StringBuilder();
+          for (var e : limits.entrySet()) {
+            if (grants.length() > 0) grants.append(',');
+            grants
+                .append("{\"key\":\"")
+                .append(e.getKey())
+                .append("\",\"limitValue\":")
+                .append(e.getValue())
+                .append('}');
+          }
+          JsonStub.reply(exchange, 200, "{\"data\":{\"grants\":[" + grants + "]}}");
+        });
     server.createContext(
         "/admin/tenant",
         exchange -> {
@@ -138,6 +163,33 @@ public final class TenantSvcStub implements AutoCloseable {
                   + String.join(",", stub.depositSchemes.getOrDefault(country, java.util.List.of()))
                   + "]}}");
         });
+    // A tenant's exchange rates (03.x): the home currency from its profile and the rates given
+    // with withFxRate; a tenant with none keeps only its home currency.
+    server.createContext(
+        "/admin/tenant/fx-rates",
+        exchange -> {
+          stub.requests.incrementAndGet();
+          String tenant = exchange.getRequestHeaders().getFirst("X-Tenant-Id");
+          String profile = tenant == null ? null : stub.profiles.get(tenant);
+          if (profile == null) {
+            JsonStub.reply(
+                exchange,
+                404,
+                "{\"error\":{\"code\":\"TENANT_NOT_FOUND\",\"message\":\"no such tenant\"}}");
+            return;
+          }
+          java.util.regex.Matcher m =
+              java.util.regex.Pattern.compile("\"currency\":\"([A-Z]{3})\"").matcher(profile);
+          String home = m.find() ? m.group(1) : "GBP";
+          JsonStub.reply(
+              exchange,
+              200,
+              "{\"data\":{\"home\":\""
+                  + home
+                  + "\",\"rates\":["
+                  + String.join(",", stub.fxRates.getOrDefault(tenant, java.util.List.of()))
+                  + "]}}");
+        });
     // A tenant's retention schedule (21.16), as registered; a tenant with none has an empty one.
     server.createContext(
         "/admin/tenant/retention",
@@ -186,6 +238,20 @@ public final class TenantSvcStub implements AutoCloseable {
   }
 
   /** Registers a tenant's declared currency and country. */
+  private final java.util.Map<String, java.util.Map<String, Long>> limits =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * A limit the business's plan carries (21.8, 21.11): {@code stores.max}, {@code images.mb.max}… A
+   * business given none is unrestricted, as a business on no plan is.
+   */
+  public TenantSvcStub withLimit(String tenantId, String key, long value) {
+    limits
+        .computeIfAbsent(tenantId, k -> new java.util.concurrent.ConcurrentHashMap<>())
+        .put(key, value);
+    return this;
+  }
+
   public TenantSvcStub with(String tenantId, String currency, String country) {
     profiles.put(
         tenantId,
@@ -347,6 +413,22 @@ public final class TenantSvcStub implements AutoCloseable {
    * @param holds hold objects as the sheet lists them, e.g. {@code
    *     {"subjectKind":"CUSTOMER","subjectId":"…"}}
    */
+  /**
+   * Gives a registered tenant an exchange rate (03.x): {@code rate} home units per one unit of
+   * {@code currency}, as tenant-svc's {@code GET /admin/tenant/fx-rates} would list it.
+   */
+  public TenantSvcStub withFxRate(String tenantId, String currency, String rate) {
+    fxRates
+        .computeIfAbsent(tenantId, k -> new java.util.concurrent.CopyOnWriteArrayList<>())
+        .add(
+            "{\"currency\":\""
+                + currency
+                + "\",\"rate\":"
+                + rate
+                + ",\"effectiveFrom\":\"2026-01-01\"}");
+    return this;
+  }
+
   public TenantSvcStub withRetention(
       String tenantId, java.util.Map<String, Integer> periods, java.util.List<String> holds) {
     StringBuilder classes = new StringBuilder();
@@ -394,6 +476,54 @@ public final class TenantSvcStub implements AutoCloseable {
                 + field("line1", line1)
                 + field("city", city)
                 + field("pincode", pincode)
+                + "}");
+    return this;
+  }
+
+  /**
+   * Registers one of a tenant's warehouses (type WAREHOUSE), as tenant-svc's {@code GET
+   * /admin/stores} lists it: a stock-only site that serves shops (depot / DC replenishment).
+   */
+  public TenantSvcStub withWarehouse(String tenantId, String storeId) {
+    stores
+        .computeIfAbsent(tenantId, t -> new java.util.concurrent.CopyOnWriteArrayList<>())
+        .add("{\"id\":\"" + storeId + "\",\"country\":null,\"type\":\"WAREHOUSE\"}");
+    return this;
+  }
+
+  /**
+   * Registers one of a tenant's shops (type STORE) with its coordinates, as tenant-svc's {@code GET
+   * /admin/stores} lists it: where an online order is routed from (order orchestration).
+   */
+  public TenantSvcStub withStoreAt(String tenantId, String storeId, double lat, double lng) {
+    stores
+        .computeIfAbsent(tenantId, t -> new java.util.concurrent.CopyOnWriteArrayList<>())
+        .add(
+            "{\"id\":\""
+                + storeId
+                + "\",\"country\":\"GB\",\"type\":\"STORE\",\"geoLat\":"
+                + lat
+                + ",\"geoLng\":"
+                + lng
+                + "}");
+    return this;
+  }
+
+  /**
+   * Registers one of a tenant's dark stores (type DARK_STORE) with its coordinates, as tenant-svc's
+   * {@code GET /admin/stores} lists it: a shop with no shop floor that fills online orders for
+   * delivery only (ship-from-store and dark-store picking).
+   */
+  public TenantSvcStub withDarkStore(String tenantId, String storeId, double lat, double lng) {
+    stores
+        .computeIfAbsent(tenantId, t -> new java.util.concurrent.CopyOnWriteArrayList<>())
+        .add(
+            "{\"id\":\""
+                + storeId
+                + "\",\"country\":\"GB\",\"type\":\"DARK_STORE\",\"geoLat\":"
+                + lat
+                + ",\"geoLng\":"
+                + lng
                 + "}");
     return this;
   }

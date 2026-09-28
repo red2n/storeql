@@ -49,8 +49,8 @@ public class PurchaseRepository extends BaseOutboxRepository {
                       + " (id,tenant_id,name,vat_number,vat_registered,country_code,currency,payment_terms_days,"
                       + "  remittance_email,bank_account_name,bank_sort_code,bank_account_number,bank_iban,"
                       + "  bank_bic,bank_details_changed_at,bank_details_changed_by,einvoice_scheme,"
-                      + "  einvoice_id)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                      + "  einvoice_id,lead_time_days)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, s.id());
             ps.setObject(2, s.tenantId());
             ps.setString(3, s.name());
@@ -62,6 +62,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
             bindPaymentFields(ps, 9, s);
             ps.setString(17, s.einvoiceScheme());
             ps.setString(18, s.einvoiceId());
+            bindLeadTime(ps, 19, s);
             ps.executeUpdate();
           } catch (java.sql.SQLException sqle) {
             throw supplierConflict(sqle);
@@ -146,7 +147,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
                       + " currency=?, payment_terms_days=?, remittance_email=?, bank_account_name=?,"
                       + " bank_sort_code=?, bank_account_number=?, bank_iban=?, bank_bic=?,"
                       + " bank_details_changed_at=?, bank_details_changed_by=?, einvoice_scheme=?,"
-                      + " einvoice_id=?, updated_at=now()"
+                      + " einvoice_id=?, lead_time_days=?, updated_at=now()"
                       + " WHERE tenant_id=? AND id=?")) {
             ps.setString(1, s.name());
             ps.setString(2, s.vatNumber());
@@ -157,8 +158,9 @@ public class PurchaseRepository extends BaseOutboxRepository {
             bindPaymentFields(ps, 7, s);
             ps.setString(15, s.einvoiceScheme());
             ps.setString(16, s.einvoiceId());
-            ps.setObject(17, s.tenantId());
-            ps.setObject(18, s.id());
+            bindLeadTime(ps, 17, s);
+            ps.setObject(18, s.tenantId());
+            ps.setObject(19, s.id());
             return ps.executeUpdate() > 0;
           } catch (java.sql.SQLException sqle) {
             throw supplierConflict(sqle);
@@ -193,7 +195,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
       "id,tenant_id,name,vat_number,vat_registered,country_code,currency,payment_terms_days,"
           + "created_at,updated_at,remittance_email,bank_account_name,bank_sort_code,"
           + "bank_account_number,bank_iban,bank_bic,bank_details_changed_at,bank_details_changed_by,"
-          + "einvoice_scheme,einvoice_id";
+          + "einvoice_scheme,einvoice_id,lead_time_days";
 
   /**
    * Binds the eight payment fields — remittance email, bank details, the change stamp — from {@code
@@ -211,8 +213,17 @@ public class PurchaseRepository extends BaseOutboxRepository {
     ps.setObject(at + 7, s.bankDetailsChangedBy());
   }
 
+  private static void bindLeadTime(java.sql.PreparedStatement ps, int at, Supplier s)
+      throws SQLException {
+    if (s.leadTimeDays() == null) ps.setNull(at, java.sql.Types.INTEGER);
+    else ps.setInt(at, s.leadTimeDays());
+  }
+
   static Supplier mapSupplier(ResultSet rs) throws SQLException {
     OffsetDateTime changed = rs.getObject("bank_details_changed_at", OffsetDateTime.class);
+    // wasNull speaks of the last column read: asked right after the one that may be null.
+    int quoted = rs.getInt("lead_time_days");
+    Integer leadTimeDays = rs.wasNull() ? null : quoted;
     return new Supplier(
         rs.getObject("id", UUID.class),
         rs.getObject("tenant_id", UUID.class),
@@ -233,7 +244,8 @@ public class PurchaseRepository extends BaseOutboxRepository {
         changed == null ? null : changed.toInstant(),
         rs.getObject("bank_details_changed_by", UUID.class),
         rs.getString("einvoice_scheme"),
-        rs.getString("einvoice_id"));
+        rs.getString("einvoice_id"),
+        leadTimeDays);
   }
 
   // ── Purchase Orders ───────────────────────────────────────────────────────────
@@ -252,8 +264,9 @@ public class PurchaseRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "INSERT INTO purchase_orders"
                       + " (id,tenant_id,supplier_id,store_id,status,currency,"
-                      + "  total_net,total_vat,total_gross,expected_delivery,created_by)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+                      + "  total_net,total_vat,total_gross,expected_delivery,created_by,source,"
+                      + "  ownership,sales_order_id,ship_to,duty_status)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, po.id());
             ps.setObject(2, po.tenantId());
             ps.setObject(3, po.supplierId());
@@ -265,6 +278,11 @@ public class PurchaseRepository extends BaseOutboxRepository {
             ps.setBigDecimal(9, po.totalGross());
             ps.setObject(10, po.expectedDelivery());
             ps.setObject(11, po.createdBy());
+            ps.setString(12, po.source() == null ? Domain.PO_SOURCE_MANUAL : po.source());
+            ps.setString(13, po.ownership() == null ? Domain.PO_OWNERSHIP_OWNED : po.ownership());
+            ps.setObject(14, po.salesOrderId());
+            ps.setString(15, po.shipTo());
+            ps.setString(16, po.dutyStatus() == null ? Domain.PO_DUTY_PAID : po.dutyStatus());
             ps.executeUpdate();
           }
           insertOutbox(c, event);
@@ -284,7 +302,8 @@ public class PurchaseRepository extends BaseOutboxRepository {
     return query(
         "SELECT id,tenant_id,supplier_id,store_id,status,currency,"
             + "total_net,total_vat,total_gross,expected_delivery,created_at,updated_at,cancelled_at,"
-            + "cancelled_reason,closed_at,closed_reason,created_by,approved_by,approved_at"
+            + "cancelled_reason,closed_at,closed_reason,created_by,approved_by,approved_at,source,"
+            + "fx_rate,total_net_home,home_currency,ownership,sales_order_id,ship_to,duty_status"
             + " FROM purchase_orders WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?",
         ps -> {
           ps.setObject(1, tenantId);
@@ -306,7 +325,8 @@ public class PurchaseRepository extends BaseOutboxRepository {
         query(
             "SELECT id,tenant_id,supplier_id,store_id,status,currency,"
                 + "total_net,total_vat,total_gross,expected_delivery,created_at,updated_at,cancelled_at,"
-                + "cancelled_reason,closed_at,closed_reason,created_by,approved_by,approved_at"
+                + "cancelled_reason,closed_at,closed_reason,created_by,approved_by,approved_at,source,"
+                + "fx_rate,total_net_home,home_currency,ownership,sales_order_id,ship_to,duty_status"
                 + " FROM purchase_orders WHERE tenant_id=? AND id=?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -334,20 +354,56 @@ public class PurchaseRepository extends BaseOutboxRepository {
    */
   public boolean submitPurchaseOrder(
       UUID tenantId, UUID id, String status, Domain.PurchaseOrderApproval trail) {
+    return submitPurchaseOrder(tenantId, id, status, trail, NO_ANNOUNCEMENT);
+  }
+
+  /** What a status change says about the order's cross-dock allocations, given them. */
+  public static final java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>>
+      NO_ANNOUNCEMENT = a -> Optional.empty();
+
+  /**
+   * Writes what the announcement makes of the order's cross-dock allocations, on the caller's
+   * transaction: a submitted order's snapshot, or an empty one when the order stops being on its
+   * way. Nothing when the order has no allocations.
+   */
+  private void announceAllocationsTx(
+      Connection c,
+      UUID tenantId,
+      UUID poId,
+      java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>> announce)
+      throws SQLException {
+    List<Domain.LineAllocation> allocations = CrossDockRepository.allocationsTx(c, tenantId, poId);
+    if (allocations.isEmpty()) return;
+    Optional<OutboxRow> row = announce.apply(allocations);
+    if (row.isPresent()) insertOutbox(c, row.get());
+  }
+
+  /** As above, announcing the order's cross-dock allocations on the same transaction. */
+  public boolean submitPurchaseOrder(
+      UUID tenantId,
+      UUID id,
+      String status,
+      Domain.PurchaseOrderApproval trail,
+      java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>> announce) {
     return inTx(
         c -> {
           int rows;
           try (var ps =
               c.prepareStatement(
-                  "UPDATE purchase_orders SET status=?, updated_at=now()"
+                  // The moment the order went to the supplier, kept for the lead time it is
+                  // measured by; an order that waits for approval is stamped when approved.
+                  "UPDATE purchase_orders SET status=?, updated_at=now(),"
+                      + " submitted_at = CASE WHEN ?='SUBMITTED' THEN now() ELSE submitted_at END"
                       + " WHERE tenant_id=? AND id=? AND status='DRAFT'")) {
             ps.setString(1, status);
-            ps.setObject(2, tenantId);
-            ps.setObject(3, id);
+            ps.setString(2, status);
+            ps.setObject(3, tenantId);
+            ps.setObject(4, id);
             rows = ps.executeUpdate();
           }
           if (rows == 0) return false;
           insertApproval(c, trail);
+          announceAllocationsTx(c, tenantId, id, announce);
           return true;
         },
         "submit purchase order");
@@ -368,12 +424,23 @@ public class PurchaseRepository extends BaseOutboxRepository {
    */
   public boolean decidePurchaseOrder(
       UUID tenantId, UUID id, boolean approve, Domain.PurchaseOrderApproval decision) {
+    return decidePurchaseOrder(tenantId, id, approve, decision, NO_ANNOUNCEMENT);
+  }
+
+  /** As above, announcing the order's cross-dock allocations on the same transaction. */
+  public boolean decidePurchaseOrder(
+      UUID tenantId,
+      UUID id,
+      boolean approve,
+      Domain.PurchaseOrderApproval decision,
+      java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>> announce) {
     return inTx(
         c -> {
           int rows;
           String sql =
               approve
                   ? "UPDATE purchase_orders SET status='SUBMITTED', approved_by=?, approved_at=now(),"
+                      + " submitted_at=now(),"
                       + " updated_at=now() WHERE tenant_id=? AND id=? AND status='PENDING_APPROVAL'"
                   : "UPDATE purchase_orders SET status='DRAFT', approved_by=NULL, approved_at=NULL,"
                       + " updated_at=now() WHERE tenant_id=? AND id=? AND status='PENDING_APPROVAL'";
@@ -386,6 +453,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
           }
           if (rows == 0) return false;
           insertApproval(c, decision);
+          announceAllocationsTx(c, tenantId, id, announce);
           return true;
         },
         approve ? "approve purchase order" : "reject purchase order");
@@ -483,6 +551,16 @@ public class PurchaseRepository extends BaseOutboxRepository {
    *     or CANCELLED and therefore not cancellable
    */
   public boolean cancelPurchaseOrder(UUID tenantId, UUID id, String reason, OutboxRow event) {
+    return cancelPurchaseOrder(tenantId, id, reason, event, NO_ANNOUNCEMENT);
+  }
+
+  /** As above, announcing the order's cross-dock allocations on the same transaction. */
+  public boolean cancelPurchaseOrder(
+      UUID tenantId,
+      UUID id,
+      String reason,
+      OutboxRow event,
+      java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>> announce) {
     return inTx(
         c -> {
           int rows;
@@ -498,6 +576,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
           }
           if (rows == 0) return false;
           insertOutbox(c, event);
+          announceAllocationsTx(c, tenantId, id, announce);
           return true;
         },
         "cancel purchase order");
@@ -529,7 +608,37 @@ public class PurchaseRepository extends BaseOutboxRepository {
         rs.getObject("approved_by", UUID.class),
         rs.getObject("approved_at", OffsetDateTime.class) == null
             ? null
-            : rs.getObject("approved_at", OffsetDateTime.class).toInstant());
+            : rs.getObject("approved_at", OffsetDateTime.class).toInstant(),
+        rs.getString("source"),
+        // Kept at the column's ten decimals; read back as it was set (0.79, not 0.7900000000).
+        rs.getBigDecimal("fx_rate") == null
+            ? null
+            : rs.getBigDecimal("fx_rate").stripTrailingZeros(),
+        rs.getBigDecimal("total_net_home"),
+        rs.getString("home_currency"),
+        rs.getString("ownership"),
+        rs.getObject("sales_order_id", UUID.class),
+        rs.getString("ship_to"),
+        rs.getString("duty_status"));
+  }
+
+  /**
+   * Keeps the translation a spend decision was made against (03.x): the rate and the net in the
+   * home currency. A rate moves; the record of what was decided must not.
+   */
+  public void recordTranslation(
+      UUID tenantId, UUID id, BigDecimal fxRate, BigDecimal totalNetHome, String homeCurrency) {
+    exec(
+        "UPDATE purchase_orders SET fx_rate=?, total_net_home=?, home_currency=?"
+            + " WHERE tenant_id=? AND id=?",
+        ps -> {
+          ps.setBigDecimal(1, fxRate);
+          ps.setBigDecimal(2, totalNetHome);
+          ps.setString(3, homeCurrency);
+          ps.setObject(4, tenantId);
+          ps.setObject(5, id);
+        },
+        "record purchase order translation");
   }
 
   // ── PO Lines ──────────────────────────────────────────────────────────────────
@@ -562,8 +671,8 @@ public class PurchaseRepository extends BaseOutboxRepository {
           try (var ps =
               c.prepareStatement(
                   "INSERT INTO purchase_order_lines"
-                      + " (id,tenant_id,po_id,variant_id,qty,unit_price,vat_code)"
-                      + " VALUES (?,?,?,?,?,?,?)")) {
+                      + " (id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,proposal_reason)"
+                      + " VALUES (?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, line.id());
             ps.setObject(2, line.tenantId());
             ps.setObject(3, line.poId());
@@ -571,6 +680,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
             ps.setBigDecimal(5, line.qty());
             ps.setBigDecimal(6, line.unitPrice());
             ps.setString(7, line.vatCode());
+            ps.setString(8, line.proposalReason());
             ps.executeUpdate();
           }
           restateTotals(c, line.tenantId(), line.poId(), currency, vatRates);
@@ -600,7 +710,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
     List<PurchaseOrderLine> lines = new ArrayList<>();
     try (var ps =
         c.prepareStatement(
-            "SELECT id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,created_at"
+            "SELECT id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,created_at,proposal_reason"
                 + " FROM purchase_order_lines WHERE tenant_id=? AND po_id=?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, poId);
@@ -615,7 +725,8 @@ public class PurchaseRepository extends BaseOutboxRepository {
                   rs.getBigDecimal("qty"),
                   rs.getBigDecimal("unit_price"),
                   rs.getString("vat_code"),
-                  rs.getObject("created_at", OffsetDateTime.class).toInstant()));
+                  rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                  rs.getString("proposal_reason")));
         }
       }
     }
@@ -642,7 +753,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
    */
   public List<PurchaseOrderLine> findPurchaseOrderLines(UUID tenantId, UUID poId) {
     return query(
-        "SELECT id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,created_at"
+        "SELECT id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,created_at,proposal_reason"
             + " FROM purchase_order_lines WHERE tenant_id=? AND po_id=?",
         ps -> {
           ps.setObject(1, tenantId);
@@ -657,7 +768,8 @@ public class PurchaseRepository extends BaseOutboxRepository {
                 rs.getBigDecimal("qty"),
                 rs.getBigDecimal("unit_price"),
                 rs.getString("vat_code"),
-                rs.getObject("created_at", OffsetDateTime.class).toInstant()),
+                rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                rs.getString("proposal_reason")),
         "find po lines");
   }
 
@@ -762,6 +874,9 @@ public class PurchaseRepository extends BaseOutboxRepository {
               gr.tenantId(),
               gr.poId(),
               complete ? Domain.PO_RECEIVED : Domain.PO_PARTIALLY_RECEIVED);
+          // The delivery as measured against the order's promise: the fact the supplier's
+          // scorecard is made from, kept with the receipt it belongs to.
+          SupplierPerformanceRepository.recordDeliveryTx(c, gr, lines, complete);
 
           // The asset and the accrual commit with the receipt, or neither does. An idempotent
           // replay returned above, before any of this, so a retried delivery posts once.
@@ -870,6 +985,15 @@ public class PurchaseRepository extends BaseOutboxRepository {
    * close racing a final delivery cannot both win — whichever commits second finds no row.
    */
   public boolean closePurchaseOrderShort(UUID tenantId, UUID poId, String reason) {
+    return closePurchaseOrderShort(tenantId, poId, reason, NO_ANNOUNCEMENT);
+  }
+
+  /** As above, announcing the order's cross-dock allocations on the same transaction. */
+  public boolean closePurchaseOrderShort(
+      UUID tenantId,
+      UUID poId,
+      String reason,
+      java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>> announce) {
     return inTx(
         c -> {
           try (var ps =
@@ -880,8 +1004,10 @@ public class PurchaseRepository extends BaseOutboxRepository {
             ps.setString(1, reason);
             ps.setObject(2, tenantId);
             ps.setObject(3, poId);
-            return ps.executeUpdate() > 0;
+            if (ps.executeUpdate() == 0) return false;
           }
+          announceAllocationsTx(c, tenantId, poId, announce);
+          return true;
         },
         "close purchase order short");
   }

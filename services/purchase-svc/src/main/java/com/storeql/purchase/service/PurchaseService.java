@@ -12,6 +12,7 @@ import com.storeql.purchase.domain.Domain.NominalLedgerEntry;
 import com.storeql.purchase.domain.Domain.PurchaseOrder;
 import com.storeql.purchase.domain.Domain.PurchaseOrderLine;
 import com.storeql.purchase.domain.Domain.Supplier;
+import com.storeql.purchase.domain.Handle;
 import com.storeql.purchase.domain.LedgerPosting;
 import com.storeql.purchase.domain.Money;
 import com.storeql.purchase.domain.PeriodControl;
@@ -32,6 +33,7 @@ import com.storeql.purchase.dto.Dtos.RecordCreditNoteRequest;
 import com.storeql.purchase.dto.Dtos.ResolveSupplierInvoiceRequest;
 import com.storeql.purchase.dto.Dtos.UpdateSupplierRequest;
 import com.storeql.purchase.repo.PurchaseRepository;
+import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import com.storeql.web.Parsing;
 import com.storeql.web.Permissions;
@@ -62,6 +64,7 @@ public class PurchaseService {
   @Inject com.storeql.purchase.client.InventoryClient inventory;
 
   @Inject ServiceConfig config;
+  @Inject com.storeql.service.FxRates fx;
 
   // ── Currency ──────────────────────────────────────────────────────────────────
 
@@ -136,7 +139,8 @@ public class PurchaseService {
             bank.empty() ? null : now,
             bank.empty() ? null : ctx.userId(),
             address == null ? null : address.scheme(),
-            address == null ? null : address.id());
+            address == null ? null : address.id(),
+            req.leadTimeDays());
     return repo.createSupplier(s);
   }
 
@@ -240,7 +244,8 @@ public class PurchaseService {
             bankChangedAt,
             bankChangedBy,
             address == null ? null : address.scheme(),
-            address == null ? null : address.id());
+            address == null ? null : address.id(),
+            req.leadTimeDays() == null ? existing.leadTimeDays() : req.leadTimeDays());
     if (!repo.updateSupplier(updated)) {
       throw ApiException.notFound("PURCHASE_SUPPLIER_NOT_FOUND", "Supplier not found: " + id);
     }
@@ -322,6 +327,8 @@ public class PurchaseService {
    */
   public PurchaseOrder createPurchaseOrder(CreatePurchaseOrderRequest req, TenantContext ctx) {
     Supplier supplier = getSupplier(ctx, req.supplierId());
+    String ownership = ownershipOf(req.ownership());
+    String dutyStatus = dutyStatusOf(req.dutyStatus());
     String currency = supplier.currency();
     if (req.currency() != null) {
       String asked = Money.requireIso4217(req.currency());
@@ -361,7 +368,9 @@ public class PurchaseService {
             // subject to golden rule #3 for the same reason tenant_id is.
             ctx.userId(),
             null,
-            null);
+            null,
+            Domain.PO_SOURCE_MANUAL);
+    po = po.withOwnership(ownership).withDutyStatus(dutyStatus);
     return repo.createPurchaseOrder(
         po, Events.purchaseOrderCreated(ctx.requireTenantId(), po.id()));
   }
@@ -424,7 +433,8 @@ public class PurchaseService {
             req.qty(),
             req.unitPrice(),
             req.vatCode() != null ? req.vatCode().toUpperCase(java.util.Locale.ROOT) : "T1",
-            Instant.now());
+            Instant.now(),
+            null);
     return repo.addPurchaseOrderLine(
         line, po.currency(), pricing.findVatRates(ctx.requireTenantId()));
   }
@@ -464,6 +474,27 @@ public class PurchaseService {
    * @throws ApiException 400 {@code PURCHASE_PO_NOT_DRAFT} if the order is not DRAFT; 409 if it
    *     stopped being DRAFT between the read and the write
    */
+  /**
+   * Cross-docking: an order on its way announces its allocations to inventory-svc as they stand, so
+   * the shops count them on their way and the delivery goes straight across the dock.
+   */
+  private static java.util.function.Function<
+          List<Domain.LineAllocation>, java.util.Optional<OutboxRow>>
+      allocationsStand(PurchaseOrder po) {
+    return a ->
+        java.util.Optional.of(
+            Events.crossDockAllocationsSet(po.tenantId(), po.id(), po.storeId(), a));
+  }
+
+  /** An order that stops being on its way announces that nothing is owed to the shops any more. */
+  private static java.util.function.Function<
+          List<Domain.LineAllocation>, java.util.Optional<OutboxRow>>
+      allocationsLapse(PurchaseOrder po) {
+    return a ->
+        java.util.Optional.of(
+            Events.crossDockAllocationsSet(po.tenantId(), po.id(), po.storeId(), List.of()));
+  }
+
   public PurchaseOrder submitPurchaseOrder(TenantContext ctx, UUID poId) {
     UUID tenantId = ctx.requireTenantId();
     PurchaseOrder po = getPurchaseOrder(ctx, poId);
@@ -471,7 +502,8 @@ public class PurchaseService {
       throw ApiException.badRequest("PURCHASE_PO_NOT_DRAFT", "Only DRAFT orders can be submitted");
 
     SpendAuthority authority =
-        SpendAuthority.decide(po.totalNet(), po.currency(), ctx.roles(), config.approvalLimits());
+        SpendAuthority.decide(
+            po.totalNet(), po.currency(), ctx.roles(), config.approvalLimits(), translation(po));
     String landing = authority.authorised() ? Domain.PO_SUBMITTED : Domain.PO_PENDING_APPROVAL;
 
     boolean submitted =
@@ -479,11 +511,30 @@ public class PurchaseService {
             tenantId,
             poId,
             landing,
-            trailRow(ctx, po, Domain.APPROVAL_REQUESTED, authority, authority.reason()));
+            trailRow(ctx, po, Domain.APPROVAL_REQUESTED, authority, authority.reason()),
+            allocationsStand(po));
     if (!submitted)
       throw ApiException.conflict(
           "PURCHASE_PO_NOT_DRAFT", "The order stopped being DRAFT before it could be submitted");
+    if (authority.translation() != null) {
+      // The figure the decision was made against, kept: a rate moves, the record must not.
+      SpendAuthority.Translation t = authority.translation();
+      repo.recordTranslation(tenantId, poId, t.rate(), t.homeAmount(), t.homeCurrency());
+    }
     return getPurchaseOrder(ctx, poId);
+  }
+
+  /**
+   * The order's net in the business's home currency at the rate it keeps (03.x), or null when the
+   * order is already in the home currency or no rate is kept — in which case an unconfigured
+   * currency fails closed, as before.
+   */
+  private SpendAuthority.Translation translation(PurchaseOrder po) {
+    if (po.totalNet() == null || po.currency() == null) return null;
+    return fx.toHome(po.tenantId(), po.totalNet(), po.currency())
+        .filter(c -> !c.currency().equals(po.currency()))
+        .map(c -> new SpendAuthority.Translation(c.amount(), c.currency(), c.rate()))
+        .orElse(null);
   }
 
   /**
@@ -508,7 +559,8 @@ public class PurchaseService {
     PurchaseOrder po = requirePendingApproval(ctx, poId);
 
     SpendAuthority authority =
-        SpendAuthority.decide(po.totalNet(), po.currency(), ctx.roles(), config.approvalLimits());
+        SpendAuthority.decide(
+            po.totalNet(), po.currency(), ctx.roles(), config.approvalLimits(), translation(po));
     if (!authority.authorised())
       throw ApiException.forbidden("PURCHASE_APPROVAL_EXCEEDS_AUTHORITY", authority.reason());
 
@@ -522,7 +574,8 @@ public class PurchaseService {
                 po,
                 Domain.APPROVAL_APPROVED,
                 authority,
-                req == null ? null : trimmed(req.reason())));
+                req == null ? null : trimmed(req.reason())),
+            allocationsStand(po));
     if (!decided)
       throw ApiException.conflict(
           "PURCHASE_PO_NOT_PENDING_APPROVAL",
@@ -555,10 +608,15 @@ public class PurchaseService {
           "A rejection must say why, so the buyer knows what to change");
 
     SpendAuthority authority =
-        SpendAuthority.decide(po.totalNet(), po.currency(), ctx.roles(), config.approvalLimits());
+        SpendAuthority.decide(
+            po.totalNet(), po.currency(), ctx.roles(), config.approvalLimits(), translation(po));
     boolean decided =
         repo.decidePurchaseOrder(
-            tenantId, poId, false, trailRow(ctx, po, Domain.APPROVAL_REJECTED, authority, reason));
+            tenantId,
+            poId,
+            false,
+            trailRow(ctx, po, Domain.APPROVAL_REJECTED, authority, reason),
+            allocationsLapse(po));
     if (!decided)
       throw ApiException.conflict(
           "PURCHASE_PO_NOT_PENDING_APPROVAL",
@@ -675,7 +733,11 @@ public class PurchaseService {
 
     boolean cancelled =
         repo.cancelPurchaseOrder(
-            tenantId, poId, reason, Events.purchaseOrderCancelled(tenantId, poId, reason));
+            tenantId,
+            poId,
+            reason,
+            Events.purchaseOrderCancelled(tenantId, poId, reason),
+            allocationsLapse(po));
     if (!cancelled)
       throw ApiException.conflict(
           "PURCHASE_PO_NOT_CANCELLABLE",
@@ -713,7 +775,8 @@ public class PurchaseService {
       TenantContext ctx, UUID poId, CancelPurchaseOrderRequest req) {
     UUID tenantId = ctx.requireTenantId();
     PurchaseOrder po = getPurchaseOrder(ctx, poId);
-    boolean closed = repo.closePurchaseOrderShort(tenantId, poId, req.reason().trim());
+    boolean closed =
+        repo.closePurchaseOrderShort(tenantId, poId, req.reason().trim(), allocationsLapse(po));
     if (!closed)
       throw ApiException.conflict(
           "PURCHASE_PO_NOT_CLOSEABLE",
@@ -745,6 +808,12 @@ public class PurchaseService {
       TenantContext ctx, CaptureSupplierInvoiceRequest req) {
     UUID tenantId = ctx.requireTenantId();
     PurchaseOrder po = getPurchaseOrder(ctx, req.poId());
+    if (po.consigned()) {
+      throw ApiException.conflict(
+          "PURCHASE_CONSIGNMENT_NOT_INVOICED",
+          "a consignment order is settled on its sales (see /admin/consignment/settlements), not"
+              + " invoiced on receipt");
+    }
 
     if (req.lines() == null || req.lines().isEmpty())
       throw ApiException.badRequest(
@@ -947,6 +1016,12 @@ public class PurchaseService {
   public GoodsReceipt receiveGoods(
       CreateGoodsReceiptRequest req, TenantContext ctx, String idempotencyKey) {
     PurchaseOrder po = getPurchaseOrder(ctx, req.poId());
+    if (po.dropship()) {
+      throw ApiException.conflict(
+          "PURCHASE_DROPSHIP_NOT_RECEIVED",
+          "a dropship order ships to the customer and is never received into stock; mark it"
+              + " delivered instead (POST /purchase-orders/{id}/dropship-delivered)");
+    }
     // A partially received order is still receivable — that is the whole point of the state. The
     // authoritative check is inside the repository transaction, under a row lock; this one exists
     // to fail a hopeless request early with a clearer message than a rolled-back transaction.
@@ -989,8 +1064,47 @@ public class PurchaseService {
         gr,
         lines,
         Events.goodsReceived(
-            ctx.requireTenantId(), gr.id(), gr.storeId(), gr.poId(), lines, unitPrice),
+            ctx.requireTenantId(),
+            gr.id(),
+            gr.storeId(),
+            gr.poId(),
+            lines,
+            unitPrice,
+            po.ownership(),
+            po.supplierId(),
+            po.dutyStatus()),
         receiptPosting(po, gr, lines, unitPrice));
+  }
+
+  /**
+   * OWNED when unsaid; CONSIGNMENT for goods the supplier keeps until they sell.
+   *
+   * @throws ApiException 400 {@code PURCHASE_OWNERSHIP_INVALID} for an ownership nobody defined
+   */
+  static String ownershipOf(String ownership) {
+    if (ownership == null || ownership.isBlank()) return Domain.PO_OWNERSHIP_OWNED;
+    String code = ownership.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!Domain.PO_OWNERSHIP_OWNED.equals(code) && !Domain.PO_OWNERSHIP_CONSIGNMENT.equals(code)) {
+      throw ApiException.badRequest(
+          "PURCHASE_OWNERSHIP_INVALID", "ownership must be OWNED or CONSIGNMENT; got " + ownership);
+    }
+    return code;
+  }
+
+  /**
+   * DUTY_PAID when unsaid; DUTY_SUSPENDED for excise goods arriving into bond.
+   *
+   * @throws ApiException 400 {@code PURCHASE_DUTY_STATUS_INVALID} for a status nobody defined
+   */
+  static String dutyStatusOf(String dutyStatus) {
+    if (dutyStatus == null || dutyStatus.isBlank()) return Domain.PO_DUTY_PAID;
+    String code = dutyStatus.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!Domain.PO_DUTY_PAID.equals(code) && !Domain.PO_DUTY_SUSPENDED.equals(code)) {
+      throw ApiException.badRequest(
+          "PURCHASE_DUTY_STATUS_INVALID",
+          "dutyStatus must be DUTY_PAID or DUTY_SUSPENDED; got " + dutyStatus);
+    }
+    return code;
   }
 
   /** The order's price per variant — the first line's, where a variant appears twice. */
@@ -1363,7 +1477,7 @@ public class PurchaseService {
 
   private List<NominalLedgerEntry> buildArEntries(
       UUID tenantId, UUID arId, RaiseIntercompanyInvoiceRequest req, LocalDate today) {
-    String desc = "Intercompany AR invoice " + arId;
+    String desc = "Intercompany AR invoice " + Handle.of(arId);
     List<NominalLedgerEntry> entries = new ArrayList<>();
     BigDecimal gross = req.grossAmount();
     BigDecimal net = req.netAmount();
@@ -1421,7 +1535,7 @@ public class PurchaseService {
 
   private List<NominalLedgerEntry> buildApEntries(
       UUID tenantId, UUID apId, RaiseIntercompanyInvoiceRequest req, LocalDate today) {
-    String desc = "Intercompany AP invoice " + apId;
+    String desc = "Intercompany AP invoice " + Handle.of(apId);
     List<NominalLedgerEntry> entries = new ArrayList<>();
     BigDecimal gross = req.grossAmount();
     BigDecimal net = req.netAmount();
@@ -1517,7 +1631,7 @@ public class PurchaseService {
   public void settleIntercompanyInvoice(TenantContext ctx, UUID id) {
     IntercompanyInvoice inv = getIntercompanyInvoice(ctx, id);
     LocalDate today = LocalDate.now();
-    String desc = "Settlement of intercompany invoice " + id;
+    String desc = "Settlement of intercompany invoice " + Handle.of(id);
     List<NominalLedgerEntry> settlements = new ArrayList<>();
 
     if (Domain.INV_AR.equals(inv.invoiceType())) {
@@ -1703,6 +1817,8 @@ public class PurchaseService {
       GoodsReceipt gr,
       List<GoodsReceiptLine> lines,
       java.util.Map<UUID, BigDecimal> priceByVariant) {
+    // Consignment stock is the supplier's until it sells: no asset, and nothing owed at the door.
+    if (po.consigned()) return List.of();
     BigDecimal value = BigDecimal.ZERO;
     for (GoodsReceiptLine l : lines) {
       BigDecimal price = priceByVariant.get(l.variantId());
@@ -1715,7 +1831,7 @@ public class PurchaseService {
     return LedgerPosting.of(
             po.tenantId(),
             today(),
-            "Goods received against PO " + po.id(),
+            "Goods received against " + po.reference(),
             Domain.SOURCE_GOODS_RECEIPT,
             gr.id(),
             gr.storeId())

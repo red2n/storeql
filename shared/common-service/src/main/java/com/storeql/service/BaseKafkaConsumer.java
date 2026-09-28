@@ -60,6 +60,15 @@ public abstract class BaseKafkaConsumer {
   protected abstract void handle(String topic, String value);
 
   /**
+   * Where this consumer's group starts when it has no committed offset: {@code earliest} by
+   * default, so a new consumer misses nothing published before it existed. A projection of live
+   * events that must not replay retained history on its first deployment answers {@code latest}.
+   */
+  protected String offsetReset() {
+    return "earliest";
+  }
+
+  /**
    * CDI observer — makes the bean eager so polling starts at application startup.
    * {@code @ApplicationScoped} beans are otherwise lazy and would never be instantiated (so {@link
    * #start()} would never run) without something observing them.
@@ -85,7 +94,9 @@ public abstract class BaseKafkaConsumer {
       return;
     }
     try {
-      loop = new KafkaEventLoop(consumerName(), bootstrap, groupId(), topics(), this::handle);
+      loop =
+          new KafkaEventLoop(
+              consumerName(), bootstrap, groupId(), topics(), offsetReset(), this::handle);
       loop.start();
       KafkaConsumerRegistry.clear(consumerName());
     } catch (Exception e) {

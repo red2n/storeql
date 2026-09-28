@@ -4,7 +4,6 @@ import com.storeql.ids.Ids;
 import com.storeql.notification.client.CustomerClient;
 import com.storeql.notification.service.Messages;
 import com.storeql.notification.service.Notifier;
-import com.storeql.notification.template.Catalogue;
 import com.storeql.notification.template.Values;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -14,6 +13,7 @@ import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.UUID;
 
 /**
@@ -21,11 +21,16 @@ import java.util.UUID;
  * are skipped; for a real customer the email is resolved from customer-svc (best-effort — a missing
  * email just skips the send). Malformed payloads are skipped; a delivery failure propagates so the
  * consumer loop retries (idempotent per event in {@link Notifier}).
+ *
+ * <p>Delivery and collection slots: when the order carries a window ({@code slotStartsAt} / {@code
+ * slotEndsAt} / {@code slotTimeZone}), the confirmation says it in the store's own zone and the
+ * reader's language; an order with no window reads exactly as before.
  */
 @ApplicationScoped
 class OrderConfirmedHandler {
 
   private static final Logger LOG = System.getLogger(OrderConfirmedHandler.class.getName());
+  private static final String DELIVERY = "DELIVERY";
 
   @Inject Notifier notifier;
   @Inject CustomerClient customers;
@@ -37,6 +42,10 @@ class OrderConfirmedHandler {
     UUID customerId;
     BigDecimal total;
     String currency;
+    String fulfilmentType;
+    Instant slotStartsAt;
+    Instant slotEndsAt;
+    String slotTimeZone;
     try (var reader = Json.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       if (!obj.containsKey("customerId") || obj.isNull("customerId")) {
@@ -49,54 +58,34 @@ class OrderConfirmedHandler {
       total = obj.getJsonNumber("total").bigDecimalValue();
       // order-svc always sends the order's currency; one without is malformed, not pounds (SJ-D53).
       currency = obj.getString("currency");
+      fulfilmentType = obj.getString("fulfilmentType", null);
+      slotStartsAt = Payloads.instant(obj, "slotStartsAt");
+      slotEndsAt = Payloads.instant(obj, "slotEndsAt");
+      slotTimeZone = obj.getString("slotTimeZone", null);
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "Malformed OrderConfirmed payload skipped: " + e.getMessage());
       return;
     }
 
-    String email = customers.emailOf(tenantId, customerId).orElse(null);
-    if (email == null) {
-      LOG.log(Level.DEBUG, "No email for customer {0} — order confirmation skipped", customerId);
-      return;
-    }
-    // In the shopper's own language when they have said which (13.x), the shop's when not.
-    String language = customers.languageOf(tenantId, customerId).orElse(null);
-    notifier.notifyOnce(
+    // How it reaches them — email, the shopper's own language, a push to a registered phone, each
+    // once — is the way every order message does (ship-from-store added two more).
+    boolean delivery = DELIVERY.equals(fulfilmentType);
+    OrderMessages.tell(
+        notifier,
+        customers,
         eventId,
         "ORDER_CONFIRMATION",
         tenantId,
         customerId,
-        email,
-        message(Catalogue.Form.EMAIL, language, orderId, total, currency));
-
-    // And to the phone in their pocket, when the shopper registered one here (13.7). A login with
-    // no device, or a customer with no login, gets the email alone; a push that fails is logged,
-    // never retried into the email's idempotency.
-    customers
-        .loginIdOf(tenantId, customerId)
-        .ifPresent(
-            login -> {
-              try {
-                notifier.notifyOnce(
-                    eventId,
-                    "ORDER_CONFIRMATION_PUSH",
-                    tenantId,
-                    customerId,
-                    login.toString(),
-                    message(Catalogue.Form.PUSH, language, orderId, total, currency),
-                    "PUSH");
-              } catch (RuntimeException e) {
-                LOG.log(Level.DEBUG, "No push for order {0}: {1}", orderId, e.getMessage());
-              }
-            });
-  }
-
-  private static Messages.Message message(
-      Catalogue.Form form, String language, UUID orderId, BigDecimal total, String currency) {
-    return new Messages.Message(
-        "ORDER_CONFIRMED",
-        form,
-        language,
-        Values.of().text("order", orderId.toString()).money("total", total, currency));
+        orderId,
+        form ->
+            new Messages.Message(
+                "ORDER_CONFIRMED",
+                form,
+                null,
+                Values.of()
+                    .text("order", orderId.toString())
+                    .money("total", total, currency)
+                    .window("window", delivery, slotStartsAt, slotEndsAt, slotTimeZone)));
   }
 }

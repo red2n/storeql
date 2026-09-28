@@ -4,7 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../shared/util/status_labels.dart';
 import 'storefront_providers.dart';
 
 // ---------------------------------------------------------------------------
@@ -14,6 +17,297 @@ import 'storefront_providers.dart';
 // ---------------------------------------------------------------------------
 
 String _customer(String path) => '/${ApiConstants.customer}$path';
+
+/// The purpose marketing is consented under; its channels are chosen beneath it.
+const marketingPurpose = 'MARKETING';
+
+/// A purpose as the notice words it — *Loyalty: points and store credit on what you buy* — split
+/// into its name and what it covers, the second a sentence of its own that starts with a capital:
+/// (`Loyalty`, `Points and store credit on what you buy`). Words with no colon are all name.
+({String name, String? covers}) purposeParts(String text) {
+  final at = text.indexOf(':');
+  final name = (at < 0 ? text : text.substring(0, at)).trim();
+  final rest = at < 0 ? '' : text.substring(at + 1).trim();
+  String capital(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+  if (name.isEmpty) return (name: capital(rest), covers: null);
+  return (name: name, covers: rest.isEmpty ? null : capital(rest));
+}
+
+// ── Marketing channels (PECR reg.22) ────────────────────────────────────────
+
+/// One marketing channel as the shop currently has it recorded.
+class MarketingPreference {
+  final String channel;
+  final bool granted;
+  final String basis;
+
+  const MarketingPreference({
+    required this.channel,
+    required this.granted,
+    required this.basis,
+  });
+
+  factory MarketingPreference.fromJson(Map<String, dynamic> json) =>
+      MarketingPreference(
+        channel: json['channel'] as String? ?? '',
+        granted: json['granted'] as bool? ?? false,
+        basis: json['basis'] as String? ?? 'NONE',
+      );
+}
+
+/// The shopper's marketing preferences at the shop they are browsing.
+///
+/// A channel the shop has never recorded simply has no entry: silence is not
+/// consent, so the screen shows it off and sending is refused server-side.
+final marketingPreferencesProvider =
+    FutureProvider.autoDispose<List<MarketingPreference>?>((ref) async {
+  final auth = ref.watch(storefrontAuthProvider);
+  if (!auth.isSignedIn) return null;
+  final dio = ref.watch(storefrontDioProvider);
+  try {
+    final resp = await dio.get(_customer('/customers/me/marketing'));
+    final data = (resp.data['data'] as List?) ?? const [];
+    return data
+        .map((e) => MarketingPreference.fromJson(e as Map<String, dynamic>))
+        .toList();
+  } on DioException catch (e) {
+    // 404 means this shop holds no record of them yet — which is not an error,
+    // it is a shopper who has never bought here and consented to nothing.
+    if (e.response?.statusCode == 404) return const <MarketingPreference>[];
+    rethrow;
+  }
+});
+
+/// The wording a channel is agreed against, recorded with the grant: UK GDPR art.7(1) makes the
+/// shop prove what was agreed to.
+const marketingNotice = 'Email me about offers, new lines and events at this shop. '
+    'I can stop this at any time, from here or from any message.';
+
+/// The channels marketing may use, in the words a shopper chooses them by.
+const marketingChannels = <String, ({String label, String detail})>{
+  'EMAIL': (label: 'Email', detail: 'Offers and news by email'),
+  'SMS': (label: 'Text message', detail: 'Short updates by SMS'),
+  'PHONE': (label: 'Phone', detail: 'Marketing calls'),
+  'POST': (label: 'Post', detail: 'Leaflets and catalogues'),
+};
+
+/// Records channel choices in one request. A grant carries the wording it was agreed against; a
+/// withdrawal agrees to nothing, so it carries none.
+Future<void> putMarketingChannels(Dio dio, Map<String, bool> choices) => dio.put(
+      _customer('/customers/me/marketing'),
+      data: {
+        'channels': [
+          for (final e in choices.entries) {'channel': e.key, 'granted': e.value}
+        ],
+        'notice': choices.values.any((granted) => granted) ? marketingNotice : null,
+      },
+    );
+
+/// Said wherever a channel is disabled for want of the Marketing purpose, and
+/// wherever the server refuses one switched on for the same reason (409
+/// MARKETING_PURPOSE_NOT_GRANTED) — one form of words, never a raw code.
+const switchOnMarketingFirst = 'Switch on Marketing first';
+
+/// Turns off every channel that is on, so none is left on once the Marketing
+/// purpose is off. customer-svc now does this itself, atomically, on the same
+/// transaction as the withdrawal — sending it again here is a no-op once
+/// that has already happened, and keeps this screen correct against an older
+/// server too; either way, the channels are re-read after, never assumed.
+Future<void> withdrawMarketingChannels(WidgetRef ref) async {
+  final prefs = await ref.read(marketingPreferencesProvider.future) ??
+      const <MarketingPreference>[];
+  final on = {for (final p in prefs) if (p.granted) p.channel: false};
+  if (on.isNotEmpty) {
+    await putMarketingChannels(ref.read(storefrontDioProvider), on);
+  }
+  ref.invalidate(marketingPreferencesProvider);
+}
+
+/// The channels marketing may use — email, text, phone, post — each a PECR reg.22 consent of its
+/// own, with the wording they are agreed against beneath them.
+///
+/// Nested under the Marketing purpose ([purposeGranted] set), a channel follows it: it can be
+/// turned on only while Marketing is on, and it can always be turned off. On its own
+/// ([purposeGranted] null, when the purposes could not be read) every channel is the shopper's to
+/// set, because an opt-out is never hidden behind a failed load.
+class MarketingChannels extends ConsumerStatefulWidget {
+  const MarketingChannels({super.key, this.purposeGranted, this.busy = false});
+
+  /// Whether the Marketing purpose is on; null when the channels stand alone.
+  final bool? purposeGranted;
+
+  /// A write elsewhere on the card is in flight.
+  final bool busy;
+
+  @override
+  ConsumerState<MarketingChannels> createState() => _MarketingChannelsState();
+}
+
+class _MarketingChannelsState extends ConsumerState<MarketingChannels> {
+  bool _saving = false;
+
+  Future<void> _set(String channel, bool granted) async {
+    setState(() => _saving = true);
+    try {
+      await putMarketingChannels(ref.read(storefrontDioProvider), {channel: granted});
+      ref.invalidate(marketingPreferencesProvider);
+      _say(granted
+          ? 'Saved. We will only send what you have agreed to.'
+          : 'Saved. We will stop sending you these.');
+    } catch (e) {
+      // Worded the same as the disabled switch's own hint below — never the
+      // raw code — whether it is refused because Marketing was withdrawn
+      // since this screen last read it, or was never on to begin with.
+      _say(apiErrorCode(e) == 'MARKETING_PURPOSE_NOT_GRANTED'
+          ? switchOnMarketingFirst
+          : friendlyError(e, fallback: 'Could not save that just now.'));
+      // The purpose may no longer be what this screen last read — re-read it
+      // too, rather than leave a switch showing what the server just refused.
+      ref.invalidate(marketingPreferencesProvider);
+      ref.invalidate(myPrivacyProvider);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  /// Ends the channels left on under a purpose that is off (a consent staff
+  /// recorded, or one older than the purpose), in one request.
+  Future<void> _endStale(List<String> channels) async {
+    setState(() => _saving = true);
+    try {
+      await putMarketingChannels(
+          ref.read(storefrontDioProvider), {for (final c in channels) c: false});
+      ref.invalidate(marketingPreferencesProvider);
+      _say('Saved. We will stop sending you these.');
+    } catch (e) {
+      _say(friendlyError(e, fallback: 'Could not save that just now.'));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  void _say(String text) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+    }
+  }
+
+  /// `Email`, `Email and Post`, `Email, Phone and Post`.
+  static String _inWords(List<String> channels) {
+    final names = [for (final c in channels) marketingChannels[c]?.label ?? c];
+    if (names.length <= 1) return names.join();
+    return '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.textTheme.bodySmall
+        ?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    final nested = widget.purposeGranted != null;
+    final waiting = widget.purposeGranted == false;
+    // Nested, a channel is set in under its purpose; alone, it lines up with any list tile.
+    final start = nested ? AppSpacing.lg + AppSpacing.xl : AppSpacing.lg;
+    return ref.watch(marketingPreferencesProvider).when(
+          loading: () => const Padding(
+            padding: EdgeInsetsDirectional.symmetric(vertical: AppSpacing.lg),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+          error: (e, _) => ListTile(
+            contentPadding: EdgeInsetsDirectional.only(start: start, end: AppSpacing.lg),
+            leading: const Icon(Icons.error_outline),
+            title: Text(friendlyError(e, fallback: 'Could not load your preferences.')),
+            trailing: TextButton(
+              onPressed: () => ref.invalidate(marketingPreferencesProvider),
+              child: const Text('Retry'),
+            ),
+          ),
+          data: (prefs) {
+            final on = {
+              for (final p in prefs ?? const <MarketingPreference>[]) p.channel: p.granted,
+            };
+            // Channels still on under a purpose that is off: a consent staff
+            // recorded, or one from before the purpose was asked. Named, with
+            // one tap to end them, rather than a hint that contradicts them.
+            final stale = waiting
+                ? [
+                    for (final c in marketingChannels.keys)
+                      if (on[c] ?? false) c,
+                  ]
+                : const <String>[];
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (stale.isNotEmpty)
+                  Padding(
+                    key: const Key('marketing-stale'),
+                    padding: EdgeInsetsDirectional.fromSTEB(
+                        start, 0, AppSpacing.lg, AppSpacing.xs),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${_inWords(stale)} ${stale.length == 1 ? 'is' : 'are'} '
+                          'still on from before Marketing was asked. Turn '
+                          '${stale.length == 1 ? 'it' : 'them'} off, or turn on '
+                          'Marketing to keep ${stale.length == 1 ? 'it' : 'them'}.',
+                          style: muted,
+                        ),
+                        TextButton(
+                          key: const Key('marketing-stale-off'),
+                          onPressed: _saving || widget.busy
+                              ? null
+                              : () => _endStale(stale),
+                          child: Text(stale.length == 1
+                              ? 'Turn this off'
+                              : 'Turn these off'),
+                        ),
+                      ],
+                    ),
+                  )
+                else if (waiting)
+                  Padding(
+                    padding: EdgeInsetsDirectional.fromSTEB(
+                        start, 0, AppSpacing.lg, AppSpacing.xs),
+                    child: Text(
+                      'Turn on Marketing to choose how you hear from this shop.',
+                      style: muted,
+                    ),
+                  ),
+                for (final entry in marketingChannels.entries)
+                  SwitchListTile.adaptive(
+                    key: Key('marketing-${entry.key}'),
+                    contentPadding:
+                        EdgeInsetsDirectional.only(start: start, end: AppSpacing.lg),
+                    value: on[entry.key] ?? false,
+                    // Off can always be chosen; on only under a purpose that is on.
+                    onChanged: _saving ||
+                            widget.busy ||
+                            (waiting && !(on[entry.key] ?? false))
+                        ? null
+                        : (v) => _set(entry.key, v),
+                    title: Text(entry.value.label),
+                    // Off, waiting on the purpose above: say why, in the same
+                    // words a refusal to switch it on uses. An explicit colour,
+                    // not the tile's own disabled dimming (38% opacity, under
+                    // 4.5:1) — the hint must stay as readable as any other text.
+                    subtitle: waiting && !(on[entry.key] ?? false)
+                        ? Text(switchOnMarketingFirst,
+                            key: const Key('marketing-channel-hint'),
+                            style: TextStyle(color: theme.colorScheme.onSurfaceVariant))
+                        : Text(entry.value.detail),
+                  ),
+                Padding(
+                  padding: EdgeInsetsDirectional.fromSTEB(
+                      start, AppSpacing.xs, AppSpacing.lg, AppSpacing.sm),
+                  child: Text(marketingNotice, style: muted),
+                ),
+              ],
+            );
+          },
+        );
+  }
+}
 
 class PrivacyLanguage {
   final String code;
@@ -211,7 +505,16 @@ const privacyRequestKinds = <String, String>{
 };
 
 String privacyRequestLabel(String kind) =>
-    privacyRequestKinds[kind] ?? kind.toLowerCase();
+    privacyRequestKinds[kind] ?? humanizeCode(kind);
+
+/// How a settled request ended, in words — the words the shop's own privacy
+/// screen uses.
+String privacyRequestOutcome(String status) => switch (status.toUpperCase()) {
+      'RESOLVED' => 'Answered',
+      'REFUSED' => 'Refused',
+      'CLOSED' => 'Closed',
+      _ => humanizeCode(status),
+    };
 
 /// The language the shopper reads the notice in.
 final privacyLanguageProvider = StateProvider<String>((_) => 'en');
@@ -266,16 +569,20 @@ class PrivacyNoticeSection extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text('Your privacy notice', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 4),
+        const SizedBox(height: AppSpacing.xs),
         Text(
           'What this shop collects, why, and how to exercise your rights — '
           'in the language you choose.',
           style: muted,
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: AppSpacing.md),
         async.when(
+          // A new language keeps the card — and the open notice, and the
+          // picker — up while it loads, so the text they asked to read in it
+          // is not folded away again.
+          skipLoadingOnReload: true,
           loading: () => const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
+            padding: EdgeInsetsDirectional.symmetric(vertical: AppSpacing.xl),
             child: Center(child: CircularProgressIndicator()),
           ),
           error: (e, _) => ListTile(
@@ -303,13 +610,15 @@ class PrivacyNoticeSection extends ConsumerWidget {
     final current = choices.any((l) => l.code == view.requested)
         ? view.requested
         : (view.served ?? 'en');
+    final notice = view.notice;
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            DropdownButtonFormField<String>(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(
+                AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, 0),
+            child: DropdownButtonFormField<String>(
               key: const Key('privacy-language'),
               isExpanded: true,
               initialValue: current,
@@ -324,58 +633,79 @@ class PrivacyNoticeSection extends ConsumerWidget {
                 }
               },
             ),
-            const SizedBox(height: 12),
-            if (view.notice == null)
-              Text('This shop has not published its notice yet.', style: muted)
-            else ...[
-              if (view.served != view.requested)
-                Text(
-                  'Not yet in that language; shown in ${view.notice!.languageName}.',
-                  style: muted,
-                ),
-              Text(view.notice!.title, style: theme.textTheme.titleMedium),
-              const SizedBox(height: 4),
-              Text(view.notice!.body),
-              const SizedBox(height: 4),
-              Text('Version ${view.notice!.version}', style: muted),
-            ],
-            const SizedBox(height: 12),
-            Text('What we ask your consent for', style: theme.textTheme.titleSmall),
-            for (final p in view.purposes)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text('• ${p.text}'),
-              ),
-            const SizedBox(height: 12),
-            Text('Questions or grievances', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 4),
-            if (!view.contact.hasContact)
-              Text('This shop has not named a contact yet.', style: muted)
-            else
-              Text([
-                if (view.contact.name != null) view.contact.name!,
-                if (view.contact.email != null) view.contact.email!,
-                if (view.contact.phone != null) view.contact.phone!,
-                if (view.contact.address != null) view.contact.address!,
-              ].join(' · ')),
-            Text(
-              'A request is answered within ${view.contact.responseDays} days.',
-              style: muted,
-            ),
-            if (view.dpdp || view.dpdpFrom != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                view.dpdp
-                    ? "India's Digital Personal Data Protection Act binds this shop. "
-                        'You may complain to the Data Protection Board of India '
-                        'if a grievance is not answered.'
-                    : "India's Digital Personal Data Protection Act binds this "
-                        'shop from ${view.dpdpFrom}.',
+          ),
+          if (notice != null && view.served != view.requested)
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(
+                  AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
+              child: Text(
+                'Not yet in that language; shown in ${notice.languageName}.',
                 style: muted,
               ),
+            ),
+          // The full notice waits behind its title, so on a phone the switches below are not a
+          // screen or more away. One tap opens it; nothing in it is hidden for good.
+          ExpansionTile(
+            key: const Key('privacy-notice'),
+            shape: const Border(),
+            collapsedShape: const Border(),
+            tilePadding:
+                const EdgeInsetsDirectional.symmetric(horizontal: AppSpacing.lg),
+            childrenPadding: const EdgeInsetsDirectional.fromSTEB(
+                AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.lg),
+            expandedAlignment: AlignmentDirectional.centerStart,
+            expandedCrossAxisAlignment: CrossAxisAlignment.start,
+            title: Text(
+              notice?.title ?? 'What we ask, and who to ask',
+              style: theme.textTheme.titleMedium,
+            ),
+            subtitle: Text(
+              notice == null
+                  ? 'This shop has not published its notice yet.'
+                  : 'Version ${notice.version}. What this shop collects, why, and who to ask.',
+            ),
+            children: [
+              if (notice != null) ...[
+                Text(notice.body),
+                const SizedBox(height: AppSpacing.md),
+              ],
+              Text('What we ask your consent for', style: theme.textTheme.titleSmall),
+              for (final p in view.purposes)
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
+                  child: Text('• ${p.text}'),
+                ),
+              const SizedBox(height: AppSpacing.md),
+              Text('Questions or grievances', style: theme.textTheme.titleSmall),
+              const SizedBox(height: AppSpacing.xs),
+              if (!view.contact.hasContact)
+                Text('This shop has not named a contact yet.', style: muted)
+              else
+                Text([
+                  if (view.contact.name != null) view.contact.name!,
+                  if (view.contact.email != null) view.contact.email!,
+                  if (view.contact.phone != null) view.contact.phone!,
+                  if (view.contact.address != null) view.contact.address!,
+                ].join(' · ')),
+              Text(
+                'A request is answered within ${view.contact.responseDays} days.',
+                style: muted,
+              ),
+              if (view.dpdp || view.dpdpFrom != null) ...[
+                const SizedBox(height: AppSpacing.sm),
+                Text(
+                  view.dpdp
+                      ? "India's Digital Personal Data Protection Act binds this shop. "
+                          'You may complain to the Data Protection Board of India '
+                          'if a grievance is not answered.'
+                      : "India's Digital Personal Data Protection Act binds this "
+                          'shop from ${AppFormat.date(view.dpdpFrom)}.',
+                  style: muted,
+                ),
+              ],
             ],
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -405,7 +735,13 @@ class _ConsentsSectionState extends ConsumerState<ConsentsSection> {
         },
       );
       ref.invalidate(myPrivacyProvider);
-      _say(granted ? 'Saved.' : 'Withdrawn.');
+      // Marketing off is every channel off: one is never left on without the other.
+      if (purpose == marketingPurpose && !granted) {
+        await withdrawMarketingChannels(ref);
+      }
+      _say(granted
+          ? (purpose == marketingPurpose ? 'Saved. Now choose the channels below.' : 'Saved.')
+          : 'Withdrawn.');
     } catch (e) {
       _say(friendlyError(e, fallback: 'Could not save that just now.'));
     } finally {
@@ -420,6 +756,8 @@ class _ConsentsSectionState extends ConsumerState<ConsentsSection> {
           .read(storefrontDioProvider)
           .delete(_customer('/customers/me/privacy/consents'));
       ref.invalidate(myPrivacyProvider);
+      // Every consent includes the channels marketing is sent on.
+      await withdrawMarketingChannels(ref);
       _say('Every consent withdrawn.');
     } catch (e) {
       _say(friendlyError(e, fallback: 'Could not withdraw just now.'));
@@ -435,26 +773,45 @@ class _ConsentsSectionState extends ConsumerState<ConsentsSection> {
     }
   }
 
+  /// One purpose: its name, and what it covers as a sentence of its own.
+  Widget _purposeTile(PurposeConsent c, MyPrivacy mine) {
+    final parts = purposeParts(c.text);
+    return SwitchListTile.adaptive(
+      key: Key('consent-${c.purpose}'),
+      value: c.granted,
+      onChanged: _busy || (c.tracking && !mine.canTrack)
+          ? null
+          : (v) => _choose(c.purpose, v),
+      title: Text(parts.name),
+      subtitle: parts.covers == null ? null : Text(parts.covers!),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final muted = theme.textTheme.bodyMedium
         ?.copyWith(color: theme.colorScheme.onSurfaceVariant);
     final async = ref.watch(myPrivacyProvider);
+    final channelsOn = ref
+            .watch(marketingPreferencesProvider)
+            .value
+            ?.any((p) => p.granted) ??
+        false;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text('Your consents', style: theme.textTheme.titleLarge),
-        const SizedBox(height: 4),
+        const SizedBox(height: AppSpacing.xs),
         Text(
           'Each purpose on its own. Withdrawing is as easy as giving: one tap, '
           'nothing to fill in.',
           style: muted,
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: AppSpacing.md),
         async.when(
           loading: () => const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
+            padding: EdgeInsetsDirectional.symmetric(vertical: AppSpacing.xl),
             child: Center(child: CircularProgressIndicator()),
           ),
           error: (e, _) => ListTile(
@@ -489,26 +846,20 @@ class _ConsentsSectionState extends ConsumerState<ConsentsSection> {
                       leading: const Icon(Icons.family_restroom_outlined),
                       title: Text('${mine.guardianName} has consented for you'),
                     ),
-                  for (final c in mine.consents)
-                    SwitchListTile(
-                      key: Key('consent-${c.purpose}'),
-                      value: c.granted,
-                      onChanged: _busy || (c.tracking && !mine.canTrack)
-                          ? null
-                          : (v) => _choose(c.purpose, v),
-                      title: Text(c.text.split(':').first),
-                      subtitle: Text(c.text.contains(':')
-                          ? c.text.split(':').sublist(1).join(':').trim()
-                          : c.text),
-                    ),
+                  for (final c in mine.consents) ...[
+                    _purposeTile(c, mine),
+                    // Marketing is asked once: its channels are chosen beneath it and follow it.
+                    if (c.purpose == marketingPurpose)
+                      MarketingChannels(purposeGranted: c.granted, busy: _busy),
+                  ],
                   Padding(
-                    padding: const EdgeInsets.all(8),
+                    padding: const EdgeInsets.all(AppSpacing.sm),
                     child: Align(
-                      alignment: Alignment.centerRight,
+                      alignment: AlignmentDirectional.centerEnd,
                       child: TextButton.icon(
                         key: const Key('privacy-withdraw-all'),
                         onPressed: _busy ||
-                                !mine.consents.any((c) => c.granted)
+                                !(mine.consents.any((c) => c.granted) || channelsOn)
                             ? null
                             : _withdrawAll,
                         icon: const Icon(Icons.block_outlined),
@@ -566,9 +917,13 @@ class RequestsSection extends ConsumerWidget {
                     title: Text(privacyRequestLabel(r.kind)),
                     subtitle: Text(r.status == 'OPEN'
                         ? (r.overdue
-                            ? 'Overdue: was due by ${r.dueOn}'
-                            : 'Due by ${r.dueOn}')
-                        : '${r.status.toLowerCase()}: ${r.resolution ?? ''}'),
+                            ? 'Overdue: was due by ${AppFormat.date(r.dueOn)}'
+                            : 'Due by ${AppFormat.date(r.dueOn)}')
+                        : [
+                            privacyRequestOutcome(r.status),
+                            if ((r.resolution ?? '').trim().isNotEmpty)
+                              r.resolution!.trim(),
+                          ].join(': ')),
                   ),
                 ),
             ],

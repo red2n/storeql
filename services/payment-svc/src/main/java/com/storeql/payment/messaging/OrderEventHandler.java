@@ -30,6 +30,9 @@ class OrderEventHandler {
   static final String CONSUMER_NAME = "payment-svc/order-refund";
   static final String REFUND_METHOD_ORIGINAL = "ORIGINAL";
 
+  /** The kind on a refund for a line closed short or substituted: order-svc keeps the status. */
+  static final String ADJUSTMENT_KIND = "ORDER_ADJUSTMENT";
+
   @Inject PaymentService service;
   @Inject com.storeql.payment.repo.CashMovementRepository cashMovements;
 
@@ -43,6 +46,8 @@ class OrderEventHandler {
     UUID tenantId;
     UUID orderId;
     BigDecimal requestedAmount; // null => cancellation: refund all remaining captured
+    String reason;
+    String kind = null;
     try (var reader = Json.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventType = obj.getString("eventType", null);
@@ -52,8 +57,23 @@ class OrderEventHandler {
           return;
         }
         requestedAmount = obj.getJsonNumber("refundAmount").bigDecimalValue();
+        reason = "Return refund";
       } else if ("OrderCancelled".equals(eventType)) {
         requestedAmount = null;
+        reason = "Order cancelled";
+      } else if ("OrderLineShortClosed".equals(eventType)
+          || "OrderLineSubstituted".equals(eventType)) {
+        // Substitutions for out-of-stock online lines: what the shopper paid for what they will
+        // not get — or the difference to a cheaper substitute — goes back; a substitute charged
+        // the same refunds nothing. order-svc has already lowered the order's total by as much,
+        // so the refund is marked an adjustment and moves no status there.
+        requestedAmount = obj.getJsonNumber("refundAmount").bigDecimalValue();
+        if (requestedAmount.signum() <= 0) {
+          return;
+        }
+        reason =
+            "OrderLineShortClosed".equals(eventType) ? "Line closed short" : "Line substituted";
+        kind = ADJUSTMENT_KIND;
       } else {
         return; // not a refund-triggering event
       }
@@ -65,8 +85,8 @@ class OrderEventHandler {
       return;
     }
 
-    String reason = requestedAmount == null ? "Order cancelled" : "Return refund";
-    service.refundForOrderEvent(eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason);
+    service.refundForOrderEvent(
+        eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, kind);
   }
 
   /**

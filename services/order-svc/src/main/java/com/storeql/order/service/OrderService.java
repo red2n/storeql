@@ -25,6 +25,10 @@ import com.storeql.order.domain.Domain.SalesByHourRow;
 import com.storeql.order.domain.Domain.SalesByStaffRow;
 import com.storeql.order.domain.Domain.SpecialOrder;
 import com.storeql.order.domain.Domain.SpecialOrderItem;
+import com.storeql.order.domain.Handover;
+import com.storeql.order.domain.OrderSplit;
+import com.storeql.order.domain.Routing;
+import com.storeql.order.domain.SubstitutePrice;
 import com.storeql.order.dto.Dtos.AddDepositRequest;
 import com.storeql.order.dto.Dtos.CreateLayawayRequest;
 import com.storeql.order.dto.Dtos.CreateReturnRequest;
@@ -81,7 +85,10 @@ public class OrderService {
   @Inject SalesInvoiceService salesInvoices;
   @Inject com.storeql.service.Jurisdictions jurisdictions;
   @Inject com.storeql.order.client.ProductClient products;
+  @Inject com.storeql.order.client.StockClient stock;
   @Inject com.storeql.order.repo.DepositRepository depositRepo;
+  @Inject OrderRouter router;
+  @Inject FulfilmentWindowService windows;
 
   // ── Orders ────────────────────────────────────────────────────────────────
 
@@ -311,11 +318,44 @@ public class OrderService {
         storeId = resolved.get().storeId();
       }
     }
+    // Delivery and collection slots: the window belongs to the store that fills the order — for a
+    // delivery, the store the postcode just resolved to — captured before routing can reassign
+    // storeId to a different shop below, so a split (or reassigned single-store) delivery's window
+    // still comes from the area store's own offering, as the intent decided.
+    UUID areaStore = storeId;
     ctx.requireStoreAccess(storeId);
     if (!storeStatusRepo.isActive(tenantId, storeId))
       throw ApiException.conflict(
           "STORE_NOT_OPERATIONAL",
           "Store is closed or suspended — orders cannot be placed at this location");
+    // A dark store has no shop floor (ship-from-store and dark-store picking): it fills online
+    // orders for delivery, nobody is there to hand a collection over, and no till rings there.
+    if (isDarkStore(tenantId, storeId)) {
+      if ("POS".equalsIgnoreCase(req.channel())) {
+        throw ApiException.conflict(
+            "ORDER_NO_TILL_AT_DARK_STORE", "a dark store has no till; it fills online orders only");
+      }
+      if (!delivery) {
+        throw ApiException.conflict(
+            "ORDER_PICKUP_NOT_OFFERED",
+            "a dark store offers no collection; choose delivery, or a shop to collect from");
+      }
+    }
+    // Delivery and collection slots: ONLINE DELIVERY/PICKUP only; a slot sent on anything else
+    // (POS, or an online in-store sale) names a thing that does not apply to it.
+    boolean pickup = Order.FULFILMENT_PICKUP.equals(fulfilment);
+    boolean slotEligible = Order.CHANNEL_ONLINE.equals(req.channel()) && (delivery || pickup);
+    boolean slotNamed = !isBlank(req.slotWindowId()) || !isBlank(req.slotStartsAt());
+    if (!slotEligible && slotNamed) {
+      throw ApiException.badRequest(
+          "ORDER_SLOT_NOT_APPLICABLE",
+          "a fulfilment slot only applies to an online delivery or pickup order");
+    }
+    FulfilmentWindowService.ResolvedSlot slot =
+        slotEligible
+            ? windows.resolveForCheckout(
+                tenantId, areaStore, fulfilment, req.slotWindowId(), req.slotStartsAt())
+            : null;
     String paymentMethod = null;
     if (req.paymentMethod() != null && !req.paymentMethod().isBlank()) {
       paymentMethod = req.paymentMethod().trim().toUpperCase(java.util.Locale.ROOT);
@@ -324,6 +364,20 @@ public class OrderService {
             "ORDER_PAYMENT_METHOD_INVALID",
             "paymentMethod must be one of CASH, CARD, UPI, WALLET — got: " + req.paymentMethod());
     }
+    // A phone at the till (intent/phone-at-the-till.md): the store says whether its till asks for
+    // the customer's number. A Required store refuses a till sale with neither a number nor a
+    // customer. A number given is read in the store's own country, then the business's; at the
+    // till one that is no phone anywhere the business trades is refused, while the customer is
+    // still there to correct it. Online it is read the same way and never refused over.
+    boolean tillSale = "POS".equalsIgnoreCase(req.channel());
+    if (tillSale
+        && TillPhone.missing(tillPhoneAsk(tenantId, storeId), customerId, req.contactPhone())) {
+      throw ApiException.conflict(
+          "ORDER_CONTACT_PHONE_REQUIRED",
+          "this store asks for a phone number on every till sale; give the customer's, or name the"
+              + " customer");
+    }
+    String contactPhoneE164 = contactPhoneE164(tenantId, storeId, req.contactPhone(), tillSale);
 
     boolean enforcePricing = config.pricingEnforce();
 
@@ -424,6 +478,43 @@ public class OrderService {
               Parsing.optionalUuid(ir.markdownId(), "markdownId"),
               quotedVatCode,
               quotedVatRate));
+    }
+
+    // Order orchestration (intent/order-orchestration-and-split-fulfilment.md): an online delivery
+    // order the delivery-area store cannot fill alone goes to the shops that can — one other shop
+    // as an ordinary order there, several as a group of orders. Not for a basket with a staff
+    // discount or a whole-basket offer, whose money is not shared across parts here; those are
+    // placed at the area store as they always were.
+    if (Order.CHANNEL_ONLINE.equals(req.channel())
+        && delivery
+        && config.reserveEnforce()
+        && (req.discountAmount() == null || req.discountAmount().signum() == 0)
+        && (quoted == null || quoted.basketDiscount().signum() == 0)) {
+      var routed = router.route(ctx, tenantId, storeId, items).orElse(null);
+      if (routed != null && routed.legs().size() == 1) {
+        storeId = routed.legs().get(0).storeId();
+      } else if (routed != null) {
+        BigDecimal splitTax =
+            enforcePricing
+                ? serverTax.setScale(2, java.math.RoundingMode.HALF_UP)
+                : req.taxAmount() != null ? req.taxAmount() : BigDecimal.ZERO;
+        return placeSplit(
+            new SplitCheckout(
+                req,
+                tenantId,
+                customerId,
+                loginId,
+                currency,
+                fulfilment,
+                paymentMethod,
+                items,
+                splitTax,
+                quoted == null ? List.of() : quoted.applied(),
+                slot,
+                contactPhoneE164),
+            routed,
+            idempotencyKey);
+      }
     }
 
     // Hold stock for ONLINE orders before persisting, so a short line rejects the checkout with
@@ -533,14 +624,32 @@ public class OrderService {
             req.contactPhone(),
             paymentMethod,
             promoDiscount,
-            seller);
+            seller,
+            // The shopper's choice at checkout: substitutions welcome unless they said no
+            // (substitutions for out-of-stock online lines).
+            req.allowSubstitutions() == null || req.allowSubstitutions(),
+            slot == null ? null : slot.windowId(),
+            slot == null ? null : slot.startsAt(),
+            slot == null ? null : slot.endsAt(),
+            slot == null ? null : slot.timeZone(),
+            contactPhoneE164);
 
     try {
       Order placed =
           repo.createOrder(
               order,
               items,
-              Events.orderPlaced(tenantId, orderId, req.channel(), customerId, loginId, storeId),
+              Events.orderPlaced(
+                  tenantId,
+                  orderId,
+                  req.channel(),
+                  customerId,
+                  loginId,
+                  storeId,
+                  null,
+                  order.slotStartsAt(),
+                  order.slotEndsAt(),
+                  order.slotTimeZone()),
               discountAudit,
               quoted == null ? List.of() : quoted.applied(),
               containerDeposits);
@@ -570,6 +679,813 @@ public class OrderService {
       inventory.releaseQuietly(tenantId, heldReservations);
       throw e;
     }
+  }
+
+  /**
+   * Whether the store is one of the tenant's dark stores. An unreadable answer is not a refusal:
+   * the store is taken for a shop and the order placed as it always was, as routing does when the
+   * stores cannot be read.
+   */
+  private boolean isDarkStore(UUID tenantId, UUID storeId) {
+    try {
+      var stores = profiles.stores(tenantId, storeId);
+      return stores != null && stores.isDark(storeId);
+    } catch (ApiException e) {
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "store types unreadable ({0}); {1} taken for a shop",
+          e.code(),
+          storeId);
+      return false;
+    }
+  }
+
+  /**
+   * What the store's till asks for the customer's phone (a phone at the till). A store whose choice
+   * cannot be read asks it optionally: a sale is never refused over a store tenant-svc could not
+   * answer about.
+   */
+  private String tillPhoneAsk(UUID tenantId, UUID storeId) {
+    try {
+      var stores = profiles.stores(tenantId, storeId);
+      return TillPhone.ask(stores == null ? null : stores.tillPhoneOf(storeId));
+    } catch (ApiException e) {
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "stores unreadable ({0}); the till at {1} taken to ask for a phone optionally",
+          e.code(),
+          storeId);
+      return TillPhone.OPTIONAL;
+    }
+  }
+
+  /**
+   * A contact number in international form (a phone at the till): read in the store's own country,
+   * then the business's home and its other stores'. With no country readable a national number is
+   * kept as typed and never refused.
+   *
+   * @param tillSale whether the number was given at a till, where one that reads nowhere the
+   *     business trades is refused
+   * @return the international form, or {@code null} when none was given or it did not read
+   * @throws ApiException 400 {@code ORDER_CONTACT_PHONE_INVALID} at a till, for a number that is no
+   *     phone anywhere the business trades
+   */
+  private String contactPhoneE164(UUID tenantId, UUID storeId, String typed, boolean tillSale) {
+    if (isBlank(typed)) return null;
+    Map<UUID, String> countries = storeCountries(tenantId, storeId);
+    TillPhone.Reading reading =
+        TillPhone.read(typed, countries.get(storeId), homeCountry(tenantId), countries.values());
+    if (tillSale && reading.unreadable()) {
+      throw ApiException.badRequest(
+          "ORDER_CONTACT_PHONE_INVALID",
+          "the contact phone is not a phone number in any country this business trades in; check"
+              + " it, or leave it out");
+    }
+    return reading.e164();
+  }
+
+  /** The country of each of the tenant's stores, or none when they cannot be read. */
+  private Map<UUID, String> storeCountries(UUID tenantId, UUID storeId) {
+    try {
+      var stores = profiles.stores(tenantId, storeId);
+      return stores == null ? Map.of() : stores.countries();
+    } catch (ApiException e) {
+      return Map.of();
+    }
+  }
+
+  /** The business's own country, or {@code null} when it cannot be read. */
+  private String homeCountry(UUID tenantId) {
+    try {
+      return profiles.requireCountry(tenantId);
+    } catch (ApiException e) {
+      return null;
+    }
+  }
+
+  // ── Short closes and substitutions (substitutions for out-of-stock online lines) ──
+
+  /** A stand-in the business declared for a line's product, with what the store has of it. */
+  public record SubstituteSuggestion(
+      UUID variantId, String productName, String sku, BigDecimal available) {}
+
+  /** An order the store still owes something on, and the lines it owes. */
+  public record OwingOrder(Order order, List<OrderItem> lines) {
+    public OwingOrder {
+      lines = List.copyOf(lines);
+    }
+  }
+
+  /**
+   * Closes a line short: the quantity (all still outstanding, when none is given) will never be
+   * handed over, the order owes less, and what the shopper paid for it goes back. Any member of
+   * staff at the order's store; once per Idempotency-Key.
+   *
+   * @throws ApiException 404 {@code ORDER_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}; 409 {@code
+   *     ORDER_LINE_NOT_ADJUSTABLE}, {@code ORDER_LINE_QTY_EXCEEDS_OUTSTANDING}; 400 {@code
+   *     ORDER_LINE_UNKNOWN}
+   */
+  public Order shortClose(
+      UUID tenantId,
+      UUID orderId,
+      UUID variantId,
+      com.storeql.order.dto.Dtos.ShortCloseRequest req,
+      TenantContext ctx,
+      String idempotencyKey) {
+    Order order = getOrder(tenantId, orderId);
+    ctx.requireStoreAccess(order.storeId());
+    if (idempotencyKey != null && repo.findAdjustmentByKey(tenantId, idempotencyKey).isPresent()) {
+      return getOrder(tenantId, orderId);
+    }
+    BigDecimal qty =
+        req == null || req.qty() == null ? outstandingOf(tenantId, orderId, variantId) : req.qty();
+    String reason = req == null || isBlank(req.reason()) ? null : req.reason().trim();
+    String name = variantName(tenantId, variantId);
+    try {
+      return repo.adjustLine(
+              tenantId,
+              orderId,
+              variantId,
+              qty,
+              null,
+              reason,
+              ctx.userId(),
+              idempotencyKey,
+              a ->
+                  List.of(
+                      Events.orderLineShortClosed(
+                          a.order(), variantId, name, qty, a.adjustment().refundAmount())))
+          .order();
+    } catch (ApiException e) {
+      if ("ORDER_DUPLICATE_KEY".equals(e.code())) return getOrder(tenantId, orderId);
+      throw e;
+    }
+  }
+
+  /**
+   * Puts a substitute in the bag for a line the store cannot fill, where the shopper allowed it: a
+   * new line at the store's price for the substitute, capped at the original line's gross unit
+   * price, its VAT within it; the original closed short for the quantity; the substitute picked at
+   * once. Any member of staff at the order's store; once per Idempotency-Key.
+   *
+   * @throws ApiException as {@link #shortClose}, plus 409 {@code ORDER_SUBSTITUTION_NOT_ALLOWED},
+   *     400 {@code ORDER_SUBSTITUTE_SAME_VARIANT}, 409 {@code ORDER_SUBSTITUTE_NOT_SELLABLE} (no
+   *     price, or none on the shelf), 503 {@code ORDER_PRICING_UNAVAILABLE}
+   */
+  public Order substitute(
+      UUID tenantId,
+      UUID orderId,
+      UUID variantId,
+      com.storeql.order.dto.Dtos.SubstituteRequest req,
+      TenantContext ctx,
+      String idempotencyKey) {
+    Order order = getOrder(tenantId, orderId);
+    ctx.requireStoreAccess(order.storeId());
+    if (idempotencyKey != null && repo.findAdjustmentByKey(tenantId, idempotencyKey).isPresent()) {
+      return getOrder(tenantId, orderId);
+    }
+    if (!order.allowSubstitutions()) {
+      throw ApiException.conflict(
+          "ORDER_SUBSTITUTION_NOT_ALLOWED",
+          "the shopper asked for no substitutions on this order; close the line short instead");
+    }
+    UUID sub = Parsing.uuid(req.substituteVariantId(), "substituteVariantId");
+    if (sub.equals(variantId)) {
+      throw ApiException.badRequest(
+          "ORDER_SUBSTITUTE_SAME_VARIANT", "a substitute is another product than the one short");
+    }
+    List<OrderItem> items = repo.findOrderItems(tenantId, orderId);
+    OrderItem original =
+        items.stream()
+            .filter(i -> i.variantId().equals(variantId) && i.remainingQty().signum() > 0)
+            .findFirst()
+            .or(() -> items.stream().filter(i -> i.variantId().equals(variantId)).findFirst())
+            .orElseThrow(
+                () ->
+                    ApiException.badRequest(
+                        "ORDER_LINE_UNKNOWN", "variant " + variantId + " is not on this order"));
+    BigDecimal qty = req.qty() != null ? req.qty() : outstandingOf(tenantId, orderId, variantId);
+    int scale = java.util.Currency.getInstance(order.currency()).getDefaultFractionDigits();
+    // What a unit of the original is worth, gross, as it stands — the most a substitute costs.
+    BigDecimal standing = original.standingQty();
+    BigDecimal originalGrossUnit =
+        standing.signum() > 0
+            ? original
+                .lineTotal()
+                .add(original.vatAmount() == null ? BigDecimal.ZERO : original.vatAmount())
+                .divide(standing, 6, RoundingMode.HALF_UP)
+            : original.unitPrice();
+    // On the shelf at the order's store, when the shelf can be read; a supplier-shipped product is
+    // held nowhere and passes.
+    stock
+        .stockByStore(tenantId, List.of(sub))
+        .ifPresent(
+            st -> {
+              BigDecimal available =
+                  st.available()
+                      .getOrDefault(order.storeId(), Map.of())
+                      .getOrDefault(sub, BigDecimal.ZERO);
+              if (available.compareTo(qty) < 0 && !st.dropship().contains(sub)) {
+                throw ApiException.conflict(
+                    "ORDER_SUBSTITUTE_NOT_SELLABLE",
+                    "the store has "
+                        + available.stripTrailingZeros().toPlainString()
+                        + " of "
+                        + sub
+                        + ", not "
+                        + qty.stripTrailingZeros().toPlainString());
+              }
+            });
+    // Its price at the store, from pricing-svc as at checkout; the given unit price when
+    // server-side
+    // pricing is off.
+    BigDecimal net;
+    BigDecimal vat;
+    BigDecimal rate = null;
+    String code = null;
+    if (config.pricingEnforce()) {
+      try {
+        var quoted =
+            pricing.quoteBasket(
+                tenantId,
+                List.of(new com.storeql.order.client.PricingClient.LineRequest(sub, qty)),
+                order.storeId(),
+                order.channel(),
+                order.customerId(),
+                null);
+        var line = quoted.lines().get(0);
+        net = line.lineNet();
+        vat = line.lineVat();
+        rate = line.vatRate();
+        code = line.vatCode();
+      } catch (org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException e) {
+        throw new ApiException(
+            503,
+            "ORDER_PRICING_UNAVAILABLE",
+            "pricing-svc circuit open — too many recent failures",
+            List.of(),
+            e);
+      } catch (ApiException e) {
+        if (e.status() >= 500) throw e;
+        throw new ApiException(
+            409,
+            "ORDER_SUBSTITUTE_NOT_SELLABLE",
+            "no price for " + sub + " at this store: " + e.getMessage(),
+            List.of(),
+            e);
+      }
+    } else {
+      if (req.unitPrice() == null) {
+        throw ApiException.badRequest(
+            "ORDER_PRICE_REQUIRED", "unitPrice is required for the substitute " + sub);
+      }
+      net = req.unitPrice().multiply(qty).setScale(scale, RoundingMode.HALF_UP);
+      vat = original.vatAmount() == null ? null : BigDecimal.ZERO.setScale(scale);
+    }
+    var charge = SubstitutePrice.charge(originalGrossUnit, net, vat, rate, qty, scale);
+    var priced =
+        new OrderRepository.Substitute(
+            sub,
+            qty,
+            charge.unitPrice(),
+            charge.lineNet(),
+            vat == null ? null : charge.lineVat(),
+            code,
+            rate);
+    String fromName = variantName(tenantId, variantId);
+    String toName = variantName(tenantId, sub);
+    String reason = isBlank(req.reason()) ? null : req.reason().trim();
+    try {
+      return repo.adjustLine(
+              tenantId,
+              orderId,
+              variantId,
+              qty,
+              priced,
+              reason,
+              ctx.userId(),
+              idempotencyKey,
+              a ->
+                  List.of(
+                      // The substitute is in the picker's hand: deducted and its revenue recorded
+                      // as any picked line is, the original's waiting line set to what it still
+                      // owes.
+                      Events.orderFulfilled(
+                          tenantId,
+                          orderId,
+                          a.order().storeId(),
+                          List.of(a.substituteItem()),
+                          com.storeql.order.domain.LineRevenue.unitNet(a.order(), a.items()),
+                          scale,
+                          a.outstanding(),
+                          a.order().status(),
+                          a.order().channel(),
+                          a.order().fulfilmentType(),
+                          a.order().customerId(),
+                          a.order().loginId()),
+                      Events.orderLineSubstituted(
+                          a.order(),
+                          variantId,
+                          fromName,
+                          sub,
+                          toName,
+                          qty,
+                          a.adjustment().chargedAmount(),
+                          a.adjustment().refundAmount())))
+          .order();
+    } catch (ApiException e) {
+      if ("ORDER_DUPLICATE_KEY".equals(e.code())) return getOrder(tenantId, orderId);
+      throw e;
+    }
+  }
+
+  /**
+   * The stand-ins the business declared for a line's product, each with what the order's store has
+   * of it, most available first; nothing when none is declared.
+   */
+  public List<SubstituteSuggestion> substituteSuggestions(
+      UUID tenantId, UUID orderId, UUID variantId, TenantContext ctx) {
+    Order order = getOrder(tenantId, orderId);
+    ctx.requireStoreAccess(order.storeId());
+    List<UUID> ids = products.substitutes(tenantId, variantId, ctx);
+    if (ids.isEmpty()) return List.of();
+    Map<UUID, com.storeql.order.client.ProductClient.VariantName> names =
+        products.names(tenantId, ids, ctx).orElse(Map.of());
+    Map<UUID, BigDecimal> available =
+        stock
+            .stockByStore(tenantId, ids)
+            .map(s -> s.available().getOrDefault(order.storeId(), Map.of()))
+            .orElse(Map.of());
+    return ids.stream()
+        .map(
+            v -> {
+              var n = names.get(v);
+              return new SubstituteSuggestion(
+                  v,
+                  n == null ? null : n.productName(),
+                  n == null ? null : n.sku(),
+                  available.getOrDefault(v, BigDecimal.ZERO));
+            })
+        .sorted(java.util.Comparator.comparing(SubstituteSuggestion::available).reversed())
+        .toList();
+  }
+
+  /** The store's online orders still owing something, oldest first, each with the lines it owes. */
+  public List<OwingOrder> owingLines(UUID tenantId, UUID storeId, TenantContext ctx) {
+    ctx.requireStoreAccess(storeId);
+    List<Order> orders = repo.findOwingOrders(tenantId, storeId);
+    Map<UUID, List<OrderItem>> items =
+        repo.findOrderItems(tenantId, orders.stream().map(Order::id).toList());
+    List<OwingOrder> out = new ArrayList<>();
+    for (Order o : orders) {
+      List<OrderItem> owing =
+          items.getOrDefault(o.id(), List.of()).stream()
+              .filter(i -> i.remainingQty().signum() > 0)
+              .toList();
+      if (!owing.isEmpty()) out.add(new OwingOrder(o, owing));
+    }
+    return out;
+  }
+
+  private BigDecimal outstandingOf(UUID tenantId, UUID orderId, UUID variantId) {
+    List<OrderItem> items = repo.findOrderItems(tenantId, orderId);
+    if (items.stream().noneMatch(i -> i.variantId().equals(variantId))) {
+      throw ApiException.badRequest(
+          "ORDER_LINE_UNKNOWN", "variant " + variantId + " is not on this order");
+    }
+    // Possibly nothing: the repository then says why — a picked order has no line to close, a
+    // confirmed one owes nothing on this line.
+    return items.stream()
+        .filter(i -> i.variantId().equals(variantId))
+        .map(OrderItem::remainingQty)
+        .reduce(BigDecimal.ZERO, BigDecimal::add);
+  }
+
+  /** The product's name for a message, or null when product-svc cannot say. */
+  private String variantName(UUID tenantId, UUID variantId) {
+    var n = products.namesAsSystem(tenantId, List.of(variantId)).orElse(Map.of()).get(variantId);
+    return n == null ? null : n.productName();
+  }
+
+  // ── Handover (ship-from-store and dark-store picking) ─────────────────────
+
+  /**
+   * Hands a picked delivery order to a carrier: recorded once, on the order's own store, by any
+   * member of staff assigned there; the shopper is told it is on its way through {@code
+   * OrderDispatched}.
+   *
+   * @throws ApiException 404 {@code ORDER_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}; 409 {@code
+   *     ORDER_HANDOVER_KIND_MISMATCH} (not an online delivery), {@code ORDER_NOT_PICKED} (not yet
+   *     FULFILLED — still being picked, part-picked, or cancelled), {@code
+   *     ORDER_ALREADY_HANDED_OVER}
+   */
+  public Handover dispatch(
+      UUID tenantId,
+      UUID orderId,
+      com.storeql.order.dto.Dtos.DispatchRequest req,
+      TenantContext ctx) {
+    Order order = getOrder(tenantId, orderId);
+    String carrier = req.carrier().trim();
+    String reference = isBlank(req.reference()) ? null : req.reference().trim();
+    Handover h =
+        new Handover(
+            Ids.newId(),
+            tenantId,
+            orderId,
+            order.storeId(),
+            Handover.KIND_DISPATCHED,
+            carrier,
+            reference,
+            req.parcels(),
+            null,
+            ctx.userId(),
+            Instant.now());
+    return handOver(
+        order,
+        h,
+        Order.FULFILMENT_DELIVERY,
+        ctx,
+        "dispatched: " + carrier + (reference == null ? "" : ", ref " + reference),
+        Events.orderDispatched(
+            tenantId,
+            orderId,
+            order.storeId(),
+            order.customerId(),
+            order.loginId(),
+            carrier,
+            reference,
+            req.parcels()));
+  }
+
+  /**
+   * Hands a picked pickup order to its shopper at the counter: recorded once, by any member of
+   * staff at the store, naming who took it when staff noted it.
+   *
+   * @throws ApiException as {@link #dispatch}, with {@code ORDER_HANDOVER_KIND_MISMATCH} for
+   *     anything but an online pickup
+   */
+  public Handover collect(
+      UUID tenantId,
+      UUID orderId,
+      com.storeql.order.dto.Dtos.CollectRequest req,
+      TenantContext ctx) {
+    Order order = getOrder(tenantId, orderId);
+    String who = req == null || isBlank(req.collectedBy()) ? null : req.collectedBy().trim();
+    Handover h =
+        new Handover(
+            Ids.newId(),
+            tenantId,
+            orderId,
+            order.storeId(),
+            Handover.KIND_COLLECTED,
+            null,
+            null,
+            null,
+            who,
+            ctx.userId(),
+            Instant.now());
+    return handOver(
+        order,
+        h,
+        Order.FULFILMENT_PICKUP,
+        ctx,
+        who == null ? "collected" : "collected by " + who,
+        Events.orderCollected(
+            tenantId, orderId, order.storeId(), order.customerId(), order.loginId(), who));
+  }
+
+  private Handover handOver(
+      Order order,
+      Handover h,
+      String forFulfilment,
+      TenantContext ctx,
+      String reason,
+      com.storeql.service.OutboxRow event) {
+    ctx.requireStoreAccess(order.storeId());
+    // A till sale is handed over when it is paid; a pickup is collected and a delivery dispatched,
+    // never the other way about.
+    if (!Order.CHANNEL_ONLINE.equals(order.channel())
+        || !forFulfilment.equals(order.fulfilmentType())) {
+      throw ApiException.conflict(
+          "ORDER_HANDOVER_KIND_MISMATCH",
+          "order "
+              + order.id()
+              + " is a "
+              + order.channel()
+              + " "
+              + order.fulfilmentType()
+              + " order; "
+              + (Handover.KIND_DISPATCHED.equals(h.kind())
+                  ? "only an online delivery is dispatched"
+                  : "only an online pickup is collected"));
+    }
+    // Picked and packed in full: a part-picked order is dispatched when it is complete, and a
+    // cancelled one never.
+    if (!Order.STATUS_FULFILLED.equals(order.status())) {
+      throw ApiException.conflict(
+          "ORDER_NOT_PICKED",
+          "order "
+              + order.id()
+              + " is "
+              + order.status()
+              + "; only an order picked in full (FULFILLED) is handed over");
+    }
+    if (repo.findHandover(order.tenantId(), order.id()).isPresent()) {
+      throw ApiException.conflict(
+          "ORDER_ALREADY_HANDED_OVER", "order " + order.id() + " was handed over already");
+    }
+    return repo.recordHandover(h, reason, event);
+  }
+
+  /** The handover an order had, if any. */
+  public java.util.Optional<Handover> handoverOf(UUID tenantId, UUID orderId) {
+    return repo.findHandover(tenantId, orderId);
+  }
+
+  /** The handovers of these orders, by order; an order not yet handed over is not in the map. */
+  public Map<UUID, Handover> handoversOf(UUID tenantId, List<Order> orders) {
+    if (orders.isEmpty()) return Map.of();
+    return repo.findHandovers(tenantId, orders.stream().map(Order::id).toList());
+  }
+
+  /** A priced online delivery order about to be placed as a group (order orchestration). */
+  private record SplitCheckout(
+      PlaceOrderRequest req,
+      UUID tenantId,
+      UUID customerId,
+      UUID loginId,
+      String currency,
+      String fulfilment,
+      String paymentMethod,
+      List<OrderItem> items,
+      BigDecimal tax,
+      List<com.storeql.order.client.PricingClient.AppliedPromotion> applied,
+      /**
+       * The delivery or collection window the checkout holds, resolved once against the area store
+       * before it was known whether the order would split (delivery and collection slots): every
+       * part carries it, and it takes one place. Null when the area store offers no windows of this
+       * type.
+       */
+      FulfilmentWindowService.ResolvedSlot slot,
+      /** The contact number in international form (a phone at the till); every part carries it. */
+      String contactPhoneE164) {
+    SplitCheckout {
+      items = List.copyOf(items);
+      applied = List.copyOf(applied);
+    }
+  }
+
+  /**
+   * Places a delivery order as a group of orders, one per shop (order orchestration): each part its
+   * lines, its share of the tax, its own holds at its own store and its own OrderPlaced naming the
+   * group; the group and every part on one transaction. The holds are all or nothing: one shop
+   * short releases what the others held. The checkout's key places the group once and a retry gets
+   * the first part back, as a retried single order gets its order.
+   *
+   * @return the first part, the delivery-area store's when it takes part
+   */
+  private Order placeSplit(SplitCheckout co, Routing.Plan plan, String idempotencyKey) {
+    UUID tenantId = co.tenantId();
+    if (idempotencyKey != null) {
+      var earlier = repo.findOrderByIdempotencyKey(tenantId, idempotencyKey);
+      if (earlier.isPresent()) return earlier.get();
+    }
+    List<OrderItem> items = co.items();
+    List<OrderSplit.Part> parts =
+        OrderSplit.split(
+            items.stream()
+                .map(i -> new OrderSplit.Line(i.variantId(), i.qty(), i.lineTotal(), i.vatAmount()))
+                .toList(),
+            plan.byStore(),
+            co.tax(),
+            BigDecimal.ZERO,
+            BigDecimal.ZERO);
+    List<List<com.storeql.order.client.PricingClient.AppliedPromotion>> promotions =
+        promotionsByPart(co.applied(), parts);
+    UUID groupId = Ids.newId();
+    UUID idemBase = idempotencyKey != null ? Ids.parse(idempotencyKey) : groupId;
+    PlaceOrderRequest req = co.req();
+    Instant now = Instant.now();
+    List<OrderRepository.NewOrder> placed = new ArrayList<>();
+    List<UUID> held = new ArrayList<>();
+    BigDecimal groupTotal = BigDecimal.ZERO;
+    try {
+      for (int k = 0; k < parts.size(); k++) {
+        OrderSplit.Part part = parts.get(k);
+        UUID childId = Ids.newId();
+        List<OrderItem> childItems = new ArrayList<>();
+        for (OrderSplit.LinePart lp : part.lines()) {
+          OrderItem it = items.get(lp.lineIndex());
+          childItems.add(
+              new OrderItem(
+                  Ids.newId(),
+                  tenantId,
+                  childId,
+                  it.variantId(),
+                  lp.qty(),
+                  it.unitPrice(),
+                  lp.lineTotal(),
+                  it.notes(),
+                  it.weighingInstrumentId(),
+                  BigDecimal.ZERO,
+                  lp.vat(),
+                  it.markdownId(),
+                  it.vatCode(),
+                  it.vatRate()));
+        }
+        held.addAll(
+            inventory.reserveForOrder(
+                tenantId,
+                childId,
+                part.storeId(),
+                childItems.stream()
+                    .map(
+                        i ->
+                            new com.storeql.order.client.InventoryClient.ReserveLine(
+                                i.variantId(), i.qty()))
+                    .toList(),
+                config.reservationTtlSeconds(),
+                Ids.derived(idemBase, "store:" + part.storeId())));
+        List<OrderDeposit> deposits =
+            containerDeposits(tenantId, part.storeId(), co.currency(), childId, childItems);
+        BigDecimal total =
+            part.subtotal()
+                .add(part.tax())
+                .add(
+                    deposits.stream()
+                        .map(OrderDeposit::amount)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add));
+        groupTotal = groupTotal.add(total);
+        Order child =
+            new Order(
+                childId,
+                tenantId,
+                part.storeId(),
+                co.customerId(),
+                co.loginId(),
+                req.channel(),
+                co.fulfilment(),
+                Order.STATUS_PENDING,
+                part.subtotal(),
+                part.tax(),
+                BigDecimal.ZERO,
+                total,
+                co.currency(),
+                req.notes(),
+                // The first part carries the checkout's key, so a retry finds it as a retried
+                // single order finds its order.
+                k == 0 ? idempotencyKey : null,
+                now,
+                now,
+                req.taxExempt() != null && req.taxExempt(),
+                req.exemptReason(),
+                req.deliveryLine1(),
+                req.deliveryLine2(),
+                req.deliveryCity(),
+                req.deliveryPostalCode(),
+                req.deliveryRecipientName(),
+                req.deliveryRecipientPhone(),
+                req.contactPhone(),
+                co.paymentMethod(),
+                BigDecimal.ZERO,
+                null,
+                req.allowSubstitutions() == null || req.allowSubstitutions(),
+                co.slot() == null ? null : co.slot().windowId(),
+                co.slot() == null ? null : co.slot().startsAt(),
+                co.slot() == null ? null : co.slot().endsAt(),
+                co.slot() == null ? null : co.slot().timeZone(),
+                co.contactPhoneE164());
+        placed.add(
+            new OrderRepository.NewOrder(
+                child,
+                childItems,
+                Events.orderPlaced(
+                    tenantId,
+                    childId,
+                    req.channel(),
+                    co.customerId(),
+                    co.loginId(),
+                    part.storeId(),
+                    groupId,
+                    child.slotStartsAt(),
+                    child.slotEndsAt(),
+                    child.slotTimeZone()),
+                null,
+                promotions.get(k),
+                deposits));
+      }
+      repo.createOrderGroup(
+          new com.storeql.order.domain.OrderGroup(
+              groupId,
+              tenantId,
+              co.customerId(),
+              co.loginId(),
+              groupTotal,
+              co.currency(),
+              now,
+              List.of()),
+          idempotencyKey,
+          placed);
+    } catch (ApiException e) {
+      // A retry that raced the first placement: its holds replayed the first's, so none is freed.
+      if ("ORDER_DUPLICATE_KEY".equals(e.code()) && idempotencyKey != null) {
+        return repo.findOrderByIdempotencyKey(tenantId, idempotencyKey).orElseThrow(() -> e);
+      }
+      inventory.releaseQuietly(tenantId, held);
+      throw e;
+    } catch (RuntimeException e) {
+      inventory.releaseQuietly(tenantId, held);
+      throw e;
+    }
+    Order first = placed.get(0).order();
+    // A coupon is spent once for the checkout, against its first part; each part counts down its
+    // own reduced-price stickers.
+    if (!co.applied().isEmpty()) {
+      pricing.recordRedemptionsQuietly(
+          tenantId, first.id(), co.customerId(), co.applied(), co.currency());
+    }
+    for (OrderRepository.NewOrder n : placed) {
+      if (n.items().stream().anyMatch(i -> i.markdownId() != null)) {
+        pricing.recordMarkdownRedemptionsQuietly(tenantId, n.order().id(), n.items());
+      }
+    }
+    return first;
+  }
+
+  /**
+   * Each part's share of the line promotions: a promotion on a product goes with the parts that
+   * hold it, shared by their quantities when the line was split; one on no product goes with the
+   * first part.
+   */
+  private static List<List<com.storeql.order.client.PricingClient.AppliedPromotion>>
+      promotionsByPart(
+          List<com.storeql.order.client.PricingClient.AppliedPromotion> applied,
+          List<OrderSplit.Part> parts) {
+    List<List<com.storeql.order.client.PricingClient.AppliedPromotion>> out = new ArrayList<>();
+    parts.forEach(p -> out.add(new ArrayList<>()));
+    for (var a : applied) {
+      List<BigDecimal> qtys =
+          parts.stream()
+              .map(
+                  p ->
+                      p.lines().stream()
+                          .filter(l -> l.variantId().equals(a.variantId()))
+                          .map(OrderSplit.LinePart::qty)
+                          .reduce(BigDecimal.ZERO, BigDecimal::add))
+              .toList();
+      if (a.variantId() == null || qtys.stream().allMatch(q -> q.signum() == 0)) {
+        out.get(0).add(a);
+        continue;
+      }
+      List<BigDecimal> shares = OrderSplit.share(a.amount(), qtys);
+      for (int k = 0; k < parts.size(); k++) {
+        if (qtys.get(k).signum() > 0) {
+          out.get(k)
+              .add(
+                  new com.storeql.order.client.PricingClient.AppliedPromotion(
+                      a.promotionId(), a.name(), a.variantId(), shares.get(k)));
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The checkout an order is a part of, when a delivery was split across shops.
+   *
+   * @return the group, its parts in the order the shopper reads them; empty for an order never
+   *     split
+   */
+  public java.util.Optional<com.storeql.order.domain.OrderGroup> groupOf(
+      UUID tenantId, UUID orderId) {
+    return repo.groupIdOf(tenantId, orderId).flatMap(g -> repo.findGroup(tenantId, g));
+  }
+
+  /** The checkout each of these orders is a part of, for those that were split. */
+  public Map<UUID, UUID> groupIdsOf(UUID tenantId, List<Order> orders) {
+    if (orders.isEmpty()) return Map.of();
+    return repo.groupIdsOf(tenantId, orders.stream().map(Order::id).toList());
+  }
+
+  /**
+   * A split checkout, for its shopper or the business's staff.
+   *
+   * @throws ApiException 404 {@code ORDER_GROUP_NOT_FOUND} when there is none in the tenant, or the
+   *     caller may not read it — a denial is a 404 so ids cannot be probed
+   */
+  public com.storeql.order.domain.OrderGroup getGroup(UUID groupId, TenantContext ctx) {
+    UUID tenantId = ctx.requireTenantId();
+    var group =
+        repo.findGroup(tenantId, groupId)
+            .orElseThrow(
+                () -> ApiException.notFound("ORDER_GROUP_NOT_FOUND", "order group not found"));
+    boolean mine = group.loginId() != null && group.loginId().equals(ctx.userId());
+    boolean staff =
+        isStaff(ctx) && group.parts().stream().anyMatch(p -> ctx.hasStoreAccess(p.storeId()));
+    if (!mine && !staff) {
+      throw ApiException.notFound("ORDER_GROUP_NOT_FOUND", "order group not found");
+    }
+    return group;
   }
 
   /**
@@ -612,15 +1528,119 @@ public class OrderService {
       Instant to,
       String afterCursor,
       int limit) {
-    Instant afterCreatedAt = null;
+    return listOrders(
+        tenantId,
+        storeId,
+        customerId,
+        loginId,
+        channel,
+        status,
+        null,
+        null,
+        null,
+        null,
+        from,
+        to,
+        afterCursor,
+        limit);
+  }
+
+  /**
+   * As above, also by how the order is fulfilled and whether it was handed over (ship-from-store
+   * and dark-store picking): a store's packed parcels awaiting the courier are {@code
+   * fulfilmentType=DELIVERY}, {@code status=FULFILLED}, {@code handedOver=false}.
+   *
+   * <p>{@code handedFrom}/{@code handedTo} bound when the order was <em>handed over</em>, not when
+   * it was placed ({@code from}/{@code to} stay on creation): yesterday's delivery dispatched this
+   * morning is among today's handovers. A window implies {@code handedOver = true}; asked of the
+   * orders not yet handed over it is refused, since they have no handover time.
+   *
+   * @param fulfilmentType restrict to PICKUP, DELIVERY or INSTORE, or {@code null}
+   * @param handedOver {@code false} for orders not yet handed over, {@code true} for those that
+   *     were, or {@code null} for either (or for {@code true} when a window is given)
+   * @param handedFrom inclusive lower bound on the handover time, or {@code null}
+   * @param handedTo exclusive upper bound on the handover time, or {@code null}
+   * @throws ApiException 400 {@code ORDER_HANDOVER_FILTER_INVALID} for a window with {@code
+   *     handedOver = false}
+   */
+  public OrderPage listOrders(
+      UUID tenantId,
+      UUID storeId,
+      UUID customerId,
+      UUID loginId,
+      String channel,
+      String status,
+      String fulfilmentType,
+      Boolean handedOver,
+      Instant handedFrom,
+      Instant handedTo,
+      Instant from,
+      Instant to,
+      String afterCursor,
+      int limit) {
+    return listOrders(
+        tenantId,
+        storeId,
+        customerId,
+        loginId,
+        channel,
+        status,
+        fulfilmentType,
+        handedOver,
+        handedFrom,
+        handedTo,
+        from,
+        to,
+        null,
+        afterCursor,
+        limit);
+  }
+
+  /**
+   * As above, also by {@code sort}: {@code null} (or anything but {@code "slot"}) keeps the usual
+   * newest-first order; {@code "slot"} orders by the delivery or collection window's start instead
+   * (delivery and collection slots) — soonest first, an order with no window last, then id — so the
+   * Fulfilment queue can be worked in the order the vans and the counter need it.
+   *
+   * @param sort {@code "slot"} for slot order; anything else (including {@code null}) for the usual
+   *     newest-first order
+   */
+  public OrderPage listOrders(
+      UUID tenantId,
+      UUID storeId,
+      UUID customerId,
+      UUID loginId,
+      String channel,
+      String status,
+      String fulfilmentType,
+      Boolean handedOver,
+      Instant handedFrom,
+      Instant handedTo,
+      Instant from,
+      Instant to,
+      String sort,
+      String afterCursor,
+      int limit) {
+    boolean handedWindow = handedFrom != null || handedTo != null;
+    if (handedWindow && Boolean.FALSE.equals(handedOver)) {
+      throw ApiException.badRequest(
+          "ORDER_HANDOVER_FILTER_INVALID",
+          "handedFrom and handedTo are for handover=DONE: an order not handed over has no"
+              + " handover time");
+    }
+    Boolean handed = handedWindow ? Boolean.TRUE : handedOver;
+    boolean bySlot = "slot".equalsIgnoreCase(sort);
+    Instant afterKey = null;
     UUID afterId = null;
     String rawKey = com.storeql.web.Cursor.decode(afterCursor);
     if (rawKey != null) {
-      // Raw cursor key is "<ISO created_at>|<order id>" — the keyset of the last row served.
+      // Raw cursor key is "<ISO instant>|<order id>" — the keyset of the last row served, on
+      // created_at for the usual order or on the slot's effective instant (a store with no window
+      // sorting as the far-future sentinel OrderRepository.NO_SLOT_SORT_KEY) for slot order.
       int sep = rawKey.indexOf('|');
       try {
         if (sep < 0) throw new IllegalArgumentException("missing separator");
-        afterCreatedAt = Instant.parse(rawKey.substring(0, sep));
+        afterKey = Instant.parse(rawKey.substring(0, sep));
         afterId = Ids.parse(rawKey.substring(sep + 1));
       } catch (RuntimeException e) {
         throw new ApiException(400, "INVALID_CURSOR", "Malformed pagination cursor", List.of(), e);
@@ -635,18 +1655,26 @@ public class OrderService {
             loginId,
             channel,
             status,
+            fulfilmentType,
+            handed,
+            handedFrom,
+            handedTo,
             from,
             to,
-            afterCreatedAt,
+            afterKey,
             afterId,
-            limit + 1);
+            limit + 1,
+            bySlot);
     if (rows.size() <= limit) {
       return new OrderPage(rows, null);
     }
     List<Order> page = rows.subList(0, limit);
     Order last = page.get(page.size() - 1);
-    return new OrderPage(
-        page, com.storeql.web.Cursor.encode(last.createdAt().toString() + "|" + last.id()));
+    Instant lastKey =
+        bySlot
+            ? (last.slotStartsAt() != null ? last.slotStartsAt() : OrderRepository.NO_SLOT_SORT_KEY)
+            : last.createdAt();
+    return new OrderPage(page, com.storeql.web.Cursor.encode(lastKey + "|" + last.id()));
   }
 
   /** Hard cap on one export, so a data request cannot read an unbounded table into memory. */
@@ -798,6 +1826,23 @@ public class OrderService {
    * for that. DELIVERY is excluded: a till can take payment for goods that go out on a van, and
    * those are handed over when they arrive.
    */
+  /** The delivery address as one line, or null when the order delivers nowhere. */
+  static String deliveryAddressOf(Order order) {
+    StringBuilder sb = new StringBuilder();
+    for (String part :
+        new String[] {
+          order.deliveryLine1(),
+          order.deliveryLine2(),
+          order.deliveryCity(),
+          order.deliveryPostalCode()
+        }) {
+      if (part == null || part.isBlank()) continue;
+      if (sb.length() > 0) sb.append(", ");
+      sb.append(part.trim());
+    }
+    return sb.length() == 0 ? null : sb.toString();
+  }
+
   static boolean isTillSale(String channel, String fulfilmentType) {
     return Order.CHANNEL_POS.equals(channel)
         && (Order.FULFILMENT_INSTORE.equals(fulfilmentType)
@@ -818,7 +1863,8 @@ public class OrderService {
    *     the order is not awaiting confirmation
    */
   public Order confirmOrder(UUID tenantId, UUID orderId, UUID userId) {
-    // Load the order so OrderConfirmed can carry the buyer + settled amount (loyalty accrual).
+    // Load the order so OrderConfirmed can carry the buyer + settled amount (loyalty accrual)
+    // and its lines (sales by category).
     Order order = getOrder(tenantId, orderId);
     var confirmEvent =
         Events.orderConfirmed(
@@ -829,7 +1875,15 @@ public class OrderService {
             order.customerId(),
             order.total(),
             order.taxAmount(),
-            order.currency());
+            order.currency(),
+            repo.findOrderItems(tenantId, orderId),
+            order.fulfilmentType(),
+            deliveryAddressOf(order),
+            order.deliveryRecipientName(),
+            order.deliveryRecipientPhone(),
+            order.slotStartsAt(),
+            order.slotEndsAt(),
+            order.slotTimeZone());
     Order confirmed =
         isTillSale(order.channel(), order.fulfilmentType())
             ? repo.confirmAndFulfil(
@@ -1214,7 +2268,7 @@ public class OrderService {
         Order.STATUS_CANCELLED,
         reason,
         userId,
-        Events.orderCancelled(tenantId, orderId, reason));
+        Events.orderCancelled(tenantId, orderId, reason, order.channel(), order.fulfilmentType()));
   }
 
   /**
@@ -1286,6 +2340,33 @@ public class OrderService {
       com.storeql.order.dto.Dtos.FulfilRequest req,
       UUID userId,
       TenantContext ctx) {
+    return fulfil(tenantId, orderId, req, userId, ctx, null, null).orElseThrow();
+  }
+
+  /**
+   * {@link #fulfilOrder} once per {@code dedupeId}, for an event that hands an order over (a wave
+   * picked at the store): the dedupe mark and the handover are one transaction, so a redelivered
+   * event hands over nothing twice and a failure after the mark loses nothing.
+   *
+   * @return true when this call handed the lines over; false when the dedupe id was already applied
+   */
+  public boolean fulfilOrderOnce(
+      UUID dedupeId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      com.storeql.order.dto.Dtos.FulfilRequest req) {
+    return fulfil(tenantId, orderId, req, null, null, dedupeId, consumer).isPresent();
+  }
+
+  private java.util.Optional<Order> fulfil(
+      UUID tenantId,
+      UUID orderId,
+      com.storeql.order.dto.Dtos.FulfilRequest req,
+      UUID userId,
+      TenantContext ctx,
+      UUID dedupeId,
+      String dedupeConsumer) {
     Order order = getOrder(tenantId, orderId);
     if (ctx != null) {
       ctx.requireStoreAccess(order.storeId());
@@ -1310,27 +2391,38 @@ public class OrderService {
         orderId,
         wanted,
         userId,
-        now ->
-            Events.orderFulfilled(
-                tenantId,
-                orderId,
-                order.storeId(),
-                now.stream()
-                    .map(
-                        l ->
-                            new OrderItem(
-                                null,
-                                tenantId,
-                                orderId,
-                                l.variantId(),
-                                l.qty(),
-                                BigDecimal.ZERO,
-                                BigDecimal.ZERO,
-                                null,
-                                null))
-                    .toList(),
-                unitNet,
-                scale));
+        dedupeId,
+        dedupeConsumer,
+        f -> {
+          Map<UUID, BigDecimal> outstanding = new LinkedHashMap<>();
+          for (var l : f.lines()) outstanding.put(l.variantId(), l.outstandingQty());
+          return Events.orderFulfilled(
+              tenantId,
+              orderId,
+              order.storeId(),
+              f.lines().stream()
+                  .map(
+                      l ->
+                          new OrderItem(
+                              null,
+                              tenantId,
+                              orderId,
+                              l.variantId(),
+                              l.qty(),
+                              BigDecimal.ZERO,
+                              BigDecimal.ZERO,
+                              null,
+                              null))
+                  .toList(),
+              unitNet,
+              scale,
+              outstanding,
+              f.complete() ? Order.STATUS_FULFILLED : Order.STATUS_PARTIALLY_FULFILLED,
+              order.channel(),
+              order.fulfilmentType(),
+              order.customerId(),
+              order.loginId());
+        });
   }
 
   // ── Returns ───────────────────────────────────────────────────────────────
@@ -1849,12 +2941,14 @@ public class OrderService {
           orderId);
       return;
     }
+    // The lines once, for the fulfilment event and for OrderConfirmed (sales by category).
+    List<OrderItem> items = repo.findOrderItems(tenantId, orderId);
     // A till sale is handed over the moment it is paid for, so the capture that completes it also
     // fulfils it, in the same transaction (SJ-D40). The event is built for every tender but only
     // written by the one that completes the sale; a partial tender or a redelivery writes nothing.
     var fulfilEvent =
         isTillSale(order.channel(), order.fulfilmentType())
-            ? fulfilledWithRevenue(tenantId, order, repo.findOrderItems(tenantId, orderId))
+            ? fulfilledWithRevenue(tenantId, order, items)
             : null;
     boolean completed =
         repo.applyPaymentCaptured(
@@ -1871,7 +2965,15 @@ public class OrderService {
                 order.customerId(),
                 order.total(),
                 order.taxAmount(),
-                order.currency()),
+                order.currency(),
+                items,
+                order.fulfilmentType(),
+                deliveryAddressOf(order),
+                order.deliveryRecipientName(),
+                order.deliveryRecipientPhone(),
+                order.slotStartsAt(),
+                order.slotEndsAt(),
+                order.slotTimeZone()),
             fulfilEvent);
 
     // Till sales are confirmed here, not in confirmOrder, so this is where most receipts are
@@ -2142,10 +3244,23 @@ public class OrderService {
       java.util.UUID tenantId,
       java.util.UUID orderId,
       java.math.BigDecimal amount) {
+    applyRefund(eventId, tenantId, orderId, amount, false);
+  }
+
+  /**
+   * As above; an {@code adjustment} refund (a line closed short or substituted) records the money
+   * and moves no status — the goods are still to be handed over.
+   */
+  public void applyRefund(
+      java.util.UUID eventId,
+      java.util.UUID tenantId,
+      java.util.UUID orderId,
+      java.math.BigDecimal amount,
+      boolean adjustment) {
     if (eventId == null || amount == null || amount.signum() <= 0) {
       return;
     }
-    repo.applyRefundOnce(eventId, tenantId, orderId, amount);
+    repo.applyRefundOnce(eventId, tenantId, orderId, amount, adjustment);
   }
 
   /**

@@ -46,6 +46,7 @@ class OrderServiceDeliveryTest {
   @Mock StoreStatusRepository storeStatusRepo;
   @Mock TenantClient tenants;
   @Mock com.storeql.service.TenantProfiles profiles;
+  @Mock FulfilmentWindowService windows;
 
   private OrderService svc;
 
@@ -60,6 +61,9 @@ class OrderServiceDeliveryTest {
     svc.storeStatusRepo = storeStatusRepo;
     svc.tenants = tenants;
     svc.profiles = profiles;
+    // Delivery and collection slots: no window is named or offered in this fixture — the mock's
+    // default null answer is exactly "no slot", so checkout behaves as it did before the feature.
+    svc.windows = windows;
     // 09.16: no deposit scheme reaches these sales; a mock answers empty.
     svc.jurisdictions = org.mockito.Mockito.mock(com.storeql.service.Jurisdictions.class);
     // The tenant's declared currency, as tenant-svc would answer (SJ-D53).
@@ -103,6 +107,9 @@ class OrderServiceDeliveryTest {
         postalCode,
         recipientName,
         recipientPhone,
+        null,
+        null,
+        null,
         null,
         null,
         null,

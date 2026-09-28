@@ -49,10 +49,12 @@ public class SubscriptionService {
    * rate, which is the safe side of the mistake.
    *
    * @param on the day it starts
+   * @param billingEmail where notices about what it owes go — the owner's address at sign-up — or
+   *     null when none is known, in which case dunning names the business rather than chasing it
    * @throws ApiException 409 {@code SUBSCRIPTION_EXISTS}, {@code TENANT_HAS_NO_PLAN}, {@code
    *     PLAN_PRICE_MISSING}
    */
-  public SubscriptionFile start(UUID tenantId, LocalDate on, UUID actorId) {
+  public SubscriptionFile start(UUID tenantId, LocalDate on, UUID actorId, String billingEmail) {
     if (repo.ofTenant(tenantId).isPresent()) {
       throw ApiException.conflict(
           "SUBSCRIPTION_EXISTS", "This business is already signed up; change its plan instead");
@@ -116,7 +118,7 @@ public class SubscriptionService {
                 null,
                 null,
                 null),
-            null,
+            blankToNull(billingEmail),
             now,
             null,
             now,
@@ -221,9 +223,17 @@ public class SubscriptionService {
     Subscription s = require(tenantId);
     Buyer before = s.buyer();
     Buyer after = com.storeql.tenant.mapper.BillingMappers.merge(before, req);
-    repo.save(rebuild(s, after, s.cancelAtPeriodEnd(), s.pendingPlanId()));
+    // Where notices go (SJ-D72): the request's address when it gives one, else unchanged. The
+    // owner's address from sign-up stands until the business names another, never cleared by an
+    // update that did not mention it — a business with no address cannot be told it is late.
+    String email =
+        blankToNull(req.billingEmail()) == null ? s.billingEmail() : req.billingEmail().strip();
+    repo.save(rebuild(s, after, email, s.cancelAtPeriodEnd(), s.pendingPlanId()));
 
     String detail = "billing details set for " + after.country();
+    if (!java.util.Objects.equals(email, s.billingEmail())) {
+      detail += "; notices go to " + email;
+    }
     if (before.vatChecked() && !after.vatChecked()) {
       // Worth its own sentence in the history: the treatment on the next invoice changes because of
       // it, and somebody will ask why.
@@ -334,15 +344,23 @@ public class SubscriptionService {
   }
 
   private static Subscription with(Subscription s, boolean cancelAtPeriodEnd, UUID pendingPlanId) {
-    return rebuild(s, s.buyer(), cancelAtPeriodEnd, pendingPlanId);
+    return rebuild(s, s.buyer(), s.billingEmail(), cancelAtPeriodEnd, pendingPlanId);
   }
 
   private static Subscription replaceBuyer(Subscription s, Buyer buyer) {
-    return rebuild(s, buyer, s.cancelAtPeriodEnd(), s.pendingPlanId());
+    return rebuild(s, buyer, s.billingEmail(), s.cancelAtPeriodEnd(), s.pendingPlanId());
+  }
+
+  private static String blankToNull(String s) {
+    return s == null || s.isBlank() ? null : s.strip();
   }
 
   private static Subscription rebuild(
-      Subscription s, Buyer buyer, boolean cancelAtPeriodEnd, UUID pendingPlanId) {
+      Subscription s,
+      Buyer buyer,
+      String billingEmail,
+      boolean cancelAtPeriodEnd,
+      UUID pendingPlanId) {
     return new Subscription(
         s.id(),
         s.tenantId(),
@@ -357,7 +375,7 @@ public class SubscriptionService {
         pendingPlanId,
         cancelAtPeriodEnd,
         buyer,
-        s.billingEmail(),
+        billingEmail,
         s.startedAt(),
         s.cancelledAt(),
         s.createdAt(),

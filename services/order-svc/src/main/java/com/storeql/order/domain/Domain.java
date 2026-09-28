@@ -307,7 +307,242 @@ public final class Domain {
        * pays commission pays the seller. Null for a sale nobody is credited with — the ordinary
        * case online.
        */
-      UUID sellerUserId) {
+      UUID sellerUserId,
+      /**
+       * Whether the shopper allows the store to substitute a line it cannot fill (substitutions for
+       * out-of-stock online lines): their choice at checkout, on unless they turned it off.
+       */
+      boolean allowSubstitutions,
+      /**
+       * The delivery or collection window this order holds (delivery and collection slots): the
+       * {@code fulfilment_windows} row it was taken from. All four slot fields are set together or
+       * not at all — a till sale and an order at a store with no windows carry none.
+       */
+      UUID slotWindowId,
+      /** The chosen occurrence's start, in UTC. */
+      Instant slotStartsAt,
+      /** The chosen occurrence's end, in UTC. */
+      Instant slotEndsAt,
+      /**
+       * The IANA zone the occurrence was resolved in at the moment it was taken — the store's own
+       * zone, or the window's saved one when tenant-svc could not be read — so the server can
+       * always show the store's own local time again without asking tenant-svc a second time.
+       */
+      String slotTimeZone,
+      /**
+       * {@code contactPhone} in international form (a phone at the till): read at placement in the
+       * store's own country, then the business's, and what a recall text goes to. Null when no
+       * number was given or the one given could not be read.
+       */
+      String contactPhoneE164) {
+
+    /** An order as recorded before its contact number was kept in international form. */
+    public Order(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID customerId,
+        UUID loginId,
+        String channel,
+        String fulfilmentType,
+        String status,
+        BigDecimal subtotal,
+        BigDecimal taxAmount,
+        BigDecimal discountAmount,
+        BigDecimal total,
+        String currency,
+        String notes,
+        String idempotencyKey,
+        Instant createdAt,
+        Instant updatedAt,
+        boolean taxExempt,
+        String exemptReason,
+        String deliveryLine1,
+        String deliveryLine2,
+        String deliveryCity,
+        String deliveryPostalCode,
+        String deliveryRecipientName,
+        String deliveryRecipientPhone,
+        String contactPhone,
+        String paymentMethod,
+        BigDecimal promotionDiscount,
+        UUID sellerUserId,
+        boolean allowSubstitutions,
+        UUID slotWindowId,
+        Instant slotStartsAt,
+        Instant slotEndsAt,
+        String slotTimeZone) {
+      this(
+          id,
+          tenantId,
+          storeId,
+          customerId,
+          loginId,
+          channel,
+          fulfilmentType,
+          status,
+          subtotal,
+          taxAmount,
+          discountAmount,
+          total,
+          currency,
+          notes,
+          idempotencyKey,
+          createdAt,
+          updatedAt,
+          taxExempt,
+          exemptReason,
+          deliveryLine1,
+          deliveryLine2,
+          deliveryCity,
+          deliveryPostalCode,
+          deliveryRecipientName,
+          deliveryRecipientPhone,
+          contactPhone,
+          paymentMethod,
+          promotionDiscount,
+          sellerUserId,
+          allowSubstitutions,
+          slotWindowId,
+          slotStartsAt,
+          slotEndsAt,
+          slotTimeZone,
+          null);
+    }
+
+    /** An order as recorded before delivery and collection slots existed: no window. */
+    public Order(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID customerId,
+        UUID loginId,
+        String channel,
+        String fulfilmentType,
+        String status,
+        BigDecimal subtotal,
+        BigDecimal taxAmount,
+        BigDecimal discountAmount,
+        BigDecimal total,
+        String currency,
+        String notes,
+        String idempotencyKey,
+        Instant createdAt,
+        Instant updatedAt,
+        boolean taxExempt,
+        String exemptReason,
+        String deliveryLine1,
+        String deliveryLine2,
+        String deliveryCity,
+        String deliveryPostalCode,
+        String deliveryRecipientName,
+        String deliveryRecipientPhone,
+        String contactPhone,
+        String paymentMethod,
+        BigDecimal promotionDiscount,
+        UUID sellerUserId,
+        boolean allowSubstitutions) {
+      this(
+          id,
+          tenantId,
+          storeId,
+          customerId,
+          loginId,
+          channel,
+          fulfilmentType,
+          status,
+          subtotal,
+          taxAmount,
+          discountAmount,
+          total,
+          currency,
+          notes,
+          idempotencyKey,
+          createdAt,
+          updatedAt,
+          taxExempt,
+          exemptReason,
+          deliveryLine1,
+          deliveryLine2,
+          deliveryCity,
+          deliveryPostalCode,
+          deliveryRecipientName,
+          deliveryRecipientPhone,
+          contactPhone,
+          paymentMethod,
+          promotionDiscount,
+          sellerUserId,
+          allowSubstitutions,
+          null,
+          null,
+          null,
+          null);
+    }
+
+    /** An order as recorded before the shopper could say: substitutions allowed. */
+    public Order(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID customerId,
+        UUID loginId,
+        String channel,
+        String fulfilmentType,
+        String status,
+        BigDecimal subtotal,
+        BigDecimal taxAmount,
+        BigDecimal discountAmount,
+        BigDecimal total,
+        String currency,
+        String notes,
+        String idempotencyKey,
+        Instant createdAt,
+        Instant updatedAt,
+        boolean taxExempt,
+        String exemptReason,
+        String deliveryLine1,
+        String deliveryLine2,
+        String deliveryCity,
+        String deliveryPostalCode,
+        String deliveryRecipientName,
+        String deliveryRecipientPhone,
+        String contactPhone,
+        String paymentMethod,
+        BigDecimal promotionDiscount,
+        UUID sellerUserId) {
+      this(
+          id,
+          tenantId,
+          storeId,
+          customerId,
+          loginId,
+          channel,
+          fulfilmentType,
+          status,
+          subtotal,
+          taxAmount,
+          discountAmount,
+          total,
+          currency,
+          notes,
+          idempotencyKey,
+          createdAt,
+          updatedAt,
+          taxExempt,
+          exemptReason,
+          deliveryLine1,
+          deliveryLine2,
+          deliveryCity,
+          deliveryPostalCode,
+          deliveryRecipientName,
+          deliveryRecipientPhone,
+          contactPhone,
+          paymentMethod,
+          promotionDiscount,
+          sellerUserId,
+          true);
+    }
+
     public static final String CHANNEL_ONLINE = "ONLINE";
     public static final String CHANNEL_POS = "POS";
     public static final String FULFILMENT_PICKUP = "PICKUP";
@@ -368,7 +603,50 @@ public final class Domain {
       /** The VAT code the quote applied (18.9); null for a line placed before it was kept. */
       String vatCode,
       /** The VAT rate the quote applied, as a fraction: 0.2000 for 20% (18.9). */
-      BigDecimal vatRate) {
+      BigDecimal vatRate,
+      /**
+       * How much of {@code qty} will never be handed over: closed short by the store, or replaced
+       * by a substitute (substitutions for out-of-stock online lines). The line's charge is reduced
+       * pro rata to what stands.
+       */
+      BigDecimal shortQty,
+      /** The line this one stands in for, when it is a substitute the store put in the bag. */
+      UUID substitutesItemId) {
+
+    /** A line as recorded before short closes and substitutes existed. */
+    public OrderItem(
+        UUID id,
+        UUID tenantId,
+        UUID orderId,
+        UUID variantId,
+        BigDecimal qty,
+        BigDecimal unitPrice,
+        BigDecimal lineTotal,
+        String notes,
+        UUID weighingInstrumentId,
+        BigDecimal fulfilledQty,
+        BigDecimal vatAmount,
+        UUID markdownId,
+        String vatCode,
+        BigDecimal vatRate) {
+      this(
+          id,
+          tenantId,
+          orderId,
+          variantId,
+          qty,
+          unitPrice,
+          lineTotal,
+          notes,
+          weighingInstrumentId,
+          fulfilledQty,
+          vatAmount,
+          markdownId,
+          vatCode,
+          vatRate,
+          BigDecimal.ZERO,
+          null);
+    }
 
     /** A line as recorded before its VAT code and rate were kept. */
     public OrderItem(
@@ -455,9 +733,15 @@ public final class Domain {
           null);
     }
 
-    /** What is still to be handed over. */
+    /** What is still to be handed over: not yet picked, and not closed short. */
     public BigDecimal remainingQty() {
-      return qty.subtract(fulfilledQty == null ? BigDecimal.ZERO : fulfilledQty);
+      return qty.subtract(fulfilledQty == null ? BigDecimal.ZERO : fulfilledQty)
+          .subtract(shortQty == null ? BigDecimal.ZERO : shortQty);
+    }
+
+    /** What stands of the line: ordered less what was closed short. */
+    public BigDecimal standingQty() {
+      return qty.subtract(shortQty == null ? BigDecimal.ZERO : shortQty);
     }
   }
 

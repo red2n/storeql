@@ -1,5 +1,6 @@
 package com.storeql.iam.repo;
 
+import com.storeql.iam.domain.StaffLogin;
 import com.storeql.iam.domain.TokenIdentity;
 import com.storeql.iam.domain.User;
 import com.storeql.ids.Ids;
@@ -88,6 +89,48 @@ public class UserRepository extends BaseOutboxRepository {
             "find user by id")
         .stream()
         .findFirst();
+  }
+
+  /**
+   * The business's staff among the ids, by email. The tenant is the first condition: a login that
+   * is another business's, a customer's (no tenant), or that nobody holds is simply not a row here.
+   *
+   * <p>A caller held to one or more stores names only staff who hold a role at one of those stores
+   * or a business-wide role ({@code user_roles.store_id IS NULL}) in the caller's business —
+   * filtered in the database, never by fetching every row and checking in Java. A caller held to no
+   * store (an owner, a business-wide manager, the platform admin) names every match, as before.
+   *
+   * @param tenantId the caller's business, from the token
+   * @param ids the user ids to name; at most a hundred, already read as UUIDv7s
+   * @param storeIds the caller's stores ({@code TenantContext.storeIds()}); empty means
+   *     unrestricted
+   * @return one entry per staff login found, ordered by email
+   */
+  public List<StaffLogin> staffLogins(UUID tenantId, List<UUID> ids, Set<UUID> storeIds) {
+    String sql =
+        "SELECT u.id, u.email FROM users u"
+            + " WHERE u.tenant_id = ? AND u.id = ANY(?) AND u.type = 'STAFF'"
+            + " AND u.email IS NOT NULL"
+            + (storeIds.isEmpty()
+                ? ""
+                // A role held at no store is business-wide only when it is a staff role: a login
+                // that signed up as a shopper first keeps its CUSTOMER role, store-less, and that
+                // must not name it to a manager of every store.
+                : " AND EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id"
+                    + " WHERE ur.user_id = u.id AND (ur.store_id = ANY(?)"
+                    + " OR (ur.store_id IS NULL AND r.name <> 'CUSTOMER')))")
+            + " ORDER BY lower(u.email), u.id";
+    return query(
+        sql,
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids.toArray()));
+          if (!storeIds.isEmpty()) {
+            ps.setArray(3, ps.getConnection().createArrayOf("uuid", storeIds.toArray()));
+          }
+        },
+        rs -> new StaffLogin(rs.getObject("id", UUID.class), rs.getString("email")),
+        "find staff logins");
   }
 
   /**
@@ -502,7 +545,8 @@ public class UserRepository extends BaseOutboxRepository {
 
   /**
    * Deletes a customer's login in one transaction with everything that would let it be used or
-   * found again: its sessions, its one-time codes, and the event that tells other services.
+   * found again: its sessions, its one-time codes, any waiting password-reset link, and the event
+   * that tells other services.
    *
    * <p>The row stays, with status DELETED, so the user id other records carry still resolves to
    * something rather than nothing; what identifies the person does not. Email and phone become NULL
@@ -526,6 +570,13 @@ public class UserRepository extends BaseOutboxRepository {
           }
           try (var ps =
               c.prepareStatement("UPDATE refresh_tokens SET revoked = true WHERE user_id = ?")) {
+            ps.setObject(1, user.id());
+            ps.executeUpdate();
+          }
+          // This row is anonymised, not deleted (unlike ON DELETE CASCADE on a hard delete), so a
+          // password-reset link minted for this login must be cleared here or it would sit,
+          // useless but present, until the sweeper's day-old cutoff.
+          try (var ps = c.prepareStatement("DELETE FROM password_reset_tokens WHERE user_id = ?")) {
             ps.setObject(1, user.id());
             ps.executeUpdate();
           }

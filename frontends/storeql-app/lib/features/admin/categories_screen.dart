@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../shared/widgets/status_badge.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/scrollable_table.dart';
 import 'providers/admin_providers.dart';
+import '../../core/theme.dart';
 
 class CategoriesScreen extends ConsumerWidget {
   const CategoriesScreen({super.key});
@@ -19,7 +23,8 @@ class CategoriesScreen extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+          padding: EdgeInsets.fromLTRB(context.pageGutter, context.pageGutter,
+              context.pageGutter, 16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -224,82 +229,78 @@ class _WideTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return LayoutBuilder(
-      builder: (context, bc) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Card(
-          clipBehavior: Clip.antiAlias,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minWidth: bc.maxWidth - 32),
-              child: DataTable(
-                headingRowColor:
-                    WidgetStatePropertyAll(cs.surfaceContainerHigh),
-                columnSpacing: 24,
-                columns: const [
-                  DataColumn(label: Text('Name')),
-                  DataColumn(label: Text('Parent')),
-                  DataColumn(label: Text('Status')),
-                  DataColumn(label: Text('')),
-                ],
-                rows: cats.map((cat) {
-                  final active = cat.status.toUpperCase() == 'ACTIVE';
-                  final parentName = cat.parentId != null
-                      ? (byId[cat.parentId]?.name ?? '—')
-                      : '—';
-                  final isChild = cat.parentId != null;
-                  return DataRow(cells: [
-                    DataCell(Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (isChild) ...[
-                          const SizedBox(width: 20),
-                          Icon(Icons.subdirectory_arrow_right,
-                              size: 14, color: cs.outline),
-                          const SizedBox(width: 4),
-                        ],
-                        Text(cat.name,
-                            style: TextStyle(
-                              fontWeight: isChild
-                                  ? FontWeight.normal
-                                  : FontWeight.bold,
-                            )),
-                      ],
-                    )),
-                    DataCell(Text(parentName,
+    // Both axes scroll inside the card: the rows past its height were
+    // clipped with no way to reach them.
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: context.pageGutter),
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child: ScrollableTable(
+          child: DataTable(
+            headingRowColor:
+                WidgetStatePropertyAll(cs.surfaceContainerHigh),
+            columnSpacing: 24,
+            columns: const [
+              DataColumn(label: Text('Name')),
+              DataColumn(label: Text('Parent')),
+              DataColumn(label: Text('Status')),
+              DataColumn(label: Text('')),
+            ],
+            rows: cats.map((cat) {
+              final active = cat.status.toUpperCase() == 'ACTIVE';
+              final parentName = cat.parentId != null
+                  ? (byId[cat.parentId]?.name ?? '—')
+                  : '—';
+              final isChild = cat.parentId != null;
+              return DataRow(cells: [
+                DataCell(Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isChild) ...[
+                      const SizedBox(width: 20),
+                      Icon(Icons.subdirectory_arrow_right,
+                          size: 14, color: cs.outline),
+                      const SizedBox(width: 4),
+                    ],
+                    Text(cat.name,
                         style: TextStyle(
-                            fontSize: 12, color: cs.outline))),
-                    DataCell(_StatusChip(active: active, label: cat.status)),
-                    DataCell(PopupMenuButton<String>(
-                      icon: const Icon(Icons.more_vert),
-                      tooltip: 'Actions',
-                      itemBuilder: (_) => [
-                        const PopupMenuItem(
-                            value: 'edit',
-                            child: Row(children: [
-                              Icon(Icons.edit_outlined, size: 18),
-                              SizedBox(width: 8),
-                              Text('Edit'),
-                            ])),
-                        if (active)
-                          PopupMenuItem(
-                              value: 'deactivate',
-                              child: Row(children: [
-                                Icon(Icons.block_outlined,
-                                    size: 18, color: cs.error),
-                                const SizedBox(width: 8),
-                                Text('Deactivate',
-                                    style: TextStyle(color: cs.error)),
-                              ])),
-                      ],
-                      onSelected: (v) =>
-                          v == 'edit' ? onEdit(cat) : onDeactivate(cat),
-                    )),
-                  ]);
-                }).toList(),
-              ),
-            ),
+                          fontWeight: isChild
+                              ? FontWeight.normal
+                              : FontWeight.bold,
+                        )),
+                  ],
+                )),
+                DataCell(Text(parentName,
+                    style: TextStyle(
+                        fontSize: 12, color: cs.outline))),
+                DataCell(_StatusChip(active: active, label: cat.status)),
+                DataCell(PopupMenuButton<String>(
+                  icon: const Icon(Icons.more_vert),
+                  tooltip: 'Actions',
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                        value: 'edit',
+                        child: Row(children: [
+                          Icon(Icons.edit_outlined, size: 18),
+                          SizedBox(width: 8),
+                          Text('Edit'),
+                        ])),
+                    if (active)
+                      PopupMenuItem(
+                          value: 'deactivate',
+                          child: Row(children: [
+                            Icon(Icons.block_outlined,
+                                size: 18, color: cs.error),
+                            const SizedBox(width: 8),
+                            Text('Deactivate',
+                                style: TextStyle(color: cs.error)),
+                          ])),
+                  ],
+                  onSelected: (v) =>
+                      v == 'edit' ? onEdit(cat) : onDeactivate(cat),
+                )),
+              ]);
+            }).toList(),
           ),
         ),
       ),
@@ -325,7 +326,7 @@ class _NarrowList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: EdgeInsets.symmetric(horizontal: context.pageGutter, vertical: 8),
       itemCount: cats.length,
       separatorBuilder: (_, _) => const SizedBox(height: 4),
       itemBuilder: (context, i) {
@@ -387,28 +388,17 @@ class _NarrowList extends StatelessWidget {
 
 // ── Status chip ───────────────────────────────────────────────────────────────
 
+/// A category's status as the shared badge, in words.
 class _StatusChip extends StatelessWidget {
   final bool active;
   final String label;
   const _StatusChip({required this.active, required this.label});
 
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: active ? cs.secondaryContainer : cs.errorContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(label,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-            color: active ? cs.onSecondaryContainer : cs.onErrorContainer,
-          )),
-    );
-  }
+  Widget build(BuildContext context) => StatusBadge(
+        active ? 'Active' : humanizeCode(label),
+        tone: active ? StatusTone.success : StatusTone.neutral,
+      );
 }
 
 // ── Create / Edit dialog ──────────────────────────────────────────────────────
@@ -459,7 +449,7 @@ class _CategoryDialogState extends State<_CategoryDialog> {
         widget.availableParents.where((c) => c.status.toUpperCase() == 'ACTIVE').toList();
 
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      shape: const RoundedRectangleBorder(borderRadius: AppRadius.card),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 420),
         child: Padding(
@@ -481,7 +471,7 @@ class _CategoryDialogState extends State<_CategoryDialog> {
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
                       color: cs.errorContainer,
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: AppRadius.chip,
                     ),
                     child: Text(_error!,
                         style: TextStyle(color: cs.onErrorContainer)),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/spacing.dart';
 import 'pricing_providers.dart';
 
 // ---------------------------------------------------------------------------
@@ -47,31 +48,65 @@ class StandardVatBanner extends ConsumerWidget {
       return const SizedBox.shrink();
     }
     final cs = Theme.of(context).colorScheme;
-    return Card(
-      key: const Key('standard-vat-missing'),
-      color: cs.errorContainer,
-      margin: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Icon(Icons.report_outlined, color: cs.onErrorContainer),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                'No standard VAT rate is set, so no price can be quoted to a shopper or at the '
-                'till. Add the rate with code $standardVatCode — marked exempt if this business '
-                'charges no VAT.',
-                style: TextStyle(color: cs.onErrorContainer),
-              ),
-            ),
-            const SizedBox(width: 12),
-            FilledButton(
-              key: const Key('standard-vat-add'),
-              onPressed: onAdd,
-              child: const Text('Add standard rate'),
-            ),
-          ],
+    final gutter = context.pageGutter;
+    final icon = Icon(Icons.report_outlined, color: cs.onErrorContainer);
+    final message = Text(
+      'No standard VAT rate is set, so no price can be quoted to a shopper or at the '
+      'till. Add the rate with code $standardVatCode — marked exempt if this business '
+      'charges no VAT.',
+      style: TextStyle(color: cs.onErrorContainer),
+    );
+    final button = FilledButton(
+      key: const Key('standard-vat-add'),
+      onPressed: onAdd,
+      child: const Text('Add standard rate'),
+    );
+    // Inset by the page gutter, like the title above it and the lists below.
+    return Padding(
+      padding: EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.md, gutter, 0),
+      child: Card(
+        key: const Key('standard-vat-missing'),
+        color: cs.errorContainer,
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.md),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // Below 600px the button goes under the message: in one row on a phone it squeezed
+              // the message to about 105px and eleven lines. With text at 130% and up it goes
+              // under below laptop width too, by the rule PageHeader keeps.
+              final largeText = MediaQuery.textScalerOf(context).scale(16) > 16 * 1.3;
+              final stacked =
+                  AppBreakpoints.classOf(constraints.maxWidth) == WindowClass.compact ||
+                      (largeText && constraints.maxWidth < AppBreakpoints.expanded);
+              if (stacked) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        icon,
+                        const SizedBox(width: AppSpacing.md),
+                        Expanded(child: message),
+                      ],
+                    ),
+                    const SizedBox(height: AppSpacing.md),
+                    Align(alignment: AlignmentDirectional.centerEnd, child: button),
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  icon,
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(child: message),
+                  const SizedBox(width: AppSpacing.md),
+                  button,
+                ],
+              );
+            },
+          ),
         ),
       ),
     );

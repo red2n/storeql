@@ -25,6 +25,7 @@ public class SalesEventHandler {
   private static final Logger LOG = System.getLogger(SalesEventHandler.class.getName());
 
   @Inject SalesPostingService postings;
+  @Inject com.storeql.purchase.service.DropshipService dropship;
   @Inject com.storeql.purchase.service.DeferredRevenueService deferred;
 
   /** {@code OrderConfirmed}: the sale, with its total, the VAT inside it and its currency. */
@@ -40,6 +41,8 @@ public class SalesEventHandler {
           o.getJsonNumber("total").bigDecimalValue(),
           o.getJsonNumber("taxAmount").bigDecimalValue(),
           o.getString("currency"));
+      // Dropship: a line the supplier ships to the customer raises the supplier's order.
+      dropship.orderConfirmed(o);
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "OrderConfirmed not posted, malformed: " + e.getMessage());
     }

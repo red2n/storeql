@@ -4,6 +4,10 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
+import 'package:storeql_app/core/auth/auth_notifier.dart';
+import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/shelf_space_screen.dart';
 
@@ -68,6 +72,20 @@ class _Server implements HttpClientAdapter {
             : [],
       }));
     }
+    if (o.method == 'GET' && o.path.contains('/variants/resolve')) {
+      // product-svc names the variants the gap report carries only by id.
+      return jsonResponse(jsonEncode({
+        'data': [
+          {'variantId': 'v-empty', 'productName': 'Oat milk 1L', 'sku': 'OAT-1L'},
+          {'variantId': 'v-full', 'productName': 'Sourdough loaf', 'sku': 'SD-800'},
+        ],
+      }));
+    }
+    if (o.method == 'GET' && o.path.endsWith('/admin/products/p1')) {
+      return jsonResponse(jsonEncode({
+        'data': {'id': 'p1', 'name': 'Tinned peaches', 'status': 'ACTIVE'},
+      }));
+    }
     if (o.method == 'GET' && o.path.contains('/merchandising/fixtures')) {
       return jsonResponse(jsonEncode({
         'data': [
@@ -105,8 +123,10 @@ class _Server implements HttpClientAdapter {
 }
 
 Future<_Server> _pump(WidgetTester tester, Widget child,
-    {Map<String, dynamic>? sweep}) async {
-  tester.view.physicalSize = const Size(1400, 2400);
+    {Map<String, dynamic>? sweep,
+    Size size = const Size(1400, 2400),
+    AuthNotifier Function() auth = _owner}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   final server = _Server(sweep: sweep ?? {'applied': 1, 'notApplied': []});
@@ -114,7 +134,10 @@ Future<_Server> _pump(WidgetTester tester, Widget child,
     ..httpClientAdapter = server;
   await tester.pumpWidget(
     ProviderScope(
-      overrides: [apiClientProvider.overrideWithValue(FakeApiClient(dio))],
+      overrides: [
+        apiClientProvider.overrideWithValue(FakeApiClient(dio)),
+        authNotifierProvider.overrideWith(auth),
+      ],
       child: MaterialApp(home: Scaffold(body: child)),
     ),
   );
@@ -122,13 +145,25 @@ Future<_Server> _pump(WidgetTester tester, Widget child,
   return server;
 }
 
+AuthNotifier _owner() => RoleAuth('OWNER');
+
+/// The card a row sits in.
+Finder _cardOf(String key) =>
+    find.ancestor(of: find.byKey(Key(key)), matching: find.byType(Card));
+
 void main() {
+  // Dates are written in the app's own locale (en_GB), whose symbols load here.
+  setUpAll(initializeDateFormatting);
+  // The dates below are read the British way (19 Sep): pinned, since the app itself assumes no
+  // country for English.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+
   testWidgets('a bay below its presentation minimum is marked, a full one is not',
       (tester) async {
     await _pump(tester, const ShelfSpaceScreen());
 
-    expect(find.text('56.000 to fill  ·  shelf holds 60'), findsOneWidget);
-    expect(find.text('0.000 to fill  ·  shelf holds 12'), findsOneWidget);
+    expect(find.text('56 to fill  ·  shelf holds 60'), findsOneWidget);
+    expect(find.text('0 to fill  ·  shelf holds 12'), findsOneWidget);
     // The warning is on the picked-over bay only: 20 units against a shelf of 12
     // is not a gap, however low the reorder level would call it.
     expect(find.text('Below minimum'), findsOneWidget);
@@ -163,7 +198,9 @@ void main() {
     await tester.tap(find.text('Range'));
     await tester.pumpAndSettle();
 
-    expect(find.text('De-list  ·  due 2026-09-19'), findsOneWidget);
+    // 'Sep' and not 'Sep 2026': en_GB abbreviates September as "Sept".
+    expect(find.textContaining('De-list  ·  due 19 Sep'), findsOneWidget);
+    expect(find.textContaining('2026-09-19'), findsNothing);
     expect(find.text('Bottom of the category on margin'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('range-apply')));
@@ -203,4 +240,136 @@ void main() {
         find.textContaining('1 could not be applied. This line has no store range'),
         findsOneWidget);
   });
+
+  testWidgets('each gap names its product and SKU, not a variant id',
+      (tester) async {
+    await _pump(tester, const ShelfSpaceScreen());
+
+    expect(find.text('Oat milk 1L  ·  OAT-1L'), findsOneWidget);
+    expect(find.text('Sourdough loaf  ·  SD-800'), findsOneWidget);
+    expect(find.textContaining('v-empty'), findsNothing);
+  });
+
+  testWidgets('counts of units read as whole numbers, not the ledger\'s decimals',
+      (tester) async {
+    await _pump(tester, const ShelfSpaceScreen());
+
+    expect(find.text('4 available  ·  looks picked over below 12'), findsOneWidget);
+    expect(find.text('20 available  ·  looks picked over below 3'), findsOneWidget);
+    expect(find.textContaining('.000'), findsNothing);
+  });
+
+  testWidgets('the cards are 8px apart, so their outlines do not double up',
+      (tester) async {
+    await _pump(tester, const ShelfSpaceScreen());
+
+    final first = tester.getRect(_cardOf('gap-v-empty'));
+    final second = tester.getRect(_cardOf('gap-v-full'));
+    expect(second.top - first.bottom, 8);
+  });
+
+  testWidgets('the store picker is a themed field, not a bare underlined button',
+      (tester) async {
+    await _pump(tester, const ShelfSpaceScreen());
+
+    // A field draws its outline from the theme's input decoration; a bare
+    // DropdownButton draws Flutter's fixed grey underline instead.
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('shelf-store')),
+            matching: find.byType(InputDecorator)),
+        findsOneWidget);
+  });
+
+  testWidgets('the first tab starts at the page edge, under the title',
+      (tester) async {
+    await _pump(tester, const ShelfSpaceScreen());
+
+    final edge = tester.getTopLeft(find.text('Shelf space')).dx;
+    expect(edge, 24);
+    expect(tester.getTopLeft(find.text('Gaps to fill')).dx, edge);
+    expect(tester.getTopLeft(find.textContaining('What it would take')).dx, edge);
+  });
+
+  testWidgets('on a phone the page is inset 16, title, tabs and list alike',
+      (tester) async {
+    await _pump(tester, const ShelfSpaceScreen(), size: const Size(390, 844));
+
+    expect(tester.takeException(), isNull);
+    expect(tester.getTopLeft(find.text('Shelf space')).dx, 16);
+    expect(tester.getTopLeft(find.text('Gaps to fill')).dx, 16);
+    expect(tester.getTopLeft(find.textContaining('What it would take')).dx, 16);
+    expect(tester.getTopLeft(_cardOf('gap-v-empty')).dx, 16);
+  });
+
+  testWidgets('on a phone at 200% text the gaps still lay out', (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await _pump(tester, const ShelfSpaceScreen(), size: const Size(390, 844));
+    expect(tester.takeException(), isNull);
+    // Below the fold at this size: scroll the gaps list to it.
+    await tester.scrollUntilVisible(find.text('Below minimum'), 200,
+        scrollable: find
+            .descendant(of: find.byType(ListView), matching: find.byType(Scrollable))
+            .first);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a due range change names the product it is about', (tester) async {
+    await _pump(tester, const ShelfSpaceScreen());
+    await tester.tap(find.text('Range'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Tinned peaches'), findsOneWidget);
+  });
+
+  // ── a storekeeper: the Gaps tab only, at their own stores ──────────────────
+
+  group('a storekeeper', () {
+    testWidgets('sees only the Gaps tab, never Shelving or Range', (tester) async {
+      await _pump(tester, const ShelfSpaceScreen(), auth: () => RoleAuth('STOREKEEPER'));
+
+      expect(find.text('Gaps to fill'), findsOneWidget);
+      expect(find.text('Shelving'), findsNothing);
+      expect(find.text('Range'), findsNothing);
+    });
+
+    testWidgets('is offered only their own stores', (tester) async {
+      await _pump(
+        tester,
+        const ShelfSpaceScreen(),
+        auth: () => _StoreHeld('STOREKEEPER', const ['s2']),
+      );
+
+      // High Street (s1) is not theirs; Retail Park (s2) is, and its empty
+      // gaps report shows.
+      expect(find.text('Retail Park'), findsOneWidget);
+      expect(find.text('High Street'), findsNothing);
+      expect(find.byKey(const Key('gaps-empty')), findsOneWidget);
+    });
+
+    testWidgets('a manager keeps all three tabs', (tester) async {
+      await _pump(tester, const ShelfSpaceScreen(), auth: () => RoleAuth('MANAGER'));
+
+      expect(find.text('Gaps to fill'), findsOneWidget);
+      expect(find.text('Shelving'), findsOneWidget);
+      expect(find.text('Range'), findsOneWidget);
+    });
+  });
+}
+
+class _StoreHeld extends AuthNotifier {
+  final String role;
+  final List<String> storeIds;
+  _StoreHeld(this.role, this.storeIds);
+
+  @override
+  Future<AuthState> build() async => AuthAuthenticated(
+        accessToken: 'a',
+        refreshToken: 'r',
+        userId: 'u',
+        tenantId: 't',
+        roles: [role],
+        storeIds: storeIds,
+      );
 }

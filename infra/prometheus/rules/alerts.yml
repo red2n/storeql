@@ -150,3 +150,54 @@ groups:
         annotations:
           summary: "The web shell could not be checked for script integrity"
           description: "The gateway could not read the web shell's entry page or inventory for 30 minutes, so its scripts are unverified."
+
+  # ── Backups ─────────────────────────────────────────────────────────────────
+  # The backup job writes its metrics for the node exporter's textfile collector; Postgres's own
+  # archiver counters come from postgres_exporter. A backup nobody has taken lately, or a WAL
+  # archive that is failing, is a restore that will not work when it is needed.
+  - name: backups
+    rules:
+      - alert: BackupMissing
+        expr: absent(storeql_backup_last_success_timestamp_seconds)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No backup has ever reported"
+          description: "The backup job's metrics are not being scraped: is the backup service running, and node-exporter reading /backups/metrics?"
+
+      - alert: BackupStale
+        expr: time() - storeql_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The last successful backup is more than 26 hours old"
+          description: "A daily backup did not land. Check the backup service's log (docker compose logs backup) and take one by hand: docker compose run --rm backup now."
+
+      - alert: BackupUnencrypted
+        expr: storeql_backup_encrypted == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backups are being written unencrypted"
+          description: "STOREQL_BACKUP_RECIPIENT is not set; every dump on the backups volume is readable as it is."
+
+      - alert: BaseBackupStale
+        expr: time() - storeql_backup_base_last_timestamp_seconds > 9 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No base backup for point-in-time recovery in nine days"
+          description: "A restore to a moment replays every archived WAL segment since the last base backup; the longer since, the longer that takes. docker compose run --rm backup base."
+
+      - alert: WalArchiveFailing
+        expr: increase(pg_stat_archiver_failed_count[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL cannot archive its WAL"
+          description: "archive_command is failing: the WAL piles up under pg_wal and no restore to a moment is possible past the last archived segment. Check the backups volume and its permissions."

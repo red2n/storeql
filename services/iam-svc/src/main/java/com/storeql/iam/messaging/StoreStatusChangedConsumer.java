@@ -12,6 +12,7 @@ import jakarta.inject.Inject;
 class StoreStatusChangedConsumer extends BaseStoreStatusChangedConsumer {
 
   @Inject PosSessionStoreStatusHandler posSessionHandler;
+  @Inject StoreTypeHandler storeTypeHandler;
 
   @Override
   protected String consumerName() {
@@ -33,5 +34,6 @@ class StoreStatusChangedConsumer extends BaseStoreStatusChangedConsumer {
   protected void handle(String topic, String value) {
     super.handle(topic, value);
     posSessionHandler.handle(value);
+    storeTypeHandler.handle(value);
   }
 }

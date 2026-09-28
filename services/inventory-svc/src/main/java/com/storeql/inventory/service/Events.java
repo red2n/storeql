@@ -2,6 +2,10 @@ package com.storeql.inventory.service;
 
 import com.storeql.events.EventPayload;
 import com.storeql.ids.Ids;
+import com.storeql.inventory.domain.Domain.BondRelease;
+import com.storeql.inventory.domain.Domain.PickWave;
+import com.storeql.inventory.domain.Domain.YieldRun;
+import com.storeql.inventory.domain.Domain.YieldRunOutput;
 import com.storeql.inventory.domain.FoodSafety.CheckRecord;
 import com.storeql.inventory.domain.FoodSafety.OverduePoint;
 import com.storeql.inventory.domain.Recall.AffectedOrder;
@@ -12,6 +16,7 @@ import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObjectBuilder;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -68,6 +73,134 @@ public final class Events {
         + ",\"reservationId\":\""
         + reservationId
         + "\"}";
+  }
+
+  /**
+   * A sale drawn from a batch the supplier still owns: purchase-svc owes the supplier {@code qty}
+   * at {@code unitCost} (the order's price) for it. One per consignment batch drawn.
+   */
+  public static String consignmentStockSold(
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      UUID batchId,
+      UUID supplierId,
+      UUID orderId,
+      BigDecimal qty,
+      BigDecimal unitCost) {
+    return EventPayload.base("ConsignmentStockSold", tenantId, batchId)
+        + storeVariant(storeId, variantId)
+        + ",\"batchId\":\""
+        + batchId
+        + "\",\"supplierId\":\""
+        + supplierId
+        + "\",\"orderId\":"
+        + (orderId == null ? "null" : "\"" + orderId + "\"")
+        + ",\"qty\":"
+        + qty.toPlainString()
+        + ",\"unitCost\":"
+        + (unitCost == null ? "null" : unitCost.toPlainString())
+        + "}";
+  }
+
+  /**
+   * Duty-suspended stock released to home use: the duty on it is now owed to the revenue, and
+   * purchase-svc posts it.
+   */
+  public static String dutyReleased(BondRelease r) {
+    return EventPayload.base("DutyReleased", r.tenantId(), r.id())
+        + storeVariant(r.storeId(), r.variantId())
+        + ",\"releaseId\":\""
+        + r.id()
+        + "\",\"qty\":"
+        + r.qty().toPlainString()
+        + ",\"dutyPerUnit\":"
+        + r.dutyPerUnit().toPlainString()
+        + ",\"dutyAmount\":"
+        + r.dutyAmount().toPlainString()
+        + ",\"currency\":\""
+        + r.currency()
+        + "\",\"reference\":"
+        + (r.reference() == null ? "null" : "\"" + EventPayload.esc(r.reference()) + "\"")
+        + "}";
+  }
+
+  /**
+   * A breakdown recorded: the primal consumed, each cut made as a batch at its apportioned cost,
+   * and the loss against what was expected — for a report that wants yield by store and template.
+   */
+  public static String yieldRecorded(YieldRun r) {
+    StringBuilder sb = new StringBuilder(EventPayload.base("YieldRecorded", r.tenantId(), r.id()));
+    sb.append(",\"runId\":\"")
+        .append(r.id())
+        .append("\",\"storeId\":\"")
+        .append(r.storeId())
+        .append("\",\"templateId\":\"")
+        .append(r.templateId())
+        .append("\",\"inputVariantId\":\"")
+        .append(r.inputVariantId())
+        .append("\",\"inputQty\":")
+        .append(r.inputQty().toPlainString())
+        .append(",\"inputCost\":")
+        .append(r.inputCost() == null ? "null" : r.inputCost().toPlainString())
+        .append(",\"outputQty\":")
+        .append(r.outputQty().toPlainString())
+        .append(",\"lossQty\":")
+        .append(r.lossQty().toPlainString())
+        .append(",\"expectedLossQty\":")
+        .append(r.expectedLossQty().toPlainString())
+        .append(",\"lossAtCost\":")
+        .append(r.lossAtCost() == null ? "null" : r.lossAtCost().toPlainString())
+        .append(",\"outputs\":[");
+    boolean first = true;
+    for (YieldRunOutput o : r.outputs()) {
+      if (!first) sb.append(',');
+      first = false;
+      sb.append("{\"variantId\":\"")
+          .append(o.variantId())
+          .append("\",\"qty\":")
+          .append(o.qty().toPlainString())
+          .append(",\"unitCost\":")
+          .append(o.unitCost() == null ? "null" : o.unitCost().toPlainString())
+          .append(",\"batchId\":")
+          .append(o.batchId() == null ? "null" : "\"" + o.batchId() + "\"")
+          .append('}');
+    }
+    sb.append("]}");
+    return sb.toString();
+  }
+
+  /**
+   * A wave picked at a store: which orders to fulfil for what, as picked. order-svc fulfils each
+   * order it names for exactly these quantities, once per event.
+   */
+  public static String wavePicked(PickWave wave, Map<UUID, Map<UUID, BigDecimal>> picked) {
+    StringBuilder sb =
+        new StringBuilder(EventPayload.base("WavePicked", wave.tenantId(), wave.id()));
+    sb.append(",\"waveId\":\"")
+        .append(wave.id())
+        .append("\",\"storeId\":\"")
+        .append(wave.storeId())
+        .append("\",\"orders\":[");
+    boolean firstOrder = true;
+    for (Map.Entry<UUID, Map<UUID, BigDecimal>> o : picked.entrySet()) {
+      if (!firstOrder) sb.append(',');
+      firstOrder = false;
+      sb.append("{\"orderId\":\"").append(o.getKey()).append("\",\"lines\":[");
+      boolean firstLine = true;
+      for (Map.Entry<UUID, BigDecimal> l : o.getValue().entrySet()) {
+        if (!firstLine) sb.append(',');
+        firstLine = false;
+        sb.append("{\"variantId\":\"")
+            .append(l.getKey())
+            .append("\",\"qty\":")
+            .append(l.getValue().stripTrailingZeros().toPlainString())
+            .append('}');
+      }
+      sb.append("]}");
+    }
+    sb.append("]}");
+    return sb.toString();
   }
 
   static String stockAdjusted(UUID tenantId, UUID storeId, UUID variantId, BigDecimal delta) {
@@ -137,21 +270,61 @@ public final class Events {
         + "}";
   }
 
+  /**
+   * A transfer left its store: what went, line by line, so a consumer can hold it as stock in
+   * transit (depot / DC replenishment). A transfer ships all it asked for, so the line's quantity
+   * is the requested one.
+   */
   static String transferOrderShipped(
-      UUID tenantId, UUID orderId, UUID fromStoreId, UUID toStoreId) {
+      UUID tenantId,
+      UUID orderId,
+      UUID fromStoreId,
+      UUID toStoreId,
+      java.util.List<com.storeql.inventory.domain.Domain.TransferOrderLine> lines) {
     return EventPayload.base("TransferOrderShipped", tenantId, orderId)
         + ",\"fromStoreId\":\""
         + fromStoreId
         + "\",\"toStoreId\":\""
         + toStoreId
-        + "\"}";
+        + "\","
+        + transferLines(lines, true)
+        + "}";
   }
 
-  static String transferOrderReceived(UUID tenantId, UUID orderId, UUID toStoreId) {
+  /** A transfer arrived: what arrived, line by line, closing what was in transit. */
+  static String transferOrderReceived(
+      UUID tenantId,
+      UUID orderId,
+      UUID fromStoreId,
+      UUID toStoreId,
+      java.util.List<com.storeql.inventory.domain.Domain.TransferOrderLine> lines) {
     return EventPayload.base("TransferOrderReceived", tenantId, orderId)
-        + ",\"toStoreId\":\""
+        + ",\"fromStoreId\":\""
+        + fromStoreId
+        + "\",\"toStoreId\":\""
         + toStoreId
-        + "\"}";
+        + "\","
+        + transferLines(lines, false)
+        + "}";
+  }
+
+  /** The {@code lines} member: each line's variant and quantity (shipped, or else requested). */
+  private static String transferLines(
+      java.util.List<com.storeql.inventory.domain.Domain.TransferOrderLine> lines,
+      boolean requested) {
+    StringBuilder sb = new StringBuilder("\"lines\":[");
+    for (int i = 0; i < lines.size(); i++) {
+      var l = lines.get(i);
+      java.math.BigDecimal qty =
+          requested || l.shippedQty() == null ? l.requestedQty() : l.shippedQty();
+      if (i > 0) sb.append(',');
+      sb.append("{\"variantId\":\"")
+          .append(l.variantId())
+          .append("\",\"qty\":")
+          .append(qty.stripTrailingZeros().toPlainString())
+          .append('}');
+    }
+    return sb.append(']').toString();
   }
 
   static String transferOrderCancelled(UUID tenantId, UUID orderId) {

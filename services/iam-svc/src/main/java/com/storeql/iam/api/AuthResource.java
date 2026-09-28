@@ -7,20 +7,25 @@ import com.storeql.iam.dto.Dtos.ProvisionStaffRequest;
 import com.storeql.iam.dto.Dtos.ProvisionStaffResponse;
 import com.storeql.iam.dto.Dtos.RefreshRequest;
 import com.storeql.iam.dto.Dtos.RegisterRequest;
+import com.storeql.iam.dto.Dtos.StaffUserResponse;
 import com.storeql.iam.dto.Dtos.TokenResponse;
 import com.storeql.iam.service.AuthService;
+import com.storeql.iam.service.StaffDirectory;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.util.List;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -38,6 +43,7 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 public class AuthResource {
 
   @Inject AuthService auth;
+  @Inject StaffDirectory staff;
   @Inject TenantContext ctx;
 
   /**
@@ -61,6 +67,43 @@ public class AuthResource {
     Validations.validate(req);
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     return ApiResponse.ok(auth.provisionStaff(ctx.requireTenantId(), req.email(), req.password()));
+  }
+
+  /**
+   * Admin endpoint. Names the business's staff among the ids by their login email, for screens that
+   * hold only a user id (staff assignments, the audit trail). Tenant comes from the JWT: another
+   * business's staff, a customer and an unknown id are left out, never refused one by one.
+   *
+   * <p>Role asserted here as well as by AdminAuthorizationFilter, as for {@link #provisionStaff}.
+   *
+   * <p>Scoped by the caller's stores ({@link TenantContext#storeIds()}). Held to no store — an
+   * owner, a business-wide manager, the platform admin — every match in the business is named, as
+   * before. Held to one or more stores, only staff who hold a role at one of those stores or a
+   * business-wide role in the caller's business are named; the rest are left out, never refused one
+   * by one.
+   *
+   * @param ids comma-separated UUIDv7s, at most 100
+   * @return {@code [{userId, email}]} for the staff found
+   */
+  @Operation(
+      summary = "Name staff users by id",
+      description =
+          "The login email of each of the caller's business's staff among ?ids= (comma-separated,"
+              + " at most 100). Another business's staff, customers and unknown ids are left out"
+              + " of the answer. A caller held to one or more stores is answered only staff at"
+              + " those stores or with a business-wide role; an owner, a business-wide manager or"
+              + " the platform admin is answered every match. Requires PLATFORM_ADMIN, OWNER, or"
+              + " MANAGER.")
+  @APIResponse(responseCode = "200", description = "The staff found among the ids")
+  @APIResponse(
+      responseCode = "400",
+      description = "More than 100 ids (STAFF_IDS_TOO_MANY), or one not a UUIDv7 (INVALID_UUID)")
+  @APIResponse(responseCode = "403", description = "Caller lacks an admin/owner/manager role")
+  @GET
+  @Path("/admin/staff-users")
+  public ApiResponse<List<StaffUserResponse>> staffUsers(@QueryParam("ids") String ids) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    return ApiResponse.ok(staff.logins(ctx.requireTenantId(), ids, ctx.storeIds()));
   }
 
   /**

@@ -1,86 +1,228 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../shared/util/status_labels.dart';
 import '../../shared/widgets/reference_fields.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
 import 'price_reductions_tab.dart';
 import 'pricing_providers.dart';
 import 'unit_pricing_tabs.dart';
 import 'vat_rate_form.dart';
 import 'providers/admin_providers.dart';
 import 'widgets/variant_picker.dart';
+import 'fx_rates_card.dart';
+import 'price_zones_tab.dart';
+import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
+import '../../core/theme.dart';
 
 class PricingScreen extends ConsumerWidget {
-  const PricingScreen({super.key});
+  const PricingScreen({super.key, this.initialTab});
+
+  /// The tab to open on, by its address name (`/admin/pricing?tab=vat-return`); the first when
+  /// null or one this screen does not have.
+  final String? initialTab;
+
+  /// Each tab's name in an address, in the order the tabs are shown.
+  static const tabNames = [
+    'price-lists',
+    'promotions',
+    'vat-rates',
+    'vat-return',
+    'shelf-labels',
+    'unit-pricing',
+    'reductions',
+    'zones',
+  ];
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final auth = ref.watch(authNotifierProvider).value;
+    final management = auth is AuthAuthenticated &&
+        (auth.roles.contains('OWNER') ||
+            auth.roles.contains('MANAGER') ||
+            auth.roles.contains('PLATFORM_ADMIN'));
+    // One inset for the title, the banner, the add bars and the cards, so their edges line up:
+    // 16 on a phone, 24 from tablet width.
+    final gutter = context.pageGutter;
+    final start = tabNames.indexOf(initialTab ?? '');
     return DefaultTabController(
-      length: 7,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-            child: Text(
-              'Pricing',
-              style: Theme.of(context).textTheme.headlineMedium,
+      // A link to another tab while Pricing is open starts it again on that tab.
+      key: ValueKey(initialTab),
+      length: tabNames.length,
+      initialIndex: start < 0 ? 0 : start,
+      // The title and the banner scroll away with the tab's list and the tabs
+      // stay pinned: at large text on a phone the fixed rows alone were taller
+      // than the screen, and the lists got no room.
+      child: NestedScrollView(
+        headerSliverBuilder: (context, _) => [
+          // The banner and the tabs follow straight under the title, so no bottom inset.
+          SliverToBoxAdapter(
+            child: PageHeader(
+              title: 'Pricing',
+              padding: EdgeInsetsDirectional.fromSTEB(gutter, gutter, gutter, 0),
             ),
           ),
           // SJ-D56: nothing is quoted until the standard rate is set; say so wherever pricing opens.
-          StandardVatBanner(
-            onAdd: () => showDialog(
-              context: context,
-              builder: (_) => const _VatRateDialog(initialCode: standardVatCode),
+          SliverToBoxAdapter(
+            child: StandardVatBanner(
+              onAdd: () => showDialog(
+                context: context,
+                builder: (_) => const _VatRateDialog(initialCode: standardVatCode),
+              ),
             ),
           ),
-          const TabBar(
-            isScrollable: true,
-            tabAlignment: TabAlignment.start,
-            tabs: [
-              Tab(text: 'Price Lists'),
-              Tab(text: 'Promotions'),
-              Tab(text: 'VAT Rates'),
-              Tab(text: 'VAT Return'),
-              Tab(text: 'Shelf Labels'),
-              Tab(text: 'Unit Pricing'),
-              Tab(text: 'Reductions'),
-            ],
-          ),
-          const Expanded(
-            child: TabBarView(
-              children: [
-                _PriceListsTab(),
-                _PromotionsTab(),
-                _VatRatesTab(),
-                _VatReturnTab(),
-                ShelfLabelsTab(),
-                UnitPricingGapsTab(),
-                PriceReductionsTab(),
-              ],
+          // The tabs start at the page's edge, not M3's 52px scroll offset, and the first label
+          // lines up under the title: the gutter less the tab's own 16 of label padding.
+          SliverPersistentHeader(
+            pinned: true,
+            delegate: _PinnedTabs(
+              TabBar(
+                isScrollable: true,
+                tabAlignment: TabAlignment.start,
+                padding: EdgeInsetsDirectional.only(start: gutter - AppSpacing.lg),
+                labelPadding: const EdgeInsetsDirectional.symmetric(horizontal: AppSpacing.lg),
+                tabs: const [
+                  Tab(text: 'Price Lists'),
+                  Tab(text: 'Promotions'),
+                  Tab(text: 'VAT Rates'),
+                  Tab(text: 'VAT Return'),
+                  Tab(text: 'Shelf Labels'),
+                  Tab(text: 'Unit Pricing'),
+                  Tab(text: 'Reductions'),
+                  Tab(text: 'Zones & repricing'),
+                ],
+              ),
             ),
           ),
         ],
+        body: TabBarView(
+          children: [
+            const _PriceListsTab(),
+            const _PromotionsTab(),
+            const _VatRatesTab(),
+            const _VatReturnTab(),
+            const ShelfLabelsTab(),
+            const UnitPricingGapsTab(),
+            const PriceReductionsTab(),
+            // Price zones and competitor-driven repricing (03.x).
+            PriceZonesTab(management: management),
+          ],
+        ),
       ),
     );
   }
 }
 
-Widget _addBar(BuildContext context, String label, VoidCallback onPressed) {
-  return Padding(
-    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-    child: Row(
-      children: [
-        const Spacer(),
-        FilledButton.icon(
-          onPressed: onPressed,
-          icon: const Icon(Icons.add),
-          label: Text(label),
+/// The tab bar, pinned under the scrolling title on the page's own surface.
+class _PinnedTabs extends SliverPersistentHeaderDelegate {
+  _PinnedTabs(this.tabs);
+  final TabBar tabs;
+
+  @override
+  double get minExtent => tabs.preferredSize.height;
+  @override
+  double get maxExtent => tabs.preferredSize.height;
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) =>
+      Material(color: Theme.of(context).colorScheme.surface, child: tabs);
+
+  @override
+  bool shouldRebuild(_PinnedTabs oldDelegate) => oldDelegate.tabs != tabs;
+}
+
+/// A tab that scrolls as one: the controls above its list ([header]: an
+/// exchange-rate card, an add bar) and then either the list's cards
+/// ([itemCount], [itemBuilder]) or one [state] (loading, a refusal, nothing
+/// yet). At large text on a phone the controls scroll away, so the list is
+/// never left no room under them.
+Widget _scrollingTab(
+  BuildContext context, {
+  required List<Widget> header,
+  Widget? state,
+  int itemCount = 0,
+  NullableIndexedWidgetBuilder? itemBuilder,
+}) =>
+    CustomScrollView(
+      slivers: [
+        SliverToBoxAdapter(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: header,
+          ),
         ),
+        if (state != null)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsetsDirectional.symmetric(vertical: AppSpacing.xxl),
+              child: state,
+            ),
+          )
+        else
+          SliverPadding(
+            padding: _listPadding(context),
+            sliver: SliverList.separated(
+              itemCount: itemCount,
+              separatorBuilder: (_, _) => const SizedBox(height: 4),
+              itemBuilder: itemBuilder!,
+            ),
+          ),
       ],
+    );
+
+/// A tab's nothing-yet state: an icon and words, inside the tab's own scroll.
+Widget _emptyInList(ColorScheme cs, IconData icon, String text) => Center(
+  child: Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 64, color: cs.outlineVariant),
+      const SizedBox(height: 12),
+      Text(text, textAlign: TextAlign.center),
+    ],
+  ),
+);
+
+/// The day an ISO date names, as a date (`1 Apr 2026`), read as it is written
+/// — a period's `2026-04-01T00:00:00Z` stays 1 April in any time zone.
+String _isoDay(String iso) {
+  final d = DateTime.tryParse(iso);
+  return d == null ? iso : AppFormat.dateOf(d);
+}
+
+/// A price list's or a promotion's channel in words: `POS` is the shop floor, `ALL` both.
+String _channelWords(String? channel) => switch ((channel ?? '').toUpperCase()) {
+  'ALL' => 'All channels',
+  'ONLINE' => 'Online',
+  'POS' => 'In store',
+  _ => humanizeCode(channel),
+};
+
+/// The inset of a tab's list: the page gutter at the sides, so the cards line up under the title.
+EdgeInsetsDirectional _listPadding(BuildContext context, {double bottom = AppSpacing.lg}) {
+  final gutter = context.pageGutter;
+  return EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.lg, gutter, bottom);
+}
+
+Widget _addBar(BuildContext context, String label, VoidCallback onPressed) {
+  final gutter = context.pageGutter;
+  return Padding(
+    padding: EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.md, gutter, 0),
+    // At the end of the row, ending where the cards end; an Align rather than a Row with a
+    // Spacer, so at large text the label wraps instead of running off a phone.
+    child: Align(
+      alignment: AlignmentDirectional.centerEnd,
+      child: FilledButton.icon(
+        onPressed: onPressed,
+        icon: const Icon(Icons.add),
+        label: Text(label),
+      ),
     ),
   );
 }
@@ -94,8 +236,15 @@ class _PriceListsTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(priceListsProvider);
     final cs = Theme.of(context).colorScheme;
-    return Column(
-      children: [
+    final auth = ref.watch(authNotifierProvider).value;
+    final management = auth is AuthAuthenticated &&
+        (auth.roles.contains('OWNER') ||
+            auth.roles.contains('MANAGER') ||
+            auth.roles.contains('PLATFORM_ADMIN'));
+    final header = <Widget>[
+        // The business's exchange rates (03.x): what a price is shown in, what a foreign order is
+        // measured in.
+        FxRatesCard(management: management),
         _addBar(
           context,
           'New price list',
@@ -104,28 +253,24 @@ class _PriceListsTab extends ConsumerWidget {
             builder: (_) => const _PriceListDialog(),
           ),
         ),
-        Expanded(
-          child: async.when(
-            loading: () => const LoadingView(label: 'Loading price lists…'),
-            error: (e, _) => ErrorView(
+    ];
+    return async.when(
+            loading: () => _scrollingTab(context, header: header, state: const LoadingView(label: 'Loading price lists…')),
+            error: (e, _) => _scrollingTab(context, header: header, state: ErrorView(
               message: friendlyError(
                 e,
                 fallback: 'Could not load price lists.',
               ),
               onRetry: () => ref.invalidate(priceListsProvider),
-            ),
+            )),
             data: (lists) {
               if (lists.isEmpty) {
-                return _empty(
-                  cs,
-                  Icons.price_change_outlined,
-                  'No price lists yet',
-                );
+                return _scrollingTab(context, header: header, state: _emptyInList(cs, Icons.price_change_outlined, 'No price lists yet'));
               }
-              return ListView.separated(
-                padding: const EdgeInsets.all(16),
+              return _scrollingTab(
+                context,
+                header: header,
                 itemCount: lists.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 4),
                 itemBuilder: (_, i) {
                   final l = lists[i];
                   return Card(
@@ -147,10 +292,10 @@ class _PriceListsTab extends ConsumerWidget {
                       ),
                       subtitle: Text(
                         [
-                          if (l.channel != null) l.channel,
+                          if (l.channel != null) _channelWords(l.channel),
                           if (l.currency != null) l.currency,
                           if (l.effectiveFrom != null)
-                            'from ${l.effectiveFrom}',
+                            'from ${AppFormat.date(l.effectiveFrom)}',
                         ].whereType<String>().join(' · '),
                       ),
                       // Same defect as promotions, on the thing that IS the
@@ -197,10 +342,7 @@ class _PriceListsTab extends ConsumerWidget {
                 },
               );
             },
-          ),
-        ),
-      ],
-    );
+          );
   }
 }
 
@@ -215,6 +357,8 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
   final _nameCtrl = TextEditingController();
   String _channel = 'ALL';
   String? _currency;
+  // 03.x: a list bound to a price zone prices that zone's stores and no other.
+  String? _zoneId;
   DateTime _from = DateTime.now();
   bool _loading = false;
   String? _error;
@@ -244,6 +388,7 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
               'name': _nameCtrl.text.trim(),
               'channel': _channel,
               if (_currency != null) 'currency': _currency,
+              if (_zoneId != null) 'zoneId': _zoneId,
               // A bare '2026-01-01' is rejected with INVALID_DATE — the column is
               // TIMESTAMPTZ. Sent as a UTC instant, which is also what golden rule
               // 14 asks for: convert at the UI edge, store UTC.
@@ -286,11 +431,12 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
                 Expanded(
                   child: DropdownButtonFormField<String>(
                     initialValue: _channel,
+                    // The channel's words ellipsize rather than overflow a half-width field.
+                    isExpanded: true,
                     decoration: const InputDecoration(labelText: 'Channel'),
-                    items: const [
-                      DropdownMenuItem(value: 'ALL', child: Text('All')),
-                      DropdownMenuItem(value: 'ONLINE', child: Text('Online')),
-                      DropdownMenuItem(value: 'POS', child: Text('POS')),
+                    items: [
+                      for (final c in const ['ALL', 'ONLINE', 'POS'])
+                        DropdownMenuItem(value: c, child: Text(_channelWords(c))),
                     ],
                     onChanged: (v) => setState(() => _channel = v!),
                   ),
@@ -310,6 +456,25 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
               'Effective from',
               _from,
               (d) => setState(() => _from = d),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String?>(
+              key: const Key('price-list-zone'),
+              initialValue: _zoneId,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Prices',
+                helperText: 'Every store, or the stores of one price zone',
+              ),
+              items: [
+                const DropdownMenuItem<String?>(
+                  value: null,
+                  child: Text('Every store (tenant-wide)'),
+                ),
+                for (final z in ref.watch(priceZonesProvider).value ?? const <PriceZone>[])
+                  DropdownMenuItem<String?>(value: z.id, child: Text('Zone: ${z.name}')),
+              ],
+              onChanged: (v) => setState(() => _zoneId = v),
             ),
           ],
         ),
@@ -385,10 +550,10 @@ class _PriceListItemsDialog extends ConsumerWidget {
                     ),
                   ),
                   subtitle: Text(
-                    '${sku.isNotEmpty ? '$sku  ·  ' : ''}min qty ${it.minQty.toStringAsFixed(0)}',
+                    '${sku.isNotEmpty ? '$sku  ·  ' : ''}min qty ${AppFormat.count(it.minQty)}',
                   ),
                   trailing: Text(
-                    '${priceList.currency ?? ''} ${it.price.toStringAsFixed(2)}',
+                    AppFormat.money(it.price, currencyCode: priceList.currency),
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 );
@@ -522,7 +687,7 @@ Widget _chip(
   Color fg,
 ) => Container(
   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-  decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(4)),
+  decoration: BoxDecoration(color: bg, borderRadius: AppRadius.badge),
   child: Text(
     text,
     style: TextStyle(color: fg, fontSize: 10.5, fontWeight: FontWeight.bold),
@@ -536,8 +701,9 @@ class _PromotionsTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(promotionsProvider);
     final cs = Theme.of(context).colorScheme;
-    return Column(
-      children: [
+    // A promotion's amounts are in the business's home currency.
+    final currency = ref.watch(tenantInfoProvider).value?.currency;
+    final header = <Widget>[
         _addBar(
           context,
           'New promotion',
@@ -546,25 +712,21 @@ class _PromotionsTab extends ConsumerWidget {
             builder: (_) => const _PromotionDialog(),
           ),
         ),
-        Expanded(
-          child: async.when(
-            loading: () => const LoadingView(label: 'Loading promotions…'),
-            error: (e, _) => ErrorView(
+    ];
+    return async.when(
+            loading: () => _scrollingTab(context, header: header, state: const LoadingView(label: 'Loading promotions…')),
+            error: (e, _) => _scrollingTab(context, header: header, state: ErrorView(
               message: friendlyError(e, fallback: 'Could not load promotions.'),
               onRetry: () => ref.invalidate(promotionsProvider),
-            ),
+            )),
             data: (promos) {
               if (promos.isEmpty) {
-                return _empty(
-                  cs,
-                  Icons.local_offer_outlined,
-                  'No promotions yet',
-                );
+                return _scrollingTab(context, header: header, state: _emptyInList(cs, Icons.local_offer_outlined, 'No promotions yet'));
               }
-              return ListView.separated(
-                padding: const EdgeInsets.all(16),
+              return _scrollingTab(
+                context,
+                header: header,
                 itemCount: promos.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 4),
                 itemBuilder: (_, i) {
                   final p = promos[i];
                   return Card(
@@ -605,10 +767,10 @@ class _PromotionsTab extends ConsumerWidget {
                       ),
                       subtitle: Text(
                         [
-                          p.summary,
+                          p.summaryIn(currency),
                           if (p.couponCode != null) 'code ${p.couponCode}',
                           if (p.channel != null && p.channel != 'ALL')
-                            p.channel,
+                            _channelWords(p.channel),
                           // Priority only earns space when it is not the default:
                           // every promotion showing "priority 100" tells nobody
                           // anything.
@@ -660,10 +822,7 @@ class _PromotionsTab extends ConsumerWidget {
                 },
               );
             },
-          ),
-        ),
-      ],
-    );
+          );
   }
 }
 
@@ -1164,14 +1323,15 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                   Expanded(
                     child: DropdownButtonFormField<String>(
                       initialValue: _channel,
+                      // The channel's words ellipsize rather than overflow a half-width field.
+                      isExpanded: true,
                       decoration: const InputDecoration(labelText: 'Channel'),
-                      items: const [
-                        DropdownMenuItem(value: 'ALL', child: Text('All')),
-                        DropdownMenuItem(
-                          value: 'ONLINE',
-                          child: Text('Online'),
-                        ),
-                        DropdownMenuItem(value: 'POS', child: Text('POS')),
+                      items: [
+                        for (final c in const ['ALL', 'ONLINE', 'POS'])
+                          DropdownMenuItem(
+                            value: c,
+                            child: Text(_channelWords(c)),
+                          ),
                       ],
                       onChanged: (v) => setState(() => _channel = v!),
                     ),
@@ -1244,7 +1404,7 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                 ],
               ),
               const SizedBox(height: 4),
-              SwitchListTile(
+              SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
                 value: _exclusive,
                 onChanged: (v) => setState(() => _exclusive = v),
@@ -1284,8 +1444,7 @@ class _VatRatesTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(vatRatesProvider);
     final cs = Theme.of(context).colorScheme;
-    return Column(
-      children: [
+    final header = <Widget>[
         _addBar(
           context,
           'New VAT rate',
@@ -1294,21 +1453,21 @@ class _VatRatesTab extends ConsumerWidget {
             builder: (_) => const _VatRateDialog(),
           ),
         ),
-        Expanded(
-          child: async.when(
-            loading: () => const LoadingView(label: 'Loading VAT rates…'),
-            error: (e, _) => ErrorView(
+    ];
+    return async.when(
+            loading: () => _scrollingTab(context, header: header, state: const LoadingView(label: 'Loading VAT rates…')),
+            error: (e, _) => _scrollingTab(context, header: header, state: ErrorView(
               message: friendlyError(e, fallback: 'Could not load VAT rates.'),
               onRetry: () => ref.invalidate(vatRatesProvider),
-            ),
+            )),
             data: (rates) {
               if (rates.isEmpty) {
-                return _empty(cs, Icons.percent, 'No VAT rates yet');
+                return _scrollingTab(context, header: header, state: _emptyInList(cs, Icons.percent, 'No VAT rates yet'));
               }
-              return ListView.separated(
-                padding: const EdgeInsets.all(16),
+              return _scrollingTab(
+                context,
+                header: header,
                 itemCount: rates.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 4),
                 itemBuilder: (_, i) {
                   final r = rates[i];
                   return Card(
@@ -1337,10 +1496,7 @@ class _VatRatesTab extends ConsumerWidget {
                 },
               );
             },
-          ),
-        ),
-      ],
-    );
+          );
   }
 }
 
@@ -1467,7 +1623,7 @@ class _VatRateDialogState extends ConsumerState<_VatRateDialog> {
               decoration: const InputDecoration(labelText: 'Rate %'),
             ),
             const SizedBox(height: 4),
-            SwitchListTile(
+            SwitchListTile.adaptive(
               contentPadding: EdgeInsets.zero,
               value: _exempt,
               onChanged: (v) => setState(() => _exempt = v),
@@ -1551,11 +1707,7 @@ class _VatReturnTabState extends ConsumerState<_VatReturnTab> {
     });
   }
 
-  String _dayLabel(String iso) {
-    final d = DateTime.tryParse(iso);
-    if (d == null) return iso;
-    return d.toIso8601String().split('T').first;
-  }
+  String _dayLabel(String iso) => _isoDay(iso);
 
   static const _boxLabels = <int, String>{
     1: 'VAT due on sales and other outputs',
@@ -1578,7 +1730,12 @@ class _VatReturnTabState extends ConsumerState<_VatReturnTab> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          padding: EdgeInsetsDirectional.fromSTEB(
+            context.pageGutter,
+            AppSpacing.md,
+            context.pageGutter,
+            0,
+          ),
           child: Wrap(
             spacing: 12,
             runSpacing: 8,
@@ -1642,7 +1799,7 @@ class _VatReturnTabState extends ConsumerState<_VatReturnTab> {
                 9: vr.box9,
               };
               return ListView(
-                padding: const EdgeInsets.all(16),
+                padding: _listPadding(context),
                 children: [
                   Text(
                     'HMRC Making Tax Digital VAT return (boxes 1–9)',
@@ -1664,7 +1821,7 @@ class _VatReturnTabState extends ConsumerState<_VatReturnTab> {
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: cs.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: AppRadius.chip,
                       ),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1688,7 +1845,7 @@ class _VatReturnTabState extends ConsumerState<_VatReturnTab> {
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: cs.errorContainer,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: AppRadius.chip,
                       ),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1755,7 +1912,8 @@ class _VatReturnTabState extends ConsumerState<_VatReturnTab> {
                                 ),
                               )
                             : Text(
-                                e.value.toStringAsFixed(2),
+                                // An MTD return is in pounds.
+                                AppFormat.money(e.value, currencyCode: 'GBP'),
                                 style: TextStyle(
                                   fontWeight: highlight
                                       ? FontWeight.bold
@@ -1832,7 +1990,7 @@ class _MtdFilingSection extends ConsumerWidget {
                     r.registered
                         ? (r.provider == 'HMRC'
                               ? (r.connected
-                                    ? 'HMRC\'s grant held since ${r.connectedAt}'
+                                    ? 'HMRC\'s grant held since ${AppFormat.dateTime(r.connectedAt)}'
                                     : 'HMRC\'s grant not yet given')
                               : 'The simulator accepts what HMRC\'s sandbox accepts; nothing reaches HMRC.')
                         : (r.hmrcConfigured
@@ -1956,7 +2114,7 @@ class _MtdFilingSection extends ConsumerWidget {
                                       ),
                                       subtitle: Text(
                                         s.status == 'ACCEPTED'
-                                            ? 'Box 1 ${s.box1.toStringAsFixed(2)} · box 5 ${s.box5.toStringAsFixed(2)} · box 6 ${s.box6.toStringAsFixed(0)} · form bundle ${s.formBundleNumber ?? '—'}'
+                                            ? 'Box 1 ${AppFormat.money(s.box1, currencyCode: 'GBP')} · box 5 ${AppFormat.money(s.box5, currencyCode: 'GBP')} · box 6 ${AppFormat.money(s.box6, currencyCode: 'GBP')} · form bundle ${s.formBundleNumber ?? '—'}'
                                             : '${s.errorCode ?? ''} ${s.errorMessage ?? ''}',
                                       ),
                                     ),
@@ -1972,11 +2130,7 @@ class _MtdFilingSection extends ConsumerWidget {
     );
   }
 
-  static String _day(String? iso) {
-    if (iso == null) return '—';
-    final d = DateTime.tryParse(iso);
-    return d == null ? iso : d.toIso8601String().split('T').first;
-  }
+  static String _day(String? iso) => iso == null ? '—' : _isoDay(iso);
 }
 
 class _MtdRegisterDialog extends ConsumerStatefulWidget {
@@ -2173,7 +2327,7 @@ class _MtdFileDialogState extends ConsumerState<_MtdFileDialog> {
           children: [
             Text(
               'The nine boxes are computed from this business\'s records for '
-              '${o.start.split('T').first} to ${o.end.split('T').first} and sent as they are; '
+              '${_isoDay(o.start)} to ${_isoDay(o.end)} and sent as they are; '
               'boxes 6 to 9 in whole pounds. What HMRC answers is kept.',
             ),
             const SizedBox(height: 12),
@@ -2217,24 +2371,13 @@ class _MtdFileDialogState extends ConsumerState<_MtdFileDialog> {
 
 // ── Shared bits ──────────────────────────────────────────────────────────────
 
-Widget _empty(ColorScheme cs, IconData icon, String text) => Center(
-  child: Column(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      Icon(icon, size: 64, color: cs.outlineVariant),
-      const SizedBox(height: 12),
-      Text(text),
-    ],
-  ),
-);
-
 Widget _activeBadge(BuildContext context, bool active) {
   final cs = Theme.of(context).colorScheme;
   return Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
     decoration: BoxDecoration(
       color: active ? cs.secondaryContainer : cs.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: AppRadius.badge,
     ),
     child: Text(
       active ? 'ACTIVE' : 'INACTIVE',
@@ -2256,7 +2399,7 @@ Widget _errorBox(BuildContext context, String? error) {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: cs.errorContainer,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: AppRadius.chip,
       ),
       child: Text(error, style: TextStyle(color: cs.onErrorContainer)),
     ),
@@ -2275,7 +2418,7 @@ Widget _datePickerTile(
     title: Text(
       value == null
           ? label
-          : '$label: ${value.toIso8601String().split('T').first}',
+          : '$label: ${AppFormat.dateOf(value)}',
     ),
     trailing: const Icon(Icons.edit_calendar_outlined),
     onTap: () async {

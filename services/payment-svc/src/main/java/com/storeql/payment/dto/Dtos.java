@@ -7,6 +7,7 @@ import jakarta.validation.constraints.PositiveOrZero;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
@@ -77,7 +78,10 @@ public final class Dtos {
       description =
           "Payment tender to capture for an order, either staff-recorded (POS) or online.")
   public record RecordTenderRequest(
-      @Schema(description = "UUID of the order this tender is captured against.") @NotBlank
+      @Schema(
+              description =
+                  "UUID of the order this tender is captured against. Online, name the order or"
+                      + " the split checkout (groupId), not both.")
           String orderId,
       @Schema(description = "Amount tendered, in the order's currency.")
           @NotNull
@@ -103,7 +107,23 @@ public final class Dtos {
       @Schema(
               description =
                   "ISO currency code of the store-credit balance; the tenant's own when omitted.")
-          String currency) {}
+          String currency,
+      @Schema(
+              description =
+                  "Online only: the split checkout paid once for all its parts (order"
+                      + " orchestration), instead of orderId. The amount is the checkout's total;"
+                      + " one tender is captured per part.")
+          // One constructor only: JSON-B binds a request body to a record through its single
+          // constructor, and a second one makes every body unreadable.
+          String groupId) {}
+
+  @Schema(
+      name = "GroupPaymentResponse",
+      description =
+          "One payment for a split checkout: a captured tender per part, each confirming its own"
+              + " order; together they are the checkout's total.")
+  public record GroupPaymentResponse(
+      UUID groupId, BigDecimal total, List<TenderResponse> tenders) {}
 
   @Schema(
       name = "RecordRefundRequest",

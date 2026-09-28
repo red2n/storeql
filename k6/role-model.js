@@ -52,10 +52,10 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   // ── the catalogue and the built-in roles ─────────────────────────────────────
   const catalogue = call('GET', `${ROLES}/permissions`, { token: owner });
   expect(catalogue, '[+] the permission catalogue reads', 200);
-  truthy('[+] ...twelve permissions, each with a sentence and who holds it', list(catalogue).length === 12 && list(catalogue).every((p) => p.code && p.description && Array.isArray(p.defaultFor)), list(catalogue).length);
+  truthy('[+] ...thirteen permissions, each with a sentence and who holds it', list(catalogue).length === 13 && list(catalogue).every((p) => p.code && p.description && Array.isArray(p.defaultFor)), list(catalogue).length);
   const roles = call('GET', ROLES, { token: owner });
   expect(roles, '[+] the roles read', 200);
-  truthy('[+] ...the four built-in tiers first, a manager holding everything, a cashier the drawer', list(roles).slice(0, 4).map((r) => r.code).join(',') === 'OWNER,MANAGER,STOREKEEPER,CASHIER' && list(roles)[1].permissions.length === 12 && list(roles)[3].permissions.join() === 'purchasing.approve,till.no_sale', list(roles).map((r) => r.code));
+  truthy('[+] ...the four built-in tiers first, a manager holding everything, a cashier the drawer', list(roles).slice(0, 4).map((r) => r.code).join(',') === 'OWNER,MANAGER,STOREKEEPER,CASHIER' && list(roles)[1].permissions.length === 13 && list(roles)[3].permissions.join() === 'purchasing.approve,till.no_sale', list(roles).map((r) => r.code));
   expect(call('GET', ROLES, { token: cashier.token }), '[-] a cashier cannot read the roles', 403);
 
   // ── defining roles, and every way that is wrong ──────────────────────────────
@@ -87,8 +87,8 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   const traineeClaims = signInUntil(trainee, (c) => c.tenant === tenant.tenantId && (c.roles || []).includes('CASHIER') && Array.isArray(c.perms));
   truthy('[+] the trainee signs in as a CASHIER whose token carries nothing', traineeClaims.perms.length === 0, traineeClaims.perms);
   truthy('[+] /auth/me shows the shift lead the same five', (me(lead.token).permissions || []).length === 5);
-  truthy('[+] ...and the plain manager everything, from the tier', (me(manager.token).permissions || []).length === 12);
-  truthy('[+] ...and the owner everything, never narrowed', (me(owner).permissions || []).length === 12);
+  truthy('[+] ...and the plain manager everything, from the tier', (me(manager.token).permissions || []).length === 13);
+  truthy('[+] ...and the owner everything, never narrowed', (me(owner).permissions || []).length === 13);
 
   // ── every gated decision, refused by name and admitted by tier ───────────────
   expect(journal(lead.token), '[-] the shift lead cannot post a journal', 403, 'PERMISSION_DENIED');

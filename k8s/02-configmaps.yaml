@@ -207,3 +207,17 @@ data:
         allowUiUpdates: true
         options:
           path: /var/lib/grafana/dashboards
+---
+# On a fresh Postgres volume: the pg_hba line the backup job's base backups need (16-backup.yaml).
+# Mirrors infra/postgres-init-hba.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storeql-postgres-init-hba
+  namespace: storeql
+data:
+  02-replication-hba.sh: |
+    #!/bin/sh
+    set -e
+    HBA="${PGDATA:-/var/lib/postgresql/data}/pg_hba.conf"
+    grep -q storeql-backup "$HBA" || printf 'host replication all all scram-sha-256 # storeql-backup: base backups for point-in-time recovery\n' >> "$HBA"

@@ -190,7 +190,15 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   // Called after onboarding steps so the JWT picks up the new tenantId
   Future<void> refresh() async {
     final refresh = await _storage.read(key: StorageKeys.refreshToken);
-    if (refresh == null) return;
+    if (refresh == null || refresh.isEmpty) {
+      // A sandbox session has no refresh token (22.8): when its one access
+      // token runs out, the owner is back in the live business.
+      final live = await _storage.read(key: StorageKeys.liveAccessToken);
+      if (live != null && live.isNotEmpty) {
+        await leaveSandbox();
+      }
+      return;
+    }
     state = await AsyncValue.guard(() async {
       final resp = await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.iam}/auth/refresh',
@@ -214,6 +222,52 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     // server has not been told about, and they outlive the cashier's shift.
     await _storage.deleteAll(keep: const {StorageKeys.posOfflineSales});
     state = const AsyncValue.data(AuthUnauthenticated());
+  }
+
+  /// Into the business's sandbox (22.8): trades the live owner's token for one
+  /// that names the sandbox as its tenant, keeping the live tokens aside so
+  /// [leaveSandbox] needs no sign-in. The sandbox session lasts one access
+  /// token; it has no refresh token.
+  Future<void> enterSandbox() async {
+    final resp = await ref
+        .read(apiClientProvider)
+        .dio
+        .post('/${ApiConstants.iam}/auth/sandbox/token');
+    final data = resp.data['data'] as Map<String, dynamic>;
+    final liveAccess = await _storage.read(key: StorageKeys.accessToken);
+    final liveRefresh = await _storage.read(key: StorageKeys.refreshToken);
+    if (liveAccess != null) {
+      await _storage.write(key: StorageKeys.liveAccessToken, value: liveAccess);
+    }
+    if (liveRefresh != null) {
+      await _storage.write(
+          key: StorageKeys.liveRefreshToken, value: liveRefresh);
+    }
+    final access = data['accessToken'] as String;
+    await _storage.write(key: StorageKeys.accessToken, value: access);
+    await _storage.write(key: StorageKeys.refreshToken, value: '');
+    state = AsyncValue.data(_decode(access, ''));
+  }
+
+  /// Back from the sandbox to the live business, on the tokens kept aside;
+  /// signed out if they are gone.
+  Future<void> leaveSandbox() async {
+    final liveAccess = await _storage.read(key: StorageKeys.liveAccessToken);
+    final liveRefresh = await _storage.read(key: StorageKeys.liveRefreshToken);
+    await _storage.write(key: StorageKeys.liveAccessToken, value: '');
+    await _storage.write(key: StorageKeys.liveRefreshToken, value: '');
+    if (liveAccess == null ||
+        liveAccess.isEmpty ||
+        liveRefresh == null ||
+        liveRefresh.isEmpty) {
+      await _storage.deleteAll(keep: const {StorageKeys.posOfflineSales});
+      state = const AsyncValue.data(AuthUnauthenticated());
+      return;
+    }
+    state = AsyncValue.data(await _saveAndDecode(
+        {'accessToken': liveAccess, 'refreshToken': liveRefresh}));
+    // The live access token may have run out meanwhile.
+    await refresh();
   }
 
   Future<AuthState> _saveAndDecode(Map<String, dynamic> tokenData) async {
@@ -247,6 +301,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
         permissions: (claims['perms'] as List<dynamic>?)
             ?.map((s) => s.toString())
             .toList(),
+        sandbox: (claims['amr'] as List<dynamic>?)
+                ?.map((s) => s.toString())
+                .contains('sandbox') ??
+            false,
       );
     } catch (_) {
       return const AuthUnauthenticated();

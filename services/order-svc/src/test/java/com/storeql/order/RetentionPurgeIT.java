@@ -89,7 +89,7 @@ class RetentionPurgeIT {
     assertThat(run.getInt("rowsAffected"), is(1));
     assertThat(run.getInt("heldSkipped"), is(0));
     assertThat(phoneOf(settled), is((String) null));
-    assertThat(phoneOf(open), is("+447700900123"));
+    assertThat(phoneOf(open), is("+447400900123"));
     String payload =
         scalar(
             PG,
@@ -122,8 +122,8 @@ class RetentionPurgeIT {
     assertThat(run.getInt("rowsAffected"), is(1));
     assertThat(run.getInt("heldSkipped"), is(2));
     assertThat(phoneOf(plain), is((String) null));
-    assertThat(phoneOf(ofHeldCustomer), is("+447700900123"));
-    assertThat(phoneOf(heldOrder), is("+447700900123"));
+    assertThat(phoneOf(ofHeldCustomer), is("+447400900123"));
+    assertThat(phoneOf(heldOrder), is("+447400900123"));
   }
 
   @Test
@@ -132,7 +132,7 @@ class RetentionPurgeIT {
     JsonObject run = ok(sweep(CLASS_HELD, "OWNER"));
     assertThat(run.getInt("rowsAffected"), is(0));
     assertThat(run.getInt("heldSkipped"), is(1));
-    assertThat(phoneOf(settled), is("+447700900123"));
+    assertThat(phoneOf(settled), is("+447400900123"));
 
     tillSale(UNSET, null, true);
     Response unset = sweep(UNSET, "OWNER");
@@ -154,7 +154,7 @@ class RetentionPurgeIT {
             + "'");
     sweeper.sweepQuietly();
     assertThat(phoneOf(old), is((String) null));
-    assertThat(phoneOf(recent), is("+447700900123"));
+    assertThat(phoneOf(recent), is("+447400900123"));
     assertThat(
         scalar(
             PG,
@@ -191,7 +191,7 @@ class RetentionPurgeIT {
                         + S
                         + "\",\"channel\":\"POS\",\"fulfilmentType\":\"INSTORE\","
                         + (customer == null ? "" : "\"customerId\":\"" + customer + "\",")
-                        + "\"currency\":\"GBP\",\"contactPhone\":\"+447700900123\","
+                        + "\"currency\":\"GBP\",\"contactPhone\":\"+447400900123\","
                         + "\"items\":[{\"variantId\":\""
                         + V
                         + "\",\"qty\":1,\"unitPrice\":5.00}]}",
@@ -213,7 +213,15 @@ class RetentionPurgeIT {
         .post(Entity.entity("{}", MediaType.APPLICATION_JSON));
   }
 
+  /**
+   * The order's number as typed, or — should a purge ever leave it behind — its international form
+   * (a phone at the till): a purged order answers null only when both are gone.
+   */
   private static String phoneOf(String orderId) {
-    return scalar(PG, "SELECT contact_phone FROM \"order\".orders WHERE id = '" + orderId + "'");
+    return scalar(
+        PG,
+        "SELECT coalesce(contact_phone, contact_phone_e164) FROM \"order\".orders WHERE id = '"
+            + orderId
+            + "'");
   }
 }

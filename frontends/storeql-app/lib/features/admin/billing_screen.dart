@@ -2,10 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
+import '../../core/reference/iso_reference.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 
 // ---------------------------------------------------------------------------
 // What this business pays the platform (21.9).
@@ -43,9 +49,19 @@ class BillingBuyer {
   /// Said plainly, because the consequence is money.
   String get vatSays {
     if (vatNumber == null || vatNumber!.isEmpty) return 'No VAT number given';
-    if (vatChecked) return '$vatNumber · checked${vatCheckSource == null ? '' : ' ($vatCheckSource)'}';
+    if (vatChecked) return '$vatNumber · ${vatCheckedHow(vatCheckSource)}';
     return '$vatNumber · not checked yet, so VAT is charged';
   }
+
+  /// How a checked number was checked, in words: the source is stored as a
+  /// code (VIES | MANUAL | SIMULATED).
+  static String vatCheckedHow(String? source) => switch ((source ?? '').toUpperCase()) {
+        '' => 'checked',
+        'VIES' => 'checked with VIES',
+        'MANUAL' => 'checked by hand',
+        'SIMULATED' => 'checked by the simulator, not a real register',
+        _ => 'checked (${humanizeCode(source)})',
+      };
 }
 
 class Subscription {
@@ -61,6 +77,8 @@ class Subscription {
   final bool cancelAtPeriodEnd;
   final bool changePending;
   final BillingBuyer? buyer;
+  /// Where the platform's invoices and notices go: the owner's sign-up address until changed.
+  final String? billingEmail;
 
   const Subscription({
     required this.status,
@@ -75,6 +93,7 @@ class Subscription {
     required this.cancelAtPeriodEnd,
     required this.changePending,
     required this.buyer,
+    this.billingEmail,
   });
 
   factory Subscription.fromJson(Map<String, dynamic> j) => Subscription(
@@ -90,10 +109,42 @@ class Subscription {
         cancelAtPeriodEnd: j['cancelAtPeriodEnd'] == true,
         changePending: j['pendingPlanId'] != null,
         buyer: j['buyer'] == null ? null : BillingBuyer.fromJson(Map<String, dynamic>.from(j['buyer'] as Map)),
+        billingEmail: j['billingEmail'] as String?,
       );
 
   bool get trialing => status == 'TRIALING';
   bool get behind => status == 'PAST_DUE';
+
+  /// The status in words, and the tone its badge is shown in.
+  (String, StatusTone) get statusSays => switch (status) {
+        'TRIALING' => ('Trial', StatusTone.info),
+        'ACTIVE' => ('Active', StatusTone.success),
+        'PAST_DUE' => ('Past due', StatusTone.error),
+        'SUSPENDED' => ('Suspended', StatusTone.warning),
+        'CANCELLED' => ('Cancelled', StatusTone.neutral),
+        _ => (humanizeCode(status), StatusTone.neutral),
+      };
+
+  /// What it costs per billing interval, as money: `£29.00 per month`.
+  String get priceSays {
+    final per = switch ((billingInterval ?? '').toUpperCase()) {
+      'MONTH' => 'month',
+      'YEAR' => 'year',
+      '' => 'period',
+      _ => humanizeCode(billingInterval).toLowerCase(),
+    };
+    final price = priceAmount == null ? '—' : AppFormat.money(priceAmount!, currencyCode: currency);
+    return '$price per $per';
+  }
+
+  /// The last day billed: [periodEnd] is exclusive — the day the next period
+  /// starts — so the period's own last day is the one before it.
+  String? get periodLastDay {
+    final end = DateTime.tryParse(periodEnd ?? '');
+    if (end == null) return periodEnd;
+    // Calendar arithmetic, not 24 hours, so a clock change cannot shift it.
+    return DateTime(end.year, end.month, end.day - 1).toIso8601String();
+  }
 }
 
 class Invoice {
@@ -132,6 +183,15 @@ class Invoice {
       );
 
   bool get owed => status == 'OPEN';
+
+  /// A settled invoice's status in words, and its badge's tone.
+  (String, StatusTone) get statusSays => switch (status) {
+        'OPEN' => ('Owed', StatusTone.error),
+        'PAID' => ('Paid', StatusTone.success),
+        'VOID' => ('Voided', StatusTone.neutral),
+        'UNCOLLECTIBLE' => ('Written off', StatusTone.warning),
+        _ => (humanizeCode(status), StatusTone.neutral),
+      };
 
   /// The reverse charge is worth naming: it is why an invoice carries no VAT.
   String? get treatmentSays => switch (taxTreatment) {
@@ -175,54 +235,51 @@ class BillingScreen extends ConsumerWidget {
     final billing = ref.watch(billingProvider);
     final text = Theme.of(context).textTheme;
     final cs = Theme.of(context).colorScheme;
+    // 16 on a phone, 24 from tablet width up, under the header's own inset.
+    final gutter = context.pageGutter;
     void refresh() => ref.invalidate(billingProvider);
 
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text('Billing', style: text.headlineSmall)),
-              IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'What this business pays the platform, and the invoices it has been sent.',
-            style: text.bodyMedium?.copyWith(color: cs.outline),
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: billing.when(
-              loading: () => const LoadingView(label: 'Loading the subscription…'),
-              error: (e, _) => ErrorView(
-                message: friendlyError(e, fallback: 'Could not load the billing details.'),
-                onRetry: refresh,
-              ),
-              data: (f) => !f.subscribed
-                  ? Text(
-                      key: const Key('billing-none'),
-                      'This business is not subscribed to anything, so nothing is being billed.',
-                      style: text.bodyLarge,
-                    )
-                  : ListView(
-                      children: [
-                        _SubscriptionCard(subscription: f.subscription!),
-                        const SizedBox(height: 16),
-                        Text('Invoices', style: text.titleMedium),
-                        const SizedBox(height: 8),
-                        if (f.invoices.isEmpty)
-                          Text('None yet.', style: text.bodyMedium?.copyWith(color: cs.outline))
-                        else
-                          for (final invoice in f.invoices) _InvoiceRow(invoice: invoice),
-                      ],
-                    ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        PageHeader(
+          title: 'Billing',
+          subtitle: 'What this business pays the platform, and the invoices it has been sent.',
+          actions: [
+            IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
+          ],
+        ),
+        Expanded(
+          child: billing.when(
+            loading: () => const LoadingView(label: 'Loading the subscription…'),
+            error: (e, _) => ErrorView(
+              message: friendlyError(e, fallback: 'Could not load the billing details.'),
+              onRetry: refresh,
             ),
+            data: (f) => !f.subscribed
+                ? const EmptyState(
+                    key: Key('billing-none'),
+                    icon: Icons.receipt_long_outlined,
+                    title: 'No subscription',
+                    message:
+                        'This business is not subscribed to anything, so nothing is being billed.',
+                  )
+                : ListView(
+                    padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, gutter),
+                    children: [
+                      _SubscriptionCard(subscription: f.subscription!),
+                      const SizedBox(height: AppSpacing.lg),
+                      Text('Invoices', style: text.titleMedium),
+                      const SizedBox(height: AppSpacing.sm),
+                      if (f.invoices.isEmpty)
+                        Text('None yet.', style: text.bodyMedium?.copyWith(color: cs.outline))
+                      else
+                        for (final invoice in f.invoices) _InvoiceRow(invoice: invoice),
+                    ],
+                  ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -237,51 +294,66 @@ class _SubscriptionCard extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final cs = Theme.of(context).colorScheme;
     final s = subscription;
-    final price = s.priceAmount == null ? '—' : '${s.currency ?? ''} ${s.priceAmount}';
+    final (statusWords, statusTone) = s.statusSays;
+    // The day the next period starts: when a cancellation or a plan change lands.
+    final nextStarts = s.periodEnd == null ? 'the period end' : AppFormat.date(s.periodEnd);
     return Card(
       key: const Key('subscription'),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: AppSpacing.cardPadding,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
                 Expanded(child: Text(s.planName ?? s.planCode ?? 'Plan', style: text.titleLarge)),
-                Chip(label: Text(s.status), visualDensity: VisualDensity.compact),
+                const SizedBox(width: AppSpacing.sm),
+                StatusBadge(statusWords, key: const Key('subscription-status'), tone: statusTone),
               ],
             ),
-            const SizedBox(height: 8),
-            Text('$price per ${s.billingInterval?.toLowerCase() ?? 'period'}', style: text.bodyLarge),
+            const SizedBox(height: AppSpacing.sm),
+            Text(s.priceSays, style: text.bodyLarge),
             if (s.periodStart != null && s.periodEnd != null) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: AppSpacing.xs),
               Text(
-                'Billed ${s.periodStart} to ${s.periodEnd}',
+                'Billed ${AppFormat.date(s.periodStart)} to ${AppFormat.date(s.periodLastDay)}',
                 style: text.bodyMedium?.copyWith(color: cs.outline),
               ),
             ],
             if (s.trialing && s.trialEnd != null) ...[
-              const SizedBox(height: 8),
-              _Note(key: const Key('note-trial'), text: 'Free until ${s.trialEnd}. The first invoice comes then.', tone: cs.primary),
+              const SizedBox(height: AppSpacing.sm),
+              _Note(
+                key: const Key('note-trial'),
+                text: 'Free until ${AppFormat.date(s.trialEnd)}. The first invoice comes then.',
+                tone: cs.primary,
+              ),
             ],
             if (s.behind) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               _Note(key: const Key('note-behind'), text: 'An invoice is past its date.', tone: cs.error),
             ],
             if (s.cancelAtPeriodEnd) ...[
-              const SizedBox(height: 8),
-              _Note(key: const Key('note-ending'), text: 'Ends on ${s.periodEnd ?? 'the period end'}.', tone: cs.error),
+              const SizedBox(height: AppSpacing.sm),
+              _Note(key: const Key('note-ending'), text: 'Ends on $nextStarts.', tone: cs.error),
             ],
             if (s.changePending) ...[
-              const SizedBox(height: 8),
-              _Note(key: const Key('note-pending'), text: 'A plan change takes effect on ${s.periodEnd ?? 'the period end'}.', tone: cs.primary),
+              const SizedBox(height: AppSpacing.sm),
+              _Note(
+                key: const Key('note-pending'),
+                text: 'A plan change takes effect on $nextStarts.',
+                tone: cs.primary,
+              ),
             ],
             if (s.buyer != null) ...[
-              const Divider(height: 24),
+              const Divider(height: AppSpacing.xl),
               Text('Invoiced to', style: text.titleSmall),
-              const SizedBox(height: 4),
-              Text('${s.buyer!.name ?? '—'} · ${s.buyer!.country ?? '—'}', style: text.bodyMedium),
-              const SizedBox(height: 4),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                '${s.buyer!.name ?? '—'} · '
+                '${s.buyer!.country == null ? '—' : countryName(s.buyer!.country!)}',
+                style: text.bodyMedium,
+              ),
+              const SizedBox(height: AppSpacing.xs),
               Text(
                 s.buyer!.vatSays,
                 style: text.bodySmall?.copyWith(
@@ -289,6 +361,19 @@ class _SubscriptionCard extends StatelessWidget {
                 ),
               ),
             ],
+            // Where a late-payment notice goes (21.12). Said here because a business that never
+            // sees one is suspended without warning, and the address is the owner's from sign-up
+            // unless somebody changed it.
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              s.billingEmail == null || s.billingEmail!.isEmpty
+                  ? 'No billing email: the platform cannot tell you when an invoice is late.'
+                  : 'Invoices and payment notices go to ${s.billingEmail}.',
+              key: const Key('billing-email'),
+              style: text.bodySmall?.copyWith(
+                color: s.billingEmail == null || s.billingEmail!.isEmpty ? cs.error : cs.outline,
+              ),
+            ),
           ],
         ),
       ),
@@ -307,29 +392,72 @@ class _InvoiceRow extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final i = invoice;
     final says = i.treatmentSays;
-    return ListTile(
+    final (statusWords, statusTone) = i.statusSays;
+    // Its own row rather than a ListTile: a dense tile caps its trailing slot
+    // at 48px, and the amount over its status outgrows that as soon as the
+    // text is larger than 100%.
+    final number = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(i.number, style: text.bodyLarge),
+        Text(
+          [
+            if (i.issueDate != null) 'Issued ${AppFormat.date(i.issueDate)}',
+            if (i.owed && i.dueDate != null) 'due ${AppFormat.date(i.dueDate)}',
+            ?says,
+          ].join(' · '),
+          style: text.bodySmall?.copyWith(color: cs.outline),
+        ),
+      ],
+    );
+    final amount = Text(
+      i.totalAmount == null
+          ? '—'
+          : AppFormat.money(i.totalAmount!, currencyCode: i.currency),
+      style: text.bodyLarge,
+    );
+    // What is still owed is the one thing to act on, so it is said with its
+    // amount; a settled invoice says its status as a word.
+    final status = i.owed
+        ? Text(
+            '${AppFormat.money(i.outstanding ?? 0, currencyCode: i.currency)} owed',
+            style: text.bodySmall?.copyWith(color: cs.error),
+          )
+        : StatusBadge(statusWords, tone: statusTone);
+    return Padding(
       key: Key('invoice-${i.number}'),
-      dense: true,
-      title: Text(i.number, style: text.bodyLarge),
-      subtitle: Text(
-        [
-          if (i.issueDate != null) 'Issued ${i.issueDate}',
-          if (i.owed && i.dueDate != null) 'due ${i.dueDate}',
-          ?says,
-        ].join(' · '),
-        style: text.bodySmall?.copyWith(color: cs.outline),
-      ),
-      trailing: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Text('${i.currency ?? ''} ${i.totalAmount ?? '—'}', style: text.bodyLarge),
-          Text(
-            i.owed ? '${i.currency ?? ''} ${i.outstanding ?? 0} owed' : i.status.toLowerCase(),
-            style: text.bodySmall?.copyWith(color: i.owed ? cs.error : cs.outline),
-          ),
-        ],
-      ),
+      padding: const EdgeInsetsDirectional.symmetric(vertical: AppSpacing.sm),
+      child: LayoutBuilder(builder: (context, constraints) {
+        // A phone at large text puts the amount under the number, so the
+        // number keeps the width; otherwise the amount sits at the end.
+        final largeText = MediaQuery.textScalerOf(context).scale(16) > 16 * 1.3;
+        if (largeText && constraints.maxWidth < PageHeader.defaultStackBelow) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              number,
+              const SizedBox(height: AppSpacing.xs),
+              Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.xs,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [amount, status],
+              ),
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(child: number),
+            const SizedBox(width: AppSpacing.md),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [amount, const SizedBox(height: AppSpacing.xs), status],
+            ),
+          ],
+        );
+      }),
     );
   }
 }
@@ -344,7 +472,7 @@ class _Note extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         children: [
           Icon(Icons.info_outline, size: 16, color: tone),
-          const SizedBox(width: 6),
+          const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(text, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: tone)),
           ),

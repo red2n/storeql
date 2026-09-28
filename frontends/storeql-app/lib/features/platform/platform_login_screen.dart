@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_notifier.dart';
+import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
 
 /// Platform console sign-in. Deliberately separate from the store/POS [LoginScreen]
 /// and its `/auth/login` call — a platform-admin credential must never be entered on
@@ -37,18 +40,18 @@ class _PlatformLoginScreenState extends ConsumerState<PlatformLoginScreen> {
   Widget build(BuildContext context) {
     final authAsync = ref.watch(authNotifierProvider);
     final isLoading = authAsync.isLoading;
-    final error = authAsync.hasError ? _friendlyError(authAsync.error.toString()) : null;
+    final error = authAsync.hasError ? _friendlyError(authAsync.error!) : null;
     final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: context.pagePadding,
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 420),
             child: Card(
               child: Padding(
-                padding: const EdgeInsets.all(32),
+                padding: const EdgeInsets.all(AppSpacing.xxl),
                 child: Form(
                   key: _formKey,
                   child: Column(
@@ -56,7 +59,7 @@ class _PlatformLoginScreenState extends ConsumerState<PlatformLoginScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Icon(Icons.admin_panel_settings_rounded, size: 52, color: cs.primary),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: AppSpacing.sm),
                       Text(
                         'Platform console',
                         style: Theme.of(context)
@@ -65,7 +68,7 @@ class _PlatformLoginScreenState extends ConsumerState<PlatformLoginScreen> {
                             ?.copyWith(fontWeight: FontWeight.bold, color: cs.primary),
                         textAlign: TextAlign.center,
                       ),
-                      const SizedBox(height: 4),
+                      const SizedBox(height: AppSpacing.xs),
                       Text(
                         'Platform administrators only',
                         style: Theme.of(context)
@@ -74,17 +77,17 @@ class _PlatformLoginScreenState extends ConsumerState<PlatformLoginScreen> {
                             ?.copyWith(color: cs.outline),
                         textAlign: TextAlign.center,
                       ),
-                      const SizedBox(height: 28),
+                      const SizedBox(height: AppSpacing.xl),
                       if (error != null) ...[
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
                           decoration: BoxDecoration(
                             color: cs.errorContainer,
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: AppRadius.chip,
                           ),
                           child: Text(error, style: TextStyle(color: cs.onErrorContainer)),
                         ),
-                        const SizedBox(height: 16),
+                        const SizedBox(height: AppSpacing.lg),
                       ],
                       TextFormField(
                         controller: _emailCtrl,
@@ -97,7 +100,7 @@ class _PlatformLoginScreenState extends ConsumerState<PlatformLoginScreen> {
                         validator: (v) =>
                             v == null || !v.contains('@') ? 'Enter a valid email' : null,
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: AppSpacing.lg),
                       TextFormField(
                         controller: _passwordCtrl,
                         obscureText: _obscure,
@@ -112,10 +115,12 @@ class _PlatformLoginScreenState extends ConsumerState<PlatformLoginScreen> {
                             onPressed: () => setState(() => _obscure = !_obscure),
                           ),
                         ),
-                        validator: (v) =>
-                            v == null || v.length < 8 ? 'Minimum 8 characters' : null,
+                        // A sign-in, not a new password: the policy's length is
+                        // iam-svc's business when a password is set, and a wrong
+                        // one of any length is simply wrong.
+                        validator: (v) => v == null || v.isEmpty ? 'Enter your password' : null,
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: AppSpacing.xl),
                       FilledButton(
                         onPressed: isLoading ? null : _submit,
                         child: isLoading
@@ -137,8 +142,9 @@ class _PlatformLoginScreenState extends ConsumerState<PlatformLoginScreen> {
     );
   }
 
-  String _friendlyError(String raw) {
-    if (raw.contains('401') || raw.contains('INVALID_CREDENTIALS')) {
+  String _friendlyError(Object e) {
+    final raw = e.toString();
+    if (apiErrorCode(e) == 'INVALID_CREDENTIALS' || raw.contains('401') || raw.contains('INVALID_CREDENTIALS')) {
       return 'Invalid email or password.';
     }
     if (raw.contains('SocketException') || raw.contains('Failed host lookup')) {

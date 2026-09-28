@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../core/auth/auth_notifier.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
 import '../../shared/widgets/reference_fields.dart';
 import 'onboarding_notifier.dart';
+import 'public_plans.dart';
 
 class OnboardingWizard extends ConsumerStatefulWidget {
   const OnboardingWizard({super.key});
@@ -21,6 +25,9 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
   // currency; choosing a country suggests the currency it trades in.
   String? _country;
   String? _currency;
+  // The plan chosen from the price list (21.13); until the business chooses,
+  // the platform's default is shown and sent.
+  String? _planId;
   final _step1Key = GlobalKey<FormState>();
 
 
@@ -54,6 +61,7 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
   @override
   Widget build(BuildContext context) {
     final ob = ref.watch(onboardingNotifierProvider);
+    final plans = ref.watch(publicPlansProvider);
 
     // When step 2 is done, router redirect will pick it up via auth state change
     ref.listen<OnboardingState>(onboardingNotifierProvider, (_, next) {
@@ -64,21 +72,35 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
     final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
+      // A login routed here by mistake — a member of staff who signed up
+      // instead of being invited — leaves by signing out, not only by
+      // creating a business.
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        actions: [
+          TextButton.icon(
+            key: const Key('onboarding-sign-out'),
+            onPressed: () => ref.read(authNotifierProvider.notifier).logout(),
+            icon: const Icon(Icons.logout),
+            label: const Text('Sign out'),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+        ],
+      ),
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 560),
             child: Column(
               children: [
-                const SizedBox(height: 24),
                 Icon(Icons.storefront_rounded, size: 40, color: cs.primary),
-                const SizedBox(height: 4),
+                const SizedBox(height: AppSpacing.xs),
                 Text('Set up your business',
                     style: Theme.of(context)
                         .textTheme
                         .headlineSmall
                         ?.copyWith(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 4),
+                const SizedBox(height: AppSpacing.xs),
                 // step indicators
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -88,20 +110,20 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
                     _StepDot(active: ob.step == 1, done: ob.step > 1, label: '2'),
                   ],
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: AppSpacing.lg),
                 if (ob.error != null)
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    padding: EdgeInsets.symmetric(horizontal: context.pageGutter),
                     child: Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(AppSpacing.md),
                       decoration: BoxDecoration(
                         color: cs.errorContainer,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: AppRadius.chip,
                       ),
                       child: Text(ob.error!, style: TextStyle(color: cs.onErrorContainer)),
                     ),
                   ),
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.sm),
                 Expanded(
                   child: PageView(
                     controller: _pageCtrl,
@@ -118,6 +140,9 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
                           _currency = currencyOfCountry(v) ?? _currency;
                         }),
                         onCurrencyChanged: (v) => setState(() => _currency = v!),
+                        plans: plans,
+                        planId: _planId,
+                        onPlanChanged: (v) => setState(() => _planId = v),
                         loading: ob.loading,
                         onNext: () {
                           if (!_step1Key.currentState!.validate()) return;
@@ -126,6 +151,8 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
                                 legalName: _legalNameCtrl.text.trim(),
                                 country: _country!,
                                 currency: _currency!,
+                                planId: _planId ??
+                                    PublicPlan.defaultId(plans.value ?? const []),
                               );
                         },
                       ),
@@ -180,6 +207,9 @@ class _Step1TenantForm extends StatelessWidget {
   final String? currency;
   final ValueChanged<String?> onCountryChanged;
   final ValueChanged<String?> onCurrencyChanged;
+  final AsyncValue<List<PublicPlan>> plans;
+  final String? planId;
+  final ValueChanged<String?> onPlanChanged;
   final bool loading;
   final VoidCallback onNext;
 
@@ -191,6 +221,9 @@ class _Step1TenantForm extends StatelessWidget {
     required this.currency,
     required this.onCountryChanged,
     required this.onCurrencyChanged,
+    required this.plans,
+    required this.planId,
+    required this.onPlanChanged,
     required this.loading,
     required this.onNext,
   });
@@ -198,7 +231,7 @@ class _Step1TenantForm extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
+      padding: context.pagePadding,
       child: Form(
         key: formKey,
         child: Column(
@@ -206,53 +239,117 @@ class _Step1TenantForm extends StatelessWidget {
           children: [
             Text('Business details',
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
+            const SizedBox(height: AppSpacing.xs),
             Text('Tell us about your business.',
                 style: Theme.of(context).textTheme.bodyMedium),
-            const SizedBox(height: 24),
+            const SizedBox(height: AppSpacing.xl),
             TextFormField(
               controller: bizNameCtrl,
               textInputAction: TextInputAction.next,
+              // No field on the wizard has a leading icon: the shared country,
+              // currency and time-zone dropdowns have none, and a label must
+              // start where the one above it does.
               decoration: const InputDecoration(
                 labelText: 'Business name *',
                 hintText: 'e.g. Green Valley Supermarket',
-                prefixIcon: Icon(Icons.business),
               ),
               validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             TextFormField(
               controller: legalNameCtrl,
               textInputAction: TextInputAction.next,
               decoration: const InputDecoration(
                 labelText: 'Legal / registered name (optional)',
-                prefixIcon: Icon(Icons.balance),
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             CountryField(
               label: 'Country *',
               value: country,
               onChanged: onCountryChanged,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             CurrencyField(
               label: 'Currency *',
               value: currency,
               onChanged: onCurrencyChanged,
             ),
-            const SizedBox(height: 32),
-            FilledButton(
+            const SizedBox(height: AppSpacing.lg),
+            // The price list (21.13). When it cannot be read the business still
+            // signs up: the platform starts it on the default plan.
+            plans.when(
+              loading: () => const Text('Loading plans…'),
+              error: (_, _) => Text(
+                'Plans could not be loaded; you will start on the standard plan '
+                'and can change it later from Billing.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              data: (list) => list.isEmpty
+                  ? const SizedBox.shrink()
+                  : _PlanField(
+                      plans: list,
+                      value: planId ?? PublicPlan.defaultId(list)!,
+                      currency: currency,
+                      onChanged: onPlanChanged,
+                    ),
+            ),
+            const SizedBox(height: AppSpacing.xxl),
+            // The arrow is an icon, after the word: Icons.arrow_forward turns
+            // round in Urdu and Arabic, where a "→" in the label would not.
+            FilledButton.icon(
               onPressed: loading ? null : onNext,
-              child: loading
-                  ?  SizedBox(
+              iconAlignment: IconAlignment.end,
+              icon: loading ? null : const Icon(Icons.arrow_forward),
+              label: loading
+                  ? SizedBox(
                       height: 20, width: 20,
                       child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
-                  : const Text('Continue  →'),
+                  : const Text('Continue'),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The plans on sale, one line each — the price in the business's own currency
+/// where the plan is priced in it, and the trial — with what the chosen one is.
+class _PlanField extends StatelessWidget {
+  final List<PublicPlan> plans;
+  final String value;
+  final String? currency;
+  final ValueChanged<String?> onChanged;
+
+  const _PlanField({
+    required this.plans,
+    required this.value,
+    required this.currency,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final chosen = plans.firstWhere((p) => p.id == value, orElse: () => plans.first);
+    final about = [
+      if (chosen.description != null && chosen.description!.isNotEmpty) chosen.description!,
+      if (chosen.includes.isNotEmpty) 'Includes ${chosen.includes.join(', ')}.',
+    ].join(' ');
+    return DropdownButtonFormField<String>(
+      key: ValueKey('plan-$value-$currency'),
+      initialValue: value,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: 'Plan *',
+        helperText: about.isEmpty ? null : about,
+        helperMaxLines: 3,
+      ),
+      items: [
+        for (final p in plans)
+          DropdownMenuItem(value: p.id, child: Text(p.label(currency), overflow: TextOverflow.ellipsis)),
+      ],
+      onChanged: onChanged,
     );
   }
 }
@@ -295,7 +392,7 @@ class _Step2StoreForm extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
+      padding: context.pagePadding,
       child: Form(
         key: formKey,
         child: Column(
@@ -303,21 +400,20 @@ class _Step2StoreForm extends StatelessWidget {
           children: [
             Text('Your first store',
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
+            const SizedBox(height: AppSpacing.xs),
             Text('You can add more stores later from the admin panel.',
                 style: Theme.of(context).textTheme.bodyMedium),
-            const SizedBox(height: 24),
+            const SizedBox(height: AppSpacing.xl),
             TextFormField(
               controller: nameCtrl,
               textInputAction: TextInputAction.next,
               decoration: const InputDecoration(
                 labelText: 'Store name *',
                 hintText: 'e.g. Main Street Branch',
-                prefixIcon: Icon(Icons.store),
               ),
               validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             TextFormField(
               controller: codeCtrl,
               textInputAction: TextInputAction.next,
@@ -325,33 +421,26 @@ class _Step2StoreForm extends StatelessWidget {
               decoration: const InputDecoration(
                 labelText: 'Store code * (e.g. STR-001)',
                 hintText: 'Short unique code',
-                prefixIcon: Icon(Icons.tag),
               ),
               validator: (v) => v == null || v.trim().isEmpty ? 'Required' : null,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             DropdownButtonFormField<String>(
               initialValue: storeType,
-              decoration: const InputDecoration(
-                labelText: 'Type',
-                prefixIcon: Icon(Icons.category_outlined),
-              ),
+              decoration: const InputDecoration(labelText: 'Type'),
               items: const [
                 DropdownMenuItem(value: 'STORE', child: Text('Retail Store')),
                 DropdownMenuItem(value: 'WAREHOUSE', child: Text('Warehouse')),
               ],
               onChanged: onTypeChanged,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             TextFormField(
               controller: line1Ctrl,
               textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(
-                labelText: 'Address line 1',
-                prefixIcon: Icon(Icons.location_on_outlined),
-              ),
+              decoration: const InputDecoration(labelText: 'Address line 1'),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             Row(
               children: [
                 Expanded(
@@ -361,7 +450,7 @@ class _Step2StoreForm extends StatelessWidget {
                     decoration: const InputDecoration(labelText: 'City'),
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: AppSpacing.md),
                 Expanded(
                   child: TextFormField(
                     controller: pincodeCtrl,
@@ -371,15 +460,15 @@ class _Step2StoreForm extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             CountryField(value: country, onChanged: onCountryChanged),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             TimezoneField(
               label: 'Timezone *',
               value: timezone,
               onChanged: onTimezoneChanged,
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: AppSpacing.xxl),
             FilledButton(
               onPressed: loading ? null : onSubmit,
               child: loading

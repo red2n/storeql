@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/einvoice_providers.dart';
@@ -129,6 +130,14 @@ class _Server implements HttpClientAdapter {
         ]
       });
     }
+    if (p.endsWith('/variants/resolve')) {
+      return json({
+        'data': [
+          {'variantId': 'v-oat-0001', 'productName': 'Oat loaf', 'sku': 'OAT-1'},
+          {'variantId': 'v-rye-0002', 'productName': 'Rye loaf', 'sku': 'RYE-2'},
+        ],
+      });
+    }
     if (p.endsWith('/purchase-orders/po-1/lines')) {
       return json({
         'data': [
@@ -200,6 +209,8 @@ Future<void> _upload(WidgetTester tester) async {
 }
 
 void main() {
+  // Dates are written with AppFormat, in the app's en_GB locale.
+  setUpAll(initializeDateFormatting);
   testWidgets('what waits comes ahead of what was captured, with its reason in words',
       (tester) async {
     final server = _Server()
@@ -323,7 +334,9 @@ void main() {
 
     await tester.tap(find.byKey(const Key('einvoice-line-1')));
     await tester.pumpAndSettle();
-    await tester.tap(find.textContaining('v-rye-0002').last);
+    // The order's lines by their product's name.
+    expect(find.textContaining('v-rye-0002'), findsNothing);
+    await tester.tap(find.textContaining('Rye loaf').last);
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('einvoice-match')));
     await tester.pumpAndSettle();

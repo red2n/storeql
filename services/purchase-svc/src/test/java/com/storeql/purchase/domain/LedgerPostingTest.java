@@ -33,6 +33,38 @@ class LedgerPostingTest {
   }
 
   @Test
+  @DisplayName(
+      "A description longer than the ledger's column is cut to fit, ending with an ellipsis, so a"
+          + " long reason never fails the posting")
+  void aLongDescriptionIsCutToTheColumn() {
+    String reason = "r".repeat(500);
+    var lines =
+        LedgerPosting.of(
+                T,
+                D,
+                "Freight on receipt #1a2b3c4d reversed: " + reason,
+                Domain.SOURCE_JOURNAL,
+                null,
+                null)
+            .debit("2109", "GR/IR", d("1.00"))
+            .credit("1001", "Stock", d("1.00"))
+            .build();
+    String said = lines.get(0).description();
+    assertThat(said.length(), is(LedgerPosting.DESCRIPTION_MAX));
+    assertThat(said.startsWith("Freight on receipt #1a2b3c4d reversed: rrr"), is(true));
+    assertThat(said.endsWith("…"), is(true));
+    String exact = "x".repeat(LedgerPosting.DESCRIPTION_MAX);
+    assertThat(
+        LedgerPosting.of(T, D, exact, Domain.SOURCE_JOURNAL, null, null)
+            .debit("1", "a", d("1"))
+            .credit("2", "b", d("1"))
+            .build()
+            .get(0)
+            .description(),
+        is(exact));
+  }
+
+  @Test
   @DisplayName("Two sides that agree build, share one journal id and carry the header")
   void balancedBuilds() {
     UUID store = Ids.newId();

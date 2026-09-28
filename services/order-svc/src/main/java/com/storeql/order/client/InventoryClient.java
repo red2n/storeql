@@ -110,9 +110,8 @@ public class InventoryClient {
       ReserveLine line,
       long ttlSeconds,
       String idempotencyKey) {
-    ServiceInstance instance =
-        registry
-            .resolve(INVENTORY_SERVICE)
+    String base =
+        baseUri()
             .orElseThrow(() -> unavailable("no healthy inventory-svc instance in discovery", null));
 
     String payload =
@@ -127,7 +126,7 @@ public class InventoryClient {
 
     try (HttpClientResponse res =
         webClient
-            .post(instance.baseUri() + "/inventory/reservations")
+            .post(base + "/inventory/reservations")
             .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
             .header(HeaderNames.create(HttpHeaders.IDEMPOTENCY_KEY), idempotencyKey)
             .header(HeaderNames.CONTENT_TYPE, "application/json")
@@ -163,14 +162,14 @@ public class InventoryClient {
   public void releaseQuietly(UUID tenantId, List<UUID> reservationIds) {
     for (UUID id : reservationIds) {
       try {
-        ServiceInstance instance = registry.resolve(INVENTORY_SERVICE).orElse(null);
-        if (instance == null) {
+        String base = baseUri().orElse(null);
+        if (base == null) {
           LOG.log(Level.WARNING, "release of reservation {0} skipped: no inventory-svc", id);
           continue;
         }
         try (HttpClientResponse res =
             webClient
-                .post(instance.baseUri() + "/inventory/reservations/" + id + "/release")
+                .post(base + "/inventory/reservations/" + id + "/release")
                 .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
                 .submit("")) {
           if (res.status().code() != 200) {
@@ -189,6 +188,15 @@ public class InventoryClient {
             e.getMessage());
       }
     }
+  }
+
+  /**
+   * A configured address first — a deployment without discovery, or a test standing a stub where
+   * inventory-svc would be — else the instance from Consul.
+   */
+  private java.util.Optional<String> baseUri() {
+    return com.storeql.service.ServiceReader.configuredUrl(INVENTORY_SERVICE)
+        .or(() -> registry.resolve(INVENTORY_SERVICE).map(ServiceInstance::baseUri));
   }
 
   private static String errorMessage(String body) {

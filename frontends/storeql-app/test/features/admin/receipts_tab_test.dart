@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:storeql_app/shared/widgets/status_badge.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
@@ -135,6 +137,8 @@ Future<_Server> _pump(WidgetTester tester,
 }
 
 void main() {
+  // Receipts are dated with AppFormat, in the app's en_GB locale.
+  setUpAll(initializeDateFormatting);
   testWidgets('the series, the audit and the receipts in order are shown', (tester) async {
     final server = await _pump(tester);
     expect(find.text('MAIN · 2026'), findsOneWidget);
@@ -142,8 +146,12 @@ void main() {
     expect(find.text('Sequence intact'), findsOneWidget);
     expect(find.text('GB-A-2026-000001'), findsOneWidget);
     expect(find.text('GB-A-2026-000002'), findsOneWidget);
-    // A voided sale keeps its number and is shown as void, not removed.
-    expect(find.textContaining('VOID'), findsOneWidget);
+    // A voided sale keeps its number and is shown as void, not removed: a
+    // badge in words, with its amount as money.
+    expect(find.widgetWithText(StatusBadge, 'Void'), findsOneWidget);
+    expect(find.textContaining('VOID'), findsNothing);
+    expect(find.textContaining(RegExp(r'[A-Z]{3} \d')), findsNothing,
+        reason: 'money as a symbol and grouping, never a code and a bare number');
     // Every read went to the admin routes, filtered by store, series and year.
     final audit = server.requests.firstWhere((r) => r.path.endsWith('/audit'));
     expect(audit.queryParameters, {'storeId': 's1', 'series': 'MAIN', 'period': DateTime.now().year.toString()});

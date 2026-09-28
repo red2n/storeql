@@ -220,14 +220,14 @@ class _SsoFormState extends ConsumerState<_SsoForm> {
                       c?.clientSecretSet != true && (v ?? '').trim().isEmpty ? 'Required the first time' : null,
                 ),
                 const SizedBox(height: 8),
-                SwitchListTile(
+                SwitchListTile.adaptive(
                   key: const Key('sso-form-enabled'),
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Staff can sign in with it'),
                   value: _enabled,
                   onChanged: _busy ? null : (v) => setState(() => _enabled = v),
                 ),
-                SwitchListTile(
+                SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Match by email only when the provider verified it'),
                   subtitle: const Text('Turn off only if your provider never says, and you trust its addresses.'),

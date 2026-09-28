@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.comparesEqualTo;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
@@ -161,6 +162,54 @@ class DeferredRevenueTest {
     assertThat(net(out.posting(), Domain.CODE_SALES), comparesEqualTo(BigDecimal.ZERO));
     assertThat(out.posting().get(0).description(), containsString("awarded"));
     assertPool(out.pool(), "100", "4.00", "0");
+  }
+
+  @Test
+  @DisplayName("Loyalty and breakage journals name the sale or event by '#' and its handle")
+  void loyaltyAndBreakageJournalsNameTheirSourceByItsHandle() {
+    // Read in the accounting package and on the Integrations screen; the id stays in sourceRef.
+    UUID ref = Ids.parse("01a0905d-7082-7518-9ec6-aee90d72a43e");
+    Source src = new Source(TENANT, ref, STORE, LocalDate.of(2026, 9, 15));
+    BigDecimal hundred = new BigDecimal("100");
+
+    PointsOutcome earned =
+        DeferredRevenue.earned(
+            src, SETTINGS, PointsPool.EMPTY, hundred, new BigDecimal("120"), new BigDecimal("20"));
+    PointsOutcome awarded = DeferredRevenue.adjusted(src, SETTINGS, PointsPool.EMPTY, hundred);
+    PointsOutcome redeemed = DeferredRevenue.redeemed(src, SETTINGS, awarded.pool(), hundred);
+    PointsOutcome lapsed =
+        DeferredRevenue.adjusted(src, SETTINGS, awarded.pool(), hundred.negate());
+    PointsOutcome expired = DeferredRevenue.expired(src, SETTINGS, awarded.pool(), hundred);
+    GiftCardPool cards = DeferredRevenue.loaded(GiftCardPool.EMPTY, new BigDecimal("100.00"));
+    GiftCardOutcome breakage =
+        DeferredRevenue.giftCardRedeemed(src, SETTINGS, cards, new BigDecimal("90.00"));
+    GiftCardOutcome reversed =
+        DeferredRevenue.giftCardRedeemed(src, SETTINGS, breakage.pool(), new BigDecimal("10.00"));
+
+    assertThat(
+        earned.posting().get(0).description(), is("Loyalty points earned on sale #0d72a43e"));
+    assertThat(awarded.posting().get(0).description(), is("Loyalty points awarded, #0d72a43e"));
+    assertThat(redeemed.posting().get(0).description(), is("Loyalty points redeemed, #0d72a43e"));
+    assertThat(lapsed.posting().get(0).description(), is("Loyalty points lapsed, #0d72a43e"));
+    assertThat(expired.posting().get(0).description(), is("Loyalty points expired, #0d72a43e"));
+    assertThat(breakage.posting().get(0).description(), is("Gift card breakage on sale #0d72a43e"));
+    assertThat(
+        reversed.posting().get(0).description(),
+        is("Gift card breakage reversed on sale #0d72a43e"));
+    for (List<NominalLedgerEntry> posting :
+        List.of(
+            earned.posting(),
+            awarded.posting(),
+            redeemed.posting(),
+            lapsed.posting(),
+            expired.posting(),
+            breakage.posting(),
+            reversed.posting())) {
+      for (NominalLedgerEntry l : posting) {
+        assertThat(l.description(), not(containsString(ref.toString())));
+        assertThat(l.sourceRef(), is(ref));
+      }
+    }
   }
 
   @Test

@@ -1,4 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/format.dart';
+import '../../shared/util/status_labels.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/paged.dart';
@@ -105,29 +107,34 @@ class Promotion {
     this.getDiscountPct,
   });
 
-  /// How this promotion reads on one line of the list.
-  String get summary {
+  /// How this promotion reads on one line of the list, its amounts as money
+  /// in the business's [currency] (grouped, with no symbol, while it is not
+  /// known).
+  String summaryIn(String? currency) {
+    String money(num v) => AppFormat.money(v, currencyCode: currency);
     switch (type) {
       case 'PERCENT':
-        return '${value.toStringAsFixed(0)}% off each item';
+        return '${AppFormat.count(value)}% off each item';
       case 'FLAT':
-        return '${value.toStringAsFixed(2)} off each item';
+        return '${money(value)} off each item';
       case 'BASKET_PERCENT':
-        return '${value.toStringAsFixed(0)}% off the basket';
+        return '${AppFormat.count(value)}% off the basket';
       case 'BASKET_FLAT':
-        return '${value.toStringAsFixed(2)} off the basket';
+        return '${money(value)} off the basket';
       case 'SPEND_THRESHOLD':
-        return '${value.toStringAsFixed(2)} off over '
-            '${(minOrderAmount ?? 0).toStringAsFixed(2)}';
+        return '${money(value)} off over ${money(minOrderAmount ?? 0)}';
       case 'BOGO':
         final free = (getDiscountPct ?? 0) >= 100;
-        return 'Buy ${(buyQty ?? 0).toStringAsFixed(0)}, '
-            'get ${(getQty ?? 0).toStringAsFixed(0)} '
-            '${free ? 'free' : '${(getDiscountPct ?? 0).toStringAsFixed(0)}% off'}';
+        return 'Buy ${AppFormat.count(buyQty ?? 0)}, '
+            'get ${AppFormat.count(getQty ?? 0)} '
+            '${free ? 'free' : '${AppFormat.count(getDiscountPct ?? 0)}% off'}';
       default:
-        return type;
+        return humanizeCode(type);
     }
   }
+
+  /// [summaryIn] with the currency not known.
+  String get summary => summaryIn(null);
 
   factory Promotion.fromJson(Map<String, dynamic> j) => Promotion(
     id: j['id'] as String? ?? '',

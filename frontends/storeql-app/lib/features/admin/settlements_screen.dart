@@ -6,11 +6,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'package:storeql_app/core/ids.dart';
+import '../../shared/widgets/empty_state.dart';
+import '../../shared/util/short_ref.dart';
+import 'providers/admin_providers.dart';
 
 // ---------------------------------------------------------------------------
 // Card settlements (11.10).
@@ -135,6 +143,9 @@ class SettlementLine {
 
 class UnsettledPayment {
   final String paymentId;
+
+  /// The sale the payment was taken for, when payment-svc says.
+  final String? orderId;
   final String? reference;
   final String method;
   final num amount;
@@ -143,6 +154,7 @@ class UnsettledPayment {
 
   const UnsettledPayment({
     required this.paymentId,
+    this.orderId,
     required this.reference,
     required this.method,
     required this.amount,
@@ -152,6 +164,7 @@ class UnsettledPayment {
 
   factory UnsettledPayment.fromJson(Map<String, dynamic> j) => UnsettledPayment(
         paymentId: j['paymentId'] as String,
+        orderId: j['orderId'] as String?,
         reference: j['reference'] as String?,
         method: j['method'] as String? ?? '',
         amount: j['amount'] as num? ?? 0,
@@ -166,7 +179,16 @@ String settlementStatusLabel(String status) => switch (status) {
       'EXCEPTIONS' => 'Needs decisions',
       'READY' => 'Ready to sign off',
       'RECONCILED' => 'Reconciled',
-      _ => status,
+      _ => humanizeCode(status),
+    };
+
+/// The tone a payout's status is shown in: open decisions need a look, a payout
+/// ready to sign off only waits for someone, and one in the books is done.
+StatusTone settlementStatusTone(String status) => switch (status) {
+      'EXCEPTIONS' => StatusTone.warning,
+      'READY' => StatusTone.info,
+      'RECONCILED' => StatusTone.success,
+      _ => StatusTone.neutral,
     };
 
 String settlementLineLabel(String type) => switch (type) {
@@ -179,17 +201,27 @@ String settlementLineLabel(String type) => switch (type) {
       _ => type,
     };
 
-String settlementMatchLabel(SettlementLine l) => switch (l.resolution ?? l.matchStatus) {
-      'MATCHED' => 'Matched',
-      'NOT_APPLICABLE' => 'A fee',
-      'UNMATCHED' => 'Nothing here answers to it',
-      'AMOUNT_MISMATCH' => 'We hold ${l.expectedAmount ?? '?'}',
-      'DUPLICATE' => 'Already settled by another line',
-      'MATCHED_BY_HAND' => 'Matched by hand',
-      'DIFFERENCE_ACCEPTED' => 'Difference accepted (we hold ${l.expectedAmount ?? '?'})',
-      'UNALLOCATED' => 'Sent to unallocated receipts',
-      final other => other,
-    };
+/// What became of a payout line, in words; the sum we hold for it in the
+/// payout's [currency].
+String settlementMatchLabel(SettlementLine l, {String? currency}) {
+  final held = l.expectedAmount == null
+      ? null
+      : AppFormat.money(l.expectedAmount!, currencyCode: currency);
+  return switch (l.resolution ?? l.matchStatus) {
+    'MATCHED' => 'Matched',
+    'NOT_APPLICABLE' => 'A fee',
+    'UNMATCHED' => 'Nothing here answers to it',
+    'AMOUNT_MISMATCH' =>
+      held == null ? 'We hold a different sum' : 'We hold $held',
+    'DUPLICATE' => 'Already settled by another line',
+    'MATCHED_BY_HAND' => 'Matched by hand',
+    'DIFFERENCE_ACCEPTED' => held == null
+        ? 'Difference accepted'
+        : 'Difference accepted (we hold $held)',
+    'UNALLOCATED' => 'Sent to unallocated receipts',
+    final other => humanizeCode(other),
+  };
+}
 
 const settlementFormatLabels = {
   'STOREQL': 'Our own spreadsheet layout',
@@ -227,66 +259,87 @@ class SettlementsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final unsettled = ref.watch(settlementViewProvider);
-    final text = Theme.of(context).textTheme;
     void refresh() {
       ref.invalidate(settlementsProvider);
       ref.invalidate(unsettledPaymentsProvider);
     }
 
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text('Card settlements', style: text.headlineSmall)),
-              OutlinedButton.icon(
-                key: const Key('settlement-import'),
-                icon: const Icon(Icons.upload_file_outlined),
-                label: const Text('Import a payout'),
-                onPressed: () async {
-                  final id = await showDialog<String>(context: context, builder: (_) => const ImportSettlementDialog());
-                  refresh();
-                  if (id != null && context.mounted) {
-                    await showDialog<void>(context: context, builder: (_) => SettlementDialog(id: id));
-                    refresh();
-                  }
-                },
-              ),
-              const SizedBox(width: 8),
-              IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'What the acquirer paid into the bank, against the card payments taken. '
-            'A payout is in the books once everything in it is accounted for.',
-            style: text.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.outline),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            children: [
-              ChoiceChip(
-                label: const Text('Payouts'),
-                selected: !unsettled,
-                onSelected: (_) => ref.read(settlementViewProvider.notifier).showUnsettled(false),
-              ),
-              ChoiceChip(
-                key: const Key('settlement-unsettled'),
-                label: const Text('Not yet paid out'),
-                selected: unsettled,
-                onSelected: (_) => ref.read(settlementViewProvider.notifier).showUnsettled(true),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Expanded(child: unsettled ? const _UnsettledList() : _BatchList(onChanged: refresh)),
-        ],
+    final actions = [
+      OutlinedButton.icon(
+        key: const Key('settlement-import'),
+        icon: const Icon(Icons.upload_file_outlined),
+        label: const Text('Import a payout'),
+        onPressed: () async {
+          final id = await showDialog<String>(context: context, builder: (_) => const ImportSettlementDialog());
+          refresh();
+          if (id != null && context.mounted) {
+            await showDialog<void>(context: context, builder: (_) => SettlementDialog(id: id));
+            refresh();
+          }
+        },
       ),
+      IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
+    ];
+    // The page is inset by the gutter — 16 on a phone, 24 from tablet width —
+    // and scrolls as one, so a tall header (large text on a phone) scrolls
+    // away instead of squeezing the list.
+    final gutter = context.pageGutter;
+    return CustomScrollView(
+      slivers: [
+        SliverPadding(
+          padding: EdgeInsetsDirectional.fromSTEB(gutter, gutter, gutter, 0),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                PageHeader(
+                  title: 'Card settlements',
+                  subtitle: 'What the acquirer paid into the bank, against the card payments taken. '
+                      'A payout is in the books once everything in it is accounted for.',
+                  padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.md),
+                  actions: actions,
+                  // Below 600 the actions go under the title, so the long
+                  // subtitle keeps its line rather than breaking mid-word beside them.
+                  stackBelow: AppBreakpoints.medium,
+                ),
+                Wrap(
+                  spacing: AppSpacing.sm,
+                  runSpacing: AppSpacing.sm,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('Payouts'),
+                      selected: !unsettled,
+                      onSelected: (_) => ref.read(settlementViewProvider.notifier).showUnsettled(false),
+                    ),
+                    ChoiceChip(
+                      key: const Key('settlement-unsettled'),
+                      label: const Text('Not yet paid out'),
+                      selected: unsettled,
+                      onSelected: (_) => ref.read(settlementViewProvider.notifier).showUnsettled(true),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.md),
+              ],
+            ),
+          ),
+        ),
+        SliverPadding(
+          padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, gutter),
+          sliver: unsettled ? const _UnsettledList() : _BatchList(onChanged: refresh),
+        ),
+      ],
     );
   }
+}
+
+/// A list's loading, failure or empty state, filling what the page leaves.
+class _Fill extends StatelessWidget {
+  final Widget child;
+  const _Fill(this.child);
+
+  @override
+  Widget build(BuildContext context) => SliverFillRemaining(hasScrollBody: false, child: child);
 }
 
 class _BatchList extends ConsumerWidget {
@@ -295,40 +348,69 @@ class _BatchList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final cs = Theme.of(context).colorScheme;
     return ref.watch(settlementsProvider).when(
-          loading: () => const LoadingView(label: 'Loading payouts…'),
-          error: (e, _) => ErrorView(message: friendlyError(e, fallback: 'Could not load payouts.'), onRetry: onChanged),
+          loading: () => const _Fill(LoadingView(label: 'Loading payouts…')),
+          error: (e, _) => _Fill(ErrorView(message: friendlyError(e, fallback: 'Could not load payouts.'), onRetry: onChanged)),
           data: (list) => list.isEmpty
-              ? const Center(child: Text('No payouts imported yet. Import the acquirer\'s settlement file to begin.'))
-              : ListView.separated(
+              ? const _Fill(EmptyState(title: 'No payouts imported yet. Import the acquirer\'s settlement file to begin.'))
+              : SliverList.separated(
                   itemCount: list.length,
-                  separatorBuilder: (_, _) => const SizedBox(height: 8),
-                  itemBuilder: (context, i) {
-                    final b = list[i];
-                    return Card(
-                      child: ListTile(
-                        key: Key('settlement-${b.id}'),
-                        leading: Icon(
-                          b.reconciled ? Icons.task_alt : Icons.rule_outlined,
-                          color: b.reconciled ? cs.primary : cs.error,
-                        ),
-                        title: Text('${b.net} ${b.currency} · ${b.provider} ${b.reference}'),
-                        subtitle: Text(
-                          b.openExceptions > 0
-                              ? 'Paid ${b.payoutDate} · ${b.openExceptions} of ${b.lineCount} lines need a decision'
-                              : 'Paid ${b.payoutDate} · ${b.lineCount} lines · fees ${b.fees}',
-                        ),
-                        trailing: Chip(label: Text(settlementStatusLabel(b.status))),
-                        onTap: () async {
-                          await showDialog<void>(context: context, builder: (_) => SettlementDialog(id: b.id));
-                          onChanged();
-                        },
-                      ),
-                    );
-                  },
+                  separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.sm),
+                  itemBuilder: (context, i) => _BatchTile(batch: list[i], onChanged: onChanged),
                 ),
         );
+  }
+}
+
+class _BatchTile extends StatelessWidget {
+  final SettlementBatch batch;
+  final VoidCallback onChanged;
+  const _BatchTile({required this.batch, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final b = batch;
+    final paid = AppFormat.date(b.payoutDate);
+    // Red is for a payout with decisions still open; one ready to sign off has
+    // nothing wrong with it, it only waits.
+    final (icon, colour) = switch (b.status) {
+      'RECONCILED' => (Icons.task_alt, context.status.success),
+      'READY' => (Icons.fact_check_outlined, context.status.info),
+      _ when b.openExceptions > 0 || b.status == 'EXCEPTIONS' => (Icons.rule_outlined, cs.error),
+      _ => (Icons.rule_outlined, cs.onSurfaceVariant),
+    };
+    final badge = StatusBadge(settlementStatusLabel(b.status), tone: settlementStatusTone(b.status));
+    final line = Text(
+      b.openExceptions > 0
+          ? 'Paid $paid · ${b.openExceptions} of ${b.lineCount} lines need a decision'
+          : 'Paid $paid · ${b.lineCount} lines · fees ${AppFormat.money(b.fees, currencyCode: b.currency)}',
+    );
+    return LayoutBuilder(builder: (context, constraints) {
+      // On a phone, or with large text, the badge goes under the line rather
+      // than taking the width the words need.
+      final below = constraints.maxWidth < AppBreakpoints.medium ||
+          MediaQuery.textScalerOf(context).scale(16) > 16 * 1.3;
+      return Card(
+        child: ListTile(
+          key: Key('settlement-${b.id}'),
+          leading: Icon(icon, color: colour),
+          title: Text('${AppFormat.money(b.net, currencyCode: b.currency)} · ${b.provider} ${b.reference}'),
+          subtitle: below
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [line, const SizedBox(height: AppSpacing.xs), badge],
+                )
+              : line,
+          trailing: below ? null : badge,
+          onTap: () async {
+            await showDialog<void>(context: context, builder: (_) => SettlementDialog(id: b.id));
+            onChanged();
+          },
+        ),
+      );
+    });
   }
 }
 
@@ -337,15 +419,18 @@ class _UnsettledList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // payment-svc sends the amount alone; a business takes payments in its
+    // home currency (a foreign price is shown, never charged).
+    final currency = ref.watch(tenantInfoProvider).value?.currency;
     return ref.watch(unsettledPaymentsProvider).when(
-          loading: () => const LoadingView(label: 'Loading payments…'),
-          error: (e, _) => ErrorView(
+          loading: () => const _Fill(LoadingView(label: 'Loading payments…')),
+          error: (e, _) => _Fill(ErrorView(
             message: friendlyError(e, fallback: 'Could not load payments.'),
             onRetry: () => ref.invalidate(unsettledPaymentsProvider),
-          ),
+          )),
           data: (list) => list.isEmpty
-              ? const Center(child: Text('Every card payment older than three days has been paid out.'))
-              : ListView.separated(
+              ? const _Fill(EmptyState(title: 'Every card payment older than three days has been paid out.'))
+              : SliverList.separated(
                   itemCount: list.length,
                   separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (context, i) {
@@ -353,8 +438,15 @@ class _UnsettledList extends ConsumerWidget {
                     return ListTile(
                       key: Key('unsettled-${u.paymentId}'),
                       leading: const Icon(Icons.hourglass_bottom_outlined),
-                      title: Text('${u.amount} · ${u.method}${u.reference == null ? '' : ' · ${u.reference}'}'),
-                      subtitle: Text('Taken ${u.capturedAt.length < 10 ? u.capturedAt : u.capturedAt.substring(0, 10)} · payment ${u.paymentId}'),
+                      title: Text([
+                        AppFormat.money(u.amount, currencyCode: currency),
+                        humanizeCode(u.method),
+                        ?u.reference,
+                      ].join(' · ')),
+                      subtitle: Text([
+                        'Taken ${AppFormat.date(u.capturedAt)}',
+                        if (u.orderId != null) 'order …${shortRef(u.orderId!)}',
+                      ].join(' · ')),
                       trailing: Text('${u.daysOutstanding} days'),
                     );
                   },
@@ -416,7 +508,7 @@ class _SettlementDialogState extends ConsumerState<SettlementDialog> {
       };
 
   Future<void> _decide(SettlementLine line) async {
-    final decision = await showDialog<Map<String, dynamic>>(context: context, builder: (_) => _DecideDialog(line: line));
+    final decision = await showDialog<Map<String, dynamic>>(context: context, builder: (_) => _DecideDialog(line: line, currency: _batch?.currency));
     if (decision == null || !mounted) return;
     setState(() {
       _busy = true;
@@ -453,6 +545,8 @@ class _SettlementDialogState extends ConsumerState<SettlementDialog> {
     }
   }
 
+  String _money(num amount) => AppFormat.money(amount, currencyCode: _batch?.currency);
+
   @override
   Widget build(BuildContext context) {
     final b = _batch;
@@ -469,10 +563,11 @@ class _SettlementDialogState extends ConsumerState<SettlementDialog> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text('${b.net} ${b.currency} into the bank on ${b.payoutDate}', style: text.titleMedium),
-                    const SizedBox(height: 4),
+                    Text('${_money(b.net)} into the bank on ${AppFormat.date(b.payoutDate)}', style: text.titleMedium),
+                    const SizedBox(height: AppSpacing.xs),
                     Text(
-                      'Sales ${b.sales} · refunds ${b.refunds} · chargebacks ${b.chargebacks} · fees ${b.fees} · ${b.lineCount} lines',
+                      'Sales ${_money(b.sales)} · refunds ${_money(b.refunds)} · chargebacks ${_money(b.chargebacks)} · '
+                      'fees ${_money(b.fees)} · ${b.lineCount} lines',
                       style: text.bodySmall?.copyWith(color: cs.outline),
                     ),
                     const Divider(height: 24),
@@ -503,9 +598,13 @@ class _SettlementDialogState extends ConsumerState<SettlementDialog> {
                         key: Key('settlement-line-${l.lineNo}'),
                         dense: true,
                         contentPadding: EdgeInsets.zero,
-                        title: Text('${l.lineNo}. ${settlementLineLabel(l.type)} ${l.gross} · ${l.reference ?? l.originalReference ?? 'no reference'}'),
+                        title: Text('${l.lineNo}. ${settlementLineLabel(l.type)} ${_money(l.gross)} · ${l.reference ?? l.originalReference ?? 'no reference'}'),
                         subtitle: Text(
-                          [settlementMatchLabel(l), if (l.fee != 0) 'fee ${l.fee}', if (l.note != null) l.note!].join(' · '),
+                          [
+                            settlementMatchLabel(l, currency: b.currency),
+                            if (l.fee != 0) 'fee ${_money(l.fee)}',
+                            if (l.note != null) l.note!,
+                          ].join(' · '),
                           style: TextStyle(color: l.open ? cs.error : null),
                         ),
                         trailing: b.reconciled || (!l.open && l.resolution == null)
@@ -540,7 +639,10 @@ class _SettlementDialogState extends ConsumerState<SettlementDialog> {
 /// What to do with a line that did not match.
 class _DecideDialog extends StatefulWidget {
   final SettlementLine line;
-  const _DecideDialog({required this.line});
+  const _DecideDialog({required this.line, this.currency});
+
+  /// The payout's currency, which its lines are in.
+  final String? currency;
 
   @override
   State<_DecideDialog> createState() => _DecideDialogState();
@@ -586,7 +688,7 @@ class _DecideDialogState extends State<_DecideDialog> {
     final l = widget.line;
     final cs = Theme.of(context).colorScheme;
     return AlertDialog(
-      title: Text('${settlementLineLabel(l.type)} ${l.gross} · ${l.reference ?? l.originalReference ?? ''}'),
+      title: Text('${settlementLineLabel(l.type)} ${AppFormat.money(l.gross, currencyCode: widget.currency)} · ${l.reference ?? l.originalReference ?? ''}'),
       content: SizedBox(
         width: 460,
         child: SingleChildScrollView(
@@ -594,7 +696,7 @@ class _DecideDialogState extends State<_DecideDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(settlementMatchLabel(l)),
+              Text(settlementMatchLabel(l, currency: widget.currency)),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
                 key: const Key('decide-resolution'),
@@ -781,7 +883,7 @@ class _ImportSettlementDialogState extends ConsumerState<ImportSettlementDialog>
                 key: const Key('import-date'),
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.event_outlined),
-                title: Text(_paidOn == null ? 'Paid on${_format == 'STOREQL' ? ' *' : ''}' : 'Paid on ${_paidOn!.toIso8601String().substring(0, 10)}'),
+                title: Text(_paidOn == null ? 'Paid on${_format == 'STOREQL' ? ' *' : ''}' : 'Paid on ${AppFormat.date(_paidOn!.toIso8601String())}'),
                 onTap: () async {
                   final now = DateTime.now();
                   final picked = await showDatePicker(context: context, firstDate: now.subtract(const Duration(days: 730)), lastDate: now, initialDate: now);

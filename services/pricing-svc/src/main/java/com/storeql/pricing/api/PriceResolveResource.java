@@ -75,6 +75,24 @@ public class PriceResolveResource {
    * @throws com.storeql.web.ApiException {@code 404} as soon as any line has no active price — the
    *     whole call fails rather than returning a partial list
    */
+  /**
+   * The currencies a shop can show prices in (03.x): its own, then those it keeps a rate for.
+   *
+   * @return the home currency and the list
+   */
+  @Operation(
+      summary = "Currencies a shop can show prices in",
+      description =
+          "The business's own currency first, then every currency it keeps an exchange rate for."
+              + " What the storefront's currency picker offers; prices are always charged in the"
+              + " business's own.")
+  @APIResponse(responseCode = "200", description = "The currencies")
+  @GET
+  @Path("/currencies")
+  public Response currencies() {
+    return Response.ok(ApiResponse.ok(svc.currencies(ctx.requireTenantId()))).build();
+  }
+
   @Operation(
       summary = "Resolve effective prices for multiple lines",
       description =

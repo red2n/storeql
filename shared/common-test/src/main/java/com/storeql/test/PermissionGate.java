@@ -132,6 +132,20 @@ public final class PermissionGate {
     notDenied(method, pathAndQuery, json, tier, null, "a plain " + tier);
   }
 
+  /**
+   * A tier whose defaults never included the permission is refused on its defaults alone: the route
+   * asks, and the tier has no answer.
+   */
+  public void assertTierRefused(String method, String pathAndQuery, String json, String tier) {
+    try (Response r = send(method, pathAndQuery, json, tier, null)) {
+      String body = r.readEntity(String.class);
+      check(
+          r.getStatus() == 403 && body.contains("PERMISSION_DENIED"),
+          pathAndQuery + ": a plain " + tier + " should be 403 PERMISSION_DENIED",
+          r.getStatus() + " " + body);
+    }
+  }
+
   private void notDenied(
       String method, String path, String json, String roles, String permissions, String who) {
     try (Response r = send(method, path, json, roles, permissions)) {

@@ -197,7 +197,8 @@ void main() {
     expect(synced, hasLength(1));
     expect(synced.single.id, _saleId);
     expect(synced.single.orderId, 'order-1');
-    expect(synced.single.reference, '3c4d5e', reason: 'the id\'s random tail, as a person reads it');
+    expect(synced.single.reference, '3C4D5E',
+        reason: 'the id\'s random tail in capitals, as the offline receipt printed it');
     expect(synced.single.fiscalNumber, isNull,
         reason: 'the number is looked up when someone asks, not during replay');
     // Replay made no extra request for it: the queue owes the server writes,

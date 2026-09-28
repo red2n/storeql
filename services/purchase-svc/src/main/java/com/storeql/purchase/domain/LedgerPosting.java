@@ -34,6 +34,19 @@ public final class LedgerPosting {
 
   private record Line(String code, String name, BigDecimal debit, BigDecimal credit) {}
 
+  /**
+   * The longest description the ledger keeps ({@code nominal_ledger_entries.description
+   * VARCHAR(500)}). A longer one — a reversal's reason can be 500 characters on its own — is cut to
+   * fit and ends with an ellipsis, so the posting never fails on its words.
+   */
+  public static final int DESCRIPTION_MAX = 500;
+
+  private static String fit(String description) {
+    return description.length() <= DESCRIPTION_MAX
+        ? description
+        : description.substring(0, DESCRIPTION_MAX - 1) + "\u2026";
+  }
+
   private LedgerPosting(
       UUID tenantId,
       LocalDate entryDate,
@@ -50,7 +63,7 @@ public final class LedgerPosting {
     this.tenantId = tenantId;
     this.journalId = Ids.newId();
     this.entryDate = entryDate;
-    this.description = description.trim();
+    this.description = fit(description.trim());
     this.sourceType = sourceType;
     this.sourceRef = sourceRef;
     this.storeId = storeId;

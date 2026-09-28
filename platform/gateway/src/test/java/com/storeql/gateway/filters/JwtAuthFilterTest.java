@@ -97,6 +97,30 @@ class JwtAuthFilterTest {
     verify(requestContext).abortWith(any());
   }
 
+  // ── The API's own description (22.8) ──────────────────────────────────────
+  // What versions exist and when the alias retires is the one thing an integrator reads before
+  // holding any credential, so it needs none.
+
+  @Test
+  void theVersionsDocumentIsPublic() throws IOException {
+    when(requestContext.getMethod()).thenReturn("GET");
+    when(uriInfo.getPath()).thenReturn("api/versions");
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+  }
+
+  @Test
+  void theVersionsDocumentIsNotAServiceCalledVersions() throws IOException {
+    when(requestContext.getMethod()).thenReturn("GET");
+    when(uriInfo.getPath()).thenReturn("api/versions/anything");
+
+    filter.filter(requestContext);
+
+    verify(requestContext).abortWith(any());
+  }
+
   // ── E-invoice deliveries (07.13, the transport seam) ──────────────────────
   // A network's access point delivers a supplier's e-invoice with no JWT; purchase-svc checks the
   // delivery key. The shape is exact: the network is one segment, and the upload route beside it
@@ -400,6 +424,10 @@ class JwtAuthFilterTest {
       {"PUT", "api/customer-svc/customers/01a09509-72ec-72e9-9f08-94a93df26a36/addresses"},
       {"PUT", "api/notification-svc/notifications/devices/01a09509-72ec-72e9-9f08-94a93df26a36"},
       {"POST", "api/notification-svc/notifications/send"},
+      // A split checkout is read by id only: not its list, not anything under it, not a write.
+      {"GET", "api/order-svc/order-groups"},
+      {"GET", "api/order-svc/order-groups/01a09509-72ec-72e9-9f08-94a93df26a36/parts"},
+      {"POST", "api/order-svc/order-groups/01a09509-72ec-72e9-9f08-94a93df26a36"},
     };
     for (String[] c : cases) {
       headers.clear();
@@ -425,7 +453,9 @@ class JwtAuthFilterTest {
         new String[] {
           "api/order-svc/orders/01a09509-72ec-72e9-9f08-94a93df26a36",
           "api/order-svc/orders/01a09509-72ec-72e9-9f08-94a93df26a36/history",
-          "api/order-svc/orders/01a09509-72ec-72e9-9f08-94a93df26a36/fiscal-receipt"
+          "api/order-svc/orders/01a09509-72ec-72e9-9f08-94a93df26a36/fiscal-receipt",
+          // A split checkout's parts (order orchestration), checked in order-svc like an order.
+          "api/order-svc/order-groups/01a09509-72ec-72e9-9f08-94a93df26a36"
         }) {
       org.junit.jupiter.api.Assertions.assertEquals(
           "tenant-abc", tenantDerivedFor("GET", path, true), path);
@@ -746,6 +776,88 @@ class JwtAuthFilterTest {
       filter.filter(requestContext);
 
       verify(requestContext, never()).abortWith(any());
+    }
+  }
+
+  // ── password reset ────────────────────────────────────────────────────────
+
+  @Test
+  void aForgottenPasswordIsAskedForAndResetWithoutAToken() throws IOException {
+    String[][] routes = {
+      {"api/iam-svc/auth/password/forgot", "POST"},
+      {"api/iam-svc/auth/password/reset", "POST"},
+      {"api/iam-svc/auth/password-policy", "GET"},
+      {"api/v1/iam-svc/auth/password/forgot", "POST"},
+      {"api/v1/iam-svc/auth/password-policy", "GET"}
+    };
+    for (String[] route : routes) {
+      org.mockito.Mockito.reset(requestContext);
+      lenient().when(requestContext.getUriInfo()).thenReturn(uriInfo);
+      lenient().when(requestContext.getHeaders()).thenReturn(headers);
+      when(uriInfo.getPath()).thenReturn(route[0]);
+      lenient().when(requestContext.getMethod()).thenReturn(route[1]);
+
+      filter.filter(requestContext);
+
+      verify(requestContext, never()).abortWith(any());
+    }
+  }
+
+  @Test
+  void nothingBesideThePasswordResetPathsIsPublic() throws IOException {
+    for (String path :
+        new String[] {
+          "api/iam-svc/auth/password",
+          "api/iam-svc/auth/password/forgot/x",
+          "api/iam-svc/auth/password/resets",
+          "api/iam-svc/auth/password-policy/x",
+          "api/tenant-svc/auth/password/forgot"
+        }) {
+      org.mockito.Mockito.reset(requestContext);
+      lenient().when(requestContext.getUriInfo()).thenReturn(uriInfo);
+      lenient().when(requestContext.getHeaders()).thenReturn(headers);
+      when(uriInfo.getPath()).thenReturn(path);
+      lenient().when(requestContext.getMethod()).thenReturn("POST");
+
+      filter.filter(requestContext);
+
+      org.junit.jupiter.api.Assertions.assertEquals(401, abortedStatus(), path);
+    }
+  }
+
+  // ── delivery and collection slots ─────────────────────────────────────────
+
+  @Test
+  void aGuestReadsAStoresFulfilmentSlotsForTheStorefrontsTenant() throws IOException {
+    when(uriInfo.getPath()).thenReturn("api/order-svc/storefront/fulfilment-slots");
+    when(requestContext.getMethod()).thenReturn("GET");
+    when(requestContext.getHeaderString("X-Storefront-Tenant")).thenReturn("tenant-abc");
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+    org.junit.jupiter.api.Assertions.assertEquals("tenant-abc", headers.getFirst("X-Tenant-Id"));
+  }
+
+  @Test
+  void theSlotReadIsTheOnlyPublicOrderRouteAndOnlyForReading() throws IOException {
+    String[][] routes = {
+      {"api/order-svc/storefront/fulfilment-slots", "POST"},
+      {"api/order-svc/storefront/fulfilment-slots/x", "GET"},
+      {"api/order-svc/storefront", "GET"},
+      {"api/order-svc/admin/fulfilment-windows", "GET"}
+    };
+    for (String[] route : routes) {
+      org.mockito.Mockito.reset(requestContext);
+      lenient().when(requestContext.getUriInfo()).thenReturn(uriInfo);
+      lenient().when(requestContext.getHeaders()).thenReturn(headers);
+      when(uriInfo.getPath()).thenReturn(route[0]);
+      lenient().when(requestContext.getMethod()).thenReturn(route[1]);
+      lenient().when(requestContext.getHeaderString("X-Storefront-Tenant")).thenReturn("t");
+
+      filter.filter(requestContext);
+
+      org.junit.jupiter.api.Assertions.assertEquals(401, abortedStatus(), route[0]);
     }
   }
 

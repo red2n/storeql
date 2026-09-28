@@ -19,6 +19,14 @@ public class ExportableData extends TenantDataSpec {
 
   @Override
   public Set<String> derivedTables() {
-    return Set.of("inventory_projection", "movement_events", "open_supply_lines", "sales_facts");
+    return Set.of(
+        "inventory_projection",
+        "movement_events",
+        "open_supply_lines",
+        "sales_facts",
+        "sales_line_facts",
+        "sales_voids",
+        "catalogue_products",
+        "catalogue_variants");
   }
 }

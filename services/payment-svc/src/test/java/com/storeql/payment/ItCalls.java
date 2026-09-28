@@ -21,8 +21,15 @@ final class ItCalls {
 
   private ItCalls() {}
 
-  /** Who is calling, as the gateway's identity headers say. */
-  record Caller(UUID tenantId, UUID userId, String roles) {
+  /**
+   * Who is calling, as the gateway's identity headers say: the stores they are held to ride along
+   * as {@code X-Store-Ids}, none meaning the whole business.
+   */
+  record Caller(UUID tenantId, UUID userId, String roles, UUID store) {
+
+    Caller(UUID tenantId, UUID userId, String roles) {
+      this(tenantId, userId, roles, null);
+    }
 
     static Caller owner(UUID tenantId) {
       return new Caller(tenantId, Ids.newId(), "OWNER");
@@ -30,6 +37,11 @@ final class ItCalls {
 
     Caller as(String role) {
       return new Caller(tenantId, Ids.newId(), role);
+    }
+
+    /** The same person, held to one store. */
+    Caller at(UUID storeId) {
+      return new Caller(tenantId, userId, roles, storeId);
     }
   }
 
@@ -71,6 +83,7 @@ final class ItCalls {
             .header("X-Tenant-Id", who.tenantId())
             .header("X-User-Id", who.userId())
             .header("X-Roles", who.roles());
+    if (who.store() != null) b = b.header("X-Store-Ids", who.store());
     if (idempotencyKey != null) b = b.header("Idempotency-Key", idempotencyKey);
     Response r =
         "GET".equals(method)

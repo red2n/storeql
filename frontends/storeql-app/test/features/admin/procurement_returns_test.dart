@@ -4,9 +4,11 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/procurement_screen.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // Return to vendor and the debit note (07.8): the reverse SJ-D3 named. From a
 // received order a storekeeper sends goods back with a reason, the server
@@ -96,6 +98,13 @@ Future<_Server> _openPo(WidgetTester tester) async {
 }
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  setUpAll(initializeDateFormatting);
   testWidgets('a received order shows what went back and offers a return', (
     tester,
   ) async {
@@ -206,7 +215,7 @@ void main() {
       expect(body['creditNoteDate'], '2026-09-20');
       expect(body['amount'], 9.0);
       expect(
-        find.textContaining('credit note CN-77 · 2026-09-20'),
+        find.textContaining('credit note CN-77 · 20 Sept 2026'),
         findsOneWidget,
       );
       expect(

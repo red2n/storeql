@@ -6,6 +6,7 @@ import '../../core/network/api_error.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'einvoice_providers.dart' show eInvoiceSaverProvider;
 import 'einvoice_tab.dart' show ElectronicAddressFields;
+import 'providers/admin_providers.dart' show tenantInfoProvider;
 import 'sales_invoice_providers.dart';
 
 // ── A sale's invoice and credit notes (18.9) ────────────────────────────────
@@ -442,6 +443,10 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // A hint, not a default: the business's own country when it is known,
+    // never a country picked for it (multi-location, multi-tenant — SJ-D67).
+    final tenantCountry = ref.watch(tenantInfoProvider).value?.country;
+    final countryHint = (tenantCountry == null || tenantCountry.isEmpty) ? null : tenantCountry;
     return AlertDialog(
       title: const Text('VAT registration'),
       content: SizedBox(
@@ -453,7 +458,7 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                SwitchListTile(
+                SwitchListTile.adaptive(
                   key: const Key('customer-vat-registered'),
                   contentPadding: EdgeInsets.zero,
                   title: const Text('VAT-registered business'),
@@ -504,9 +509,9 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
                         enabled: _registered,
                         maxLength: 2,
                         textCapitalization: TextCapitalization.characters,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Country',
-                          hintText: 'GB',
+                          hintText: countryHint,
                           counterText: '',
                         ),
                         validator: (v) {
@@ -520,7 +525,7 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
                     ),
                   ],
                 ),
-                SwitchListTile(
+                SwitchListTile.adaptive(
                   key: const Key('customer-vat-reverse-charge'),
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Reverse charge'),

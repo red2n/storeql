@@ -49,7 +49,7 @@ class _Product implements HttpClientAdapter {
   }
 }
 
-Future<_Product> _open(WidgetTester tester, {_Product? product}) async {
+Future<_Product> _open(WidgetTester tester, {_Product? product, String? tenantCountry}) async {
   tester.view.physicalSize = const Size(1400, 2000);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
@@ -58,7 +58,17 @@ Future<_Product> _open(WidgetTester tester, {_Product? product}) async {
   final p = product ?? _Product();
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = p;
   await tester.pumpWidget(ProviderScope(
-    overrides: [apiClientProvider.overrideWithValue(_FakeApiClient(dio))],
+    overrides: [
+      apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
+      if (tenantCountry != null)
+        tenantInfoProvider.overrideWith((ref) async => TenantInfo(
+              id: 't-1',
+              name: 'Test',
+              status: 'ACTIVE',
+              currency: '',
+              country: tenantCountry,
+            )),
+    ],
     child: MaterialApp(
       home: Scaffold(
         body: Builder(
@@ -86,6 +96,9 @@ Finder _segment(String code, String label) =>
 
 Map<String, dynamic> _json(Object? data) =>
     (data is String ? jsonDecode(data) : data) as Map<String, dynamic>;
+
+Finder _originField() =>
+    find.byWidgetPredicate((w) => w is TextField && w.decoration?.labelText == 'Country');
 
 void main() {
   testWidgets('an undeclared food item says it is on the gaps list', (tester) async {
@@ -210,5 +223,19 @@ void main() {
     final sent = _json(p.puts['compliance']);
     expect(sent['depositMaterial'], isNull);
     expect(sent['depositVolumeMl'], isNull);
+  });
+
+  // ── Origin country: a hint, never a default (SJ-D67) ────────────────────
+
+  testWidgets('the origin country hints the business\'s own country, never a fixed one',
+      (tester) async {
+    await _open(tester, tenantCountry: 'IN');
+    expect(tester.widget<TextField>(_originField()).decoration?.hintText, 'IN');
+  });
+
+  testWidgets('an unknown business country hints nothing, rather than a fixed default',
+      (tester) async {
+    await _open(tester, tenantCountry: '');
+    expect(tester.widget<TextField>(_originField()).decoration?.hintText, isNull);
   });
 }

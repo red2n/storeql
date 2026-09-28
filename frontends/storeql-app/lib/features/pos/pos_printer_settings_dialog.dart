@@ -166,7 +166,7 @@ class _PrinterSettingsDialogState extends ConsumerState<PrinterSettingsDialog> {
                   selected: {_draft.paper},
                   onSelectionChanged: (s) => setState(() => _draft = _draft.copyWith(paper: s.first)),
                 ),
-                SwitchListTile(
+                SwitchListTile.adaptive(
                   key: const Key('printer-drawer'),
                   contentPadding: EdgeInsets.zero,
                   value: _draft.openDrawer,

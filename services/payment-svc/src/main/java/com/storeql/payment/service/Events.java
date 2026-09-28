@@ -65,6 +65,21 @@ final class Events {
       UUID orderId,
       java.math.BigDecimal amount,
       java.util.List<com.storeql.payment.domain.Domain.RefundAllocation> tenders) {
+    return paymentRefunded(tenantId, refundId, orderId, amount, tenders, null);
+  }
+
+  /**
+   * As above, saying what kind of refund it is: {@code ORDER_ADJUSTMENT} for a line closed short or
+   * substituted (substitutions for out-of-stock online lines), which order-svc records without
+   * moving the order's status; null for a return's or a cancellation's, which do.
+   */
+  static OutboxRow paymentRefunded(
+      UUID tenantId,
+      UUID refundId,
+      UUID orderId,
+      java.math.BigDecimal amount,
+      java.util.List<com.storeql.payment.domain.Domain.RefundAllocation> tenders,
+      String kind) {
     // Each tender's share, so the ledger credits the control account the money left from (17.7).
     StringBuilder shares = new StringBuilder();
     for (var t : tenders) {
@@ -81,8 +96,14 @@ final class Events {
         refundId,
         String.format(
             "{\"eventId\":\"%s\",\"eventType\":\"PaymentRefunded\",\"tenantId\":\"%s\","
-                + "\"refundId\":\"%s\",\"orderId\":\"%s\",\"amount\":%s,\"tenders\":[%s]}",
-            Ids.newId(), tenantId, refundId, orderId, amount.toPlainString(), shares));
+                + "\"refundId\":\"%s\",\"orderId\":\"%s\",\"amount\":%s,\"tenders\":[%s]%s}",
+            Ids.newId(),
+            tenantId,
+            refundId,
+            orderId,
+            amount.toPlainString(),
+            shares,
+            kind == null ? "" : ",\"kind\":\"" + clean(kind) + "\""));
   }
 
   /**

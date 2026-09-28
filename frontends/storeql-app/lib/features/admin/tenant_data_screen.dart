@@ -7,11 +7,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/util/file_download.dart';
+import '../../shared/util/status_labels.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
 import 'payment_runs_tab.dart' show PaymentRunReasonDialog, validIsoDate;
 import 'tenant_data_providers.dart';
 
@@ -52,6 +57,41 @@ String switchingStageText(String stage) => switch (stage) {
   _ => stage,
 };
 
+/// What a service holds, in words an owner knows: `iam-svc` is where the
+/// staff sign in, `cart-svc` the shoppers' carts. A service this list does not
+/// know yet reads as its name without the suffix, never as `something-svc`.
+String tenantDataServiceName(String service) => switch (service) {
+  ApiConstants.tenant => 'Business and stores',
+  ApiConstants.iam => 'Staff sign-ins',
+  ApiConstants.product => 'Products',
+  ApiConstants.pricing => 'Prices',
+  ApiConstants.inventory => 'Stock',
+  ApiConstants.purchase => 'Purchasing and accounts',
+  ApiConstants.order => 'Orders',
+  ApiConstants.payment => 'Payments',
+  ApiConstants.customer => 'Customers',
+  ApiConstants.notification => 'Messages',
+  ApiConstants.reporting => 'Reports',
+  ApiConstants.cart => 'Shopping carts',
+  _ => humanizeCode(service.replaceFirst(RegExp(r'-svc$'), '')),
+};
+
+/// A count grouped as every other number is (*138,469*).
+String _count(int n) => AppFormat.count(n);
+
+/// *1 row*, *138,469 rows*.
+String _rows(int n) => '${_count(n)} ${n == 1 ? 'row' : 'rows'}';
+
+/// A `service/table` key as an owner reads it: `Business and stores: stores`,
+/// never the platform's `tenant-svc/stores`.
+String _tableInWords(String? key) {
+  if (key == null) return 'a table';
+  final slash = key.indexOf('/');
+  if (slash < 0) return tenantDataServiceName(key);
+  return '${tenantDataServiceName(key.substring(0, slash))}: '
+      '${key.substring(slash + 1)}';
+}
+
 void _tell(ScaffoldMessengerState messenger, String message) {
   messenger
     ..hideCurrentSnackBar()
@@ -64,37 +104,52 @@ class TenantDataScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authNotifierProvider).value;
-    final owner = auth is AuthAuthenticated && auth.roles.contains('OWNER');
-    final cs = Theme.of(context).colorScheme;
+    final owner =
+        auth is AuthAuthenticated && auth.roles.contains(UserRoles.owner);
+    final gutter = context.pageGutter;
+    // Cards of running text and a date field: kept to a readable measure on a
+    // desktop, the heading over them on the same edge.
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsetsDirectional.only(bottom: gutter),
       children: [
-        Text(
-          'Data export and leaving',
-          style: Theme.of(context).textTheme.headlineMedium,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Everything this business holds on the platform, service by service, to '
-          'download or bring in; and notice to leave, with the data erased once it '
-          'ends. The EU Data Act gives a business these rights.',
-          style: TextStyle(color: cs.outline),
-        ),
-        const SizedBox(height: 16),
-        if (!owner)
-          Row(
+        ContentBounds(
+          maxWidth: AppBreakpoints.formMaxWidth + 2 * gutter,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Icon(Icons.lock_outline, color: cs.outline),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text(
-                  "Only the owner can take the business's data out, bring it in, "
-                  'or give notice.',
-                ),
+              const PageHeader(
+                title: 'Data export and leaving',
+                subtitle:
+                    'Everything this business holds on the platform, service by '
+                    'service, to download or bring in; and notice to leave, with the '
+                    'data erased once it ends. The EU Data Act gives a business these '
+                    'rights.',
               ),
+              // The page is the owner's; the navigation lists it for nobody else,
+              // and anyone who reaches it by its address is told whose it is.
+              if (!owner)
+                const EmptyState(
+                  icon: Icons.lock_outline,
+                  title:
+                      "Only the owner can take the business's data out, bring it in, "
+                      'or give notice.',
+                  message: 'Ask the owner if the data needs to move.',
+                )
+              else
+                Padding(
+                  padding: EdgeInsetsDirectional.symmetric(horizontal: gutter),
+                  child: const Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _DataCard(),
+                      SizedBox(height: AppSpacing.lg),
+                      _LeavingCard(),
+                    ],
+                  ),
+                ),
             ],
-          )
-        else ...const [_DataCard(), SizedBox(height: 16), _LeavingCard()],
+          ),
+        ),
       ],
     );
   }
@@ -118,7 +173,7 @@ class _DataCardState extends ConsumerState<_DataCard> {
         ref.read(apiClientProvider).dio,
         manifests,
         onProgress: (n) {
-          if (mounted) setState(() => _progress = 'Read $n rows…');
+          if (mounted) setState(() => _progress = 'Read ${_rows(n)}…');
         },
       );
       final day = DateTime.now().toIso8601String().substring(0, 10);
@@ -130,7 +185,7 @@ class _DataCardState extends ConsumerState<_DataCard> {
       final rows = manifests.fold(0, (n, m) => n + m.rows);
       _tell(
         messenger,
-        'Downloaded $rows rows from ${manifests.length} services.',
+        'Downloaded ${_rows(rows)} from ${manifests.length} services.',
       );
     } catch (e) {
       _tell(
@@ -186,16 +241,17 @@ class _DataCardState extends ConsumerState<_DataCard> {
         bundle,
         skip: skip,
         onProgress: (n) {
-          if (mounted) setState(() => _progress = 'Imported $n rows…');
+          if (mounted) setState(() => _progress = 'Imported ${_rows(n)}…');
         },
       );
       ref.invalidate(tenantDataManifestsProvider);
       _tell(
         messenger,
         result.complete
-            ? 'Imported ${result.rows} rows.'
-            : 'Imported ${result.rows} rows, then ${result.refusedAt} was '
-                  'refused: ${result.refusal}',
+            ? 'Imported ${_rows(result.rows)}.'
+            : 'Imported ${_rows(result.rows)}, then '
+                  '${_tableInWords(result.refusedAt)} was refused: '
+                  '${result.refusal}',
       );
     } on FormatException catch (e) {
       _tell(messenger, e.message);
@@ -214,7 +270,7 @@ class _DataCardState extends ConsumerState<_DataCard> {
     final cs = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: AppSpacing.cardPadding,
         child: ref
             .watch(tenantDataManifestsProvider)
             .when(
@@ -236,10 +292,10 @@ class _DataCardState extends ConsumerState<_DataCard> {
                       'What this business holds',
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: AppSpacing.xs),
                     Text(
-                      '$rows rows in ${list.length} services, as JSON Lines: one '
-                      'object per row, keyed by column.',
+                      '${_rows(rows)} in ${list.length} services, as JSON Lines: '
+                      'one object per row, keyed by column.',
                       style: TextStyle(color: cs.outline),
                     ),
                     for (final m in list)
@@ -247,9 +303,10 @@ class _DataCardState extends ConsumerState<_DataCard> {
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         leading: const Icon(Icons.dns_outlined),
-                        title: Text(m.service),
+                        title: Text(tenantDataServiceName(m.service)),
                         trailing: Text(
-                          '${m.rows} rows · ${m.tables.length} tables',
+                          '${_rows(m.rows)} · ${_count(m.tables.length)} '
+                          '${m.tables.length == 1 ? 'table' : 'tables'}',
                         ),
                       ),
                     ExpansionTile(
@@ -263,12 +320,19 @@ class _DataCardState extends ConsumerState<_DataCard> {
                         for (final m in list) ...[
                           for (final e in m.excludedTables.entries)
                             if (!tenantDataMachinery.contains(e.key))
-                              _Reason('${m.service}: ${e.key}', e.value),
+                              _Reason(
+                                '${tenantDataServiceName(m.service)}: ${e.key}',
+                                e.value,
+                              ),
                           for (final e in m.excludedColumns.entries)
-                            _Reason('${m.service}: ${e.key}', e.value),
+                            _Reason(
+                              '${tenantDataServiceName(m.service)}: ${e.key}',
+                              e.value,
+                            ),
                           for (final e in m.keptAtErasure.entries)
                             _Reason(
-                              '${m.service}: ${e.key}, kept at erasure',
+                              '${tenantDataServiceName(m.service)}: ${e.key}, '
+                              'kept at erasure',
                               e.value,
                             ),
                         ],
@@ -276,12 +340,14 @@ class _DataCardState extends ConsumerState<_DataCard> {
                     ),
                     if (_progress != null)
                       Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: AppSpacing.sm,
+                        ),
                         child: Text(_progress!),
                       ),
                     Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
+                      spacing: AppSpacing.sm,
+                      runSpacing: AppSpacing.sm,
                       children: [
                         FilledButton.icon(
                           onPressed: _progress != null
@@ -405,7 +471,7 @@ class _LeavingCardState extends ConsumerState<_LeavingCard> {
     final cs = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: AppSpacing.cardPadding,
         child: ref
             .watch(switchingStatusProvider)
             .when(
@@ -427,7 +493,7 @@ class _LeavingCardState extends ConsumerState<_LeavingCard> {
                       'Leaving the platform',
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: AppSpacing.xs),
                     if (!standing) ...[
                       Text(
                         s == null
@@ -435,7 +501,7 @@ class _LeavingCardState extends ConsumerState<_LeavingCard> {
                             : 'The last notice was withdrawn: ${n?.cancelReason ?? ''}',
                         style: TextStyle(color: cs.outline),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: AppSpacing.sm),
                       FilledButton.icon(
                         onPressed: _busy ? null : _give,
                         icon: const Icon(Icons.logout),
@@ -446,7 +512,7 @@ class _LeavingCardState extends ConsumerState<_LeavingCard> {
                         switchingStageText(s.stage),
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: AppSpacing.sm),
                       _Date('Notice ends', n!.noticeEndsOn),
                       if (n.intent == 'SWITCH') ...[
                         _Date('Transitional period ends', n.transitionEndsOn),
@@ -454,13 +520,19 @@ class _LeavingCardState extends ConsumerState<_LeavingCard> {
                       ],
                       _Date('Erased from', n.erasureDueOn),
                       if (s.awaiting.isNotEmpty)
-                        Text('Waiting for: ${s.awaiting.join(', ')}'),
+                        Text(
+                          'Waiting for: '
+                          '${s.awaiting.map(tenantDataServiceName).join(', ')}',
+                        ),
                       for (final e in s.evidence)
-                        Text('${e.service}: ${e.rowsErased} rows erased'),
-                      const SizedBox(height: 8),
+                        Text(
+                          '${tenantDataServiceName(e.service)}: '
+                          '${_rows(e.rowsErased)} erased',
+                        ),
+                      const SizedBox(height: AppSpacing.sm),
                       Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
+                        spacing: AppSpacing.sm,
+                        runSpacing: AppSpacing.sm,
                         children: [
                           if (n.intent == 'SWITCH' &&
                               n.extendedAt == null &&
@@ -497,7 +569,8 @@ class _Date extends StatelessWidget {
     child: Row(
       children: [
         Expanded(child: Text(label)),
-        Text(value ?? '-'),
+        const SizedBox(width: AppSpacing.sm),
+        Text(value == null || value!.isEmpty ? '—' : AppFormat.date(value)),
       ],
     ),
   );

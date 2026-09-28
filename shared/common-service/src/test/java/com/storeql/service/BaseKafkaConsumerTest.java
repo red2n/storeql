@@ -43,7 +43,7 @@ class BaseKafkaConsumerTest {
     protected void handle(String topic, String value) {}
   }
 
-  private static final class HealthyConsumer extends BaseKafkaConsumer {
+  private static class HealthyConsumer extends BaseKafkaConsumer {
     @Override
     protected List<String> topics() {
       return List.of("some-topic");
@@ -61,6 +61,14 @@ class BaseKafkaConsumerTest {
 
     @Override
     protected void handle(String topic, String value) {}
+  }
+
+  /** A projection of live events: it starts where the topic is now, not at the beginning. */
+  private static final class LatestConsumer extends HealthyConsumer {
+    @Override
+    protected String offsetReset() {
+      return "latest";
+    }
   }
 
   private static void enable(BaseKafkaConsumer c) throws Exception {
@@ -90,6 +98,23 @@ class BaseKafkaConsumerTest {
   void cleanup() {
     KafkaConsumerRegistry.clear(EXPLODING_NAME);
     KafkaConsumerRegistry.clear(HEALTHY_NAME);
+  }
+
+  @Test
+  void aConsumerStartsAtTheEarliestOffsetUnlessItSaysOtherwise() throws Exception {
+    org.junit.jupiter.api.Assertions.assertEquals("earliest", new HealthyConsumer().offsetReset());
+    // What the consumer answers is what its loop is built with.
+    var c = new LatestConsumer();
+    enable(c);
+    start(c);
+    try {
+      var f = BaseKafkaConsumer.class.getDeclaredField("loop");
+      f.setAccessible(true);
+      org.junit.jupiter.api.Assertions.assertEquals(
+          "latest", ((KafkaEventLoop) f.get(c)).offsetReset());
+    } finally {
+      stop(c);
+    }
   }
 
   @Test

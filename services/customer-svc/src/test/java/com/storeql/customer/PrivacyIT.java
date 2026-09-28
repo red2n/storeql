@@ -7,6 +7,7 @@ import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
+import com.storeql.test.TenantSvcStub;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.client.Entity;
@@ -29,9 +30,13 @@ import org.junit.jupiter.api.Test;
 class PrivacyIT {
 
   private static final PostgresSupport PG;
+  private static final String TENANT = "01a090c3-38ae-7b21-9c0f-6f2b5a1d4e70";
 
   static {
     PG = PostgresSupport.start();
+    // A British business: no per-purpose consent law binds it, so a channel's own consent stands
+    // on its own — exactly what this file's marketing-preference tests already assume.
+    TenantSvcStub.start().with(TENANT, "GBP", "GB");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -40,8 +45,6 @@ class PrivacyIT {
     System.setProperty("storeql.consul.enabled", "false");
     System.setProperty("storeql.kafka.enabled", "false");
   }
-
-  private static final String TENANT = "01a090c3-38ae-7b21-9c0f-6f2b5a1d4e70";
 
   @Inject WebTarget target;
 

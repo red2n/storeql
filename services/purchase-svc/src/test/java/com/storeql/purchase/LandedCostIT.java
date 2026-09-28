@@ -1,7 +1,9 @@
 package com.storeql.purchase;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
@@ -173,18 +175,36 @@ class LandedCostIT {
     throw new AssertionError("no line for " + variantId + " in " + charge);
   }
 
-  /** The ledger lines one source wrote about one receipt, today; the tests share a ledger. */
-  private JsonArray journal(String sourceType, String grId) {
+  /**
+   * The ledger lines one source wrote about one charge, today; the tests share a ledger. Matched on
+   * the source reference, which carries the id: the description names things by handle only.
+   */
+  private JsonArray journal(String sourceType, String chargeId) {
     String today = LocalDate.now(ZoneOffset.UTC).toString();
     var out = Json.createArrayBuilder();
     for (JsonValue v : dataArray(get("/nominal-ledger?limit=100&from=" + today + "&to=" + today))) {
       JsonObject e = v.asJsonObject();
       if (sourceType.equals(e.getString("sourceType", null))
-          && e.getString("description", "").contains(grId)) {
+          && chargeId.equals(e.getString("sourceRef", null))) {
         out.add(v);
       }
     }
     return out.build();
+  }
+
+  /** How people see an id: its last eight characters, as every screen and journal shows it. */
+  private static String handle(String id) {
+    return "#" + id.substring(id.length() - 8);
+  }
+
+  /** Every line of a journal carries this description, and none carries a whole id. */
+  private static void describedAs(JsonArray lines, String description, String... ids) {
+    assertThat(lines.isEmpty(), is(false));
+    for (JsonValue v : lines) {
+      String said = v.asJsonObject().getString("description");
+      assertThat(said, is(description));
+      for (String id : ids) assertThat(said, not(containsString(id)));
+    }
   }
 
   private static BigDecimal sum(JsonArray entries, String code, String side) {
@@ -232,9 +252,16 @@ class LandedCostIT {
     assertThat(
         line(c, PEARS).getJsonNumber("lineValue").bigDecimalValue(), is(new BigDecimal("15.00")));
 
-    JsonArray posted = journal("LANDED_COST", ids[1]);
+    JsonArray posted = journal("LANDED_COST", c.getString("id"));
     assertThat(sum(posted, "1001", "debit"), is(new BigDecimal("10.00")));
     assertThat(sum(posted, "2110", "credit"), is(new BigDecimal("10.00")));
+    // Read in the accounting package and on the Integrations screen: the receipt and its order
+    // named as people see them (the procurement screen shows "PO #…"), never by a whole id.
+    describedAs(
+        posted,
+        "Freight landed on receipt " + handle(ids[1]) + " against PO " + handle(ids[0]),
+        ids[1],
+        ids[0]);
     assertThat(outboxTypes(c.getString("id")), is("LandedCostApplied,"));
 
     // The charge is read back whole, and listed by receipt and by order.
@@ -285,9 +312,18 @@ class LandedCostIT {
     assertThat(
         "the lines stay with the reversed charge", reversed.getJsonArray("lines").size(), is(2));
 
-    JsonArray mirror = journal("LANDED_COST_REVERSAL", ids[1]);
+    JsonArray mirror = journal("LANDED_COST_REVERSAL", id);
     assertThat(sum(mirror, "2110", "debit"), is(new BigDecimal("6.00")));
     assertThat(sum(mirror, "1001", "credit"), is(new BigDecimal("6.00")));
+    describedAs(
+        mirror,
+        "Insurance on receipt "
+            + handle(ids[1])
+            + " against PO "
+            + handle(ids[0])
+            + " reversed: insurer credited the premium",
+        ids[1],
+        ids[0]);
     assertThat(outboxTypes(id), is("LandedCostApplied,LandedCostReversed,"));
 
     Response twice = post("/landed-costs/" + id + "/reversal", "{\"reason\":\"again\"}");

@@ -21,6 +21,7 @@ public class PosSessionService {
   @Inject PosSessionRepository repo;
   @Inject TenantStatusRepository tenantStatusRepo;
   @Inject StoreStatusRepository storeStatusRepo;
+  @Inject com.storeql.iam.repo.StoreTypeRepository storeTypes;
 
   /**
    * Opens a POS session for the calling cashier at a store.
@@ -30,7 +31,7 @@ public class PosSessionService {
    * @return the newly opened session
    * @throws ApiException {@code POS_SESSION_INVALID_TIMEOUT} (400) when the timeout falls outside
    *     60..86400; {@code TENANT_NOT_OPERATIONAL} or {@code STORE_NOT_OPERATIONAL} (409) when the
-   *     tenant or store is not trading
+   *     tenant or store is not trading; {@code POS_STORE_HAS_NO_TILL} (409) at a dark store
    */
   public PosSession start(TenantContext ctx, StartPosSessionRequest req) {
     int timeout = req.idleTimeoutSeconds() != null ? req.idleTimeoutSeconds() : 900;
@@ -50,6 +51,11 @@ public class PosSessionService {
       throw ApiException.conflict(
           "STORE_NOT_OPERATIONAL",
           "Store is not accepting new sessions — it is closed or suspended");
+    // A dark store has no shop floor (ship-from-store and dark-store picking): it fills online
+    // orders for delivery, and no till rings there.
+    if (storeTypes.typeOf(tenantId, storeId).filter("DARK_STORE"::equals).isPresent())
+      throw ApiException.conflict(
+          "POS_STORE_HAS_NO_TILL", "a dark store has no till — it fills online orders only");
     var session =
         new PosSession(
             Ids.newId(),

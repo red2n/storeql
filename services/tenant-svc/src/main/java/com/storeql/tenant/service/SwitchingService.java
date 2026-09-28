@@ -199,6 +199,11 @@ public class SwitchingService {
     }
     Optional<Switch> s = repo.byErasureEvent(tenantId, erasureEventId);
     if (s.isEmpty()) {
+      // A sandbox removed (22.8) is erased the same way but gave no notice: nothing to record.
+      if (tenants.findTenant(tenantId).map(Tenant::isSandbox).orElse(false)) {
+        LOG.log(Level.INFO, "Sandbox {0} erased by {1}", tenantId, evidence.service());
+        return false;
+      }
       LOG.log(Level.WARNING, "TenantDataErased for no erasure started here: {0}", erasureEventId);
       return false;
     }

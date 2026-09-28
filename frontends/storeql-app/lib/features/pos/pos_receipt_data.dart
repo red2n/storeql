@@ -6,6 +6,7 @@
 /// lives behind the conditional export in `pos_receipt.dart`.
 library;
 
+import '../../core/format.dart';
 import 'pos_fiscal_receipt.dart';
 import 'pos_providers.dart';
 import '../../shared/util/short_ref.dart';
@@ -88,13 +89,12 @@ class PosReceiptData {
 
   String get shortId => shortRef(orderId).toUpperCase();
 
-  String _fmt(double v) => '$currency ${v.toStringAsFixed(2)}';
+  /// Money as the shopper reads it, `£12.00`. (The thermal encoder keeps
+  /// currency codes: a printer's code page cannot print every symbol.)
+  String _fmt(double v) => AppFormat.money(v, currencyCode: currency);
 
-  String _fmtDate() {
-    final d = dateTime.toLocal();
-    String p(int n) => n.toString().padLeft(2, '0');
-    return '${d.year}-${p(d.month)}-${p(d.day)}  ${p(d.hour)}:${p(d.minute)}';
-  }
+  /// When the sale was made, in the till's own time: `25 Sept 2026 14:05`.
+  String _fmtDate() => AppFormat.dateTime(dateTime.toIso8601String());
 
   String toHtml() {
     final itemRows = StringBuffer();

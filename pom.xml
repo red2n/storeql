@@ -70,6 +70,10 @@
         <version.lib.opentelemetry-sdk-extension-autoconfigure>1.62.0</version.lib.opentelemetry-sdk-extension-autoconfigure>
         <version.lib.opentelemetry.opentracing.shim>1.62.0</version.lib.opentelemetry.opentracing.shim>
 
+        <!-- Google's phone number metadata (customer-svc reads a phone in the business's own
+             country and keeps it in E.164). No advisory; raise it with the metadata releases. -->
+        <libphonenumber.version>9.0.32</libphonenumber.version>
+
         <!-- Quality tooling versions -->
         <archunit.version>1.5.0</archunit.version>
         <spotbugs-plugin.version>4.10.4.1</spotbugs-plugin.version>
@@ -210,6 +214,13 @@
                 <version>${junit.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+
+            <!-- Phone numbers in E.164, read in the business's own country (customer-svc) -->
+            <dependency>
+                <groupId>com.googlecode.libphonenumber</groupId>
+                <artifactId>libphonenumber</artifactId>
+                <version>${libphonenumber.version}</version>
             </dependency>
 
             <!-- MicroProfile Fault Tolerance — retry, circuit-breaker, timeout on sync clients -->

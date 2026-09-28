@@ -57,6 +57,20 @@ public final class Domain {
   }
 
   /** Sales totals bucketed by day (and currency). net = gross − refunded. */
+  /**
+   * One line of a confirmed sale, as OrderConfirmed carries it. Unit price is null when unknown.
+   */
+  public record SaleLine(
+      UUID variantId, BigDecimal qty, BigDecimal unitPrice, BigDecimal lineTotal) {}
+
+  /**
+   * What one category took: the leaf category, or its top-level ancestor when the report rolls up.
+   * A null category is the lines whose product has no category, or whose variant the catalogue has
+   * not announced.
+   */
+  public record SalesCategoryStat(
+      UUID categoryId, String currency, long orders, BigDecimal units, BigDecimal gross) {}
+
   public record SalesDayStat(
       String day, String currency, long orders, BigDecimal gross, BigDecimal refunded) {
     /**

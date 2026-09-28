@@ -2,12 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../admin/providers/admin_providers.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
+import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
+import '../../shared/widgets/page_header.dart';
 import '../../shared/widgets/reference_fields.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/scrollable_table.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'tenant_onboarding_notifier.dart';
 
 class TenantsScreen extends ConsumerWidget {
@@ -16,53 +22,27 @@ class TenantsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tenantsAsync = ref.watch(allTenantsProvider);
-    final cs = Theme.of(context).colorScheme;
+    // Kept through a refresh, hidden while the list itself shows an error.
+    final count = tenantsAsync.hasError ? null : tenantsAsync.value?.length;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text('Tenants',
-                        style: Theme.of(context).textTheme.headlineMedium),
-                  ),
-                  tenantsAsync.when(
-                    loading: () => const SizedBox.shrink(),
-                    error: (_, _) => const SizedBox.shrink(),
-                    data: (list) => Chip(
-                      label: Text('${list.length} tenants'),
-                      backgroundColor: cs.secondaryContainer,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              OverflowBar(
-                spacing: 8,
-                overflowSpacing: 8,
-                overflowAlignment: OverflowBarAlignment.start,
-                children: [
-                  FilledButton.icon(
-                    onPressed: () => _showOnboardingDialog(context, ref),
-                    icon: const Icon(Icons.add_business),
-                    label: const Text('Onboard New Tenant'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: () => ref.invalidate(allTenantsProvider),
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Refresh'),
-                  ),
-                ],
-              ),
-            ],
-          ),
+        PageHeader(
+          title: 'Tenants',
+          subtitle: count == null ? null : _tenantCount(count),
+          actions: [
+            FilledButton.icon(
+              onPressed: () => _showOnboardingDialog(context, ref),
+              icon: const Icon(Icons.add_business),
+              label: const Text('Onboard new tenant'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => ref.invalidate(allTenantsProvider),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Refresh'),
+            ),
+          ],
         ),
 
         // List
@@ -73,55 +53,58 @@ class TenantsScreen extends ConsumerWidget {
               message: friendlyError(e, fallback: 'Could not load tenants.'),
               onRetry: () => ref.invalidate(allTenantsProvider),
             ),
-            data: (tenants) {
-              if (tenants.isEmpty) {
-                return Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.business_outlined,
-                          size: 64, color: cs.outlineVariant),
-                      const SizedBox(height: 16),
-                      Text('No tenants yet',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Use "Onboard New Tenant" to add the first business.',
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodyMedium
-                            ?.copyWith(color: cs.outline),
-                        textAlign: TextAlign.center,
+            data: (tenants) => RefreshIndicator.adaptive(
+              onRefresh: () => _pullToRefresh(ref),
+              // Laid out for the width the page has, not the window's: from
+              // tablet width the rail takes some of it.
+              child: LayoutBuilder(builder: (context, bc) {
+                if (tenants.isEmpty) {
+                  return SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(minHeight: bc.maxHeight),
+                      child: EmptyState(
+                        icon: Icons.business_outlined,
+                        title: 'No tenants yet',
+                        message:
+                            'Use "Onboard new tenant" to add the first business.',
+                        action: OutlinedButton.icon(
+                          onPressed: () => _showOnboardingDialog(context, ref),
+                          icon: const Icon(Icons.add_business),
+                          label: const Text('Onboard new tenant'),
+                        ),
                       ),
-                      const SizedBox(height: 24),
-                      OutlinedButton.icon(
-                        onPressed: () => _showOnboardingDialog(context, ref),
-                        icon: const Icon(Icons.add_business),
-                        label: const Text('Onboard New Tenant'),
-                      ),
-                    ],
-                  ),
-                );
-              }
-
-              return LayoutBuilder(builder: (context, bc) {
-                final wide = bc.maxWidth >= 700;
-                if (wide) {
-                  return _WideTable(
+                    ),
+                  );
+                }
+                final width = AppBreakpoints.classOf(bc.maxWidth);
+                if (width >= WindowClass.expanded) {
+                  return _TenantTable(
                     tenants: tenants,
                     onToggleStatus: (t) => _toggleStatus(context, ref, t),
                   );
                 }
-                return _NarrowList(
+                return _TenantList(
                   tenants: tenants,
+                  compact: width == WindowClass.compact,
                   onToggleStatus: (t) => _toggleStatus(context, ref, t),
                 );
-              });
-            },
+              }),
+            ),
           ),
         ),
       ],
     );
+  }
+
+  /// Pull to refresh: the spinner stays until the list has been read again.
+  Future<void> _pullToRefresh(WidgetRef ref) async {
+    ref.invalidate(allTenantsProvider);
+    try {
+      await ref.read(allTenantsProvider.future);
+    } on Object {
+      // A failed read replaces the list with the error view and its retry.
+    }
   }
 
   Future<void> _toggleStatus(
@@ -186,191 +169,277 @@ class TenantsScreen extends ConsumerWidget {
   }
 }
 
-// ── Wide table ────────────────────────────────────────────────────────────────
+/// *1 tenant*, *4 tenants*.
+String _tenantCount(int n) => n == 1 ? '1 tenant' : '$n tenants';
 
-class _WideTable extends StatelessWidget {
+// ── Wide table (expanded and up) ──────────────────────────────────────────────
+
+class _TenantTable extends StatelessWidget {
   final List<PlatformTenant> tenants;
   final void Function(PlatformTenant) onToggleStatus;
-  const _WideTable({required this.tenants, required this.onToggleStatus});
+  const _TenantTable({required this.tenants, required this.onToggleStatus});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return LayoutBuilder(
-      builder: (context, bc) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Card(
+    final text = Theme.of(context).textTheme;
+    final gutter = context.pageGutter;
+    // The page scrolls up and down, so it can be pulled to refresh however
+    // short the table is; the table scrolls sideways on its own when its
+    // columns need more than the width.
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, gutter),
+      children: [
+        Card(
           clipBehavior: Clip.antiAlias,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minWidth: bc.maxWidth - 32),
-              child: DataTable(
-                headingRowColor:
-                    WidgetStatePropertyAll(cs.surfaceContainerHigh),
-                columnSpacing: 24,
-                columns: const [
-                  DataColumn(label: Text('Business')),
-                  DataColumn(label: Text('Country')),
-                  DataColumn(label: Text('Currency')),
-                  DataColumn(label: Text('Status')),
-                  DataColumn(label: Text('Created')),
-                  DataColumn(label: Text('')),
-                ],
-                rows: tenants.map((t) {
-                  final active = t.status.toUpperCase() == 'ACTIVE';
-                  return DataRow(cells: [
-                    DataCell(Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(t.name,
-                            style:
-                                const TextStyle(fontWeight: FontWeight.bold)),
-                        if (t.legalName != null)
-                          Text(t.legalName!,
-                              style:
-                                  TextStyle(fontSize: 11, color: cs.outline)),
-                      ],
+          child: ScrollableTable(
+            child: DataTable(
+              headingRowColor:
+                  WidgetStatePropertyAll(cs.surfaceContainerHigh),
+              columnSpacing: AppSpacing.xl,
+              // A row grows with its text (a legal name, large type) rather
+              // than clipping it at the default 48.
+              dataRowMaxHeight: double.infinity,
+              columns: const [
+                DataColumn(label: Text('Business')),
+                DataColumn(label: Text('Country')),
+                DataColumn(label: Text('Currency')),
+                DataColumn(label: Text('Status')),
+                DataColumn(label: Text('Created')),
+                DataColumn(label: Text('')),
+              ],
+              rows: [
+                for (final t in tenants)
+                  DataRow(cells: [
+                    DataCell(Padding(
+                      padding:
+                          const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(t.name,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold)),
+                          if ((t.legalName ?? '').isNotEmpty)
+                            Text(t.legalName!,
+                                style: text.bodySmall
+                                    ?.copyWith(color: cs.onSurfaceVariant)),
+                        ],
+                      ),
                     )),
                     DataCell(Text(t.country)),
                     DataCell(Text(t.currency)),
-                    DataCell(_StatusChip(active: active, label: t.status)),
-                    DataCell(Text(
-                      t.createdAt.length >= 10
-                          ? t.createdAt.substring(0, 10)
-                          : t.createdAt,
-                      style: const TextStyle(
-                          fontFamily: 'monospace', fontSize: 12),
+                    DataCell(_TenantStatus(t)),
+                    DataCell(Text(AppFormat.date(t.createdAt))),
+                    DataCell(_StatusAction(
+                      tenant: t,
+                      onPressed: () => onToggleStatus(t),
                     )),
-                    DataCell(
-                      PopupMenuButton<String>(
-                        icon: const Icon(Icons.more_vert),
-                        tooltip: 'Actions',
-                        itemBuilder: (_) => [
-                          PopupMenuItem(
-                            value: 'toggle',
-                            child: Row(
-                              children: [
-                                Icon(
-                                  active
-                                      ? Icons.block_outlined
-                                      : Icons.check_circle_outline,
-                                  size: 18,
-                                  color: active
-                                      ? cs.error
-                                      : context.status.success,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(active ? 'Deactivate' : 'Activate'),
-                              ],
-                            ),
-                          ),
-                        ],
-                        onSelected: (_) => onToggleStatus(t),
-                      ),
-                    ),
-                  ]);
-                }).toList(),
-              ),
+                  ]),
+              ],
             ),
           ),
         ),
-      ),
+      ],
     );
   }
 }
 
-// ── Narrow list ───────────────────────────────────────────────────────────────
+// ── List (phones and tablets in portrait) ─────────────────────────────────────
 
-class _NarrowList extends StatelessWidget {
+class _TenantList extends StatelessWidget {
   final List<PlatformTenant> tenants;
+
+  /// A phone: the status and the action go on a line under the text.
+  final bool compact;
   final void Function(PlatformTenant) onToggleStatus;
-  const _NarrowList({required this.tenants, required this.onToggleStatus});
+  const _TenantList({
+    required this.tenants,
+    required this.compact,
+    required this.onToggleStatus,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final gutter = context.pageGutter;
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, gutter),
       itemCount: tenants.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 4),
+      separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.sm),
       itemBuilder: (context, i) {
         final t = tenants[i];
-        final cs = Theme.of(context).colorScheme;
-        final active = t.status.toUpperCase() == 'ACTIVE';
-        return Card(
-          child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: cs.primaryContainer,
-              child: Text(
-                t.name.isNotEmpty ? t.name[0].toUpperCase() : '?',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, color: cs.onPrimaryContainer),
-              ),
-            ),
-            title: Text(t.name,
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text('${t.country} · ${t.currency}'),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _StatusChip(active: active, label: t.status),
-                PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_vert),
-                  tooltip: 'Actions',
-                  itemBuilder: (_) => [
-                    PopupMenuItem(
-                      value: 'toggle',
-                      child: Row(
-                        children: [
-                          Icon(
-                            active
-                                ? Icons.block_outlined
-                                : Icons.check_circle_outline,
-                            size: 18,
-                            color: active
-                                ? cs.error
-                                : context.status.success,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(active ? 'Deactivate' : 'Activate'),
-                        ],
-                      ),
-                    ),
-                  ],
-                  onSelected: (_) => onToggleStatus(t),
-                ),
-              ],
-            ),
-          ),
+        return _TenantCard(
+          tenant: t,
+          compact: compact,
+          onToggleStatus: () => onToggleStatus(t),
         );
       },
     );
   }
 }
 
-class _StatusChip extends StatelessWidget {
-  final bool active;
-  final String label;
-  const _StatusChip({required this.active, required this.label});
+class _TenantCard extends StatelessWidget {
+  final PlatformTenant tenant;
+  final bool compact;
+  final VoidCallback onToggleStatus;
+  const _TenantCard({
+    required this.tenant,
+    required this.compact,
+    required this.onToggleStatus,
+  });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: active ? cs.secondaryContainer : cs.errorContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
+    final text = Theme.of(context).textTheme;
+    final t = tenant;
+    final secondary = text.bodySmall?.copyWith(color: cs.onSurfaceVariant);
+    final legal = t.legalName ?? '';
+    final created = AppFormat.date(t.createdAt);
+
+    final avatar = CircleAvatar(
+      backgroundColor: cs.primaryContainer,
       child: Text(
-        label,
+        t.name.isNotEmpty ? t.name[0].toUpperCase() : '?',
         style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.bold,
-          color: active ? cs.onSecondaryContainer : cs.onErrorContainer,
-        ),
+            fontWeight: FontWeight.bold, color: cs.onPrimaryContainer),
       ),
+    );
+    final details = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(t.name, style: text.titleMedium),
+        if (legal.isNotEmpty) Text(legal, style: secondary),
+        Text(
+          [t.country, t.currency, if (created.isNotEmpty) 'Created $created']
+              .join(' · '),
+          style: secondary,
+        ),
+      ],
+    );
+    final status = _TenantStatus(t);
+    final action = _StatusAction(tenant: t, onPressed: onToggleStatus);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsetsDirectional.fromSTEB(
+            AppSpacing.lg, AppSpacing.md, AppSpacing.sm, AppSpacing.sm),
+        child: compact
+            // The status and the action on a line of their own, lined up
+            // under the text, so the name keeps the width of the card. They
+            // wrap rather than overflow when the type is large.
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      avatar,
+                      const SizedBox(width: AppSpacing.md),
+                      Expanded(child: details),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Padding(
+                    padding: const EdgeInsetsDirectional.only(
+                        start: 40 + AppSpacing.md),
+                    child: Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: AppSpacing.sm,
+                      children: [status, action],
+                    ),
+                  ),
+                ],
+              )
+            : Row(
+                children: [
+                  avatar,
+                  const SizedBox(width: AppSpacing.md),
+                  Expanded(child: details),
+                  const SizedBox(width: AppSpacing.md),
+                  status,
+                  const SizedBox(width: AppSpacing.sm),
+                  action,
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+/// A tenant's status in words, in its tone: *Active* success, *Pending* info,
+/// *Suspended* warning, *Deactivated* and *Closed* neutral, anything failed
+/// error. The server sends ACTIVE, INACTIVE or PENDING; a state this map does
+/// not know still reads as words, never as the code.
+class _TenantStatusBadge extends StatelessWidget {
+  final String status;
+  const _TenantStatusBadge(this.status);
+
+  @override
+  Widget build(BuildContext context) {
+    final code = status.toUpperCase();
+    final (label, tone) = switch (code) {
+      'ACTIVE' => ('Active', StatusTone.success),
+      'PENDING' => ('Pending', StatusTone.info),
+      'SUSPENDED' => ('Suspended', StatusTone.warning),
+      'INACTIVE' || 'DEACTIVATED' => ('Deactivated', StatusTone.neutral),
+      'CLOSED' => ('Closed', StatusTone.neutral),
+      _ when code.contains('FAIL') => (humanizeCode(status), StatusTone.error),
+      _ => (humanizeCode(status), StatusTone.neutral),
+    };
+    return StatusBadge(label, tone: tone);
+  }
+}
+
+/// A tenant's status and, for a business's sandbox (22.8) — a tenant of its
+/// own — a *Sandbox* badge beside it, so the platform never mistakes it for a
+/// customer. The two wrap rather than overflow when the type is large.
+class _TenantStatus extends StatelessWidget {
+  final PlatformTenant tenant;
+  const _TenantStatus(this.tenant);
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _TenantStatusBadge(tenant.status);
+    if (!tenant.sandbox) return status;
+    return Wrap(
+      spacing: AppSpacing.xs,
+      runSpacing: AppSpacing.xs,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        status,
+        const StatusBadge(
+          'Sandbox',
+          key: Key('sandbox-chip'),
+          tone: StatusTone.accent,
+          icon: Icons.science_outlined,
+        ),
+      ],
+    );
+  }
+}
+
+/// A row's one action — switch the business off, or back on — in words rather
+/// than behind a menu of one. The confirmation dialog still comes first.
+class _StatusAction extends StatelessWidget {
+  final PlatformTenant tenant;
+  final VoidCallback onPressed;
+  const _StatusAction({required this.tenant, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    final active = tenant.status.toUpperCase() == 'ACTIVE';
+    return TextButton(
+      style: active
+          ? TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error)
+          : null,
+      onPressed: onPressed,
+      child: Text(active ? 'Deactivate' : 'Activate'),
     );
   }
 }
@@ -430,7 +499,7 @@ class _OnboardingDialogState extends ConsumerState<_OnboardingDialog> {
     });
 
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      shape: const RoundedRectangleBorder(borderRadius: AppRadius.card),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 520),
         child: Padding(
@@ -470,7 +539,7 @@ class _OnboardingDialogState extends ConsumerState<_OnboardingDialog> {
                     const SizedBox(height: 8),
                     LinearProgressIndicator(
                       value: ob.step == 0 ? 0.5 : 1.0,
-                      borderRadius: BorderRadius.circular(4),
+                      borderRadius: AppRadius.badge,
                     ),
                     const SizedBox(height: 16),
                     if (ob.error != null) ...[
@@ -478,7 +547,7 @@ class _OnboardingDialogState extends ConsumerState<_OnboardingDialog> {
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
                           color: cs.errorContainer,
-                          borderRadius: BorderRadius.circular(8),
+                          borderRadius: AppRadius.chip,
                         ),
                         child: Text(ob.error!,
                             style: TextStyle(color: cs.onErrorContainer)),

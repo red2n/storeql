@@ -193,6 +193,28 @@ public class GatewayConfig {
   java.util.Optional<String> securityTxtPreferredLanguages;
 
   /** Parsed once at startup — these are consulted on every proxied request. */
+  // ── API versioning (22.8) ──────────────────────────────────────────────────
+  // The versions the door answers, the one new integrations are pointed at, and the alias's dates.
+  // Parsed once at start so an inconsistent policy stops the gateway rather than a client.
+
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.api.current", defaultValue = "v1")
+  String apiCurrent;
+
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.api.versions", defaultValue = "v1")
+  String apiVersionsCsv;
+
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.api.alias-deprecated-since", defaultValue = "2026-09-23")
+  String apiAliasDeprecatedSince;
+
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.api.alias-sunset", defaultValue = "2027-09-30")
+  String apiAliasSunset;
+
+  private ApiVersions.Policy apiVersionPolicy;
+
   private java.util.Set<String> routableServiceSet;
 
   private java.util.Set<String> corsAllowedOriginSet;
@@ -201,6 +223,13 @@ public class GatewayConfig {
   void parseSets() {
     routableServiceSet = csvToSet(routableServices);
     corsAllowedOriginSet = csvToSet(corsAllowedOrigins.orElse(""));
+    apiVersionPolicy =
+        ApiVersions.Policy.of(apiCurrent, apiVersionsCsv, apiAliasDeprecatedSince, apiAliasSunset);
+  }
+
+  /** The API versioning policy (22.8): versions answered, the current one, the alias's dates. */
+  public ApiVersions.Policy apiVersions() {
+    return apiVersionPolicy;
   }
 
   private static java.util.Set<String> csvToSet(String csv) {

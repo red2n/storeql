@@ -1,5 +1,6 @@
 package com.storeql.inventory.mapper;
 
+import com.storeql.inventory.domain.Domain;
 import com.storeql.inventory.domain.Domain.AbcAssignment;
 import com.storeql.inventory.domain.Domain.AbcCompileRun;
 import com.storeql.inventory.domain.Domain.AccountingPeriod;
@@ -9,6 +10,8 @@ import com.storeql.inventory.domain.Domain.CycleCountHeader;
 import com.storeql.inventory.domain.Domain.CycleCountLine;
 import com.storeql.inventory.domain.Domain.DeadStockRow;
 import com.storeql.inventory.domain.Domain.DemandBucket;
+import com.storeql.inventory.domain.Domain.DemandForecast;
+import com.storeql.inventory.domain.Domain.FreshProfile;
 import com.storeql.inventory.domain.Domain.KanbanCard;
 import com.storeql.inventory.domain.Domain.Level;
 import com.storeql.inventory.domain.Domain.LevelSummary;
@@ -41,6 +44,8 @@ import com.storeql.inventory.domain.Domain.TransferOrder;
 import com.storeql.inventory.domain.Domain.TransferOrderLine;
 import com.storeql.inventory.domain.Domain.ValuationRow;
 import com.storeql.inventory.domain.Domain.ZoneGlMapping;
+import com.storeql.inventory.domain.Forecasting;
+import com.storeql.inventory.dto.Dtos;
 import com.storeql.inventory.dto.Dtos.AbcAssignmentResponse;
 import com.storeql.inventory.dto.Dtos.AbcCompileRunResponse;
 import com.storeql.inventory.dto.Dtos.AccountingPeriodResponse;
@@ -51,6 +56,9 @@ import com.storeql.inventory.dto.Dtos.CycleCountLineResponse;
 import com.storeql.inventory.dto.Dtos.DeadStockRowResponse;
 import com.storeql.inventory.dto.Dtos.DemandBucketResponse;
 import com.storeql.inventory.dto.Dtos.ExpiringBatchResponse;
+import com.storeql.inventory.dto.Dtos.ForecastPointResponse;
+import com.storeql.inventory.dto.Dtos.ForecastResponse;
+import com.storeql.inventory.dto.Dtos.ForecastRunResponse;
 import com.storeql.inventory.dto.Dtos.KanbanCardResponse;
 import com.storeql.inventory.dto.Dtos.LevelResponse;
 import com.storeql.inventory.dto.Dtos.LevelSummaryResponse;
@@ -83,6 +91,9 @@ import com.storeql.inventory.dto.Dtos.TransferOrderLineResponse;
 import com.storeql.inventory.dto.Dtos.TransferOrderResponse;
 import com.storeql.inventory.dto.Dtos.ValuationRowResponse;
 import com.storeql.inventory.dto.Dtos.ZoneGlMappingResponse;
+import com.storeql.inventory.service.ForecastService;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
@@ -116,7 +127,12 @@ public final class Mappers {
    */
   public static LevelResponse toLevel(Level l) {
     return new LevelResponse(
-        l.storeId().toString(), l.variantId().toString(), l.onHand(), l.reserved(), l.available());
+        l.storeId().toString(),
+        l.variantId().toString(),
+        l.onHand(),
+        l.reserved(),
+        l.available(),
+        l.inBond());
   }
 
   /**
@@ -140,7 +156,102 @@ public final class Mappers {
         b.materialStatus(),
         b.materialStatusReason(),
         b.grade(),
-        b.zoneId() == null ? null : b.zoneId().toString());
+        b.zoneId() == null ? null : b.zoneId().toString(),
+        b.ownership(),
+        b.ownerSupplierId() == null ? null : b.ownerSupplierId().toString(),
+        b.dutyStatus());
+  }
+
+  public static Dtos.BondApprovalResponse toDto(Domain.BondApproval a) {
+    return new Dtos.BondApprovalResponse(
+        a.storeId().toString(),
+        a.approvalNumber(),
+        a.regime(),
+        a.active(),
+        ts(a.createdAt()),
+        a.endedAt() == null ? null : a.endedAt().toString());
+  }
+
+  public static Dtos.DutyRateResponse toDto(Domain.ExciseDutyRate r) {
+    return new Dtos.DutyRateResponse(
+        r.variantId().toString(), r.dutyPerUnit(), r.currency(), r.note(), ts(r.updatedAt()));
+  }
+
+  public static Dtos.BondReleaseResponse toDto(Domain.BondRelease r) {
+    return new Dtos.BondReleaseResponse(
+        r.id().toString(),
+        r.storeId().toString(),
+        r.variantId().toString(),
+        r.qty(),
+        r.dutyPerUnit(),
+        r.dutyAmount(),
+        r.currency(),
+        r.reference(),
+        ts(r.releasedAt()));
+  }
+
+  // ── Fresh yield, preparation and butchery loss ─────────────────────────────
+
+  public static Dtos.YieldOutputSpecResponse toDto(Domain.YieldOutputSpec o) {
+    return new Dtos.YieldOutputSpecResponse(
+        o.variantId().toString(), o.expectedPct(), o.costShare(), o.shelfLifeDays());
+  }
+
+  public static Dtos.YieldTemplateResponse toDto(Domain.YieldTemplate t) {
+    return new Dtos.YieldTemplateResponse(
+        t.id().toString(),
+        t.name(),
+        t.inputVariantId().toString(),
+        t.unit(),
+        t.notes(),
+        t.active(),
+        t.expectedLossPct(),
+        t.outputs().stream().map(Mappers::toDto).toList(),
+        t.createdAt().toString());
+  }
+
+  public static Dtos.YieldRunOutputResponse toDto(Domain.YieldRunOutput o) {
+    return new Dtos.YieldRunOutputResponse(
+        o.variantId().toString(),
+        o.qty(),
+        o.expectedQty(),
+        o.unitCost(),
+        o.batchId() == null ? null : o.batchId().toString());
+  }
+
+  public static Dtos.YieldRunResponse toDto(Domain.YieldRun r) {
+    return new Dtos.YieldRunResponse(
+        r.id().toString(),
+        r.storeId().toString(),
+        r.templateId().toString(),
+        r.templateName(),
+        r.inputVariantId().toString(),
+        r.inputQty(),
+        r.inputCost(),
+        r.outputQty(),
+        r.lossQty(),
+        r.lossPct(),
+        r.expectedLossQty(),
+        r.lossVariance(),
+        r.lossAtCost(),
+        r.reference(),
+        r.notes(),
+        r.recordedAt().toString(),
+        r.outputs().stream().map(Mappers::toDto).toList());
+  }
+
+  public static Dtos.YieldTotalsResponse toDto(Domain.YieldTotals t) {
+    return new Dtos.YieldTotalsResponse(
+        t.runs(), t.inputQty(), t.outputQty(), t.lossQty(), t.expectedLossQty(), t.lossAtCost());
+  }
+
+  public static Dtos.BondStockResponse toDto(Domain.BondStock s) {
+    return new Dtos.BondStockResponse(
+        s.storeId().toString(),
+        s.variantId().toString(),
+        s.qty(),
+        s.dutyPerUnit(),
+        s.dutyPotential());
   }
 
   /**
@@ -158,7 +269,8 @@ public final class Mappers {
         r.orderId() == null ? null : r.orderId().toString(),
         r.status(),
         r.expiresAt() == null ? null : r.expiresAt().toString(),
-        ts(r.createdAt()));
+        ts(r.createdAt()),
+        r.fulfilment());
   }
 
   /**
@@ -180,7 +292,15 @@ public final class Mappers {
    */
   public static ValuationRowResponse toValuationRow(ValuationRow r) {
     return new ValuationRowResponse(
-        r.groupKey(), r.method(), r.onHandQty(), r.unvaluedQty(), r.value());
+        r.groupKey(),
+        r.method(),
+        r.onHandQty(),
+        r.unvaluedQty(),
+        r.value(),
+        r.consignmentQty(),
+        r.consignmentValue(),
+        r.dutySuspendedQty(),
+        r.dutyPotential());
   }
 
   /**
@@ -361,7 +481,8 @@ public final class Mappers {
         l.variantId().toString(),
         l.requestedQty(),
         l.shippedQty(),
-        l.receivedQty());
+        l.receivedQty(),
+        l.reason());
   }
 
   /**
@@ -383,6 +504,10 @@ public final class Mappers {
         ts(o.createdAt()),
         ts(o.shippedAt()),
         ts(o.receivedAt()),
+        o.source(),
+        o.proposalRunId() == null ? null : o.proposalRunId().toString(),
+        o.purchaseOrderId() == null ? null : o.purchaseOrderId().toString(),
+        o.goodsReceiptId() == null ? null : o.goodsReceiptId().toString(),
         lines.stream().map(Mappers::toTransferOrderLine).toList());
   }
 
@@ -852,5 +977,70 @@ public final class Mappers {
             .toList(),
         report.historyComplete(),
         report.windowDays());
+  }
+
+  // ── Demand forecast (06.x) ───────────────────────────────────────────────────
+
+  public static ForecastRunResponse toForecastRun(ForecastService.RunResult r) {
+    return new ForecastRunResponse(
+        r.storeId().toString(),
+        r.variants(),
+        r.byMethod(),
+        r.meanMape(),
+        r.horizonDays(),
+        r.computedAt().toString(),
+        r.fresh(),
+        r.seasonal(),
+        r.promoted());
+  }
+
+  /**
+   * A stored forecast on the wire; the daily points only when asked, since a list of a store's
+   * forecasts would otherwise carry a month of numbers per row.
+   */
+  public static ForecastResponse toForecast(DemandForecast d, boolean withPoints) {
+    Forecasting.Forecast f = d.forecast();
+    FreshProfile fresh = d.fresh() == null ? FreshProfile.KEEPS : d.fresh();
+    List<ForecastPointResponse> points = List.of();
+    if (withPoints) {
+      List<ForecastPointResponse> out = new java.util.ArrayList<>(f.points().size());
+      for (int i = 0; i < f.points().size(); i++) {
+        out.add(new ForecastPointResponse(f.fromDay().plusDays(i).toString(), f.points().get(i)));
+      }
+      points = out;
+    }
+    return new ForecastResponse(
+        d.id().toString(),
+        d.storeId().toString(),
+        d.variantId().toString(),
+        f.method(),
+        f.intermittent(),
+        f.alpha(),
+        f.level(),
+        f.weekdayProfile(),
+        d.historyFrom().toString(),
+        d.historyTo().toString(),
+        f.historyDays(),
+        d.horizonDays(),
+        f.fromDay().toString(),
+        f.expectedOver(7),
+        f.expectedOver(28),
+        f.accuracy().holdoutDays(),
+        f.accuracy().mape(),
+        f.accuracy().bias(),
+        f.accuracy().mase(),
+        points,
+        d.computedAt().toString(),
+        fresh.fresh(),
+        fresh.shelfLifeDays(),
+        fresh.wasteRate() == null
+            ? null
+            : fresh.wasteRate().multiply(BigDecimal.valueOf(100)).setScale(2, RoundingMode.HALF_UP),
+        fresh.maxCoverDays(),
+        f.seasonalIndices(),
+        f.uplift(),
+        f.uplift() == null ? null : f.upliftSource(),
+        f.promotedHistoryDays(),
+        f.promotedAheadDays());
   }
 }

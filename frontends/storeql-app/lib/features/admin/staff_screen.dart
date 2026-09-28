@@ -7,13 +7,30 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
+import 'providers/staff_names.dart';
 import 'role_dialog.dart';
 import '../../shared/util/short_ref.dart';
+import '../../core/theme.dart';
 
 const _roles = ['OWNER', 'MANAGER', 'STOREKEEPER', 'CASHIER'];
+
+/// A role by its name — the one the Roles tab shows beside its code — and, while
+/// the roles are loading or for a code they do not list, the code in words.
+String _roleName(String code, Map<String, String> names) {
+  final name = names[code];
+  return name != null && name.isNotEmpty ? name : humanizeCode(code);
+}
+
+/// Role code → name, from the roles already read (empty while they load).
+Map<String, String> _roleNames(List<TenantRole>? roles) =>
+    {for (final r in roles ?? const <TenantRole>[]) r.code: r.name};
 
 /// Staff and the roles they hold (20.10). Two tabs: the people assigned to
 /// stores, and the roles — the four built-in tiers beside the tenant's own,
@@ -23,19 +40,22 @@ class StaffScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // One inset for the title, the tab labels, the actions and the cards, so
+    // their edges line up: 16 on a phone, 24 from tablet width.
+    final gutter = context.pageGutter;
     return DefaultTabController(
       length: 2,
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-            child: Text('Staff', style: Theme.of(context).textTheme.headlineMedium),
-          ),
-          const TabBar(
+          const PageHeader(title: 'Staff'),
+          TabBar(
             isScrollable: true,
             tabAlignment: TabAlignment.start,
-            tabs: [Tab(text: 'People'), Tab(text: 'Roles')],
+            padding: EdgeInsetsDirectional.only(start: gutter - AppSpacing.lg),
+            labelPadding:
+                const EdgeInsetsDirectional.symmetric(horizontal: AppSpacing.lg),
+            tabs: const [Tab(text: 'People'), Tab(text: 'Roles')],
           ),
           const Expanded(
             child: TabBarView(children: [_PeopleTab(), _RolesTab()]),
@@ -52,50 +72,46 @@ class _PeopleTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final staffAsync = ref.watch(staffProvider);
-    final cs = Theme.of(context).colorScheme;
+    final gutter = context.pageGutter;
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+          padding: EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.md, gutter, 0),
           // A Wrap, not a Row: four actions do not fit a phone's width on one line.
-          // Full width, so the end alignment has somewhere to push them to.
-          child: SizedBox(
-            width: double.infinity,
-            child: Wrap(
-              alignment: WrapAlignment.end,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                OutlinedButton.icon(
-                  key: const Key('sso-open'),
-                  onPressed: () => showDialog<bool>(context: context, builder: (_) => const SsoSettingsDialog()),
-                  icon: const Icon(Icons.business_outlined),
-                  label: const Text('Single sign-on'),
-                ),
-                OutlinedButton.icon(
-                  key: const Key('mfa-policy-open'),
-                  onPressed: () => showDialog<bool>(context: context, builder: (_) => const MfaPolicyDialog()),
-                  icon: const Icon(Icons.verified_user_outlined),
-                  label: const Text('Second step'),
-                ),
-                FilledButton.icon(
-                  onPressed: () => _showAssignDialog(context, ref),
-                  icon: const Icon(Icons.person_add),
-                  label: const Text('Assign Staff'),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.refresh),
-                  tooltip: 'Refresh staff',
-                  onPressed: () => ref.invalidate(staffProvider),
-                ),
-              ],
-            ),
+          child: Wrap(
+            alignment: WrapAlignment.end,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: AppSpacing.sm,
+            runSpacing: AppSpacing.sm,
+            children: [
+              OutlinedButton.icon(
+                key: const Key('sso-open'),
+                onPressed: () => showDialog<bool>(context: context, builder: (_) => const SsoSettingsDialog()),
+                icon: const Icon(Icons.business_outlined),
+                label: const Text('Single sign-on'),
+              ),
+              OutlinedButton.icon(
+                key: const Key('mfa-policy-open'),
+                onPressed: () => showDialog<bool>(context: context, builder: (_) => const MfaPolicyDialog()),
+                icon: const Icon(Icons.verified_user_outlined),
+                label: const Text('Second step'),
+              ),
+              FilledButton.icon(
+                onPressed: () => _showAssignDialog(context, ref),
+                icon: const Icon(Icons.person_add),
+                label: const Text('Assign Staff'),
+              ),
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: 'Refresh staff',
+                onPressed: () => ref.invalidate(staffProvider),
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: AppSpacing.sm),
         Expanded(
           child: staffAsync.when(
             loading: () => const LoadingView(label: 'Loading staff…'),
@@ -105,89 +121,61 @@ class _PeopleTab extends ConsumerWidget {
             ),
             data: (staff) {
               if (staff.isEmpty) {
-                return Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.people_outline, size: 64, color: cs.outlineVariant),
-                      const SizedBox(height: 16),
-                      Text('No staff assigned yet',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Assign a user to a store with a role to grant them access.',
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodyMedium
-                            ?.copyWith(color: cs.outline),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 24),
-                      OutlinedButton.icon(
-                        onPressed: () => _showAssignDialog(context, ref),
-                        icon: const Icon(Icons.person_add),
-                        label: const Text('Assign Staff'),
-                      ),
-                    ],
+                return EmptyState(
+                  icon: Icons.people_outline,
+                  title: 'No staff assigned yet',
+                  message:
+                      'Assign a user to a store with a role to grant them access.',
+                  action: OutlinedButton.icon(
+                    onPressed: () => _showAssignDialog(context, ref),
+                    icon: const Icon(Icons.person_add),
+                    label: const Text('Assign Staff'),
                   ),
                 );
               }
-              return ListView.separated(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                itemCount: staff.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 4),
-                itemBuilder: (context, i) {
-                  final m = staff[i];
-                  return Card(
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: cs.secondaryContainer,
-                        child: Icon(Icons.person_outline,
-                            color: cs.onSecondaryContainer),
-                      ),
-                      title: Row(
-                        children: [
-                          _RoleBadge(role: m.role),
-                          if (m.customRole) ...[
-                            const SizedBox(width: 4),
-                            Text('on ${m.baseTier}',
-                                style: TextStyle(fontSize: 11, color: cs.outline)),
-                          ],
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              m.userId,
-                              style: const TextStyle(
-                                  fontFamily: 'monospace', fontSize: 12),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                      subtitle: Text(
-                        'Store: ${shortRef(m.storeId)}',
-                        style:
-                            const TextStyle(fontFamily: 'monospace', fontSize: 11),
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.phonelink_erase_outlined),
-                            tooltip: 'Reset second step (lost phone)',
-                            onPressed: () => resetSecondFactor(context, ref, m.userId, 'this member of staff'),
-                          ),
-                          IconButton(
-                            icon: Icon(Icons.delete_outline, color: cs.error),
-                            tooltip: 'Remove',
-                            onPressed: () => _removeStaff(context, ref, m),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              );
+              // People and places by name: tenant-svc's assignments carry
+              // only ids, iam-svc names the logins and the stores are read
+              // already. A short reference stands in while a name is unknown.
+              final logins = ref
+                      .watch(staffLoginsProvider(
+                          staffIdsKey(staff.map((m) => m.userId))))
+                      .value ??
+                  const <String, String>{};
+              final storeNames = {
+                for (final s in ref.watch(storesProvider).value ??
+                    const <StoreInfo>[])
+                  s.id: s.name,
+              };
+              final roleNames = _roleNames(ref.watch(rolesProvider).value);
+              return LayoutBuilder(builder: (context, constraints) {
+                // On a phone the two actions fold into one menu, so the name
+                // keeps most of the row.
+                final compact = AppBreakpoints.classOf(constraints.maxWidth) ==
+                    WindowClass.compact;
+                return ListView.separated(
+                  padding: EdgeInsetsDirectional.fromSTEB(
+                      gutter, AppSpacing.sm, gutter, AppSpacing.lg),
+                  itemCount: staff.length,
+                  separatorBuilder: (_, _) =>
+                      const SizedBox(height: AppSpacing.xs),
+                  itemBuilder: (context, i) {
+                    final m = staff[i];
+                    return _StaffCard(
+                      member: m,
+                      name: staffDisplayName(m.userId, logins),
+                      store: storeNames[m.storeId] ??
+                          'Store ${shortRef(m.storeId)}',
+                      role: _roleName(m.role, roleNames),
+                      tier: _roleName(m.baseTier, roleNames),
+                      compact: compact,
+                      onResetSecondStep: (who) =>
+                          resetSecondFactor(context, ref, m.userId, who),
+                      onRemove: (who, store, role) =>
+                          _removeStaff(context, ref, m, who, store, role),
+                    );
+                  },
+                );
+              });
             },
           ),
         ),
@@ -204,14 +192,14 @@ class _PeopleTab extends ConsumerWidget {
     );
   }
 
-  Future<void> _removeStaff(
-      BuildContext context, WidgetRef ref, StaffMember m) async {
+  Future<void> _removeStaff(BuildContext context, WidgetRef ref, StaffMember m,
+      String who, String store, String role) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Remove staff assignment?'),
         content: Text(
-            'Remove ${m.role} access for this user at this store. They lose access to it immediately.'),
+            'Remove $role access for $who at $store. They lose access to it immediately.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -248,28 +236,120 @@ class _PeopleTab extends ConsumerWidget {
   }
 }
 
+/// One assignment: who (their login), then their role and the store on the
+/// line under it. The name has a line of its own, so neither the role badge nor
+/// the actions can cut it short.
+class _StaffCard extends StatelessWidget {
+  const _StaffCard({
+    required this.member,
+    required this.name,
+    required this.store,
+    required this.role,
+    required this.tier,
+    required this.compact,
+    required this.onResetSecondStep,
+    required this.onRemove,
+  });
+
+  final StaffMember member;
+  final String name;
+  final String store;
+  final String role;
+  final String tier;
+  final bool compact;
+  final void Function(String who) onResetSecondStep;
+  final void Function(String who, String store, String role) onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Card(
+      child: ListTile(
+        key: Key('staff-${member.id}'),
+        leading: CircleAvatar(
+          backgroundColor: cs.secondaryContainer,
+          child: Icon(Icons.person_outline, color: cs.onSecondaryContainer),
+        ),
+        title: Text(name),
+        subtitle: Padding(
+          padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
+          child: Wrap(
+            spacing: AppSpacing.sm,
+            runSpacing: AppSpacing.xs,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              _RoleBadge(role: role),
+              if (member.customRole) Text('on $tier'),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.store_outlined, size: 16, color: cs.onSurfaceVariant),
+                  const SizedBox(width: AppSpacing.xs),
+                  Flexible(child: Text(store)),
+                ],
+              ),
+            ],
+          ),
+        ),
+        trailing: compact
+            ? PopupMenuButton<String>(
+                key: Key('staff-actions-${member.id}'),
+                tooltip: 'Actions for $name',
+                onSelected: (v) => v == 'reset'
+                    ? onResetSecondStep(name)
+                    : onRemove(name, store, role),
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: 'reset',
+                    child: Row(
+                      children: [
+                        Icon(Icons.phonelink_erase_outlined, size: 20),
+                        SizedBox(width: AppSpacing.md),
+                        Flexible(child: Text('Reset second step')),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'remove',
+                    child: Row(
+                      children: [
+                        Icon(Icons.delete_outline, size: 20, color: cs.error),
+                        const SizedBox(width: AppSpacing.md),
+                        const Flexible(child: Text('Remove')),
+                      ],
+                    ),
+                  ),
+                ],
+              )
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.phonelink_erase_outlined),
+                    tooltip: 'Reset second step (lost phone)',
+                    onPressed: () => onResetSecondStep(name),
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.delete_outline, color: cs.error),
+                    tooltip: 'Remove',
+                    onPressed: () => onRemove(name, store, role),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+/// A role in the house badge. The People tab passes the role's name; the Roles
+/// tab, where roles are defined by code, passes the code beside the name.
 class _RoleBadge extends StatelessWidget {
   final String role;
   const _RoleBadge({required this.role});
 
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: cs.primaryContainer,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text(
-        role,
-        style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-            color: cs.onPrimaryContainer),
-      ),
-    );
-  }
+  Widget build(BuildContext context) =>
+      StatusBadge(role, tone: StatusTone.accent);
 }
 
 class _AssignStaffDialog extends ConsumerStatefulWidget {
@@ -293,13 +373,17 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
   /// named with the tier it stands on. Falls back to the tiers alone while the
   /// list loads or if it cannot be read.
   List<DropdownMenuItem<String>> _roleItems(AsyncValue<List<TenantRole>> roles) {
+    // Every role by its name — the tiers as the staff list names them
+    // (*Cashier*), a custom role with the tier it stands on (*Shift lead · on
+    // Manager*) — never its code.
+    final names = _roleNames(roles.value);
     final items = _roles
-        .map((r) => DropdownMenuItem(value: r, child: Text(r)))
+        .map((r) => DropdownMenuItem(value: r, child: Text(_roleName(r, names))))
         .toList();
     for (final r in (roles.value ?? const <TenantRole>[]).where((r) => r.custom)) {
       items.add(DropdownMenuItem(
         value: r.code,
-        child: Text('${r.name} (${r.code}, on ${r.baseTier})',
+        child: Text('${r.name} · on ${_roleName(r.baseTier, names)}',
             overflow: TextOverflow.ellipsis),
       ));
     }
@@ -384,8 +468,9 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
         ),
       );
     } else {
+      final role = _roleName(_role, _roleNames(ref.read(rolesProvider).value));
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$email assigned as $_role.')),
+        SnackBar(content: Text('$email assigned as $role.')),
       );
     }
   }
@@ -431,7 +516,7 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: cs.errorContainer,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: AppRadius.chip,
                   ),
                   child: Text(_error!, style: TextStyle(color: cs.onErrorContainer)),
                 ),
@@ -549,10 +634,11 @@ class _TempPasswordRevealState extends State<_TempPasswordReveal> {
     final cs = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+      padding: const EdgeInsetsDirectional.fromSTEB(
+          AppSpacing.md, AppSpacing.sm, AppSpacing.xs, AppSpacing.sm),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: AppRadius.chip,
       ),
       child: Row(
         children: [
@@ -600,10 +686,12 @@ class _RolesTab extends ConsumerWidget {
   const _RolesTab();
 
   Future<void> _delete(BuildContext context, WidgetRef ref, TenantRole role) async {
+    // By its name, as the list names it; the code only travels in the request.
+    final name = _roleName(role.code, {role.code: role.name});
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Delete ${role.code}?'),
+        title: Text('Delete $name?'),
         content: const Text(
             'Refused while anyone still holds it — remove those assignments first.'),
         actions: [
@@ -625,7 +713,7 @@ class _RolesTab extends ConsumerWidget {
       ref.invalidate(rolesProvider);
       if (!context.mounted) return;
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('${role.code} deleted.')));
+          .showSnackBar(SnackBar(content: Text('$name deleted.')));
     } catch (e) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -637,11 +725,12 @@ class _RolesTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
     final rolesAsync = ref.watch(rolesProvider);
+    final gutter = context.pageGutter;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+          padding: EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.md, gutter, 0),
           child: Row(
             children: [
               Expanded(
@@ -677,8 +766,11 @@ class _RolesTab extends ConsumerWidget {
               message: friendlyError(e, fallback: 'Could not load roles.'),
               onRetry: () => ref.invalidate(rolesProvider),
             ),
-            data: (roles) => ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            data: (roles) {
+              final names = _roleNames(roles);
+              return ListView.separated(
+              padding: EdgeInsetsDirectional.fromSTEB(
+                  gutter, AppSpacing.sm, gutter, AppSpacing.lg),
               itemCount: roles.length,
               separatorBuilder: (_, _) => const SizedBox(height: 4),
               itemBuilder: (context, i) {
@@ -693,14 +785,17 @@ class _RolesTab extends ConsumerWidget {
                         color: r.custom ? cs.onTertiaryContainer : cs.onSecondaryContainer,
                       ),
                     ),
+                    // The role by its name; a custom one says so in a badge.
                     title: Row(children: [
-                      _RoleBadge(role: r.code),
-                      const SizedBox(width: 8),
-                      Expanded(child: Text(r.name, overflow: TextOverflow.ellipsis)),
+                      Flexible(child: Text(r.name, overflow: TextOverflow.ellipsis)),
+                      if (r.custom) ...[
+                        const SizedBox(width: AppSpacing.sm),
+                        const _RoleBadge(role: 'Custom'),
+                      ],
                     ]),
                     subtitle: Text(
                       r.custom
-                          ? 'On ${r.baseTier} · ${r.permissions.isEmpty ? 'holds nothing' : r.permissions.join(', ')}'
+                          ? 'On ${_roleName(r.baseTier, names)} · ${r.permissions.isEmpty ? 'holds nothing' : r.permissions.join(', ')}'
                           : r.permissions.isEmpty
                               ? 'Built in · holds no permission'
                               : 'Built in · ${r.permissions.join(', ')}',
@@ -727,7 +822,8 @@ class _RolesTab extends ConsumerWidget {
                   ),
                 );
               },
-            ),
+            );
+            },
           ),
         ),
       ],

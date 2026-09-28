@@ -24,7 +24,12 @@ public final class Dtos {
       @Schema(description = "ISO 3166-1 alpha-2 country code.") @NotBlank @Size(min = 2, max = 2)
           String country,
       @Schema(description = "ISO 4217 currency code.") @NotBlank @Size(min = 3, max = 3)
-          String currency) {}
+          String currency,
+      @Schema(
+              description =
+                  "The plan chosen at signup (21.13): one on sale to the public, else the platform's"
+                      + " default. 409 PLAN_NOT_SOLD or PLAN_NOT_PUBLIC otherwise.")
+          String planId) {}
 
   @Schema(name = "UpdateTenantRequest")
   public record UpdateTenantRequest(
@@ -72,7 +77,12 @@ public final class Dtos {
                   "Null defaults to true (show prices). false = availability-only storefront.")
           Boolean showPrices,
       @Schema(description = "Null defaults to CASH,CARD. Subset of CASH, CARD, UPI, WALLET.")
-          List<String> enabledPaymentMethods) {}
+          List<String> enabledPaymentMethods,
+      @Schema(
+              description =
+                  "What the till asks for the customer's phone: REQUIRED, OPTIONAL or OFF. Null"
+                      + " defaults to OPTIONAL.")
+          String tillPhone) {}
 
   @Schema(name = "UpdateStoreRequest")
   public record UpdateStoreRequest(
@@ -92,7 +102,12 @@ public final class Dtos {
               description =
                   "Null keeps current value. Subset of CASH, CARD, UPI, WALLET; must not be"
                       + " empty.")
-          List<String> enabledPaymentMethods) {}
+          List<String> enabledPaymentMethods,
+      @Schema(
+              description =
+                  "What the till asks for the customer's phone: REQUIRED, OPTIONAL or OFF. Null"
+                      + " keeps the current value.")
+          String tillPhone) {}
 
   @Schema(name = "PatchStatusRequest")
   public record PatchStatusRequest(
@@ -177,16 +192,24 @@ public final class Dtos {
       @Schema(description = "Identifier within that scheme, or null.") String einvoiceId,
       @Schema(
               description =
-                  "Why it is switched off: NON_PAYMENT (dunning, and lifted by paying up) or"
-                      + " ADMINISTRATOR (never lifted by a payment). Null when it is trading.")
-          String deactivatedReason) {}
+                  "Why it is switched off: NON_PAYMENT (dunning, and lifted by paying up),"
+                      + " ADMINISTRATOR (never lifted by a payment) or SANDBOX_DELETED (a sandbox"
+                      + " its owner removed). Null when it is trading.")
+          String deactivatedReason,
+      @Schema(
+              description =
+                  "LIVE, or SANDBOX for a business's test double (22.8): nothing in a sandbox is"
+                      + " real — no message leaves it, no money moves, nothing is billed.")
+          String mode,
+      @Schema(description = "For a SANDBOX, the live business it stands in for; null otherwise.")
+          String sandboxOf) {}
 
   @Schema(name = "StoreResponse")
   public record StoreResponse(
       String id,
       String name,
       String code,
-      @Schema(description = "STORE or WAREHOUSE.") String type,
+      @Schema(description = "STORE, WAREHOUSE or DARK_STORE.") String type,
       @Schema(description = "ACTIVE or INACTIVE.") String status,
       @Schema(description = "True if this is the tenant's default store.") boolean isDefault,
       String line1,
@@ -201,6 +224,10 @@ public final class Dtos {
       String businessHours,
       boolean showPrices,
       List<String> enabledPaymentMethods,
+      @Schema(
+              description =
+                  "What the till asks for the customer's phone: REQUIRED, OPTIONAL or OFF.")
+          String tillPhone,
       String createdAt,
       String updatedAt) {}
 
@@ -222,7 +249,25 @@ public final class Dtos {
       @Schema(
               description =
                   "The deposit return scheme in force where this store trades, or null (09.16).")
-          DepositSchemeResponse depositScheme) {}
+          DepositSchemeResponse depositScheme,
+      @Schema(description = "STORE, WAREHOUSE or DARK_STORE.") String type,
+      @Schema(
+              description =
+                  "Whether a shopper may collect an order here. False at a dark store, which fills"
+                      + " online orders for delivery only (ship-from-store and dark-store picking).")
+          boolean pickupOffered,
+      @Schema(
+              description =
+                  "The business the store belongs to: the tenant's legal name, else its name. Always"
+                      + " the business whose storefront is asked. The storefront's accessibility"
+                      + " statement names it as the service provider, never a store.")
+          String businessName,
+      @Schema(
+              description =
+                  "What the store's till asks for the customer's phone: REQUIRED, OPTIONAL or OFF"
+                      + " (a phone at the till). The till reads it here, from the list a cashier"
+                      + " may read; it names nobody.")
+          String tillPhone) {}
 
   @Schema(name = "ZoneResponse")
   public record ZoneResponse(
@@ -272,7 +317,12 @@ public final class Dtos {
       @Schema(
               description =
                   "Required: the IANA zone the first store trades in, such as Europe/London.")
-          String storeTimezone) {}
+          String storeTimezone,
+      @Schema(
+              description =
+                  "The plan chosen at signup (21.13): one on sale to the public, else the platform's"
+                      + " default. 409 PLAN_NOT_SOLD or PLAN_NOT_PUBLIC otherwise.")
+          String planId) {}
 
   @Schema(name = "OnboardResponse")
   public record OnboardResponse(TenantResponse tenant, StoreResponse store) {}

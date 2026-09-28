@@ -236,6 +236,16 @@ public final class PostgresSupport implements AutoCloseable {
                 + ". common-service's afterMigrate__uuid_v7_everywhere.sql adds the check after every"
                 + " migrate; did the migration fail?");
       }
+      List<String> unbound = guardsWithUnboundBodies();
+      if (!unbound.isEmpty()) {
+        throw new AssertionError(
+            "v7 guard functions whose bodies are parsed at call time: "
+                + unbound
+                + ". pg_restore runs with an empty search_path, so a guard that names another"
+                + " function unqualified fails every COPY into a table it checks and the backup"
+                + " cannot be restored (the backup drill found this). Define guards with BEGIN"
+                + " ATOMIC so their references bind at creation.");
+      }
     } finally {
       container.stop();
     }
@@ -279,6 +289,30 @@ public final class PostgresSupport implements AutoCloseable {
   public List<String> unguardedUuidColumns() {
     return columnsMatching(UNGUARDED_UUID_COLUMNS);
   }
+
+  /**
+   * @return every v7 guard function ({@code uuid_*_v7}) in any schema whose SQL body is a string
+   *     parsed at call time rather than a body parsed at creation ({@code pg_proc.prosqlbody}); a
+   *     restore runs with an empty search_path and such a body cannot resolve what it names
+   */
+  public List<String> guardsWithUnboundBodies() {
+    List<String> out = new java.util.ArrayList<>();
+    try (Connection c = dataSource().getConnection();
+        PreparedStatement ps = c.prepareStatement(UNBOUND_GUARDS);
+        ResultSet rs = ps.executeQuery()) {
+      while (rs.next()) {
+        out.add(rs.getString(1));
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException("could not audit the v7 guard functions", e);
+    }
+    return out;
+  }
+
+  private static final String UNBOUND_GUARDS =
+      "SELECT n.nspname || '.' || p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+          + " WHERE p.proname LIKE 'uuid\\_%\\_v7' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'sql')"
+          + " AND p.prosqlbody IS NULL AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1";
 
   /**
    * @return every uuid or uuid[] column, in any table, holding values that are not RFC 9562 v7,

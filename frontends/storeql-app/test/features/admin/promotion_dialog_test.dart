@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/pricing_screen.dart';
 
@@ -79,6 +80,8 @@ Future<void> _pickScope(WidgetTester tester, String label) async {
 }
 
 void main() {
+  // The dialog's dates are written with AppFormat, in the app's en_GB locale.
+  setUpAll(initializeDateFormatting);
   testWidgets('a deal applies to everything unless told otherwise, and says so', (tester) async {
     final server = await _open(tester);
     expect(find.text('Everything'), findsOneWidget);

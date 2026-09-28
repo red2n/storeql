@@ -22,7 +22,7 @@ class PermissionsTest {
   @Test
   @DisplayName("Every code in the catalogue has a sentence, and the sets agree")
   void catalogueIsComplete() {
-    assertEquals(12, Permissions.ALL.size());
+    assertEquals(13, Permissions.ALL.size());
     for (String code : Permissions.ALL) {
       assertTrue(Permissions.catalogue().containsKey(code));
       assertTrue(Permissions.isKnown(code));
@@ -37,7 +37,8 @@ class PermissionsTest {
     assertEquals(Permissions.ALL, Permissions.defaultsFor("MANAGER"));
     assertEquals(Permissions.ALL, Permissions.defaultsFor("OWNER"));
     assertEquals(
-        Set.of(Permissions.STOCK_ADJUST, Permissions.PURCHASING_APPROVE),
+        Set.of(
+            Permissions.STOCK_ADJUST, Permissions.STOCK_TRANSFER, Permissions.PURCHASING_APPROVE),
         Permissions.defaultsFor("STOREKEEPER"));
     assertEquals(
         Set.of(Permissions.TILL_NO_SALE, Permissions.PURCHASING_APPROVE),
@@ -51,7 +52,11 @@ class PermissionsTest {
   @DisplayName("Several roles hold the union of their defaults")
   void effectiveIsAUnion() {
     assertEquals(
-        Set.of(Permissions.STOCK_ADJUST, Permissions.TILL_NO_SALE, Permissions.PURCHASING_APPROVE),
+        Set.of(
+            Permissions.STOCK_ADJUST,
+            Permissions.STOCK_TRANSFER,
+            Permissions.TILL_NO_SALE,
+            Permissions.PURCHASING_APPROVE),
         Permissions.effective(Set.of("STOREKEEPER", "CASHIER")));
     assertTrue(Permissions.effective(Set.of()).isEmpty());
     assertTrue(Permissions.effective(null).isEmpty());

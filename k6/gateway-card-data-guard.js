@@ -72,6 +72,9 @@ export default function ({ tenant, store, productId, variantId }) {
   expect(product({ description: 'IMEI 353918050478917, serial 36123456789012, call +44 7911 123456, ref ORD-2026-000042' }), 'an IMEI, a GTIN-14, a phone number and an order ref are not cards', 201);
   expect(product({ description: 'looks like a card but fails Luhn: 4111111111111112' }), 'sixteen digits that fail Luhn are not a card', 201);
   expect(product({ description: `id 01234567-8901-7234-8567-890123456789 and stamp ${Date.now()}` }), 'an all-digit id and a timestamp are not cards', 201);
+  // SJ-D67: 5100 7069 8187 0918 is Luhn-valid in Mastercard's range and 4236 7684 9322 3069 in Visa's;
+  // inside a UUID's shape each is an identifier, whatever its digits add up to.
+  expect(product({ description: 'ids 019993e0-5100-7069-8187-0918e7284e47 and 01998bcd-4236-7684-9322-3069a2373271' }), 'two ids whose digit groups line up as card numbers are ids (SJ-D67)', 201);
 
   // ── the real flow, with the guard in place ────────────────────────────────
   const sale = call('POST', '/api/order-svc/orders', { token: owner, idem: true, body: { storeId: store.id, channel: 'POS', fulfilmentType: 'INSTORE', currency: 'GBP', items: [{ variantId, qty: 1, unitPrice: '9.00' }] } });

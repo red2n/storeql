@@ -98,7 +98,12 @@ public class AdminResource {
             "MANUAL",
             null,
             zoneId,
-            idempotencyKey != null && !idempotencyKey.isBlank() ? idempotencyKey : null);
+            idempotencyKey != null && !idempotencyKey.isBlank() ? idempotencyKey : null,
+            req.ownership(),
+            req.supplierId() == null || req.supplierId().isBlank()
+                ? null
+                : uuid(req.supplierId(), "supplierId"),
+            req.dutyStatus());
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toBatch(batch)))
         .build();
@@ -213,7 +218,7 @@ public class AdminResource {
       @QueryParam("after") String after,
       @QueryParam("limit") Integer limit) {
     UUID tenantId = ctx.requireTenantId();
-    UUID storeId = store == null || store.isBlank() ? null : uuid(store, "store");
+    UUID storeId = ctx.scopeStore(store == null || store.isBlank() ? null : uuid(store, "store"));
     int clamped = Cursor.clampLimit(limit);
     var page = service.levelsPage(tenantId, storeId, after, clamped);
     List<LevelResponse> items = page.levels().stream().map(Mappers::toLevel).toList();
@@ -229,7 +234,7 @@ public class AdminResource {
   @Path("/levels/summary")
   public ApiResponse<LevelSummaryResponse> levelsSummary(@QueryParam("store") String store) {
     UUID tenantId = ctx.requireTenantId();
-    UUID storeId = store == null || store.isBlank() ? null : uuid(store, "store");
+    UUID storeId = ctx.scopeStore(store == null || store.isBlank() ? null : uuid(store, "store"));
     return ApiResponse.ok(
         Mappers.toLevelSummary(service.levelsSummary(tenantId, storeId)),
         ApiResponse.Meta.of(ctx.requestId()));
@@ -259,7 +264,7 @@ public class AdminResource {
       @QueryParam("material_status") String materialStatus,
       @QueryParam("limit") Integer limitParam) {
     UUID tenantId = ctx.requireTenantId();
-    UUID storeId = store == null || store.isBlank() ? null : uuid(store, "store");
+    UUID storeId = ctx.scopeStore(store == null || store.isBlank() ? null : uuid(store, "store"));
     UUID variantId = variant == null || variant.isBlank() ? null : uuid(variant, "variant");
     String ms = materialStatus == null || materialStatus.isBlank() ? null : materialStatus;
     int limit = limitParam == null || limitParam < 1 ? 20 : Math.min(limitParam, 100);
@@ -281,7 +286,9 @@ public class AdminResource {
   @GET
   @Path("/batches/{id}")
   public ApiResponse<BatchResponse> getBatch(@PathParam("id") UUID id) {
-    return ApiResponse.ok(Mappers.toBatch(service.getBatch(ctx.requireTenantId(), id)));
+    var batch = service.getBatch(ctx.requireTenantId(), id);
+    ctx.requireStoreAccess(batch.storeId()); // SJ-D74: a batch is read at the store that holds it
+    return ApiResponse.ok(Mappers.toBatch(batch));
   }
 
   /**
@@ -303,6 +310,7 @@ public class AdminResource {
       @PathParam("id") UUID id, MaterialStatusRequest req) {
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getBatch(tenantId, id).storeId());
     var batch = service.updateMaterialStatus(tenantId, id, req.materialStatus(), req.reason());
     return ApiResponse.ok(Mappers.toBatch(batch));
   }
@@ -331,7 +339,7 @@ public class AdminResource {
       @QueryParam("type") String type,
       @QueryParam("limit") Integer limitParam) {
     UUID tenantId = ctx.requireTenantId();
-    UUID storeId = store == null || store.isBlank() ? null : uuid(store, "store");
+    UUID storeId = ctx.scopeStore(store == null || store.isBlank() ? null : uuid(store, "store"));
     UUID variantId = variant == null || variant.isBlank() ? null : uuid(variant, "variant");
     int limit = limitParam == null || limitParam < 1 ? 20 : Math.min(limitParam, 100);
     var items =

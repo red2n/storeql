@@ -71,7 +71,8 @@ public final class SalesPosting {
       UUID tenantId, UUID orderId, UUID storeId, BigDecimal total, BigDecimal tax, LocalDate date) {
     if (total == null || total.signum() <= 0) return List.of();
     BigDecimal vat = tax == null ? BigDecimal.ZERO : tax.max(BigDecimal.ZERO).min(total);
-    return LedgerPosting.of(tenantId, date, "Sale " + orderId, Domain.SOURCE_SALE, orderId, storeId)
+    return LedgerPosting.of(
+            tenantId, date, "Sale " + Handle.of(orderId), Domain.SOURCE_SALE, orderId, storeId)
         .debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, total)
         .credit(Domain.CODE_SALES, Domain.NAME_SALES, total.subtract(vat))
         .credit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat)
@@ -87,7 +88,7 @@ public final class SalesPosting {
     return LedgerPosting.of(
             tenantId,
             date,
-            "Tender (" + how + ") for sale " + orderId,
+            "Tender (" + how + ") for sale " + Handle.of(orderId),
             Domain.SOURCE_SALE_TENDER,
             orderId,
             storeId)
@@ -126,7 +127,7 @@ public final class SalesPosting {
         LedgerPosting.of(
             tenantId,
             date,
-            "Refund for sale " + orderId,
+            "Refund for sale " + Handle.of(orderId),
             Domain.SOURCE_SALE_REFUND,
             orderId,
             storeId);
@@ -161,7 +162,7 @@ public final class SalesPosting {
         LedgerPosting.of(
             tenantId,
             date,
-            "Chargeback on sale " + orderId,
+            "Chargeback on sale " + Handle.of(orderId),
             Domain.SOURCE_CHARGEBACK,
             orderId,
             storeId);
@@ -196,7 +197,7 @@ public final class SalesPosting {
         LedgerPosting.of(
             tenantId,
             date,
-            "Chargeback " + (won ? "won" : "lost") + " on sale " + orderId,
+            "Chargeback " + (won ? "won" : "lost") + " on sale " + Handle.of(orderId),
             Domain.SOURCE_CHARGEBACK,
             orderId,
             storeId);

@@ -6,8 +6,13 @@ import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../shared/util/short_ref.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
+import 'providers/admin_providers.dart';
 
 // ---------------------------------------------------------------------------
 // The card machines a business has (07.16).
@@ -64,6 +69,16 @@ class CardTerminalRow {
       );
 }
 
+/// A make by its name: payment-svc stores it as a code
+/// (SIMULATED | STRIPE_TERMINAL | ADYEN | VERIFONE).
+String terminalVendorLabel(String vendor) => switch (vendor.toUpperCase()) {
+      'SIMULATED' => 'Simulated',
+      'STRIPE_TERMINAL' => 'Stripe Terminal',
+      'ADYEN' => 'Adyen',
+      'VERIFONE' => 'Verifone',
+      _ => humanizeCode(vendor),
+    };
+
 const _terminalsPath = '/${ApiConstants.payment}/admin/payments/terminals';
 
 final terminalsProvider =
@@ -92,14 +107,23 @@ class TerminalsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final terminals = ref.watch(terminalsProvider);
+    // Which store each machine is at, by name: two "Till 1"s at two stores are
+    // different machines. The end of the id stands in until the stores load.
+    final storeNames = {
+      for (final s in ref.watch(storesProvider).value ?? const <StoreInfo>[]) s.id: s.name,
+    };
+    String storeOf(String id) => storeNames[id] ?? shortRef(id);
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      // 16 on a phone, 24 from tablet width up.
+      padding: context.pagePadding,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text('Card machines', style: theme.textTheme.headlineMedium),
-            ),
+        PageHeader(
+          title: 'Card machines',
+          subtitle: 'The card machines on your counters, and which store each one is '
+              'at. A card is approved by the machine itself — this platform never '
+              'sees the card number, only the last four digits your receipt prints.',
+          padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
+          actions: [
             FilledButton.icon(
               key: const Key('terminal-add'),
               onPressed: () => _add(context, ref),
@@ -108,15 +132,6 @@ class TerminalsScreen extends ConsumerWidget {
             ),
           ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          'The card machines on your counters, and which store each one is at. A '
-          'card is approved by the machine itself — this platform never sees the '
-          'card number, only the last four digits your receipt prints.',
-          style: theme.textTheme.bodyMedium
-              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-        ),
-        const SizedBox(height: AppSpacing.lg),
         terminals.when(
           loading: () => const LoadingView(label: 'Loading card machines…'),
           error: (e, _) => ErrorView(
@@ -126,16 +141,13 @@ class TerminalsScreen extends ConsumerWidget {
           ),
           data: (rows) {
             if (rows.isEmpty) {
-              return const Card(
+              return const EmptyState(
                 key: Key('terminals-empty'),
-                child: Padding(
-                  padding: EdgeInsets.all(AppSpacing.lg),
-                  child: Text(
-                    'No card machines yet. Until one is added, a card tender is '
-                    'recorded on the cashier\'s word — nothing checks with the '
-                    'machine whether the card was actually approved.',
-                  ),
-                ),
+                icon: Icons.point_of_sale_outlined,
+                title: 'No card machines yet',
+                message: 'Until one is added, a card tender is recorded on the '
+                    'cashier\'s word — nothing checks with the machine whether the '
+                    'card was actually approved.',
               );
             }
             final active = rows.where((t) => t.active).toList();
@@ -147,6 +159,7 @@ class TerminalsScreen extends ConsumerWidget {
                   _Group(
                     title: 'On the counter',
                     rows: active,
+                    storeOf: storeOf,
                     onRetire: (t) => _retire(context, ref, t),
                   ),
                 if (retired.isNotEmpty) ...[
@@ -154,10 +167,11 @@ class TerminalsScreen extends ConsumerWidget {
                   _Group(
                     title: 'Retired',
                     rows: retired,
+                    storeOf: storeOf,
                     onRetire: null,
                   ),
                   Padding(
-                    padding: const EdgeInsets.only(top: AppSpacing.xs),
+                    padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
                     child: Text(
                       'Retired machines are kept because past payments point at '
                       'them. Their labels are free to reuse.',
@@ -207,9 +221,17 @@ class TerminalsScreen extends ConsumerWidget {
 }
 
 class _Group extends StatelessWidget {
-  const _Group({required this.title, required this.rows, this.onRetire});
+  const _Group({
+    required this.title,
+    required this.rows,
+    required this.storeOf,
+    this.onRetire,
+  });
   final String title;
   final List<CardTerminalRow> rows;
+
+  /// A store's name from its id.
+  final String Function(String storeId) storeOf;
   final void Function(CardTerminalRow)? onRetire;
 
   @override
@@ -230,20 +252,20 @@ class _Group extends StatelessWidget {
                       ? Icons.point_of_sale_outlined
                       : Icons.power_off_outlined),
                   title: Text(t.label),
-                  subtitle: Text(_subtitle(t)),
+                  subtitle: Text(_subtitle(t, storeOf(t.storeId))),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       if (t.simulated)
-                        const Chip(
-                          label: Text('Simulated'),
-                          visualDensity: VisualDensity.compact,
-                        ),
+                        const StatusBadge('Simulated', tone: StatusTone.warning),
+                      // Retiring switches a machine off and keeps it on record
+                      // (payments point at it), so it is a power button, never
+                      // a bin.
                       if (onRetire != null)
                         IconButton(
                           key: Key('terminal-retire-${t.id}'),
                           tooltip: 'Retire',
-                          icon: const Icon(Icons.delete_outline),
+                          icon: const Icon(Icons.power_settings_new),
                           onPressed: () => onRetire!(t),
                         ),
                     ],
@@ -256,9 +278,10 @@ class _Group extends StatelessWidget {
     );
   }
 
-  static String _subtitle(CardTerminalRow t) {
+  static String _subtitle(CardTerminalRow t, String store) {
     final parts = <String>[
-      t.simulated ? 'Simulated — no card is really taken' : t.vendor,
+      store,
+      t.simulated ? 'Simulated — no card is really taken' : terminalVendorLabel(t.vendor),
       if (t.serial != null) 'serial ${t.serial}',
       if (t.createdAt != null) 'added ${AppFormat.date(t.createdAt)}',
       if (t.retiredReason != null) 'retired: ${t.retiredReason}',
@@ -277,29 +300,40 @@ class _AddTerminalDialog extends ConsumerStatefulWidget {
 class _AddTerminalDialogState extends ConsumerState<_AddTerminalDialog> {
   final _label = TextEditingController();
   final _serial = TextEditingController();
-  final _storeId = TextEditingController();
+  String? _storeId;
   String? _vendor;
   bool _saving = false;
   String? _error;
 
   @override
+  void initState() {
+    super.initState();
+    // Add is offered once there is a name to show the cashier.
+    _label.addListener(() => setState(() {}));
+  }
+
+  @override
   void dispose() {
     _label.dispose();
     _serial.dispose();
-    _storeId.dispose();
     super.dispose();
   }
 
-  Future<void> _save() async {
+  /// The stores a machine can go on the counter of. A dark store has no till —
+  /// it fills online orders only — so nothing is paid there in person.
+  static List<StoreInfo> _counters(List<StoreInfo> stores) =>
+      [for (final s in stores) if (s.type != 'DARK_STORE') s];
+
+  Future<void> _save(String storeId, String vendor) async {
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
       await ref.read(apiClientProvider).dio.post(_terminalsPath, data: {
-        'storeId': _storeId.text.trim(),
+        'storeId': storeId,
         'label': _label.text.trim(),
-        'vendor': _vendor,
+        'vendor': vendor,
         if (_serial.text.trim().isNotEmpty) 'serial': _serial.text.trim(),
       });
       if (mounted) Navigator.of(context).pop(true);
@@ -316,6 +350,12 @@ class _AddTerminalDialogState extends ConsumerState<_AddTerminalDialog> {
   @override
   Widget build(BuildContext context) {
     final vendors = ref.watch(terminalVendorsProvider);
+    final stores = ref.watch(storesProvider);
+    final counters = _counters(stores.value ?? const <StoreInfo>[]);
+    // One store, or one make, is chosen already: there is nothing to pick.
+    final storeId = _storeId ?? (counters.length == 1 ? counters.first.id : null);
+    final names = vendors.value ?? const <String>[];
+    final vendor = _vendor ?? (names.length == 1 ? names.first : null);
     return AlertDialog(
       key: const Key('terminal-add-dialog'),
       title: const Text('Add a card machine'),
@@ -334,10 +374,29 @@ class _AddTerminalDialogState extends ConsumerState<_AddTerminalDialog> {
                 ),
               ),
               const SizedBox(height: AppSpacing.sm),
-              TextField(
-                key: const Key('terminal-store'),
-                controller: _storeId,
-                decoration: const InputDecoration(labelText: 'Store'),
+              stores.when(
+                loading: () => const LinearProgressIndicator(),
+                error: (e, _) => Text(
+                  friendlyError(e, fallback: 'Could not read the stores.'),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+                data: (_) => DropdownButtonFormField<String>(
+                  key: const Key('terminal-store'),
+                  initialValue: storeId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Store',
+                    helperText: 'Where the machine sits on the counter.',
+                  ),
+                  items: [
+                    for (final s in counters)
+                      DropdownMenuItem(
+                        value: s.id,
+                        child: Text(s.name, overflow: TextOverflow.ellipsis),
+                      ),
+                  ],
+                  onChanged: (v) => setState(() => _storeId = v),
+                ),
               ),
               const SizedBox(height: AppSpacing.sm),
               vendors.when(
@@ -348,7 +407,7 @@ class _AddTerminalDialogState extends ConsumerState<_AddTerminalDialog> {
                 ),
                 data: (names) => DropdownButtonFormField<String>(
                   key: const Key('terminal-vendor'),
-                  initialValue: _vendor ?? (names.length == 1 ? names.first : null),
+                  initialValue: vendor,
                   isExpanded: true,
                   decoration: const InputDecoration(
                     labelText: 'Make',
@@ -361,7 +420,7 @@ class _AddTerminalDialogState extends ConsumerState<_AddTerminalDialog> {
                         value: n,
                         child: Text(n == 'SIMULATED'
                             ? 'Simulated (nothing is really charged)'
-                            : n),
+                            : terminalVendorLabel(n)),
                       ),
                   ],
                   onChanged: (v) => setState(() => _vendor = v),
@@ -378,7 +437,7 @@ class _AddTerminalDialogState extends ConsumerState<_AddTerminalDialog> {
               ),
               if (_error != null)
                 Padding(
-                  padding: const EdgeInsets.only(top: AppSpacing.sm),
+                  padding: const EdgeInsetsDirectional.only(top: AppSpacing.sm),
                   child: Text(_error!,
                       style:
                           TextStyle(color: Theme.of(context).colorScheme.error)),
@@ -394,7 +453,13 @@ class _AddTerminalDialogState extends ConsumerState<_AddTerminalDialog> {
         ),
         FilledButton(
           key: const Key('terminal-add-save'),
-          onPressed: _saving ? null : _save,
+          // Nothing is sent until there is a store, a name and a make.
+          onPressed: _saving ||
+                  storeId == null ||
+                  vendor == null ||
+                  _label.text.trim().isEmpty
+              ? null
+              : () => _save(storeId, vendor),
           child: const Text('Add'),
         ),
       ],

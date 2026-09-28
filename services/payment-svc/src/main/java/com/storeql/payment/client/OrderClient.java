@@ -65,7 +65,41 @@ public class OrderClient {
       BigDecimal total,
       String status,
       String storeId,
-      String currency) {}
+      String currency,
+      /**
+       * The split checkout the order is a part of (order orchestration), or null: a part is paid
+       * with its checkout, never alone.
+       */
+      String groupId) {
+
+    /** An order as read before split checkouts existed. */
+    public OrderInfo(
+        String customerId,
+        String loginId,
+        String channel,
+        BigDecimal total,
+        String status,
+        String storeId,
+        String currency) {
+      this(customerId, loginId, channel, total, status, storeId, currency, null);
+    }
+  }
+
+  /**
+   * A delivery checkout split across shops (order orchestration), as order-svc reports it.
+   *
+   * @param loginId the login that placed it; null for a guest checkout
+   * @param parts the orders, the delivery-area store's first
+   */
+  public record GroupInfo(
+      UUID id, String loginId, BigDecimal total, String currency, List<GroupPart> parts) {
+    public GroupInfo {
+      parts = List.copyOf(parts);
+    }
+  }
+
+  /** One order of a split checkout. */
+  public record GroupPart(UUID orderId, UUID storeId, String status, BigDecimal total) {}
 
   /**
    * Throws 404 when the order doesn't exist in the tenant, 503 when order-svc cannot be reached.
@@ -80,14 +114,13 @@ public class OrderClient {
       abortOn = {ApiException.class})
   @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
   public OrderInfo getOrder(UUID tenantId, UUID orderId) {
-    ServiceInstance instance =
-        registry
-            .resolve(ORDER_SERVICE)
+    String base =
+        baseUri()
             .orElseThrow(() -> unavailable("no healthy order-svc instance in discovery", null));
 
     try (HttpClientResponse res =
         webClient
-            .get(instance.baseUri() + "/orders/" + orderId)
+            .get(base + "/orders/" + orderId)
             .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
             // Trusted service-to-service call behind the gateway. It stamps a staff role for the
             // same reason CustomerClient does: reading an order is now staff-gated, and taking
@@ -118,6 +151,80 @@ public class OrderClient {
   }
 
   /**
+   * A split checkout, read as a member of staff for the same reason as {@link #getOrder}.
+   *
+   * @throws ApiException 404 {@code PAYMENT_GROUP_NOT_FOUND} when order-svc has no such checkout in
+   *     the tenant; 503 when order-svc cannot be reached
+   */
+  @Retry(
+      maxRetries = 2,
+      delay = 200,
+      abortOn = {ApiException.class})
+  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
+  public GroupInfo getGroup(UUID tenantId, UUID groupId) {
+    String base =
+        baseUri()
+            .orElseThrow(() -> unavailable("no healthy order-svc instance in discovery", null));
+    try (HttpClientResponse res =
+        webClient
+            .get(base + "/order-groups/" + groupId)
+            .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
+            .header(HeaderNames.create(HttpHeaders.ROLES), INTERNAL_ROLE)
+            .request()) {
+      int status = res.status().code();
+      if (status == 404) {
+        throw ApiException.notFound(
+            "PAYMENT_GROUP_NOT_FOUND", "checkout " + groupId + " not found");
+      }
+      if (status != 200) {
+        throw unavailable("order-svc returned HTTP " + status, null);
+      }
+      String body = res.as(String.class);
+      try {
+        return parseGroup(body);
+      } catch (RuntimeException e) {
+        throw unavailable("malformed response from order-svc", e);
+      }
+    } catch (ApiException e) {
+      throw e;
+    } catch (CircuitBreakerOpenException e) {
+      throw unavailable("order-svc circuit open — too many recent failures", e);
+    } catch (RuntimeException e) {
+      throw unavailable("order-svc unreachable", e);
+    }
+  }
+
+  static GroupInfo parseGroup(String body) {
+    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+      JsonObject data = reader.readObject().getJsonObject("data");
+      List<GroupPart> parts = new java.util.ArrayList<>();
+      for (JsonObject p : data.getJsonArray("parts").getValuesAs(JsonObject.class)) {
+        parts.add(
+            new GroupPart(
+                com.storeql.ids.Ids.parse(p.getString("orderId")),
+                com.storeql.ids.Ids.parse(p.getString("storeId")),
+                p.getString("status"),
+                p.getJsonNumber("total").bigDecimalValue()));
+      }
+      return new GroupInfo(
+          com.storeql.ids.Ids.parse(data.getString("id")),
+          optionalString(data, "loginId"),
+          data.getJsonNumber("total").bigDecimalValue(),
+          optionalString(data, "currency"),
+          parts);
+    }
+  }
+
+  /**
+   * A configured address first — a deployment without discovery, or a test standing a stub where
+   * order-svc would be — else the instance from Consul.
+   */
+  private java.util.Optional<String> baseUri() {
+    return com.storeql.service.ServiceReader.configuredUrl(ORDER_SERVICE)
+        .or(() -> registry.resolve(ORDER_SERVICE).map(ServiceInstance::baseUri));
+  }
+
+  /**
    * Parses an order response body into the fields payment needs.
    *
    * <p>{@code customerId} is read with {@code containsKey} rather than {@code isNull} alone,
@@ -140,7 +247,10 @@ public class OrderClient {
           data.getJsonNumber("total").bigDecimalValue(),
           data.getString("status"),
           optionalString(data, "storeId"),
-          optionalString(data, "currency"));
+          optionalString(data, "currency"),
+          data.containsKey("group") && !data.isNull("group")
+              ? data.getJsonObject("group").getString("id")
+              : null);
     }
   }
 

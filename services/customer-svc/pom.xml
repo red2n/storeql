@@ -29,7 +29,7 @@
             <groupId>io.helidon.microprofile.bundles</groupId>
             <artifactId>helidon-microprofile-core</artifactId>
         </dependency>
-        <!-- OpenAPI: serves the generated contract at /openapi (A2). -->
+        <!-- OpenAPI: serves the generated contract at /openapi. -->
         <dependency>
             <groupId>io.helidon.microprofile.openapi</groupId>
             <artifactId>helidon-microprofile-openapi</artifactId>

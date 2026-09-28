@@ -10,6 +10,7 @@ pom.xml.next
 release.properties
 dependency-reduced-pom.xml
 
+*.patch
 # IDE
 .idea/
 *.iml
@@ -50,3 +51,6 @@ tools/grype
 tools/cosign
 tools/syft
 tools/docker-buildx
+
+# Host caches for the no-SDK Flutter build (scripts/lib/flutter-in-docker.sh): the SDK clone and the pub cache
+.cache/

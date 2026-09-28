@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
 import 'package:storeql_app/features/admin/reports_screen.dart';
@@ -70,6 +71,8 @@ class _RecordingAdapter implements HttpClientAdapter {
 }
 
 void main() {
+  // Report periods are dated with AppFormat, in the app's en_GB locale.
+  setUpAll(initializeDateFormatting);
   group('date handling — the endpoints parse instants, not dates', () {
     test('shrinkage widens the picker range to instants', () async {
       final h = _harness();
@@ -347,6 +350,38 @@ void main() {
       expect(find.text('8.0'), findsOneWidget, reason: '4 exceptions per 50 sales');
     });
 
+    testWidgets('sales by category names each category from the catalogue and shows what it cannot place',
+        (tester) async {
+      final adapter = _RecordingAdapter()
+        ..bodyFor['by-category'] = '{"data":{"level":"leaf","rows":['
+            '{"categoryId":"c-1","currency":"GBP","orders":2,"units":5.000,"gross":10.00,"share":47.62},'
+            '{"currency":"GBP","orders":1,"units":1,"gross":11.00,"share":52.38}]}}'
+        ..bodyFor['categories'] =
+            '{"data":[{"id":"c-1","name":"Soft drinks","status":"ACTIVE","createdAt":"2026-01-01T00:00:00Z"}]}';
+      await pump(tester, adapter);
+      await tester.tap(find.text('Sales by Category').last);
+      await tester.pumpAndSettle();
+      expect(find.text('Soft drinks'), findsOneWidget);
+      expect(find.text('Uncategorised'), findsOneWidget);
+      expect(find.text('47.62'), findsOneWidget);
+      expect(find.textContaining('has not announced yet'), findsOneWidget);
+      expect(find.text('Export CSV'), findsOneWidget);
+      expect(adapter.callTo('by-category').query['level'], 'leaf');
+      await tester.tap(find.text('Top level'));
+      await tester.pumpAndSettle();
+      expect(
+          adapter.calls.where((c) => c.path.contains('by-category')).last.query['level'], 'top');
+    });
+
+    testWidgets('sales by category with no lines says so', (tester) async {
+      final adapter = _RecordingAdapter()
+        ..bodyFor['by-category'] = '{"data":{"level":"leaf","rows":[]}}';
+      await pump(tester, adapter);
+      await tester.tap(find.text('Sales by Category').last);
+      await tester.pumpAndSettle();
+      expect(find.text('No sale lines in this range.'), findsOneWidget);
+    });
+
     testWidgets('a report with rows offers the CSV export', (tester) async {
       final adapter = _RecordingAdapter()
         ..bodyFor['low-stock'] = '{"data":[{"storeId":"s-1","variantId":"v-1",'
@@ -560,9 +595,30 @@ void main() {
       await tester.tap(find.text('Tender Mix').last);
       await tester.pumpAndSettle();
 
-      expect(find.text('CARD'), findsOneWidget);
+      // The method in words, never its code.
+      expect(find.text('Card'), findsOneWidget);
+      expect(find.text('CARD'), findsNothing);
       expect(find.text('50.0%'), findsOneWidget);
       expect(find.textContaining('3 tenders did not capture'), findsOneWidget);
+    });
+
+    testWidgets('amounts read as money in the business\'s currency, never bare numbers',
+        (tester) async {
+      final adapter = _RecordingAdapter()
+        ..bodyFor['/admin/tenant'] =
+            '{"data":{"id":"t","name":"Corner Shop","status":"ACTIVE","currency":"GBP","country":"GB"}}'
+        ..bodyFor['tender-mix'] = '{"data":[{"method":"GIFT_CARD",'
+            '"capturedAmount":1234.5,"capturedCount":2,"refundedAmount":40.00,'
+            '"refundedCount":1,"failedCount":0,"netAmount":1194.5,"shareOfNet":100.0}]}';
+      await pump(tester, adapter);
+      await tester.tap(find.text('Tender Mix').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Gift card'), findsOneWidget);
+      expect(find.text('£1,234.50'), findsOneWidget);
+      expect(find.text('£40.00'), findsOneWidget);
+      expect(find.text('£1,194.50'), findsOneWidget);
+      expect(find.text('1234.50'), findsNothing);
     });
 
     testWidgets('stock turn shows a dash, not a zero, when nothing turned',

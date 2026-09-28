@@ -4,6 +4,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:storeql_app/shared/widgets/status_badge.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/inventory_markdown_tab.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
@@ -93,8 +95,9 @@ Future<_Server> _open(
   WidgetTester tester, {
   bool reachable = true,
   bool stickered = false,
+  Size size = const Size(1200, 1600),
 }) async {
-  tester.view.physicalSize = const Size(1200, 1600);
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   final server = _Server()
@@ -135,6 +138,7 @@ Map<String, dynamic> _json(RequestOptions o) => o.data is String
     : o.data as Map<String, dynamic>;
 
 void main() {
+  setUpAll(initializeDateFormatting);
   testWidgets('the plan lists what is expiring, priced off the ladder', (
     tester,
   ) async {
@@ -144,7 +148,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.textContaining('GBP 4.00 → GBP 2.40 (40 % off, 2-day step)'),
+      find.textContaining('£4.00 → £2.40 (40 % off, 2-day step)'),
       findsOneWidget,
     );
     expect(find.textContaining('Honey roast ham · batch B-8'), findsOneWidget);
@@ -169,7 +173,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Sticker at a lower price'), findsOneWidget);
       expect(
-        find.textContaining('The ladder says 40 % off → GBP 2.40'),
+        find.textContaining('The ladder says 40 % off → £2.40'),
         findsOneWidget,
       );
       // The ladder's step and the whole batch are offered; the counter keeps them.
@@ -198,9 +202,13 @@ void main() {
 
       // The plan now shows the sticker on the batch instead of offering another.
       expect(find.byKey(const Key('markdown-sticker-$_batch')), findsNothing);
-      expect(find.textContaining('2100001002402 · GBP 2.40'), findsWidgets);
+      expect(find.textContaining('2100001002402 · £2.40'), findsWidgets);
       expect(find.byKey(const Key('markdown-md-1')), findsOneWidget);
       expect(find.textContaining('5 of 6 left'), findsOneWidget);
+      // The sticker says its status in words, as a badge, and its dates as dates.
+      expect(find.widgetWithText(StatusBadge, 'Active'), findsOneWidget);
+      expect(find.text('ACTIVE'), findsNothing);
+      expect(find.textContaining('GBP'), findsNothing);
     },
   );
 
@@ -315,5 +323,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('A ladder needs at least one step.'), findsOneWidget);
     expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+  });
+
+  testWidgets('on a phone the stickered heading and filter fit, and a sticker keeps its label',
+      (tester) async {
+    await _open(tester, stickered: true, size: const Size(390, 2400));
+    expect(tester.takeException(), isNull);
+    expect(find.text('Stickered'), findsOneWidget);
   });
 }

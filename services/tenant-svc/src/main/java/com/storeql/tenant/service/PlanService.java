@@ -185,7 +185,11 @@ public class PlanService {
    * @throws ApiException 409 {@code PLAN_NOT_SOLD} for a plan that is not on sale
    */
   public PlanFile makeDefault(UUID id) {
-    require(id);
+    Plan plan = require(id);
+    if (Plans.SANDBOX_CODE.equalsIgnoreCase(plan.code())) {
+      throw ApiException.conflict(
+          "PLAN_SANDBOX_ONLY", "The SANDBOX plan is for sandboxes; no business starts on it");
+    }
     if (!repo.makeDefault(id)) {
       throw ApiException.conflict(
           "PLAN_NOT_SOLD", "Only a plan on sale can be the one a new business starts on");
@@ -338,6 +342,15 @@ public class PlanService {
     if (!plan.sold() && !planId.equals(tenant.planId())) {
       throw ApiException.conflict("PLAN_NOT_SOLD", "This plan is " + plan.status());
     }
+    // The sandbox plan is for sandboxes (22.8): a live business on it would trade unbilled on a
+    // sandbox's allowances, and a sandbox on anything else would be billed for nothing real.
+    if (Plans.SANDBOX_CODE.equalsIgnoreCase(plan.code()) != tenant.isSandbox()) {
+      throw ApiException.conflict(
+          "PLAN_SANDBOX_ONLY",
+          tenant.isSandbox()
+              ? "A sandbox stays on the SANDBOX plan"
+              : "The SANDBOX plan is for a business's sandbox, never for the business itself");
+    }
     List<Usage> over = usage(tenantId, planId).stream().filter(Usage::over).toList();
     if (!over.isEmpty()) {
       throw ApiException.conflict(
@@ -412,6 +425,49 @@ public class PlanService {
    *
    * @return the plan it was put on, or empty
    */
+  /**
+   * Puts a business that is signing up on the plan it chose (21.13): one on sale, to the public.
+   *
+   * @throws ApiException 404 {@code PLAN_NOT_FOUND}; 409 {@code PLAN_NOT_SOLD} for a draft or a
+   *     retired plan; 409 {@code PLAN_NOT_PUBLIC} for one the platform sells only by hand
+   */
+  public void putOnPlan(UUID tenantId, UUID planId) {
+    Plan plan = requireChoosable(planId);
+    repo.changeTenantPlan(tenantId, Optional.empty(), planId, null, "signed up on " + plan.code());
+  }
+
+  /**
+   * The plan a sandbox sits on (22.8), seeded by migration and kept for sandboxes alone.
+   *
+   * @throws ApiException {@code 503 SANDBOX_PLAN_MISSING} when a deployment has lost it
+   */
+  public UUID requireSandboxPlanId() {
+    return repo.findByCode(Plans.SANDBOX_CODE)
+        .map(Plan::id)
+        .orElseThrow(
+            () ->
+                new ApiException(
+                    503,
+                    "SANDBOX_PLAN_MISSING",
+                    "This deployment has no SANDBOX plan; a sandbox cannot be made until it is restored",
+                    List.of()));
+  }
+
+  /** The plan a business may choose at signup: on sale, and to the public. */
+  public Plan requireChoosable(UUID planId) {
+    Plan plan =
+        repo.find(planId)
+            .orElseThrow(() -> ApiException.notFound("PLAN_NOT_FOUND", "No such plan"));
+    if (!plan.sold()) {
+      throw ApiException.conflict("PLAN_NOT_SOLD", "This plan is " + plan.status());
+    }
+    if (!plan.isPublic()) {
+      throw ApiException.conflict(
+          "PLAN_NOT_PUBLIC", "This plan is sold by the platform directly, not chosen at signup");
+    }
+    return plan;
+  }
+
   public Optional<UUID> putOnDefaultPlan(UUID tenantId) {
     try {
       Optional<UUID> planId = defaultPlanId();

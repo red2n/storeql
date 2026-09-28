@@ -476,7 +476,12 @@ class PlanIT {
     assertThat(body, containsString("staff.max"));
     assertThat(body, containsString("products.max"));
     assertThat(body, containsString("feature.storefront"));
+    // 21.11: a request rate and two storage caps, each with the door that refuses.
+    assertThat(body, containsString("requests.per-minute"));
+    assertThat(body, containsString("images.mb.max"));
+    assertThat(body, containsString("documents.mb.max"));
     assertThat("each names who refuses when it is exceeded", body, containsString("tenant-svc"));
+    assertThat(body, containsString("gateway"));
     assertThat(call("GET", PLANS + "/entitlement-keys", null, null, "OWNER").status(), is(403));
   }
 }

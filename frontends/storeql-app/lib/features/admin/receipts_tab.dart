@@ -8,12 +8,14 @@ import 'package:flutter_riverpod/legacy.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/util/short_ref.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
 
 // The legal receipt register: the series a store runs, the documents in it in
@@ -316,8 +318,10 @@ class ReceiptsTab extends ConsumerWidget {
       );
     }
 
+    // The page gutter (16 on a phone, 24 from tablet up), so the heading
+    // lines up under the page title as the other tabs do.
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      padding: context.pagePadding,
       children: [
         Text('Legal receipts', style: theme.textTheme.titleLarge),
         const SizedBox(height: 4),
@@ -455,44 +459,53 @@ class ReceiptsTab extends ConsumerWidget {
                                   ),
                                 ),
                                 title: Text(r.fullNumber),
-                                subtitle: Text(
-                                  '${r.issuedAt} · order ${shortRef(r.orderId)}',
-                                ),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
+                                // The stamp and the void as badges under the
+                                // number, so the trailing slot keeps only the
+                                // amount and the number keeps its width.
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    if (r.stampLabel != null) ...[
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 6,
-                                          vertical: 2,
+                                    Text(
+                                      '${AppFormat.dateTime(r.issuedAt)} · order …${shortRef(r.orderId)}',
+                                    ),
+                                    if (r.voided || r.stampLabel != null)
+                                      Padding(
+                                        padding: const EdgeInsetsDirectional.only(
+                                          top: AppSpacing.xs,
                                         ),
-                                        decoration: BoxDecoration(
-                                          color: r.tseError != null
-                                              ? theme.colorScheme.errorContainer
-                                              : theme
-                                                    .colorScheme
-                                                    .secondaryContainer,
-                                          borderRadius: BorderRadius.circular(
-                                            4,
-                                          ),
-                                        ),
-                                        child: Text(
-                                          r.stampLabel!,
-                                          style: theme.textTheme.labelSmall,
+                                        child: Wrap(
+                                          spacing: AppSpacing.sm,
+                                          runSpacing: AppSpacing.xs,
+                                          children: [
+                                            if (r.voided)
+                                              const StatusBadge(
+                                                'Void',
+                                                tone: StatusTone.error,
+                                              ),
+                                            if (r.stampLabel != null)
+                                              StatusBadge(
+                                                r.stampLabel!,
+                                                tone: r.tseError != null
+                                                    ? StatusTone.error
+                                                    : StatusTone.neutral,
+                                              ),
+                                          ],
                                         ),
                                       ),
-                                      const SizedBox(width: 8),
-                                    ],
-                                    Text(
-                                      '${r.voided ? 'VOID · ' : ''}${r.currency} ${r.grossTotal.toStringAsFixed(2)}',
-                                      style: r.voided
-                                          ? TextStyle(
-                                              color: theme.colorScheme.error,
-                                            )
-                                          : null,
-                                    ),
                                   ],
+                                ),
+                                trailing: Text(
+                                  AppFormat.money(
+                                    r.grossTotal,
+                                    currencyCode: r.currency,
+                                  ),
+                                  style: r.voided
+                                      ? TextStyle(
+                                          color: theme.colorScheme.error,
+                                          decoration:
+                                              TextDecoration.lineThrough,
+                                        )
+                                      : null,
                                 ),
                               ),
                           ],

@@ -36,7 +36,8 @@ class TotalsTest {
         new BigDecimal(qty),
         new BigDecimal(unitPrice),
         vatCode,
-        Instant.now());
+        Instant.now(),
+        null);
   }
 
   // ── the defect itself ───────────────────────────────────────────────────────

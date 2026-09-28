@@ -26,10 +26,21 @@ public final class OnceRepo extends NotificationRepository {
     return notified || recorded.contains(eventId + "/" + type);
   }
 
+  /** What the last record said happened: SENT, or SUPPRESSED in a sandbox. */
+  public String lastStatus;
+
   /** What the last message was written in, and from which words. */
   public String language;
 
   public String template;
+
+  /** The rest of the last record, for a test that needs more than the dedupe guard. */
+  public UUID tenantId;
+
+  public String channel;
+  public String recipient;
+  public String subject;
+  public String body;
 
   @Override
   public void recordNotification(
@@ -59,8 +70,14 @@ public final class OnceRepo extends NotificationRepository {
       String status,
       String language,
       String template) {
+    this.tenantId = tenantId;
+    this.channel = channel;
+    this.recipient = recipient;
+    this.subject = subject;
+    this.body = body;
     this.language = language;
     this.template = template;
+    this.lastStatus = status;
     records++;
     this.subjectId = subjectId;
     recorded.add(eventId + "/" + type);

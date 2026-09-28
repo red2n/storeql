@@ -15,7 +15,10 @@ import java.util.List;
 class SalesEventConsumer extends BaseKafkaConsumer {
 
   private static final List<String> TOPICS =
-      List.of("storeql.order.order-confirmed", "storeql.payment.payment-refunded");
+      List.of(
+          "storeql.order.order-confirmed",
+          "storeql.payment.payment-refunded",
+          "storeql.order.order-voided");
 
   @Inject SalesEventDispatcher dispatcher;
 

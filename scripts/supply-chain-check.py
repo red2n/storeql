@@ -29,7 +29,7 @@ SBOM = ROOT / "scripts/sbom.sh"
 SCAN = ROOT / ".github/workflows/vulnerability-scan.yml"
 DEPENDABOT = ROOT / ".github/dependabot.yml"
 
-IMAGE_JOBS = ("services", "web")
+IMAGE_JOBS = ("services", "web", "backup")
 DIGEST = "steps.build.outputs.digest"
 
 
@@ -152,7 +152,7 @@ def problems(texts):
         out += [f"docker-publish.yml: {p}" for p in image_job_problems(name, jobs[name])]
 
     # The verifier and the cleanup must know every image the workflow publishes.
-    published = [m["name"] for m in jobs.get("services", {}).get("strategy", {}).get("matrix", {}).get("include", [])] + ["web"]
+    published = [m["name"] for m in jobs.get("services", {}).get("strategy", {}).get("matrix", {}).get("include", [])] + ["web", "backup"]
     listed = re.search(r"IMAGES=\(([^)]*)\)", verify_text)
     verified = listed.group(1).split() if listed else []
     for image in published:
@@ -202,7 +202,7 @@ BREAKS = [
     ("the SBOM attestation kept out of the registry", "          sbom-path: ${{ runner.temp }}/sbom.cdx.json\n          push-to-registry: true", "          sbom-path: ${{ runner.temp }}/sbom.cdx.json\n          push-to-registry: false", "publish"),
     ("provenance attested to a name with no digest", "          subject-digest: ${{ steps.build.outputs.digest }}\n          push-to-registry: true\n\n      - name: Install cosign", "          push-to-registry: true\n\n      - name: Install cosign", "publish"),
     ("an SBOM in a format nobody asked for", "format: cyclonedx-json", "format: syft-json", "publish"),
-    ("a published image the verifier never checks", "reporting-svc web)", "web)", "verify"),
+    ("a published image the verifier never checks", "reporting-svc web backup)", "web backup)", "verify"),
     ("the release without its SBOM", "scripts/sbom.sh", "true", "release"),
     ("the SBOM script making no SBOM", "org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom", "help:effective-pom", "sbom"),
     ("test helpers counted among what ships", "<excludeArtifactId>common-test</excludeArtifactId>", "", "pom"),
@@ -214,7 +214,7 @@ BREAKS = [
     ("the nightly scan switched off", "  schedule:\n    - cron: '17 3 * * *' # nightly, 03:17 UTC\n", "", "scan"),
     ("pull requests no longer scanned", "  pull_request:\n    branches: [main, master]\n", "", "scan"),
     ("the dependency scan removed", "run: scripts/vuln-scan.sh deps", "run: true", "scan"),
-    ("a published image left out of the nightly scan", "customer-svc, notification-svc, reporting-svc, web]", "customer-svc, notification-svc, web]", "scan"),
+    ("a published image left out of the nightly scan", "customer-svc, notification-svc, reporting-svc, web, backup]", "customer-svc, notification-svc, web, backup]", "scan"),
     ("the failing severity loosened in a workflow", "          SARIF_DIR: ${{ runner.temp }}/sarif\n        run: scripts/vuln-scan.sh deps", "          SARIF_DIR: ${{ runner.temp }}/sarif\n          FAIL_ON: critical\n        run: scripts/vuln-scan.sh deps", "scan"),
     ("the update bot blind to the base images", "  - package-ecosystem: docker\n", "  - package-ecosystem: gomod\n", "dependabot"),
     ("the update bot blind to the workflows' actions", "  - package-ecosystem: github-actions\n", "  - package-ecosystem: gomod\n", "dependabot"),
@@ -255,7 +255,7 @@ def main():
     if found:
         print(f"supply chain: {len(found)} promise(s) broken", file=sys.stderr)
         return 1
-    print("supply chain: 15 images built with SBOM and max provenance, scanned, then attested and signed by digest; the release carries its SBOM, checksums and provenance; dependencies scanned on pull requests, main and nightly, and the published images nightly — a new image is covered by the publish workflow, against the digest it just pushed; four ecosystems watched for updates — all checks pass")
+    print("supply chain: 16 images built with SBOM and max provenance, scanned, then attested and signed by digest; the release carries its SBOM, checksums and provenance; dependencies scanned on pull requests, main and nightly, and the published images nightly — a new image is covered by the publish workflow, against the digest it just pushed; four ecosystems watched for updates — all checks pass")
     return 0
 
 

@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 
+import '../../core/format.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 
@@ -214,18 +214,17 @@ String _hazardLabel(String hazard) => switch (hazard) {
 String _kindLabel(String kind) =>
     kind == 'WITHDRAWAL' ? 'Product withdrawal' : 'Product recall';
 
-final _day = DateFormat('d MMM yyyy');
 
 /// What to look for on the pack, in the words printed on it.
 String describePackScope(ActiveRecallItem i) {
   final parts = <String>[
     if (i.batchNo != null) 'lot ${i.batchNo}',
     if (i.expiryFrom != null && i.expiryTo != null)
-      'best before ${_day.format(i.expiryFrom!)} to ${_day.format(i.expiryTo!)}'
+      'best before ${AppFormat.dateOf(i.expiryFrom!)} to ${AppFormat.dateOf(i.expiryTo!)}'
     else if (i.expiryFrom != null)
-      'best before ${_day.format(i.expiryFrom!)} or later'
+      'best before ${AppFormat.dateOf(i.expiryFrom!)} or later'
     else if (i.expiryTo != null)
-      'best before ${_day.format(i.expiryTo!)} or earlier',
+      'best before ${AppFormat.dateOf(i.expiryTo!)} or earlier',
   ];
   return parts.join(', ');
 }

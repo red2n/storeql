@@ -59,7 +59,7 @@ class RateLimitFilterTest {
     connection.sync().flushall();
     filter = new RateLimitFilter();
     filter.config = config;
-    filter.redis = connection.sync();
+    filter.counter = counterOn(connection);
   }
 
   @AfterEach
@@ -123,7 +123,7 @@ class RateLimitFilterTest {
 
     RateLimitFilter secondReplica = new RateLimitFilter();
     secondReplica.config = config;
-    secondReplica.redis = connection.sync();
+    secondReplica.counter = counterOn(connection);
 
     filter.filter(requestContext); // replica 1: count=1
     secondReplica.filter(requestContext); // replica 2: count=2
@@ -141,5 +141,12 @@ class RateLimitFilterTest {
     filter.filter(requestContext);
     String key = "ratelimit:" + ClientIp.resolve(requestContext, null, false);
     assertEquals(RateLimitFilter.WINDOW_SECONDS, connection.sync().ttl(key));
+  }
+
+  /** The shared counter, on this test's Redis. */
+  private static RateCounter counterOn(StatefulRedisConnection<String, String> c) {
+    RateCounter counter = new RateCounter();
+    counter.redis = c.sync();
+    return counter;
   }
 }

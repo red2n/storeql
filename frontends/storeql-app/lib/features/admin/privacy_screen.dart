@@ -6,6 +6,10 @@ import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/util/short_ref.dart';
+import '../../shared/widgets/status_badge.dart';
+import 'customer_providers.dart';
 
 // ---------------------------------------------------------------------------
 // The business's side of its customers' privacy under India's DPDP Act (13.12):
@@ -46,12 +50,16 @@ class PublishedNotice {
   final String languageName;
   final int version;
   final String title;
+
+  /// The notice's text as published: where a correction starts from.
+  final String body;
   final String publishedAt;
   const PublishedNotice({
     required this.language,
     required this.languageName,
     required this.version,
     required this.title,
+    this.body = '',
     required this.publishedAt,
   });
   factory PublishedNotice.fromJson(Map<String, dynamic> j) => PublishedNotice(
@@ -59,6 +67,7 @@ class PublishedNotice {
         languageName: j['languageName'] as String? ?? '',
         version: (j['version'] as num?)?.toInt() ?? 0,
         title: j['title'] as String? ?? '',
+        body: j['body'] as String? ?? '',
         publishedAt: j['publishedAt'] as String? ?? '',
       );
 }
@@ -158,6 +167,12 @@ const _kindLabels = <String, String>{
   'GRIEVANCE': 'Grievance',
 };
 
+/// How a settled request ended, in words.
+const _settledLabels = <String, String>{
+  'RESOLVED': 'Resolved',
+  'REFUSED': 'Refused',
+};
+
 final privacySettingsProvider =
     FutureProvider.autoDispose<PrivacySettings>((ref) async {
   final resp = await ref.read(apiClientProvider).dio.get(_privacy('/settings'));
@@ -201,27 +216,33 @@ class PrivacyScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
+    // The page's gutter, the shared heading, and the forms at a form's width
+    // on a desktop (their fields ran edge to edge); the lists a little wider.
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.lg),
-      children: [
-        Text('Privacy', style: theme.textTheme.headlineMedium),
-        const SizedBox(height: AppSpacing.xs),
-        Text(
-          "Your customers' privacy as India's DPDP Act asks for it, and as good "
-          'sense asks anywhere: who they write to, the notice they read in their '
-          'language, what they ask for, and what they are told of a breach.',
-          style: theme.textTheme.bodyMedium
-              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+      padding: context.pagePadding,
+      children: const [
+        ContentBounds(
+          maxWidth: AppBreakpoints.expanded,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              PageHeader(
+                title: 'Privacy',
+                subtitle: "Your customers' privacy as India's DPDP Act asks for it, and as good "
+                    'sense asks anywhere: who they write to, the notice they read in their '
+                    'language, what they ask for, and what they are told of a breach.',
+                padding: EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
+              ),
+              ContentBounds.form(child: _SettingsCard()),
+              SizedBox(height: AppSpacing.lg),
+              ContentBounds.form(child: _NoticesCard()),
+              SizedBox(height: AppSpacing.lg),
+              _RequestsCard(),
+              SizedBox(height: AppSpacing.lg),
+              _IntimationsCard(),
+            ],
+          ),
         ),
-        const SizedBox(height: AppSpacing.lg),
-        const _SettingsCard(),
-        const SizedBox(height: AppSpacing.lg),
-        const _NoticesCard(),
-        const SizedBox(height: AppSpacing.lg),
-        const _RequestsCard(),
-        const SizedBox(height: AppSpacing.lg),
-        const _IntimationsCard(),
       ],
     );
   }
@@ -310,20 +331,31 @@ class _SettingsCardState extends ConsumerState<_SettingsCard> {
                   'to answer a request: ninety at most (Rules r.14).',
                   style: theme.textTheme.bodySmall,
                 ),
+                const SizedBox(height: AppSpacing.md),
+                // 12 between fields, as the other admin forms have them: edge to edge, their
+                // outlines touched.
                 TextField(
                     key: const Key('privacy-grievance-name'),
                     controller: _name,
                     decoration: const InputDecoration(labelText: 'Name')),
+                const SizedBox(height: AppSpacing.md),
                 TextField(
                     key: const Key('privacy-grievance-email'),
                     controller: _email,
+                    keyboardType: TextInputType.emailAddress,
                     decoration: const InputDecoration(labelText: 'Email')),
+                const SizedBox(height: AppSpacing.md),
                 TextField(
+                    key: const Key('privacy-grievance-phone'),
                     controller: _phone,
+                    keyboardType: TextInputType.phone,
                     decoration: const InputDecoration(labelText: 'Phone')),
+                const SizedBox(height: AppSpacing.md),
                 TextField(
+                    key: const Key('privacy-grievance-address'),
                     controller: _address,
                     decoration: const InputDecoration(labelText: 'Address')),
+                const SizedBox(height: AppSpacing.md),
                 TextField(
                   key: const Key('privacy-response-days'),
                   controller: _days,
@@ -331,9 +363,9 @@ class _SettingsCardState extends ConsumerState<_SettingsCard> {
                   decoration:
                       const InputDecoration(labelText: 'Days to answer a request'),
                 ),
-                const SizedBox(height: AppSpacing.sm),
+                const SizedBox(height: AppSpacing.md),
                 Align(
-                  alignment: Alignment.centerRight,
+                  alignment: AlignmentDirectional.centerEnd,
                   child: FilledButton(
                     key: const Key('privacy-save-settings'),
                     onPressed: _busy ? null : _save,
@@ -362,11 +394,31 @@ class _NoticesCardState extends ConsumerState<_NoticesCard> {
   final _body = TextEditingController();
   bool _busy = false;
 
+  /// The language whose published version the fields were last filled from, and what they were
+  /// filled with: a correction starts from the notice as it stands rather than a blank page.
+  String? _filledFor;
+  String _filledTitle = '';
+  String _filledBody = '';
+
   @override
   void dispose() {
     _title.dispose();
     _body.dispose();
     super.dispose();
+  }
+
+  /// Whether the fields still hold what was last put in them, so changing the language may
+  /// replace them without losing anything typed.
+  bool get _untouched => _title.text == _filledTitle && _body.text == _filledBody;
+
+  /// Fills the fields from [notice] — the published version of the chosen language, or blank when
+  /// there is none — unless something has been typed since they were last filled.
+  void _fillFrom(PublishedNotice? notice) {
+    if (!_untouched) return;
+    _filledTitle = notice?.title ?? '';
+    _filledBody = notice?.body ?? '';
+    _title.text = _filledTitle;
+    _body.text = _filledBody;
   }
 
   Future<void> _publish() async {
@@ -377,6 +429,10 @@ class _NoticesCardState extends ConsumerState<_NoticesCard> {
         'title': _title.text.trim(),
         'body': _body.text.trim(),
       });
+      // What was published is now the version the fields stand on.
+      _filledFor = _language;
+      _filledTitle = _title.text;
+      _filledBody = _body.text;
       ref.invalidate(privacyNoticesProvider);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -400,6 +456,11 @@ class _NoticesCardState extends ConsumerState<_NoticesCard> {
     final published = {
       for (final n in async.value ?? const <PublishedNotice>[]) n.language: n
     };
+    // Once the published versions are read, the chosen language's is where the fields start.
+    if (async.hasValue && _filledFor != _language) {
+      _filledFor = _language;
+      _fillFrom(published[_language]);
+    }
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.lg),
@@ -433,12 +494,14 @@ class _NoticesCardState extends ConsumerState<_NoticesCard> {
               ],
               onChanged: (v) => setState(() => _language = v ?? 'en'),
             ),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               key: const Key('privacy-notice-title'),
               controller: _title,
               maxLength: 200,
               decoration: const InputDecoration(labelText: 'Title', counterText: ''),
             ),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               key: const Key('privacy-notice-body'),
               controller: _body,
@@ -447,9 +510,9 @@ class _NoticesCardState extends ConsumerState<_NoticesCard> {
               decoration: const InputDecoration(
                   labelText: 'The notice', counterText: '', alignLabelWithHint: true),
             ),
-            const SizedBox(height: AppSpacing.sm),
+            const SizedBox(height: AppSpacing.md),
             Align(
-              alignment: Alignment.centerRight,
+              alignment: AlignmentDirectional.centerEnd,
               child: FilledButton.icon(
                 key: const Key('privacy-publish'),
                 onPressed: _busy ? null : _publish,
@@ -465,8 +528,8 @@ class _NoticesCardState extends ConsumerState<_NoticesCard> {
                   ? Text('No notice published yet: consent cannot be informed '
                       'without one.', style: theme.textTheme.bodySmall)
                   : Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
+                      spacing: AppSpacing.sm,
+                      runSpacing: AppSpacing.xs,
                       children: [
                         for (final n in list)
                           Chip(
@@ -547,19 +610,23 @@ class _RequestsCardState extends ConsumerState<_RequestsCard> {
   Widget _row(BuildContext context, PrivacyRequestRow r) {
     final cs = Theme.of(context).colorScheme;
     final open = r.status == 'OPEN';
+    final due = AppFormat.date(r.dueOn);
+    final settled = _settledLabels[r.status] ?? humanizeCode(r.status);
     return ListTile(
       key: Key('privacy-request-${r.id}'),
       leading: Icon(
         open ? Icons.hourglass_top_outlined : Icons.task_alt,
         color: r.overdue ? cs.error : null,
       ),
-      title: Text('${_kindLabels[r.kind] ?? r.kind}'
+      // Who asked, by name: the person the answer goes to.
+      title: Text('${_kindLabels[r.kind] ?? humanizeCode(r.kind)} from '
+          '${_customerName(ref, r.customerId)}'
           '${r.nomineeName != null ? ' — ${r.nomineeName}' : ''}'),
       subtitle: Text([
         if (r.detail != null) r.detail!,
         open
-            ? (r.overdue ? 'Overdue: due ${r.dueOn}' : 'Due ${r.dueOn}')
-            : '${r.status.toLowerCase()}: ${r.resolution ?? ''}',
+            ? (r.overdue ? 'Overdue: due $due' : 'Due $due')
+            : '$settled: ${r.resolution ?? ''}',
       ].join('\n')),
       isThreeLine: r.detail != null,
       trailing: open
@@ -571,9 +638,23 @@ class _RequestsCardState extends ConsumerState<_RequestsCard> {
               ),
               child: const Text('Answer'),
             )
-          : (r.overdue ? const Chip(label: Text('Overdue')) : null),
+          : (r.overdue
+              ? const StatusBadge('Overdue', tone: StatusTone.error)
+              : null),
     );
   }
+}
+
+/// A customer by name — their full name, else their email — from their record. While it loads, or
+/// when it cannot be read, the end of their id stands in for it, never the whole of it.
+String _customerName(WidgetRef ref, String customerId) {
+  final placeholder = 'customer #${shortRef(customerId)}';
+  if (customerId.isEmpty) return 'a customer';
+  final c = ref.watch(customerDetailProvider(customerId)).value;
+  if (c == null) return placeholder;
+  if (c.fullName.isNotEmpty) return c.fullName;
+  if (c.email.trim().isNotEmpty) return c.email.trim();
+  return placeholder;
 }
 
 class _ResolveDialog extends ConsumerStatefulWidget {
@@ -630,6 +711,7 @@ class _ResolveDialogState extends ConsumerState<_ResolveDialog> {
             selected: {_status},
             onSelectionChanged: (s) => setState(() => _status = s.first),
           ),
+          const SizedBox(height: AppSpacing.md),
           TextField(
             key: const Key('resolve-text'),
             controller: _resolution,
@@ -681,23 +763,31 @@ class _IntimationsCard extends ConsumerWidget {
             async.when(
               loading: () => const SizedBox.shrink(),
               error: (e, _) => Text(friendlyError(e, fallback: 'Could not load.')),
-              data: (list) => Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (final i in list)
-                    ListTile(
-                      key: Key('intimation-${i.id}'),
-                      leading: const Icon(Icons.campaign_outlined),
-                      title: Text(i.subject),
-                      subtitle: Text(
-                          'Sent ${AppFormat.dateTime(i.sentAt)} to ${i.recipients}'
-                          '${i.failures > 0 ? ', ${i.failures} not reached' : ''}'),
+              data: (list) => list.isEmpty
+                  // Only the button would show otherwise: say that none were sent.
+                  ? Padding(
+                      padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.sm),
+                      child: Text('No breach has been told to customers.',
+                          key: const Key('intimations-none'),
+                          style: theme.textTheme.bodySmall),
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final i in list)
+                          ListTile(
+                            key: Key('intimation-${i.id}'),
+                            leading: const Icon(Icons.campaign_outlined),
+                            title: Text(i.subject),
+                            subtitle: Text(
+                                'Sent ${AppFormat.dateTime(i.sentAt)} to ${i.recipients}'
+                                '${i.failures > 0 ? ', ${i.failures} not reached' : ''}'),
+                          ),
+                      ],
                     ),
-                ],
-              ),
             ),
             Align(
-              alignment: Alignment.centerRight,
+              alignment: AlignmentDirectional.centerEnd,
               child: FilledButton.tonalIcon(
                 key: const Key('privacy-tell-customers'),
                 onPressed: () => showDialog<void>(
@@ -779,6 +869,7 @@ class _BreachIntimationDialogState extends ConsumerState<BreachIntimationDialog>
               'may mean for them, what you have done, what they can do, and who '
               'to write to.',
             ),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               key: const Key('intimation-subject'),
               controller: _subject,
@@ -786,6 +877,7 @@ class _BreachIntimationDialogState extends ConsumerState<BreachIntimationDialog>
               decoration:
                   const InputDecoration(labelText: 'Subject', counterText: ''),
             ),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               key: const Key('intimation-body'),
               controller: _body,

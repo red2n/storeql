@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/format.dart';
+import '../../core/spacing.dart';
 import 'customer_display_channel.dart';
 import 'pos_providers.dart';
 
@@ -111,11 +113,31 @@ class _CustomerDisplayScreenState extends ConsumerState<CustomerDisplayScreen> {
     final type = m['type'] as String? ?? 'idle';
     final storeName = m['storeName'] as String? ?? '';
     final currency = m['currency'] as String? ?? '';
+    // The amount as the back office writes it: `£5.50`, `€4.50`, `¥370`.
     String money(Object? v) =>
-        '$currency ${((v as num?) ?? 0).toStringAsFixed(2)}'.trim();
+        AppFormat.money((v as num?) ?? 0, currencyCode: currency);
     final big =
         theme.textTheme.displayMedium?.copyWith(fontWeight: FontWeight.w600);
     final mid = theme.textTheme.headlineSmall;
+
+    // The store's name heads the sale and the thank-you, so the top of the
+    // screen says whose till this is while the basket is still short.
+    final header = storeName.isEmpty
+        ? null
+        : Padding(
+            key: const Key('display-store-name'),
+            padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.md),
+            child: Row(children: [
+              Icon(Icons.storefront, size: 32, color: cs.primary),
+              const SizedBox(width: AppSpacing.md),
+              Expanded(
+                child: Text(storeName,
+                    style: theme.textTheme.headlineMedium,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+              ),
+            ]),
+          );
 
     final Widget body;
     switch (type) {
@@ -125,19 +147,22 @@ class _CustomerDisplayScreenState extends ConsumerState<CustomerDisplayScreen> {
           key: const Key('display-sale'),
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (header != null) ...[header, const Divider()],
             Expanded(
               child: ListView(
                 reverse: true,
                 children: [
                   for (final l in lines.reversed)
                     Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
                       child: Row(children: [
                         Expanded(
                             child: Text('${(l as Map)['qty']} × ${l['name']}',
                                 style: mid,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis)),
+                        // Room between the ellipsis and the amount.
+                        const SizedBox(width: AppSpacing.lg),
                         Text(money(l['lineTotal']), style: mid),
                       ]),
                     ),
@@ -159,16 +184,24 @@ class _CustomerDisplayScreenState extends ConsumerState<CustomerDisplayScreen> {
       case 'paid':
         body = Column(
           key: const Key('display-paid'),
-          mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('Thank you', style: big, textAlign: TextAlign.center),
-            const SizedBox(height: 24),
-            _row('Total', money(m['total']), mid),
-            _row('Paid', money(m['paid']), mid),
-            if (((m['change'] as num?) ?? 0) > 0)
-              _row('Change', money(m['change']), big,
-                  key: const Key('display-change')),
+            if (header != null) ...[header, const Divider()],
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('Thank you', style: big, textAlign: TextAlign.center),
+                  const SizedBox(height: AppSpacing.xl),
+                  _row('Total', money(m['total']), mid),
+                  _row('Paid', money(m['paid']), mid),
+                  if (((m['change'] as num?) ?? 0) > 0)
+                    _row('Change', money(m['change']), big,
+                        key: const Key('display-change')),
+                ],
+              ),
+            ),
           ],
         );
       default:
@@ -178,11 +211,11 @@ class _CustomerDisplayScreenState extends ConsumerState<CustomerDisplayScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(Icons.storefront, size: 96, color: cs.primary),
-              const SizedBox(height: 16),
+              const SizedBox(height: AppSpacing.lg),
               Text(storeName.isEmpty ? 'Welcome' : storeName,
                   style: big, textAlign: TextAlign.center),
               if (storeName.isNotEmpty) ...[
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.sm),
                 Text('Welcome', style: mid),
               ],
             ],
@@ -192,7 +225,8 @@ class _CustomerDisplayScreenState extends ConsumerState<CustomerDisplayScreen> {
     return Scaffold(
       backgroundColor: cs.surface,
       body: SafeArea(
-        child: Padding(padding: const EdgeInsets.all(32), child: body),
+        child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.xxl), child: body),
       ),
     );
   }
@@ -201,9 +235,10 @@ class _CustomerDisplayScreenState extends ConsumerState<CustomerDisplayScreen> {
           {Key? key}) =>
       Padding(
         key: key,
-        padding: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
         child: Row(children: [
           Expanded(child: Text(label, style: style)),
+          const SizedBox(width: AppSpacing.lg),
           Text(value, style: style),
         ]),
       );

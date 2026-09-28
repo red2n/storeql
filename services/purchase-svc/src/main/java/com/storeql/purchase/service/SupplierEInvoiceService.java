@@ -104,6 +104,7 @@ public class SupplierEInvoiceService {
   private static final int SHOWN_RULES = 5;
 
   @Inject SupplierEInvoiceRepository repo;
+  @Inject com.storeql.service.Entitlements entitlements;
   @Inject PurchaseRepository purchases;
   @Inject PurchaseService purchasing;
   @Inject TenantProfiles tenants;
@@ -170,6 +171,14 @@ public class SupplierEInvoiceService {
     String sha = sha256(body);
     Optional<UUID> seen = repo.findIdBySha(tenantId, sha);
     if (seen.isPresent()) return receipt(tenantId, seen.get(), true);
+    // The plan's cap on what the business keeps in documents (21.11): asked after the dedupe, since
+    // a document already held costs nothing more, and before the document is read, since one there
+    // is no room for is not worth parsing. A plan with no cap holds nothing back.
+    entitlements.requireBytesWithin(
+        tenantId,
+        com.storeql.service.Entitlements.DOCUMENTS_MB_MAX,
+        "MB of supplier e-invoice documents",
+        () -> repo.documentBytes(tenantId) + body.length);
 
     EInvoices.Received received = already != null ? already : read(body);
     Invoice inv = received.invoice();

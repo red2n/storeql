@@ -1,4 +1,5 @@
 import 'unit_price.dart';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -7,14 +8,23 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
+import '../../shared/util/slot_label.dart';
+import '../../core/input_mode.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../core/storage/app_storage.dart';
+import '../../shared/widgets/empty_state.dart';
 import 'account_screen.dart' show MyCustomer, SavedAddress, myAddressesProvider, myCustomerProvider;
+import 'cart_line.dart';
+import 'delivery_slot_picker.dart';
+import 'storefront_widgets.dart' show ProductImageThumb;
+import 'order_summary.dart';
 import 'storefront_providers.dart';
 import 'storefront_shell.dart' show StorefrontAuthDialog;
 import 'survey_widgets.dart';
 import '../../shared/util/short_ref.dart';
 import 'package:storeql_app/core/ids.dart';
+import '../../core/theme.dart';
 
 class StorefrontCartScreen extends ConsumerStatefulWidget {
   const StorefrontCartScreen({super.key});
@@ -31,6 +41,9 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
   // happens before [_placing] flips the button's loading spinner on).
   bool _checkoutInFlight = false;
   String _fulfilment = 'PICKUP'; // PICKUP | DELIVERY
+  // Substitutions for out-of-stock online lines: the shopper's choice at checkout, on unless they
+  // turn it off. A substitute is never charged more than the original and can be handed back.
+  bool _allowSubstitutions = true;
   // Selected payment option key: CARD | UPI | WALLET (pay online now) or CASH (pay in person at
   // handover). '' = pay later with no declared method (only when the store disabled every online
   // tender). Which keys are offered comes from the store's enabledPaymentMethods config.
@@ -47,11 +60,22 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
   /// The saved address the delivery form was last filled from, if any (12.10).
   String? _savedAddressId;
 
+  // ── Delivery and collection slots ──────────────────────────────────────
+  // The window the shopper chose, if any, and — for a delivery — the store
+  // the typed postcode resolves to (tenant-svc's soft delivery-coverage
+  // check), read fresh whenever the postcode changes so the picker always
+  // asks the right store for its windows.
+  SlotOption? _selectedSlot;
+  String? _resolvedStoreId;
+  String? _resolvedForPostcode;
+  Timer? _resolveDebounce;
+
   static const _addressStorage = AppStorage();
 
   @override
   void initState() {
     super.initState();
+    _postalCtrl.addListener(_scheduleResolveStore);
     _loadSavedAddress();
   }
 
@@ -126,6 +150,8 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
 
   @override
   void dispose() {
+    _resolveDebounce?.cancel();
+    _postalCtrl.removeListener(_scheduleResolveStore);
     _line1Ctrl.dispose();
     _line2Ctrl.dispose();
     _cityCtrl.dispose();
@@ -134,6 +160,53 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
     _recipientPhoneCtrl.dispose();
     _contactPhoneCtrl.dispose();
     super.dispose();
+  }
+
+  /// The postcode changed (typed, or a saved address filled it): re-resolve
+  /// which store would fulfil a delivery there, debounced so a shopper still
+  /// typing does not fire a request per keystroke. A blank postcode clears
+  /// the last resolution at once — nothing to resolve.
+  void _scheduleResolveStore() {
+    _resolveDebounce?.cancel();
+    final pincode = _postalCtrl.text.trim();
+    if (pincode.isEmpty) {
+      if (_resolvedStoreId != null || _resolvedForPostcode != null) {
+        setState(() {
+          _resolvedStoreId = null;
+          _resolvedForPostcode = null;
+          _selectedSlot = null;
+        });
+      }
+      return;
+    }
+    if (pincode == _resolvedForPostcode) return;
+    _resolveDebounce = Timer(const Duration(milliseconds: 500), () => _resolveStore(pincode));
+  }
+
+  /// Soft delivery-coverage check (tenant-svc `/fulfilment/resolve`), for the
+  /// slot picker's benefit only: the order's own placement resolves it again,
+  /// authoritatively. An unreadable postcode (not yet covered, no network)
+  /// leaves the picker unmounted rather than blocking anything here.
+  Future<void> _resolveStore(String pincode) async {
+    try {
+      final dio = ref.read(storefrontDioProvider);
+      final resp = await dio.get('/${ApiConstants.tenant}/fulfilment/resolve',
+          queryParameters: {'pincode': pincode});
+      final data = resp.data['data'] as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        _resolvedForPostcode = pincode;
+        _resolvedStoreId = data['storeId'] as String?;
+        _selectedSlot = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _resolvedForPostcode = pincode;
+        _resolvedStoreId = null;
+        _selectedSlot = null;
+      });
+    }
   }
 
   static String? _requiredField(String? v) =>
@@ -174,9 +247,18 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
   Widget build(BuildContext context) {
     final cart = ref.watch(cartProvider);
     final notifier = ref.read(cartProvider.notifier);
-    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
     final showPrices = ref.watch(storefrontShowPricesProvider);
     final configAsync = ref.watch(storefrontConfigProvider);
+    // A dark store sells delivery-only (ship-from-store and dark-store picking): no collection
+    // is offered there, so the choice is not shown and the checkout is a delivery.
+    final pickupOffered = configAsync.value?.pickupOffered ?? true;
+    if (!pickupOffered && _fulfilment != 'DELIVERY') {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _fulfilment = 'DELIVERY');
+      });
+    }
     final storeName = configAsync.value?.storeName ?? '-';
     final scheme = configAsync.value?.depositScheme;
     final currency = cart.isNotEmpty ? cart.first.currency : '';
@@ -191,321 +273,474 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
         _payOptions(showPrices, enabledMethods, _fulfilment == 'DELIVERY');
     final selectedPay = _selectedOption(payOptions);
 
+    // Delivery and collection slots: for a collection, the store the shopper is
+    // browsing (chosen at the top of the storefront); for a delivery, the store
+    // the typed postcode resolves to — unknown until it does, in which case the
+    // picker simply is not mounted yet.
+    final currentStoreId = ref.watch(storefrontStoreProvider);
+    final resolvedPickerStoreId =
+        _fulfilment == 'DELIVERY' ? _resolvedStoreId : currentStoreId;
+    final pickerStoreId = (resolvedPickerStoreId != null && resolvedPickerStoreId.isNotEmpty)
+        ? resolvedPickerStoreId
+        : null;
+    final slotsOffered = pickerStoreId == null
+        ? false
+        : ref
+                .watch(fulfilmentSlotsProvider((store: pickerStoreId, type: _fulfilment)))
+                .value
+                ?.offered ??
+            false;
+    final slotMissing = slotsOffered && _selectedSlot == null;
+
     if (cart.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.shopping_bag_outlined, size: 64, color: cs.outlineVariant),
-            const SizedBox(height: 16),
-            const Text('Your cart is empty'),
-            const SizedBox(height: 16),
-            OutlinedButton.icon(
-              onPressed: () => context.go('/store/products'),
-              icon: const Icon(Icons.storefront),
-              label: const Text('Browse products'),
-            ),
-          ],
+      return EmptyState(
+        icon: Icons.shopping_bag_outlined,
+        title: 'Your cart is empty',
+        action: OutlinedButton.icon(
+          onPressed: () => context.go('/store/products'),
+          icon: const Icon(Icons.storefront),
+          label: const Text('Browse products'),
         ),
       );
     }
 
-    return Column(
-      children: [
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemCount: cart.length,
-            separatorBuilder: (_, _) => const Divider(height: 1),
-            itemBuilder: (_, i) {
-              final l = cart[i];
-              return ListTile(
-                title: Text(l.productName),
-                subtitle: showPrices
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('${l.sku}  ·  ${l.currency} ${l.unitPrice.toStringAsFixed(2)}'),
-                          CartLineUnitPrice(variantId: l.variantId),
-                        ],
-                      )
-                    : Text(l.sku),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.remove_circle_outline),
-                      tooltip: 'Decrease quantity',
-                      onPressed: () =>
-                          notifier.setQty(l.variantId, l.qty - 1),
-                    ),
-                    Text('${l.qty}',
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
-                    IconButton(
-                      icon: const Icon(Icons.add_circle_outline),
-                      tooltip: 'Increase quantity',
-                      onPressed: () =>
-                          notifier.setQty(l.variantId, l.qty + 1),
-                    ),
-                    if (showPrices) ...[
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 72,
-                        child: Text(
-                          '${l.currency} ${l.lineTotal.toStringAsFixed(2)}',
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+    final gutter = context.pageGutter;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final itemCount = cart.fold<int>(0, (s, l) => s + l.qty);
+    final totalText = AppFormat.money(total, currencyCode: currency);
+    // Swiped away on a touch screen; a mouse uses the bin the minus becomes at one.
+    final swipe = !pointerFirst;
+    // Every line in one card, the dividers inset past the thumbnails.
+    final lines = Card(
+      child: Column(
+        children: [
+          for (var i = 0; i < cart.length; i++) ...[
+            if (i > 0)
+              const Divider(height: 1, indent: CartLineTile.dividerIndent),
+            _lineTile(cart[i], i,
+                showPrices: showPrices, notifier: notifier, swipe: swipe),
+          ],
+        ],
+      ),
+    );
+    final depositNote = scheme == null
+        ? null
+        : Text(
+            key: const Key('deposit-note'),
+            'Drinks in ${scheme.inWords} carry a refundable deposit of '
+            '${AppFormat.money(scheme.depositEach, currencyCode: scheme.currency)} '
+            'each, added to the order as its own line. It is paid back '
+            'when the empty container is returned.',
+            style: theme.textTheme.bodySmall,
+          );
+    final reviewButton = FilledButton.icon(
+      key: const Key('review-order-button'),
+      onPressed: (_placing || slotMissing) ? null : _checkout,
+      icon: _placing
+          ? SizedBox(
+              height: 18,
+              width: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: cs.onPrimary))
+          : Icon(selectedPay.payNow ? Icons.lock_outline : Icons.receipt_long),
+      label: Text(_placing
+          ? (selectedPay.payNow ? 'Processing payment…' : 'Placing order…')
+          : 'Review order'),
+    );
+
+    // The amount in the currency the shopper chose to see prices in (03.x);
+    // paid in the shop's own.
+    final shownNote = Consumer(builder: (context, ref, _) {
+      final shownIn = ref.watch(displayCurrencyProvider);
+      final shop = ref.watch(storefrontCurrenciesProvider).value;
+      final shown =
+          shownIn == null || shop == null ? null : shop.shown(total, shownIn);
+      if (shown == null || shownIn == currency) return const SizedBox.shrink();
+      return Text(
+        '≈ ${AppFormat.money(shown, currencyCode: shownIn)} at the shop\'s rate; '
+        'you pay in $currency',
+        key: const Key('cart-total-shown'),
+        textAlign: TextAlign.end,
+        style: theme.textTheme.bodySmall,
+      );
+    });
+
+    // The price breakdown and the one action. [withAction]: the button ends
+    // it; on a phone it sits in the bar under the scroll instead.
+    Widget summary({required bool withAction}) => OrderSummary(
+          itemCount: itemCount,
+          subtotal: showPrices ? totalText : null,
+          total: showPrices ? totalText : null,
+          notes: [
+            if (showPrices) shownNote,
+            if (showPrices && depositNote != null) depositNote,
+          ],
+          action: withAction ? reviewButton : null,
+        );
+
+    // How the order reaches the shopper and how it is paid.
+    Widget checkout() => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // A dark store sells delivery-only (ship-from-store and dark-store picking):
+            // there is no choice to make there, so it says so instead.
+            if (pickupOffered)
+              // As wide as the panel, so the two choices read as one control.
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                        value: 'PICKUP',
+                        label: Text('Collect from store'),
+                        icon: Icon(Icons.storefront_outlined)),
+                    ButtonSegment(
+                        value: 'DELIVERY',
+                        label: Text('Deliver to home'),
+                        icon: Icon(Icons.local_shipping_outlined)),
                   ],
+                  selected: {_fulfilment},
+                  onSelectionChanged: (s) => setState(() {
+                    _fulfilment = s.first;
+                    // A different fulfilment type offers a different store's
+                    // windows (or none) — last time's choice does not carry over.
+                    _selectedSlot = null;
+                  }),
                 ),
-              );
-            },
-          ),
-        ),
-        SafeArea(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-                maxHeight: MediaQuery.of(context).size.height * 0.7),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
+              )
+            else
+              Row(
+                key: const Key('delivery-only'),
                 children: [
-                  if (showPrices)
-                    Row(
-                      children: [
-                        Text('Total (incl. VAT)',
-                            style: Theme.of(context).textTheme.titleMedium),
-                        const Spacer(),
-                        Text('$currency ${total.toStringAsFixed(2)}',
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleLarge
-                                ?.copyWith(fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                  if (showPrices && scheme != null) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      key: const Key('deposit-note'),
-                      'Drinks in ${scheme.inWords} carry a refundable deposit of '
-                      '${scheme.currency} ${scheme.depositEach.toStringAsFixed(2)} '
-                      'each, added to the order as its own line. It is paid back '
-                      'when the empty container is returned.',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                  if (showPrices) const SizedBox(height: 12),
-                  SegmentedButton<String>(
-                    segments: const [
-                      ButtonSegment(
-                          value: 'PICKUP',
-                          label: Text('Collect from store'),
-                          icon: Icon(Icons.storefront_outlined)),
-                      ButtonSegment(
-                          value: 'DELIVERY',
-                          label: Text('Deliver to home'),
-                          icon: Icon(Icons.local_shipping_outlined)),
-                    ],
-                    selected: {_fulfilment},
-                    onSelectionChanged: (s) =>
-                        setState(() => _fulfilment = s.first),
+                  Icon(Icons.local_shipping_outlined,
+                      size: 18, color: cs.onSurfaceVariant),
+                  const SizedBox(width: AppSpacing.sm),
+                  Expanded(
+                    child: Text('Delivery only from this shop',
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(color: cs.onSurfaceVariant)),
                   ),
-                  if (_fulfilment == 'DELIVERY') ...[
-                    const SizedBox(height: 12),
-                    // The shopper's address book at this shop, when they keep one (12.10).
-                    // Picking one fills the form; the form stays editable afterwards.
-                    if (savedAddresses.isNotEmpty) ...[
-                      DropdownButtonFormField<String?>(
-                        key: const Key('cart-saved-address'),
-                        isExpanded: true,
-                        initialValue: _savedAddressId,
-                        decoration: const InputDecoration(
-                            labelText: 'Use a saved address', isDense: true),
-                        items: [
-                          const DropdownMenuItem<String?>(
-                              value: null, child: Text('Type an address')),
-                          for (final a in savedAddresses)
-                            DropdownMenuItem<String?>(
-                                value: a.id,
-                                child: Text(
-                                    '${a.oneLine}${a.isDefault ? ' (default)' : ''}',
-                                    overflow: TextOverflow.ellipsis)),
-                        ],
-                        onChanged: (id) {
-                          if (id == null) {
-                            setState(() => _savedAddressId = null);
-                            return;
-                          }
-                          _useSavedAddress(savedAddresses.firstWhere((a) => a.id == id), me);
-                        },
-                      ),
-                      const SizedBox(height: 12),
-                    ],
-                    Form(
-                      key: _addressFormKey,
-                      child: Column(
-                        children: [
-                          TextFormField(
-                            controller: _line1Ctrl,
-                            decoration: const InputDecoration(
-                                labelText: 'Address line 1',
-                                isDense: true),
-                            validator: _requiredField,
-                          ),
-                          const SizedBox(height: 8),
-                          TextFormField(
-                            controller: _line2Ctrl,
-                            decoration: const InputDecoration(
-                                labelText: 'Address line 2 (optional)',
-                                isDense: true),
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: TextFormField(
-                                  controller: _cityCtrl,
-                                  decoration: const InputDecoration(
-                                      labelText: 'City', isDense: true),
-                                  validator: _requiredField,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: TextFormField(
-                                  controller: _postalCtrl,
-                                  decoration: const InputDecoration(
-                                      labelText: 'Postal code', isDense: true),
-                                  validator: _requiredField,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          TextFormField(
-                            controller: _recipientNameCtrl,
-                            decoration: const InputDecoration(
-                                labelText: 'Recipient name', isDense: true),
-                            validator: _requiredField,
-                          ),
-                          const SizedBox(height: 8),
-                          TextFormField(
-                            controller: _recipientPhoneCtrl,
-                            decoration: const InputDecoration(
-                                labelText: 'Recipient phone', isDense: true),
-                            keyboardType: TextInputType.phone,
-                            validator: _requiredField,
-                          ),
-                        ],
-                      ),
-                    ),
+                ],
+              ),
+            const SizedBox(height: AppSpacing.xs),
+            // Substitutions for out-of-stock online lines: on unless the shopper turns them off.
+            SwitchListTile.adaptive(
+              key: const Key('allow-substitutions'),
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Allow substitutions'),
+              subtitle: const Text(
+                  'If something is out of stock, the shop may pack a similar item. '
+                  'You never pay more, and you can hand it back for a refund.'),
+              value: _allowSubstitutions,
+              onChanged: (v) => setState(() => _allowSubstitutions = v),
+            ),
+            if (_fulfilment == 'DELIVERY') ...[
+              const SizedBox(height: 12),
+              // The shopper's address book at this shop, when they keep one (12.10).
+              // Picking one fills the form; the form stays editable afterwards.
+              if (savedAddresses.isNotEmpty) ...[
+                DropdownButtonFormField<String?>(
+                  key: const Key('cart-saved-address'),
+                  isExpanded: true,
+                  initialValue: _savedAddressId,
+                  decoration: const InputDecoration(
+                      labelText: 'Use a saved address', isDense: true),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                        value: null, child: Text('Type an address')),
+                    for (final a in savedAddresses)
+                      DropdownMenuItem<String?>(
+                          value: a.id,
+                          child: Text(
+                              '${a.oneLine}${a.isDefault ? ' (default)' : ''}',
+                              overflow: TextOverflow.ellipsis)),
                   ],
-                  if (_fulfilment == 'PICKUP') ...[
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _contactPhoneCtrl,
-                      keyboardType: TextInputType.phone,
+                  onChanged: (id) {
+                    if (id == null) {
+                      setState(() => _savedAddressId = null);
+                      return;
+                    }
+                    _useSavedAddress(savedAddresses.firstWhere((a) => a.id == id), me);
+                  },
+                ),
+                const SizedBox(height: 12),
+              ],
+              Form(
+                key: _addressFormKey,
+                child: Column(
+                  children: [
+                    TextFormField(
+                      controller: _line1Ctrl,
                       decoration: const InputDecoration(
-                        labelText: 'Contact phone *',
-                        hintText: 'We\'ll notify you when your order is ready',
-                        isDense: true,
-                        prefixIcon: Icon(Icons.phone_outlined),
-                      ),
+                          labelText: 'Address line 1',
+                          isDense: true),
+                      validator: _requiredField,
                     ),
-                  ],
-                  const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('Payment',
-                        style: Theme.of(context).textTheme.titleSmall),
-                  ),
-                  const SizedBox(height: 6),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _line2Ctrl,
+                      decoration: const InputDecoration(
+                          labelText: 'Address line 2 (optional)',
+                          isDense: true),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        for (final o in payOptions)
-                          ChoiceChip(
-                            avatar: Icon(o.icon,
-                                size: 16,
-                                color: selectedPay.method == o.method
-                                    ? cs.onSecondaryContainer
-                                    : cs.onSurfaceVariant),
-                            label: Text(
-                                o.payNow ? '${o.label} · pay now' : o.label),
-                            selected: selectedPay.method == o.method,
-                            onSelected: (_) =>
-                                setState(() => _payMethod = o.method),
+                        Expanded(
+                          child: TextFormField(
+                            controller: _cityCtrl,
+                            decoration: const InputDecoration(
+                                labelText: 'City', isDense: true),
+                            validator: _requiredField,
                           ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Container(
-                    width: double.infinity,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    margin: const EdgeInsets.only(bottom: 12),
-                    decoration: BoxDecoration(
-                      color: cs.secondaryContainer,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                            _fulfilment == 'DELIVERY'
-                                ? Icons.local_shipping_outlined
-                                : Icons.storefront_outlined,
-                            size: 18,
-                            color: cs.onSecondaryContainer),
+                        ),
                         const SizedBox(width: 8),
                         Expanded(
-                          child: Text(
-                            _fulfilmentBannerText(
-                                showPrices, storeName, currency, total, selectedPay),
-                            style: TextStyle(
-                                color: cs.onSecondaryContainer, fontSize: 12),
+                          child: TextFormField(
+                            controller: _postalCtrl,
+                            decoration: const InputDecoration(
+                                labelText: 'Postal code', isDense: true),
+                            validator: _requiredField,
                           ),
                         ),
                       ],
                     ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _recipientNameCtrl,
+                      decoration: const InputDecoration(
+                          labelText: 'Recipient name', isDense: true),
+                      validator: _requiredField,
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _recipientPhoneCtrl,
+                      decoration: const InputDecoration(
+                          labelText: 'Recipient phone', isDense: true),
+                      keyboardType: TextInputType.phone,
+                      validator: _requiredField,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (_fulfilment == 'PICKUP') ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _contactPhoneCtrl,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(
+                  labelText: 'Contact phone *',
+                  hintText: 'We\'ll notify you when your order is ready',
+                  isDense: true,
+                  prefixIcon: Icon(Icons.phone_outlined),
+                ),
+              ),
+            ],
+            if (pickerStoreId != null) ...[
+              const SizedBox(height: 12),
+              DeliverySlotPicker(
+                key: ValueKey('slot-picker-$pickerStoreId-$_fulfilment'),
+                storeId: pickerStoreId,
+                fulfilmentType: _fulfilment,
+                selected: _selectedSlot,
+                onSelected: (s) => setState(() => _selectedSlot = s),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Text('Payment', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                for (final o in payOptions)
+                  ChoiceChip(
+                    avatar: Icon(o.icon,
+                        size: 16,
+                        color: selectedPay.method == o.method
+                            ? cs.onSecondaryContainer
+                            : cs.onSurfaceVariant),
+                    label: Text(
+                        o.payNow ? '${o.label} · pay now' : o.label),
+                    selected: selectedPay.method == o.method,
+                    onSelected: (_) =>
+                        setState(() => _payMethod = o.method),
                   ),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: _placing ? null : _checkout,
-                      icon: _placing
-                          ?  SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
-                          : Icon(selectedPay.payNow
-                              ? Icons.lock_outline
-                              : Icons.receipt_long),
-                      label: Text(_placing
-                          ? (selectedPay.payNow
-                              ? 'Processing payment…'
-                              : 'Placing order…')
-                          : 'Review order'),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: cs.secondaryContainer,
+                borderRadius: AppRadius.chip,
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                      _fulfilment == 'DELIVERY'
+                          ? Icons.local_shipping_outlined
+                          : Icons.storefront_outlined,
+                      size: 18,
+                      color: cs.onSecondaryContainer),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _fulfilmentBannerText(
+                          showPrices, storeName, currency, total, selectedPay),
+                      style: TextStyle(
+                          color: cs.onSecondaryContainer, fontSize: 12),
                     ),
                   ),
                 ],
               ),
             ),
+          ],
+        );
+
+    return LayoutBuilder(builder: (context, constraints) {
+      final windowClass = AppBreakpoints.classOf(constraints.maxWidth);
+      if (windowClass >= WindowClass.expanded) {
+        // Two columns: the items on the start side, checkout and the summary
+        // with its button beside them.
+        final available = constraints.maxWidth < AppBreakpoints.contentMaxWidth
+            ? constraints.maxWidth
+            : AppBreakpoints.contentMaxWidth;
+        final half = (available - 2 * gutter - AppSpacing.xl) / 2;
+        return ContentBounds(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: EdgeInsetsDirectional.fromSTEB(
+                      gutter, gutter, 0, gutter + bottomInset),
+                  child: lines,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.xl),
+              SizedBox(
+                width: half > 420 ? 420.0 : half,
+                child: SingleChildScrollView(
+                  padding: EdgeInsetsDirectional.fromSTEB(
+                      0, gutter, gutter, gutter + bottomInset),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Card(
+                        child: Padding(
+                          padding: AppSpacing.cardPadding,
+                          child: checkout(),
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.lg),
+                      summary(withAction: true),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      // One column and one scroll: the items, checkout, then the summary — no
+      // panel that squeezes the list. A form's width at most.
+      final compact = windowClass == WindowClass.compact;
+      final scroll = SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(gutter, AppSpacing.sm, gutter,
+            gutter + (compact ? 0 : bottomInset)),
+        child: ContentBounds.form(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              lines,
+              const SizedBox(height: AppSpacing.xl),
+              checkout(),
+              const SizedBox(height: AppSpacing.xl),
+              summary(withAction: !compact),
+            ],
           ),
         ),
-      ],
-    );
+      );
+      if (!compact) return scroll;
+
+      // A phone: the total and the button stay in view under the scroll.
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: scroll),
+          OrderSummaryBar(
+            itemCount: itemCount,
+            total: showPrices ? totalText : null,
+            action: reviewButton,
+          ),
+        ],
+      );
+    });
   }
 
-  /// The bottom panel's fulfilment/payment summary line. Three independent axes: fulfilment
+  /// One cart line, stepped by the amber stepper; at one its minus takes the
+  /// line out, as a swipe does on a touch screen, with *Undo* offered.
+  Widget _lineTile(CartLine l, int index,
+          {required bool showPrices,
+          required CartNotifier notifier,
+          required bool swipe}) =>
+      CartLineTile(
+        key: ValueKey(l.variantId),
+        id: l.variantId,
+        // The product's own picture, as the shop shows it; a line added before
+        // lines knew their product keeps initials seeded by its name.
+        image: l.productId == null
+            ? null
+            : ProductImageThumb(
+                productId: l.productId!,
+                label: l.productName,
+                fontSize: 16,
+                borderRadius: AppRadius.chip,
+              ),
+        thumbSeed: l.productId ?? l.productName,
+        name: l.productName,
+        detail: showPrices
+            ? '${l.sku}  ·  ${AppFormat.money(l.unitPrice, currencyCode: l.currency)}'
+            : l.sku,
+        extra: showPrices ? CartLineUnitPrice(variantId: l.variantId) : null,
+        qty: l.qty,
+        onInc: () => notifier.setQty(l.variantId, l.qty + 1),
+        onDec: () => notifier.setQty(l.variantId, l.qty - 1),
+        onRemove: () => _removeLine(l, index),
+        lineTotal: showPrices
+            ? AppFormat.money(l.lineTotal, currencyCode: l.currency)
+            : null,
+        swipeToRemove: swipe,
+      );
+
+  /// Takes [line] out of the cart and offers it back where it was.
+  void _removeLine(CartLine line, int index) {
+    final notifier = ref.read(cartProvider.notifier);
+    notifier.remove(line.variantId);
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text('Removed ${line.productName}'),
+        duration: const Duration(seconds: 5),
+        // Waits for a screen-reader user to reach it; goes by itself otherwise.
+        persist: MediaQuery.accessibleNavigationOf(context),
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () => _restoreLine(notifier, line, index),
+        ),
+      ));
+  }
+
+  /// Puts a removed line back at [index], unless it is in the cart again.
+  void _restoreLine(CartNotifier notifier, CartLine line, int index) =>
+      notifier.insert(index, line);
+
+  /// The checkout's fulfilment/payment summary line. Three independent axes: fulfilment
   /// (pickup/delivery), whether a price is known (showPrices), and the selected payment option —
   /// catalog-mode stores have no known price, so pay-now options are never offered there.
   String _fulfilmentBannerText(bool showPrices, String storeName,
@@ -518,7 +753,7 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
           ? '$where · price & payment confirmed on delivery'
           : '$where · price & payment confirmed in store';
     }
-    final amount = '$currency ${total.toStringAsFixed(2)}';
+    final amount = AppFormat.money(total, currencyCode: currency);
     return '$where · ${pay.label.toLowerCase()}: $amount';
   }
 
@@ -570,6 +805,7 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
     final storeName = ref.read(storefrontConfigProvider).value?.storeName ?? '-';
     final currency = cart.first.currency;
     final total = cart.fold<double>(0, (s, l) => s + l.lineTotal);
+    final totalText = AppFormat.money(total, currencyCode: currency);
     final itemCount = cart.fold<int>(0, (s, l) => s + l.qty);
     final confirmed = await showModalBottomSheet<bool>(
       context: context,
@@ -608,7 +844,7 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
                     '$itemCount item${itemCount == 1 ? '' : 's'}'),
                 if (showPrices)
                   row(Icons.receipt_long_outlined, 'Total',
-                      '$currency ${total.toStringAsFixed(2)} (incl. VAT)'),
+                      '$totalText (incl. VAT)'),
                 row(
                     delivery
                         ? Icons.local_shipping_outlined
@@ -617,6 +853,16 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
                     delivery
                         ? '${_line1Ctrl.text.trim()}, ${_cityCtrl.text.trim()} ${_postalCtrl.text.trim()}\n${_recipientNameCtrl.text.trim()} · ${_recipientPhoneCtrl.text.trim()}'
                         : '$storeName\nWe\'ll call ${_contactPhoneCtrl.text.trim()} when it\'s ready'),
+                // The chosen delivery/collection window (delivery-and-collection-slots),
+                // the last look before the order holds it.
+                if (_selectedSlot != null)
+                  row(
+                      Icons.schedule_outlined,
+                      delivery ? 'Delivery window' : 'Collection window',
+                      slotWhen(
+                          date: _selectedSlot!.date,
+                          startTime: _selectedSlot!.startTime,
+                          endTime: _selectedSlot!.endTime)),
                 row(pay.icon, 'Payment',
                     pay.payNow ? '${pay.label} — charged now' : pay.label),
                 const SizedBox(height: 16),
@@ -624,7 +870,7 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
                   onPressed: () => Navigator.pop(ctx, true),
                   icon: Icon(pay.payNow ? Icons.lock_outline : Icons.check),
                   label: Text(pay.payNow && showPrices
-                      ? 'Pay $currency ${total.toStringAsFixed(2)}'
+                      ? 'Pay $totalText'
                       : 'Place order'),
                 ),
                 TextButton(
@@ -691,6 +937,7 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
           'storeId': storeId,
           'channel': 'ONLINE',
           'fulfilmentType': _fulfilment,
+          'allowSubstitutions': _allowSubstitutions,
           if (currency.isNotEmpty) 'currency': currency,
           'items': [
             for (final l in cart)
@@ -699,6 +946,13 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
               // it's recorded as a 0-value request to be priced/fulfilled later.
               {'variantId': l.variantId, 'qty': l.qty, 'unitPrice': l.unitPrice},
           ],
+          // The chosen delivery/collection window (delivery-and-collection-slots):
+          // sent only when the store offered one and the shopper picked it — a
+          // store with no windows checks out exactly as before.
+          if (_selectedSlot != null) ...{
+            'slotWindowId': _selectedSlot!.windowId,
+            'slotStartsAt': _selectedSlot!.startsAt.toUtc().toIso8601String(),
+          },
           'contactPhone': delivery
               ? _recipientPhoneCtrl.text.trim()
               : _contactPhoneCtrl.text.trim(),
@@ -724,6 +978,41 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
       // 09.16: the server put the return-scheme deposit on the order as its own
       // line; the shopper sees it and pays the total that carries it.
       final depositAmount = (data['depositAmount'] as num?)?.toDouble() ?? 0;
+      // The window this order holds (delivery-and-collection-slots), for the
+      // confirmation and the on-device order history; null for an order with
+      // none, and never a price — the window carries no fee in this cut.
+      final orderSlot = OrderSlot.maybe(data['slot']);
+      // Order orchestration: a delivery the shop serving the postcode cannot fill alone comes in
+      // parts from several shops — one checkout, paid once for all of them.
+      final group = data['group'] as Map<String, dynamic>?;
+      final parts = [
+        for (final p in (group?['parts'] as List?) ?? const [])
+          CheckoutPart.fromJson(p as Map<String, dynamic>),
+      ];
+      final split = parts.length > 1;
+      final payTotal =
+          split ? (group!['total'] as num?)?.toDouble() ?? total : total;
+      // What the shopper pays: the whole checkout's total when it comes in parts.
+      final totalText = AppFormat.money(payTotal, currencyCode: currency);
+      final depositText = AppFormat.money(depositAmount, currencyCode: currency);
+      final storeNames =
+          split ? await _storeNames() : const <String, String>{};
+      if (split && payNow) {
+        if (!mounted) return;
+        // No spinner behind the sheet: the shopper is deciding, nothing is in flight.
+        setState(() => _placing = false);
+        final go = await _confirmSplitSheet(parts, storeNames,
+            group!['currency'] as String? ?? currency, payTotal);
+        if (!mounted) return;
+        if (!go) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Nothing was charged. Your order is held for a '
+                'short while and released if it is not paid.'),
+          ));
+          return;
+        }
+        setState(() => _placing = true);
+      }
 
       // 2. "Pay now" captures payment online immediately (capture → PaymentCaptured → order
       // confirms). "Pay later" — catalog mode, or a priced shop's customer choosing to defer —
@@ -731,12 +1020,15 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
       if (payNow) {
         await dio.post(
           '/${ApiConstants.payment}/payments/online',
-          data: {
-            'orderId': orderId,
-            'amount': total,
-            'method': pay.method,
-            'storeId': storeId,
-          },
+          // A split checkout is paid once, for all its parts.
+          data: split
+              ? {'groupId': group!['id'], 'amount': payTotal, 'method': pay.method}
+              : {
+                  'orderId': orderId,
+                  'amount': total,
+                  'method': pay.method,
+                  'storeId': storeId,
+                },
           options: Options(headers: {'Idempotency-Key': derivedId(idemBase, 'pay')}),
         );
       }
@@ -745,17 +1037,35 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
       if (delivery) await _saveAddress();
 
       // Remember this order on-device so it shows in "My orders" (guest fallback).
-      await ref.read(storefrontOrdersProvider.notifier).add(
-            StorefrontOrderRecord(
-              orderId: orderId,
-              total: showPrices ? total : 0,
-              currency: showPrices ? currency : '',
-              itemCount: cart.fold<int>(0, (s, l) => s + l.qty),
-              placedAt: DateTime.now(),
-              storeName: storeName,
-              fulfilmentType: _fulfilment,
-            ),
-          );
+      if (split) {
+        for (final p in parts) {
+          await ref.read(storefrontOrdersProvider.notifier).add(
+                StorefrontOrderRecord(
+                  orderId: p.orderId,
+                  total: showPrices ? p.total : 0,
+                  currency: showPrices ? currency : '',
+                  itemCount: p.units,
+                  placedAt: DateTime.now(),
+                  storeName: storeNames[p.storeId] ?? storeName,
+                  fulfilmentType: _fulfilment,
+                  slot: orderSlot,
+                ),
+              );
+        }
+      } else {
+        await ref.read(storefrontOrdersProvider.notifier).add(
+              StorefrontOrderRecord(
+                orderId: orderId,
+                total: showPrices ? total : 0,
+                currency: showPrices ? currency : '',
+                itemCount: cart.fold<int>(0, (s, l) => s + l.qty),
+                placedAt: DateTime.now(),
+                storeName: storeName,
+                fulfilmentType: _fulfilment,
+                slot: orderSlot,
+              ),
+            );
+      }
       // Signed-in customers get a server-backed list — refresh it so the new
       // order shows on the next visit to "My orders".
       ref.invalidate(serverOrdersProvider);
@@ -773,17 +1083,21 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text('Order #${shortRef(orderId)}'),
+              if (split) ...[
+                const SizedBox(height: 6),
+                Text(splitSummary(parts, storeNames),
+                    key: const Key('split-parts'), textAlign: TextAlign.center),
+              ],
               if (payNow) ...[
                 const SizedBox(height: 6),
-                Text('$currency ${total.toStringAsFixed(2)} paid',
+                Text('$totalText paid',
                     style: const TextStyle(fontWeight: FontWeight.bold)),
               ],
               if (depositAmount > 0) ...[
                 const SizedBox(height: 6),
                 Text(
                     key: const Key('deposit-charged'),
-                    'Includes a refundable container deposit of '
-                    '$currency ${depositAmount.toStringAsFixed(2)}',
+                    'Includes a refundable container deposit of $depositText',
                     style: TextStyle(color: Theme.of(ctx).colorScheme.outline)),
               ],
               const SizedBox(height: 6),
@@ -797,16 +1111,26 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
                   delivery ? 'Deliver to your address' : 'Collect from $storeName',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                   textAlign: TextAlign.center),
+              if (orderSlot != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                    slotWhen(
+                        date: orderSlot.date,
+                        startTime: orderSlot.startTime,
+                        endTime: orderSlot.endTime),
+                    key: const Key('order-slot-label'),
+                    style: TextStyle(color: Theme.of(ctx).colorScheme.outline)),
+              ],
               if (!payNow)
                 Text(
                     showPrices
                         ? (pay.method == 'CASH'
                             ? (delivery
-                                ? 'Pay $currency ${total.toStringAsFixed(2)} in cash on delivery.'
-                                : 'Pay $currency ${total.toStringAsFixed(2)} in cash at pickup.')
+                                ? 'Pay $totalText in cash on delivery.'
+                                : 'Pay $totalText in cash at pickup.')
                             : (delivery
-                                ? 'Pay $currency ${total.toStringAsFixed(2)} on delivery.'
-                                : 'Pay $currency ${total.toStringAsFixed(2)} at pickup.'))
+                                ? 'Pay $totalText on delivery.'
+                                : 'Pay $totalText at pickup.'))
                         : (delivery
                             ? 'Price & payment will be confirmed on delivery.'
                             : 'Price & payment will be confirmed in store.'),
@@ -841,15 +1165,36 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
       _recipientPhoneCtrl.clear();
       _contactPhoneCtrl.clear();
       setState(() {
-        _fulfilment = 'PICKUP';
+        _fulfilment =
+            (ref.read(storefrontConfigProvider).value?.pickupOffered ?? true)
+                ? 'PICKUP'
+                : 'DELIVERY';
         _payMethod = '';
+        _selectedSlot = null;
       });
       // Refill the address form from the just-saved address so a follow-up
       // delivery order in the same session starts prefilled too.
       await _loadSavedAddress();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _placing = false);
+      final code = apiErrorCode(e);
+      // The window filled or closed while the shopper was checking out: the
+      // choice no longer holds, so it is cleared and the picker re-reads
+      // rather than leaving a stale "Full" occurrence selected.
+      if (code == 'ORDER_SLOT_FULL' || code == 'ORDER_SLOT_CLOSED') {
+        final sid = _fulfilment == 'DELIVERY'
+            ? _resolvedStoreId
+            : ref.read(storefrontStoreProvider);
+        if (sid != null && sid.isNotEmpty) {
+          ref.invalidate(fulfilmentSlotsProvider((store: sid, type: _fulfilment)));
+        }
+        setState(() {
+          _placing = false;
+          _selectedSlot = null;
+        });
+      } else {
+        setState(() => _placing = false);
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(_checkoutErrorMessage(e)),
@@ -866,14 +1211,101 @@ class _StorefrontCartScreenState extends ConsumerState<StorefrontCartScreen> {
       case 'ORDER_INSUFFICIENT_STOCK':
         return 'Sorry — some items in your cart just sold out. '
             'Please adjust the quantities and try again.';
+      case 'ORDER_UNFULFILLABLE':
+        return 'Sorry — our shops can\'t gather everything in your cart right now. '
+            'Please adjust the quantities and try again.';
       case 'ORDER_INVENTORY_UNAVAILABLE':
         return 'We couldn\'t confirm stock right now. Please try again in a moment.';
       case 'PAYMENT_METHOD_DISABLED':
         return 'That payment method isn\'t available at this store any more. '
             'Please pick another one.';
+      // Delivery and collection slots (delivery-and-collection-slots): the
+      // window filled or closed while checking out, or the choice sent didn't
+      // hold — the picker above re-reads so another can be chosen.
+      case 'ORDER_SLOT_FULL':
+      case 'ORDER_SLOT_CLOSED':
+        return 'That window has just filled — pick another.';
+      case 'ORDER_SLOT_REQUIRED':
+        return 'Please choose a delivery or collection window.';
+      case 'ORDER_SLOT_UNKNOWN':
+        return 'That window is no longer available. Please choose another.';
+      case 'ORDER_SLOT_NOT_APPLICABLE':
+        return 'A window cannot be chosen for this order.';
       default:
         return friendlyError(e, fallback: 'Checkout failed.');
     }
+  }
+
+  // ── Split delivery (order orchestration) ─────────────────────────────────
+
+  /// The shops' names, for saying where each part comes from; none when they cannot be read.
+  Future<Map<String, String>> _storeNames() async {
+    try {
+      final stores = await ref.read(storefrontStoresProvider.future);
+      return {for (final s in stores) s.id: s.name};
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Before any money moves: the order comes in parts, from which shops, for how much each, and
+  /// one payment for all of it. Returns true when the shopper pays.
+  Future<bool> _confirmSplitSheet(List<CheckoutPart> parts,
+      Map<String, String> storeNames, String currency, double payTotal) async {
+    final paid = await showModalBottomSheet<bool>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Your order comes in ${parts.length} parts',
+                    style: Theme.of(ctx).textTheme.titleLarge),
+                const SizedBox(height: 8),
+                Text(
+                    'Not everything is at one shop, so ${parts.length} of our shops '
+                    'will each send part of it. You pay once.',
+                    style: TextStyle(color: cs.onSurfaceVariant)),
+                const SizedBox(height: 8),
+                for (final p in parts)
+                  ListTile(
+                    key: Key('split-part-${p.orderId}'),
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.local_shipping_outlined,
+                        color: cs.onSurfaceVariant),
+                    title: Text(storeNames[p.storeId] ?? 'Another shop'),
+                    subtitle:
+                        Text('${p.units} item${p.units == 1 ? '' : 's'}'),
+                    // Its own style, or a trailing slot's money inherits 11px labelSmall.
+                    trailing: Text(AppFormat.money(p.total, currencyCode: currency),
+                        style: Theme.of(ctx)
+                            .textTheme
+                            .titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w600)),
+                  ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  key: const Key('split-pay'),
+                  onPressed: () => Navigator.pop(ctx, true),
+                  icon: const Icon(Icons.lock_outline),
+                  label: Text('Pay ${AppFormat.money(payTotal, currencyCode: currency)}'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Not now'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    return paid == true;
   }
 
   // ── Pending-order guard ──────────────────────────────────────────────────

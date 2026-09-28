@@ -3,10 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/empty_state.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 
 // ---------------------------------------------------------------------------
 // Plans and packaging (21.8) — the platform's own price list.
@@ -34,7 +39,18 @@ class PlanPrice {
         amount: j['amount'] as num? ?? 0,
         effectiveFrom: j['effectiveFrom'] as String? ?? '',
       );
+
+  /// `£29.00 from 1 Jan 2026` — money in its currency and a date in words, never the NUMERIC as it
+  /// arrives (`29.0`) or an ISO date.
+  String get says =>
+      '${AppFormat.money(amount, currencyCode: currency)} from ${AppFormat.date(effectiveFrom)}';
 }
+
+/// What one unit costs, in its currency: `£0.05`. An overage price is set to four places, finer
+/// than a currency's minor unit, so a price like 0.035 is shown to the places it has (`£0.035`) —
+/// never rounded to a price nobody set. Otherwise it is exactly [AppFormat.money].
+String unitPriceSays(num amount, String currency) =>
+    AppFormat.money(amount, currencyCode: currency, maxDecimals: 4);
 
 class PlanGrant {
   final String key;
@@ -175,7 +191,7 @@ class Plan {
     final priced = meterPrices.where((x) => x.meter == m.meter).toList();
     if (priced.isEmpty) return '${m.label}: ${m.included} a period, then not charged';
     return '${m.label}: ${m.included} a period, then '
-        '${priced.map((x) => '${x.unitAmount} ${x.currency}').join(' / ')} each';
+        '${priced.map((x) => unitPriceSays(x.unitAmount, x.currency)).join(' / ')} each';
   }
 
   bool get sold => status == 'ACTIVE';
@@ -211,7 +227,14 @@ String planStatusLabel(String status) => switch (status) {
       'DRAFT' => 'Draft',
       'ACTIVE' => 'On sale',
       'RETIRED' => 'Retired',
-      _ => status,
+      _ => humanizeCode(status),
+    };
+
+/// On sale is the good state; a draft is still being written; retired is closed.
+StatusTone planStatusTone(String status) => switch (status) {
+      'ACTIVE' => StatusTone.success,
+      'DRAFT' => StatusTone.info,
+      _ => StatusTone.neutral,
     };
 
 String planIntervalLabel(String interval) => interval == 'YEAR' ? 'a year' : 'a month';
@@ -237,52 +260,48 @@ class PlansScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final plans = ref.watch(plansProvider);
-    final text = Theme.of(context).textTheme;
+    final gutter = context.pageGutter;
     void refresh() => ref.invalidate(plansProvider);
 
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text('Plans', style: text.headlineSmall)),
-              OutlinedButton.icon(
-                key: const Key('plan-write'),
-                icon: const Icon(Icons.add),
-                label: const Text('Write a plan'),
-                onPressed: () async {
-                  final written = await showDialog<bool>(context: context, builder: (_) => const WritePlanDialog());
-                  if (written == true) refresh();
-                },
-              ),
-              const SizedBox(width: 8),
-              IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'What a business can be sold. A plan is written, priced and given its allowances before '
-            'it goes on sale; one plan on sale is the one a business signing up starts on.',
-            style: text.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.outline),
-          ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: plans.when(
-              loading: () => const LoadingView(label: 'Loading plans…'),
-              error: (e, _) => ErrorView(message: friendlyError(e, fallback: 'Could not load plans.'), onRetry: refresh),
-              data: (list) => list.isEmpty
-                  ? const Center(child: Text('No plans yet. Write one, price it, then put it on sale.'))
-                  : ListView.separated(
-                      itemCount: list.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 10),
-                      itemBuilder: (context, i) => _PlanCard(plan: list[i], onChanged: refresh),
-                    ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        PageHeader(
+          title: 'Plans',
+          subtitle: 'What a business can be sold. A plan is written, priced and given its allowances '
+              'before it goes on sale; one plan on sale is the one a business signing up starts on.',
+          actions: [
+            OutlinedButton.icon(
+              key: const Key('plan-write'),
+              icon: const Icon(Icons.add),
+              label: const Text('Write a plan'),
+              onPressed: () async {
+                final written = await showDialog<bool>(context: context, builder: (_) => const WritePlanDialog());
+                if (written == true) refresh();
+              },
             ),
+            IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
+          ],
+        ),
+        Expanded(
+          child: plans.when(
+            loading: () => const LoadingView(label: 'Loading plans…'),
+            error: (e, _) => ErrorView(message: friendlyError(e, fallback: 'Could not load plans.'), onRetry: refresh),
+            data: (list) => list.isEmpty
+                ? const EmptyState(
+                    icon: Icons.sell_outlined,
+                    title: 'No plans yet',
+                    message: 'Write one, price it, then put it on sale.',
+                  )
+                : ListView.separated(
+                    padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, gutter),
+                    itemCount: list.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.md),
+                    itemBuilder: (context, i) => _PlanCard(plan: list[i], onChanged: refresh),
+                  ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -329,93 +348,107 @@ class _PlanCardState extends ConsumerState<_PlanCard> {
     final p = widget.plan;
     final cs = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
+    final heading = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('${p.name} · ${p.code}', style: text.titleMedium),
+        const SizedBox(height: AppSpacing.xs),
+        Text(
+          [
+            'billed ${planIntervalLabel(p.billingInterval)}',
+            if (p.trialDays > 0) '${p.trialDays} days free',
+            if (!p.isPublic) 'not on the public list',
+          ].join(' · '),
+          style: text.bodySmall?.copyWith(color: cs.outline),
+        ),
+      ],
+    );
+    final badges = Wrap(
+      spacing: AppSpacing.sm,
+      runSpacing: AppSpacing.xs,
+      children: [
+        if (p.isDefault)
+          StatusBadge(
+            'New businesses start here',
+            key: Key('plan-default-${p.code}'),
+            tone: StatusTone.accent,
+          ),
+        StatusBadge(
+          planStatusLabel(p.status),
+          key: Key('plan-status-${p.code}'),
+          tone: planStatusTone(p.status),
+        ),
+      ],
+    );
     return Card(
       key: Key('plan-${p.code}'),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: AppSpacing.cardPadding,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('${p.name} · ${p.code}', style: text.titleMedium),
-                      const SizedBox(height: 2),
-                      Text(
-                        [
-                          'billed ${planIntervalLabel(p.billingInterval)}',
-                          if (p.trialDays > 0) '${p.trialDays} days free',
-                          if (!p.isPublic) 'not on the public list',
-                        ].join(' · '),
-                        style: text.bodySmall?.copyWith(color: cs.outline),
-                      ),
-                    ],
-                  ),
-                ),
-                if (p.isDefault)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: Chip(
-                      key: Key('plan-default-${p.code}'),
-                      label: const Text('New businesses start here'),
+            // Below 600px the badges go under the name: beside it, the default plan's two leave the
+            // name a sliver of a phone card and it breaks letter by letter.
+            LayoutBuilder(
+              builder: (context, constraints) => constraints.maxWidth < AppBreakpoints.medium
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [heading, const SizedBox(height: AppSpacing.sm), badges],
+                    )
+                  : Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [Expanded(child: heading), const SizedBox(width: AppSpacing.md), badges],
                     ),
-                  ),
-                Chip(label: Text(planStatusLabel(p.status))),
-              ],
             ),
             if (p.description != null) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               Text(p.description!, style: text.bodyMedium),
             ],
-            const Divider(height: 24),
+            const Divider(height: AppSpacing.xl),
             Text('Price', style: text.titleSmall),
-            const SizedBox(height: 4),
+            const SizedBox(height: AppSpacing.xs),
             if (p.prices.isEmpty)
               Text('No price yet — it cannot go on sale without one.', style: TextStyle(color: cs.error))
             else
-              Text(
-                p.prices.map((x) => '${x.amount} ${x.currency} from ${x.effectiveFrom}').join('  ·  '),
-                style: text.bodyMedium,
-              ),
-            const SizedBox(height: 12),
+              Text(p.prices.map((x) => x.says).join('  ·  '), style: text.bodyMedium),
+            const SizedBox(height: AppSpacing.md),
             Text('What it includes', style: text.titleSmall),
-            const SizedBox(height: 4),
+            const SizedBox(height: AppSpacing.xs),
             if (p.includes.isEmpty)
               Text('Nothing named — a business on it is unrestricted.', style: text.bodyMedium)
             else
               Wrap(
-                spacing: 8,
-                runSpacing: 6,
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.xs,
                 children: [
                   for (final g in p.includes)
                     Chip(key: Key('plan-grant-${p.code}-${g.key}'), label: Text('${g.label}: ${g.says}')),
                 ],
               ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             Text('Metered use', style: text.titleSmall),
-            const SizedBox(height: 4),
+            const SizedBox(height: AppSpacing.xs),
             if (p.meters.isEmpty)
               Text('Nothing metered — orders and texts are uncounted against this plan.', style: text.bodyMedium)
             else
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
-                children: [
-                  for (final m in p.meters)
-                    Chip(key: Key('plan-meter-${p.code}-${m.meter}'), label: Text(p.meterSays(m))),
-                ],
-              ),
+              // Rows of text, not chips: a chip keeps its label on one line and fades it, and a
+              // metered line is longer than a phone card, so the price at its end was cut off.
+              for (final m in p.meters)
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.xs),
+                  child: Text(
+                    p.meterSays(m),
+                    key: Key('plan-meter-${p.code}-${m.meter}'),
+                    style: text.bodyMedium,
+                  ),
+                ),
             if (_error != null) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: AppSpacing.sm),
               Text(_error!, key: Key('plan-error-${p.code}'), style: TextStyle(color: cs.error)),
             ],
-            const SizedBox(height: 8),
+            const SizedBox(height: AppSpacing.sm),
             Wrap(
-              spacing: 8,
+              spacing: AppSpacing.sm,
               children: [
                 TextButton(
                   key: Key('plan-price-${p.code}'),
@@ -557,13 +590,13 @@ class _WritePlanDialogState extends ConsumerState<WritePlanDialog> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text('It is a draft until you put it on sale, so nothing here is offered to anybody yet.'),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               TextField(key: const Key('plan-code'), controller: _code, decoration: const InputDecoration(labelText: 'Code *', hintText: 'STARTER')),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               TextField(key: const Key('plan-name'), controller: _name, decoration: const InputDecoration(labelText: 'Name *')),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               TextField(controller: _description, maxLines: 2, decoration: const InputDecoration(labelText: 'What it is for')),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               DropdownButtonFormField<String>(
                 key: const Key('plan-interval'),
                 isExpanded: true,
@@ -575,14 +608,14 @@ class _WritePlanDialogState extends ConsumerState<WritePlanDialog> {
                 ],
                 onChanged: (v) => setState(() => _interval = v ?? 'MONTH'),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               TextField(
                 key: const Key('plan-trial'),
                 controller: _trial,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(labelText: 'Days free before the first bill'),
               ),
-              SwitchListTile(
+              SwitchListTile.adaptive(
                 key: const Key('plan-public'),
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Show it on the price list'),
@@ -612,7 +645,9 @@ class SetPriceDialog extends ConsumerStatefulWidget {
 }
 
 class _SetPriceDialogState extends ConsumerState<SetPriceDialog> {
-  final _currency = TextEditingController(text: 'GBP');
+  // No currency preselected (SJ-D67): a plan can be priced in any tenant's
+  // home currency, and the operator names the one this price is in.
+  final _currency = TextEditingController();
   final _amount = TextEditingController();
   DateTime? _from;
   String? _error;
@@ -626,6 +661,11 @@ class _SetPriceDialogState extends ConsumerState<SetPriceDialog> {
   }
 
   Future<void> _save() async {
+    final currency = _currency.text.trim().toUpperCase();
+    if (currency.isEmpty) {
+      setState(() => _error = 'Choose a currency — a three-letter code, such as USD or INR.');
+      return;
+    }
     final amount = num.tryParse(_amount.text.trim());
     if (amount == null || amount < 0) {
       setState(() => _error = 'A price is a number, like 49.00.');
@@ -637,7 +677,7 @@ class _SetPriceDialogState extends ConsumerState<SetPriceDialog> {
     });
     try {
       await ref.read(apiClientProvider).dio.post('$_base/${widget.planId}/prices', data: {
-        'currency': _currency.text.trim().toUpperCase(),
+        'currency': currency,
         'amount': amount,
         'effectiveFrom': ?_from?.toIso8601String().substring(0, 10),
       });
@@ -646,7 +686,9 @@ class _SetPriceDialogState extends ConsumerState<SetPriceDialog> {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _error = apiErrorCode(e) == 'CURRENCY_INVALID' ? 'A currency is a three-letter code, like GBP.' : friendlyError(e);
+        _error = apiErrorCode(e) == 'CURRENCY_INVALID'
+            ? 'A currency is a three-letter code, such as USD or INR.'
+            : friendlyError(e);
       });
     }
   }
@@ -663,14 +705,19 @@ class _SetPriceDialogState extends ConsumerState<SetPriceDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('From a date. An earlier price is kept, so an invoice raised under it stays explicable.'),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             Row(
               children: [
                 SizedBox(
                   width: 110,
-                  child: TextField(key: const Key('price-currency'), controller: _currency, decoration: const InputDecoration(labelText: 'Currency')),
+                  child: TextField(
+                    key: const Key('price-currency'),
+                    controller: _currency,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(labelText: 'Currency', hintText: 'e.g. USD'),
+                  ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: AppSpacing.md),
                 Expanded(
                   child: TextField(
                     key: const Key('price-amount'),
@@ -685,7 +732,7 @@ class _SetPriceDialogState extends ConsumerState<SetPriceDialog> {
               key: const Key('price-from'),
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.event_outlined),
-              title: Text(_from == null ? 'From today' : 'From ${_from!.toIso8601String().substring(0, 10)}'),
+              title: Text(_from == null ? 'From today' : 'From ${AppFormat.date(_from!.toIso8601String())}'),
               onTap: () async {
                 final now = DateTime.now();
                 final picked = await showDatePicker(context: context, firstDate: now.subtract(const Duration(days: 365)), lastDate: now.add(const Duration(days: 730)), initialDate: now);
@@ -811,11 +858,11 @@ class _SetIncludesDialogState extends ConsumerState<SetIncludesDialog> {
                     'Only what the platform actually enforces can be promised here. Leave a limit '
                     'empty to say nothing about it; type “-” for unlimited.',
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: AppSpacing.md),
                   for (final k in list)
                     if (k.limit)
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.sm),
                         child: TextField(
                           key: Key('include-${k.key}'),
                           controller: _limits[k.key],
@@ -823,7 +870,7 @@ class _SetIncludesDialogState extends ConsumerState<SetIncludesDialog> {
                         ),
                       )
                     else
-                      SwitchListTile(
+                      SwitchListTile.adaptive(
                         key: Key('include-${k.key}'),
                         contentPadding: EdgeInsets.zero,
                         title: Text(k.label),
@@ -953,7 +1000,7 @@ class _SetMetersDialogState extends ConsumerState<SetMetersDialog> {
                     'How many each billing period. Beyond it, use is charged at the plan’s overage price — '
                     'or, for what may be refused, stopped. Leave empty to say nothing; “-” for unlimited.',
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: AppSpacing.md),
                   for (final k in list) ...[
                     TextField(
                       key: Key('meter-${k.key}'),
@@ -962,7 +1009,7 @@ class _SetMetersDialogState extends ConsumerState<SetMetersDialog> {
                       decoration: InputDecoration(labelText: '${k.label} (${k.unit}s)', helperText: 'counted by ${k.countedBy}'),
                     ),
                     if (k.refusable)
-                      SwitchListTile(
+                      SwitchListTile.adaptive(
                         key: Key('meter-hard-${k.key}'),
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Stop marketing beyond it, rather than charge'),
@@ -970,7 +1017,7 @@ class _SetMetersDialogState extends ConsumerState<SetMetersDialog> {
                         value: _hard[k.key] ?? false,
                         onChanged: (v) => setState(() => _hard[k.key] = v),
                       ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: AppSpacing.sm),
                   ],
                   if (_error != null) Text(_error!, key: const Key('meters-error'), style: TextStyle(color: cs.error)),
                 ],
@@ -1002,7 +1049,9 @@ class SetMeterPriceDialog extends ConsumerStatefulWidget {
 }
 
 class _SetMeterPriceDialogState extends ConsumerState<SetMeterPriceDialog> {
-  final _currency = TextEditingController(text: 'GBP');
+  // No currency preselected (SJ-D67): a plan can be priced in any tenant's
+  // home currency, and the operator names the one this price is in.
+  final _currency = TextEditingController();
   final _amount = TextEditingController();
   String? _meter;
   DateTime? _from;
@@ -1017,9 +1066,14 @@ class _SetMeterPriceDialogState extends ConsumerState<SetMeterPriceDialog> {
   }
 
   Future<void> _save() async {
+    final currency = _currency.text.trim().toUpperCase();
     final amount = num.tryParse(_amount.text.trim());
     if (_meter == null) {
       setState(() => _error = 'Choose what is being priced.');
+      return;
+    }
+    if (currency.isEmpty) {
+      setState(() => _error = 'Choose a currency — a three-letter code, such as USD or INR.');
       return;
     }
     if (amount == null || amount < 0) {
@@ -1033,7 +1087,7 @@ class _SetMeterPriceDialogState extends ConsumerState<SetMeterPriceDialog> {
     try {
       await ref.read(apiClientProvider).dio.post('$_base/${widget.planId}/meter-prices', data: {
         'meter': _meter,
-        'currency': _currency.text.trim().toUpperCase(),
+        'currency': currency,
         'unitAmount': amount,
         'effectiveFrom': ?_from?.toIso8601String().substring(0, 10),
       });
@@ -1042,7 +1096,9 @@ class _SetMeterPriceDialogState extends ConsumerState<SetMeterPriceDialog> {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _error = apiErrorCode(e) == 'CURRENCY_INVALID' ? 'A currency is a three-letter code, like GBP.' : friendlyError(e);
+        _error = apiErrorCode(e) == 'CURRENCY_INVALID'
+            ? 'A currency is a three-letter code, such as USD or INR.'
+            : friendlyError(e);
       });
     }
   }
@@ -1060,7 +1116,7 @@ class _SetMeterPriceDialogState extends ConsumerState<SetMeterPriceDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('Each one beyond what the plan includes, before tax. A period is charged at the price in force the day it began.'),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             DropdownButtonFormField<String>(
               key: const Key('meter-price-meter'),
               initialValue: _meter,
@@ -1071,14 +1127,19 @@ class _SetMeterPriceDialogState extends ConsumerState<SetMeterPriceDialog> {
               ],
               onChanged: (v) => setState(() => _meter = v),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: AppSpacing.sm),
             Row(
               children: [
                 SizedBox(
                   width: 110,
-                  child: TextField(key: const Key('meter-price-currency'), controller: _currency, decoration: const InputDecoration(labelText: 'Currency')),
+                  child: TextField(
+                    key: const Key('meter-price-currency'),
+                    controller: _currency,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(labelText: 'Currency', hintText: 'e.g. USD'),
+                  ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: AppSpacing.md),
                 Expanded(
                   child: TextField(
                     key: const Key('meter-price-amount'),
@@ -1093,7 +1154,7 @@ class _SetMeterPriceDialogState extends ConsumerState<SetMeterPriceDialog> {
               key: const Key('meter-price-from'),
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.event_outlined),
-              title: Text(_from == null ? 'From today' : 'From ${_from!.toIso8601String().substring(0, 10)}'),
+              title: Text(_from == null ? 'From today' : 'From ${AppFormat.date(_from!.toIso8601String())}'),
               onTap: () async {
                 final now = DateTime.now();
                 final picked = await showDatePicker(context: context, firstDate: now.subtract(const Duration(days: 365)), lastDate: now.add(const Duration(days: 730)), initialDate: now);

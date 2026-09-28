@@ -27,9 +27,13 @@ void main() {
     expect(l.actionSignIn, 'Zaloguj się');
   });
 
-  testWidgets('an untranslated locale falls back to English', (tester) async {
-    // Romanian is a stub ARB — strings fall back to the English template.
+  testWidgets('every shipped language carries the sign-in, Romanian too',
+      (tester) async {
+    // Romanian was a stub that fell back to English; every shipped ARB is now
+    // complete (test/core/l10n/arb_completeness_test.dart keeps it so). A
+    // language the app does not ship falls back to plain English in
+    // AppLocales.resolve (test/core/l10n/app_locales_test.dart).
     final l = await _localizationsFor(tester, const Locale('ro'));
-    expect(l.actionSignIn, 'Sign in');
+    expect(l.actionSignIn, 'Conectează-te');
   });
 }

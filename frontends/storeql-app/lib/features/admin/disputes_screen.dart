@@ -3,11 +3,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'package:storeql_app/core/ids.dart';
+import '../../shared/widgets/empty_state.dart';
 
 // ---------------------------------------------------------------------------
 // Chargebacks (11.9).
@@ -113,7 +118,18 @@ String disputeStatusLabel(String status) => switch (status) {
       'WON' => 'Won',
       'LOST' => 'Lost',
       'ACCEPTED' => 'Accepted',
-      _ => status,
+      _ => humanizeCode(status),
+    };
+
+/// The tone a dispute's status is shown in: one waiting on the business needs a
+/// look (and is an error once its date has passed), one with the bank waits on
+/// someone else, won is good, lost is a failure, accepted is simply closed.
+StatusTone disputeStatusTone(String status, {bool overdue = false}) => switch (status) {
+      'NEEDS_RESPONSE' => overdue ? StatusTone.error : StatusTone.warning,
+      'UNDER_REVIEW' => StatusTone.info,
+      'WON' => StatusTone.success,
+      'LOST' => StatusTone.error,
+      _ => StatusTone.neutral,
     };
 
 String disputeReasonLabel(String reason) => switch (reason) {
@@ -146,10 +162,14 @@ String _historyLabel(String kind) => switch (kind) {
       'ACCEPTED' => 'Accepted, not contested',
       'WON' => 'Won',
       'LOST' => 'Lost',
-      _ => kind,
+      _ => humanizeCode(kind),
     };
 
-String _day(String? iso) => iso == null || iso.length < 16 ? '—' : '${iso.substring(0, 10)} ${iso.substring(11, 16)} UTC';
+/// A moment on the shop's own clock (`27 Sept 2026 23:59`), or a dash for none.
+String _day(String? iso) => iso == null || iso.isEmpty ? '—' : AppFormat.dateTime(iso);
+
+/// A dispute's sum in its currency: `£42.50`.
+String _money(Dispute d, num amount) => AppFormat.money(amount, currencyCode: d.currency);
 
 /// Which status the register shows; null for all of them.
 class DisputeStatusFilter extends Notifier<String?> {
@@ -179,69 +199,88 @@ class DisputesScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final disputes = ref.watch(disputesProvider);
     final filter = ref.watch(disputesStatusFilterProvider);
-    final text = Theme.of(context).textTheme;
     void refresh() => ref.invalidate(disputesProvider);
 
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text('Chargebacks', style: text.headlineSmall)),
-              OutlinedButton.icon(
-                key: const Key('dispute-record'),
-                icon: const Icon(Icons.add),
-                label: const Text('Record a chargeback'),
-                onPressed: () async {
-                  final recorded = await showDialog<bool>(context: context, builder: (_) => const RecordDisputeDialog());
-                  if (recorded == true) refresh();
-                },
-              ),
-              const SizedBox(width: 8),
-              IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'A customer\'s bank has taken a card payment back. Answer by the date, or it is lost.',
-            style: text.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.outline),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            children: [
-              for (final s in const [null, 'NEEDS_RESPONSE', 'UNDER_REVIEW', 'WON', 'LOST', 'ACCEPTED'])
-                ChoiceChip(
-                  label: Text(s == null ? 'All' : disputeStatusLabel(s)),
-                  selected: filter == s,
-                  onSelected: (_) => ref.read(disputesStatusFilterProvider.notifier).show(s),
+    final actions = [
+      OutlinedButton.icon(
+        key: const Key('dispute-record'),
+        icon: const Icon(Icons.add),
+        label: const Text('Record a chargeback'),
+        onPressed: () async {
+          final recorded = await showDialog<bool>(context: context, builder: (_) => const RecordDisputeDialog());
+          if (recorded == true) refresh();
+        },
+      ),
+      IconButton(icon: const Icon(Icons.refresh), tooltip: 'Refresh', onPressed: refresh),
+    ];
+    // The page is inset by the gutter — 16 on a phone, 24 from tablet width —
+    // and scrolls as one, so a tall header (large text on a phone) scrolls
+    // away instead of squeezing the list.
+    final gutter = context.pageGutter;
+    return CustomScrollView(
+      slivers: [
+        SliverPadding(
+          padding: EdgeInsetsDirectional.fromSTEB(gutter, gutter, gutter, 0),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                PageHeader(
+                  title: 'Chargebacks',
+                  subtitle: 'A customer\'s bank has taken a card payment back. Answer by the date, or it is lost.',
+                  padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.md),
+                  actions: actions,
+                  // Below 600 the actions go under the title, so the long
+                  // subtitle keeps its line rather than breaking mid-word beside them.
+                  stackBelow: AppBreakpoints.medium,
                 ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Expanded(
-            child: disputes.when(
-              loading: () => const LoadingView(label: 'Loading chargebacks…'),
-              error: (e, _) => ErrorView(message: friendlyError(e, fallback: 'Could not load chargebacks.'), onRetry: refresh),
-              data: (list) => list.isEmpty
-                  ? const Center(child: Text('No chargebacks. Long may it last.'))
-                  : ListView.separated(
-                      itemCount: list.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 8),
-                      itemBuilder: (context, i) => _DisputeTile(
-                        dispute: list[i],
-                        onOpen: () async {
-                          await showDialog<void>(context: context, builder: (_) => DisputeDialog(id: list[i].id));
-                          refresh();
-                        },
+                Wrap(
+                  spacing: AppSpacing.sm,
+                  runSpacing: AppSpacing.sm,
+                  children: [
+                    for (final s in const [null, 'NEEDS_RESPONSE', 'UNDER_REVIEW', 'WON', 'LOST', 'ACCEPTED'])
+                      ChoiceChip(
+                        label: Text(s == null ? 'All' : disputeStatusLabel(s)),
+                        selected: filter == s,
+                        onSelected: (_) => ref.read(disputesStatusFilterProvider.notifier).show(s),
                       ),
-                    ),
+                  ],
+                ),
+                const SizedBox(height: AppSpacing.md),
+              ],
             ),
           ),
-        ],
-      ),
+        ),
+        SliverPadding(
+          padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, gutter),
+          sliver: disputes.when(
+            loading: () => const SliverFillRemaining(
+              hasScrollBody: false,
+              child: LoadingView(label: 'Loading chargebacks…'),
+            ),
+            error: (e, _) => SliverFillRemaining(
+              hasScrollBody: false,
+              child: ErrorView(message: friendlyError(e, fallback: 'Could not load chargebacks.'), onRetry: refresh),
+            ),
+            data: (list) => list.isEmpty
+                ? const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: EmptyState(title: 'No chargebacks. Long may it last.'),
+                  )
+                : SliverList.separated(
+                    itemCount: list.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.sm),
+                    itemBuilder: (context, i) => _DisputeTile(
+                      dispute: list[i],
+                      onOpen: () async {
+                        await showDialog<void>(context: context, builder: (_) => DisputeDialog(id: list[i].id));
+                        refresh();
+                      },
+                    ),
+                  ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -256,26 +295,40 @@ class _DisputeTile extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final d = dispute;
     final urgent = d.status == 'NEEDS_RESPONSE';
-    return Card(
-      child: ListTile(
-        key: Key('dispute-${d.id}'),
-        onTap: onOpen,
-        leading: Icon(
-          urgent ? Icons.report_gmailerrorred_outlined : Icons.gavel_outlined,
-          color: urgent ? cs.error : cs.outline,
-        ),
-        title: Text('${d.amount} ${d.currency} · ${disputeReasonLabel(d.reason)}'),
-        subtitle: Text(
-          d.overdue
-              ? 'The date to answer has passed (${_day(d.evidenceDueBy)})'
-              : urgent
-                  ? 'Answer by ${_day(d.evidenceDueBy)}'
-                  : 'Opened ${_day(d.openedAt)}${d.reference == null ? '' : ' · ${d.reference}'}',
-          style: TextStyle(color: d.overdue ? cs.error : null),
-        ),
-        trailing: Chip(label: Text(disputeStatusLabel(d.status))),
-      ),
+    final badge = StatusBadge(disputeStatusLabel(d.status), tone: disputeStatusTone(d.status, overdue: d.overdue));
+    final line = Text(
+      d.overdue
+          ? 'The date to answer has passed (${_day(d.evidenceDueBy)})'
+          : urgent
+              ? 'Answer by ${_day(d.evidenceDueBy)}'
+              : 'Opened ${_day(d.openedAt)}${d.reference == null ? '' : ' · ${d.reference}'}',
+      style: TextStyle(color: d.overdue ? cs.error : null),
     );
+    return LayoutBuilder(builder: (context, constraints) {
+      // On a phone, or with large text, the badge goes under the date rather
+      // than taking the width the words need.
+      final below = constraints.maxWidth < AppBreakpoints.medium ||
+          MediaQuery.textScalerOf(context).scale(16) > 16 * 1.3;
+      return Card(
+        child: ListTile(
+          key: Key('dispute-${d.id}'),
+          onTap: onOpen,
+          leading: Icon(
+            urgent ? Icons.report_gmailerrorred_outlined : Icons.gavel_outlined,
+            color: urgent ? cs.error : cs.outline,
+          ),
+          title: Text('${_money(d, d.amount)} · ${disputeReasonLabel(d.reason)}'),
+          subtitle: below
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [line, const SizedBox(height: AppSpacing.xs), badge],
+                )
+              : line,
+          trailing: below ? null : badge,
+        ),
+      );
+    });
   }
 }
 
@@ -366,7 +419,7 @@ class _DisputeDialogState extends ConsumerState<DisputeDialog> {
     final cs = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     return AlertDialog(
-      title: Text(file == null ? 'Chargeback' : '${file.dispute.amount} ${file.dispute.currency} · ${disputeStatusLabel(file.dispute.status)}'),
+      title: Text(file == null ? 'Chargeback' : '${_money(file.dispute, file.dispute.amount)} · ${disputeStatusLabel(file.dispute.status)}'),
       content: SizedBox(
         width: 560,
         child: file == null
@@ -382,7 +435,7 @@ class _DisputeDialogState extends ConsumerState<DisputeDialog> {
                       [
                         if (file.dispute.reference != null) 'Case ${file.dispute.reference}',
                         file.dispute.manual ? 'told by the acquirer' : 'told by ${file.dispute.provider}',
-                        if (file.dispute.feeAmount > 0) 'fee ${file.dispute.feeAmount} ${file.dispute.currency}',
+                        if (file.dispute.feeAmount > 0) 'fee ${_money(file.dispute, file.dispute.feeAmount)}',
                         if (file.dispute.status == 'NEEDS_RESPONSE') 'answer by ${_day(file.dispute.evidenceDueBy)}',
                       ].join(' · '),
                       style: text.bodySmall?.copyWith(color: file.dispute.overdue ? cs.error : cs.outline),
@@ -610,7 +663,7 @@ class _RecordDisputeDialogState extends ConsumerState<RecordDisputeDialog> {
                 key: const Key('dispute-due'),
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.event_outlined),
-                title: Text(_dueBy == null ? 'Answer by *' : 'Answer by ${_dueBy!.toIso8601String().substring(0, 10)}'),
+                title: Text(_dueBy == null ? 'Answer by *' : 'Answer by ${AppFormat.date(_dueBy!.toIso8601String())}'),
                 onTap: () async {
                   final now = DateTime.now();
                   final picked = await showDatePicker(

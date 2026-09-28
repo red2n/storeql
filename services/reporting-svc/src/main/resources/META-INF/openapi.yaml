@@ -4,15 +4,16 @@ info:
   version: "1.0"
   description: >
     Pure CQRS read-model service built by consuming inventory and sales events (StockReceived,
-    StockDeducted, StockAdjusted, TransferOrderShipped/Received, OrderConfirmed, PaymentRefunded).
-    Serves cross-store inventory reports (on-hand, supply/demand netting, movement statistics) and
-    sales revenue reports (summary, daily buckets). Publishes no events of its own. Reached through
+    StockDeducted, StockAdjusted, TransferOrderShipped/Received, OrderConfirmed, PaymentRefunded,
+    OrderVoided). Serves cross-store inventory reports (on-hand, supply/demand netting, movement
+    statistics) and sales revenue reports (summary, daily buckets); a till sale voided after the
+    fact is left out of every sales report. Publishes no events of its own. Reached through
     the API gateway at /api/reporting-svc.
 tags:
   - name: Inventory Reports
     description: Cross-store on-hand, supply/demand netting, and movement-statistics reports.
   - name: Sales Reports
-    description: Revenue summary and daily revenue-bucket reports, net of refunds.
+    description: Revenue summary and daily revenue buckets, net of refunds; voided sales left out.
 components:
   schemas:
     Problem:

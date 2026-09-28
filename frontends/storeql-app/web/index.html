@@ -7,23 +7,35 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="storeql.com — multi-tenant retail platform">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Browser chrome / status bar follows the app's light and dark themes (lib/core/theme.dart). -->
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#FAF8F3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
   <!-- PWA manifest -->
   <link rel="manifest" href="manifest.json">
   <!-- Favicon placeholder -->
   <link rel="icon" type="image/png" href="icons/Icon-192.png">
   <title>storeql.com</title>
   <style>
+    /* Splash matches the first Flutter frame in both themes — no white flash in dark mode. */
+    :root { --sq-bg: #FAF8F3; --sq-muted: #5F5C55; --sq-accent: #3A3833; }
+    @media (prefers-color-scheme: dark) {
+      :root { --sq-bg: #161513; --sq-muted: #BDB8AD; --sq-accent: #F2D27A; }
+    }
     body {
       margin: 0;
-      background-color: #FFFFF0;
+      background-color: var(--sq-bg);
     }
     #loading {
       display: flex;
       align-items: center;
       justify-content: center;
       height: 100vh;
-      font-family: sans-serif;
-      color: #575757;
+      font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--sq-muted);
       font-size: 1.1rem;
       gap: 12px;
     }
@@ -32,9 +44,12 @@
       height: 32px;
       animation: spinner-rotate 1.4s linear infinite;
     }
+    @media (prefers-reduced-motion: reduce) {
+      #loading .spinner { animation: none; }
+    }
     #loading .spinner circle {
       fill: none;
-      stroke: #575757;
+      stroke: var(--sq-accent);
       stroke-width: 3;
       stroke-linecap: round;
       stroke-dasharray: 80;

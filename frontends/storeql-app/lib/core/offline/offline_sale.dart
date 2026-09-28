@@ -71,8 +71,10 @@ class OfflineSale {
 
   /// Short human reference, printed on the offline receipt and shown in the
   /// pending list, so a cashier holding a piece of paper can find the sale.
+  /// The id's random tail, in capitals like every order reference: a real id
+  /// is a UUIDv7, whose tail is lower-case hex (`…2b7c41ae` reads `7C41AE`).
   String get reference =>
-      id.length > 6 ? id.substring(id.length - 6) : id.toUpperCase();
+      (id.length > 6 ? id.substring(id.length - 6) : id).toUpperCase();
 
   /// Record that one step of tender [i] has landed.
   OfflineSale markTender(int i, {bool? tenderDone, bool? redeemDone}) {

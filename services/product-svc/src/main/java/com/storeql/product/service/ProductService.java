@@ -603,6 +603,14 @@ public class ProductService {
       throw ApiException.badRequest(
           "PRODUCT_IMAGE_TOO_LARGE",
           "image is " + bytes.length + " bytes; must be under " + MAX_IMAGE_BYTES + " (256 KB)");
+    // The plan's cap on what the business keeps in images (21.11), measured as it would stand with
+    // this one in: what the other products hold plus this, so replacing an image is not charged
+    // twice. Refused before a byte is stored; a plan with no cap holds nothing back.
+    entitlements.requireBytesWithin(
+        tenantId,
+        com.storeql.service.Entitlements.IMAGES_MB_MAX,
+        "MB of product images",
+        () -> repo.imageBytesExcept(tenantId, productId) + bytes.length);
     repo.upsertProductImage(tenantId, productId, normalized, bytes);
   }
 

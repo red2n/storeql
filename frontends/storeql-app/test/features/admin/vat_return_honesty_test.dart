@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/pricing_screen.dart';
 
@@ -55,6 +56,7 @@ Future<void> _pump(WidgetTester tester, {required bool honest}) async {
 }
 
 void main() {
+  setUpAll(initializeDateFormatting);
   testWidgets('with box 4 real, the return is fit to file and says what the zero boxes assume',
       (tester) async {
     await _pump(tester, honest: true);
@@ -63,8 +65,8 @@ void main() {
     expect(find.byKey(const Key('vat-return-note')), findsOneWidget);
     expect(find.textContaining('Northern Ireland'), findsWidgets);
     // Box 4 carries the reclaim, box 7 the net purchases; 2, 8 and 9 are not modelled.
-    expect(find.text('30.00'), findsOneWidget);
-    expect(find.text('150.00'), findsOneWidget);
+    expect(find.text('£30.00'), findsOneWidget);
+    expect(find.text('£150.00'), findsOneWidget);
     expect(find.byKey(const Key('vat-box-2-not-computed')), findsOneWidget);
     expect(find.byKey(const Key('vat-box-8-not-computed')), findsOneWidget);
     expect(find.byKey(const Key('vat-box-9-not-computed')), findsOneWidget);

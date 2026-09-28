@@ -126,7 +126,12 @@ public final class Dtos {
       String createdAt,
       String updatedAt,
       @Schema(description = "The language their messages are written in; null when not said")
-          String preferredLanguage) {}
+          String preferredLanguage,
+      @Schema(
+              description =
+                  "phone normalised to E.164 against the business's own countries; null"
+                      + " when phone is null or none of them parse it.")
+          String phoneE164) {}
 
   @Schema(name = "AddressResponse", description = "A customer address.")
   public record AddressResponse(
@@ -148,14 +153,78 @@ public final class Dtos {
       @Schema(description = "Current redeemable points balance.") BigDecimal pointsBalance,
       @Schema(description = "Total points ever earned, never decremented.")
           BigDecimal lifetimePoints,
-      @Schema(description = "BRONZE, SILVER, GOLD, etc.") String tier) {}
+      @Schema(description = "The tier the qualifying points reach under the programme.")
+          String tier,
+      @Schema(description = "Since when the customer has held the tier.") String tierSince,
+      @Schema(
+              description =
+                  "What counts towards the tier: lifetime points, or the points earned within the"
+                      + " programme's qualifying window.")
+          BigDecimal qualifyingPoints,
+      @Schema(description = "The earn multiplier the tier gives on a sale.") BigDecimal multiplier,
+      @Schema(description = "The next tier and how far it is; absent at the top.")
+          NextTierResponse nextTier,
+      @Schema(
+              description =
+                  "Points that die within thirty days, and the first day any do; absent when none.")
+          ExpiringSoonResponse expiringSoon,
+      @Schema(
+              description =
+                  "Months a point lives under the programme; absent when points never expire.")
+          Integer expiryMonths) {}
+
+  @Schema(name = "NextTierResponse")
+  public record NextTierResponse(String name, BigDecimal threshold, BigDecimal pointsToGo) {}
+
+  @Schema(name = "ExpiringSoonResponse")
+  public record ExpiringSoonResponse(BigDecimal points, String on) {}
+
+  @Schema(name = "TierResponse")
+  public record TierResponse(
+      @Schema(description = "Capitals, digits and underscores; e.g. GOLD.") String name,
+      @Schema(description = "Qualifying points that reach it; the first tier's is zero.")
+          BigDecimal threshold,
+      @Schema(description = "Points per base point on a sale: 1 to 10.") BigDecimal multiplier) {}
+
+  @Schema(
+      name = "LoyaltyProgrammeResponse",
+      description = "The business's loyalty programme, or the platform's default.")
+  public record LoyaltyProgrammeResponse(
+      @Schema(description = "Months a point lives; absent for never.") Integer expiryMonths,
+      @Schema(description = "Months of earning that count towards a tier; absent for a lifetime.")
+          Integer qualifyingMonths,
+      List<TierResponse> tiers,
+      String reason,
+      String setBy,
+      String setAt,
+      @Schema(description = "True when the business never set a programme of its own.")
+          boolean isDefault) {}
+
+  @Schema(name = "TierRequest")
+  public record TierRequest(
+      @NotBlank String name,
+      @NotNull BigDecimal threshold,
+      @Schema(description = "1 when absent.") BigDecimal multiplier) {}
+
+  @Schema(name = "SetLoyaltyProgrammeRequest", description = "The programme to put in force.")
+  public record SetLoyaltyProgrammeRequest(
+      @Schema(description = "1 to 120; absent for never.") Integer expiryMonths,
+      @Schema(description = "1 to 36; absent for a lifetime.") Integer qualifyingMonths,
+      @NotNull @Size(min = 1, max = 6) List<TierRequest> tiers,
+      @NotBlank String reason) {}
+
+  @Schema(name = "ExpiryRunResponse", description = "What a loyalty sweep did.")
+  public record ExpiryRunResponse(
+      @Schema(description = "Customers whose points died.") int customers,
+      @Schema(description = "Points that died.") BigDecimal points,
+      @Schema(description = "Accounts that changed tier.") int retiered) {}
 
   @Schema(
       name = "LoyaltyLedgerEntryResponse",
       description = "One append-only entry in a customer's loyalty ledger.")
   public record LoyaltyLedgerEntryResponse(
       String id,
-      @Schema(description = "EARN, REDEEM, or ADJUST.") String type,
+      @Schema(description = "EARN, REDEEM, EXPIRE or ADJUST.") String type,
       @Schema(description = "Signed points delta for this entry.") BigDecimal points,
       @Schema(description = "Points balance immediately after this entry.") BigDecimal balanceAfter,
       String orderId,

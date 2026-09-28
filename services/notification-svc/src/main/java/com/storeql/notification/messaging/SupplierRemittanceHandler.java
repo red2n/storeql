@@ -12,7 +12,6 @@ import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -65,7 +64,7 @@ public class SupplierRemittanceHandler {
         items.add(
             Values.of()
                 .text("reference", item.getString("reference", ""))
-                .day("document_date", day(item, "documentDate"))
+                .day("document_date", Payloads.day(item, "documentDate"))
                 .money("amount", item.getJsonNumber("amount").bigDecimalValue().abs(), currency)
                 .flag("credit", "CREDIT_NOTE".equals(item.getString("type", ""))));
       }
@@ -83,15 +82,9 @@ public class SupplierRemittanceHandler {
             null,
             Values.of()
                 .text("reference", reference)
-                .day("payment_date", day(obj, "paymentDate"))
+                .day("payment_date", Payloads.day(obj, "paymentDate"))
                 .text("supplier", obj.getString("supplierName", ""))
                 .items("items", items)
                 .money("total", obj.getJsonNumber("total").bigDecimalValue(), currency)));
-  }
-
-  private static LocalDate day(JsonObject obj, String field) {
-    return obj.containsKey(field) && !obj.isNull(field)
-        ? LocalDate.parse(obj.getString(field))
-        : null;
   }
 }

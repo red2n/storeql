@@ -10,6 +10,7 @@ import com.storeql.purchase.domain.Domain.PurchaseOrderLine;
 import com.storeql.purchase.domain.Domain.Supplier;
 import com.storeql.purchase.domain.LandedCost;
 import com.storeql.purchase.domain.SpendAuthority;
+import com.storeql.purchase.domain.SupplierScorecard;
 import com.storeql.purchase.dto.Dtos;
 import com.storeql.purchase.dto.Dtos.GoodsReceiptLineResponse;
 import com.storeql.purchase.dto.Dtos.GoodsReceiptResponse;
@@ -17,10 +18,14 @@ import com.storeql.purchase.dto.Dtos.IntercompanyInvoiceResponse;
 import com.storeql.purchase.dto.Dtos.LandedCostLineResponse;
 import com.storeql.purchase.dto.Dtos.LandedCostResponse;
 import com.storeql.purchase.dto.Dtos.NominalLedgerEntryResponse;
+import com.storeql.purchase.dto.Dtos.ProposalRunResponse;
+import com.storeql.purchase.dto.Dtos.ProposedOrderResponse;
 import com.storeql.purchase.dto.Dtos.PurchaseOrderLineProgressResponse;
 import com.storeql.purchase.dto.Dtos.PurchaseOrderLineResponse;
 import com.storeql.purchase.dto.Dtos.PurchaseOrderResponse;
+import com.storeql.purchase.dto.Dtos.SkippedItemResponse;
 import com.storeql.purchase.dto.Dtos.SupplierResponse;
+import com.storeql.purchase.service.ProposalService;
 import java.util.List;
 
 /** Domain → DTO mappers. No business logic. */
@@ -55,7 +60,56 @@ public final class Mappers {
         s.hasBankDetails(),
         s.bankDetailsChangedAt(),
         s.einvoiceScheme(),
-        s.einvoiceId());
+        s.einvoiceId(),
+        s.leadTimeDays());
+  }
+
+  // ── Supplier lead times and scorecards ─────────────────────────────────────
+
+  public static Dtos.SupplierDeliveryResponse toDto(SupplierScorecard.Delivery d) {
+    return new Dtos.SupplierDeliveryResponse(
+        d.id(),
+        d.supplierId(),
+        d.poId(),
+        d.grId(),
+        d.storeId(),
+        d.orderedAt(),
+        d.promisedDate(),
+        d.receivedAt(),
+        d.leadDays(),
+        d.lateDays(),
+        d.complete(),
+        d.receivedQty());
+  }
+
+  public static Dtos.SupplierScorecardResponse toDto(SupplierScorecard.Card c) {
+    SupplierScorecard.Deliveries d = c.deliveries();
+    SupplierScorecard.Fill f = c.fill();
+    SupplierScorecard.Quality q = c.quality();
+    SupplierScorecard.Invoices i = c.invoices();
+    return new Dtos.SupplierScorecardResponse(
+        c.supplierId(),
+        c.supplierName(),
+        c.leadTimeDays(),
+        c.from(),
+        c.to(),
+        new Dtos.DeliveryStatsResponse(
+            d.count(),
+            d.avgLeadDays(),
+            d.medianLeadDays(),
+            d.maxLeadDays(),
+            d.promised(),
+            d.onTime(),
+            d.late(),
+            d.onTimePct(),
+            d.avgDaysLate(),
+            d.receivedQty()),
+        new Dtos.FillStatsResponse(
+            f.orders(), f.orderedQty(), f.receivedQty(), f.fillRatePct(), f.shortClosed()),
+        new Dtos.QualityStatsResponse(q.returns(), q.returnedQty(), q.returnRatePct()),
+        new Dtos.InvoiceStatsResponse(i.invoices(), i.flagged(), i.accuracyPct()),
+        c.score(),
+        c.grade());
   }
 
   /**
@@ -84,7 +138,74 @@ public final class Mappers {
         po.closedReason(),
         po.createdBy(),
         po.approvedBy(),
-        po.approvedAt());
+        po.approvedAt(),
+        po.source(),
+        po.fxRate(),
+        po.totalNetHome(),
+        po.homeCurrency(),
+        po.ownership(),
+        po.salesOrderId(),
+        po.shipTo(),
+        po.dutyStatus());
+  }
+
+  public static Dtos.DutyReleaseResponse toDto(Domain.DutyRelease r) {
+    return new Dtos.DutyReleaseResponse(
+        r.id(),
+        r.releaseId(),
+        r.storeId(),
+        r.variantId(),
+        r.qty(),
+        r.dutyPerUnit(),
+        r.dutyAmount(),
+        r.currency(),
+        r.reference(),
+        r.releasedOn());
+  }
+
+  public static Dtos.DropshipArrangementResponse toDto(Domain.DropshipArrangement a) {
+    return new Dtos.DropshipArrangementResponse(
+        a.id(),
+        a.variantId(),
+        a.supplierId(),
+        a.unitCost(),
+        a.vatCode(),
+        a.active(),
+        a.createdAt(),
+        a.endedAt());
+  }
+
+  public static Dtos.ConsignmentSaleResponse toDto(Domain.ConsignmentSale s) {
+    return new Dtos.ConsignmentSaleResponse(
+        s.id(),
+        s.supplierId(),
+        s.storeId(),
+        s.variantId(),
+        s.batchId(),
+        s.orderId(),
+        s.qty(),
+        s.unitCost(),
+        s.amount(),
+        s.currency(),
+        s.soldOn(),
+        s.settled(),
+        s.settlementId(),
+        s.recordedAt());
+  }
+
+  public static Dtos.ConsignmentSettlementResponse toDto(
+      Domain.ConsignmentSettlement s, List<Domain.ConsignmentSale> sales) {
+    return new Dtos.ConsignmentSettlementResponse(
+        s.id(),
+        s.supplierId(),
+        s.reference(),
+        s.periodFrom(),
+        s.periodTo(),
+        s.currency(),
+        s.total(),
+        s.salesCount(),
+        s.createdAt(),
+        sales == null ? null : sales.stream().map(Mappers::toDto).toList());
   }
 
   /**
@@ -198,7 +319,8 @@ public final class Mappers {
         line.qty(),
         line.unitPrice(),
         line.vatCode(),
-        line.createdAt());
+        line.createdAt(),
+        line.proposalReason());
   }
 
   /**
@@ -522,5 +644,29 @@ public final class Mappers {
   public static LandedCostLineResponse toDto(LandedCost.Line l) {
     return new LandedCostLineResponse(
         l.id(), l.grLineId(), l.variantId(), l.qty(), l.lineValue(), l.amount(), l.perUnit());
+  }
+
+  /** A proposal run on the wire, its orders described (06.x). */
+  public static ProposalRunResponse toDto(ProposalService.RunResult r) {
+    return new ProposalRunResponse(
+        r.run().id(),
+        r.run().storeId(),
+        r.run().ranAt().toString(),
+        r.run().coverDays(),
+        r.run().considered(),
+        r.orders().stream()
+            .map(
+                o ->
+                    new ProposedOrderResponse(
+                        o.poId(),
+                        o.supplierId(),
+                        o.supplierName(),
+                        o.currency(),
+                        o.lines(),
+                        o.totalNet()))
+            .toList(),
+        r.run().skipped().stream()
+            .map(x -> new SkippedItemResponse(x.variantId(), x.reason()))
+            .toList());
   }
 }

@@ -1,5 +1,6 @@
 package com.storeql.customer.repo;
 
+import com.storeql.customer.domain.Privacy;
 import com.storeql.customer.domain.Privacy.ConsentEntry;
 import com.storeql.customer.domain.Privacy.GuardianConsent;
 import com.storeql.customer.domain.Privacy.Intimation;
@@ -169,7 +170,11 @@ public class PrivacyRepository extends BaseJdbcRepository {
         "purpose consents");
   }
 
-  /** Records grants and withdrawals: the current state and the evidence, in one transaction. */
+  /**
+   * Records grants and withdrawals: the current state and the evidence, in one transaction — and,
+   * for MARKETING withdrawn, the marketing-channel cascade on the same transaction: the purpose
+   * withdrawal and every channel it switches off commit or roll back together.
+   */
   public void record(List<ConsentEntry> entries) {
     inTx(
         c -> {
@@ -194,6 +199,7 @@ public class PrivacyRepository extends BaseJdbcRepository {
             }
             insertLog(c, e, e.granted());
           }
+          cascadeMarketingWithdrawal(c, entries);
           return null;
         },
         "record purpose consents");
@@ -257,7 +263,8 @@ public class PrivacyRepository extends BaseJdbcRepository {
 
   /**
    * Withdraws a guardian's consent and, with it, every tracking consent the child had, recording
-   * each withdrawal as evidence.
+   * each withdrawal as evidence — MARKETING among them cascades to every marketing channel on the
+   * same transaction, exactly as a direct withdrawal of it does.
    *
    * @return whether a standing consent was withdrawn
    */
@@ -290,6 +297,7 @@ public class PrivacyRepository extends BaseJdbcRepository {
             }
             insertLog(c, e, false);
           }
+          cascadeMarketingWithdrawal(c, fallingConsents);
           return true;
         },
         "withdraw guardian consent");
@@ -437,8 +445,9 @@ public class PrivacyRepository extends BaseJdbcRepository {
   public List<Reachable> reachable(UUID tenantId, List<UUID> only, int limit) {
     if (only == null || only.isEmpty()) {
       return query(
-          "SELECT id, email, phone FROM customers WHERE tenant_id = ? AND status = 'ACTIVE'"
-              + " AND (email IS NOT NULL OR phone IS NOT NULL) ORDER BY created_at, id LIMIT ?",
+          "SELECT id, email, phone, phone_e164 FROM customers WHERE tenant_id = ?"
+              + " AND status = 'ACTIVE' AND (email IS NOT NULL OR phone IS NOT NULL)"
+              + " ORDER BY created_at, id LIMIT ?",
           ps -> {
             ps.setObject(1, tenantId);
             ps.setInt(2, limit);
@@ -447,9 +456,9 @@ public class PrivacyRepository extends BaseJdbcRepository {
           "reachable customers");
     }
     return query(
-        "SELECT id, email, phone FROM customers WHERE tenant_id = ? AND status = 'ACTIVE'"
-            + " AND (email IS NOT NULL OR phone IS NOT NULL) AND id = ANY (?)"
-            + " ORDER BY created_at, id LIMIT ?",
+        "SELECT id, email, phone, phone_e164 FROM customers WHERE tenant_id = ?"
+            + " AND status = 'ACTIVE' AND (email IS NOT NULL OR phone IS NOT NULL)"
+            + " AND id = ANY (?) ORDER BY created_at, id LIMIT ?",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setArray(2, ps.getConnection().createArrayOf("uuid", only.toArray()));
@@ -459,8 +468,14 @@ public class PrivacyRepository extends BaseJdbcRepository {
         "named reachable customers");
   }
 
-  /** A customer as a breach intimation reaches them. */
-  public record Reachable(UUID id, String email, String phone) {}
+  /**
+   * A customer as a breach intimation reaches them.
+   *
+   * @param phoneE164 {@code phone} normalised, preferred for a text — the SMS channel only accepts
+   *     E.164; {@code null} when {@code phone} does not normalise, so a caller falls back to it as
+   *     typed
+   */
+  public record Reachable(UUID id, String email, String phone, String phoneE164) {}
 
   @Override
   protected RuntimeException handleTxSqlException(String what, SQLException e) {
@@ -469,6 +484,22 @@ public class PrivacyRepository extends BaseJdbcRepository {
           "PRIVACY_NOTICE_BUSY", "the notice is being published by someone else; try again");
     }
     return super.handleTxSqlException(what, e);
+  }
+
+  /**
+   * The marketing-consent cascade: a MARKETING entry that withdraws switches off every marketing
+   * channel that is on, on the same connection's transaction. Shared by a direct withdrawal ({@link
+   * #record}) and a guardian's withdrawal falling through to the child's consents ({@link
+   * #withdrawGuardian}) — both hand this the same shape of entry.
+   */
+  private static void cascadeMarketingWithdrawal(Connection c, List<ConsentEntry> entries)
+      throws SQLException {
+    for (ConsentEntry e : entries) {
+      if (Privacy.PURPOSE_MARKETING.equals(e.purpose()) && !e.granted()) {
+        CustomerRepository.cascadeWithdrawMarketingInTx(
+            c, e.tenantId(), e.customerId(), e.actorId(), e.recordedAt());
+      }
+    }
   }
 
   /** One line of evidence: a grant or a withdrawal as it happened. */
@@ -586,7 +617,10 @@ public class PrivacyRepository extends BaseJdbcRepository {
 
   private static Reachable mapReachable(ResultSet rs) throws SQLException {
     return new Reachable(
-        rs.getObject("id", UUID.class), rs.getString("email"), rs.getString("phone"));
+        rs.getObject("id", UUID.class),
+        rs.getString("email"),
+        rs.getString("phone"),
+        rs.getString("phone_e164"));
   }
 
   private static Instant instant(ResultSet rs, String column) throws SQLException {

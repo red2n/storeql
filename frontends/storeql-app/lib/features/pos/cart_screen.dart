@@ -1,12 +1,17 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
+import '../../core/input_mode.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/barcode_scanner_sheet.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import 'pos_age_check.dart';
@@ -17,9 +22,10 @@ import 'variable_measure_barcode.dart';
 import 'weighing_instruments.dart';
 import 'pos_session_providers.dart';
 
-/// The register screen. On a wide terminal it's a two-pane supermarket till —
-/// a persistent product catalog on the left, the live sale on the right. On a
-/// phone it collapses to the sale with a "Browse" sheet for the catalog.
+/// The register screen. From a tablet in portrait up it's a two-pane
+/// supermarket till — a persistent product catalog on the start side, the live
+/// sale on the end side. Narrower it collapses to the sale with a "Browse"
+/// sheet for the catalog.
 class PosCartScreen extends ConsumerStatefulWidget {
   const PosCartScreen({super.key});
 
@@ -32,11 +38,60 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
   final _barcodeFocus = FocusNode();
   bool _scanning = false;
 
+  /// From this content width the catalog stays beside the sale. An iPad in
+  /// portrait has 739 beside the POS rail, so it gets both panes; a phone and
+  /// a narrow window get the sale with the catalog behind Browse.
+  static const double _splitWidth = 720;
+
+  /// Below this window height (scaled with the text) the sale's fixed rows —
+  /// store, customer, barcode, actions, the folded totals — would leave the
+  /// lines no room: a phone on its side (844 × 390) is wide enough for both
+  /// panes but has under 300 for the sale. There the panes stack and the top
+  /// of the sale scrolls with its lines; the totals stay pinned below.
+  ///
+  /// Measured against the shell around the till: beside the rail (800 wide
+  /// and up) the pane has the window less the app bar, and its rows need
+  /// about 560 of window; under a bottom bar the pane also loses the bar, and
+  /// at those widths the sale is at its narrowest (360), so its rows wrap
+  /// taller — about 680.
+  static const double _shortBesideRail = 560;
+  static const double _shortOverBottomBar = 680;
+
+  @override
+  void initState() {
+    super.initState();
+    // A keyboard handler rather than Shortcuts, as the navigation shell does
+    // for Ctrl+K: it works wherever focus is, including after a click on the
+    // catalog has taken it off the barcode field.
+    HardwareKeyboard.instance.addHandler(_onKey);
+  }
+
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
     _barcodeCtrl.dispose();
     _barcodeFocus.dispose();
     super.dispose();
+  }
+
+  /// F2 puts the cursor back in the barcode field from anywhere on the Sale
+  /// screen, ready for the scanner or a typed SKU.
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent ||
+        event.logicalKey != LogicalKeyboardKey.f2 ||
+        !mounted ||
+        _scanning) {
+      return false;
+    }
+    // Not while a dialog or the Browse sheet is over the screen: focus is then
+    // in that route — neither on this page nor on a scope above it.
+    final primary = FocusManager.instance.primaryFocus;
+    final onThisPage = primary == null ||
+        primary.enclosingScope == _barcodeFocus.enclosingScope ||
+        _barcodeFocus.ancestors.contains(primary);
+    if (!onThisPage) return false;
+    _barcodeFocus.requestFocus();
+    return true;
   }
 
   Future<void> _scan(String raw) async {
@@ -144,7 +199,12 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
     // Picking from the catalog is the other way into the sale, so it gets the
     // same checks — otherwise browsing would be the way round them.
     final line = await _prepareForSale(offer.toLine());
-    if (line == null || !mounted) return;
+    if (!mounted) return;
+    // On a keyboard till the click on the catalog took the cursor out of the
+    // barcode field; put it back so the scanner can carry on. Not on touch,
+    // where focusing the field would open the on-screen keyboard.
+    if (pointerFirst) _barcodeFocus.requestFocus();
+    if (line == null) return;
     ref.read(posCartProvider.notifier).addOrIncrement(line);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -403,8 +463,10 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
                           for (final s in sales)
                             ListTile(
                               title: Text(s.customerName ?? 'Held sale'),
+                              // A held sale carries no currency: the amount alone.
                               subtitle: Text(
-                                '${s.lines.length} items · ${s.subtotal.toStringAsFixed(2)}',
+                                '${s.lines.length} item${s.lines.length == 1 ? '' : 's'}'
+                                ' · ${AppFormat.money(s.subtotal)}',
                               ),
                               onTap: () => Navigator.pop(ctx, s),
                             ),
@@ -490,71 +552,127 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Short is the window's height, not the pane's: the keyboard shrinks the
+    // pane, and a barcode field that moved when it opened would lose focus.
+    final window = MediaQuery.sizeOf(context);
+    final need = window.width < AppBreakpoints.rail
+        ? _shortOverBottomBar
+        : _shortBesideRail;
+    final short =
+        window.height < MediaQuery.textScalerOf(context).scale(need);
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 880;
-        if (wide) {
+        final width = constraints.maxWidth;
+        final phone = AppBreakpoints.classOf(width) == WindowClass.compact;
+        // On a phone, or in a window too short for the full breakdown to leave
+        // the sale lines any room (a laptop browser, the keyboard up on a
+        // tablet in landscape), the totals fold into one row.
+        final tight = phone || short || constraints.maxHeight < 680;
+        if (width >= _splitWidth && !short) {
+          // The sale keeps a till-receipt width; the catalog takes the rest.
+          final saleWidth = (width * 0.46).clamp(360.0, 420.0).toDouble();
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Expanded(child: _CatalogPane(onPick: _addOffer)),
               const VerticalDivider(width: 1),
-              SizedBox(width: 420, child: _salePane(showBrowse: false)),
+              SizedBox(
+                width: saleWidth,
+                child: _salePane(
+                  showBrowse: false,
+                  phone: false,
+                  tight: tight,
+                  narrowLines: true,
+                  scrollHeader: false,
+                ),
+              ),
             ],
           );
         }
-        return _salePane(showBrowse: true);
+        return _salePane(
+          showBrowse: true,
+          phone: phone,
+          tight: tight,
+          narrowLines: phone,
+          scrollHeader: short,
+        );
       },
     );
   }
 
-  Widget _salePane({required bool showBrowse}) {
+  /// The running sale. [phone]: Browse is an icon, so the barcode field keeps
+  /// most of its row, and a walk-in's phone field shares a row with the
+  /// customer button. [tight]: the totals fold into one row. [narrowLines]: the
+  /// pane is under 600 wide, so each sale line puts its stepper under its name.
+  /// [scrollHeader]: a short window — the rows above the lines scroll with
+  /// them instead of staying put, so nothing overflows; the totals stay.
+  Widget _salePane({
+    required bool showBrowse,
+    required bool phone,
+    required bool tight,
+    required bool narrowLines,
+    required bool scrollHeader,
+  }) {
     final items = ref.watch(posCartProvider);
-    return Column(
-      children: [
-        const RecallListBanner(),
-        _StoreSelector(),
-        const _CustomerBar(),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _barcodeCtrl,
-                  focusNode: _barcodeFocus,
-                  autofocus: true,
-                  enabled: !_scanning,
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: 'Scan barcode or type SKU…',
-                    prefixIcon: const Icon(Icons.qr_code_scanner),
-                    suffixIcon: _scanning
-                        ? const Padding(
-                            padding: EdgeInsets.all(12),
-                            child: SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                          )
-                        : IconButton(
-                            icon: const Icon(Icons.add_circle_outline),
-                            color: context.channelAccent.color,
-                            onPressed: () => _scan(_barcodeCtrl.text),
+    final cs = Theme.of(context).colorScheme;
+    final header = <Widget>[
+      const RecallListBanner(),
+      _StoreSelector(),
+      _CustomerBar(compact: phone),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _barcodeCtrl,
+                focusNode: _barcodeFocus,
+                autofocus: true,
+                enabled: !_scanning,
+                decoration: InputDecoration(
+                  isDense: true,
+                  // The full hint ellipsizes in a phone's ~160px; say the same shorter.
+                  hintText: phone
+                      ? 'Scan or type SKU…'
+                      : 'Scan barcode or type SKU…',
+                  prefixIcon: const Icon(Icons.qr_code_scanner),
+                  // The way back to this field, where there is a keyboard.
+                  suffixText: pointerFirst ? 'F2' : null,
+                  suffixIcon: _scanning
+                      ? const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           ),
-                  ),
-                  onSubmitted: _scan,
+                        )
+                      : IconButton(
+                          icon: const Icon(Icons.add_circle_outline),
+                          color: cs.primary,
+                          onPressed: () => _scan(_barcodeCtrl.text),
+                        ),
                 ),
+                onSubmitted: _scan,
               ),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              tooltip: 'Scan with camera',
+              onPressed: _scanning ? null : _scanWithCamera,
+              icon: const Icon(Icons.camera_alt_outlined),
+            ),
+            if (showBrowse) ...[
               const SizedBox(width: 8),
-              IconButton.filledTonal(
-                tooltip: 'Scan with camera',
-                onPressed: _scanning ? null : _scanWithCamera,
-                icon: const Icon(Icons.camera_alt_outlined),
-              ),
-              if (showBrowse) ...[
-                const SizedBox(width: 8),
+              // A labelled button would leave a phone's barcode field about
+              // 100px for text; as an icon it keeps most of the row.
+              if (phone)
+                IconButton.outlined(
+                  tooltip: 'Browse products',
+                  onPressed: _scanning ? null : _browse,
+                  icon: const Icon(Icons.grid_view),
+                )
+              else
                 OutlinedButton.icon(
                   onPressed: _scanning ? null : _browse,
                   icon: const Icon(Icons.grid_view, size: 18),
@@ -566,73 +684,134 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
                     ),
                   ),
                 ),
-              ],
             ],
-          ),
+          ],
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-          child: Row(
-            children: [
-              TextButton.icon(
-                onPressed: items.isEmpty ? null : _park,
-                icon: const Icon(Icons.pause_circle_outline, size: 18),
-                label: const Text('Hold'),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+        child: Row(
+          children: [
+            // Hold and Resume wrap onto a second line rather than push No
+            // sale off the row when the text is large.
+            Expanded(
+              child: Wrap(
+                children: [
+                  TextButton.icon(
+                    onPressed: items.isEmpty ? null : _park,
+                    icon: const Icon(Icons.pause_circle_outline, size: 18),
+                    label: const Text('Hold'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _resume,
+                    icon: const Icon(Icons.play_circle_outline, size: 18),
+                    label: const Text('Resume'),
+                  ),
+                ],
               ),
-              TextButton.icon(
-                onPressed: _resume,
-                icon: const Icon(Icons.play_circle_outline, size: 18),
-                label: const Text('Resume'),
-              ),
-              const Spacer(),
-              TextButton.icon(
-                onPressed: _noSale,
-                icon: const Icon(Icons.point_of_sale, size: 18),
-                label: const Text('No sale'),
-              ),
-            ],
-          ),
+            ),
+            TextButton.icon(
+              onPressed: _noSale,
+              icon: const Icon(Icons.point_of_sale, size: 18),
+              label: const Text('No sale'),
+            ),
+          ],
         ),
-        const Divider(height: 1),
-        Expanded(
-          child: items.isEmpty
-              ? Center(
+      ),
+      const Divider(height: 1),
+    ];
+    final emptyBody = Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.shopping_cart_outlined,
+            size: 48,
+            color: cs.outlineVariant,
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Text(
+            'Scan or tap a product to start',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: cs.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+    // Pinned under the header, the empty till scrolls rather than overflowing
+    // when the room left is less than its icon and words need.
+    final empty = LayoutBuilder(
+      builder: (context, c) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: c.maxHeight.isFinite ? c.maxHeight : 0,
+          ),
+          child: emptyBody,
+        ),
+      ),
+    );
+    Widget line(BuildContext _, int idx) =>
+        _SaleLine(line: items[idx], narrow: narrowLines);
+    Widget separator(BuildContext _, int _) => const Divider(height: 1);
+    final totals = <Widget>[
+      const Divider(height: 1),
+      _TotalsBar(collapsible: tight),
+    ];
+
+    if (scrollHeader) {
+      return Column(
+        children: [
+          Expanded(
+            child: CustomScrollView(
+              slivers: [
+                SliverToBoxAdapter(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.shopping_cart_outlined,
-                        size: 48,
-                        color: Theme.of(context).colorScheme.outlineVariant,
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Scan or tap a product to start',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.outline,
-                        ),
-                      ),
-                    ],
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: header,
                   ),
-                )
+                ),
+                if (items.isEmpty)
+                  SliverFillRemaining(hasScrollBody: false, child: emptyBody)
+                else
+                  SliverList.separated(
+                    itemCount: items.length,
+                    separatorBuilder: separator,
+                    itemBuilder: line,
+                  ),
+              ],
+            ),
+          ),
+          ...totals,
+        ],
+      );
+    }
+    return Column(
+      children: [
+        ...header,
+        Expanded(
+          child: items.isEmpty
+              ? empty
               : ListView.separated(
                   itemCount: items.length,
-                  separatorBuilder: (_, _) => const Divider(height: 1),
-                  itemBuilder: (_, idx) => _SaleLine(line: items[idx]),
+                  separatorBuilder: separator,
+                  itemBuilder: line,
                 ),
         ),
-        const Divider(height: 1),
-        _TotalsBar(),
+        ...totals,
       ],
     );
   }
 }
 
 /// One line on the running sale: name, unit price, qty stepper, line total, and
-/// a swipe-to-remove gesture.
+/// a swipe-to-remove gesture. In a pane under 600 wide ([narrow]) the line
+/// total sits on the name's row and the stepper beside the price under it — a
+/// trailing stepper there would leave the name a word or two.
 class _SaleLine extends ConsumerWidget {
   final PosLine line;
-  const _SaleLine({required this.line});
+  final bool narrow;
+  const _SaleLine({required this.line, this.narrow = false});
 
   /// A measured line changes by reading the scale again, never by one.
   Future<void> _remeasure(
@@ -667,117 +846,143 @@ class _SaleLine extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final notifier = ref.read(posCartProvider.notifier);
     final showPrices = ref.watch(posShowPricesProvider);
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    String money(double v) => AppFormat.money(v, currencyCode: line.currency);
+    // Figures set their own type: a list row's trailing slot would otherwise
+    // give them its 11px label style.
+    final figure = theme.textTheme.titleSmall?.copyWith(
+      fontWeight: FontWeight.bold,
+    );
+
+    final details = line.reduced
+        ? Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 6,
+            children: [
+              Container(
+                key: Key('reduced-${line.markdownId}'),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: cs.tertiaryContainer,
+                  borderRadius: AppRadius.badge,
+                ),
+                child: Text(
+                  // A sticker the law will not let be called reduced is still a markdown.
+                  line.originalPrice != null ? 'REDUCED' : 'MARKDOWN',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: cs.onTertiaryContainer,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              if (showPrices) Text(money(line.unitPrice)),
+              if (showPrices && line.originalPrice != null)
+                Text(
+                  'was ${money(line.originalPrice!)}',
+                  style: const TextStyle(
+                    decoration: TextDecoration.lineThrough,
+                  ),
+                ),
+              Text('· ${line.sku}'),
+            ],
+          )
+        : Text(
+            showPrices ? '${money(line.unitPrice)} · ${line.sku}' : line.sku,
+          );
+
+    final quantity = <Widget>[
+      if (line.measured)
+        TextButton(
+          onPressed: () => _remeasure(context, ref, line),
+          child: Text(
+            line.qtyLabel,
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+        )
+      else ...[
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          icon: const Icon(Icons.remove_circle_outline),
+          tooltip: 'Decrease quantity',
+          onPressed: () => notifier.setQty(
+            line.variantId,
+            line.qty - 1,
+            markdownId: line.markdownId,
+          ),
+        ),
+        Text(line.qtyLabel, style: figure),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          icon: const Icon(Icons.add_circle_outline),
+          tooltip: 'Increase quantity',
+          onPressed: () => notifier.setQty(
+            line.variantId,
+            line.qty + 1,
+            markdownId: line.markdownId,
+          ),
+        ),
+      ],
+    ];
+
+    final total = showPrices
+        ? Text(money(line.lineTotal), textAlign: TextAlign.end, style: figure)
+        : null;
+
     return Dismissible(
       key: ValueKey(line.variantId),
       direction: DismissDirection.endToStart,
       background: Container(
-        color: Theme.of(context).colorScheme.errorContainer,
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 20),
-        child: Icon(
-          Icons.delete_outline,
-          color: Theme.of(context).colorScheme.onErrorContainer,
-        ),
+        color: cs.errorContainer,
+        alignment: AlignmentDirectional.centerEnd,
+        padding: const EdgeInsetsDirectional.only(end: 20),
+        child: Icon(Icons.delete_outline, color: cs.onErrorContainer),
       ),
       onDismissed: (_) =>
           notifier.setQty(line.variantId, 0, markdownId: line.markdownId),
-      child: ListTile(
-        dense: true,
-        title: Text(line.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: line.reduced
-            ? Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: 6,
+      child: narrow
+          ? ListTile(
+              dense: true,
+              title: Row(
                 children: [
-                  Container(
-                    key: Key('reduced-${line.markdownId}'),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 1,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.tertiaryContainer,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
+                  Expanded(
                     child: Text(
-                      // A sticker the law will not let be called reduced is still a markdown.
-                      line.originalPrice != null ? 'REDUCED' : 'MARKDOWN',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.onTertiaryContainer,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      line.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (showPrices)
-                    Text(
-                      '${line.currency} ${line.unitPrice.toStringAsFixed(2)}',
-                    ),
-                  if (showPrices && line.originalPrice != null)
-                    Text(
-                      'was ${line.originalPrice!.toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        decoration: TextDecoration.lineThrough,
-                      ),
-                    ),
-                  Text('· ${line.sku}'),
+                  if (total != null) ...[const SizedBox(width: 8), total],
                 ],
-              )
-            : Text(
-                showPrices
-                    ? '${line.currency} ${line.unitPrice.toStringAsFixed(2)} · ${line.sku}'
-                    : line.sku,
               ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (line.measured)
-              TextButton(
-                onPressed: () => _remeasure(context, ref, line),
-                child: Text(
-                  line.qtyLabel,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              )
-            else ...[
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.remove_circle_outline),
-                tooltip: 'Decrease quantity',
-                onPressed: () => notifier.setQty(
-                  line.variantId,
-                  line.qty - 1,
-                  markdownId: line.markdownId,
-                ),
+              subtitle: Row(
+                children: [
+                  Expanded(child: details),
+                  ...quantity,
+                ],
               ),
-              Text(
-                line.qtyLabel,
-                style: const TextStyle(fontWeight: FontWeight.bold),
+            )
+          : ListTile(
+              dense: true,
+              title: Text(
+                line.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.add_circle_outline),
-                tooltip: 'Increase quantity',
-                onPressed: () => notifier.setQty(
-                  line.variantId,
-                  line.qty + 1,
-                  markdownId: line.markdownId,
-                ),
+              subtitle: details,
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ...quantity,
+                  // Totals line up down the list; a long one still fits.
+                  if (total != null)
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(minWidth: 72),
+                      child: total,
+                    ),
+                ],
               ),
-            ],
-            if (showPrices)
-              SizedBox(
-                width: 72,
-                child: Text(
-                  '${line.currency} ${line.lineTotal.toStringAsFixed(2)}',
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
-          ],
-        ),
-      ),
+            ),
     );
   }
 }
@@ -818,7 +1023,7 @@ class _CatalogPaneState extends ConsumerState<_CatalogPane> {
       children: [
         // Search bar + in-stock toggle
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 4, 8),
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 12, 4, 8),
           child: Row(
             children: [
               Expanded(
@@ -861,37 +1066,41 @@ class _CatalogPaneState extends ConsumerState<_CatalogPane> {
             ],
           ),
         ),
-        SizedBox(
-          height: 40,
+        // A chip's height while the categories load, and taller with large
+        // text — a fixed height would clip the labels.
+        ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 40),
           child: categoriesAsync.when(
             loading: () => const SizedBox.shrink(),
             error: (_, _) => const SizedBox.shrink(),
-            data: (cats) => ListView(
+            data: (cats) => SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: const Text('All'),
-                    selected: selectedCat == null,
-                    onSelected: (_) =>
-                        ref.read(posSelectedCategoryProvider.notifier).state =
-                            null,
-                  ),
-                ),
-                for (final c in cats)
+              child: Row(
+                children: [
                   Padding(
-                    padding: const EdgeInsets.only(right: 8),
+                    padding: const EdgeInsetsDirectional.only(end: 8),
                     child: ChoiceChip(
-                      label: Text(c.name),
-                      selected: selectedCat == c.id,
+                      label: const Text('All'),
+                      selected: selectedCat == null,
                       onSelected: (_) =>
                           ref.read(posSelectedCategoryProvider.notifier).state =
-                              c.id,
+                              null,
                     ),
                   ),
-              ],
+                  for (final c in cats)
+                    Padding(
+                      padding: const EdgeInsetsDirectional.only(end: 8),
+                      child: ChoiceChip(
+                        label: Text(c.name),
+                        selected: selectedCat == c.id,
+                        onSelected: (_) => ref
+                            .read(posSelectedCategoryProvider.notifier)
+                            .state = c.id,
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
@@ -920,7 +1129,10 @@ class _CatalogPaneState extends ConsumerState<_CatalogPane> {
               }
 
               if (displayProducts.isEmpty) {
-                return const Center(child: Text('No in-stock products.'));
+                return const EmptyState(
+                  icon: Icons.inventory_2_outlined,
+                  title: 'No in-stock products.',
+                );
               }
               return GridView.builder(
                 padding: const EdgeInsets.all(12),
@@ -980,8 +1192,10 @@ class _OfferTile extends ConsumerWidget {
               ),
               const SizedBox(height: 6),
               offerAsync.when(
-                loading: () => Text('…', style: TextStyle(color: cs.outline)),
-                error: (_, _) => Text('—', style: TextStyle(color: cs.outline)),
+                loading: () =>
+                    Text('…', style: TextStyle(color: cs.onSurfaceVariant)),
+                error: (_, _) =>
+                    Text('—', style: TextStyle(color: cs.onSurfaceVariant)),
                 data: (o) {
                   if (o == null) {
                     return Text(
@@ -1013,9 +1227,10 @@ class _OfferTile extends ConsumerWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          '${o.currency} ${o.unitPrice.toStringAsFixed(2)}',
+                          AppFormat.money(o.unitPrice, currencyCode: o.currency),
+                          // A price is a figure: on-surface ink, not the accent.
                           style: TextStyle(
-                            color: context.channelAccent.color,
+                            color: cs.onSurface,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
@@ -1072,13 +1287,15 @@ class _StoreSelector extends ConsumerWidget {
       orElse: () => null,
     );
 
+    // surfaceContainerHighest is kept for loading skeletons; the bar sits one
+    // step down, where the timer's onSurfaceVariant still clears AA.
     return Container(
       width: double.infinity,
-      color: cs.surfaceContainerHighest,
+      color: cs.surfaceContainerHigh,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       child: Row(
         children: [
-          Icon(Icons.store, size: 18, color: context.channelAccent.color),
+          Icon(Icons.store, size: 18, color: cs.primary),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -1088,11 +1305,11 @@ class _StoreSelector extends ConsumerWidget {
             ),
           ),
           if (session != null) ...[
-            Icon(Icons.schedule, size: 14, color: cs.outline),
+            Icon(Icons.schedule, size: 14, color: cs.onSurfaceVariant),
             const SizedBox(width: 4),
             Text(
               _elapsed(session.startedAt),
-              style: TextStyle(color: cs.outline, fontSize: 12),
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
             ),
           ],
         ],
@@ -1111,8 +1328,14 @@ class _StoreSelector extends ConsumerWidget {
 
 /// Shows the customer attached to the sale. For walk-in sales a mandatory phone
 /// field is shown inline — the store needs a contact number for every order.
+///
+/// On a phone ([compact]) a walk-in's phone field and the button that attaches
+/// a customer share one row, which leaves the sale lines more of the screen.
+/// Decided by width only: the keyboard changes the height, and a field that
+/// moved when the keyboard opened would lose its focus.
 class _CustomerBar extends ConsumerStatefulWidget {
-  const _CustomerBar();
+  final bool compact;
+  const _CustomerBar({this.compact = false});
 
   @override
   ConsumerState<_CustomerBar> createState() => _CustomerBarState();
@@ -1133,13 +1356,25 @@ class _CustomerBarState extends ConsumerState<_CustomerBar> {
     super.dispose();
   }
 
+  Future<void> _pickCustomer() async {
+    final picked = await showDialog<Customer?>(
+      context: context,
+      builder: (_) => const _CustomerPickerDialog(),
+    );
+    if (picked == null || !mounted) return;
+    ref.read(posCustomerProvider.notifier).state =
+        picked.id.isEmpty ? null : picked;
+  }
+
   @override
   Widget build(BuildContext context) {
     final customer = ref.watch(posCustomerProvider);
+    final tillPhone = ref.watch(posTillPhoneProvider);
+    final walkInPhone = ref.watch(posWalkInPhoneProvider);
     final cs = Theme.of(context).colorScheme;
 
     // When a customer is attached, clear the walk-in phone so it doesn't linger.
-    if (customer != null && ref.read(posWalkInPhoneProvider).isNotEmpty) {
+    if (customer != null && walkInPhone.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           ref.read(posWalkInPhoneProvider.notifier).state = '';
@@ -1148,14 +1383,63 @@ class _CustomerBarState extends ConsumerState<_CustomerBar> {
       });
     }
 
+    // Walk-in phone (phone-at-the-till): shown whenever no customer account is
+    // linked and this store's till asks at all — hidden outright under Don't ask.
+    final phoneField = (customer != null || tillPhone == 'OFF')
+        ? null
+        : TextField(
+            key: const Key('pos-customer-phone-field'),
+            controller: _phoneCtrl,
+            keyboardType: TextInputType.phone,
+            decoration: InputDecoration(
+              isDense: true,
+              labelText: posPhoneFieldLabel(tillPhone),
+              hintText: posPhoneFieldHint(tillPhone),
+              prefixIcon: const Icon(Icons.phone_outlined, size: 18),
+              // A blank field is only a warning where the store requires a
+              // number; under Optional it is exactly what the customer chose.
+              suffixIcon: walkInPhone.isNotEmpty
+                  ? Icon(
+                      Icons.check_circle_outline,
+                      size: 18,
+                      color: context.status.success,
+                    )
+                  : (tillPhone == 'REQUIRED'
+                      ? Icon(
+                          Icons.warning_amber_outlined,
+                          size: 18,
+                          color: context.status.warning,
+                        )
+                      : null),
+            ),
+            onChanged: (v) =>
+                ref.read(posWalkInPhoneProvider.notifier).state = v.trim(),
+          );
+
+    if (widget.compact && phoneField != null) {
+      return Padding(
+        padding: const EdgeInsetsDirectional.fromSTEB(12, 8, 4, 4),
+        child: Row(
+          children: [
+            Expanded(child: phoneField),
+            IconButton(
+              icon: const Icon(Icons.person_add_alt),
+              tooltip: 'Add customer',
+              onPressed: _pickCustomer,
+            ),
+          ],
+        ),
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 4, 0),
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 4, 0),
           child: Row(
             children: [
-              Icon(Icons.person_outline, size: 18, color: cs.outline),
+              Icon(Icons.person_outline, size: 18, color: cs.onSurfaceVariant),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -1165,7 +1449,7 @@ class _CustomerBarState extends ConsumerState<_CustomerBar> {
                             ? customer.email
                             : customer.fullName),
                   style: TextStyle(
-                    color: customer == null ? cs.outline : cs.onSurface,
+                    color: customer == null ? cs.onSurfaceVariant : cs.onSurface,
                     fontWeight: customer == null
                         ? FontWeight.normal
                         : FontWeight.w600,
@@ -1185,47 +1469,15 @@ class _CustomerBarState extends ConsumerState<_CustomerBar> {
                   size: 18,
                 ),
                 label: Text(customer == null ? 'Add' : 'Change'),
-                onPressed: () async {
-                  final picked = await showDialog<Customer?>(
-                    context: context,
-                    builder: (_) => const _CustomerPickerDialog(),
-                  );
-                  if (picked != null) {
-                    ref.read(posCustomerProvider.notifier).state =
-                        picked.id.isEmpty ? null : picked;
-                  }
-                },
+                onPressed: _pickCustomer,
               ),
             ],
           ),
         ),
-        // Walk-in phone — mandatory when no customer account is linked.
-        if (customer == null)
+        if (phoneField != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-            child: TextField(
-              controller: _phoneCtrl,
-              keyboardType: TextInputType.phone,
-              decoration: InputDecoration(
-                isDense: true,
-                labelText: 'Customer phone *',
-                hintText: 'Required for all orders',
-                prefixIcon: const Icon(Icons.phone_outlined, size: 18),
-                suffixIcon: ref.watch(posWalkInPhoneProvider).isEmpty
-                    ? Icon(
-                        Icons.warning_amber_outlined,
-                        size: 18,
-                        color: context.status.warning,
-                      )
-                    : Icon(
-                        Icons.check_circle_outline,
-                        size: 18,
-                        color: context.status.success,
-                      ),
-              ),
-              onChanged: (v) =>
-                  ref.read(posWalkInPhoneProvider.notifier).state = v.trim(),
-            ),
+            child: phoneField,
           ),
       ],
     );
@@ -1233,21 +1485,33 @@ class _CustomerBarState extends ConsumerState<_CustomerBar> {
 }
 
 /// Subtotal, optional order discount, net total, plus Clear / Tender actions.
-class _TotalsBar extends ConsumerWidget {
-  Future<void> _editDiscount(
-    BuildContext context,
-    WidgetRef ref,
-    String currency,
-    double subtotal,
-  ) async {
+///
+/// [collapsible] (a phone, or a short window): the breakdown folds into one
+/// row above the buttons — the total, with a line saying what is in it — and a
+/// tap on that row opens it, discount button included.
+class _TotalsBar extends ConsumerStatefulWidget {
+  final bool collapsible;
+  const _TotalsBar({this.collapsible = false});
+
+  @override
+  ConsumerState<_TotalsBar> createState() => _TotalsBarState();
+}
+
+class _TotalsBarState extends ConsumerState<_TotalsBar> {
+  bool _expanded = false;
+
+  Future<void> _editDiscount(String currency, double subtotal) async {
+    // Read before the dialog and set through afterwards: the bar may be
+    // rebuilt in another layout while the dialog is open.
+    final discountState = ref.read(posDiscountProvider.notifier);
+    final reasonState = ref.read(posDiscountReasonProvider.notifier);
     final ctrl = TextEditingController(
-      text: ref.read(posDiscountProvider) > 0
-          ? ref.read(posDiscountProvider).toStringAsFixed(2)
+      text: discountState.state > 0
+          ? discountState.state.toStringAsFixed(2)
           : '',
     );
-    final reasonCtrl = TextEditingController(
-      text: ref.read(posDiscountReasonProvider),
-    );
+    final reasonCtrl = TextEditingController(text: reasonState.state);
+    final symbol = AppFormat.currencySymbol(currency);
     // The server refuses a discount with no reason and records the one given against the cashier,
     // so Apply stays disabled until both fields are filled rather than failing at tender time.
     final result = await showDialog<(double, String)>(
@@ -1270,7 +1534,7 @@ class _TotalsBar extends ConsumerWidget {
                   ),
                   decoration: InputDecoration(
                     labelText: 'Discount amount',
-                    prefixText: '$currency ',
+                    prefixText: symbol.isEmpty ? null : '$symbol ',
                   ),
                   onChanged: (_) => setDialogState(() {}),
                 ),
@@ -1302,14 +1566,12 @@ class _TotalsBar extends ConsumerWidget {
       ),
     );
     if (result == null) return;
-    ref.read(posDiscountProvider.notifier).state = result.$1
-        .clamp(0, subtotal)
-        .toDouble();
-    ref.read(posDiscountReasonProvider.notifier).state = result.$2;
+    discountState.state = result.$1.clamp(0, subtotal).toDouble();
+    reasonState.state = result.$2;
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final items = ref.watch(posCartProvider);
     final showPrices = ref.watch(posShowPricesProvider);
     final subtotal = ref.watch(posCartProvider.notifier).total;
@@ -1320,8 +1582,11 @@ class _TotalsBar extends ConsumerWidget {
         .toDouble();
     final deposits = ref.watch(posCartProvider.notifier).deposits;
     final net = subtotal - discount + deposits;
-    final tt = Theme.of(context).textTheme;
+    final theme = Theme.of(context);
+    final tt = theme.textTheme;
+    final cs = theme.colorScheme;
     final qty = items.fold<int>(0, (s, l) => s + l.itemCount);
+    String money(double v) => AppFormat.money(v, currencyCode: currency);
 
     final clearButton = Expanded(
       child: OutlinedButton(
@@ -1366,73 +1631,121 @@ class _TotalsBar extends ConsumerWidget {
       );
     }
 
+    final totalStyle = tt.titleLarge?.copyWith(fontWeight: FontWeight.bold);
+    final folded = widget.collapsible && !_expanded;
+    // What the folded total is made of, in a few words.
+    final inTotal = [
+      '$qty item${qty == 1 ? '' : 's'}',
+      if (discount > 0) '${money(discount)} off',
+      if (deposits > 0) '${money(deposits)} deposit',
+    ].join(' · ');
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Text('Subtotal', style: tt.bodyMedium),
-              const Spacer(),
-              Text(
-                '$currency ${subtotal.toStringAsFixed(2)}',
-                style: tt.bodyMedium,
-              ),
-            ],
-          ),
-          if (deposits > 0) ...[
-            const SizedBox(height: 2),
+          if (!folded) ...[
             Row(
-              key: const Key('pos-deposit-row'),
               children: [
-                Text('Container deposit (refundable)', style: tt.bodyMedium),
-                const Spacer(),
-                Text(
-                  '$currency ${deposits.toStringAsFixed(2)}',
-                  style: tt.bodyMedium,
-                ),
+                Expanded(child: Text('Subtotal', style: tt.bodyMedium)),
+                Text(money(subtotal), style: tt.bodyMedium),
               ],
             ),
-          ],
-          const SizedBox(height: 2),
-          Row(
-            children: [
-              TextButton.icon(
-                onPressed: items.isEmpty
-                    ? null
-                    : () => _editDiscount(context, ref, currency, subtotal),
-                icon: const Icon(Icons.percent, size: 16),
-                label: Text(discount > 0 ? 'Discount' : 'Add discount'),
-                style: TextButton.styleFrom(
-                  padding: EdgeInsets.zero,
-                  minimumSize: const Size(0, 30),
-                ),
+            if (deposits > 0) ...[
+              const SizedBox(height: 2),
+              Row(
+                key: const Key('pos-deposit-row'),
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Container deposit (refundable)',
+                      style: tt.bodyMedium,
+                    ),
+                  ),
+                  Text(money(deposits), style: tt.bodyMedium),
+                ],
               ),
-              const Spacer(),
-              if (discount > 0)
-                Text(
-                  '− $currency ${discount.toStringAsFixed(2)}',
-                  style: tt.bodyMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.error,
+            ],
+            const SizedBox(height: 2),
+            Row(
+              children: [
+                Expanded(
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: TextButton.icon(
+                      onPressed: items.isEmpty
+                          ? null
+                          : () => _editDiscount(currency, subtotal),
+                      icon: const Icon(Icons.percent, size: 16),
+                      label: Text(discount > 0 ? 'Discount' : 'Add discount'),
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(0, 30),
+                      ),
+                    ),
                   ),
                 ),
-            ],
-          ),
-          const Divider(),
-          Row(
-            children: [
-              Text(
-                'Total',
-                style: tt.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                if (discount > 0)
+                  Text(
+                    '− ${money(discount)}',
+                    style: tt.bodyMedium?.copyWith(color: cs.error),
+                  ),
+              ],
+            ),
+            const Divider(),
+          ],
+          if (widget.collapsible)
+            // The total and what is in it, on one row; a tap opens the
+            // breakdown above it.
+            InkWell(
+              key: const Key('pos-totals-summary'),
+              onTap: () => setState(() => _expanded = !_expanded),
+              borderRadius: const BorderRadius.all(
+                Radius.circular(AppRadius.sm),
               ),
-              const Spacer(),
-              Text(
-                '$currency ${net.toStringAsFixed(2)}',
-                style: tt.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    // Gives way before the amount when room runs out (large
+                    // text, a long total): the hint first, then the word.
+                    Expanded(
+                      child: Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(text: 'Total', style: totalStyle),
+                            TextSpan(
+                              text: '  $inTotal',
+                              style: tt.bodySmall?.copyWith(
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(money(net), style: totalStyle),
+                    Icon(
+                      _expanded ? Icons.expand_more : Icons.expand_less,
+                      color: cs.onSurfaceVariant,
+                      semanticLabel: _expanded
+                          ? 'Hide price breakdown'
+                          : 'Show price breakdown',
+                    ),
+                  ],
+                ),
               ),
-            ],
-          ),
+            )
+          else
+            Row(
+              children: [
+                Expanded(child: Text('Total', style: totalStyle)),
+                Text(money(net), style: totalStyle),
+              ],
+            ),
           const SizedBox(height: 10),
           Row(
             children: [
@@ -1450,7 +1763,7 @@ class _TotalsBar extends ConsumerWidget {
                       ? null
                       : () => context.go('/pos/tender'),
                   child: Text(
-                    'Charge $currency ${net.toStringAsFixed(2)}',
+                    'Charge ${money(net)}',
                     style: const TextStyle(fontSize: 16),
                   ),
                 ),
@@ -1539,7 +1852,10 @@ class _CustomerPickerDialogState extends ConsumerState<_CustomerPickerDialog> {
                           return hay.contains(_query);
                         }).toList();
                   if (list.isEmpty) {
-                    return const Center(child: Text('No customers match.'));
+                    return const EmptyState(
+                      icon: Icons.search_off,
+                      title: 'No customers match.',
+                    );
                   }
                   return ListView.separated(
                     itemCount: list.length,

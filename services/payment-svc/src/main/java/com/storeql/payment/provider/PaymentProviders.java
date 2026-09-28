@@ -1,6 +1,7 @@
 package com.storeql.payment.provider;
 
 import com.storeql.payment.domain.Domain.PaymentIntent;
+import com.storeql.service.TenantProfiles;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -10,6 +11,7 @@ import java.lang.System.Logger.Level;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -32,6 +34,8 @@ public class PaymentProviders {
   @ConfigProperty(name = "storeql.payment.provider", defaultValue = PaymentIntent.PROVIDER_MANUAL)
   String configuredProvider;
 
+  @Inject TenantProfiles profiles;
+
   private final Map<String, PaymentProvider> byName = new HashMap<>();
   private PaymentProvider active;
 
@@ -44,7 +48,21 @@ public class PaymentProviders {
    */
   @PostConstruct
   void init() {
-    for (PaymentProvider p : discovered) {
+    register(discovered);
+  }
+
+  /** For tests: these providers, this configuration, and tenant-svc as the profiles say. */
+  public static PaymentProviders forTest(
+      Iterable<PaymentProvider> providers, String configured, TenantProfiles profiles) {
+    PaymentProviders p = new PaymentProviders();
+    p.configuredProvider = configured;
+    p.profiles = profiles;
+    p.register(providers);
+    return p;
+  }
+
+  private void register(Iterable<PaymentProvider> providers) {
+    for (PaymentProvider p : providers) {
       byName.put(p.name().toUpperCase(Locale.ROOT), p);
     }
     String wanted =
@@ -72,6 +90,27 @@ public class PaymentProviders {
    * @return the provider this service is configured to use; never null after startup
    */
   public PaymentProvider active() {
+    return active;
+  }
+
+  /**
+   * The provider that takes this business's money (22.8): the configured one — except for a
+   * sandbox, which is always MANUAL, so nothing a sandbox does authorises or captures a penny
+   * however the stack is configured. A business whose profile cannot be read is not taken for a
+   * sandbox; the payment path reads the profile for the currency anyway and fails closed there.
+   */
+  public PaymentProvider forTenant(UUID tenantId) {
+    if (profiles != null && profiles.isSandbox(tenantId)) {
+      PaymentProvider manual = byName.get(PaymentIntent.PROVIDER_MANUAL);
+      if (manual != null) {
+        return manual;
+      }
+      LOG.log(
+          Level.WARNING,
+          "No MANUAL provider registered; sandbox {0} pays through {1}",
+          tenantId,
+          active.name());
+    }
     return active;
   }
 

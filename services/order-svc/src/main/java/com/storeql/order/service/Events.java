@@ -5,6 +5,7 @@ import static com.storeql.events.EventPayload.esc;
 import com.storeql.ids.Ids;
 import com.storeql.order.domain.Domain.GiftCard;
 import com.storeql.order.domain.Domain.GiftCardTransaction;
+import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderItem;
 import com.storeql.order.domain.Domain.ReturnItem;
 import com.storeql.order.domain.RecallNotice.Line;
@@ -141,6 +142,41 @@ public final class Events {
 
   static OutboxRow orderPlaced(
       UUID tenantId, UUID orderId, String channel, UUID customerId, UUID loginId, UUID storeId) {
+    return orderPlaced(tenantId, orderId, channel, customerId, loginId, storeId, null);
+  }
+
+  /**
+   * As above, naming the checkout the order is a part of when a delivery was split across stores
+   * (order orchestration); an order never split carries no {@code groupId}.
+   */
+  static OutboxRow orderPlaced(
+      UUID tenantId,
+      UUID orderId,
+      String channel,
+      UUID customerId,
+      UUID loginId,
+      UUID storeId,
+      UUID groupId) {
+    return orderPlaced(
+        tenantId, orderId, channel, customerId, loginId, storeId, groupId, null, null, null);
+  }
+
+  /**
+   * As above, naming the delivery or collection window the order holds, when it has one (delivery
+   * and collection slots); an order with no window (a till sale, or a store with none) carries
+   * none.
+   */
+  static OutboxRow orderPlaced(
+      UUID tenantId,
+      UUID orderId,
+      String channel,
+      UUID customerId,
+      UUID loginId,
+      UUID storeId,
+      UUID groupId,
+      Instant slotStartsAt,
+      Instant slotEndsAt,
+      String slotTimeZone) {
     String customerPart =
         customerId != null ? ",\"customerId\":\"" + customerId + "\"" : ",\"customerId\":null";
     // Both ids, because consumers key on different ones: loyalty wants the shop's customer record,
@@ -163,7 +199,27 @@ public final class Events {
             + "\""
             + customerPart
             + loginPart
+            + (groupId != null ? ",\"groupId\":\"" + groupId + "\"" : "")
+            + slotFields(slotStartsAt, slotEndsAt, slotTimeZone)
             + "}");
+  }
+
+  /**
+   * The three fields OrderPlaced and OrderConfirmed carry only when the order holds a delivery or
+   * collection window (delivery and collection slots) — absent, not JSON null, so an order with no
+   * window looks exactly as it did before this feature existed.
+   */
+  private static String slotFields(Instant slotStartsAt, Instant slotEndsAt, String slotTimeZone) {
+    if (slotStartsAt == null || slotEndsAt == null || slotTimeZone == null) {
+      return "";
+    }
+    return ",\"slotStartsAt\":\""
+        + slotStartsAt
+        + "\",\"slotEndsAt\":\""
+        + slotEndsAt
+        + "\",\"slotTimeZone\":\""
+        + esc(slotTimeZone)
+        + "\"";
   }
 
   /**
@@ -171,8 +227,9 @@ public final class Events {
    * so downstream consumers can react to the sale without a callback to order-svc — customer-svc
    * accrues loyalty from {@code customerId}/{@code total} (guest orders send {@code
    * customerId:null} and earn nothing), and purchase-svc posts the sale to the ledger from {@code
-   * total} and {@code taxAmount} (17.7). Emitted exactly once, at full payment (see
-   * OrderRepository.applyPaymentCaptured).
+   * total} and {@code taxAmount} (17.7), and reporting-svc records the sale line by line from
+   * {@code lines} — each line's variant, quantity, unit price and money — for sales by category
+   * (19.x). Emitted exactly once, at full payment (see OrderRepository.applyPaymentCaptured).
    */
   static OutboxRow orderConfirmed(
       UUID tenantId,
@@ -182,7 +239,85 @@ public final class Events {
       UUID customerId,
       BigDecimal total,
       BigDecimal taxAmount,
-      String currency) {
+      String currency,
+      List<OrderItem> lines) {
+    return orderConfirmed(
+        tenantId,
+        orderId,
+        storeId,
+        channel,
+        customerId,
+        total,
+        taxAmount,
+        currency,
+        lines,
+        null,
+        null,
+        null,
+        null);
+  }
+
+  /**
+   * As above, saying how the order is fulfilled and where a delivery goes: purchase-svc raises a
+   * dropship supplier's order from this event (consignment and dropship stock ownership), shipped
+   * to the customer, so the address rides on the event rather than in a call back to order-svc. The
+   * four fields are always present; a till sale carries them as JSON null.
+   */
+  static OutboxRow orderConfirmed(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String channel,
+      UUID customerId,
+      BigDecimal total,
+      BigDecimal taxAmount,
+      String currency,
+      List<OrderItem> lines,
+      String fulfilmentType,
+      String deliveryAddress,
+      String deliveryRecipientName,
+      String deliveryRecipientPhone) {
+    return orderConfirmed(
+        tenantId,
+        orderId,
+        storeId,
+        channel,
+        customerId,
+        total,
+        taxAmount,
+        currency,
+        lines,
+        fulfilmentType,
+        deliveryAddress,
+        deliveryRecipientName,
+        deliveryRecipientPhone,
+        null,
+        null,
+        null);
+  }
+
+  /**
+   * As above, naming the delivery or collection window the order holds, when it has one (delivery
+   * and collection slots): notification-svc says the window in the confirmation; an order with no
+   * window carries none.
+   */
+  static OutboxRow orderConfirmed(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String channel,
+      UUID customerId,
+      BigDecimal total,
+      BigDecimal taxAmount,
+      String currency,
+      List<OrderItem> lines,
+      String fulfilmentType,
+      String deliveryAddress,
+      String deliveryRecipientName,
+      String deliveryRecipientPhone,
+      Instant slotStartsAt,
+      Instant slotEndsAt,
+      String slotTimeZone) {
     String customerPart = customerId != null ? "\"" + customerId + "\"" : "null";
     String amount = total != null ? total.toPlainString() : "0";
     // The VAT inside the total, so the ledger can post revenue net of it (17.7).
@@ -195,7 +330,12 @@ public final class Events {
         orderId,
         "{\"eventId\":\""
             + Ids.newId()
-            + "\",\"eventType\":\"OrderConfirmed\",\"tenantId\":\""
+            + "\",\"eventType\":\"OrderConfirmed\",\"occurredAt\":\""
+            // When the order was confirmed, on the confirmation's own transaction: inventory-svc
+            // lists the orders waiting to be picked by it, so two confirmations that ride different
+            // partitions and arrive in either order still wait in the order they happened.
+            + Instant.now()
+            + "\",\"tenantId\":\""
             + tenantId
             + "\",\"orderId\":\""
             + orderId
@@ -211,12 +351,216 @@ public final class Events {
             + tax
             + ",\"currency\":\""
             + esc(cur)
-            + "\"}");
+            + "\",\"fulfilmentType\":"
+            + jsonText(fulfilmentType)
+            + ",\"deliveryAddress\":"
+            + jsonText(deliveryAddress)
+            + ",\"deliveryRecipientName\":"
+            + jsonText(deliveryRecipientName)
+            + ",\"deliveryRecipientPhone\":"
+            + jsonText(deliveryRecipientPhone)
+            + ",\"lines\":"
+            + confirmedLines(lines)
+            + slotFields(slotStartsAt, slotEndsAt, slotTimeZone)
+            + "}");
+  }
+
+  /**
+   * The sale line by line: what reporting-svc groups by category. Unit price is omitted when
+   * unknown.
+   */
+  /** A JSON string, or JSON null for nothing. */
+  private static String jsonText(String value) {
+    return value == null || value.isBlank() ? "null" : "\"" + esc(value) + "\"";
+  }
+
+  private static String confirmedLines(List<OrderItem> lines) {
+    StringBuilder sb = new StringBuilder("[");
+    for (int i = 0; i < lines.size(); i++) {
+      OrderItem line = lines.get(i);
+      if (i > 0) sb.append(',');
+      sb.append("{\"variantId\":\"")
+          .append(line.variantId())
+          .append("\",\"qty\":")
+          .append(line.qty().toPlainString());
+      if (line.unitPrice() != null) {
+        sb.append(",\"unitPrice\":").append(line.unitPrice().toPlainString());
+      }
+      sb.append(",\"lineTotal\":")
+          .append(line.lineTotal() != null ? line.lineTotal().toPlainString() : "0")
+          .append('}');
+    }
+    return sb.append(']').toString();
+  }
+
+  /**
+   * A picked delivery order handed to a carrier (ship-from-store): the shopper is told it is on its
+   * way with the carrier and reference; a business's webhooks hear it. The buyer's ids are JSON
+   * null for a guest checkout.
+   */
+  static OutboxRow orderDispatched(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      UUID customerId,
+      UUID loginId,
+      String carrier,
+      String reference,
+      Integer parcels) {
+    return new OutboxRow(
+        "OrderDispatched",
+        "storeql.order.order-dispatched",
+        tenantId,
+        orderId,
+        handoverPayload("OrderDispatched", tenantId, orderId, storeId, customerId, loginId)
+            + ",\"carrier\":"
+            + jsonText(carrier)
+            + ",\"reference\":"
+            + jsonText(reference)
+            + ",\"parcels\":"
+            + (parcels == null ? "null" : parcels.toString())
+            + "}");
+  }
+
+  /** A picked pickup order handed to its shopper at the counter (ship-from-store). */
+  static OutboxRow orderCollected(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      UUID customerId,
+      UUID loginId,
+      String collectedBy) {
+    return new OutboxRow(
+        "OrderCollected",
+        "storeql.order.order-collected",
+        tenantId,
+        orderId,
+        handoverPayload("OrderCollected", tenantId, orderId, storeId, customerId, loginId)
+            + ",\"collectedBy\":"
+            + jsonText(collectedBy)
+            + "}");
+  }
+
+  private static String handoverPayload(
+      String type, UUID tenantId, UUID orderId, UUID storeId, UUID customerId, UUID loginId) {
+    return "{\"eventId\":\""
+        + Ids.newId()
+        + "\",\"eventType\":\""
+        + type
+        + "\",\"occurredAt\":\""
+        + Instant.now()
+        + "\",\"tenantId\":\""
+        + tenantId
+        + "\",\"orderId\":\""
+        + orderId
+        + "\",\"storeId\":\""
+        + storeId
+        + "\",\"customerId\":"
+        + (customerId == null ? "null" : "\"" + customerId + "\"")
+        + ",\"loginId\":"
+        + (loginId == null ? "null" : "\"" + loginId + "\"");
+  }
+
+  /**
+   * A line of an online order closed short by the store (substitutions for out-of-stock online
+   * lines): the quantity that will never be handed over, what goes back to the shopper, and the
+   * order's total now. inventory-svc releases the hold and shortens the waiting line, payment-svc
+   * refunds, notification-svc tells the shopper.
+   */
+  static OutboxRow orderLineShortClosed(
+      Order order, UUID variantId, String variantName, BigDecimal qty, BigDecimal refund) {
+    return new OutboxRow(
+        "OrderLineShortClosed",
+        "storeql.order.order-line-short-closed",
+        order.tenantId(),
+        order.id(),
+        adjustmentPayload("OrderLineShortClosed", order)
+            + ",\"variantId\":\""
+            + variantId
+            + "\",\"variantName\":"
+            + jsonText(variantName)
+            + ",\"qty\":"
+            + qty.toPlainString()
+            + ",\"refundAmount\":"
+            + refund.toPlainString()
+            + "}");
+  }
+
+  /**
+   * A line of an online order replaced by a substitute the store put in the bag: what was swapped
+   * for what, how much, what the substitute is charged (never more than the original) and what goes
+   * back. The substitute's own deduction rides an {@code OrderFulfilled} beside this.
+   */
+  static OutboxRow orderLineSubstituted(
+      Order order,
+      UUID fromVariantId,
+      String fromName,
+      UUID toVariantId,
+      String toName,
+      BigDecimal qty,
+      BigDecimal charged,
+      BigDecimal refund) {
+    return new OutboxRow(
+        "OrderLineSubstituted",
+        "storeql.order.order-line-substituted",
+        order.tenantId(),
+        order.id(),
+        adjustmentPayload("OrderLineSubstituted", order)
+            + ",\"fromVariantId\":\""
+            + fromVariantId
+            + "\",\"fromName\":"
+            + jsonText(fromName)
+            + ",\"toVariantId\":\""
+            + toVariantId
+            + "\",\"toName\":"
+            + jsonText(toName)
+            + ",\"qty\":"
+            + qty.toPlainString()
+            + ",\"chargedAmount\":"
+            + charged.toPlainString()
+            + ",\"refundAmount\":"
+            + refund.toPlainString()
+            + "}");
+  }
+
+  private static String adjustmentPayload(String type, Order order) {
+    return "{\"eventId\":\""
+        + Ids.newId()
+        + "\",\"eventType\":\""
+        + type
+        + "\",\"occurredAt\":\""
+        + Instant.now()
+        + "\",\"tenantId\":\""
+        + order.tenantId()
+        + "\",\"orderId\":\""
+        + order.id()
+        + "\",\"storeId\":\""
+        + order.storeId()
+        + "\",\"customerId\":"
+        + (order.customerId() == null ? "null" : "\"" + order.customerId() + "\"")
+        + ",\"loginId\":"
+        + (order.loginId() == null ? "null" : "\"" + order.loginId() + "\"")
+        + ",\"currency\":"
+        + jsonText(order.currency())
+        + ",\"orderTotal\":"
+        + (order.total() == null ? "0" : order.total().toPlainString())
+        + kind(order.channel(), order.fulfilmentType());
   }
 
   static OutboxRow orderCancelled(UUID tenantId, UUID orderId, String reason) {
+    return orderCancelled(tenantId, orderId, reason, null, null);
+  }
+
+  /**
+   * As above, saying which kind of order was cancelled ({@code channel}, {@code fulfilmentType}):
+   * inventory-svc's waiting list (wave picking) remembers a cancelled online pickup or delivery
+   * order as done, so its confirmation arriving late cannot make it wait again, and remembers
+   * nothing for a till sale.
+   */
+  static OutboxRow orderCancelled(
+      UUID tenantId, UUID orderId, String reason, String channel, String fulfilmentType) {
     // eventId lets payment-svc dedupe the automatic refund of a cancelled (paid) order; existing
-    // consumers (inventory-svc hold release) ignore the extra field.
+    // consumers (inventory-svc hold release) ignore the extra fields.
     return new OutboxRow(
         "OrderCancelled",
         "storeql.order.order-cancelled",
@@ -224,8 +568,14 @@ public final class Events {
         orderId,
         String.format(
             "{\"eventId\":\"%s\",\"eventType\":\"OrderCancelled\",\"tenantId\":\"%s\","
-                + "\"orderId\":\"%s\",\"reason\":\"%s\"}",
-            Ids.newId(), tenantId, orderId, esc(reason)));
+                + "\"orderId\":\"%s\",\"reason\":\"%s\"%s}",
+            Ids.newId(), tenantId, orderId, esc(reason), kind(channel, fulfilmentType)));
+  }
+
+  /** The {@code channel} and {@code fulfilmentType} members, when known; nothing when not. */
+  private static String kind(String channel, String fulfilmentType) {
+    return (channel == null ? "" : ",\"channel\":\"" + esc(channel) + "\"")
+        + (fulfilmentType == null ? "" : ",\"fulfilmentType\":\"" + esc(fulfilmentType) + "\"");
   }
 
   static OutboxRow orderFulfilled(
@@ -249,6 +599,68 @@ public final class Events {
       List<OrderItem> items,
       java.util.Map<UUID, BigDecimal> unitNet,
       int scale) {
+    return orderFulfilled(
+        tenantId, orderId, storeId, items, unitNet, scale, java.util.Map.of(), null, null, null);
+  }
+
+  /**
+   * As above, saying what each line still has outstanding after this handover ({@code
+   * outstandingQty}), whether the order is now {@code FULFILLED} or {@code PARTIALLY_FULFILLED}
+   * ({@code status}), and which kind of order it is ({@code channel}, {@code fulfilmentType}).
+   * inventory-svc's waiting list (wave picking) is set from these absolute figures, so a
+   * redelivered or reordered event states the same truth instead of subtracting twice, and a
+   * fulfilled online pickup or delivery order leaves the list for good; a till sale leaves nothing.
+   *
+   * @param outstanding what is still to hand over per variant, after this handover
+   * @param status the order's status after this handover, or null to say nothing
+   * @param channel the order's channel, or null to say nothing
+   * @param fulfilmentType the order's fulfilment type, or null to say nothing
+   */
+  static OutboxRow orderFulfilled(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      List<OrderItem> items,
+      java.util.Map<UUID, BigDecimal> unitNet,
+      int scale,
+      java.util.Map<UUID, BigDecimal> outstanding,
+      String status,
+      String channel,
+      String fulfilmentType) {
+    return orderFulfilled(
+        tenantId,
+        orderId,
+        storeId,
+        items,
+        unitNet,
+        scale,
+        outstanding,
+        status,
+        channel,
+        fulfilmentType,
+        null,
+        null);
+  }
+
+  /**
+   * As above, naming the buyer ({@code customerId}, the shop's record; {@code loginId}, the login
+   * that placed it), so notification-svc can tell a shopper their pickup is ready for collection
+   * (ship-from-store and dark-store picking) without a call back to order-svc. Both are JSON null
+   * for a guest checkout or a till sale.
+   */
+  static OutboxRow orderFulfilled(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      List<OrderItem> items,
+      java.util.Map<UUID, BigDecimal> unitNet,
+      int scale,
+      java.util.Map<UUID, BigDecimal> outstanding,
+      String status,
+      String channel,
+      String fulfilmentType,
+      UUID customerId,
+      UUID loginId) {
     // eventId is required by inventory-svc's OrderEventHandler for per-line dedupe — without it,
     // every OrderFulfilled is dropped as a malformed event and stock is never deducted.
     StringBuilder sb = new StringBuilder();
@@ -260,13 +672,22 @@ public final class Events {
         .append(orderId)
         .append("\",\"storeId\":\"")
         .append(storeId)
-        .append("\",\"items\":[");
+        .append('"');
+    if (status != null) sb.append(",\"status\":\"").append(esc(status)).append('"');
+    sb.append(kind(channel, fulfilmentType));
+    sb.append(",\"customerId\":")
+        .append(customerId == null ? "null" : "\"" + customerId + "\"")
+        .append(",\"loginId\":")
+        .append(loginId == null ? "null" : "\"" + loginId + "\"");
+    sb.append(",\"items\":[");
     for (int i = 0; i < items.size(); i++) {
       if (i > 0) sb.append(',');
       sb.append("{\"variantId\":\"")
           .append(items.get(i).variantId())
           .append("\",\"qty\":")
           .append(items.get(i).qty().toPlainString());
+      BigDecimal left = outstanding.get(items.get(i).variantId());
+      if (left != null) sb.append(",\"outstandingQty\":").append(left.toPlainString());
       BigDecimal net =
           com.storeql.order.domain.LineRevenue.forQty(
               unitNet, items.get(i).variantId(), items.get(i).qty(), scale);

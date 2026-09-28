@@ -176,4 +176,63 @@ class SpendAuthorityTest {
     assertThat(decision.reason(), containsString("5000"));
     assertThat(decision.reason(), containsString("JPY"));
   }
+
+  // ── the translation (03.x) ────────────────────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "An order in a currency with no ceiling is measured at the translated figure in the home currency, and the reason says so")
+  void translatedIntoTheHomeCurrency() {
+    var sterlingOnly = limits("GBP:STOREKEEPER:500", "GBP:MANAGER:5000");
+    var translation =
+        new SpendAuthority.Translation(new BigDecimal("3160.00"), "GBP", new BigDecimal("0.79"));
+    SpendAuthority held =
+        SpendAuthority.decide(
+            new BigDecimal("4000.00"),
+            "USD",
+            java.util.List.of("STOREKEEPER"),
+            sterlingOnly,
+            translation);
+    assertThat(held.authorised(), is(false));
+    assertThat(held.role(), is("STOREKEEPER"));
+    assertThat(held.ceiling(), comparesEqualTo(new BigDecimal("500")));
+    assertThat(
+        held.reason(), containsString("USD 4000.00 translated to GBP 3160.00 at 0.79 GBP per USD"));
+    assertThat(held.translation(), is(translation));
+
+    SpendAuthority fine =
+        SpendAuthority.decide(
+            new BigDecimal("500.00"),
+            "USD",
+            java.util.List.of("STOREKEEPER"),
+            sterlingOnly,
+            new SpendAuthority.Translation(
+                new BigDecimal("395.00"), "GBP", new BigDecimal("0.79")));
+    assertThat(fine.authorised(), is(true));
+    assertThat(fine.reason(), is(nullValue()));
+  }
+
+  @Test
+  @DisplayName(
+      "A currency with a ceiling of its own is not translated, and without a translation an unconfigured one still fails closed")
+  void ownCeilingWinsAndNoRateFailsClosed() {
+    var both = limits("GBP:MANAGER:5000", "USD:MANAGER:100");
+    SpendAuthority own =
+        SpendAuthority.decide(
+            new BigDecimal("150.00"),
+            "USD",
+            java.util.List.of("MANAGER"),
+            both,
+            new SpendAuthority.Translation(
+                new BigDecimal("118.50"), "GBP", new BigDecimal("0.79")));
+    assertThat(own.authorised(), is(false));
+    assertThat(own.translation(), is(nullValue()));
+    assertThat(own.ceiling(), comparesEqualTo(new BigDecimal("100")));
+
+    SpendAuthority closed =
+        SpendAuthority.decide(
+            new BigDecimal("10.00"), "JPY", java.util.List.of("MANAGER"), both, null);
+    assertThat(closed.authorised(), is(false));
+    assertThat(closed.translation(), is(nullValue()));
+  }
 }

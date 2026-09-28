@@ -4,10 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/format.dart';
+import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/reference_fields.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
 import 'receipts_tab.dart';
 import 'sales_providers.dart';
@@ -16,24 +20,41 @@ import '../../shared/util/short_ref.dart';
 import 'package:storeql_app/core/ids.dart';
 
 class SalesScreen extends ConsumerWidget {
-  const SalesScreen({super.key});
+  const SalesScreen({super.key, this.initialTab});
+
+  /// The tab to open on, by its address name (`/admin/sales?tab=receipts`); the first when null
+  /// or one this screen does not have.
+  final String? initialTab;
+
+  /// Each tab's name in an address, in the order the tabs are shown.
+  static const tabNames = ['gift-cards', 'layaways', 'special-orders', 'receipts'];
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // One inset for the title, the tabs' labels and what each tab shows: 16 on
+    // a phone, 24 from tablet width.
+    final gutter = context.pageGutter;
+    final start = tabNames.indexOf(initialTab ?? '');
     return DefaultTabController(
-      length: 4,
+      // A link to another tab while Sales tools is open starts it again on that tab.
+      key: ValueKey(initialTab),
+      length: tabNames.length,
+      initialIndex: start < 0 ? 0 : start,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-            child: Text('Sales tools',
-                style: Theme.of(context).textTheme.headlineMedium),
+          PageHeader(
+            title: 'Sales tools',
+            padding: EdgeInsetsDirectional.fromSTEB(
+                gutter, gutter, gutter, AppSpacing.sm),
           ),
-          const TabBar(
+          TabBar(
             isScrollable: true,
             tabAlignment: TabAlignment.start,
-            tabs: [
+            // A tab's label is padded 16 on each side, so the first label's
+            // text starts on the gutter.
+            padding: EdgeInsetsDirectional.only(start: gutter - AppSpacing.lg),
+            tabs: const [
               Tab(text: 'Gift Cards'),
               Tab(text: 'Layaways'),
               Tab(text: 'Special Orders'),
@@ -139,25 +160,23 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final card = _card;
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: context.pagePadding,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _codeCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Gift card code',
-                  prefixIcon: Icon(Icons.card_giftcard),
-                ),
-                onSubmitted: (_) => _lookup(),
-              ),
+        _LookupBar(
+          field: TextField(
+            controller: _codeCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Gift card code',
+              prefixIcon: Icon(Icons.card_giftcard),
             ),
-            const SizedBox(width: 8),
+            onSubmitted: (_) => _lookup(),
+          ),
+          actions: [
             FilledButton(onPressed: _lookup, child: const Text('Look up')),
-            const SizedBox(width: 8),
             OutlinedButton.icon(
               onPressed: () => showDialog(
                   context: context, builder: (_) => const _IssueGiftCardDialog()),
@@ -166,37 +185,48 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
             ),
           ],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: AppSpacing.lg),
         if (_loading) const LinearProgressIndicator(),
         if (_error != null)
           Text(_error!, style: TextStyle(color: cs.error)),
-        if (_card != null) ...[
+        if (card != null) ...[
           Card(
             child: Padding(
-              padding: const EdgeInsets.all(16),
+              padding: AppSpacing.cardPadding,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(_card!.code,
-                      style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.xs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(card.code,
+                          style: theme.textTheme.titleLarge?.copyWith(
+                              fontFamily: 'monospace',
+                              fontWeight: FontWeight.bold)),
+                      StatusBadge(_giftCardStatusLabel(card.status),
+                          tone: _giftCardStatusTone(card.status)),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
                   Text(
-                      'Balance: ${_card!.currency} ${_card!.currentBalance.toStringAsFixed(2)}',
-                      style: Theme.of(context).textTheme.titleMedium),
-                  Text('Status: ${_card!.status}',
-                      style: TextStyle(color: cs.outline)),
-                  const SizedBox(height: 12),
-                  Row(
+                      'Balance: ${AppFormat.money(card.currentBalance, currencyCode: card.currency)}',
+                      style: theme.textTheme.titleMedium),
+                  if (card.expiresAt != null)
+                    Text('Expires ${AppFormat.date(card.expiresAt)}',
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(color: cs.onSurfaceVariant)),
+                  const SizedBox(height: AppSpacing.md),
+                  Wrap(
+                    spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.sm,
                     children: [
                       OutlinedButton.icon(
                         onPressed: _submitting ? null : () => _reloadOrRedeem('reload'),
                         icon: const Icon(Icons.add, size: 18),
                         label: const Text('Reload'),
                       ),
-                      const SizedBox(width: 8),
                       OutlinedButton.icon(
                         onPressed: _submitting ? null : () => _reloadOrRedeem('redeem'),
                         icon: const Icon(Icons.remove, size: 18),
@@ -208,24 +238,109 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
               ),
             ),
           ),
-          const SizedBox(height: 12),
-          Text('Transactions', style: Theme.of(context).textTheme.labelLarge),
-          for (final t in _txns)
-            ListTile(
-              dense: true,
-              leading: Icon(
-                  t.amount >= 0 ? Icons.arrow_upward : Icons.arrow_downward,
-                  size: 16,
-                  color: t.amount >= 0
-                      ? context.status.success
-                      : Theme.of(context).colorScheme.error),
-              title: Text(t.txType),
-              trailing: Text(
-                  '${t.amount.toStringAsFixed(2)} → ${t.balanceAfter.toStringAsFixed(2)}'),
-            ),
+          const SizedBox(height: AppSpacing.md),
+          Text('Transactions', style: theme.textTheme.labelLarge),
+          for (final t in _txns) _txnTile(context, t, card.currency),
         ],
       ],
     );
+  }
+
+  /// One line of the card's ledger. Whether it put value on the card or took
+  /// it off is the transaction's type: order-svc stores every amount as a
+  /// positive number, a redemption included.
+  Widget _txnTile(BuildContext context, GiftCardTxn t, String currency) {
+    final cs = Theme.of(context).colorScheme;
+    final adds = _giftCardTxnAdds(t.txType);
+    final amount = AppFormat.money(adds ? t.amount.abs() : -t.amount.abs(),
+        currencyCode: currency);
+    final after =
+        'balance ${AppFormat.money(t.balanceAfter, currencyCode: currency)}';
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(adds ? Icons.arrow_upward : Icons.arrow_downward,
+          size: 16, color: adds ? context.status.success : cs.onSurfaceVariant),
+      title: Text(_giftCardTxnLabel(t.txType)),
+      // When it happened and what it left on the card; the subtitle wraps, so
+      // only the amount has to fit beside the words.
+      subtitle: Text(t.createdAt.isEmpty
+          ? after
+          : '${AppFormat.dateTime(t.createdAt)} · $after'),
+      trailing: Text('${adds ? '+' : ''}$amount',
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
+/// A gift card's state in words.
+String _giftCardStatusLabel(String status) =>
+    switch (status.toUpperCase()) {
+      'ACTIVE' => 'Active',
+      'DEPLETED' => 'Used up',
+      'CANCELLED' => 'Cancelled',
+      _ => humanizeCode(status),
+    };
+
+StatusTone _giftCardStatusTone(String status) =>
+    switch (status.toUpperCase()) {
+      'ACTIVE' => StatusTone.success,
+      _ => StatusTone.neutral,
+    };
+
+/// What a gift card transaction did, in words.
+String _giftCardTxnLabel(String txType) => switch (txType.toUpperCase()) {
+      'ISSUE' => 'Issued',
+      'RELOAD' => 'Reloaded',
+      'REDEEM' => 'Redeemed',
+      'REFUND' => 'Refunded to the card',
+      'CANCEL' => 'Cancelled',
+      _ => humanizeCode(txType),
+    };
+
+/// Whether a transaction put value on the card (an issue, a reload, a refund
+/// back to it) rather than taking it off (a redemption, a cancellation).
+bool _giftCardTxnAdds(String txType) => switch (txType.toUpperCase()) {
+      'ISSUE' || 'RELOAD' || 'REFUND' => true,
+      _ => false,
+    };
+
+/// A lookup field and its buttons. From tablet width they share a row; on a
+/// phone the buttons go under the field, which keeps the whole width for its
+/// label and the code typed into it.
+class _LookupBar extends StatelessWidget {
+  final Widget field;
+  final List<Widget> actions;
+
+  const _LookupBar({required this.field, required this.actions});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, constraints) {
+      if (AppBreakpoints.classOf(constraints.maxWidth) == WindowClass.compact) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            field,
+            const SizedBox(height: AppSpacing.md),
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.sm,
+              children: actions,
+            ),
+          ],
+        );
+      }
+      return Row(
+        children: [
+          Expanded(child: field),
+          for (final a in actions) ...[
+            const SizedBox(width: AppSpacing.sm),
+            a,
+          ],
+        ],
+      );
+    });
   }
 }
 
@@ -371,6 +486,11 @@ class _LayawaysTab extends ConsumerStatefulWidget {
 }
 
 class _LayawaysTabState extends ConsumerState<_LayawaysTab> {
+  /// A layaway's sums carry no currency: they are in the business's own,
+  /// which its tills charge in.
+  String _layawayMoney(double v) => AppFormat.money(v,
+      currencyCode: ref.watch(tenantInfoProvider).value?.currency);
+
   final _idCtrl = TextEditingController();
   Layaway? _layaway;
   bool _loading = false;
@@ -437,21 +557,17 @@ class _LayawaysTabState extends ConsumerState<_LayawaysTab> {
     final cs = Theme.of(context).colorScheme;
     final l = _layaway;
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: context.pagePadding,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _idCtrl,
-                decoration: const InputDecoration(
-                    labelText: 'Layaway id', prefixIcon: Icon(Icons.search)),
-                onSubmitted: (_) => _lookup(),
-              ),
-            ),
-            const SizedBox(width: 8),
+        _LookupBar(
+          field: TextField(
+            controller: _idCtrl,
+            decoration: const InputDecoration(
+                labelText: 'Layaway id', prefixIcon: Icon(Icons.search)),
+            onSubmitted: (_) => _lookup(),
+          ),
+          actions: [
             FilledButton(onPressed: () => _lookup(), child: const Text('Look up')),
-            const SizedBox(width: 8),
             OutlinedButton.icon(
               onPressed: () => showDialog<String>(
                 context: context,
@@ -464,7 +580,7 @@ class _LayawaysTabState extends ConsumerState<_LayawaysTab> {
             ),
           ],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: AppSpacing.lg),
         if (_loading) const LinearProgressIndicator(),
         if (_error != null) Text(_error!, style: TextStyle(color: cs.error)),
         if (l != null)
@@ -477,11 +593,15 @@ class _LayawaysTabState extends ConsumerState<_LayawaysTab> {
                   Text('#${shortRef(l.id)}',
                       style: const TextStyle(fontFamily: 'monospace')),
                   const SizedBox(height: 8),
-                  Text('Total: ${l.totalAmount.toStringAsFixed(2)}'),
-                  Text('Paid: ${l.depositPaid.toStringAsFixed(2)}'),
-                  Text('Balance: ${l.balance.toStringAsFixed(2)}',
+                  Text('Total: ${_layawayMoney(l.totalAmount)}'),
+                  Text('Paid: ${_layawayMoney(l.depositPaid)}'),
+                  Text('Balance: ${_layawayMoney(l.balance)}',
                       style: const TextStyle(fontWeight: FontWeight.bold)),
-                  Text('Status: ${l.status}', style: TextStyle(color: cs.outline)),
+                  const SizedBox(height: AppSpacing.xs),
+                  StatusBadge(
+                    _layawayStatusWords(l.status),
+                    tone: _layawayStatusTone(l.status),
+                  ),
                   const SizedBox(height: 12),
                   if (l.status.toUpperCase() == 'ACTIVE')
                     Wrap(
@@ -623,7 +743,8 @@ class _SpecialOrdersTab extends ConsumerWidget {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          padding: EdgeInsetsDirectional.fromSTEB(
+              context.pageGutter, AppSpacing.md, context.pageGutter, 0),
           child: Row(
             children: [
               const Spacer(),
@@ -660,7 +781,7 @@ class _SpecialOrdersTab extends ConsumerWidget {
                 );
               }
               return ListView.separated(
-                padding: const EdgeInsets.all(16),
+                padding: context.pagePadding,
                 itemCount: orders.length,
                 separatorBuilder: (_, _) => const SizedBox(height: 4),
                 itemBuilder: (_, i) {
@@ -670,9 +791,9 @@ class _SpecialOrdersTab extends ConsumerWidget {
                       title: Text(o.customerName ?? 'Special order',
                           style: const TextStyle(fontWeight: FontWeight.bold)),
                       subtitle: Text([
-                        '${o.currency} ${o.total.toStringAsFixed(2)}',
+                        AppFormat.money(o.total, currencyCode: o.currency),
                         if (o.requestedDeliveryDate != null)
-                          'due ${o.requestedDeliveryDate}',
+                          'due ${AppFormat.date(o.requestedDeliveryDate)}',
                       ].join(' · ')),
                       trailing: _SpecialOrderActions(order: o),
                     ),
@@ -701,7 +822,10 @@ class _SpecialOrderActions extends ConsumerWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _StatusChip(order.status),
+        StatusBadge(
+          _specialOrderStatusWords(order.status),
+          tone: _specialOrderStatusTone(order.status),
+        ),
         if (actions.isNotEmpty)
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
@@ -937,26 +1061,39 @@ class _LineItemsEditorState extends ConsumerState<_LineItemsEditor> {
   }
 }
 
-class _StatusChip extends StatelessWidget {
-  final String status;
-  const _StatusChip(this.status);
+/// A layaway's status in words.
+String _layawayStatusWords(String status) =>
+    switch (status.toUpperCase()) {
+      'ACTIVE' => 'Active',
+      'COMPLETED' => 'Completed',
+      'CANCELLED' => 'Cancelled',
+      _ => humanizeCode(status),
+    };
 
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(12)),
-      child: Text(status,
-          style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: cs.onSurfaceVariant)),
-    );
-  }
-}
+StatusTone _layawayStatusTone(String status) =>
+    switch (status.toUpperCase()) {
+      'ACTIVE' => StatusTone.info,
+      'COMPLETED' => StatusTone.success,
+      _ => StatusTone.neutral,
+    };
+
+/// A special order's status in words.
+String _specialOrderStatusWords(String status) =>
+    switch (status.toUpperCase()) {
+      'DRAFT' => 'Draft',
+      'PENDING' => 'Pending',
+      'CONFIRMED' => 'Confirmed',
+      'FULFILLED' => 'Fulfilled',
+      'CANCELLED' => 'Cancelled',
+      _ => humanizeCode(status),
+    };
+
+StatusTone _specialOrderStatusTone(String status) =>
+    switch (status.toUpperCase()) {
+      'DRAFT' || 'PENDING' || 'CONFIRMED' => StatusTone.info,
+      'FULFILLED' => StatusTone.success,
+      _ => StatusTone.neutral,
+    };
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
 

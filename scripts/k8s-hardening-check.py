@@ -32,7 +32,7 @@ policies = [d for _, d in docs if d["kind"] == "NetworkPolicy" and d["metadata"]
 deny = [p for p in policies if p["spec"].get("podSelector") == {} and set(p["spec"].get("policyTypes", [])) == {"Ingress", "Egress"} and not p["spec"].get("ingress") and not p["spec"].get("egress")]
 need(len(deny) == 1, "one default-deny NetworkPolicy (empty podSelector, Ingress+Egress, no rules) in storeql")
 postgres = [p for p in policies if p["spec"].get("podSelector") == {"matchLabels": {"app": "postgres"}}]
-need(postgres and all(f.get("podSelector", {}).get("matchLabels", {}).get("app") in ("pgbouncer", "postgres-exporter") for rule in postgres[0]["spec"].get("ingress", []) for f in rule.get("from", [])), "postgres ingress is from pgbouncer and its exporter only")
+need(postgres and all(f.get("podSelector", {}).get("matchLabels", {}).get("app") in ("pgbouncer", "postgres-exporter", "storeql-backup") for rule in postgres[0]["spec"].get("ingress", []) for f in rule.get("from", [])), "postgres ingress is from pgbouncer, its exporter and the backup job only")
 
 workloads = [(f, d) for f, d in docs if d["kind"] in ("Deployment", "StatefulSet", "DaemonSet", "Job")]
 need(len(workloads) >= 20, f"workloads found ({len(workloads)})")

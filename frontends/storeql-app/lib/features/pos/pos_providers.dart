@@ -382,13 +382,15 @@ final posStoresProvider = FutureProvider.autoDispose<List<StoreInfo>>((
       .dio
       .get('/${ApiConstants.tenant}/storefront/stores');
   final data = (resp.data['data'] as List?) ?? [];
-  return data.map((e) {
+  // A dark store has no till (ship-from-store and dark-store picking): the server refuses a
+  // session there, so it is not offered.
+  return data.where((e) => (e as Map<String, dynamic>)['type'] != 'DARK_STORE').map((e) {
     final m = e as Map<String, dynamic>;
     return StoreInfo(
       id: m['storeId'] as String? ?? '',
       name: m['storeName'] as String? ?? '-',
       code: '',
-      type: 'STORE',
+      type: m['type'] as String? ?? 'STORE',
       status: m['status'] as String? ?? 'ACTIVE',
       showPrices: m['showPrices'] as bool? ?? true,
       enabledPaymentMethods:
@@ -396,6 +398,7 @@ final posStoresProvider = FutureProvider.autoDispose<List<StoreInfo>>((
               ?.map((e) => e.toString().toUpperCase())
               .toList() ??
           const ['CASH', 'CARD'],
+      tillPhone: normaliseTillPhone(m['tillPhone']),
       line1: m['line1'] as String?,
       city: m['city'] as String?,
       country: m['country'] as String?,
@@ -419,6 +422,31 @@ final posEnabledPaymentMethodsProvider = Provider.autoDispose<List<String>>((
   }
   return const ['CASH', 'CARD'];
 });
+
+/// The current store's choice on whether the till asks for the customer's
+/// phone (phone-at-the-till): REQUIRED, OPTIONAL or OFF. Falls back to
+/// OPTIONAL while the store list is loading, or the store is unknown — the
+/// data-minimising default, and never a reason to block a sale on its own.
+final posTillPhoneProvider = Provider.autoDispose<String>((ref) {
+  final storeId = ref.watch(posStoreProvider);
+  final stores = ref.watch(posStoresProvider).value;
+  if (storeId == null || stores == null) return 'OPTIONAL';
+  for (final s in stores) {
+    if (s.id == storeId) return s.tillPhone;
+  }
+  return 'OPTIONAL';
+});
+
+/// The Sale tab's customer bar and the Tender screen show one contact-phone
+/// field between them — typing in either fills both — so both read the same
+/// words for a given store choice rather than each guessing its own.
+String posPhoneFieldLabel(String tillPhone) =>
+    tillPhone == 'REQUIRED' ? 'Customer phone *' : 'Customer phone (optional)';
+
+/// The field's hint for [tillPhone] — what a blank field means at this store.
+String posPhoneFieldHint(String tillPhone) => tillPhone == 'REQUIRED'
+    ? 'This store asks for a number on every sale'
+    : 'Leave blank if the customer prefers not to say';
 
 /// POS always shows prices — show_prices is a customer-facing storefront flag only.
 /// Staff at the till always need to see and charge the correct price.

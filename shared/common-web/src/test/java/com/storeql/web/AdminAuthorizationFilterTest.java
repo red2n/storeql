@@ -50,6 +50,10 @@ class AdminAuthorizationFilterTest {
   void ownProfileAndAddressBookAreOpenToASignedInShopper() throws Exception {
     ctx.set(null, null, Set.of("CUSTOMER"), null, null);
     assertNotAborted(invoke("PUT", "/customers/me"));
+    // The shopper's own loyalty: the leaf, read only.
+    assertNotAborted(invoke("GET", "/customers/me/loyalty"));
+    assertAborted(invoke("POST", "/customers/me/loyalty"), 403);
+    assertAborted(invoke("GET", "/customers/me/loyalty/ledger"), 403);
     assertNotAborted(invoke("GET", "/customers/me/addresses"));
     assertNotAborted(invoke("POST", "/customers/me/addresses"));
     assertNotAborted(invoke("PUT", "/customers/me/addresses/01a090ae-611e-7011-ae7d-1bd68c966ff6"));
@@ -192,6 +196,8 @@ class AdminAuthorizationFilterTest {
           "/orders/01a09509-72ec-72e9-9f08-94a93df26a36/history",
           "/orders/01a09509-72ec-72e9-9f08-94a93df26a36/returns",
           "/orders/01a09509-72ec-72e9-9f08-94a93df26a36/fiscal-receipt",
+          // A split checkout (order orchestration), with the order's own object-level check.
+          "/order-groups/01a09509-72ec-72e9-9f08-94a93df26a36",
           "/promotions",
           "/auth/me",
           "/cart",
@@ -215,6 +221,10 @@ class AdminAuthorizationFilterTest {
     // stays denied, so a future sub-resource cannot inherit the exemption by accident.
     assertAborted(invoke("GET", "/orders/abc/audit-trail"), 403);
     assertAborted(invoke("GET", "/orders/abc/history/all"), 403);
+    // Only the id-shaped split checkout; its list and anything under one stay staff work.
+    assertAborted(invoke("GET", "/order-groups"), 403);
+    assertAborted(invoke("GET", "/order-groups/export"), 403);
+    assertAborted(invoke("GET", "/order-groups/01a09509-72ec-72e9-9f08-94a93df26a36/parts"), 403);
   }
 
   /**
@@ -241,6 +251,25 @@ class AdminAuthorizationFilterTest {
     assertAborted(invoke("GET", "/.well-known/openid-configuration"), 403);
     assertAborted(invoke("GET", "/.well-known/security.txt.bak"), 403);
     assertAborted(invoke("POST", "/.well-known/security.txt"), 403);
+  }
+
+  /**
+   * At the gateway the request path is the proxy route, and since 22.8 the canonical form carries a
+   * version segment: {@code /api/v1/{service}/…} must strip to the same service-local path as the
+   * alias, or every public read on the versioned form — the price list, a service's OpenAPI
+   * description — is refused to the person with no account it exists for. The versions document
+   * itself is public; a private read stays private on either form.
+   */
+  @Test
+  void theVersionedFormIsAsOpenAsTheAlias() throws Exception {
+    assertNotAborted(invoke("GET", "/api/tenant-svc/plans"));
+    assertNotAborted(invoke("GET", "/api/v1/tenant-svc/plans"));
+    assertNotAborted(invoke("GET", "/api/v1/iam-svc/openapi"));
+    assertNotAborted(invoke("GET", "/api/v12/customer-svc/openapi"));
+    assertNotAborted(invoke("GET", "/api/versions"));
+    assertAborted(invoke("GET", "/api/v1/order-svc/admin/orders"), 403);
+    assertAborted(invoke("GET", "/api/v1/tenant-svc/admin/tenant"), 403);
+    assertAborted(invoke("GET", "/api/versions/extra"), 403);
   }
 
   /** CORS preflight carries no credentials by design; denying it breaks every browser client. */
@@ -389,6 +418,44 @@ class AdminAuthorizationFilterTest {
     ctx.set(null, null, Set.of("STOREKEEPER"), null, null);
     assertNotAborted(invoke("GET", "/admin/inventory/reports-config"));
     assertNotAborted(invoke("POST", "/admin/inventory/reportable-items"));
+  }
+
+  /**
+   * The one report opened to the shop floor: a storekeeper reads the shelf gaps (the resource then
+   * holds them to their own stores). Only the read, only that report, and nobody without a staff
+   * role.
+   */
+  @Test
+  void theShelfGapsAreTheOneReportStaffMayRead() throws Exception {
+    ctx.set(null, null, Set.of("STOREKEEPER"), null, null);
+    assertNotAborted(invoke("GET", "/admin/inventory/reports/shelf-gaps"));
+    assertAborted(invoke("POST", "/admin/inventory/reports/shelf-gaps"), 403);
+    assertAborted(invoke("GET", "/admin/inventory/reports/shelf-gaps/export"), 403);
+    assertAborted(invoke("GET", "/admin/inventory/reports/shelf-gapsx"), 403);
+    assertAborted(invoke("GET", "/admin/inventory/reports/low-stock"), 403);
+    ctx.set(null, null, Set.of("CUSTOMER"), null, null);
+    assertAborted(invoke("GET", "/admin/inventory/reports/shelf-gaps"), 403);
+    ctx.set(null, null, Set.of(), null, null);
+    assertAborted(invoke("GET", "/admin/inventory/reports/shelf-gaps"), 403);
+  }
+
+  // ── password reset ──────────────────────────────────────────────────────────
+
+  @Test
+  void aForgottenPasswordIsAskedForAndResetWithNoRoleAtAll() throws Exception {
+    assertNotAborted(invoke("POST", "/auth/password/forgot"));
+    assertNotAborted(invoke("POST", "/auth/password/reset"));
+    assertNotAborted(invoke("GET", "/auth/password-policy"));
+  }
+
+  @Test
+  void nothingBesideThePasswordResetPathsIsOpened() throws Exception {
+    assertAborted(invoke("POST", "/auth/password"), 403);
+    assertAborted(invoke("POST", "/auth/password/forgot/again"), 403);
+    assertAborted(invoke("POST", "/auth/password/resets"), 403);
+    assertAborted(invoke("GET", "/auth/password/reset"), 403);
+    assertAborted(invoke("POST", "/auth/password-policy"), 403);
+    assertAborted(invoke("GET", "/auth/password-policy/x"), 403);
   }
 
   @Test
@@ -692,6 +759,41 @@ class AdminAuthorizationFilterTest {
   }
 
   // ── 21.10: whether one more metered thing may be done, read service-to-service ──
+
+  @Test
+  void exchangeRatesAreStaffReadableAndSettingThemIsManagement() throws Exception {
+    // pricing-svc shows a price in another currency and purchase-svc translates a spend ceiling
+    // (03.x): both read the business's rates as STOREKEEPER, the identity one service uses for
+    // another's staff-operable reads. The leaf only; setting a rate stays management's.
+    ctx.set(null, null, Set.of("STOREKEEPER"), null, null);
+    assertNotAborted(invoke("GET", "/admin/tenant/fx-rates"));
+    assertAborted(invoke("GET", "/admin/tenant/fx-rates/USD/history"), 403);
+    assertAborted(invoke("PUT", "/admin/tenant/fx-rates/USD"), 403);
+    ctx.set(null, null, Set.of("CUSTOMER"), null, null);
+    assertAborted(invoke("GET", "/admin/tenant/fx-rates"), 403);
+    // The currencies a shop shows prices in are for anyone browsing, like a price itself.
+    assertNotAborted(invoke("GET", "/prices/currencies"));
+    ctx.set(null, null, Set.of("MANAGER"), null, null);
+    assertNotAborted(invoke("PUT", "/admin/tenant/fx-rates/USD"));
+    assertNotAborted(invoke("GET", "/admin/tenant/fx-rates/USD/history"));
+  }
+
+  @Test
+  void promotionWindowsAreStaffReadableAndTheRestOfPromotionsIsManagement() throws Exception {
+    // inventory-svc reads the windows for its forecast (06.x) as STOREKEEPER, the identity one
+    // service uses for another's staff-operable reads. The leaf only: creating, scoping and
+    // switching a promotion stay management's, and so does its switch history.
+    ctx.set(null, null, Set.of("STOREKEEPER"), null, null);
+    assertNotAborted(invoke("GET", "/admin/promotions/windows"));
+    assertAborted(invoke("GET", "/admin/promotions"), 403);
+    assertAborted(invoke("GET", "/admin/promotions/windows/extra"), 403);
+    assertAborted(invoke("POST", "/admin/promotions/windows"), 403);
+    assertAborted(invoke("POST", "/admin/promotions"), 403);
+    ctx.set(null, null, Set.of("CUSTOMER"), null, null);
+    assertAborted(invoke("GET", "/admin/promotions/windows"), 403);
+    ctx.set(null, null, Set.of("MANAGER"), null, null);
+    assertNotAborted(invoke("GET", "/admin/promotions/windows"));
+  }
 
   @Test
   void aUsageAllowanceIsStaffReadableAndWhatWasUsedIsManagement() throws Exception {

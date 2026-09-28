@@ -106,8 +106,11 @@ class RecallNoticeIssuedHandler {
           message(Catalogue.Form.EMAIL, language, p));
     } else {
       String phone = p.buyerPhone();
-      if (phone == null && p.customerId() != null) {
-        phone = customers.phoneOf(p.tenantId(), p.customerId()).orElse(null);
+      // The order's number when it can be texted, else the buyer's own record's (a phone at the
+      // till): an order placed before its number was kept in international form carries it as
+      // typed, and a local form is never guessed into a number that may not be theirs.
+      if ((phone == null || !SmsChannel.E164.matcher(phone).matches()) && p.customerId() != null) {
+        phone = customers.phoneOf(p.tenantId(), p.customerId()).orElse(phone);
       }
       if (phone != null && SmsChannel.E164.matcher(phone).matches()) {
         notifier.notifyOnce(

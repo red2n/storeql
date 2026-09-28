@@ -36,9 +36,26 @@ class OrderEventConsumer extends BaseKafkaConsumer {
       defaultValue = "storeql.order.container-deposit-refunded")
   String containerRefundTopic;
 
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.order-line-short-closed",
+      defaultValue = "storeql.order.order-line-short-closed")
+  String lineShortClosedTopic;
+
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.order-line-substituted",
+      defaultValue = "storeql.order.order-line-substituted")
+  String lineSubstitutedTopic;
+
   @Override
   protected List<String> topics() {
-    return List.of(returnedTopic, cancelledTopic, containerRefundTopic);
+    return List.of(
+        returnedTopic,
+        cancelledTopic,
+        containerRefundTopic,
+        lineShortClosedTopic,
+        lineSubstitutedTopic);
   }
 
   @Override

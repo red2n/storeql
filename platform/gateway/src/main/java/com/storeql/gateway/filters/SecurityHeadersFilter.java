@@ -35,7 +35,10 @@ public class SecurityHeadersFilter implements ContainerResponseFilter {
     h.putSingle("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
 
     String path = req.getUriInfo().getPath();
-    if (path != null && (path.contains("/auth/login") || path.contains("/auth/refresh"))) {
+    if (path != null
+        && (path.contains("/auth/login")
+            || path.contains("/auth/refresh")
+            || path.contains("/auth/password/"))) {
       h.putSingle("Cache-Control", "no-store");
       h.putSingle("Pragma", "no-cache");
     }

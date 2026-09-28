@@ -1,0 +1,81 @@
+# Backups (docs/BACKUP-AND-RESTORE.md): the storeql-backup image — the Postgres image's own tools plus
+# age and jq — takes a pg_dump from one snapshot every night with a manifest of every table's count,
+# encrypted to an age public key the cluster never holds the identity for, and a base backup once a
+# week for point-in-time recovery over the WAL the Postgres StatefulSet archives (10-postgres.yaml)
+# into the same claim. The newest 14 dumps and 4 base backups are kept; archived WAL older than the
+# oldest kept base backup goes. scripts/backup-drill.sh is the rehearsal, against docker-compose;
+# on the cluster, restore by running the same image with `restore <artefact>` against a fresh
+# Postgres, or `pitr <base-dir> <time>` as a pod of its own — the commands are in the image's script.
+#
+# A claim on the database's own disk is not a backup. Point this StorageClass at another disk, or
+# replace the CronJob's last step with a copy to object storage (rclone/aws cp of /backups) — the
+# manifests and the metrics stay the same.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storeql-backups
+  namespace: storeql
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources: { requests: { storage: 40Gi } }
+---
+# The age public key dumps are encrypted to. Generate a pair off-cluster (`age-keygen`), put the
+# public half here and keep the identity where a restore can reach it and the cluster cannot:
+#   kubectl -n storeql create secret generic storeql-backup --from-literal=STOREQL_BACKUP_RECIPIENT=age1...
+# The secret is optional: without it the job runs and says aloud that backups are UNENCRYPTED; make
+# it before the first night with real data.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: storeql-backup
+  namespace: storeql
+spec:
+  schedule: "30 2 * * *" # 02:30 UTC daily; the job takes a base backup as well when the last is 7 days old
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata: { labels: { app: storeql-backup } } # named by the backup NetworkPolicy
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70   # postgres in the alpine image, the same uid the StatefulSet writes WAL as
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile: { type: RuntimeDefault }
+          volumes:
+            - { name: backups, persistentVolumeClaim: { claimName: storeql-backups } }
+            - { name: tmp, emptyDir: {} }
+          containers:
+            - name: backup
+              image: ghcr.io/red2n/storeql-backup:latest
+              args: ["nightly"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+              env:
+                - { name: PGHOST, value: postgres }
+                - { name: PGPORT, value: "5432" }
+                - { name: PGUSER, value: storeql }
+                - { name: PGDATABASE, value: storeql }
+                - name: PGPASSWORD
+                  valueFrom: { secretKeyRef: { name: storeql-postgres, key: POSTGRES_PASSWORD } }
+                - name: STOREQL_BACKUP_RECIPIENT
+                  valueFrom: { secretKeyRef: { name: storeql-backup, key: STOREQL_BACKUP_RECIPIENT, optional: true } }
+                - { name: STOREQL_BACKUP_KEEP, value: "14" }
+                - { name: STOREQL_BACKUP_KEEP_BASE, value: "4" }
+                - { name: STOREQL_BACKUP_BASE_EVERY_DAYS, value: "7" }
+                - { name: TMPDIR, value: /tmp }
+              volumeMounts:
+                - { name: backups, mountPath: /backups }
+                - { name: tmp, mountPath: /tmp }
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { cpu: "1", memory: 512Mi }

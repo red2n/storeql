@@ -5,6 +5,7 @@ import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import 'providers/admin_providers.dart';
+import '../../core/theme.dart';
 
 // ---------------------------------------------------------------------------
 // Allergens, origin, age restriction and how an item is sold — the statements a
@@ -195,6 +196,10 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
     final cs = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     final named = _presence.values.where((p) => p != AllergenPresence.none).length;
+    // A hint, not a default: the business's own country when it is known,
+    // never a country picked for it (multi-location, multi-tenant — SJ-D67).
+    final tenantCountry = ref.watch(tenantInfoProvider).value?.country;
+    final originHint = (tenantCountry == null || tenantCountry.isEmpty) ? null : tenantCountry;
     return AlertDialog(
       title: Text('Allergens and origin — ${widget.variant.sku}'),
       content: SizedBox(
@@ -210,7 +215,7 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
                       Text(_error!, style: TextStyle(color: cs.error)),
                       const SizedBox(height: 8),
                     ],
-                    SwitchListTile(
+                    SwitchListTile.adaptive(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Food product'),
                       subtitle: const Text(
@@ -284,8 +289,8 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
                             controller: _origin,
                             maxLength: 2,
                             textCapitalization: TextCapitalization.characters,
-                            decoration: const InputDecoration(
-                                labelText: 'Country', hintText: 'GB', counterText: ''),
+                            decoration: InputDecoration(
+                                labelText: 'Country', hintText: originHint, counterText: ''),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -331,7 +336,7 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
                       onSelectionChanged: (s) => setState(() => _soldBy = s.first),
                     ),
                     if (_soldBy != 'EACH')
-                      SwitchListTile(
+                      SwitchListTile.adaptive(
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Catch weight'),
                         subtitle: const Text('Each item has its own weight and is priced on the scale'),
@@ -438,7 +443,7 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
     };
     return Container(
       padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
+      decoration: BoxDecoration(color: bg, borderRadius: AppRadius.chip),
       child: Text(label, style: TextStyle(color: fg)),
     );
   }

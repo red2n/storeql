@@ -7,6 +7,9 @@ import '../features/auth/login_screen.dart';
 import '../features/auth/second_factor_screen.dart';
 import '../features/auth/second_factor_setup_screen.dart';
 import '../features/auth/security_screen.dart';
+import '../features/auth/pay_link_screen.dart';
+import '../features/auth/forgot_password_screen.dart';
+import '../features/auth/reset_password_screen.dart';
 import '../features/platform/platform_login_screen.dart';
 import '../features/onboarding/onboarding_wizard.dart';
 import '../features/admin/admin_shell.dart';
@@ -36,6 +39,19 @@ final routerProvider = Provider<GoRouter>((ref) {
       // onboarding / platform-admin redirects below. The storefront has its own
       // (separate) customer session and tenant-from-URL context.
       if (loc.startsWith('/store')) return null;
+
+      // The pay link in a dunning notice (21.12): the business it reaches has
+      // been suspended and cannot sign in, so the page that pays needs no session.
+      if (loc.startsWith('/pay/')) return null;
+
+      // Forgot/reset password (intent/password-reset.md): no session is ever
+      // needed to ask for a link or to spend one — the link itself is the
+      // proof — and a signed-in person opening either (a staff member on a
+      // shared device, say) is not bounced away mid-reset. Mirrors how the
+      // pay link above is let through, ahead of every other rule.
+      if (loc.startsWith('/forgot-password') || loc.startsWith('/reset-password/')) {
+        return null;
+      }
 
       // A sign-in between its password and its session (20.12): the second step,
       // or the set-up of one, and nowhere else until that is done or given up.
@@ -81,7 +97,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         if (loc.startsWith('/admin') &&
             auth.isStorekeeper &&
             !auth.isManager &&
-            !_storekeeperAdminAllowed(loc)) {
+            !storekeeperAdminAllowed(loc)) {
           return auth.homeRoute;
         }
         // POS: cashiers and managers. Storekeepers stay on admin inventory.
@@ -98,6 +114,23 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/mfa/setup', builder: (_, _) => const SecondFactorSetupScreen()),
       GoRoute(path: '/account/security', builder: (_, _) => const SecurityScreen()),
       GoRoute(path: '/onboarding', builder: (_, _) => const OnboardingWizard()),
+      GoRoute(
+        path: '/pay/:token',
+        builder: (_, state) => PayLinkScreen(token: state.pathParameters['token'] ?? ''),
+      ),
+      GoRoute(
+        path: '/forgot-password',
+        // Named by whoever sent a shopper here (the storefront's own sign-in
+        // dialog, `?from=storefront`) so the page can lead back to the shop
+        // rather than to staff sign-in once they're done — never guessed from
+        // the referrer, which a deep link or a refresh would not carry.
+        builder: (_, state) => ForgotPasswordScreen(
+            from: state.uri.queryParameters['from']),
+      ),
+      GoRoute(
+        path: '/reset-password/:token',
+        builder: (_, state) => ResetPasswordScreen(token: state.pathParameters['token'] ?? ''),
+      ),
 
       // ── Platform admin shell (PLATFORM_ADMIN only) ─────────────────────────
       ShellRoute(
@@ -139,6 +172,20 @@ final routerProvider = Provider<GoRouter>((ref) {
               libraryLoader: platform_lib.loadLibrary,
               builder: (_) => platform_lib.SecurityIncidentsScreen(),
             ),
+            // One incident has its own address inside the shell, above the
+            // register: a reload or a shared link opens it, and back (the
+            // browser's, or the page's) returns to the register as it was left.
+            routes: [
+              GoRoute(
+                path: ':id',
+                builder: (_, state) => DeferredWidget(
+                  libraryLoader: platform_lib.loadLibrary,
+                  builder: (_) => platform_lib.SecurityIncidentDetailScreen(
+                    id: state.pathParameters['id']!,
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -204,6 +251,19 @@ final routerProvider = Provider<GoRouter>((ref) {
               libraryLoader: admin_lib.loadLibrary,
               builder: (_) => admin_lib.MessagesScreen(),
             ),
+            // One message's editor, inside the shell (under its one app bar)
+            // and above the list, at an address a reload or a link keeps.
+            routes: [
+              GoRoute(
+                path: ':type',
+                builder: (_, state) => DeferredWidget(
+                  libraryLoader: admin_lib.loadLibrary,
+                  builder: (_) => admin_lib.MessageEditorPage(
+                    type: state.pathParameters['type']!,
+                  ),
+                ),
+              ),
+            ],
           ),
           GoRoute(
             path: '/admin/statutory-returns',
@@ -224,6 +284,13 @@ final routerProvider = Provider<GoRouter>((ref) {
             builder: (_, _) => DeferredWidget(
               libraryLoader: admin_lib.loadLibrary,
               builder: (_) => admin_lib.PlanScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/admin/integrations',
+            builder: (_, _) => DeferredWidget(
+              libraryLoader: admin_lib.loadLibrary,
+              builder: (_) => admin_lib.IntegrationsScreen(),
             ),
           ),
           GoRoute(
@@ -311,6 +378,13 @@ final routerProvider = Provider<GoRouter>((ref) {
             ),
           ),
           GoRoute(
+            path: '/admin/fulfilment',
+            builder: (_, _) => DeferredWidget(
+              libraryLoader: admin_lib.loadLibrary,
+              builder: (_) => admin_lib.FulfilmentScreen(),
+            ),
+          ),
+          GoRoute(
             path: '/admin/procurement',
             builder: (_, _) => DeferredWidget(
               libraryLoader: admin_lib.loadLibrary,
@@ -319,9 +393,12 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: '/admin/pricing',
-            builder: (_, _) => DeferredWidget(
+            // `?tab=vat-return` opens that tab (PricingScreen.tabNames).
+            builder: (_, state) => DeferredWidget(
               libraryLoader: admin_lib.loadLibrary,
-              builder: (_) => admin_lib.PricingScreen(),
+              builder: (_) => admin_lib.PricingScreen(
+                initialTab: state.uri.queryParameters['tab'],
+              ),
             ),
           ),
           GoRoute(
@@ -340,9 +417,12 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: '/admin/sales',
-            builder: (_, _) => DeferredWidget(
+            // `?tab=receipts` opens that tab (SalesScreen.tabNames).
+            builder: (_, state) => DeferredWidget(
               libraryLoader: admin_lib.loadLibrary,
-              builder: (_) => admin_lib.SalesScreen(),
+              builder: (_) => admin_lib.SalesScreen(
+                initialTab: state.uri.queryParameters['tab'],
+              ),
             ),
           ),
           GoRoute(
@@ -470,12 +550,17 @@ final routerProvider = Provider<GoRouter>((ref) {
   return router;
 });
 
-/// Paths a storekeeper-only user may open inside the admin shell.
-bool _storekeeperAdminAllowed(String loc) {
+/// Paths a storekeeper-only user may open inside the admin shell: the pages
+/// whose reads the services open to any member of staff. Kept in step with
+/// the menu (`storekeeperAdminRoutes`) by `test/core/storekeeper_routes_test`.
+bool storekeeperAdminAllowed(String loc) {
   return loc.startsWith('/admin/inventory') ||
+      loc.startsWith('/admin/fulfilment') ||
       loc.startsWith('/admin/food-safety') ||
       loc.startsWith('/admin/recalls') ||
-      loc.startsWith('/admin/stores');
+      loc.startsWith('/admin/obligations') ||
+      loc.startsWith('/admin/stores') ||
+      loc.startsWith('/admin/shelf-space');
 }
 
 class _AuthListenable extends ChangeNotifier {

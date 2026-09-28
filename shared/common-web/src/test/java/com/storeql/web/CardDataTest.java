@@ -88,4 +88,32 @@ class CardDataTest {
   void nineteenDigitVisaIsLuhnValid() {
     assertTrue(CardData.luhn("4111111111111111110"));
   }
+
+  /**
+   * SJ-D67: a UUID's all-digit groups can line up to a Luhn-valid run in an issuer's range — one v7
+   * id in fifty thousand does — and an ordinary request carrying ids was refused as a card. A run
+   * inside a UUID's 8-4-4-4-12 shape is an identifier, whatever its digits add up to.
+   */
+  @Test
+  void uuidsAreIdentifiersNotCards() {
+    String[] ids = {
+      "019993e0-5100-7069-8187-0918e7284e47", // 5100 7069 8187 0918: Mastercard 51, Luhn-valid
+      "01998bcd-4236-7684-9322-3069a2373271", // 4236 7684 9322 3069: Visa
+      "01999912-4338-7254-9644-4289627cc2e4", // 4338725496444289627: a 19-digit Visa
+      "01a0f3c4-4111-7111-9111-007abcdef012" // 4 4111 7111 9111 007: a run ending mid-group
+    };
+    for (String id : ids) {
+      String body = "{\"userId\":\"" + id + "\",\"storeId\":\"" + id + "\",\"role\":\"CASHIER\"}";
+      assertFalse(CardData.containsPan(body), id);
+      assertEquals(body, CardData.mask(body), id);
+      assertFalse(CardData.containsPan(id.toUpperCase(java.util.Locale.ROOT)), id);
+    }
+    // A card beside a UUID is still a card, and only the card is masked.
+    String note = "ref 019993e0-5100-7069-8187-0918e7284e47 card 4111 1111 1111 1111";
+    assertTrue(CardData.containsPan(note));
+    assertEquals(
+        "ref 019993e0-5100-7069-8187-0918e7284e47 card **** **** **** 1111", CardData.mask(note));
+    // The shape has to be whole: a UUID missing a group is a run of digits like any other.
+    assertTrue(CardData.containsPan("5100-7069-8187-0918"));
+  }
 }

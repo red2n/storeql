@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/features/pos/pos_fiscal_receipt.dart';
 import 'package:storeql_app/features/pos/pos_receipt_data.dart';
 
@@ -52,6 +53,7 @@ PosReceiptData _receipt({String? number, String? note}) => PosReceiptData(
     );
 
 void main() {
+  setUpAll(initializeDateFormatting);
   group('awaitFiscalNumber', () {
     test('asks the till-readable path, not the management-only one', () async {
       final r = _Replies([_issued]);

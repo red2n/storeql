@@ -49,6 +49,12 @@ public class JwtAuthFilter implements ContainerRequestFilter {
   private static final Set<String> PUBLIC_PATHS =
       Set.of(
           "api/iam-svc/auth/register",
+          // The price list a prospect reads before signing up (21.13): plans on sale, no identity.
+          "api/tenant-svc/plans",
+          // The API's versions and their policy (22.8): what an integrator reads before holding
+          // any credential. Exactly this path — normalize() leaves it alone, having no version
+          // segment to collapse — and nothing under it.
+          "api/versions",
           "api/iam-svc/auth/login",
           // The token signing keys' public halves (20.15): public by nature.
           "api/iam-svc/auth/.well-known/jwks.json",
@@ -58,6 +64,12 @@ public class JwtAuthFilter implements ContainerRequestFilter {
           "api/iam-svc/auth/mfa/login",
           "api/iam-svc/auth/mfa/login/passkey-options",
           "api/iam-svc/auth/refresh",
+          // A forgotten password (password reset): asking for a link answers the same for any
+          // address, and spending one needs the link's 256-bit token, the whole capability. The
+          // rules a new password must meet are read before anyone has signed in.
+          "api/iam-svc/auth/password/forgot",
+          "api/iam-svc/auth/password/reset",
+          "api/iam-svc/auth/password-policy",
           // Single sign-on through a business's identity provider (20.x): starting it, the
           // provider sending the browser back, and the app trading the ticket it came back with.
           // Nobody signing in holds a token yet; the random state and the ticket with the app's
@@ -101,6 +113,9 @@ public class JwtAuthFilter implements ContainerRequestFilter {
 
   @Inject GatewayConfig config;
   @Inject TenantStatusGate tenantStatusGate;
+
+  /** What a business's API key may do (22.7), as iam-svc says. */
+  @Inject ApiKeyIntrospector apiKeys;
 
   @Inject SigningKeySet signingKeys;
 
@@ -252,6 +267,11 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     }
 
     String token = authHeader.substring(7).trim();
+    // A business's API key as the bearer (22.7): a key, not a token, and judged by iam-svc.
+    if (token.startsWith(ApiKeyIntrospector.KEY_PREFIX)) {
+      authenticateApiKey(ctx, token, normalize(path));
+      return;
+    }
     DecodedJWT jwt;
     try {
       jwt = verify(token);
@@ -402,6 +422,11 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     if ("GET".equals(method) && isOrderSelfRead(path)) {
       return true;
     }
+    // A split checkout (order orchestration): the shopper reading the parts of the delivery they
+    // placed, with order-svc's object-level check behind it like an order read by id.
+    if ("GET".equals(method) && isOrderGroupSelfRead(path)) {
+      return true;
+    }
     // The shopper's recall notices and their choice of remedy (05.10): keyed on the login in
     // order-svc like /orders/mine, with the storefront header naming the shop. Two shapes and no
     // more — the recall's list and its settlement are staff work through the normal door.
@@ -515,10 +540,19 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     if ("GET".equals(method) && "api/tenant-svc/fulfilment/resolve".equals(path)) {
       return true;
     }
+    // The delivery and collection windows a store offers over the next week, with what each has
+    // left (delivery and collection slots): read by a guest choosing one at checkout.
+    if ("GET".equals(method) && "api/order-svc/storefront/fulfilment-slots".equals(path)) {
+      return true;
+    }
     if ("GET".equals(method) && path.startsWith("api/inventory-svc/inventory/availability")) {
       return true;
     }
     if ("POST".equals(method) && "api/pricing-svc/prices/resolve".equals(path)) {
+      return true;
+    }
+    // The currencies a shop shows prices in (03.x): the picker a visitor sees before signing in.
+    if ("GET".equals(method) && "api/pricing-svc/prices/currencies".equals(path)) {
       return true;
     }
     // Active promotions powering the storefront offers banner (advertised, public offers).
@@ -603,6 +637,11 @@ public class JwtAuthFilter implements ContainerRequestFilter {
         && "remedy".equals(rest.substring(slash + 1));
   }
 
+  private static boolean isOrderGroupSelfRead(String path) {
+    String prefix = "api/order-svc/order-groups/";
+    return path.startsWith(prefix) && looksLikeUuid(path.substring(prefix.length()));
+  }
+
   private static boolean isOrderSelfRead(String path) {
     String prefix = "api/order-svc/orders/";
     if (!path.startsWith(prefix)) {
@@ -669,6 +708,83 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     // onboarding whitelists as the unversioned /api/... alias (golden rule #2 stays exact-match).
     p = p.replaceFirst("^api/v\\d+/", "api/");
     return p;
+  }
+
+  /**
+   * A business's API key at the door (22.7). The key is what one of the business's systems presents
+   * instead of a person's sign-in, so it acts as the business in the tier the key was given, for
+   * the stores it was given, and is stamped like a token would be — with the key as the actor, so
+   * every audit trail says which key did what. Three things a key is not: a person who can sign in,
+   * set up a second factor or trade a ticket (everything under iam-svc); a person who can start a
+   * business or add a store to one (onboarding); the platform (anything under a service's {@code
+   * /platform}). Those routes are refused before iam-svc is even asked. A key iam-svc does not
+   * know, has revoked, or that has expired is "invalid" and nothing more — which it was is not the
+   * caller's to act on differently; a key of a business that was switched off is refused the way
+   * the business is; and when iam-svc cannot be asked the caller is told to try again, because a
+   * 401 would tell an integrator its key is bad when it is not.
+   */
+  private void authenticateApiKey(ContainerRequestContext ctx, String key, String target) {
+    if (isNoRouteForAKey(target)) {
+      ctx.abortWith(keyRouteForbidden());
+      return;
+    }
+    ApiKeyIntrospector.Verdict verdict = apiKeys.introspect(key);
+    switch (verdict) {
+      case ApiKeyIntrospector.Unavailable unavailable -> ctx.abortWith(keyCheckUnavailable());
+      case ApiKeyIntrospector.Refused refused -> {
+        if ("tenant suspended".equals(refused.reason())) {
+          ctx.abortWith(tenantSuspended());
+          return;
+        }
+        LOG.log(
+            System.Logger.Level.INFO,
+            "API key {0}… refused on {1}: {2}",
+            key.substring(0, Math.min(key.length(), 12)),
+            target,
+            refused.reason());
+        ctx.abortWith(unauthorized("Invalid, expired or revoked API key"));
+      }
+      case ApiKeyIntrospector.Active active -> {
+        ctx.getHeaders().putSingle(HttpHeaders.USER_ID, active.keyId());
+        ctx.getHeaders().putSingle(HttpHeaders.TENANT_ID, active.tenantId());
+        ctx.getHeaders().putSingle(HttpHeaders.ROLES, active.role());
+        if (!active.storeIds().isEmpty()) {
+          ctx.getHeaders().putSingle(HttpHeaders.STORE_IDS, String.join(",", active.storeIds()));
+        }
+        ctx.getHeaders().putSingle(HttpHeaders.AUTH_METHODS, "api-key");
+      }
+    }
+  }
+
+  /** The routes a key never reaches, whatever tier it holds: see {@link #authenticateApiKey}. */
+  static boolean isNoRouteForAKey(String target) {
+    return target.startsWith("api/iam-svc/")
+        || target.matches("api/[a-z0-9-]+/onboarding(/.*)?")
+        || target.matches("api/[a-z0-9-]+/platform(/.*)?");
+  }
+
+  private static Response keyRouteForbidden() {
+    return Response.status(Response.Status.FORBIDDEN)
+        .type(MediaType.APPLICATION_JSON)
+        .entity(
+            com.storeql.web.ApiResponse.error(
+                com.storeql.web.ErrorBody.of(
+                    "API_KEY_ROUTE_FORBIDDEN",
+                    "An API key cannot sign in, manage logins, start a business or act for the"
+                        + " platform; use a person's sign-in for that")))
+        .build();
+  }
+
+  private static Response keyCheckUnavailable() {
+    return Response.status(Response.Status.SERVICE_UNAVAILABLE)
+        .header("Retry-After", "5")
+        .type(MediaType.APPLICATION_JSON)
+        .entity(
+            com.storeql.web.ApiResponse.error(
+                com.storeql.web.ErrorBody.of(
+                    "API_KEY_CHECK_UNAVAILABLE",
+                    "the API key cannot be checked right now; try again shortly")))
+        .build();
   }
 
   private static Response tenantSuspended() {

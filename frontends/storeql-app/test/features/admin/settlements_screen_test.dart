@@ -4,11 +4,15 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
+import 'package:storeql_app/features/admin/providers/admin_providers.dart';
 import 'package:storeql_app/features/admin/settlements_screen.dart';
 
 import '../../support/fake_api.dart';
+import '../../support/mid_word.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // Card settlements (11.10): a payout says what it needs of the person looking
 // at it; a line that did not match is decided with a reason and sent as
@@ -67,7 +71,7 @@ class _Server implements HttpClientAdapter {
     if (o.method == 'GET' && o.path.endsWith('/unsettled')) {
       return jsonResponse(jsonEncode({
         'data': [
-          {'paymentId': 'p-old', 'reference': 'AUTH-0421', 'method': 'CARD', 'amount': 75, 'capturedAt': '2026-09-11T10:00:00Z', 'daysOutstanding': 6},
+          {'paymentId': 'p-old', 'orderId': '01a0d950-611e-702d-bfe9-b7296be05941', 'reference': 'AUTH-0421', 'method': 'CARD', 'amount': 75, 'capturedAt': '2026-09-11T10:00:00Z', 'daysOutstanding': 6},
         ],
       }));
     }
@@ -103,8 +107,9 @@ class _Server implements HttpClientAdapter {
   }
 }
 
-Future<_Server> _pump(WidgetTester tester, Widget child, {Map<String, dynamic>? batch, List<Map<String, dynamic>>? lines}) async {
-  tester.view.physicalSize = const Size(1400, 2400);
+Future<_Server> _pump(WidgetTester tester, Widget child,
+    {Map<String, dynamic>? batch, List<Map<String, dynamic>>? lines, Size size = const Size(1400, 2400)}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   final server = _Server(
@@ -119,7 +124,11 @@ Future<_Server> _pump(WidgetTester tester, Widget child, {Map<String, dynamic>? 
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
   await tester.pumpWidget(
     ProviderScope(
-      overrides: [apiClientProvider.overrideWithValue(FakeApiClient(dio))],
+      overrides: [
+        apiClientProvider.overrideWithValue(FakeApiClient(dio)),
+        tenantInfoProvider.overrideWith((ref) async => const TenantInfo(
+            id: 't', name: 'Corner Shop', status: 'ACTIVE', currency: 'GBP', country: 'GB')),
+      ],
       child: MaterialApp(home: Scaffold(body: child)),
     ),
   );
@@ -128,21 +137,80 @@ Future<_Server> _pump(WidgetTester tester, Widget child, {Map<String, dynamic>? 
 }
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  // The list writes its dates with AppFormat, in the app's en_GB locale.
+  setUpAll(initializeDateFormatting);
+
   testWidgets('a payout says what it needs, and what has not been paid out is a list of its own', (tester) async {
     await _pump(tester, const SettlementsScreen());
 
-    expect(find.text('142.51 GBP · WORLDPAY WP-1'), findsOneWidget);
-    expect(find.text('Paid 2026-09-15 · 2 of 4 lines need a decision'), findsOneWidget);
-    expect(find.text('Paid 2026-09-15 · 4 lines · fees 17.49'), findsNWidgets(2));
+    // Money in the currency's own form, dates as a person writes them.
+    expect(find.text('£142.51 · WORLDPAY WP-1'), findsOneWidget);
+    expect(find.text('Paid 15 Sept 2026 · 2 of 4 lines need a decision'), findsOneWidget);
+    expect(find.text('Paid 15 Sept 2026 · 4 lines · fees £17.49'), findsNWidgets(2));
+    expect(find.textContaining('142.51 GBP'), findsNothing);
+    expect(find.textContaining('2026-09-15'), findsNothing);
     expect(find.text('Needs decisions'), findsOneWidget);
     expect(find.text('Ready to sign off'), findsOneWidget);
     expect(find.text('Reconciled'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('settlement-unsettled')));
     await tester.pumpAndSettle();
-    expect(find.text('75 · CARD · AUTH-0421'), findsOneWidget);
+    expect(find.text('£75.00 · Card · AUTH-0421'), findsOneWidget);
     expect(find.text('6 days'), findsOneWidget);
-    expect(find.text('Taken 2026-09-11 · payment p-old'), findsOneWidget);
+    expect(find.text('Taken 11 Sept 2026 · order …6be05941'), findsOneWidget);
+    expect(find.textContaining('CARD'), findsNothing);
+    expect(find.textContaining('2026-09-11'), findsNothing);
+    expect(find.textContaining('p-old'), findsNothing);
+  });
+
+  testWidgets('only a payout with decisions open is in the error colour', (tester) async {
+    await _pump(tester, const SettlementsScreen());
+    final error = Theme.of(tester.element(find.byType(SettlementsScreen))).colorScheme.error;
+    Color? iconOf(String id) =>
+        tester.widget<Icon>(find.descendant(of: find.byKey(Key('settlement-$id')), matching: find.byType(Icon)).first).color;
+
+    expect(iconOf('2'), error, reason: 'EXCEPTIONS: lines still need a decision');
+    expect(iconOf('3'), isNot(error), reason: 'READY: nothing is wrong, it only waits to be signed off');
+    expect(iconOf('1'), isNot(error), reason: 'RECONCILED');
+  });
+
+  testWidgets('on a phone the title keeps its words, the actions go under it, and the page is inset 16', (tester) async {
+    await _pump(tester, const SettlementsScreen(), size: const Size(390, 844));
+
+    final title = find.text('Card settlements');
+    expect(breaksMidWord(tester, title), isFalse, reason: 'the title never breaks mid-word beside the buttons');
+    expect(tester.getTopLeft(find.byKey(const Key('settlement-import'))).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(title).dy),
+        reason: 'the actions wrap under the title');
+    expect(tester.getTopLeft(title).dx, 16, reason: 'the page gutter on a phone');
+    expect(find.text('£142.51 · WORLDPAY WP-1'), findsOneWidget);
+  });
+
+  testWidgets('just under 600px the actions are under the title too, and 200% text on a phone does not overflow', (tester) async {
+    await _pump(tester, const SettlementsScreen(), size: const Size(599, 900));
+    final title = find.text('Card settlements');
+    expect(breaksMidWord(tester, title), isFalse);
+    expect(tester.getTopLeft(find.byKey(const Key('settlement-import'))).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(title).dy));
+
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    tester.view.physicalSize = const Size(390, 844);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(tester.getTopLeft(find.byKey(const Key('settlement-import'))).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(title).dy));
+    // The header scrolls away; the payouts under it lay out whole.
+    await tester.scrollUntilVisible(find.byKey(const Key('settlement-3')), 200);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Ready to sign off'), findsOneWidget);
   });
 
   testWidgets('a payout opens on what needs a decision, and every line is a tap away', (tester) async {
@@ -151,7 +219,7 @@ void main() {
     expect(server.requests.first.queryParameters['open'], true);
     expect(find.text('Lines that need a decision'), findsOneWidget);
     expect(find.textContaining('AUTH-SHORT'), findsOneWidget);
-    expect(find.textContaining('We hold 50'), findsOneWidget);
+    expect(find.textContaining('We hold £50.00'), findsOneWidget);
     expect(find.textContaining('Nothing here answers to it'), findsOneWidget);
     expect(find.textContaining('AUTH-1'), findsNothing, reason: 'a line that matched needs nobody');
     expect(find.byKey(const Key('settlement-sign-off')), findsNothing, reason: 'not while anything is open');
@@ -160,7 +228,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(server.requests.last.queryParameters['open'], false);
     expect(find.textContaining('AUTH-1 '), findsNothing);
-    expect(find.text('1. Sale 45 · AUTH-1'), findsOneWidget);
+    expect(find.text('1. Sale £45.00 · AUTH-1'), findsOneWidget);
     expect(find.byKey(const Key('settlement-decide-1')), findsNothing, reason: 'nothing to decide on a match');
   });
 
@@ -232,7 +300,7 @@ void main() {
     );
     await tester.tap(find.byKey(const Key('settlement-toggle-lines')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Sent to unallocated receipts · fee 0.7 · Not ours'), findsOneWidget);
+    expect(find.textContaining('Sent to unallocated receipts · fee £0.70 · Not ours'), findsOneWidget);
     expect(find.byKey(const Key('settlement-decide-1')), findsNothing);
     expect(find.byKey(const Key('settlement-sign-off')), findsNothing);
   });

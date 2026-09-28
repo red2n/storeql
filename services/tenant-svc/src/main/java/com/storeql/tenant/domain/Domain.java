@@ -1,6 +1,8 @@
 package com.storeql.tenant.domain;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
@@ -30,10 +32,37 @@ public final class Domain {
        * administrator's decision is not an argument a payment can win — so without this the two
        * suspensions are indistinguishable and a payment would overrule one of them silently.
        */
-      String deactivatedReason) {
+      String deactivatedReason,
+      /** LIVE, or SANDBOX for a business's test double (22.8). */
+      String mode,
+      /** For a sandbox, the live business it stands in for; null for a live business. */
+      UUID sandboxOf) {
     public static final String STATUS_PENDING = "PENDING";
     public static final String STATUS_ACTIVE = "ACTIVE";
     public static final String STATUS_INACTIVE = "INACTIVE";
+    public static final String MODE_LIVE = "LIVE";
+    public static final String MODE_SANDBOX = "SANDBOX";
+
+    /** Why a sandbox is switched off: its owner removed it (22.8). Never lifted. */
+    public static final String REASON_SANDBOX_DELETED = "SANDBOX_DELETED";
+
+    public boolean isSandbox() {
+      return MODE_SANDBOX.equals(mode);
+    }
+
+    /**
+     * The name the business answers to in public: its legal name, else the name it signed up with,
+     * trimmed. The storefront's accessibility statement speaks for this business — the European
+     * Accessibility Act's service provider — never for one of its stores.
+     *
+     * @return the legal name when it is not blank, else the name; null only when both are blank
+     */
+    public String businessName() {
+      if (legalName != null && !legalName.isBlank()) {
+        return legalName.strip();
+      }
+      return name == null || name.isBlank() ? null : name.strip();
+    }
   }
 
   public record Store(
@@ -57,13 +86,34 @@ public final class Domain {
       boolean showPrices,
       // CSV subset of PAYMENT_METHODS, e.g. "CASH,CARD,UPI" — the tenders this store accepts.
       String enabledPaymentMethods,
+      // What the till asks for the customer's phone (a phone at the till): one of TILL_PHONE.
+      String tillPhone,
       Instant createdAt,
       Instant updatedAt) {
     public static final String TYPE_STORE = "STORE";
     public static final String TYPE_WAREHOUSE = "WAREHOUSE";
+
+    /**
+     * A shop with no shop floor (ship-from-store and dark-store picking): it holds stock and fills
+     * online orders for delivery; no collection is offered there and no till opens.
+     */
+    public static final String TYPE_DARK_STORE = "DARK_STORE";
+
+    public static final java.util.List<String> TYPES =
+        java.util.List.of(TYPE_STORE, TYPE_WAREHOUSE, TYPE_DARK_STORE);
     public static final java.util.List<String> PAYMENT_METHODS =
         java.util.List.of("CASH", "CARD", "UPI", "WALLET");
     public static final String DEFAULT_PAYMENT_METHODS = "CASH,CARD";
+
+    /**
+     * What a store's till asks for the customer's phone (a phone at the till): REQUIRED refuses a
+     * till sale with neither a number nor a customer, OPTIONAL asks and takes a blank, OFF never
+     * asks. OPTIONAL until the owner or a manager chooses.
+     */
+    public static final java.util.List<String> TILL_PHONE =
+        java.util.List.of("REQUIRED", "OPTIONAL", "OFF");
+
+    public static final String DEFAULT_TILL_PHONE = "OPTIONAL";
     public static final String STATUS_ACTIVE = "ACTIVE";
     public static final String STATUS_SUSPENDED = "SUSPENDED";
     public static final String STATUS_CLOSED = "CLOSED";
@@ -427,4 +477,19 @@ public final class Domain {
       return new NoticeDuties(null, false, null, List.of());
     }
   }
+
+  /**
+   * One exchange rate a business keeps (03.x): {@code rate} home units per one unit of {@code
+   * currency}, in force from {@code effectiveFrom}. A row is never changed; a new rate is a new
+   * row.
+   */
+  public record FxRate(
+      UUID id,
+      UUID tenantId,
+      String currency,
+      BigDecimal rate,
+      LocalDate effectiveFrom,
+      String reason,
+      UUID setBy,
+      Instant setAt) {}
 }

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
 import 'package:storeql_app/features/pos/cart_screen.dart';
@@ -10,6 +11,7 @@ import 'package:storeql_app/features/pos/pos_providers.dart';
 import 'package:storeql_app/features/pos/pos_recall_check.dart';
 import 'package:storeql_app/features/pos/pos_session_providers.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // The recall check at the register.
 //
@@ -113,6 +115,15 @@ List<PosLine> _basket(WidgetTester tester) =>
         .read(posCartProvider);
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  // Dates are written through AppFormat in the app's locale (en_GB here); the
+  // app loads intl's date data through flutter_localizations, a test loads it here.
+  setUpAll(initializeDateFormatting);
   testWidgets('an item under an every-pack recall cannot be sold at all', (tester) async {
     await _pump(tester, recalls: (200, _everyPack));
     await _scan(tester, 'PEANUT');

@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
@@ -194,6 +195,31 @@ class CartCachingIT {
     var mutated =
         freshItems.stream().filter(i -> i.id().equals(Ids.parse(itemId))).findFirst().orElseThrow();
     assertThat(mutated.qty().toPlainString(), is("99.0000"));
+  }
+
+  /**
+   * An online order is placed at the store its delivery resolves to, or split across several (order
+   * orchestration); the shopper's one active cart is closed whichever store it names.
+   */
+  @Test
+  void anOnlineOrderAtAnotherStoreClosesTheShoppersCart() {
+    Response c = post("/cart", "{\"storeId\":\"" + STORE_A + "\"}");
+    assertThat(c.getStatus(), is(200));
+    String cartId = field(c.readEntity(String.class), "id");
+    UUID elsewhere = Ids.newId();
+    // At another store, the store-matched close finds nothing to close.
+    repo.markCheckedOutByCustomerAndStore(Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A), elsewhere);
+    assertThat(cartStatus(cartId), is("ACTIVE"));
+    repo.markCheckedOutByCustomer(Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A));
+    assertThat(cartStatus(cartId), is("CHECKED_OUT"));
+    // A second part of the same checkout finds nothing left to close.
+    repo.markCheckedOutByCustomer(Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A));
+    assertThat(cartStatus(cartId), is("CHECKED_OUT"));
+  }
+
+  private static String cartStatus(String cartId) {
+    return com.storeql.test.Envelopes.scalar(
+        PG, "SELECT status FROM cart.carts WHERE id = '" + cartId + "'");
   }
 
   private static String field(String json, String name) {

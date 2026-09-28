@@ -5,12 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:storeql_app/shared/widgets/status_badge.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/payment_runs_tab.dart';
 import 'package:storeql_app/features/admin/procurement_screen.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // Supplier payment runs (17.10). A manager holding finance.payments reviews a
 // proposed run — what each supplier is paid, the credit notes offset, the
@@ -239,12 +242,24 @@ FilledButton _filled(WidgetTester tester, String label) =>
     tester.widget<FilledButton>(find.widgetWithText(FilledButton, label).first);
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  // Dates are written with AppFormat, in the app's en_GB locale.
+  setUpAll(initializeDateFormatting);
   testWidgets('a finance manager reviews a proposed run and approves it', (
     tester,
   ) async {
     final server = await _pump(tester);
 
     expect(find.text('PAY260913-3F9A1C'), findsOneWidget);
+    // The run's status in words, its days as dates.
+    expect(find.widgetWithText(StatusBadge, 'Proposed'), findsOneWidget);
+    expect(find.textContaining('pay on 13 Sept 2026 · due by 20 Sept 2026'), findsOneWidget);
+    expect(find.textContaining('PROPOSED'), findsNothing);
     expect(find.text('Acme Ltd'), findsOneWidget);
     expect(find.text('Muster GmbH'), findsOneWidget);
     expect(find.textContaining('Credit note CN-A'), findsOneWidget);

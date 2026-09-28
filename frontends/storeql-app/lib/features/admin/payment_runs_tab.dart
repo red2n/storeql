@@ -13,8 +13,11 @@ import '../../core/network/api_error.dart';
 import '../../shared/util/file_download.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/status_badge.dart';
 import 'bank_details_validators.dart';
 import 'procurement_providers.dart';
+import '../../core/theme.dart';
+import '../../core/spacing.dart';
 import 'providers/admin_providers.dart' show tenantInfoProvider;
 
 /// Whether the signed-in user may run supplier payments (17.10): a manager
@@ -99,7 +102,7 @@ class PaymentRunsTab extends ConsumerWidget {
     if (!canRunPayments(auth)) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: context.pagePadding,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -126,9 +129,10 @@ class PaymentRunsTab extends ConsumerWidget {
           data: (runs) => Column(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                padding: EdgeInsetsDirectional.fromSTEB(
+                    context.pageGutter, AppSpacing.sm, context.pageGutter, 0),
                 child: Align(
-                  alignment: Alignment.centerRight,
+                  alignment: AlignmentDirectional.centerEnd,
                   child: TextButton.icon(
                     onPressed: () => showDialog<void>(
                       context: context,
@@ -161,7 +165,7 @@ class PaymentRunsTab extends ConsumerWidget {
                         ),
                       )
                     : ListView.separated(
-                        padding: const EdgeInsets.all(16),
+                        padding: context.pagePadding,
                         itemCount: runs.length,
                         separatorBuilder: (_, _) => const SizedBox(height: 8),
                         itemBuilder: (_, i) =>
@@ -238,7 +242,7 @@ class _PaymentRunCardState extends ConsumerState<PaymentRunCard> {
         title: Text('Mark ${run.reference} paid?'),
         content: Text(
           'Pays ${AppFormat.money(run.total, currencyCode: run.currency)} to '
-          '${run.suppliers.length} supplier(s) on ${run.paymentDate}. The '
+          '${run.suppliers.length} supplier(s) on ${AppFormat.date(run.paymentDate)}. The '
           'invoices are settled, the ledger is posted and each supplier is '
           'sent a remittance advice. Upload the bank file to the bank first.',
         ),
@@ -413,16 +417,27 @@ class _PaymentRunCardState extends ConsumerState<PaymentRunCard> {
           run.reference,
           style: const TextStyle(fontWeight: FontWeight.bold),
         ),
-        subtitle: Text(
-          [
-            AppFormat.money(run.total, currencyCode: run.currency),
-            run.status,
-            'pay on ${run.paymentDate}',
-            'due by ${run.payUpTo}',
-            '${run.suppliers.length} supplier(s)',
-            if (toCheck > 0) '$toCheck to check',
-            if (run.heldPayments > 0) '${run.heldPayments} held by the bank',
-          ].join(' · '),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              [
+                AppFormat.money(run.total, currencyCode: run.currency),
+                'pay on ${AppFormat.date(run.paymentDate)}',
+                'due by ${AppFormat.date(run.payUpTo)}',
+                '${run.suppliers.length} supplier(s)',
+                if (toCheck > 0) '$toCheck to check',
+                if (run.heldPayments > 0) '${run.heldPayments} held by the bank',
+              ].join(' · '),
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            // The run's status as the shared badge, in words.
+            StatusBadge(
+              paymentRunStatusLabel(run.status),
+              key: Key('run-status-${run.status}'),
+              tone: paymentRunStatusTone(run.status),
+            ),
+          ],
         ),
         childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
         children: [
@@ -579,7 +594,7 @@ class _SupplierBlock extends StatelessWidget {
                 Expanded(
                   child: Text(
                     '${d.isCredit ? 'Credit note' : 'Invoice'} ${d.reference}'
-                    '${d.dueDate != null ? ' · due ${d.dueDate}' : ''}',
+                    '${d.dueDate != null ? ' · due ${AppFormat.date(d.dueDate)}' : ''}',
                   ),
                 ),
                 Text(
@@ -634,7 +649,7 @@ class _ErrorBanner extends StatelessWidget {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: cs.errorContainer,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: AppRadius.chip,
       ),
       child: Text(message, style: TextStyle(color: cs.onErrorContainer)),
     );
@@ -1103,3 +1118,19 @@ class _PayingAccountsDialogState extends ConsumerState<PayingAccountsDialog> {
     );
   }
 }
+
+/// A payment run's status in words.
+String paymentRunStatusLabel(String status) => switch (status.toUpperCase()) {
+      'PROPOSED' => 'Proposed',
+      'APPROVED' => 'Approved',
+      'PAID' => 'Paid',
+      'CANCELLED' => 'Cancelled',
+      _ => humanizeCode(status),
+    };
+
+StatusTone paymentRunStatusTone(String status) => switch (status.toUpperCase()) {
+      'PROPOSED' => StatusTone.info,
+      'APPROVED' => StatusTone.warning,
+      'PAID' => StatusTone.success,
+      _ => StatusTone.neutral,
+    };

@@ -301,6 +301,36 @@ public class CartRepository extends BaseJdbcRepository {
               }
             },
             "mark cart checked out");
+    evictCheckedOut(tenantId, customerId, cartId);
+  }
+
+  /**
+   * Marks the shopper's ACTIVE cart checked out, whichever store it was filled at: an online order
+   * is placed at the store its delivery resolves to, or split across several (order orchestration),
+   * and a shopper has one active cart in a tenant (the unique index), so the store the cart names
+   * is not the order's to match.
+   */
+  public void markCheckedOutByCustomer(UUID tenantId, UUID customerId) {
+    UUID cartId =
+        inTx(
+            c -> {
+              try (var ps =
+                  c.prepareStatement(
+                      "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
+                          + " WHERE tenant_id = ? AND customer_id = ? AND status = 'ACTIVE'"
+                          + " RETURNING id")) {
+                ps.setObject(1, tenantId);
+                ps.setObject(2, customerId);
+                try (var rs = ps.executeQuery()) {
+                  return rs.next() ? rs.getObject("id", UUID.class) : null;
+                }
+              }
+            },
+            "mark the shopper's cart checked out");
+    evictCheckedOut(tenantId, customerId, cartId);
+  }
+
+  private void evictCheckedOut(UUID tenantId, UUID customerId, UUID cartId) {
     cache.evict(activeByCustomerKey(tenantId, customerId));
     if (cartId != null) {
       evictCart(tenantId, cartId);

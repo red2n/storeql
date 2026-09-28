@@ -6,6 +6,7 @@ import com.storeql.inventory.dto.Dtos.MoveOrderResponse;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -53,10 +54,12 @@ public class MoveOrderResource {
   @POST
   @Path("/move-orders")
   public Response createMoveOrder(CreateMoveOrderRequest req) {
+    ctx.requirePermission(Permissions.STOCK_TRANSFER); // SJ-D73
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID fromStore = uuid(req.fromStoreId(), "fromStoreId");
     UUID toStore = uuid(req.toStoreId(), "toStoreId");
+    ctx.requireStoreAccess(toStore); // SJ-D74: a move stays within the caller's stores
     List<MoveOrderLine> lines =
         req.lines().stream()
             .map(
@@ -96,7 +99,7 @@ public class MoveOrderResource {
       @QueryParam("status") String status,
       @QueryParam("limit") Integer limitParam) {
     UUID tenantId = ctx.requireTenantId();
-    UUID storeId = store == null || store.isBlank() ? null : uuid(store, "store");
+    UUID storeId = ctx.scopeStore(store == null || store.isBlank() ? null : uuid(store, "store"));
     int limit = limitParam == null || limitParam < 1 ? 20 : Math.min(limitParam, 100);
     return ApiResponse.ok(
         service.listMoveOrders(tenantId, storeId, status, limit).stream()
@@ -116,6 +119,7 @@ public class MoveOrderResource {
   @Path("/move-orders/{id}")
   public ApiResponse<MoveOrderResponse> getMoveOrder(@PathParam("id") UUID id) {
     var wl = service.getMoveOrder(ctx.requireTenantId(), id);
+    ctx.requireAnyStoreAccess(wl.order().fromStoreId(), wl.order().toStoreId());
     return ApiResponse.ok(Mappers.toMoveOrder(wl.order(), wl.lines()));
   }
 
@@ -136,7 +140,10 @@ public class MoveOrderResource {
   @POST
   @Path("/move-orders/{id}/pick")
   public ApiResponse<MoveOrderResponse> pickMoveOrder(@PathParam("id") UUID id) {
-    var wl = service.pickMoveOrder(ctx.requireTenantId(), id);
+    ctx.requirePermission(Permissions.STOCK_TRANSFER);
+    UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getMoveOrder(tenantId, id).order().fromStoreId());
+    var wl = service.pickMoveOrder(tenantId, id);
     return ApiResponse.ok(Mappers.toMoveOrder(wl.order(), wl.lines()));
   }
 
@@ -155,7 +162,10 @@ public class MoveOrderResource {
   @POST
   @Path("/move-orders/{id}/cancel")
   public ApiResponse<MoveOrderResponse> cancelMoveOrder(@PathParam("id") UUID id) {
-    var cancelled = service.cancelMoveOrder(ctx.requireTenantId(), id);
+    ctx.requirePermission(Permissions.STOCK_TRANSFER);
+    UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getMoveOrder(tenantId, id).order().fromStoreId());
+    var cancelled = service.cancelMoveOrder(tenantId, id);
     var wl = service.getMoveOrder(ctx.requireTenantId(), cancelled.id());
     return ApiResponse.ok(Mappers.toMoveOrder(wl.order(), wl.lines()));
   }

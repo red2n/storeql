@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import '../../core/theme.dart';
 
 /// Pushes a full-screen camera scanner and resolves with the first decoded
 /// barcode value, or `null` if the user closes it without a scan. Works on
@@ -87,7 +88,7 @@ class _BarcodeScannerPageState extends State<_BarcodeScannerPage> {
                 height: 180,
                 decoration: BoxDecoration(
                   border: Border.all(color: Colors.white70, width: 2),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: AppRadius.input,
                 ),
               ),
             ),

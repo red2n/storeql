@@ -1,12 +1,15 @@
 package com.storeql.tenant.service;
 
+import com.storeql.events.OutboxRecord;
 import com.storeql.ids.Ids;
 import com.storeql.service.CapabilityTokens;
+import com.storeql.service.OutboxRow;
 import com.storeql.tenant.domain.Dunning;
 import com.storeql.tenant.domain.Dunning.Overdue;
 import com.storeql.tenant.domain.Dunning.Policy;
 import com.storeql.tenant.domain.Subscriptions;
 import com.storeql.tenant.domain.Subscriptions.Invoice;
+import com.storeql.tenant.domain.Subscriptions.Subscription;
 import com.storeql.tenant.repo.BillingRepository;
 import com.storeql.tenant.repo.DunningRepository;
 import com.storeql.web.ApiException;
@@ -25,7 +28,10 @@ import java.util.UUID;
  * <p><b>Every notice a business missed is sent, once.</b> If the run has not run for a week, the
  * business is owed each reminder it did not get — skipping to the latest step would suspend a
  * business the platform never finished telling was late. The unique index on (invoice, step) is
- * what makes "once" true, so the run is safe to run twice.
+ * what makes "once" true, so the run is safe to run twice. A notice is a {@code
+ * DunningNoticeIssued} event written with the step in one transaction (SJ-D68: the step used to be
+ * recorded and the notice never sent); notification-svc writes and sends it, to the address on the
+ * subscription — the owner's from sign-up, or the one the business set since.
  *
  * <p><b>It skips and names, like the billing run.</b> One business whose notice cannot be sent must
  * not stop everybody else being chased; but an invoice nobody chased is money not asked for, so it
@@ -42,6 +48,9 @@ public class DunningService {
   /** How many overdue invoices one run looks at. Enough for a platform, bounded all the same. */
   private static final int RUN_LIMIT = 1000;
 
+  static final String NOTICE_EVENT = "DunningNoticeIssued";
+  static final String NOTICE_TOPIC = OutboxRecord.topicFor("tenant", "dunning-notice-issued");
+
   private static final System.Logger LOG = System.getLogger(DunningService.class.getName());
 
   @Inject DunningRepository repo;
@@ -53,6 +62,9 @@ public class DunningService {
   @Inject BillingService billing;
 
   @Inject TenantService tenants;
+
+  /** The link a notice carries, shared with the trial's first invoice (21.13). */
+  @Inject PayLinks payLinks;
 
   /** What one run did. */
   public record Run(List<Step> taken, List<Skipped> skipped) {
@@ -118,7 +130,7 @@ public class DunningService {
     for (Overdue overdue : repo.overdueOn(asOf, RUN_LIMIT)) {
       for (String step : policy.stepsEarnedBy(overdue.daysOverdue())) {
         try {
-          if (take(overdue, step, asOf)) {
+          if (take(overdue, policy, step, asOf)) {
             taken.add(new Step(overdue.tenantId(), overdue.number(), step));
           }
         } catch (ApiException e) {
@@ -144,12 +156,16 @@ public class DunningService {
    * means the database decides who acts, and a second run finds the step already claimed and does
    * nothing.
    *
+   * <p>A reminder and the suspension are notices, and a notice is claimed whole: the step, the pay
+   * link it carries and the event that writes it, in one transaction — so there is never a step on
+   * the file that nobody was told about. Giving up on the debt tells nobody: the service has
+   * already been taken away, and the subscription simply ends.
+   *
    * @return whether this call is the one that took it
    */
-  private boolean take(Overdue overdue, String step, LocalDate asOf) {
+  private boolean take(Overdue overdue, Policy policy, String step, LocalDate asOf) {
     // The run's own date, not the wall clock. With a test clock the two differ by months, and a
-    // file
-    // that says "suspended" without saying as of when cannot be read back against the policy.
+    // file that says "suspended" without saying as of when cannot be read back against the policy.
     String detail =
         step
             + " on "
@@ -158,36 +174,76 @@ public class DunningService {
             + overdue.daysOverdue()
             + " days overdue, invoice "
             + overdue.number();
-    if (!repo.claimStep(Ids.newId(), overdue.tenantId(), overdue.invoiceId(), step, detail, null)) {
+    if (Dunning.UNCOLLECTIBLE.equals(step)) {
+      if (!repo.claimStep(
+          Ids.newId(), overdue.tenantId(), overdue.invoiceId(), step, detail, null)) {
+        return false;
+      }
+      giveUp(overdue);
+      return true;
+    }
+    if (!notice(overdue, policy, step, detail)) {
       return false;
     }
     if (Dunning.SUSPENDED.equals(step)) {
       suspend(overdue);
-    } else if (Dunning.UNCOLLECTIBLE.equals(step)) {
-      giveUp(overdue);
-    } else {
-      remind(overdue);
     }
     return true;
   }
 
   /**
-   * Sends a notice, carrying a link that pays this invoice without a sign-in.
+   * Claims a step and queues the notice that tells the business about it, carrying a link that pays
+   * the invoice without a sign-in.
    *
    * <p>The link is the point. By the time the later notices go the business may already be
    * suspended, and a suspended business cannot sign in — telling it to pay while denying it the
    * means is not a dunning process, it is a dead end. A fresh token per notice, and only its hash
-   * is kept; see {@link CapabilityTokens}.
+   * is kept; the token itself travels in the event to notification-svc and never through a log.
+   *
+   * @throws ApiException 409 {@code DUNNING_NO_BILLING_EMAIL} when the subscription names no
+   *     address — the run names the business rather than chasing it in silence, and nothing is
+   *     claimed, so the notice is owed still
    */
-  private void remind(Overdue overdue) {
-    issuePayToken(overdue.invoiceId());
-    // The notice itself goes through notification-svc's existing channel; the token travels in the
-    // link and never in a log, which is why nothing here holds on to it.
-    LOG.log(
-        System.Logger.Level.INFO,
-        "dunning notice for {0}, invoice {1}",
+  private boolean notice(Overdue overdue, Policy policy, String step, String detail) {
+    Invoice invoice =
+        invoices
+            .invoice(overdue.invoiceId())
+            .orElseThrow(() -> ApiException.notFound("INVOICE_NOT_FOUND", "No such invoice"));
+    String recipient =
+        invoices
+            .ofTenant(overdue.tenantId())
+            .map(Subscription::billingEmail)
+            .filter(e -> e != null && !e.isBlank())
+            .orElseThrow(
+                () ->
+                    ApiException.conflict(
+                        "DUNNING_NO_BILLING_EMAIL",
+                        "This business has no billing email, so there is nobody to tell that it"
+                            + " is late"));
+    LocalDate suspendOn =
+        Dunning.SUSPENDED.equals(step)
+            ? null
+            : overdue.dueDate().plusDays(policy.suspendAfterDays());
+    String token = CapabilityTokens.mint();
+    String payload =
+        Events.dunningNoticeIssued(
+            overdue.tenantId(),
+            invoice,
+            step,
+            overdue.daysOverdue(),
+            recipient,
+            payLinks.url(token),
+            billing.profile().legalName(),
+            suspendOn);
+    return repo.claimNotice(
+        Ids.newId(),
         overdue.tenantId(),
-        overdue.number());
+        overdue.invoiceId(),
+        step,
+        detail,
+        CapabilityTokens.hash(token),
+        new OutboxRow(
+            NOTICE_EVENT, NOTICE_TOPIC, overdue.tenantId(), overdue.invoiceId(), payload));
   }
 
   /**
@@ -292,12 +348,7 @@ public class DunningService {
    *     link to it would be a dead end
    */
   public String issuePayToken(UUID invoiceId) {
-    String token = CapabilityTokens.mint();
-    if (!repo.storePayToken(invoiceId, CapabilityTokens.hash(token))) {
-      throw ApiException.conflict(
-          "INVOICE_NOT_OPEN", "This invoice cannot be paid, so a link to it would lead nowhere");
-    }
-    return token;
+    return payLinks.mint(invoiceId);
   }
 
   /** What has been done about one overdue invoice, oldest first. */

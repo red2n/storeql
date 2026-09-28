@@ -87,7 +87,7 @@ class _SendTextDialogState extends ConsumerState<SendTextDialog> {
               autofocus: true,
               decoration: const InputDecoration(labelText: 'Message'),
             ),
-            SwitchListTile(
+            SwitchListTile.adaptive(
               key: const Key('send-text-marketing'),
               contentPadding: EdgeInsets.zero,
               value: _marketing,

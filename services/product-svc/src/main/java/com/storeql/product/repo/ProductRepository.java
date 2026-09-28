@@ -331,6 +331,26 @@ public class ProductRepository extends BaseOutboxRepository {
    * @param contentType the content type
    * @param bytes the raw image bytes
    */
+  /**
+   * What the business's product images weigh, in bytes, leaving out the image {@code except} is
+   * about to replace (21.11): a replacement is measured as the room it frees plus the room it
+   * takes.
+   */
+  public long imageBytesExcept(UUID tenantId, UUID except) {
+    return query(
+            "SELECT COALESCE(SUM(octet_length(bytes)), 0) AS total FROM product_images"
+                + " WHERE tenant_id = ? AND product_id <> ?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, except);
+            },
+            rs -> rs.getLong("total"),
+            "measure product images")
+        .stream()
+        .findFirst()
+        .orElse(0L);
+  }
+
   public void upsertProductImage(UUID tenantId, UUID productId, String contentType, byte[] bytes) {
     exec(
         "INSERT INTO product_images (product_id, tenant_id, content_type, bytes, updated_at)"

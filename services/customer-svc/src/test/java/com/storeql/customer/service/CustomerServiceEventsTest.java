@@ -12,10 +12,12 @@ import static org.mockito.Mockito.when;
 import com.storeql.customer.domain.Domain.Customer;
 import com.storeql.customer.domain.Domain.LoyaltyAccount;
 import com.storeql.customer.domain.Domain.StoreCreditAccount;
+import com.storeql.customer.domain.LoyaltyProgramme;
 import com.storeql.customer.dto.Dtos.AdjustPointsRequest;
 import com.storeql.customer.dto.Dtos.IssueStoreCreditRequest;
 import com.storeql.customer.dto.Dtos.RedeemStoreCreditRequest;
 import com.storeql.customer.repo.CustomerRepository;
+import com.storeql.customer.repo.LoyaltyProgrammeRepository;
 import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
 import jakarta.json.Json;
@@ -26,6 +28,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Function;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -45,6 +48,7 @@ class CustomerServiceEventsTest {
   private static final UUID CUSTOMER = Ids.newId();
 
   @Mock CustomerRepository repo;
+  @Mock LoyaltyProgrammeRepository programmes;
   @Mock com.storeql.service.TenantProfiles profiles;
   private CustomerService service;
 
@@ -52,6 +56,11 @@ class CustomerServiceEventsTest {
   void setUp() {
     service = new CustomerService();
     service.profiles = profiles;
+    service.programmes = programmes;
+    // The platform's default programme unless a test says otherwise.
+    org.mockito.Mockito.lenient()
+        .when(programmes.programme(org.mockito.ArgumentMatchers.any()))
+        .thenAnswer(inv -> LoyaltyProgramme.defaults(inv.getArgument(0)));
     // The named currency, or the tenant's own as tenant-svc would answer (SJ-D53).
     org.mockito.Mockito.lenient()
         .when(
@@ -85,6 +94,8 @@ class CustomerServiceEventsTest {
                     null,
                     Instant.now(),
                     Instant.now(),
+                    null,
+                    null,
                     null)));
   }
 
@@ -95,7 +106,9 @@ class CustomerServiceEventsTest {
     service.accrueLoyaltyFromOrder(
         Ids.newId(), TENANT, CUSTOMER, order, new BigDecimal("24.00"), new BigDecimal("4.00"));
 
-    ArgumentCaptor<OutboxRow> captor = ArgumentCaptor.forClass(OutboxRow.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Function<BigDecimal, OutboxRow>> captor =
+        ArgumentCaptor.forClass(Function.class);
     verify(repo)
         .accrueFromOrderOnce(
             any(),
@@ -104,9 +117,13 @@ class CustomerServiceEventsTest {
             eq(CUSTOMER),
             eq(order),
             eq(new BigDecimal("24.00")),
-            anyString(),
-            captor.capture());
-    JsonObject p = Json.createReader(new StringReader(captor.getValue().payload())).readObject();
+            any(LoyaltyProgramme.class),
+            captor.capture(),
+            any());
+    // The event is built for the points actually awarded, once the tier's multiplier is known.
+    OutboxRow row = captor.getValue().apply(new BigDecimal("24.00"));
+    JsonObject p = Json.createReader(new StringReader(row.payload())).readObject();
+    assertEquals(0, new BigDecimal("24.00").compareTo(p.getJsonNumber("points").bigDecimalValue()));
     assertEquals("LoyaltyEarned", p.getString("eventType"));
     assertNotNull(Ids.parse(p.getString("eventId")));
     assertEquals(order.toString(), p.getString("orderId"));
@@ -119,7 +136,14 @@ class CustomerServiceEventsTest {
   @Test
   void everyLoyaltyEventCarriesADistinctId() {
     ArgumentCaptor<OutboxRow> captor = ArgumentCaptor.forClass(OutboxRow.class);
-    when(repo.adjustPoints(eq(TENANT), eq(CUSTOMER), any(), anyString(), captor.capture()))
+    when(repo.adjustPoints(
+            eq(TENANT),
+            eq(CUSTOMER),
+            any(),
+            anyString(),
+            any(LoyaltyProgramme.class),
+            captor.capture(),
+            any()))
         .thenReturn(null);
     service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "one"));
     service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "two"));
@@ -137,7 +161,14 @@ class CustomerServiceEventsTest {
   @Test
   void adjustPointsPublishesLoyaltyAdjustedEvent() {
     ArgumentCaptor<OutboxRow> captor = ArgumentCaptor.forClass(OutboxRow.class);
-    when(repo.adjustPoints(eq(TENANT), eq(CUSTOMER), any(), anyString(), captor.capture()))
+    when(repo.adjustPoints(
+            eq(TENANT),
+            eq(CUSTOMER),
+            any(),
+            anyString(),
+            any(LoyaltyProgramme.class),
+            captor.capture(),
+            any()))
         .thenReturn(
             new LoyaltyAccount(
                 Ids.newId(),
@@ -147,6 +178,8 @@ class CustomerServiceEventsTest {
                 BigDecimal.TEN,
                 LoyaltyAccount.TIER_BRONZE,
                 Instant.now(),
+                Instant.now(),
+                BigDecimal.TEN,
                 Instant.now()));
 
     service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.TEN, "manual"));

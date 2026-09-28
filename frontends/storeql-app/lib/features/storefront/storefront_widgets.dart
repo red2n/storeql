@@ -3,9 +3,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../shared/util/image_budget.dart';
+import 'stock_badge.dart';
 import 'storefront_providers.dart';
+
+export 'stock_badge.dart' show StockBadge;
 
 /// A lively deterministic product placeholder (colored tile + initials) so the
 /// catalog looks alive without real product images. Same product → same colour.
@@ -23,38 +27,72 @@ class ProductThumb extends StatelessWidget {
     this.borderRadius = BorderRadius.zero,
   });
 
-  static const _bg = [
-    Color(0xFFEAF2F8),
-    Color(0xFFE8F8F5),
-    Color(0xFFFEF9E7),
-    Color(0xFFFDEDEC),
-    Color(0xFFF4ECF7),
-    Color(0xFFEAFAF1),
-    Color(0xFFFBEEE6),
-    Color(0xFFEBF5FB),
+  // Soft tinted grounds with deep initials in light; deep muted grounds with pale
+  // initials in dark, so a grid of placeholders never glows. Every pair is 4.5:1+.
+  static const _bgLight = [
+    Color(0xFFE5EEF5),
+    Color(0xFFE5F5F3),
+    Color(0xFFF5F1E5),
+    Color(0xFFF5E6E5),
+    Color(0xFFF0E5F5),
+    Color(0xFFE5F5EA),
+    Color(0xFFF5ECE5),
+    Color(0xFFE5F1F5),
   ];
-  static const _fg = [
-    Color(0xFF2E86C1),
-    Color(0xFF17A589),
-    Color(0xFFB7950B),
-    Color(0xFFCB4335),
-    Color(0xFF8E44AD),
-    Color(0xFF229954),
-    Color(0xFFCA6F1E),
-    Color(0xFF2874A6),
+  static const _fgLight = [
+    Color(0xFF225477),
+    Color(0xFF227769),
+    Color(0xFF776222),
+    Color(0xFF772922),
+    Color(0xFF5B2277),
+    Color(0xFF22773E),
+    Color(0xFF774522),
+    Color(0xFF226277),
   ];
+  static const _bgDark = [
+    Color(0xFF263540),
+    Color(0xFF26403C),
+    Color(0xFF403926),
+    Color(0xFF402826),
+    Color(0xFF372640),
+    Color(0xFF26402F),
+    Color(0xFF403126),
+    Color(0xFF263940),
+  ];
+  static const _fgDark = [
+    Color(0xFFB3D0E6),
+    Color(0xFFB3E6DD),
+    Color(0xFFE6D9B3),
+    Color(0xFFE6B7B3),
+    Color(0xFFD5B3E6),
+    Color(0xFFB3E6C4),
+    Color(0xFFE6C8B3),
+    Color(0xFFB3D9E6),
+  ];
+
+  /// The placeholder grounds and their initials, in order, for one brightness —
+  /// so a test can hold every pair to 4.5:1 rather than take the comment's word.
+  static List<(Color bg, Color fg)> tones(Brightness brightness) {
+    final dark = brightness == Brightness.dark;
+    final bgs = dark ? _bgDark : _bgLight;
+    final fgs = dark ? _fgDark : _fgLight;
+    return [for (var i = 0; i < bgs.length; i++) (bgs[i], fgs[i])];
+  }
 
   @override
   Widget build(BuildContext context) {
     final h = seed.hashCode.abs();
-    final i = h % _bg.length;
+    final i = h % _bgLight.length;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final bg = dark ? _bgDark[i] : _bgLight[i];
+    final fg = dark ? _fgDark[i] : _fgLight[i];
     return Container(
-      decoration: BoxDecoration(color: _bg[i], borderRadius: borderRadius),
+      decoration: BoxDecoration(color: bg, borderRadius: borderRadius),
       alignment: Alignment.center,
       child: Text(
         _initials(label),
         style: TextStyle(
-          color: _fg[i],
+          color: fg,
           fontWeight: FontWeight.bold,
           fontSize: fontSize,
         ),
@@ -172,7 +210,8 @@ class OfferPriceAdd extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
     final configAsync = ref.watch(storefrontConfigProvider);
 
     // While config is still loading, show a neutral placeholder rather than
@@ -208,13 +247,11 @@ class OfferPriceAdd extends ConsumerWidget {
         }
         // .select() so this tile only rebuilds when *its own* variant's availability changes,
         // not on every store switch's whole-map refetch.
-        final (inStock, hasAvailData) = ref.watch(
+        final (inStock, onlyLeft, hasAvailData) = ref.watch(
           storefrontAvailabilityProvider.select((async) {
             final map = async.value;
-            return (
-              map == null ? true : (map[offer.variant.id] ?? false),
-              map != null,
-            );
+            final info = map == null ? null : map[offer.variant.id];
+            return (info?.inStock ?? true, info?.onlyLeft, map != null);
           }),
         );
 
@@ -222,19 +259,29 @@ class OfferPriceAdd extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
+            // The same money format as the unit and was prices under it, in the
+            // page's ink: a price is information, not an accent.
             Text(
-              '${offer.price.currency} ${offer.price.totalWithVat.toStringAsFixed(2)}',
+              AppFormat.money(
+                offer.price.totalWithVat,
+                currencyCode: offer.price.currency,
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: cs.primary,
-                fontWeight: FontWeight.bold,
-                fontSize: 15,
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: cs.onSurface,
+                fontWeight: FontWeight.w700,
               ),
             ),
+            if (offer.price.shownLine.isNotEmpty)
+              Text(offer.price.shownLine,
+                  key: const Key('price-shown'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
             WasPriceText(price: offer.price),
             UnitPriceText(price: offer.price),
-            if (hasAvailData) StockBadge(inStock: inStock),
+            if (hasAvailData) StockBadge(inStock: inStock, onlyLeft: onlyLeft),
           ],
         );
 
@@ -246,6 +293,7 @@ class OfferPriceAdd extends ConsumerWidget {
               inStock: inStock,
               line: CartLine(
                 variantId: offer.variant.id,
+                productId: product.id,
                 productName: product.name,
                 sku: offer.variant.sku,
                 unitPrice: offer.price.totalWithVat,
@@ -277,22 +325,24 @@ class _CatalogAdd extends ConsumerWidget {
         }
         // .select() so this tile only rebuilds when *its own* variant's availability changes,
         // not on every store switch's whole-map refetch.
-        final inStock = ref.watch(
+        final (inStock, onlyLeft) = ref.watch(
           storefrontAvailabilityProvider.select((async) {
             final map = async.value;
-            return map == null ? true : (map[variant.id] ?? false);
+            final info = map == null ? null : map[variant.id];
+            return (info?.inStock ?? true, info?.onlyLeft);
           }),
         );
         // Catalog mode: no price — the server prices the order (when pricing enforcement is on) or
         // it's a quote.
         return Row(
           children: [
-            Expanded(child: StockBadge(inStock: inStock)),
+            Expanded(child: StockBadge(inStock: inStock, onlyLeft: onlyLeft)),
             _CartControl(
               productName: product.name,
               inStock: inStock,
               line: CartLine(
                 variantId: variant.id,
+                productId: product.id,
                 productName: product.name,
                 sku: variant.sku,
                 unitPrice: 0,
@@ -352,7 +402,7 @@ class _CartControl extends ConsumerWidget {
         },
       );
     }
-    return _Stepper(
+    return QuantityStepper(
       qty: qty,
       onDec: () => notifier.setQty(line.variantId, qty - 1),
       onInc: () => notifier.setQty(line.variantId, qty + 1),
@@ -360,58 +410,46 @@ class _CartControl extends ConsumerWidget {
   }
 }
 
-/// In-stock / out-of-stock pill used when a store hides prices (catalog mode).
-class StockBadge extends StatelessWidget {
-  final bool inStock;
-  const StockBadge({super.key, required this.inStock});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = inStock
-        ? context.status.success
-        : Theme.of(context).colorScheme.onSurfaceVariant;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          inStock ? Icons.check_circle : Icons.remove_circle_outline,
-          size: 15,
-          color: color,
-        ),
-        const SizedBox(width: 4),
-        Flexible(
-          child: Text(
-            inStock ? 'In stock' : 'Out of stock',
-            style: TextStyle(
-              color: color,
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _Stepper extends StatelessWidget {
+/// The amber − qty + pill: the one quantity control of the storefront, on the
+/// shop's cards and the cart's lines alike. Its buttons are named *Remove one*
+/// and *Add one* (their hover tooltips too) and the count is announced as it
+/// changes.
+///
+/// Given [onRemove], the minus becomes a bin at one — *Remove from cart* —
+/// so taking the last one off says what it does. The cart's lines use that;
+/// the shop's cards step down to the add button instead.
+class QuantityStepper extends StatelessWidget {
   final int qty;
   final VoidCallback onDec;
   final VoidCallback onInc;
-  const _Stepper({required this.qty, required this.onDec, required this.onInc});
+
+  /// Takes the line out; shown in place of the minus at one.
+  final VoidCallback? onRemove;
+
+  const QuantityStepper({
+    super.key,
+    required this.qty,
+    required this.onDec,
+    required this.onInc,
+    this.onRemove,
+  });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final remove = onRemove;
     return Container(
       decoration: BoxDecoration(
         color: cs.primaryContainer,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: AppRadius.pill,
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _btn(context, Icons.remove, onDec, 'Remove one'),
+          if (remove != null && qty <= 1)
+            _btn(context, Icons.delete_outline, remove, 'Remove from cart')
+          else
+            _btn(context, Icons.remove, onDec, 'Remove one'),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
             // Its own node: a live region merged into the card would re-read the whole card on every step.
@@ -436,7 +474,8 @@ class _Stepper extends StatelessWidget {
   }
 
   // An icon alone names nothing to a screen reader; the label does. 30 px across, past WCAG 2.2's
-  // 24 px minimum target (2.5.8).
+  // 24 px minimum target (2.5.8). The tooltip is for a mouse pointer only: the label already names
+  // the button, and a second name would be read out twice.
   Widget _btn(
     BuildContext context,
     IconData icon,
@@ -447,12 +486,16 @@ class _Stepper extends StatelessWidget {
     return Semantics(
       button: true,
       label: label,
-      child: InkWell(
-        onTap: onTap,
-        customBorder: const CircleBorder(),
-        child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: Icon(icon, size: 18, color: cs.onPrimaryContainer),
+      child: Tooltip(
+        message: label,
+        excludeFromSemantics: true,
+        child: InkWell(
+          onTap: onTap,
+          customBorder: const CircleBorder(),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Icon(icon, size: 18, color: cs.onPrimaryContainer),
+          ),
         ),
       ),
     );

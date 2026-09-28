@@ -201,6 +201,7 @@ spec:
     - from:
         - podSelector: { matchLabels: { app: pgbouncer } }
         - podSelector: { matchLabels: { app: postgres-exporter } }
+        - podSelector: { matchLabels: { app: storeql-backup } } # pg_dump and pg_basebackup (16-backup.yaml)
       ports:
         - { protocol: TCP, port: 5432 }
 ---
@@ -341,3 +342,18 @@ spec:
         - podSelector: { matchLabels: { app: gateway } }
       ports:
         - { protocol: TCP, port: 8080 }
+---
+# The backup job (16-backup.yaml) talks to Postgres and to nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backup
+  namespace: storeql
+spec:
+  podSelector: { matchLabels: { app: storeql-backup } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: postgres } }
+      ports:
+        - { protocol: TCP, port: 5432 }

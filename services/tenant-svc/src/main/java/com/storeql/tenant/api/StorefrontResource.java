@@ -2,6 +2,7 @@ package com.storeql.tenant.api;
 
 import com.storeql.ids.Ids;
 import com.storeql.tenant.domain.Domain.Store;
+import com.storeql.tenant.domain.Domain.Tenant;
 import com.storeql.tenant.dto.Dtos.StorefrontConfigResponse;
 import com.storeql.tenant.service.TenantService;
 import com.storeql.web.ApiException;
@@ -69,7 +70,7 @@ public class StorefrontResource {
       throw new ApiException(400, "INVALID_STORE", "store must be a UUID", java.util.List.of(), e);
     }
     Store s = service.getStore(tenantId, storeId);
-    return ApiResponse.ok(toStorefrontConfig(s, service.getTenant(tenantId).currency()));
+    return ApiResponse.ok(toStorefrontConfig(s, service.getTenant(tenantId)));
   }
 
   /**
@@ -125,20 +126,22 @@ public class StorefrontResource {
   @Path("/stores")
   public ApiResponse<List<StorefrontConfigResponse>> stores() {
     UUID tenantId = ctx.requireTenantId();
-    String currency = service.getTenant(tenantId).currency();
+    Tenant tenant = service.getTenant(tenantId);
     List<StorefrontConfigResponse> items =
         service.listStores(tenantId).stream()
             .filter(s -> "ACTIVE".equalsIgnoreCase(s.status()))
-            .map(s -> toStorefrontConfig(s, currency))
+            .map(s -> toStorefrontConfig(s, tenant))
             .toList();
     return ApiResponse.ok(items);
   }
 
   /**
    * A store's public configuration, with the deposit return scheme in force where it trades, in the
-   * business's currency (09.16): what a shopper is told a drink's deposit will be.
+   * business's currency (09.16): what a shopper is told a drink's deposit will be. Named for the
+   * business it belongs to — the tenant whose storefront is asked, which the caller passes.
    */
-  private StorefrontConfigResponse toStorefrontConfig(Store s, String currency) {
+  private StorefrontConfigResponse toStorefrontConfig(Store s, Tenant tenant) {
+    String currency = tenant.currency();
     java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneOffset.UTC);
     var scheme =
         s.country() == null
@@ -155,6 +158,10 @@ public class StorefrontResource {
         s.country(),
         s.pincode(),
         null,
-        scheme.map(d -> com.storeql.tenant.mapper.Mappers.toDepositScheme(d, today)).orElse(null));
+        scheme.map(d -> com.storeql.tenant.mapper.Mappers.toDepositScheme(d, today)).orElse(null),
+        s.type(),
+        !Store.TYPE_DARK_STORE.equals(s.type()),
+        tenant.businessName(),
+        s.tillPhone());
   }
 }

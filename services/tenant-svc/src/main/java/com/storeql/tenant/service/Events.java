@@ -3,7 +3,11 @@ package com.storeql.tenant.service;
 import static com.storeql.events.EventPayload.esc;
 
 import com.storeql.ids.Ids;
+import com.storeql.tenant.domain.Domain;
+import com.storeql.tenant.domain.Subscriptions.Invoice;
+import com.storeql.tenant.domain.Subscriptions.Subscription;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.UUID;
 
 /**
@@ -19,9 +23,27 @@ final class Events {
 
   static String tenantCreated(
       UUID tenantId, UUID ownerUserId, String name, String country, String currency) {
+    return tenantCreated(
+        tenantId, ownerUserId, name, country, currency, Domain.Tenant.MODE_LIVE, null);
+  }
+
+  /**
+   * A business made, saying what kind (22.8): {@code mode} is {@code LIVE} or {@code SANDBOX}, and
+   * a sandbox names the live business it stands in for as {@code sandboxOf}. iam-svc binds the
+   * owner of a live business and, for a sandbox, keeps the mapping instead — the owner already owns
+   * the live one.
+   */
+  static String tenantCreated(
+      UUID tenantId,
+      UUID ownerUserId,
+      String name,
+      String country,
+      String currency,
+      String mode,
+      UUID sandboxOf) {
     return """
                 {"eventId":"%s","eventType":"TenantCreated","tenantId":"%s","aggregateId":"%s","occurredAt":"%s",\
-                "ownerUserId":"%s","name":"%s","country":"%s","currency":"%s"}"""
+                "ownerUserId":"%s","name":"%s","country":"%s","currency":"%s","mode":"%s","sandboxOf":%s}"""
         .formatted(
             Ids.newId(),
             tenantId,
@@ -30,7 +52,9 @@ final class Events {
             ownerUserId,
             esc(name),
             esc(country),
-            esc(currency));
+            esc(currency),
+            esc(mode),
+            sandboxOf == null ? "null" : "\"" + sandboxOf + "\"");
   }
 
   /**
@@ -176,11 +200,15 @@ final class Events {
         .formatted(Ids.newId(), tenantId, tenantId, Instant.now(), esc(status));
   }
 
-  static String storeStatusChanged(UUID tenantId, UUID storeId, String status) {
+  /**
+   * A store's status, and its type beside it (STORE, WAREHOUSE or DARK_STORE): iam-svc keeps the
+   * type so no till opens at a dark store (ship-from-store and dark-store picking).
+   */
+  static String storeStatusChanged(UUID tenantId, UUID storeId, String status, String type) {
     return """
                 {"eventId":"%s","eventType":"StoreStatusChanged","tenantId":"%s","aggregateId":"%s","occurredAt":"%s",\
-                "storeId":"%s","status":"%s"}"""
-        .formatted(Ids.newId(), tenantId, storeId, Instant.now(), storeId, esc(status));
+                "storeId":"%s","status":"%s","type":"%s"}"""
+        .formatted(Ids.newId(), tenantId, storeId, Instant.now(), storeId, esc(status), esc(type));
   }
 
   static String userRoleGranted(UUID tenantId, UUID userId, String role) {
@@ -257,5 +285,90 @@ final class Events {
             esc(priority),
             requiresAck,
             wake);
+  }
+
+  /**
+   * A word to a business about its trial (21.13): that it ends on a day and what the plan will then
+   * cost, or that it has ended and here is the first invoice with the link that pays it.
+   *
+   * @param stage {@code ENDING} or {@code ENDED}
+   * @param invoice the first invoice, on {@code ENDED}; null before
+   * @param payUrl the link that pays it, on {@code ENDED}; null before
+   */
+  static String trialNoticeIssued(
+      Subscription s,
+      String stage,
+      String planName,
+      String recipient,
+      String platformName,
+      Invoice invoice,
+      String payUrl) {
+    return """
+                {"eventId":"%s","eventType":"TrialNoticeIssued","tenantId":"%s","aggregateId":"%s","occurredAt":"%s",\
+                "subscriptionId":"%s","stage":"%s","plan":"%s","trialEnd":%s,"price":%s,"currency":"%s",\
+                "interval":"%s","recipient":"%s","platform":"%s","invoiceId":%s,"invoiceNumber":%s,\
+                "amountDue":%s,"dueDate":%s,"payUrl":%s}"""
+        .formatted(
+            Ids.newId(),
+            s.tenantId(),
+            s.id(),
+            Instant.now(),
+            s.id(),
+            esc(stage),
+            esc(planName),
+            s.trialEnd() == null ? "null" : "\"" + s.trialEnd() + "\"",
+            s.priceAmount().toPlainString(),
+            esc(s.currency()),
+            esc(s.billingInterval()),
+            esc(recipient),
+            esc(platformName),
+            invoice == null ? "null" : "\"" + invoice.id() + "\"",
+            invoice == null ? "null" : "\"" + esc(invoice.number()) + "\"",
+            invoice == null
+                ? "null"
+                : invoice.totalAmount().subtract(invoice.amountPaid()).toPlainString(),
+            invoice == null ? "null" : "\"" + invoice.dueDate() + "\"",
+            payUrl == null ? "null" : "\"" + esc(payUrl) + "\"");
+  }
+
+  /**
+   * A dunning notice to be written and sent (21.12): the invoice, what is left on it, the day it
+   * was due, the step this notice is, the day the service is interrupted if it stays unpaid, and
+   * the link that pays it without a sign-in.
+   *
+   * <p>The address and the link travel in this event and are held nowhere else in the clear: this
+   * service keeps the link only as a hash, and notification-svc is the one reader of the address.
+   *
+   * @param suspendOn the day the service is interrupted unless paid, or null once it has been
+   */
+  static String dunningNoticeIssued(
+      UUID tenantId,
+      Invoice invoice,
+      String step,
+      int daysOverdue,
+      String recipient,
+      String payUrl,
+      String platformName,
+      LocalDate suspendOn) {
+    return """
+                {"eventId":"%s","eventType":"DunningNoticeIssued","tenantId":"%s","aggregateId":"%s","occurredAt":"%s",\
+                "invoiceId":"%s","invoiceNumber":"%s","step":"%s","daysOverdue":%d,"dueDate":"%s",\
+                "currency":"%s","amountDue":%s,"recipient":"%s","payUrl":"%s","platform":"%s","suspendOn":%s}"""
+        .formatted(
+            Ids.newId(),
+            tenantId,
+            invoice.id(),
+            Instant.now(),
+            invoice.id(),
+            esc(invoice.number()),
+            esc(step),
+            daysOverdue,
+            invoice.dueDate(),
+            esc(invoice.currency()),
+            invoice.totalAmount().subtract(invoice.amountPaid()).toPlainString(),
+            esc(recipient),
+            esc(payUrl),
+            esc(platformName),
+            suspendOn == null ? "null" : "\"" + suspendOn + "\"");
   }
 }

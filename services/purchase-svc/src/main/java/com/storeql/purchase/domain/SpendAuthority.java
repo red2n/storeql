@@ -12,12 +12,14 @@ import java.util.Map;
  * {@code /purchase-orders} is not under {@code /admin/}, so the authorisation filter's default-deny
  * asked only for "some staff role", and nothing anywhere compared the figure to the person.
  *
- * <p><b>The ceiling is per currency, and that is not a detail.</b> There is no FX handling anywhere
- * in StoreQL, so there is nothing to convert with — a ceiling of 5,000 is roughly £25 against the
- * yen and roughly £13,000 against the dinar. Applying one currency's ceiling to another does not
- * degrade gracefully; it either blocks every order from an overseas supplier or grants a hundred
- * times the intended authority, and which one happens depends on nothing but where the tenant buys.
- * That is SJ-D18's inverted sign with money attached.
+ * <p><b>The ceiling is per currency, and that is not a detail.</b> A ceiling of 5,000 is roughly
+ * £25 against the yen and roughly £13,000 against the dinar, so one currency's ceiling is never
+ * applied to another's figure as if they were the same. Since 03.x a business may keep its own
+ * exchange rates, and an order in a currency with no ceiling is measured at the translated figure
+ * in the home currency — the rate the business set, never one the platform guessed. Applying one
+ * currency's ceiling to another does not degrade gracefully; it either blocks every order from an
+ * overseas supplier or grants a hundred times the intended authority, and which one happens depends
+ * on nothing but where the tenant buys. That is SJ-D18's inverted sign with money attached.
  *
  * <p><b>Measured on the net.</b> VAT is recoverable for a VAT-registered business, so it is not
  * spend — a £5,000 authority means five thousand pounds of goods, not £4,166 of goods and £834 the
@@ -37,7 +39,72 @@ import java.util.Map;
  *     authorised
  */
 public record SpendAuthority(
-    boolean authorised, String role, BigDecimal ceiling, boolean unlimited, String reason) {
+    boolean authorised,
+    String role,
+    BigDecimal ceiling,
+    boolean unlimited,
+    String reason,
+    Translation translation) {
+
+  /**
+   * An order's net translated into the home currency at the business's rate (03.x): what a ceiling
+   * declared in the home currency is measured against when the order's own currency has none.
+   */
+  public record Translation(BigDecimal homeAmount, String homeCurrency, BigDecimal rate) {}
+
+  /** A decision made in the order's own currency, with nothing translated. */
+  public SpendAuthority(
+      boolean authorised, String role, BigDecimal ceiling, boolean unlimited, String reason) {
+    this(authorised, role, ceiling, unlimited, reason, null);
+  }
+
+  /**
+   * As {@link #decide(BigDecimal, String, Collection, Map)}, but when the order's currency has no
+   * ceiling of its own and a translation into the home currency is at hand, the decision is made in
+   * the home currency at the translated figure — and says so. Without a translation, an
+   * unconfigured currency still fails closed: a rate the business has not set is not a rate.
+   *
+   * @param translation the net in the home currency at the business's rate, or null
+   */
+  public static SpendAuthority decide(
+      BigDecimal totalNet,
+      String currency,
+      Collection<String> roles,
+      Map<String, Map<String, BigDecimal>> limits,
+      Translation translation) {
+    if (limits == null || limits.isEmpty() || translation == null) {
+      return decide(totalNet, currency, roles, limits);
+    }
+    String cur = currency == null ? "" : currency.trim().toUpperCase(Locale.ROOT);
+    Map<String, BigDecimal> own = limits.get(cur);
+    Map<String, BigDecimal> home = limits.get(translation.homeCurrency());
+    if ((own != null && !own.isEmpty()) || home == null || home.isEmpty()) {
+      return decide(totalNet, currency, roles, limits);
+    }
+    SpendAuthority inHome =
+        decide(translation.homeAmount(), translation.homeCurrency(), roles, limits);
+    String said =
+        cur
+            + " "
+            + (totalNet == null ? "?" : totalNet.toPlainString())
+            + " translated to "
+            + translation.homeCurrency()
+            + " "
+            + translation.homeAmount().toPlainString()
+            + " at "
+            + translation.rate().stripTrailingZeros().toPlainString()
+            + " "
+            + translation.homeCurrency()
+            + " per "
+            + cur;
+    return new SpendAuthority(
+        inHome.authorised(),
+        inHome.role(),
+        inHome.ceiling(),
+        inHome.unlimited(),
+        inHome.reason() == null ? null : inHome.reason() + " (" + said + ")",
+        translation);
+  }
 
   /**
    * Decides whether {@code totalNet} is within the caller's own authority.

@@ -233,6 +233,20 @@ public class BillingRepository extends BaseJdbcRepository {
         .findFirst();
   }
 
+  private static final String TRIALING_ENDING_BY =
+      SUBSCRIPTION_COLUMNS
+          + " WHERE status = 'TRIALING' AND trial_end IS NOT NULL AND trial_end <= ?"
+          + " ORDER BY trial_end, id";
+
+  /** Every trial that ends on or before a day, soonest first (21.13). */
+  public List<Subscription> trialingEndingBy(LocalDate day) {
+    return query(
+        TRIALING_ENDING_BY,
+        ps -> ps.setObject(1, day),
+        BillingRepository::readSubscription,
+        "trials ending by");
+  }
+
   public List<Subscription> due(LocalDate asOf) {
     return query(
         DUE, ps -> ps.setObject(1, asOf), BillingRepository::readSubscription, "subscriptions due");

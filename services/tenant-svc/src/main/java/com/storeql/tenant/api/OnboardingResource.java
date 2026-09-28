@@ -61,7 +61,7 @@ public class OnboardingResource {
   public Response onboard(OnboardRequest req) {
     Validations.validate(req);
     UUID ownerUserId = ctx.requireUserId();
-    var result = service.onboard(ownerUserId, req);
+    var result = service.onboard(ownerUserId, ctx.email(), req);
     var body =
         new OnboardResponse(Mappers.toTenant(result.tenant()), Mappers.toStore(result.store()));
     return Response.status(Response.Status.CREATED)
@@ -89,7 +89,7 @@ public class OnboardingResource {
   public Response createTenant(CreateTenantRequest req) {
     Validations.validate(req);
     UUID ownerUserId = ctx.requireUserId();
-    var tenant = service.createTenant(ownerUserId, req);
+    var tenant = service.createTenant(ownerUserId, ctx.email(), req);
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toTenant(tenant), ApiResponse.Meta.of(ctx.requestId())))
         .build();

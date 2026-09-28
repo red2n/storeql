@@ -42,6 +42,7 @@ import com.storeql.order.dto.Dtos.SpecialOrderResponse;
 import com.storeql.order.dto.Dtos.VoidResponse;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /** Entity → DTO mappers. Entities never cross the HTTP boundary. */
 public final class Mappers {
@@ -65,7 +66,10 @@ public final class Mappers {
         str(i.weighingInstrumentId()),
         i.fulfilledQty(),
         i.vatAmount(),
-        str(i.markdownId()));
+        str(i.markdownId()),
+        i.shortQty(),
+        i.remainingQty(),
+        str(i.substitutesItemId()));
   }
 
   /**
@@ -188,6 +192,33 @@ public final class Mappers {
    */
   public static OrderResponse toDto(
       Order o, List<OrderItem> items, List<com.storeql.order.domain.Domain.OrderDeposit> deposits) {
+    return toDto(o, items, deposits, null);
+  }
+
+  /**
+   * Converts an order with the checkout it is a part of (order orchestration).
+   *
+   * @param group the split checkout, or null for an order never split
+   */
+  public static OrderResponse toDto(
+      Order o,
+      List<OrderItem> items,
+      List<com.storeql.order.domain.Domain.OrderDeposit> deposits,
+      com.storeql.order.domain.OrderGroup group) {
+    return toDto(o, items, deposits, group, null);
+  }
+
+  /**
+   * Converts an order with its handover (ship-from-store and dark-store picking).
+   *
+   * @param handover how the picked order was handed over, or null until it is
+   */
+  public static OrderResponse toDto(
+      Order o,
+      List<OrderItem> items,
+      List<com.storeql.order.domain.Domain.OrderDeposit> deposits,
+      com.storeql.order.domain.OrderGroup group,
+      com.storeql.order.domain.Handover handover) {
     return new OrderResponse(
         str(o.id()),
         str(o.storeId()),
@@ -222,7 +253,96 @@ public final class Mappers {
                 .map(com.storeql.order.domain.Domain.OrderDeposit::amount)
                 .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add),
         deposits == null ? null : deposits.stream().map(Mappers::toDto).toList(),
-        str(o.sellerUserId()));
+        str(o.sellerUserId()),
+        group == null ? null : toDto(group),
+        handover == null ? null : toDto(handover),
+        o.allowSubstitutions(),
+        slotOf(o.slotStartsAt(), o.slotEndsAt(), o.slotTimeZone()),
+        o.contactPhoneE164());
+  }
+
+  /**
+   * The delivery or collection window an order holds (delivery and collection slots), with the
+   * date/startTime/endTime already computed in the store's own zone — {@code null} when the order
+   * carries no window (a till sale, or a store with none), never a partly-filled shape.
+   */
+  static Dtos.SlotResponse slotOf(Instant startsAt, Instant endsAt, String timeZone) {
+    if (startsAt == null || endsAt == null || timeZone == null) {
+      return null;
+    }
+    java.time.ZoneId zone = java.time.ZoneId.of(timeZone);
+    java.time.ZonedDateTime localStart = startsAt.atZone(zone);
+    java.time.ZonedDateTime localEnd = endsAt.atZone(zone);
+    return new Dtos.SlotResponse(
+        startsAt.toString(),
+        endsAt.toString(),
+        timeZone,
+        localStart.toLocalDate().toString(),
+        localStart.toLocalTime().toString(),
+        localEnd.toLocalTime().toString());
+  }
+
+  /** A stand-in suggested for a line (substitutions for out-of-stock online lines). */
+  public static com.storeql.order.dto.Dtos.SubstituteSuggestionResponse toDto(
+      com.storeql.order.service.OrderService.SubstituteSuggestion s) {
+    return new com.storeql.order.dto.Dtos.SubstituteSuggestionResponse(
+        str(s.variantId()), s.productName(), s.sku(), s.available());
+  }
+
+  /** An order the store still owes something on, with the lines it owes. */
+  public static com.storeql.order.dto.Dtos.OwingOrderResponse toDto(
+      com.storeql.order.service.OrderService.OwingOrder o) {
+    return new com.storeql.order.dto.Dtos.OwingOrderResponse(
+        str(o.order().id()),
+        o.order().status(),
+        o.order().fulfilmentType(),
+        o.order().allowSubstitutions(),
+        ts(o.order().createdAt()),
+        o.lines().stream()
+            .map(
+                l ->
+                    new com.storeql.order.dto.Dtos.OwingLineResponse(
+                        str(l.variantId()),
+                        l.qty(),
+                        l.fulfilledQty(),
+                        l.shortQty(),
+                        l.remainingQty()))
+            .toList());
+  }
+
+  /** Converts a handover (ship-from-store and dark-store picking). */
+  public static com.storeql.order.dto.Dtos.HandoverResponse toDto(
+      com.storeql.order.domain.Handover h) {
+    return new com.storeql.order.dto.Dtos.HandoverResponse(
+        h.kind(),
+        h.carrier(),
+        h.reference(),
+        h.parcels(),
+        h.collectedBy(),
+        ts(h.handedAt()),
+        str(h.handedBy()));
+  }
+
+  /** Converts a split checkout (order orchestration). */
+  public static com.storeql.order.dto.Dtos.OrderGroupResponse toDto(
+      com.storeql.order.domain.OrderGroup g) {
+    return new com.storeql.order.dto.Dtos.OrderGroupResponse(
+        str(g.id()),
+        str(g.loginId()),
+        g.total(),
+        g.currency(),
+        ts(g.createdAt()),
+        g.parts().stream()
+            .map(
+                p ->
+                    new com.storeql.order.dto.Dtos.OrderPartResponse(
+                        str(p.orderId()),
+                        str(p.storeId()),
+                        p.status(),
+                        p.total(),
+                        p.units(),
+                        slotOf(p.slotStartsAt(), p.slotEndsAt(), p.slotTimeZone())))
+            .toList());
   }
 
   /** Converts one deposit line (09.16). */
@@ -270,6 +390,25 @@ public final class Mappers {
    * @return its API representation
    */
   public static OrderSummaryResponse toSummary(Order o) {
+    return toSummary(o, null);
+  }
+
+  /**
+   * Converts an order to its list form, naming the split checkout it is a part of.
+   *
+   * @param groupId the checkout, or null for an order never split
+   */
+  public static OrderSummaryResponse toSummary(Order o, java.util.UUID groupId) {
+    return toSummary(o, groupId, null);
+  }
+
+  /**
+   * Converts an order to its list form with its handover (ship-from-store).
+   *
+   * @param handover how the picked order was handed over, or null until it is
+   */
+  public static OrderSummaryResponse toSummary(
+      Order o, java.util.UUID groupId, com.storeql.order.domain.Handover handover) {
     return new OrderSummaryResponse(
         str(o.id()),
         str(o.storeId()),
@@ -284,7 +423,11 @@ public final class Mappers {
         o.currency(),
         ts(o.createdAt()),
         ts(o.updatedAt()),
-        o.paymentMethod());
+        o.paymentMethod(),
+        str(groupId),
+        handover == null ? null : toDto(handover),
+        o.allowSubstitutions(),
+        slotOf(o.slotStartsAt(), o.slotEndsAt(), o.slotTimeZone()));
   }
 
   /**
@@ -618,5 +761,62 @@ public final class Mappers {
       com.storeql.order.domain.Domain.AgeVerificationSummary s) {
     return new com.storeql.order.dto.Dtos.AgeVerificationSummaryResponse(
         s.total(), s.passed(), s.refused(), s.refusedByReason(), s.byCategory());
+  }
+
+  // ── Delivery and collection slots ─────────────────────────────────────────
+
+  /** Converts a stored window to its wire form. */
+  public static com.storeql.order.dto.Dtos.FulfilmentWindowResponse toDto(
+      com.storeql.order.domain.Windows.WindowRecord r) {
+    com.storeql.order.domain.Windows.Window w = r.window();
+    return new com.storeql.order.dto.Dtos.FulfilmentWindowResponse(
+        str(w.id()),
+        str(w.storeId()),
+        w.fulfilmentType(),
+        w.weekday(),
+        w.startTime().toString(),
+        w.endTime().toString(),
+        w.capacity(),
+        w.cutoffMinutes(),
+        w.active(),
+        r.timeZone(),
+        ts(r.updatedAt()),
+        str(r.updatedBy()));
+  }
+
+  /**
+   * Converts the storefront's read of a store's next seven days to its wire form: each occurrence's
+   * server-computed local times, and how many places it has left.
+   */
+  public static com.storeql.order.dto.Dtos.FulfilmentSlotsResponse toDto(
+      com.storeql.order.service.FulfilmentWindowService.SlotsView v) {
+    List<com.storeql.order.dto.Dtos.FulfilmentSlotDayResponse> days =
+        v.days().stream()
+            .map(
+                day -> {
+                  List<com.storeql.order.dto.Dtos.FulfilmentSlotResponse> slots =
+                      day.occurrences().stream().map(occ -> toDto(occ, v)).toList();
+                  return new com.storeql.order.dto.Dtos.FulfilmentSlotDayResponse(
+                      day.date().toString(), slots);
+                })
+            .toList();
+    return new com.storeql.order.dto.Dtos.FulfilmentSlotsResponse(
+        str(v.storeId()), v.fulfilmentType(), v.timeZone(), v.offered(), days);
+  }
+
+  private static com.storeql.order.dto.Dtos.FulfilmentSlotResponse toDto(
+      com.storeql.order.domain.Windows.Occurrence occ,
+      com.storeql.order.service.FulfilmentWindowService.SlotsView v) {
+    long taken = v.taken().getOrDefault(occ.windowId(), Map.of()).getOrDefault(occ.startsAt(), 0L);
+    int capacity = v.capacityByWindow().getOrDefault(occ.windowId(), occ.capacity());
+    int left = (int) Math.max(0, capacity - taken);
+    return new com.storeql.order.dto.Dtos.FulfilmentSlotResponse(
+        str(occ.windowId()),
+        ts(occ.startsAt()),
+        ts(occ.endsAt()),
+        occ.localStartTime().toString(),
+        occ.localEndTime().toString(),
+        left,
+        taken >= capacity);
   }
 }

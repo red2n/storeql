@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../storefront/storefront_providers.dart' show DepositScheme;
@@ -151,7 +152,7 @@ class _ContainerReturnDialogState extends ConsumerState<ContainerReturnDialog> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    '${scheme.currency} ${scheme.depositEach.toStringAsFixed(2)} '
+                    '${AppFormat.money(scheme.depositEach, currencyCode: scheme.currency)} '
                     'back on each container of ${scheme.inWords}.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
@@ -211,7 +212,7 @@ class _ContainerReturnDialogState extends ConsumerState<ContainerReturnDialog> {
                   const SizedBox(height: 8),
                   Text(
                     key: const Key('return-amount'),
-                    'Pay back ${scheme.currency} ${amount.toStringAsFixed(2)}',
+                    'Pay back ${AppFormat.money(amount, currencyCode: scheme.currency)}',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   if (_error != null) ...[

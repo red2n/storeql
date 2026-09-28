@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/network/api_error.dart';
+import '../../core/format.dart';
 import '../../core/spacing.dart';
+import '../../shared/widgets/status_badge.dart';
 import '../../shared/util/short_ref.dart';
 import 'markdown_providers.dart';
 import 'providers/admin_providers.dart';
@@ -21,7 +23,19 @@ const _reasons = {
 };
 
 String _money(String? currency, double? v) =>
-    v == null ? '—' : '${currency ?? ''} ${v.toStringAsFixed(2)}'.trim();
+    v == null ? '—' : AppFormat.money(v, currencyCode: currency);
+
+/// A batch's expiry as a date (`14 Sept 2026`), or '—' without one.
+String _expiry(String? iso) =>
+    iso == null || iso.isEmpty ? '—' : AppFormat.date(iso);
+
+/// A sticker's status in words and tone.
+(String, StatusTone) _stickerStatus(String status) => switch (status) {
+      'ACTIVE' => ('Active', StatusTone.success),
+      'EXPIRED' => ('Expired', StatusTone.neutral),
+      'CANCELLED' => ('Taken off', StatusTone.neutral),
+      _ => (humanizeCode(status), StatusTone.neutral),
+    };
 
 String _fmtQty(double q) =>
     q == q.roundToDouble() ? q.toInt().toString() : q.toStringAsFixed(3);
@@ -53,10 +67,10 @@ class _InventoryMarkdownTabState extends ConsumerState<InventoryMarkdownTab> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(
-            AppSpacing.xl,
+          padding: EdgeInsetsDirectional.fromSTEB(
+            context.pageGutter,
             AppSpacing.lg,
-            AppSpacing.xl,
+            context.pageGutter,
             0,
           ),
           child: Wrap(
@@ -140,10 +154,10 @@ class _InventoryMarkdownTabState extends ConsumerState<InventoryMarkdownTab> {
                   ),
                 )
               : ListView(
-                  padding: const EdgeInsets.fromLTRB(
-                    AppSpacing.xl,
+                  padding: EdgeInsetsDirectional.fromSTEB(
+                    context.pageGutter,
                     AppSpacing.lg,
-                    AppSpacing.xl,
+                    context.pageGutter,
                     AppSpacing.xl,
                   ),
                   children: [
@@ -158,13 +172,18 @@ class _InventoryMarkdownTabState extends ConsumerState<InventoryMarkdownTab> {
                       onChanged: _refresh,
                     ),
                     const SizedBox(height: AppSpacing.xl),
-                    Row(
+                    // The heading, then the filter beside it where there is
+                    // room and under it on a phone.
+                    Wrap(
+                      spacing: AppSpacing.md,
+                      runSpacing: AppSpacing.sm,
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         Text(
                           'Stickered',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
-                        const Spacer(),
                         SegmentedButton<String>(
                           showSelectedIcon: false,
                           style: const ButtonStyle(
@@ -275,30 +294,22 @@ class _PlanList extends ConsumerWidget {
                     ),
                   ),
                   title: Text(
-                    '${names?[s.variantId]?.productName.isNotEmpty == true ? names![s.variantId]!.productName : shortRef(s.variantId)}'
+                    '${names?[s.variantId]?.productName.isNotEmpty == true ? names![s.variantId]!.productName : '…${shortRef(s.variantId)}'}'
                     ' · batch ${s.batchNo ?? '—'}',
                   ),
-                  subtitle: Text(_planLine(s)),
-                  trailing: s.existing != null
-                      ? Chip(
-                          avatar: const Icon(Icons.label_outline, size: 16),
-                          label: Text(
-                            '${s.existing!.labelCode} · ${_money(s.existing!.currency, s.existing!.markdownPrice)}',
-                          ),
+                  // On a phone the sticker (or the way to make one) goes
+                  // under the line: at the end it would take the whole tile.
+                  subtitle: context.isCompact
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(_planLine(s)),
+                            const SizedBox(height: AppSpacing.xs),
+                            _planAction(context, s),
+                          ],
                         )
-                      : FilledButton.tonal(
-                          key: Key('markdown-sticker-${s.batchId}'),
-                          onPressed: s.currentPrice == null
-                              ? null
-                              : () => showDialog(
-                                  context: context,
-                                  builder: (_) => _StickerDialog(
-                                    storeId: storeId,
-                                    suggestion: s,
-                                  ),
-                                ).then((_) => onChanged()),
-                          child: const Text('Sticker'),
-                        ),
+                      : Text(_planLine(s)),
+                  trailing: context.isCompact ? null : _planAction(context, s),
                 ),
               ),
           ],
@@ -306,6 +317,29 @@ class _PlanList extends ConsumerWidget {
       },
     );
   }
+
+  /// The sticker already on a batch, or the button that makes one.
+  Widget _planAction(BuildContext context, MarkdownSuggestion s) =>
+      s.existing != null
+          ? Chip(
+              avatar: const Icon(Icons.label_outline, size: 16),
+              label: Text(
+                '${s.existing!.labelCode} · ${_money(s.existing!.currency, s.existing!.markdownPrice)}',
+              ),
+            )
+          : FilledButton.tonal(
+              key: Key('markdown-sticker-${s.batchId}'),
+              onPressed: s.currentPrice == null
+                  ? null
+                  : () => showDialog(
+                      context: context,
+                      builder: (_) => _StickerDialog(
+                        storeId: storeId,
+                        suggestion: s,
+                      ),
+                    ).then((_) => onChanged()),
+              child: const Text('Sticker'),
+            );
 
   static String _sourceLabel(String source) => switch (source) {
     'STORE' => "this store's own",
@@ -315,7 +349,7 @@ class _PlanList extends ConsumerWidget {
 
   static String _planLine(MarkdownSuggestion s) {
     final b = StringBuffer();
-    b.write('expires ${s.expiryDate ?? '—'} · ${_fmtQty(s.remainingQty)} left');
+    b.write('expires ${_expiry(s.expiryDate)} · ${_fmtQty(s.remainingQty)} left');
     if (s.currentPrice == null) {
       b.write(' · no POS price to reduce from');
     } else if (s.suggestedPrice == null) {
@@ -382,26 +416,30 @@ class _MarkdownList extends ConsumerWidget {
                     _ => Icons.label_off_outlined,
                   }, color: m.status == 'ACTIVE' ? cs.primary : cs.outline),
                   title: Text(
-                    '${m.labelCode} · ${names?[m.variantId]?.productName.isNotEmpty == true ? names![m.variantId]!.productName : shortRef(m.variantId)}',
+                    '${m.labelCode} · ${names?[m.variantId]?.productName.isNotEmpty == true ? names![m.variantId]!.productName : '…${shortRef(m.variantId)}'}',
                   ),
-                  subtitle: Text(
-                    '${_money(m.currency, m.markdownPrice)} (was ${m.originalPrice.toStringAsFixed(2)}, ${m.percentOff.toStringAsFixed(0)} % off)'
-                    ' · ${_fmtQty(m.remainingQty)} of ${_fmtQty(m.qty)} left'
-                    ' · expires ${m.expiryDate} · ${_reasons[m.reason] ?? m.reason}'
-                    '${m.batchNo != null ? ' · batch ${m.batchNo}' : ''}'
-                    '${m.cancelReason != null ? ' · taken off: ${m.cancelReason}' : ''}',
-                  ),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
+                  // The status as a badge under the details, and one action
+                  // at the end, so the label keeps the width on a phone.
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Chip(
-                        label: Text(
-                          m.status == 'CANCELLED' ? 'TAKEN OFF' : m.status,
-                        ),
-                        visualDensity: VisualDensity.compact,
+                      Text(
+                        '${_money(m.currency, m.markdownPrice)} (was ${_money(m.currency, m.originalPrice)}, ${m.percentOff.toStringAsFixed(0)} % off)'
+                        ' · ${_fmtQty(m.remainingQty)} of ${_fmtQty(m.qty)} left'
+                        ' · expires ${_expiry(m.expiryDate)} · ${_reasons[m.reason] ?? m.reason}'
+                        '${m.batchNo != null ? ' · batch ${m.batchNo}' : ''}'
+                        '${m.cancelReason != null ? ' · taken off: ${m.cancelReason}' : ''}',
                       ),
-                      if (m.status != 'CANCELLED')
-                        TextButton(
+                      const SizedBox(height: AppSpacing.xs),
+                      Builder(builder: (context) {
+                        final (words, tone) = _stickerStatus(m.status);
+                        return StatusBadge(words, tone: tone);
+                      }),
+                    ],
+                  ),
+                  trailing: m.status == 'CANCELLED'
+                      ? null
+                      : TextButton(
                           key: Key('markdown-cancel-${m.id}'),
                           onPressed: () => showDialog(
                             context: context,
@@ -409,8 +447,6 @@ class _MarkdownList extends ConsumerWidget {
                           ).then((_) => onChanged()),
                           child: const Text('Take off'),
                         ),
-                    ],
-                  ),
                 ),
               ),
           ],
@@ -529,7 +565,7 @@ class _StickerDialogState extends ConsumerState<_StickerDialog> {
             ),
             const SizedBox(height: 12),
             Text(
-              '${_money(issued.currency, issued.markdownPrice)} (was ${issued.originalPrice.toStringAsFixed(2)}, ${issued.percentOff.toStringAsFixed(0)} % off)',
+              '${_money(issued.currency, issued.markdownPrice)} (was ${_money(issued.currency, issued.originalPrice)}, ${issued.percentOff.toStringAsFixed(0)} % off)',
             ),
             Text(
               'The till reads the price from the code; no promotion applies on top.',
@@ -555,7 +591,7 @@ class _StickerDialogState extends ConsumerState<_StickerDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Batch ${s.batchNo ?? '—'} · expires ${s.expiryDate ?? '—'} (${s.daysToExpiry} days)'
+              'Batch ${s.batchNo ?? '—'} · expires ${_expiry(s.expiryDate)} (${s.daysToExpiry} days)'
               ' · ${_fmtQty(s.remainingQty)} left · now ${_money(s.currency, s.currentPrice)}',
             ),
             if (s.suggestedPrice != null)
@@ -876,7 +912,7 @@ class _LadderDialogState extends ConsumerState<_LadderDialog> {
                   label: const Text('Add step'),
                 ),
                 if (widget.storeId != null)
-                  SwitchListTile(
+                  SwitchListTile.adaptive(
                     key: const Key('ladder-for-store'),
                     contentPadding: EdgeInsets.zero,
                     title: const Text('For this store only'),

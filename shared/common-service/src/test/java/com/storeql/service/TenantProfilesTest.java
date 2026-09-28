@@ -1,6 +1,7 @@
 package com.storeql.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -117,6 +118,44 @@ class TenantProfilesTest {
     assertEquals("JP", p.country());
     assertEquals(TENANT, p.tenantId());
     assertEquals("KWD", TenantProfiles.parse(TENANT, body("KWD", "KW")).orElseThrow().currency());
+  }
+
+  @Test
+  @DisplayName(
+      "A sandbox says so in its profile; a live business, or one from before sandboxes, does not")
+  void readsWhetherTheTenantIsASandbox() {
+    var live = TenantProfiles.parse(TENANT, body("GBP", "GB")).orElseThrow();
+    assertEquals(false, live.sandbox());
+    var marked =
+        TenantProfiles.parse(
+                TENANT,
+                "{\"data\":{\"id\":\""
+                    + TENANT
+                    + "\",\"currency\":\"GBP\",\"country\":\"GB\",\"mode\":\"LIVE\"}}")
+            .orElseThrow();
+    assertEquals(false, marked.sandbox());
+    var sandbox =
+        TenantProfiles.parse(
+                TENANT,
+                "{\"data\":{\"id\":\""
+                    + TENANT
+                    + "\",\"currency\":\"GBP\",\"country\":\"GB\",\"mode\":\"SANDBOX\"}}")
+            .orElseThrow();
+    assertEquals(true, sandbox.sandbox());
+
+    // And through the reader: cached like the rest, and false — not a guess of true — when the
+    // profile cannot be read at all.
+    var answer =
+        new java.util.concurrent.atomic.AtomicReference<Optional<String>>(Optional.empty());
+    TenantProfiles p = TenantProfiles.forTest(t -> answer.get(), java.time.Clock.systemUTC());
+    assertEquals(false, p.isSandbox(TENANT));
+    answer.set(
+        Optional.of(
+            "{\"data\":{\"id\":\""
+                + TENANT
+                + "\",\"currency\":\"GBP\",\"country\":\"GB\",\"mode\":\"SANDBOX\"}}"));
+    assertEquals(true, p.isSandbox(TENANT));
+    assertEquals(false, p.isSandbox(null));
   }
 
   @Test
@@ -285,6 +324,179 @@ class TenantProfilesTest {
     clock.now = clock.now.plus(TenantProfiles.TTL);
     profiles.stores(TENANT, null);
     assertEquals(6, reads.get(), "the cache ages out");
+  }
+
+  @Test
+  @DisplayName("Each store's type is kept, upper-cased; one recorded as neither is a store")
+  void storesKnowWhetherTheyAreWarehouses() {
+    var profiles =
+        TenantProfiles.forTest(
+            id -> Optional.empty(),
+            (tenant, after) ->
+                Optional.of(
+                    storesPage(
+                        null,
+                        "{\"id\":\"" + STORE_DE + "\",\"type\":\"warehouse\"}",
+                        "{\"id\":\"" + STORE_NONE + "\",\"type\":\"STORE\"}",
+                        "{\"id\":\"" + STORE_NEW + "\"}")),
+            new Moving());
+    var stores = profiles.stores(TENANT, null);
+    assertTrue(stores.isWarehouse(STORE_DE));
+    assertFalse(stores.isWarehouse(STORE_NONE));
+    assertFalse(stores.isWarehouse(STORE_NEW), "no type recorded is a store, as tenant-svc says");
+    assertFalse(stores.isWarehouse(null));
+  }
+
+  @Test
+  @DisplayName("Each store's coordinates are kept where it records them; none is none")
+  void storesKnowWhereTheyAre() {
+    var profiles =
+        TenantProfiles.forTest(
+            id -> Optional.empty(),
+            (tenant, after) ->
+                Optional.of(
+                    storesPage(
+                        null,
+                        "{\"id\":\"" + STORE_DE + "\",\"geoLat\":53.8,\"geoLng\":-1.55}",
+                        "{\"id\":\"" + STORE_NONE + "\",\"geoLat\":null}")),
+            new Moving());
+    var stores = profiles.stores(TENANT, null);
+    assertEquals(53.8, stores.where(STORE_DE).lat(), 1e-9);
+    assertEquals(-1.55, stores.where(STORE_DE).lng(), 1e-9);
+    assertEquals(null, stores.where(STORE_NONE));
+  }
+
+  @Test
+  @DisplayName("A dark store is known as one; a shop and a warehouse are not")
+  void storesKnowWhichAreDark() {
+    var profiles =
+        TenantProfiles.forTest(
+            id -> Optional.empty(),
+            (tenant, after) ->
+                Optional.of(
+                    storesPage(
+                        null,
+                        "{\"id\":\"" + STORE_DE + "\",\"type\":\"DARK_STORE\"}",
+                        "{\"id\":\"" + STORE_NONE + "\",\"type\":\"STORE\"}")),
+            new Moving());
+    var stores = profiles.stores(TENANT, null);
+    assertTrue(stores.isDark(STORE_DE));
+    assertFalse(stores.isDark(STORE_NONE));
+    assertFalse(stores.isWarehouse(STORE_DE));
+    assertFalse(stores.isDark(null));
+  }
+
+  @Test
+  @DisplayName("Each store's time zone is kept where it records one; none or unreadable is none")
+  void storesKnowTheirTimeZone() {
+    var profiles =
+        TenantProfiles.forTest(
+            id -> Optional.empty(),
+            (tenant, after) ->
+                Optional.of(
+                    storesPage(
+                        null,
+                        "{\"id\":\"" + STORE_DE + "\",\"timezone\":\"Europe/Warsaw\"}",
+                        "{\"id\":\"" + STORE_NONE + "\",\"timezone\":null}")),
+            new Moving());
+    var stores = profiles.stores(TENANT, null);
+    assertEquals(java.time.ZoneId.of("Europe/Warsaw"), stores.zoneOf(STORE_DE));
+    assertEquals(null, stores.zoneOf(STORE_NONE), "no zone recorded is no zone");
+    assertEquals(null, stores.zoneOf(STORE_NEW), "an unknown store is no zone");
+    assertEquals(null, stores.zoneOf(null));
+  }
+
+  @Test
+  @DisplayName("A time zone tenant-svc could not have meant is none, never a guess")
+  void anUnreadableTimeZoneIsNone() {
+    var profiles =
+        TenantProfiles.forTest(
+            id -> Optional.empty(),
+            (tenant, after) ->
+                Optional.of(
+                    storesPage(
+                        null,
+                        "{\"id\":\"" + STORE_DE + "\",\"timezone\":\"Not/AZone\"}",
+                        "{\"id\":\"" + STORE_NONE + "\",\"timezone\":\"\"}",
+                        "{\"id\":\"" + STORE_NEW + "\",\"timezone\":123}")),
+            new Moving());
+    var stores = profiles.stores(TENANT, null);
+    assertEquals(null, stores.zoneOf(STORE_DE), "not a real IANA zone id");
+    assertEquals(null, stores.zoneOf(STORE_NONE), "blank is no zone");
+    assertEquals(null, stores.zoneOf(STORE_NEW), "a number, not text, is no zone");
+  }
+
+  @Test
+  @DisplayName("Each store says what its till asks for a phone; anything else is not recorded")
+  void storesKnowWhatTheirTillAsks() {
+    UUID storeText = Ids.parse("01a090ae-611e-702c-a97b-d1b8025478f4");
+    UUID storeNumber = Ids.parse("01a090ae-611e-702c-a97b-d1b8025478f5");
+    var profiles =
+        TenantProfiles.forTest(
+            id -> Optional.empty(),
+            (tenant, after) ->
+                Optional.of(
+                    storesPage(
+                        null,
+                        "{\"id\":\"" + STORE_DE + "\",\"tillPhone\":\"REQUIRED\"}",
+                        "{\"id\":\"" + STORE_NEW + "\",\"tillPhone\":\" off \"}",
+                        "{\"id\":\"" + STORE_NONE + "\",\"tillPhone\":null}",
+                        "{\"id\":\"" + storeText + "\",\"tillPhone\":\"SOMETIMES\"}",
+                        "{\"id\":\"" + storeNumber + "\",\"tillPhone\":1}")),
+            new Moving());
+    var stores = profiles.stores(TENANT, null);
+    assertEquals("REQUIRED", stores.tillPhoneOf(STORE_DE));
+    assertEquals("OFF", stores.tillPhoneOf(STORE_NEW), "read as tenant-svc meant it");
+    assertEquals(null, stores.tillPhoneOf(STORE_NONE), "none recorded");
+    assertEquals(null, stores.tillPhoneOf(storeText), "not one of the three: not recorded");
+    assertEquals(null, stores.tillPhoneOf(storeNumber), "a number, not text, is not recorded");
+    assertEquals(null, stores.tillPhoneOf(Ids.parse("01a090ae-611e-702c-a97b-d1b8025478f6")));
+    assertEquals(null, stores.tillPhoneOf(null));
+  }
+
+  @Test
+  @DisplayName("Every existing Stores constructor still compiles and carries no zones")
+  void everyExistingStoresConstructorStillWorks() {
+    assertEquals(
+        null,
+        new TenantProfiles.Stores(
+                java.util.Set.of(STORE_DE),
+                java.util.Map.of(),
+                java.util.Set.of(),
+                java.util.Map.of(),
+                java.util.Set.of(),
+                java.util.Map.of())
+            .tillPhoneOf(STORE_DE),
+        "the (ids, countries, warehouses, points, dark, zones) constructor records no till choice");
+    assertEquals(
+        null,
+        new TenantProfiles.Stores(java.util.Set.of(STORE_DE), java.util.Map.of()).zoneOf(STORE_DE),
+        "the (ids, countries) constructor");
+    assertEquals(
+        null,
+        new TenantProfiles.Stores(
+                java.util.Set.of(STORE_DE), java.util.Map.of(), java.util.Set.of())
+            .zoneOf(STORE_DE),
+        "the (ids, countries, warehouses) constructor");
+    assertEquals(
+        null,
+        new TenantProfiles.Stores(
+                java.util.Set.of(STORE_DE),
+                java.util.Map.of(),
+                java.util.Set.of(),
+                java.util.Map.of())
+            .zoneOf(STORE_DE),
+        "the (ids, countries, warehouses, points) constructor");
+    assertEquals(
+        null,
+        new TenantProfiles.Stores(
+                java.util.Set.of(STORE_DE),
+                java.util.Map.of(),
+                java.util.Set.of(),
+                java.util.Map.of(),
+                java.util.Set.of())
+            .zoneOf(STORE_DE),
+        "the (ids, countries, warehouses, points, dark) constructor");
   }
 
   @Test

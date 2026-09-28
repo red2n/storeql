@@ -2,11 +2,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/procurement_screen.dart';
+import 'package:storeql_app/shared/widgets/status_badge.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // The three-way match on screen: ordered against received against invoiced.
 //
@@ -75,11 +78,22 @@ Future<void> _pump(WidgetTester tester, String body) async {
 }
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  // An invoice's dates are shown as dates, which needs the locale's date data.
+  setUpAll(initializeDateFormatting);
+
   testWidgets('a clean match shows no variance and does not shout', (tester) async {
     await _pump(tester, '{"data":[${_invoice(number: "INV-1", status: "MATCHED", variances: "")}]}');
 
     expect(find.text('INV-1'), findsOneWidget);
-    expect(find.text('MATCHED'), findsOneWidget);
+    // The status in a word, not the server's constant.
+    expect(find.text('Matched'), findsOneWidget);
+    expect(find.text('MATCHED'), findsNothing);
     expect(find.textContaining('Billed for more than arrived'), findsNothing);
   });
 
@@ -93,6 +107,10 @@ void main() {
     expect(find.text('Billed for more than arrived'), findsOneWidget);
     // …not the constant the API speaks in.
     expect(find.text('INVOICED_ABOVE_RECEIVED'), findsNothing);
+    // The badge too: a word, in the tone of something to act on.
+    expect(find.text('FLAGGED'), findsNothing);
+    final badge = tester.widget<StatusBadge>(find.widgetWithText(StatusBadge, 'Flagged'));
+    expect(badge.tone, StatusTone.warning);
   });
 
   testWidgets('all three documents\' figures are on the row, not just a badge',
@@ -116,7 +134,7 @@ void main() {
         tester,
         '{"data":[${_invoice(number: "INV-4", status: "FLAGGED", variances: '"PRICE_ABOVE_ORDER"', invoicedPrice: 2.75)}]}');
 
-    expect(find.text('2.5 → 2.75'), findsOneWidget);
+    expect(find.text('£2.50 → £2.75'), findsOneWidget);
     expect(find.text('Charged above the agreed price'), findsOneWidget);
   });
 
@@ -175,6 +193,11 @@ class _Server implements HttpClientAdapter {
   @override
   Future<ResponseBody> fetch(
       RequestOptions o, Stream<List<int>>? s, Future<void>? c) async {
+    // product-svc naming the lines' variants: none known here.
+    if (o.path.endsWith('/variants/resolve')) {
+      return ResponseBody.fromString('{"data":[]}', 200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+    }
     requests.add(o);
     if (o.path.endsWith('/resolve')) {
       final body = resolveStatus == 200
@@ -240,7 +263,9 @@ void lifecycleTests() {
       (tester) async {
     await _pumpAs(tester, 'OWNER',
         '{"data":[${_lifecycleInvoice(number: "INV-5", status: "MATCHED")}]}');
-    expect(find.textContaining('due 2026-03-03'), findsOneWidget);
+    // Both dates as dates, not ISO strings.
+    expect(find.textContaining('1 Feb 2026 · due 3 Mar 2026'), findsOneWidget);
+    expect(find.textContaining('2026-03-03'), findsNothing);
     expect(find.textContaining('posted'), findsOneWidget);
   });
 
@@ -251,7 +276,7 @@ void lifecycleTests() {
         'OWNER',
         '{"data":[${_lifecycleInvoice(number: "INV-6", status: "FLAGGED", headerVariances: '"TOTAL_MISMATCH"', statedGross: 181)}]}');
     expect(find.textContaining('The stated total does not add up'), findsOneWidget);
-    expect(find.textContaining('181 stated, 180 from the lines'), findsOneWidget);
+    expect(find.textContaining('£181.00 stated, £180.00 from the lines'), findsOneWidget);
     expect(find.text('TOTAL_MISMATCH'), findsNothing);
   });
 
@@ -278,8 +303,15 @@ void lifecycleTests() {
         '${_lifecycleInvoice(number: "INV-M", status: "MATCHED")}'
         ']}');
     expect(find.text('Approve for payment'), findsNothing);
-    expect(find.text('APPROVED'), findsOneWidget);
-    expect(find.text('REJECTED'), findsOneWidget);
+    // Each decision in a word, in its tone: a rejection is a refusal, not a closed file.
+    expect(find.text('Approved'), findsOneWidget);
+    expect(find.text('Rejected'), findsOneWidget);
+    expect(find.text('APPROVED'), findsNothing);
+    expect(find.text('REJECTED'), findsNothing);
+    expect(tester.widget<StatusBadge>(find.widgetWithText(StatusBadge, 'Approved')).tone,
+        StatusTone.success);
+    expect(tester.widget<StatusBadge>(find.widgetWithText(StatusBadge, 'Rejected')).tone,
+        StatusTone.error);
     // The reason travels with the decision.
     await tester.tap(find.text('INV-R'));
     await tester.pumpAndSettle();

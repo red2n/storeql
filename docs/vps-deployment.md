@@ -263,7 +263,8 @@ These are the URLs you use when running `docker compose up` on your laptop (base
 
 1. Go to `https://app.storeql.com/#/platform/login`
 2. Enter email and password set in `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD`
-3. Lands on the **Platform Dashboard** — lists all tenants, can suspend/reactivate them, manage platform-wide settings
+3. Enter the six-digit code (*One more step*): the platform administrator always has a second factor (20.12). The code comes from an authenticator app holding `PLATFORM_ADMIN_TOTP_SECRET` — `scripts/platform-code.sh --setup` prints the key and an `otpauth://` link to add it once — or, on a local stack, from `scripts/platform-code.sh`, which prints the current code. A code works once; a wrong one counts as a failed sign-in.
+4. Lands on the **Platform Dashboard** — lists all tenants, can suspend/reactivate them, manage platform-wide settings
 
 ### Tenant owner (first login after onboarding)
 
@@ -378,17 +379,28 @@ docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 
 ### Backup Postgres, and rehearse the restore
 
-```bash
-# Dump every schema from one snapshot (custom format: restores in parallel)
-docker compose exec postgres pg_dump -U storeql -d storeql -Fc -f /tmp/storeql.dump
-docker compose cp postgres:/tmp/storeql.dump backup-$(date +%Y%m%d).dump
+The stack backs itself up ([docs/BACKUP-AND-RESTORE.md](BACKUP-AND-RESTORE.md)): the `backup` service
+dumps the database every night from one snapshot with a manifest of every table's count, encrypted to
+the age public key in `STOREQL_BACKUP_RECIPIENT`, takes a base backup weekly, and Postgres archives its
+WAL into the same volume so a restore can be taken to a moment (five minutes of data at risk at most,
+`PG_ARCHIVE_TIMEOUT`). Before the first night with real data:
 
-# Restore into a fresh server, then re-apply the per-service roles
-pg_restore -U storeql -d storeql --no-owner --no-privileges -j 4 backup-YYYYMMDD.dump
-psql -U storeql -d storeql -v ON_ERROR_STOP=1 -f infra/postgres-init-roles.sql
+```bash
+docker compose run --rm backup age-keygen            # the public key goes in .env, the identity OFF this box
+# STOREQL_BACKUP_RECIPIENT=age1... in .env, then:
+docker compose up -d postgres backup
+docker compose run --rm backup now                    # one now, to see it work
 ```
 
-A backup is only as good as its last restore. `scripts/restore-rehearsal.sh` does both against the running stack: it dumps from one exported snapshot, restores into a scratch `postgres:16-alpine` container, re-applies the roles, compares every table row for row with counts taken in the same snapshot, and appends the timings to [RESTORE-REHEARSAL.md](RESTORE-REHEARSAL.md). Run it after any schema change and at least once a quarter.
+Bind the `backups` volume to a disk other than the database's (`docker-compose.prod.yml`), or copy
+`/backups` to object storage after each run. Grafana's `backups` alerts say when a backup is missing,
+late, unencrypted, or the WAL archive is failing.
+
+A backup is only as good as its last restore. `scripts/backup-drill.sh` rehearses the whole thing
+against the running stack — backup, verify, restore into a fresh server and compare, then a recovery to
+a moment — and appends the times it measured to `docs/RESTORE-REHEARSAL.md`. Run it after any change
+to Postgres, the backup job or a migration that adds a table; it is what found that a restore could
+fail on the UUIDv7 guards.
 
 A single business's data is exported, erased and imported through each service's `/admin/tenant-data` and tenant-svc's `/admin/tenant/switching` instead ([API-GUIDE](API-GUIDE.md#tenant-data-export-and-leaving-2114)); a whole-database restore brings every business back together.
 

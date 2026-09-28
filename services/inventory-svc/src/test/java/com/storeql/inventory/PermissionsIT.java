@@ -47,4 +47,40 @@ class PermissionsIT {
     gate().assertGated("POST", "/admin/inventory/adjust", body, "stock.adjust");
     gate().assertTierNarrows("POST", "/admin/inventory/adjust", body, "STOREKEEPER");
   }
+
+  /**
+   * SJ-D73: a cashier could raise a transfer to another store and ship it. Moving stock is
+   * stock.transfer, held by a storekeeper and never by the till.
+   */
+  @Test
+  @DisplayName("Raising a transfer needs stock.transfer; a storekeeper narrowed out of it cannot")
+  void transfersAreGated() {
+    String body =
+        "{\"fromStoreId\":\""
+            + ID
+            + "\",\"toStoreId\":\""
+            + USER
+            + "\",\"transferType\":\"DIRECT\",\"lines\":[{\"variantId\":\""
+            + ID
+            + "\",\"requestedQty\":1}]}";
+    gate().assertGated("POST", "/admin/inventory/transfers", body, "stock.transfer");
+    gate().assertTierNarrows("POST", "/admin/inventory/transfers", body, "STOREKEEPER");
+    gate().assertTierRefused("POST", "/admin/inventory/transfers", body, "CASHIER");
+    gate().assertGated("POST", "/admin/inventory/transfers/" + ID + "/ship", "", "stock.transfer");
+  }
+
+  @Test
+  @DisplayName("Raising a move order needs stock.transfer too")
+  void moveOrdersAreGated() {
+    String body =
+        "{\"fromStoreId\":\""
+            + ID
+            + "\",\"toStoreId\":\""
+            + ID
+            + "\",\"lines\":[{\"variantId\":\""
+            + ID
+            + "\",\"requestedQty\":1}]}";
+    gate().assertGated("POST", "/admin/inventory/move-orders", body, "stock.transfer");
+    gate().assertTierRefused("POST", "/admin/inventory/move-orders", body, "CASHIER");
+  }
 }

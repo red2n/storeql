@@ -39,4 +39,29 @@ class TenantContextTest {
     assertThrows(NullPointerException.class, () -> ctx.assume(Ids.newId(), null));
     assertNull(ctx.tenantId(), "a refused assumption changes nothing");
   }
+
+  @Test
+  void aReadIsScopedToTheStoresTheCallerKeeps() {
+    UUID a = Ids.newId();
+    UUID b = Ids.newId();
+    TenantContext one = new TenantContext();
+    one.set(Ids.newId(), Ids.newId(), Set.of("STOREKEEPER"), Set.of(a), "req");
+    assertEquals(a, one.scopeStore(null), "one store: read it without naming it");
+    assertEquals(a, one.scopeStore(a));
+    assertEquals(
+        403, assertThrows(ApiException.class, () -> one.scopeStore(b)).status(), "another store");
+    assertTrue(one.hasStoreAccess(a));
+    one.requireAnyStoreAccess(b, a);
+    assertThrows(ApiException.class, () -> one.requireAnyStoreAccess(b, Ids.newId()));
+
+    TenantContext two = new TenantContext();
+    two.set(Ids.newId(), Ids.newId(), Set.of("STOREKEEPER"), Set.of(a, b), "req");
+    assertEquals(400, assertThrows(ApiException.class, () -> two.scopeStore(null)).status());
+    assertEquals(b, two.scopeStore(b));
+
+    TenantContext none = new TenantContext();
+    none.set(Ids.newId(), Ids.newId(), Set.of("OWNER"), Set.of(), "req");
+    assertNull(none.scopeStore(null), "held to no store: every store");
+    assertEquals(b, none.scopeStore(b));
+  }
 }

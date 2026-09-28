@@ -27,16 +27,18 @@ import java.util.Set;
  *       any staff role ({@code STOREKEEPER}/{@code CASHIER} included):
  *       <ul>
  *         <li>{@code /admin/inventory/**} (receive, adjust, levels, batches, planning, …), but
- *             <b>not</b> {@code /admin/inventory/reports/**}, which is management-only — see {@link
- *             #requiresStaffAdmin}
+ *             <b>not</b> {@code /admin/inventory/reports/**}, which is management-only save the one
+ *             read the shop floor needs, {@code GET /admin/inventory/reports/shelf-gaps} — see
+ *             {@link #requiresStaffAdmin}
  *         <li>{@code /admin/cash/**} (till open/close, drops, pay-in/out — resource layer still
  *             enforces finer rules, e.g. Z-report stays MANAGER+)
  *         <li>Read support for those UIs: {@code GET /admin/tenant}, {@code GET /admin/stores…},
  *             {@code GET /admin/products/variants/resolve}
  *         <li>Reads one service makes of another under a staff identity: {@code GET
  *             /admin/tenant/obligations}, {@code GET /admin/tenant/retention}, {@code GET
- *             /admin/tenant/plan/limits}, {@code GET /admin/tenant/usage/allowance} — each the leaf
- *             only, never the subtree it sits in
+ *             /admin/tenant/plan/limits}, {@code GET /admin/tenant/usage/allowance}, {@code GET
+ *             /admin/promotions/windows}, {@code GET /admin/tenant/fx-rates} — each the leaf only,
+ *             never the subtree it sits in
  *       </ul>
  *       Without this tier, STOREKEEPER could not receive stock and CASHIER could not open a till,
  *       even though the resource classes intentionally allow those roles.
@@ -73,6 +75,9 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
   private static final Set<String> STAFF_ROLES =
       Set.of("PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
 
+  /** The gateway's public description of the API's versions (22.8). */
+  private static final String API_VERSIONS = "/api/versions";
+
   /** Identity endpoints — they mint or manage credentials, reachable before any role exists. */
   private static final Set<String> IDENTITY_PATHS =
       Set.of(
@@ -84,7 +89,12 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
           "/auth/change-password",
           // The account holder deleting their own login — same object-level rule as changing its
           // password: the user id comes from the verified token, never from the request.
-          "/auth/delete-account");
+          "/auth/delete-account",
+          // A forgotten password (password reset): asking for a link, which answers the same
+          // whatever the address, and spending one — the 256-bit token in the body is the whole
+          // capability, and it resets exactly the one login it was minted for.
+          "/auth/password/forgot",
+          "/auth/password/reset");
 
   @Inject TenantContext ctx;
 
@@ -101,8 +111,16 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
   @Override
   public void filter(ContainerRequestContext req) throws IOException {
     // UriInfo.getPath() has no leading slash; normalize so "/admin/" matches top-level paths.
-    String path = stripGatewayPrefix("/" + req.getUriInfo().getPath());
+    String raw = "/" + req.getUriInfo().getPath();
+    String path = stripGatewayPrefix(raw);
     String method = req.getMethod();
+
+    // The gateway's own description of the API's versions (22.8): not a service call, and public
+    // by nature — read before any credential is held. Checked on the path as it came, because the
+    // prefix strip would take "versions" for a service name and leave "/".
+    if (API_VERSIONS.equals(raw)) {
+      return;
+    }
 
     // The platform operator's own surface, checked before anything else and gated to one role.
     if (isPlatformOperator(path)) {
@@ -210,6 +228,17 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
   }
 
   /**
+   * {@code GET /order-groups/{id}} with an id-shaped segment and nothing under it.
+   *
+   * @param path the service-local request path
+   * @return {@code true} for exactly that shape
+   */
+  private static boolean isOrderGroupSelfRead(String path) {
+    if (!path.startsWith("/order-groups/")) return false;
+    return looksLikeUuid(path.substring("/order-groups/".length()));
+  }
+
+  /**
    * {@code GET /payments/intents/{id}} and nothing else under it.
    *
    * @param path the service-local request path
@@ -283,11 +312,19 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         // The public halves of the token signing keys (20.15): every verifier reads them, and a
         // key set that needed a token to read could never verify the first one.
         || "/auth/.well-known/jwks.json".equals(path)
+        // The price list (21.13): the plans on sale to the public, read by a prospect deciding
+        // whether to sign up, so before there is any login to carry a role. It says only what the
+        // platform chose to advertise; a draft or a plan sold by hand is not on it, and the
+        // platform's own list stays under /platform. The gateway's PUBLIC_PATHS carries the
+        // matching entry.
+        || "/plans".equals(path)
         // Per-store storefront configuration and the list of stores a shopper may buy from,
         // plus the transact-or-not flow guard. Also read service-to-service by payment-svc.
         || pathEqualsOrUnder(path, "/storefront")
         // Stock display on a product page. Availability only — no cost, no batch, no location.
         || "/inventory/availability".equals(path)
+        // The currencies a shop can show prices in (03.x): read by anyone browsing.
+        || "/prices/currencies".equals(path)
         // /orders/mine and the id-addressed order reads. These are NOT unguarded: order-svc
         // applies object-level authorization to each — the owning customer gets their order, a
         // different customer in the same tenant gets 404 rather than 403, so the endpoint is not
@@ -295,6 +332,10 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         // would apply, and a blanket staff requirement here would stop a shopper reading their own
         // order. GET /orders, the tenant-wide list, has no such check and is deliberately excluded.
         || isOrderSelfRead(path)
+        // A split checkout (order orchestration), /order-groups/{id} and nothing under it: the same
+        // object-level check as an order — the shopper who placed it or the business's staff, and
+        // a 404 for anyone else.
+        || isOrderGroupSelfRead(path)
         // A shopper polling their own payment intent after being sent away for SCA — without this
         // they cannot learn whether the payment they just completed succeeded. Not unguarded:
         // PaymentIntentService applies the same object-level check as the tender reads, resolving
@@ -307,6 +348,8 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         // asymmetry with /customers/{id} above is deliberate — this shape cannot name a subject.
         || "/customers/me".equals(path)
         || "/customers/me/export".equals(path)
+        // The shopper's own points, tier and what is about to expire: the leaf only.
+        || "/customers/me/loyalty".equals(path)
         || "/customers/me/marketing".equals(path)
         // The shopper's own privacy (13.12), and the notice anyone may read before signing up.
         || "/customers/me/privacy".equals(path)
@@ -320,6 +363,9 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         || "/promotions".equals(path)
         // The caller's own principal — it describes the caller, so it leaks nothing new.
         || "/auth/me".equals(path)
+        // The password rules (password reset): read by a sign-up form and the reset page before
+        // anyone has signed in. The same for every login, and nothing about any of them.
+        || "/auth/password-policy".equals(path)
         // Where the caller's own login stands with second factors (20.12): a shopper's as much as
         // a member of staff's, and the login comes from the token.
         || "/auth/mfa".equals(path)
@@ -359,8 +405,11 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
     if (!path.startsWith("/api/")) {
       return path;
     }
-    int afterService = path.indexOf('/', "/api/".length());
-    return afterService >= 0 ? path.substring(afterService) : "/";
+    // The canonical form carries a version segment (22.8): /api/v1/{service}/… strips to the same
+    // service-local path as the alias /api/{service}/…, so a public read is public on both.
+    String rest = path.substring("/api/".length()).replaceFirst("^v\\d+/", "");
+    int afterService = rest.indexOf('/');
+    return afterService >= 0 ? rest.substring(afterService) : "/";
   }
 
   /**
@@ -590,6 +639,14 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
     // An allowlist entry for nobody is surface for nobody (SJ-D11's reasoning for /customers/{id},
     // applied again). Whoever builds that screen adds the carve-out deliberately, here, rather
     // than discovering the gate never existed.
+    //
+    // That screen is now built for one report (the storekeeper's Shelf space, gaps only): what it
+    // would take to fill the shelves is the shop floor's question. The read only — the resource
+    // holds a storekeeper to the stores they keep and refuses a cashier; every other report stays
+    // with management.
+    if ("GET".equalsIgnoreCase(method) && "/admin/inventory/reports/shelf-gaps".equals(path)) {
+      return true;
+    }
     if (pathEqualsOrUnder(path, "/admin/inventory/reports")) return false;
     // Warehouse ops — the storekeeper's primary job.
     if (pathEqualsOrUnder(path, "/admin/inventory")) return true;
@@ -614,11 +671,15 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
       // enforced outside tenant-svc silently enforced nothing — the SJ-D10 shape again, an
       // authorisation claim that reads as correct and is never executed.
       if ("/admin/tenant/plan/limits".equals(path)) return true;
+      // The business's exchange rates (03.x): pricing-svc and purchase-svc read them as staff.
+      if ("/admin/tenant/fx-rates".equals(path)) return true;
       // Whether one more of a metered thing may be done (21.10): notification-svc asks before a
       // marketing text, under a staff identity, as product-svc asks for its limit above. Only the
       // answer; what the business used, what it costs and every write stay management work — and
       // left off this list, the quota would fail open and never refuse anything (SJ-D65's shape).
       if ("/admin/tenant/usage/allowance".equals(path)) return true;
+      // pricing-svc's promotion windows, read by inventory-svc for the forecast (06.x).
+      if ("/admin/promotions/windows".equals(path)) return true;
       if (pathEqualsOrUnder(path, "/admin/stores")) return true;
       if ("/admin/products/variants/resolve".equals(path)) return true;
     }

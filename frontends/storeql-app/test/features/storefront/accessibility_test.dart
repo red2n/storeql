@@ -22,7 +22,8 @@ import 'package:storeql_app/features/storefront/survey_widgets.dart';
 // the cart bar say what they hold; pictures that repeat a name are silent; the
 // survey can be answered from a keyboard; and the statement is reachable from
 // the account menu, read in headed sections, and never opens with a
-// placeholder name when the shop's details cannot be read.
+// placeholder name when the shop's details cannot be read. It speaks for the
+// business (Corner Stores Ltd), never for one of its stores (Corner Shop).
 // ---------------------------------------------------------------------------
 
 const _butter = StoreProduct(id: 'p-1', name: 'Crunchy peanut butter');
@@ -62,11 +63,17 @@ List<Override> _shop({
           ]),
       storefrontSuspendedProvider.overrideWith((ref) async => false),
       // Unreadable: the real provider, over a network that answers nothing.
-      if (configReadable)
+      if (configReadable) ...[
         storefrontConfigProvider.overrideWith((ref) async =>
             StorefrontConfig(showPrices: showPrices, storeName: 'Corner Shop')),
-      storefrontAvailabilityProvider
-          .overrideWith((ref) async => const {'v-1': true, 'v-2': false}),
+        // The business the shop belongs to: the one the accessibility statement speaks for.
+        storefrontBusinessNameProvider
+            .overrideWith((ref) async => 'Corner Stores Ltd'),
+      ],
+      storefrontAvailabilityProvider.overrideWith((ref) async => const {
+        'v-1': StockInfo(inStock: true),
+        'v-2': StockInfo(inStock: false),
+      }),
       storefrontPromotionsProvider.overrideWith((ref) async => const []),
       storefrontCategoriesProvider.overrideWith(
           (ref) async => const [StoreCategory(id: 'c-1', name: 'Pantry')]),
@@ -278,7 +285,7 @@ void main() {
       await tester.pump();
     }
     expect(find.bySemanticsLabel('41 in cart'), findsOneWidget);
-    expect(find.bySemanticsLabel('41 items in the cart, GBP 102.50. View cart'),
+    expect(find.bySemanticsLabel('41 items in the cart, £102.50. View cart'),
         findsOneWidget);
 
     for (var i = 0; i < 41; i++) {
@@ -300,7 +307,7 @@ void main() {
     await _pumpShop(tester, _shop(cart: () => [_jarInCart()]));
     expect(
         tester.getSemantics(
-            find.bySemanticsLabel('1 item in the cart, GBP 2.50. View cart')),
+            find.bySemanticsLabel('1 item in the cart, £2.50. View cart')),
         isSemantics(isButton: true, hasTapAction: true));
     await _leave(tester);
 
@@ -308,7 +315,9 @@ void main() {
         _shop(showPrices: false, cart: () => [_jarInCart(priced: false)]));
     expect(
         find.bySemanticsLabel('1 item in the cart. View cart'), findsOneWidget);
-    expect(find.bySemanticsLabel(RegExp(r'GBP|0\.00')), findsNothing);
+    // Only the cart bar's own label: the offer banners mention £ amounts.
+    expect(find.bySemanticsLabel(RegExp(r'in the cart.*(£|GBP|0\.00)')),
+        findsNothing);
     await _leave(tester);
     semantics.dispose();
   });
@@ -359,17 +368,24 @@ void main() {
     await tester.tap(find.text('Accessibility'));
     await tester.pumpAndSettle();
 
+    // The business, not the store: the service provider the European Accessibility Act means.
+    expect(find.textContaining('Corner Stores Ltd wants everyone'), findsOneWidget);
+    expect(find.textContaining('Corner Shop wants everyone'), findsNothing);
+    expect(find.textContaining('partially conformant'), findsOneWidget);
+    await _meetsAllGuidelines(tester);
+
+    // Kept to a reading measure, the statement runs longer than the window: each heading is
+    // scrolled to before it is read.
     for (final heading in const [
       'Accessibility statement',
       'How far this shop meets the standard',
       'What is known not to work well yet',
     ]) {
+      await tester.scrollUntilVisible(find.text(heading), 200,
+          scrollable: _statementScroll);
       expect(tester.getSemantics(find.text(heading)),
           isSemantics(label: heading, isHeader: true));
     }
-    expect(find.textContaining('Corner Shop wants everyone'), findsOneWidget);
-    expect(find.textContaining('partially conformant'), findsOneWidget);
-    await _meetsAllGuidelines(tester);
 
     await tester.scrollUntilVisible(
         find.byKey(const Key('accessibility-feedback')), 300,

@@ -38,6 +38,13 @@
             <version>${storeql.version}</version>
         </dependency>
 
+        <!-- PhoneNumbers: a phone to E.164, read in the business's own countries, for every
+             service that keeps one (customer-svc, order-svc). The parent manages the version. -->
+        <dependency>
+            <groupId>com.googlecode.libphonenumber</groupId>
+            <artifactId>libphonenumber</artifactId>
+        </dependency>
+
         <!-- Discovery (ConsulClient) -->
         <dependency>
             <groupId>com.storeql</groupId>

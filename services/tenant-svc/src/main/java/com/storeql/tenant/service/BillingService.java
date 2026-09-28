@@ -76,6 +76,9 @@ public class BillingService {
   @Inject PlanRepository plans;
   @Inject UsageService usageOf;
 
+  /** What a business is told about its trial (21.13). */
+  @Inject TrialNoticeService trialNotices;
+
   /**
    * Membership is asked of a date, not of a list: the platform already records which countries
    * belong to which regime and when — the United Kingdom was a member until 31 January 2020 — so
@@ -393,6 +396,9 @@ public class BillingService {
     List<Invoice> raised = new ArrayList<>();
     List<Skipped> skipped = new ArrayList<>();
     Set<UUID> passedOver = new HashSet<>();
+    // Trials about to end are told so before anything is billed (21.13): the word is owed whether
+    // or not any invoice is raised today.
+    trialNotices.endingSoon(asOf, seller);
     for (int pass = 0; pass < CATCH_UP_PASSES; pass++) {
       List<Subscription> due =
           repo.due(asOf).stream().filter(s -> !passedOver.contains(s.id())).toList();
@@ -443,6 +449,7 @@ public class BillingService {
     // waiting downgrade moves the subscription, and billed in arrears on the same invoice as the
     // next period in advance.
     UsageService.Closing usage = usageOf.close(s, s.periodStart(), s.periodEnd(), 2);
+    boolean trialEnding = Subscriptions.TRIALING.equals(s.status());
     // A downgrade waits for the period already paid for; this is that moment.
     Subscription moved = applyPending(s);
     LocalDate start = moved.periodEnd();
@@ -461,6 +468,21 @@ public class BillingService {
         Subscriptions.RENEWED,
         "billed " + start + " to " + end + " on invoice " + invoice.number(),
         null);
+    if (trialEnding) {
+      // The trial is over on the file, and the business is told with the invoice and the way to
+      // pay it (21.13) — once, however often the run runs.
+      repo.record(
+          Ids.newId(),
+          moved.tenantId(),
+          moved.id(),
+          Subscriptions.TRIAL_ENDED,
+          "the trial ended on " + start + "; the first invoice is " + invoice.number(),
+          null);
+      trialNotices.ended(
+          new Builder(moved).status(Subscriptions.ACTIVE).period(start, end).trialEnd(null).build(),
+          invoice,
+          seller);
+    }
     return Optional.of(invoice);
   }
 

@@ -7,6 +7,7 @@ import com.storeql.purchase.domain.Domain.GoodsReceiptLine;
 import com.storeql.purchase.domain.Domain.NominalLedgerEntry;
 import com.storeql.purchase.domain.Domain.PurchaseOrder;
 import com.storeql.purchase.domain.Domain.PurchaseOrderLine;
+import com.storeql.purchase.domain.Handle;
 import com.storeql.purchase.domain.LandedCost;
 import com.storeql.purchase.domain.LandedCost.Charge;
 import com.storeql.purchase.domain.LandedCost.Line;
@@ -138,7 +139,7 @@ public class LandedCostService {
         LedgerPosting.of(
                 tenantId,
                 today,
-                describe(type) + " landed on receipt " + gr.id(),
+                describe(type) + " landed on " + onReceipt(gr.id(), po.id()),
                 Domain.SOURCE_LANDED_COST,
                 id,
                 gr.storeId())
@@ -176,7 +177,11 @@ public class LandedCostService {
         LedgerPosting.of(
                 tenantId,
                 today,
-                describe(c.chargeType()) + " on receipt " + c.grId() + " reversed: " + reason,
+                describe(c.chargeType())
+                    + " on "
+                    + onReceipt(c.grId(), c.poId())
+                    + " reversed: "
+                    + reason,
                 Domain.SOURCE_LANDED_COST_REVERSAL,
                 id,
                 c.storeId())
@@ -247,6 +252,14 @@ public class LandedCostService {
                             .multiply(price.getOrDefault(l.variantId(), BigDecimal.ZERO)),
                         currency)))
         .toList();
+  }
+
+  /**
+   * The receipt a charge landed on, and the order it was received against, as people see them: a
+   * receipt has no number of its own on any screen, and the order's "PO #…" is what they can find.
+   */
+  private static String onReceipt(UUID grId, UUID poId) {
+    return "receipt " + Handle.of(grId) + " against " + Handle.purchaseOrder(poId);
   }
 
   private static String describe(String chargeType) {

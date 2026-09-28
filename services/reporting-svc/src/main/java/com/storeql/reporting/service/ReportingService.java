@@ -4,6 +4,8 @@ import com.storeql.ids.Ids;
 import com.storeql.reporting.domain.Domain.InventoryProjection;
 import com.storeql.reporting.domain.Domain.MovementStat;
 import com.storeql.reporting.domain.Domain.OpenSupplyLine;
+import com.storeql.reporting.domain.Domain.SaleLine;
+import com.storeql.reporting.domain.Domain.SalesCategoryStat;
 import com.storeql.reporting.domain.Domain.SalesDayStat;
 import com.storeql.reporting.domain.Domain.SalesSummary;
 import com.storeql.reporting.repo.ReportingRepository;
@@ -157,7 +159,69 @@ public class ReportingService {
       UUID customerId,
       BigDecimal gross,
       String currency) {
-    repo.recordSaleOnce(tenantId, orderId, storeId, channel, customerId, gross, currency);
+    recordSale(tenantId, orderId, storeId, channel, customerId, gross, currency, List.of());
+  }
+
+  /**
+   * Record a sale with its lines (sales by category, 19.x). Idempotent on the order: a redelivered
+   * OrderConfirmed leaves the sale and its lines as they were.
+   *
+   * @param lines the sale line by line, empty for an event minted before lines were carried
+   */
+  public void recordSale(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String channel,
+      UUID customerId,
+      BigDecimal gross,
+      String currency,
+      List<SaleLine> lines) {
+    repo.recordSaleOnce(
+        tenantId,
+        orderId,
+        storeId,
+        channel,
+        customerId,
+        gross,
+        currency,
+        lines == null ? List.of() : List.copyOf(lines));
+  }
+
+  /**
+   * Project the catalogue's word on a product: where it sits and which variants are its. Later
+   * words win; an earlier one redelivered late changes nothing.
+   *
+   * @param categoryPath leaf first, root last; empty for a product with no category
+   * @param occurredAt when product-svc said it, or null to take the word as of now
+   */
+  public void applyProductCategorised(
+      UUID tenantId,
+      UUID productId,
+      List<UUID> categoryPath,
+      List<UUID> variantIds,
+      Instant occurredAt) {
+    repo.upsertProductCategory(
+        tenantId,
+        productId,
+        List.copyOf(categoryPath),
+        List.copyOf(variantIds),
+        occurredAt == null ? Instant.now() : occurredAt);
+  }
+
+  /** A variant created after its product was announced belongs to that product. */
+  public void applyVariantCreated(UUID tenantId, UUID variantId, UUID productId) {
+    repo.upsertVariantProduct(tenantId, variantId, productId);
+  }
+
+  /**
+   * What each category took over a range, by leaf category or rolled up to the top of the tree.
+   *
+   * @param top true to group by each category's top-level ancestor
+   */
+  public List<SalesCategoryStat> salesByCategory(
+      UUID tenantId, Instant from, Instant to, UUID storeId, String channel, boolean top) {
+    return repo.salesByCategory(tenantId, from, to, storeId, channel, top);
   }
 
   /**
@@ -199,6 +263,21 @@ public class ReportingService {
   }
 
   /**
+   * Void a sale: order-svc voided a till sale after the fact ({@code OrderVoided}). The sale's fact
+   * is marked, never deleted, and left out of every sales report from then on. Deduped on the
+   * event's id; the first void heard for an order stands, and one heard before its sale voids the
+   * sale when it lands.
+   *
+   * @param eventId the {@code OrderVoided} event id, the dedupe key
+   * @param consumer the consumer name the dedupe mark is kept under
+   * @param tenantId the business the event names, from the event itself
+   * @param orderId the voided sale
+   */
+  public void applySaleVoided(UUID eventId, String consumer, UUID tenantId, UUID orderId) {
+    repo.voidSaleOnce(eventId, consumer, tenantId, orderId);
+  }
+
+  /**
    * Aggregate sales totals over a period.
    *
    * @param tenantId owning tenant
@@ -206,7 +285,7 @@ public class ReportingService {
    * @param to exclusive end of the period, UTC
    * @param storeId restrict to one store, or {@code null} for every store in the tenant
    * @param channel restrict to {@code ONLINE} or {@code POS}, or {@code null} for both
-   * @return the summary rows, net of any refunds already projected
+   * @return the summary rows, net of any refunds already projected; voided sales left out
    */
   public List<SalesSummary> salesSummary(
       UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {
@@ -221,7 +300,7 @@ public class ReportingService {
    * @param to exclusive end of the period, UTC
    * @param storeId restrict to one store, or {@code null} for every store in the tenant
    * @param channel restrict to {@code ONLINE} or {@code POS}, or {@code null} for both
-   * @return one row per day in the period that saw a sale
+   * @return one row per day in the period that saw a sale that stands (voided sales left out)
    */
   public List<SalesDayStat> salesByDay(
       UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {

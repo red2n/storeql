@@ -1,8 +1,11 @@
 package com.storeql.web;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Finds payment card numbers (PANs) in text, so that none is ever accepted or logged.
@@ -22,6 +25,9 @@ import java.util.Optional;
  * they collide with EAN-13 barcodes and GTIN-14 codes, which retail data is full of and a tenth of
  * which pass Luhn by chance, and no issuer has used those lengths for years. Nothing longer than a
  * card is a card either, so a UUID or an all-digit identifier is never cut into pieces to find one.
+ * And a run that sits inside a UUID's 8-4-4-4-12 shape is an identifier whatever its digits add up
+ * to: one v7 id in fifty thousand has all-digit groups that line up to a Luhn-valid number in an
+ * issuer's range, and a request carrying two ids and a role was refused as a card (SJ-D67).
  *
  * <p>This keeps honest integrations honest; it is not a defence against someone determined to
  * smuggle a card number past the gateway in an encoding of their own, which would not make it a
@@ -34,6 +40,12 @@ public final class CardData {
 
   /** A run of this many digits or more is an identifier, not a card, and is skipped whole. */
   private static final int LONGEST_CARD = 19;
+
+  /** A UUID's shape, hex in either case, not touching more hex on either side. */
+  private static final Pattern UUID_SHAPE =
+      Pattern.compile(
+          "(?<![0-9A-Fa-f])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}"
+              + "-[0-9A-Fa-f]{12}(?![0-9A-Fa-f])");
 
   private CardData() {}
 
@@ -51,9 +63,10 @@ public final class CardData {
       return Optional.empty();
     }
     int n = text.length();
+    BitSet identifiers = uuidSpans(text);
     int i = 0;
     while (i < n) {
-      if (!Character.isDigit(text.charAt(i))) {
+      if (!cardDigit(text, identifiers, i)) {
         i++;
         continue;
       }
@@ -62,15 +75,15 @@ public final class CardData {
       // group is taken whole, so a long identifier is never cut into pieces to find one.
       List<int[]> groups = new ArrayList<>();
       int end = i;
-      while (end < n && Character.isDigit(text.charAt(end))) {
+      while (end < n && cardDigit(text, identifiers, end)) {
         int gs = end;
-        while (end < n && Character.isDigit(text.charAt(end))) {
+        while (end < n && cardDigit(text, identifiers, end)) {
           end++;
         }
         groups.add(new int[] {gs, end});
         if (end + 1 < n
             && (text.charAt(end) == ' ' || text.charAt(end) == '-')
-            && Character.isDigit(text.charAt(end + 1))) {
+            && cardDigit(text, identifiers, end + 1)) {
           end++;
         }
       }
@@ -136,6 +149,21 @@ public final class CardData {
       out = out.substring(0, start) + masked + out.substring(end);
       from = start + masked.length();
     }
+  }
+
+  /** A digit that may be part of a card: not one inside a UUID's shape. */
+  private static boolean cardDigit(CharSequence text, BitSet identifiers, int at) {
+    return Character.isDigit(text.charAt(at)) && !identifiers.get(at);
+  }
+
+  /** The character positions that sit inside a UUID's 8-4-4-4-12 shape. */
+  private static BitSet uuidSpans(CharSequence text) {
+    BitSet spans = new BitSet();
+    Matcher m = UUID_SHAPE.matcher(text);
+    while (m.find()) {
+      spans.set(m.start(), m.end());
+    }
+    return spans;
   }
 
   private static boolean isCard(CharSequence digits) {

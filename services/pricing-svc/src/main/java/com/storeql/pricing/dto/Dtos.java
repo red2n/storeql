@@ -2,6 +2,7 @@ package com.storeql.pricing.dto;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -153,7 +154,12 @@ public final class Dtos {
                       + " rejected with INVALID_DATE.")
           @NotBlank
           String effectiveFrom,
-      String effectiveTo) {}
+      String effectiveTo,
+      @Schema(
+              description =
+                  "A price zone this list is bound to (03.x): it then prices that zone's stores"
+                      + " and no other. Omitted, the list is tenant-wide.")
+          String zoneId) {}
 
   @Schema(name = "PriceListResponse")
   public record PriceListResponse(
@@ -165,7 +171,8 @@ public final class Dtos {
       String effectiveFrom,
       String effectiveTo,
       boolean active,
-      String createdAt) {}
+      String createdAt,
+      UUID zoneId) {}
 
   @Schema(name = "UpsertPriceListItemRequest")
   public record UpsertPriceListItemRequest(
@@ -209,7 +216,46 @@ public final class Dtos {
       @Schema(description = "ONLINE or POS. Defaults to ALL.") String channel,
       @Schema(description = "Quantity being priced. Defaults to 1.") BigDecimal qty,
       @Schema(description = "UUID of the customer, for customer-specific pricing.")
-          String customerId) {}
+          String customerId,
+      @Schema(
+              description =
+                  "ISO 4217 code to show the price in as well (03.x), at the business's own rate;"
+                      + " the price stays in the business's currency. 400 FX_RATE_MISSING without a"
+                      + " rate for it.")
+          String displayCurrency) {}
+
+  @Schema(
+      name = "DisplayPriceResponse",
+      description =
+          "The same figures in another currency at the business's rate (03.x): what a shopper sees,"
+              + " not what is charged.")
+  public record DisplayPriceResponse(
+      String currency,
+      @Schema(description = "Home units per one unit of the display currency.") BigDecimal rate,
+      BigDecimal unitPrice,
+      BigDecimal totalWithVat) {}
+
+  @Schema(
+      name = "DisplayBasketResponse",
+      description = "A basket's totals in another currency at the business's rate (03.x).")
+  public record DisplayBasketResponse(
+      String currency,
+      BigDecimal rate,
+      BigDecimal subtotal,
+      BigDecimal totalDiscount,
+      BigDecimal vatAmount,
+      BigDecimal total) {}
+
+  @Schema(name = "DisplayRateResponse", description = "Home units per one unit of a currency.")
+  public record DisplayRateResponse(String currency, BigDecimal rate) {}
+
+  @Schema(
+      name = "CurrenciesResponse",
+      description =
+          "The currencies a shop can show prices in: its own, then those it keeps a rate for, with"
+              + " the rates so a client can show a figure it already holds.")
+  public record CurrenciesResponse(
+      String home, List<String> currencies, List<DisplayRateResponse> rates) {}
 
   @Schema(name = "ResolvedPriceResponse")
   public record ResolvedPriceResponse(
@@ -250,7 +296,9 @@ public final class Dtos {
               description =
                   "Whether this price may be announced as a reduction: a promotion applies and, where"
                       + " art.6a binds, its prior price is known and above today's.")
-          boolean reductionAnnounceable) {}
+          boolean reductionAnnounceable,
+      @Schema(description = "The price in the display currency asked for; absent when none was.")
+          DisplayPriceResponse display) {}
 
   @Schema(
       name = "AppliedPriceResponse",
@@ -485,7 +533,12 @@ public final class Dtos {
       @Schema(description = "UUID of the customer, for per-customer coupon caps.")
           String customerId,
       @Schema(description = "Coupon codes the customer presented. Matched case-insensitively.")
-          List<String> couponCodes) {}
+          List<String> couponCodes,
+      @Schema(
+              description =
+                  "ISO 4217 code to show the totals in as well (03.x), at the business's own rate;"
+                      + " the basket is charged in the business's currency.")
+          String displayCurrency) {}
 
   @Schema(name = "QuoteLineRequest")
   public record QuoteLineRequest(
@@ -548,7 +601,9 @@ public final class Dtos {
                       + " NO_SUCH_COUPON, NOT_APPLICABLE, COUPON_EXHAUSTED or"
                       + " COUPON_LIMIT_REACHED. Returned rather than ignored — a customer who"
                       + " typed a code is owed an answer.")
-          Map<String, String> rejectedCoupons) {}
+          Map<String, String> rejectedCoupons,
+      @Schema(description = "The totals in the display currency asked for; absent when none was.")
+          DisplayBasketResponse display) {}
 
   @Schema(
       name = "RecordRedemptionsRequest",
@@ -574,6 +629,30 @@ public final class Dtos {
   @Schema(name = "PromotionItemResponse")
   public record PromotionItemResponse(
       UUID id, UUID tenantId, UUID promotionId, String scopeType, UUID scopeId, String createdAt) {}
+
+  @Schema(
+      name = "PromotionWindowResponse",
+      description =
+          "A promotion as a window in time over some items at a store, read by inventory-svc for"
+              + " the demand forecast (06.x).")
+  public record PromotionWindowResponse(
+      UUID promotionId,
+      @Schema(description = "The store it is scoped to; null for every store of the business.")
+          UUID storeId,
+      String name,
+      String type,
+      BigDecimal value,
+      String channel,
+      @Schema(description = "Whether it is switched on now.") boolean active,
+      String startsAt,
+      @Schema(
+              description =
+                  "Its end date, or the moment it was switched off if that came first; null when"
+                      + " open-ended.")
+          String endsAt,
+      @Schema(description = "The variants it applies to; empty when it applies to everything.")
+          List<UUID> variantIds,
+      boolean allVariants) {}
 
   // ── Tax Transactions (POSLog) ─────────────────────────────────────────────
 
@@ -945,4 +1024,119 @@ public final class Dtos {
       String receiptTimestamp,
       String errorCode,
       String errorMessage) {}
+
+  // ── Price zones and competitor-driven repricing (03.x) ─────────────────────
+
+  @Schema(name = "CreatePriceZoneRequest")
+  public record CreatePriceZoneRequest(
+      @NotBlank @Size(max = 80) String name, @Size(max = 500) String description) {}
+
+  @Schema(name = "AssignZoneStoresRequest")
+  public record AssignZoneStoresRequest(
+      @Schema(
+              description =
+                  "The zone's stores, replacing the current membership. A store is in one"
+                      + " zone at most: naming it here moves it out of any other.")
+          @NotNull
+          @Size(max = 500)
+          List<String> storeIds) {}
+
+  @Schema(name = "PriceZoneResponse")
+  public record PriceZoneResponse(
+      UUID id, String name, String description, List<UUID> storeIds, String createdAt) {}
+
+  @Schema(name = "RecordCompetitorPriceRequest")
+  public record RecordCompetitorPriceRequest(
+      @NotBlank String variantId,
+      @NotBlank @Size(max = 120) String competitor,
+      @NotNull @Positive BigDecimal price,
+      @Schema(
+              description =
+                  "The business's own currency, which is the default; another is refused"
+                      + " (PRICING_COMPETITOR_CURRENCY_MISMATCH) — rivals are compared like for like.")
+          String currency,
+      @Schema(description = "The price zone this was seen in; omitted, it counts everywhere.")
+          String zoneId,
+      @Schema(description = "The day it was seen (ISO-8601 date); today when omitted.")
+          String observedOn) {}
+
+  @Schema(name = "BatchCompetitorPricesRequest")
+  public record BatchCompetitorPricesRequest(
+      @NotEmpty @Size(max = 500) List<@Valid RecordCompetitorPriceRequest> observations) {}
+
+  @Schema(name = "BatchCompetitorPricesResult")
+  public record BatchCompetitorPricesResult(int recorded) {}
+
+  @Schema(name = "CompetitorPriceResponse")
+  public record CompetitorPriceResponse(
+      UUID id,
+      UUID variantId,
+      String competitor,
+      BigDecimal price,
+      String currency,
+      UUID zoneId,
+      String observedOn,
+      String source,
+      String recordedAt) {}
+
+  @Schema(name = "CreateRepricingRuleRequest")
+  public record CreateRepricingRuleRequest(
+      @NotBlank @Size(max = 80) String name,
+      @Schema(description = "The price list the rule writes into; its zone is the rule's.")
+          @NotBlank
+          String priceListId,
+      @Schema(description = "MATCH_LOWEST, UNDERCUT_PERCENT or UNDERCUT_AMOUNT.") @NotBlank
+          String strategy,
+      @Schema(
+              description =
+                  "The percentage (0–100) or the amount to undercut by; 0 for MATCH_LOWEST.")
+          @PositiveOrZero
+          BigDecimal value,
+      @Schema(
+              description =
+                  "The proposal never goes below this share of the current price."
+                      + " pricing-svc holds no cost, so the floor is a share of the price, not of a margin.")
+          @NotNull
+          @DecimalMin("0.01")
+          @DecimalMax("100")
+          BigDecimal floorPercent,
+      @Schema(description = "NONE (the currency's minor unit) or ENDING_99 (down to a .99).")
+          String rounding,
+      @Schema(description = "An observation older than this many days is stale; 14 by default.")
+          Integer maxAgeDays) {}
+
+  @Schema(name = "RepricingRuleResponse")
+  public record RepricingRuleResponse(
+      UUID id,
+      String name,
+      UUID priceListId,
+      UUID zoneId,
+      String strategy,
+      BigDecimal value,
+      BigDecimal floorPercent,
+      String rounding,
+      int maxAgeDays,
+      boolean active,
+      String createdAt) {}
+
+  @Schema(name = "RepricingProposalResponse")
+  public record RepricingProposalResponse(
+      UUID id,
+      UUID ruleId,
+      UUID priceListId,
+      UUID zoneId,
+      UUID variantId,
+      BigDecimal currentPrice,
+      String competitor,
+      BigDecimal competitorPrice,
+      String observedOn,
+      BigDecimal proposedPrice,
+      String currency,
+      String status,
+      String proposedAt,
+      String decidedAt) {}
+
+  @Schema(name = "RepricingRunResponse")
+  public record RepricingRunResponse(
+      UUID ruleId, int examined, int proposed, List<RepricingProposalResponse> proposals) {}
 }

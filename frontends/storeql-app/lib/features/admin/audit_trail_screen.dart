@@ -1,17 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
-import 'package:intl/intl.dart';
 
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../shared/util/file_download.dart';
 import '../../shared/util/short_ref.dart';
+import '../../shared/util/status_labels.dart';
+import '../../shared/widgets/adaptive_filters.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
 import 'providers/admin_providers.dart';
+import 'providers/staff_names.dart';
 
 // The business audit trail (20.11): who discounted, voided, opened the drawer,
 // cancelled, took goods back or wrote stock off — one timeline across the two
@@ -28,6 +33,36 @@ const auditTypeLabels = <String, String>{
   'RETURN': 'Return',
   'STOCK_ADJUSTMENT': 'Stock adjustment',
 };
+
+/// How a return's money went back, finishing "£4.20 refunded …".
+String _refundedHow(String method) => switch (method.toUpperCase()) {
+      'ORIGINAL' => 'to the original payment',
+      'STORE_CREDIT' => 'as store credit',
+      'GIFT_CARD' => 'to a gift card',
+      'CARD' => 'to the card',
+      'CASH' => 'in cash',
+      _ => 'by ${_midSentence(humanizeCode(method))}',
+    };
+
+/// The stockroom's reason codes (inventory-svc's `transaction_reason_codes`),
+/// in words. A business's own code reads as its words too.
+String _stockReason(String code) => switch (code.toUpperCase()) {
+      'DAMAGED' => 'Damaged',
+      'FOUND' => 'Found during a count',
+      'THEFT' => 'Theft or shrinkage',
+      'EXPIRY' || 'EXPIRED' => 'Expired',
+      'VENDOR_RETURN' => 'Returned to the supplier',
+      'CORRECTION' => 'Correction',
+      'SAMPLING' => 'Quality sampling',
+      _ => humanizeCode(code),
+    };
+
+/// Words from [humanizeCode] for the middle of a sentence: `Manager` →
+/// `manager`, while an acronym such as `POS lead` keeps its capitals.
+String _midSentence(String words) {
+  if (words.length < 2 || words[1].toUpperCase() == words[1]) return words;
+  return words[0].toLowerCase() + words.substring(1);
+}
 
 /// One event on the trail, from either source.
 class AuditEvent {
@@ -108,6 +143,26 @@ class AuditFilter {
 
   static const _unset = Object();
 
+  /// The trail's opening view: every store, every action, anyone, over the
+  /// last thirty days including today.
+  factory AuditFilter.lastThirtyDays() {
+    final today = DateTime.now();
+    final day = DateTime(today.year, today.month, today.day);
+    return AuditFilter(from: day.subtract(const Duration(days: 29)), to: day);
+  }
+
+  /// How many filters differ from [lastThirtyDays] — the number the phone's
+  /// *Filters* button shows.
+  int get activeCount {
+    final initial = AuditFilter.lastThirtyDays();
+    return [
+      storeId != null,
+      from != initial.from || to != initial.to,
+      type != null,
+      actorId != null,
+    ].where((on) => on).length;
+  }
+
   AuditFilter copyWith({
     Object? storeId = _unset,
     DateTime? from,
@@ -153,11 +208,8 @@ class AuditFilter {
   int get hashCode => Object.hash(storeId, from, to, type, actorId);
 }
 
-final auditFilterProvider = StateProvider<AuditFilter>((ref) {
-  final today = DateTime.now();
-  final day = DateTime(today.year, today.month, today.day);
-  return AuditFilter(from: day.subtract(const Duration(days: 29)), to: day);
-});
+final auditFilterProvider =
+    StateProvider<AuditFilter>((ref) => AuditFilter.lastThirtyDays());
 
 /// What has been loaded so far: the merged timeline, and whether order-svc has
 /// an older page to fetch.
@@ -288,11 +340,39 @@ class AuditTrailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final stores = ref.watch(storesProvider);
-    final staff = ref.watch(staffProvider);
+    final staff = ref.watch(staffProvider).value ?? const <StaffMember>[];
     final filter = ref.watch(auditFilterProvider);
     final trail = ref.watch(auditTrailProvider(filter));
+    // The trail's amounts carry no currency: a discount or a refund is in the
+    // business's home currency, the one its tills charge in.
+    final currency = ref.watch(tenantInfoProvider).value?.currency;
     final theme = Theme.of(context);
-    final dateFmt = DateFormat.yMMMd();
+    String day(DateTime d) => AppFormat.date(d.toIso8601String());
+    void setFilter(AuditFilter f) => ref.read(auditFilterProvider.notifier).state = f;
+
+    // People by their login, not their id: everyone on the staff list (the Who
+    // menu), everyone the trail names (someone who has since left included)
+    // and the supervisor who authorised a no-sale. The end of an id stands in
+    // only while iam-svc has not named someone.
+    // Names already read stay while the trail reloads (a filter, Load
+    // older), so a row never drops back to an id for a round trip; only ids
+    // not yet asked about are sent.
+    final logins = ref.watch(staffNameCacheProvider);
+    final names = ref.read(staffNameCacheProvider.notifier);
+    Future.microtask(() => names.resolve([
+          for (final s in staff) s.userId,
+          for (final e in trail.events) ...[
+            ?e.actorId,
+            if (e.type == 'NO_SALE') ?e.detail,
+          ],
+        ]));
+    // Products by name, for the stock adjustments.
+    final products = ref
+            .watch(variantLabelsProvider(variantIdsKey([
+              for (final e in trail.events) ?e.variantId,
+            ])))
+            .value ??
+        const <String, VariantLabel>{};
 
     Future<void> pickRange() async {
       final picked = await showDateRangePicker(
@@ -302,36 +382,48 @@ class AuditTrailScreen extends ConsumerWidget {
         initialDateRange: DateTimeRange(start: filter.from, end: filter.to),
       );
       if (picked != null) {
-        ref.read(auditFilterProvider.notifier).state = filter.copyWith(
+        setFilter(filter.copyWith(
           from: DateTime(picked.start.year, picked.start.month, picked.start.day),
           to: DateTime(picked.end.year, picked.end.month, picked.end.day),
-        );
+        ));
       }
     }
 
-    // One entry per person, whatever stores they are assigned at.
+    // One entry per person, whatever stores they are assigned at. A login
+    // iam-svc has not named keeps its role, so two unnamed people differ.
     final actors = <String, String>{};
-    for (final s in staff.value ?? const <StaffMember>[]) {
-      actors.putIfAbsent(s.userId, () => '${s.role} · ${shortRef(s.userId)}');
+    for (final s in staff) {
+      actors.putIfAbsent(
+        s.userId,
+        () => logins[s.userId] ?? '${humanizeCode(s.role)} · ${shortRef(s.userId)}',
+      );
     }
 
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      // 16 on a phone, 24 from tablet width up.
+      padding: context.pagePadding,
       children: [
-        Text('Audit trail', style: theme.textTheme.headlineMedium),
-        const SizedBox(height: 4),
-        Text(
-          'Who discounted, voided, opened the drawer, cancelled, took goods back '
-          'or wrote stock off — one record across the till and the stockroom, '
-          'newest first. Every row is an append-only log; nothing here can change one.',
-          style: theme.textTheme.bodyMedium
-              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        PageHeader(
+          title: 'Audit trail',
+          subtitle: 'Who discounted, voided, opened the drawer, cancelled, took goods '
+              'back or wrote stock off — one record across the till and the '
+              'stockroom, newest first. Every row is an append-only log; nothing '
+              'here can change one.',
+          padding: const EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
+          actions: [
+            OutlinedButton.icon(
+              key: const Key('audit-export'),
+              onPressed: trail.events.isEmpty ? null : () => _exportCsv(trail.events),
+              icon: const Icon(Icons.download_outlined),
+              label: const Text('Export CSV'),
+            ),
+          ],
         ),
-        const SizedBox(height: AppSpacing.lg),
-        Wrap(
-          spacing: 12,
-          runSpacing: 8,
-          crossAxisAlignment: WrapCrossAlignment.center,
+        // Inline from tablet width; on a phone, folded behind one Filters
+        // button so the trail itself starts on the first screen.
+        AdaptiveFilters(
+          activeCount: filter.activeCount,
+          onClear: () => setFilter(AuditFilter.lastThirtyDays()),
           children: [
             SizedBox(
               width: 240,
@@ -345,14 +437,14 @@ class AuditTrailScreen extends ConsumerWidget {
                   for (final s in stores.value ?? const [])
                     DropdownMenuItem<String?>(value: s.id, child: Text(s.name)),
                 ],
-                onChanged: (v) => ref.read(auditFilterProvider.notifier).state =
-                    filter.copyWith(storeId: v),
+                onChanged: (v) => setFilter(filter.copyWith(storeId: v)),
               ),
             ),
             OutlinedButton.icon(
+              key: const Key('audit-period'),
               onPressed: pickRange,
               icon: const Icon(Icons.date_range),
-              label: Text('${dateFmt.format(filter.from)} – ${dateFmt.format(filter.to)}'),
+              label: Text('${day(filter.from)} – ${day(filter.to)}'),
             ),
             SizedBox(
               width: 220,
@@ -366,8 +458,7 @@ class AuditTrailScreen extends ConsumerWidget {
                   for (final e in auditTypeLabels.entries)
                     DropdownMenuItem<String?>(value: e.key, child: Text('${e.value}s')),
                 ],
-                onChanged: (v) => ref.read(auditFilterProvider.notifier).state =
-                    filter.copyWith(type: v),
+                onChanged: (v) => setFilter(filter.copyWith(type: v)),
               ),
             ),
             SizedBox(
@@ -380,17 +471,13 @@ class AuditTrailScreen extends ConsumerWidget {
                 items: [
                   const DropdownMenuItem<String?>(value: null, child: Text('Anyone')),
                   for (final e in actors.entries)
-                    DropdownMenuItem<String?>(value: e.key, child: Text(e.value)),
+                    DropdownMenuItem<String?>(
+                      value: e.key,
+                      child: Text(e.value, overflow: TextOverflow.ellipsis),
+                    ),
                 ],
-                onChanged: (v) => ref.read(auditFilterProvider.notifier).state =
-                    filter.copyWith(actorId: v),
+                onChanged: (v) => setFilter(filter.copyWith(actorId: v)),
               ),
-            ),
-            OutlinedButton.icon(
-              key: const Key('audit-export'),
-              onPressed: trail.events.isEmpty ? null : () => _exportCsv(trail.events),
-              icon: const Icon(Icons.download_outlined),
-              label: const Text('Export CSV'),
             ),
           ],
         ),
@@ -403,24 +490,32 @@ class AuditTrailScreen extends ConsumerWidget {
             onRetry: () => ref.read(auditTrailProvider(filter).notifier).refresh(),
           )
         else if (trail.events.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 24),
-            child: Text(
-              'Nothing recorded in this period. A busy shop with an empty trail has '
-              'either had a quiet month or is not using the till for its exceptions.',
-              style: theme.textTheme.bodyMedium
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-            ),
+          const EmptyState(
+            icon: Icons.fact_check_outlined,
+            title: 'Nothing recorded in this period',
+            message: 'A busy shop with an empty trail has either had a quiet month '
+                'or is not using the till for its exceptions.',
           )
         else ...[
           Card(
             child: Column(
-              children: [for (final e in trail.events) _AuditRow(event: e)],
+              children: [
+                for (final e in trail.events)
+                  _AuditRow(
+                    event: e,
+                    currency: currency,
+                    nameOf: (id) => staffDisplayName(id, logins),
+                    productOf: (id) {
+                      final name = products[id]?.productName ?? '';
+                      return name.isNotEmpty ? name : shortRef(id);
+                    },
+                  ),
+              ],
             ),
           ),
           if (trail.error != null)
             Padding(
-              padding: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsetsDirectional.only(top: AppSpacing.sm),
               child: Text(
                 friendlyError(trail.error!, fallback: 'Could not load older events.'),
                 style: TextStyle(color: theme.colorScheme.error),
@@ -428,7 +523,7 @@ class AuditTrailScreen extends ConsumerWidget {
             ),
           if (trail.hasMore)
             Padding(
-              padding: const EdgeInsets.only(top: 12),
+              padding: const EdgeInsetsDirectional.only(top: AppSpacing.md),
               child: Center(
                 child: trail.loadingMore
                     ? const CircularProgressIndicator()
@@ -472,9 +567,24 @@ class AuditTrailScreen extends ConsumerWidget {
 }
 
 class _AuditRow extends StatelessWidget {
-  const _AuditRow({required this.event});
+  const _AuditRow({
+    required this.event,
+    required this.currency,
+    required this.nameOf,
+    required this.productOf,
+  });
 
   final AuditEvent event;
+
+  /// The business's home currency, or null while it is unknown (the amount
+  /// then shows without a symbol rather than in the wrong one).
+  final String? currency;
+
+  /// A member of staff's name from their user id.
+  final String Function(String userId) nameOf;
+
+  /// A product's name from its variant id.
+  final String Function(String variantId) productOf;
 
   @override
   Widget build(BuildContext context) {
@@ -489,26 +599,47 @@ class _AuditRow extends StatelessWidget {
       'RETURN' => (Icons.assignment_return_outlined, cs.primary),
       _ => (Icons.inventory_outlined, cs.secondary),
     };
-    final label = auditTypeLabels[e.type] ?? e.type;
+    final label = auditTypeLabels[e.type] ?? humanizeCode(e.type);
+    final money = e.amount == null ? '' : AppFormat.money(e.amount!, currencyCode: currency);
+    final detail = (e.detail ?? '').isEmpty ? null : e.detail!;
     final title = switch (e.type) {
-      'DISCOUNT' =>
-        '$label · ${e.amount?.toStringAsFixed(2) ?? ''}${e.detail != null ? ' (${e.detail})' : ''}',
-      'CANCEL' => '$label${e.detail != null ? ' · from ${e.detail}' : ''}',
-      'RETURN' =>
-        '$label · ${e.amount?.toStringAsFixed(2) ?? ''} refunded${e.detail != null ? ' via ${e.detail}' : ''}',
+      // The role the discount was granted under.
+      'DISCOUNT' => [
+          label,
+          if (money.isNotEmpty) money,
+          if (detail != null) 'authorised as ${_midSentence(humanizeCode(detail))}',
+        ].join(' · '),
+      // The status the order was in when it was cancelled.
+      'CANCEL' => detail == null
+          ? label
+          : '$label · the order was ${_midSentence(orderStatusLabel(detail))}',
+      'RETURN' => [
+          label,
+          [
+            if (money.isNotEmpty) money,
+            'refunded',
+            if (detail != null) _refundedHow(detail),
+          ].join(' '),
+        ].join(' · '),
+      // The supervisor who authorised opening the drawer.
+      'NO_SALE' => detail == null ? label : '$label · authorised by ${nameOf(detail)}',
       'STOCK_ADJUSTMENT' =>
-        '$label · ${_signed(e.qty)}${e.variantId != null ? ' × ${shortRef(e.variantId!)}' : ''}',
+        '$label · ${_signed(e.qty)}${e.variantId != null ? ' × ${productOf(e.variantId!)}' : ''}',
       _ => label,
     };
-    final when = e.occurredAt == null
-        ? ''
-        : DateFormat.yMMMd().add_Hm().format(e.occurredAt!.toLocal());
-    final who = e.actorId == null ? 'Unattributed' : 'by ${shortRef(e.actorId!)}';
+    final when = e.occurredAt == null ? '' : AppFormat.dateTime(e.occurredAt!.toIso8601String());
+    final who = e.actorId == null ? 'Unattributed' : 'by ${nameOf(e.actorId!)}';
+    // A till reason is the cashier's own words; the stockroom's is a code.
+    final reason = (e.reason ?? '').isEmpty
+        ? null
+        : e.fromStock
+            ? _stockReason(e.reason!)
+            : e.reason!;
     final subtitle = [
       if (when.isNotEmpty) when,
       who,
       if (e.orderId != null) 'order ${shortRef(e.orderId!)}',
-      if (e.reason != null && e.reason!.isNotEmpty) e.reason!,
+      ?reason,
     ].join(' · ');
     return ListTile(
       leading: Icon(icon, color: colour),

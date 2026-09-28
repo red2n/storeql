@@ -29,6 +29,62 @@ final class Events {
    * The reason is caller-supplied text, so it goes through {@link EventPayload#esc} — a quote in it
    * must not be able to corrupt the event JSON.
    */
+  /**
+   * How a variant is fulfilled from now on (dropship): from the supplier per order, or from stock
+   * again. inventory-svc keeps the projection it answers availability and holds from.
+   */
+  static OutboxRow variantSourcingChanged(
+      UUID tenantId, UUID variantId, String fulfilment, UUID supplierId) {
+    return new OutboxRow(
+        "VariantSourcingChanged",
+        "storeql.purchase.variant-sourcing-changed",
+        tenantId,
+        variantId,
+        EventPayload.base("VariantSourcingChanged", tenantId, variantId)
+            + ",\"variantId\":\""
+            + variantId
+            + "\",\"fulfilment\":\""
+            + fulfilment
+            + "\",\"supplierId\":"
+            + (supplierId == null ? "null" : "\"" + supplierId + "\"")
+            + "}");
+  }
+
+  /**
+   * The whole of a warehouse order's cross-dock allocations, as they now stand (cross-docking): a
+   * snapshot inventory-svc replaces its record with — what each shop is owed of each product when
+   * the delivery arrives. Empty when the order is rejected, cancelled or closed short. Keyed by the
+   * order, so the snapshots of one order arrive in the order they were made.
+   */
+  public static OutboxRow crossDockAllocationsSet(
+      UUID tenantId, UUID poId, UUID warehouseId, List<Domain.LineAllocation> allocations) {
+    StringBuilder sb =
+        new StringBuilder(EventPayload.base("CrossDockAllocationsSet", tenantId, poId))
+            .append(",\"poId\":\"")
+            .append(poId)
+            .append("\",\"warehouseId\":\"")
+            .append(warehouseId)
+            .append("\",\"allocations\":[");
+    for (int i = 0; i < allocations.size(); i++) {
+      Domain.LineAllocation a = allocations.get(i);
+      if (i > 0) sb.append(',');
+      sb.append("{\"variantId\":\"")
+          .append(a.variantId())
+          .append("\",\"storeId\":\"")
+          .append(a.storeId())
+          .append("\",\"qty\":")
+          .append(a.qty().stripTrailingZeros().toPlainString())
+          .append('}');
+    }
+    sb.append("]}");
+    return new OutboxRow(
+        "CrossDockAllocationsSet",
+        "storeql.purchase.crossdock-allocations-set",
+        tenantId,
+        poId,
+        sb.toString());
+  }
+
   static OutboxRow purchaseOrderCancelled(UUID tenantId, UUID poId, String reason) {
     return new OutboxRow(
         "PurchaseOrderCancelled",
@@ -56,6 +112,7 @@ final class Events {
    * reaching into another service's schema (golden rule #1), and there was exactly one receipt per
    * order back then, so nothing was lost that a join cannot recover.
    */
+  /** A receipt of the business's own, duty-paid goods, the supplier unnamed. */
   static OutboxRow goodsReceived(
       UUID tenantId,
       UUID grId,
@@ -63,6 +120,42 @@ final class Events {
       UUID poId,
       List<GoodsReceiptLine> lines,
       java.util.Map<UUID, java.math.BigDecimal> unitPrice) {
+    return goodsReceived(
+        tenantId, grId, storeId, poId, lines, unitPrice, Domain.PO_OWNERSHIP_OWNED, null);
+  }
+
+  /** A receipt of duty-paid goods of the given ownership. */
+  static OutboxRow goodsReceived(
+      UUID tenantId,
+      UUID grId,
+      UUID storeId,
+      UUID poId,
+      List<GoodsReceiptLine> lines,
+      java.util.Map<UUID, java.math.BigDecimal> unitPrice,
+      String ownership,
+      UUID supplierId) {
+    return goodsReceived(
+        tenantId,
+        grId,
+        storeId,
+        poId,
+        lines,
+        unitPrice,
+        ownership,
+        supplierId,
+        Domain.PO_DUTY_PAID);
+  }
+
+  static OutboxRow goodsReceived(
+      UUID tenantId,
+      UUID grId,
+      UUID storeId,
+      UUID poId,
+      List<GoodsReceiptLine> lines,
+      java.util.Map<UUID, java.math.BigDecimal> unitPrice,
+      String ownership,
+      UUID supplierId,
+      String dutyStatus) {
     StringBuilder sb = new StringBuilder();
     sb.append("{\"eventId\":\"")
         .append(grId)
@@ -74,6 +167,14 @@ final class Events {
         .append(grId)
         .append("\",\"poId\":\"")
         .append(poId)
+        // Whose the stock is (consignment stock ownership): OWNED, or the supplier's until sold.
+        .append("\",\"ownership\":\"")
+        .append(ownership == null ? Domain.PO_OWNERSHIP_OWNED : ownership)
+        .append("\",\"supplierId\":\"")
+        .append(supplierId)
+        // Bonded stock: a delivery under bond arrives with its duty suspended.
+        .append("\",\"dutyStatus\":\"")
+        .append(dutyStatus == null ? Domain.PO_DUTY_PAID : dutyStatus)
         .append("\",\"lines\":[");
     for (int i = 0; i < lines.size(); i++) {
       if (i > 0) sb.append(",");

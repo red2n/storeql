@@ -130,10 +130,10 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
   let saleHeld;
   let saleOpen;
   group('2. four sales', () => {
-    saleGone = sale(gone.id, '+447700900111', true);
-    saleKept = sale(kept.id, '+447700900222', true);
-    saleHeld = sale(undefined, '+447700900333', true);
-    saleOpen = sale(undefined, '+447700900444', false);
+    saleGone = sale(gone.id, '+447400900111', true);
+    saleKept = sale(kept.id, '+447400900222', true);
+    saleHeld = sale(undefined, '+447400900333', true);
+    saleOpen = sale(undefined, '+447400900444', false);
     truthy('[+] three are settled', poll(60, () => [saleGone, saleKept, saleHeld].every((o) => orderOf(o.id).status === 'FULFILLED')) >= 0);
     truthy('[+] one is still open', orderOf(saleOpen.id).status === 'PENDING', orderOf(saleOpen.id).status);
     truthy('[+] both customers were emailed their confirmations', poll(60, () => logFor(gone.email).length > 0 && logFor(kept.email).length > 0) >= 0, { gone: logFor(gone.email).length, kept: logFor(kept.email).length });
@@ -177,15 +177,15 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     const purged = runs.reduce((n, r) => n + (r.rowsAffected || 0), 0);
     truthy('[+] twenty sweeps at once redact the one order due, once between them', race.every((r) => r.status === 200) && purged === 1, { statuses: race.map((r) => r.status).join(','), purged });
     truthy('[+] ...and every one counts the two held orders as held', runs.every((r) => r.heldSkipped === 2), runs.map((r) => r.heldSkipped));
-    truthy('[+] the settled order lost its phone and kept its total', orderOf(saleGone.id).contactPhone === undefined && Number(orderOf(saleGone.id).total) > 0, orderOf(saleGone.id));
-    truthy('[+] the held customer\'s order kept its phone', orderOf(saleKept.id).contactPhone === '+447700900222');
-    truthy('[+] the held order kept its phone', orderOf(saleHeld.id).contactPhone === '+447700900333');
-    truthy('[+] the open order kept its phone', orderOf(saleOpen.id).contactPhone === '+447700900444');
+    truthy('[+] the settled order lost its phone, in both forms, and kept its total', orderOf(saleGone.id).contactPhone === undefined && orderOf(saleGone.id).contactPhoneE164 === undefined && Number(orderOf(saleGone.id).total) > 0, orderOf(saleGone.id));
+    truthy('[+] the held customer\'s order kept its phone', orderOf(saleKept.id).contactPhone === '+447400900222' && orderOf(saleKept.id).contactPhoneE164 === '+447400900222');
+    truthy('[+] the held order kept its phone', orderOf(saleHeld.id).contactPhone === '+447400900333');
+    truthy('[+] the open order kept its phone', orderOf(saleOpen.id).contactPhone === '+447400900444');
     expect(sweep('order', cashier.token), '[-] a cashier cannot run a purge', 403);
     expect(sweep('order', storekeeper.token), '[-] nor a storekeeper', 403);
     expect(sweep('order', shopper.token), '[-] nor a shopper', [401, 403]);
     expect(sweep('order', rival.owner.token), "[-] a rival's owner purges only their own business, which has no period", 409, 'RETENTION_PERIOD_NOT_SET');
-    truthy('[+] our orders are untouched by the rival\'s attempt', orderOf(saleKept.id).contactPhone === '+447700900222');
+    truthy('[+] our orders are untouched by the rival\'s attempt', orderOf(saleKept.id).contactPhone === '+447400900222');
   });
 
   // ── the notification log ──────────────────────────────────────────────────────

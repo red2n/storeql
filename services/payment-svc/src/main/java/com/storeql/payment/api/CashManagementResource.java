@@ -5,6 +5,7 @@ import com.storeql.payment.dto.Dtos.OpenTillRequest;
 import com.storeql.payment.dto.Dtos.RecordCashDropRequest;
 import com.storeql.payment.service.CashManagementService;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.Parsing;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
@@ -15,6 +16,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.UUID;
@@ -52,6 +54,34 @@ public class CashManagementResource {
     UUID userId = ctx.userId();
     var session = svc.openTill(tenantId, userId, req, ctx);
     return Response.status(201).entity(ApiResponse.ok(session)).build();
+  }
+
+  /**
+   * The caller's own open till at a store — the one a till screen resumes after a reload. Declared
+   * before {@code /{id}} so the literal segment is never read as a session id.
+   */
+  @Operation(
+      summary = "Get the caller's open till session at a store",
+      description =
+          "The session the caller opened at storeId and has not closed. Requires CASHIER, MANAGER,"
+              + " or OWNER, and access to the store.")
+  @APIResponse(responseCode = "200", description = "The caller's open till session")
+  @APIResponse(responseCode = "400", description = "INVALID_UUID: storeId missing or not a UUIDv7")
+  @APIResponse(
+      responseCode = "403",
+      description = "Caller lacks a cashier/manager/owner role, or is not assigned to the store")
+  @APIResponse(
+      responseCode = "404",
+      description = "TILL_SESSION_NOT_OPEN: the caller has no open till at the store")
+  @GET
+  @Path("/current")
+  public Response current(@QueryParam("storeId") String storeId) {
+    ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
+    UUID store = Parsing.uuid(storeId, "storeId");
+    return Response.ok(
+            ApiResponse.ok(
+                svc.currentSession(ctx.requireTenantId(), store, ctx.requireUserId(), ctx)))
+        .build();
   }
 
   /** Get current session status and float. */

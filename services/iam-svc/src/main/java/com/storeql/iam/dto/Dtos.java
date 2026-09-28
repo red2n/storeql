@@ -57,9 +57,63 @@ public final class Dtos {
       @Schema(description = "True if a new user was created; false if one already existed.")
           boolean created) {}
 
+  /** One of the business's staff, named: what {@code GET /auth/admin/staff-users} answers. */
+  @Schema(
+      name = "StaffUserResponse",
+      description =
+          "A login of the caller's business's staff, by id and email. Ids of another business's"
+              + " staff, of customers and of nobody are left out of the answer.")
+  public record StaffUserResponse(
+      @Schema(description = "UUID of the staff user.") String userId,
+      @Schema(description = "The login email.") String email) {}
+
   /** Login with email + password. */
   @Schema(name = "LoginRequest")
   public record LoginRequest(@Email @NotBlank String email, @NotBlank String password) {}
+
+  // ── Forgotten password (public — no sign-in) ──────────────────────────────
+
+  /** {@code GET /auth/password-policy}: the published rules, before anyone types a password. */
+  @Schema(
+      name = "PasswordPolicyResponse",
+      description = "The password rules in force, so a form can show them before anyone types.")
+  public record PasswordPolicyResponse(
+      @Schema(description = "Fewest characters accepted.") int minLength,
+      @Schema(description = "Most characters accepted.") int maxLength,
+      @Schema(description = "Whether a password is screened against known data breaches.")
+          boolean breachScreened,
+      @Schema(description = "Always true: a password must not be, or contain, the login.")
+          boolean mustNotContainLogin) {}
+
+  /** Ask for a password reset link. Public — the same answer whatever the address. */
+  @Schema(
+      name = "ForgotPasswordRequest",
+      description = "Ask for a password reset link. Answered the same whatever the address.")
+  public record ForgotPasswordRequest(
+      @Schema(description = "The login email every eligible account with it is reset by.")
+          @Email
+          @NotBlank
+          @Size(max = 254)
+          String email,
+      @Schema(
+              description =
+                  "ISO 639 language code, [a-z]{2,3}. Anything else, or none, reads as English.")
+          String language) {}
+
+  /** What {@code POST /auth/password/forgot} always answers, whatever the address. */
+  @Schema(name = "ForgotPasswordResponse")
+  public record ForgotPasswordResponse(@Schema(description = "Always true.") boolean accepted) {}
+
+  /** Spend a password reset link. Public — the token from the link is the proof. */
+  @Schema(name = "ResetPasswordRequest", description = "Spend a password reset link.")
+  public record ResetPasswordRequest(
+      @Schema(description = "The token from the reset link.") @NotBlank String token,
+      @Schema(description = "The new password, checked against the published policy.") @NotBlank
+          String newPassword) {}
+
+  /** What {@code POST /auth/password/reset} answers on success. */
+  @Schema(name = "ResetPasswordResponse")
+  public record ResetPasswordResponse(@Schema(description = "Always true.") boolean reset) {}
 
   /** Refresh access token. */
   @Schema(name = "RefreshRequest")
@@ -129,6 +183,17 @@ public final class Dtos {
       return new TokenResponse(access, null, "Bearer", ttl, null, null, null, true);
     }
   }
+
+  @Schema(
+      name = "SandboxTokenResponse",
+      description =
+          "A token for the business's sandbox (22.8): names the sandbox as its tenant, an owner"
+              + " there, amr [sandbox], no refresh token.")
+  public record SandboxTokenResponse(
+      String accessToken,
+      @Schema(description = "Always \"Bearer\".") String tokenType,
+      Long expiresInSeconds,
+      @Schema(description = "The sandbox tenant the token names.") String tenantId) {}
 
   /** The account holder confirming, with their password, that the account should be deleted. */
   @Schema(name = "DeleteAccountRequest")

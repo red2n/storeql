@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/storage/app_storage.dart';
 import 'package:storeql_app/features/pos/pos_printer_settings.dart';
 import 'package:storeql_app/features/pos/pos_receipt_data.dart';
@@ -52,6 +53,7 @@ PosReceiptData _receipt() => PosReceiptData(
     );
 
 void main() {
+  setUpAll(initializeDateFormatting);
   group('settings', () {
     test('round-trip through JSON', () {
       const s = PrinterSettings(

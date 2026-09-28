@@ -153,6 +153,27 @@ class RecallNoticeIT {
   }
 
   @Test
+  void aWalkInsNumberTypedTheUsualWayIsWhatTheirRecallTextGoesTo() {
+    // A phone at the till: the cashier typed each number the way people say it here, which an SMS
+    // gateway does not take. The first order keeps it in international form from the moment it is
+    // placed; the second stands for an order from before that was kept, read when the recall comes.
+    String walkIn = placeAtTillWithPhone("07400 123456");
+    String older = placeAtTillWithPhone("07400 654321");
+    com.storeql.test.Envelopes.exec(
+        PG, "UPDATE \"order\".orders SET contact_phone_e164 = NULL WHERE id = '" + older + "'");
+    UUID recall = Ids.newId();
+    assertThat(handler.handle(saleAffected(recall, walkIn, "RECALL", "REFUND")), is(true));
+    assertThat(handler.handle(saleAffected(recall, older, "RECALL", "REFUND")), is(true));
+    JsonArray listed = staffList(recall, null);
+    assertThat(
+        outboxPayload("RecallNoticeIssued", find(listed, "orderId", walkIn).getString("id")),
+        containsString("\"buyerPhone\":\"+447400123456\""));
+    assertThat(
+        outboxPayload("RecallNoticeIssued", find(listed, "orderId", older).getString("id")),
+        containsString("\"buyerPhone\":\"+447400654321\""));
+  }
+
+  @Test
   void aWithdrawalAMalformedEventAndAnOrderThisServiceNeverSawTellNobody() {
     UUID recall = Ids.newId();
     String order = placeAtTill(Ids.newId(), null);
@@ -469,6 +490,17 @@ class RecallNoticeIT {
 
   private String placeAsShopper(UUID login) {
     return place("ONLINE", "PICKUP", "", "CUSTOMER", login).getString("id");
+  }
+
+  /** A walk-in's till sale, the number given as the cashier typed it. */
+  private String placeAtTillWithPhone(String phone) {
+    return place(
+            "POS",
+            "INSTORE",
+            "\"contactPhone\":\"" + phone + "\",\"currency\":\"GBP\",",
+            "OWNER",
+            Ids.parse(OWNER))
+        .getString("id");
   }
 
   private String placeAsGuest(String phone) {

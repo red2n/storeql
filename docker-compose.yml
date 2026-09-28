@@ -66,6 +66,9 @@ configs:
 
 volumes:
   pgdata:
+  # Dumps, base backups and archived WAL (docs/BACKUP-AND-RESTORE.md). Bind it to a disk of its own
+  # in production (a backup on the database's disk is not a backup): see docker-compose.prod.yml.
+  backups:
   redis_data:
   kafka_data:
   prometheus_data:
@@ -124,46 +127,44 @@ services:
     image: postgres:16-alpine
     container_name: storeql-postgres
     restart: unless-stopped
+    # The image's entrypoint, wrapped for three things the backup job needs (the rehearsed
+    # backup-restore drill): the backups volume's directories owned by postgres (a named volume is
+    # born root's), the replication line in pg_hba.conf so pg_basebackup may connect from the backup
+    # container (an existing volume; a fresh one gets it from infra/postgres-init-hba.sh), and WAL
+    # archiving into that volume so a restore can be taken to a moment. archive_timeout bounds the
+    # data at risk: a segment is closed and archived at least every PG_ARCHIVE_TIMEOUT seconds.
     command:
-      - postgres
+      - sh
       - -c
-      - shared_buffers=${PG_SHARED_BUFFERS:-512MB}
-      - -c
-      - work_mem=${PG_WORK_MEM:-16MB}
-      - -c
-      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}
-      - -c
-      - wal_buffers=${PG_WAL_BUFFERS:-16MB}
-      - -c
-      - max_wal_size=${PG_MAX_WAL_SIZE:-1GB}
-      - -c
-      - min_wal_size=${PG_MIN_WAL_SIZE:-128MB}
-      - -c
-      - checkpoint_completion_target=0.9
-      - -c
-      - synchronous_commit=${PG_SYNCHRONOUS_COMMIT:-off}
-      - -c
-      - random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}
-      - -c
-      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-2GB}
-      - -c
-      - max_connections=${PG_MAX_CONNECTIONS:-300}
-      - -c
-      - autovacuum_max_workers=${PG_AUTOVACUUM_MAX_WORKERS:-3}
-      - -c
-      - autovacuum_vacuum_scale_factor=${PG_AUTOVACUUM_VACUUM_SCALE:-0.05}
-      - -c
-      - autovacuum_analyze_scale_factor=${PG_AUTOVACUUM_ANALYZE_SCALE:-0.025}
-      - -c
-      - autovacuum_vacuum_cost_delay=${PG_AUTOVACUUM_COST_DELAY:-2ms}
-      - -c
-      - default_statistics_target=200
-      - -c
-      - shared_preload_libraries=pg_stat_statements
-      - -c
-      - pg_stat_statements.track=all
-      - -c
-      - log_min_duration_statement=${PG_LOG_MIN_DURATION:-200}
+      - |
+        mkdir -p /backups/wal /backups/dumps /backups/base /backups/metrics && chown -R postgres:postgres /backups
+        HBA="$${PGDATA:-/var/lib/postgresql/data}/pg_hba.conf"
+        if [ -f "$$HBA" ] && ! grep -q storeql-backup "$$HBA"; then
+          printf 'host replication all all scram-sha-256 # storeql-backup: base backups for point-in-time recovery\n' >> "$$HBA"
+        fi
+        exec docker-entrypoint.sh postgres \
+          -c shared_buffers=${PG_SHARED_BUFFERS:-512MB} \
+          -c work_mem=${PG_WORK_MEM:-16MB} \
+          -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB} \
+          -c wal_buffers=${PG_WAL_BUFFERS:-16MB} \
+          -c max_wal_size=${PG_MAX_WAL_SIZE:-1GB} \
+          -c min_wal_size=${PG_MIN_WAL_SIZE:-128MB} \
+          -c checkpoint_completion_target=0.9 \
+          -c synchronous_commit=${PG_SYNCHRONOUS_COMMIT:-off} \
+          -c random_page_cost=${PG_RANDOM_PAGE_COST:-1.1} \
+          -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-2GB} \
+          -c max_connections=${PG_MAX_CONNECTIONS:-300} \
+          -c autovacuum_max_workers=${PG_AUTOVACUUM_MAX_WORKERS:-3} \
+          -c autovacuum_vacuum_scale_factor=${PG_AUTOVACUUM_VACUUM_SCALE:-0.05} \
+          -c autovacuum_analyze_scale_factor=${PG_AUTOVACUUM_ANALYZE_SCALE:-0.025} \
+          -c autovacuum_vacuum_cost_delay=${PG_AUTOVACUUM_COST_DELAY:-2ms} \
+          -c default_statistics_target=200 \
+          -c shared_preload_libraries=pg_stat_statements \
+          -c pg_stat_statements.track=all \
+          -c log_min_duration_statement=${PG_LOG_MIN_DURATION:-200} \
+          -c archive_mode=on \
+          -c "archive_command=test ! -f /backups/wal/%f && cp %p /backups/wal/%f" \
+          -c archive_timeout=${PG_ARCHIVE_TIMEOUT:-300}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-storeql}
       POSTGRES_USER: ${POSTGRES_USER:-storeql}
@@ -178,6 +179,10 @@ services:
       # volume; against an existing one, re-apply manually — see header comment in
       # the script for the exact `docker compose exec` invocation.
       - ./infra/postgres-init-roles.sql:/docker-entrypoint-initdb.d/01-roles.sql:ro
+      # A fresh volume also gets the replication line the backup job's base backups need.
+      - ./infra/postgres-init-hba.sh:/docker-entrypoint-initdb.d/02-replication-hba.sh:ro
+      # Where the dumps, base backups and archived WAL live; shared with the backup job.
+      - backups:/backups
     networks:
       storeql_network:
         ipv4_address: *postgres-ip
@@ -186,6 +191,37 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+
+  # storeql-backup — the stack's Postgres backed up on a schedule (the rehearsed backup-restore
+  # drill): a pg_dump from one snapshot every day at STOREQL_BACKUP_AT (UTC) with a manifest of every
+  # table's count, encrypted to STOREQL_BACKUP_RECIPIENT (an age public key; without one the backup
+  # is plain and the log says so), a base backup every STOREQL_BACKUP_BASE_EVERY_DAYS for
+  # point-in-time recovery over the WAL Postgres archives above, the newest STOREQL_BACKUP_KEEP kept.
+  # `docker compose run --rm backup now` takes one now; scripts/backup-drill.sh restores one, and to
+  # a moment, and proves both — see docs/BACKUP-AND-RESTORE.md.
+  backup:
+    image: ghcr.io/red2n/storeql-backup:${STOREQL_TAG:-latest}
+    build:
+      context: .
+      dockerfile: infra/backup/Dockerfile
+    container_name: storeql-backup
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-storeql}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-storeql_dev_change_me}
+      PGDATABASE: ${POSTGRES_DB:-storeql}
+      STOREQL_BACKUP_AT: ${STOREQL_BACKUP_AT:-02:30}
+      STOREQL_BACKUP_KEEP: ${STOREQL_BACKUP_KEEP:-14}
+      STOREQL_BACKUP_KEEP_BASE: ${STOREQL_BACKUP_KEEP_BASE:-4}
+      STOREQL_BACKUP_BASE_EVERY_DAYS: ${STOREQL_BACKUP_BASE_EVERY_DAYS:-7}
+      STOREQL_BACKUP_RECIPIENT: ${STOREQL_BACKUP_RECIPIENT:-}
+    volumes:
+      - backups:/backups
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [storeql_network]
 
   # PgBouncer — connection pooler (transaction mode, 2000 app → 150 real connections).
   # Business services route their runtime pool through pgbouncer:6432 (storeql.db.url, set in
@@ -393,6 +429,35 @@ services:
     mem_limit: ${MOCK_IDP_MEM_LIMIT:-256m}
     networks: [storeql_network]
 
+  # A receiver for the webhooks k6 drives (22.6): answers every request with what it received —
+  # method, headers, body — so the delivery log, which keeps the first kilobytes of an answer, shows
+  # the signature and the body as they arrived and a test can verify them. notification-svc reaches
+  # it as webhook-sink over plain HTTP (storeql.webhooks.insecure-hosts); it opens no host port and
+  # is never deployed.
+  # A mail catcher for the dev stack (password reset): notification-svc sends real email to it over
+  # SMTP, a person reads it at http://localhost:8025 and k6/password-reset-flow.js reads it through
+  # its API to follow the link as a person would. Never deployed: an operator points
+  # storeql.notification.smtp.* at their own mail service.
+  mailpit:
+    image: axllent/mailpit:v1.31.2
+    container_name: storeql-mailpit
+    restart: unless-stopped
+    ports: ["127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"]
+    environment:
+      MP_MAX_MESSAGES: "5000"
+    mem_limit: ${MAILPIT_MEM_LIMIT:-128m}
+    networks: [storeql_network]
+
+  webhook-sink:
+    image: mendhak/http-https-echo:37
+    container_name: storeql-webhook-sink
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: "8080"
+      DISABLE_REQUEST_LOGS: "true"
+    mem_limit: ${WEBHOOK_SINK_MEM_LIMIT:-128m}
+    networks: [storeql_network]
+
   # MQTT broker for notification-svc's device-facing push channel (POS terminals, kiosk/back-store
   # displays, platform console). Only exercised when storeql.notification.channel=mqtt — the default
   # (app) never talks to it, so it's deliberately not in x-svc-depends.
@@ -479,9 +544,13 @@ services:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      # The backup job's metrics (when it last succeeded, how big, encrypted or not) — see the
+      # backups alert group in infra/prometheus/rules/alerts.yml.
+      - '--collector.textfile.directory=/backups/metrics'
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
+      - backups:/backups:ro
     networks: [storeql_network]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9100/metrics > /dev/null || exit 1"]
@@ -685,6 +754,9 @@ services:
       storeql.sso.callback-url: ${SSO_CALLBACK_URL:-http://localhost:8090/api/iam-svc/auth/sso/callback}
       storeql.sso.return-origins: ${SSO_RETURN_ORIGINS:-http://localhost:8088,http://127.0.0.1:8088,http://localhost:40015,http://127.0.0.1:40015}
       storeql.sso.insecure-hosts: ${SSO_INSECURE_HOSTS:-mock-idp}
+      # The link in a password-reset email opens the web app from outside: the address a person
+      # can reach, not the container's.
+      storeql.platform.web-url: ${UI_PUBLIC_URL:-http://localhost:${UI_HOST_PORT:-8088}}
     mem_limit: ${IAM_MEM_LIMIT:-700m}
     networks: [storeql_network]
     depends_on: *svc-depends
@@ -709,6 +781,9 @@ services:
       # in k8s, where a platform administrator being able to bill next March is not a feature but a
       # way to issue an invoice nobody owes yet.
       storeql.billing.test-clock.enabled: "true"
+      # The pay link in a dunning notice opens the web app from outside (21.12): the address a
+      # business's owner can reach, not the container's.
+      storeql.platform.web-url: ${UI_PUBLIC_URL:-http://localhost:${UI_HOST_PORT:-8088}}
     mem_limit: ${TENANT_MEM_LIMIT:-700m}
     networks: [storeql_network]
     depends_on: *svc-depends
@@ -791,6 +866,9 @@ services:
       # A real access point contract gets its own value; the dev default only lets order-svc's
       # simulated network deliver between the businesses on this stack.
       storeql.einvoice.inbound.key: ${STOREQL_EINVOICE_INBOUND_KEY:-dev-einvoice-inbound-key}
+      # Accounting connectors (17.9): the tokens a business's package issued are sealed under
+      # this key (16, 24 or 32 bytes, base64) — see .env.example.
+      storeql.accounting.secrets-key: ${STOREQL_ACCOUNTING_SECRETS_KEY:-vyZCf8bWkchYrFCuJiHWqwh5mTSEykU+wRPHbL7nkok=}
       JAVA_TOOL_OPTIONS: "${PURCHASE_JAVA_OPTS:--Xms128m -Xmx384m -XX:+UseG1GC}"
       STOREQL_ADVERTISE_HOST: purchase-svc
     mem_limit: ${PURCHASE_MEM_LIMIT:-512m}
@@ -925,12 +1003,23 @@ services:
       storeql.db.password: ${NOTIFICATION_DB_PASSWORD:-notification_dev_change_me}
       JAVA_TOOL_OPTIONS: "${NOTIFICATION_JAVA_OPTS:--Xms128m -Xmx384m -XX:+UseG1GC}"
       STOREQL_ADVERTISE_HOST: notification-svc
-      # Only used when storeql.notification.channel is overridden to mqtt (default: app). The
-      # publisher connection has its own broker password (20.15): notification-svc holds nothing
-      # that can sign a platform token.
-      storeql.notification.channel: ${NOTIFICATION_CHANNEL:-app}
+      # Email on in the dev stack: every message is emailed to the mail catcher as well as kept in
+      # the in-app feed, and a password reset — which goes by email only — can be delivered at all.
+      # NOTIFICATION_CHANNEL=app turns email off (resets are then logged NOT_SENT); mqtt adds the
+      # device push instead. The publisher connection has its own broker password (20.15):
+      # notification-svc holds nothing that can sign a platform token.
+      storeql.notification.channel: ${NOTIFICATION_CHANNEL:-email}
+      storeql.notification.smtp.host: ${SMTP_HOST:-mailpit}
+      storeql.notification.smtp.port: ${SMTP_PORT:-1025}
+      storeql.notification.smtp.starttls: ${SMTP_STARTTLS:-false}
+      storeql.notification.from: ${NOTIFICATION_FROM:-no-reply@storeql.local}
       storeql.notification.mqtt.host: mqtt
       storeql.notification.mqtt.publisher-password: ${MQTT_PUBLISHER_PASSWORD:?MQTT_PUBLISHER_PASSWORD must be set - see .env.example}
+      # Webhooks to a business's own systems (22.6): each endpoint's signing secret is sealed under
+      # this key (16, 24 or 32 bytes, base64) — see .env.example. webhook-sink is the stand-in
+      # receiver k6 drives; it is reached over plain HTTP on the compose network and nowhere else.
+      storeql.webhooks.secrets-key: ${STOREQL_WEBHOOKS_SECRETS_KEY:-vyZCf8bWkchYrFCuJiHWqwh5mTSEykU+wRPHbL7nkok=}
+      storeql.webhooks.insecure-hosts: webhook-sink
     mem_limit: ${NOTIFICATION_MEM_LIMIT:-512m}
     networks: [storeql_network]
     depends_on: *svc-depends

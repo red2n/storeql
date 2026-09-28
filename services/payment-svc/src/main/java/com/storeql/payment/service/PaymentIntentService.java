@@ -103,7 +103,7 @@ public class PaymentIntentService {
             tenantId,
             orderId,
             verified.storeId(),
-            providers.active().name(),
+            providers.forTenant(tenantId).name(),
             null,
             req.amount(),
             BigDecimal.ZERO,

@@ -172,9 +172,59 @@ public class TenantContext {
    *     {@code storeId} is not one of their assigned stores
    */
   public void requireStoreAccess(UUID storeId) {
-    if (!storeIds.isEmpty() && !storeIds.contains(storeId)) {
+    if (!hasStoreAccess(storeId)) {
       throw ApiException.forbidden("STORE_ACCESS_DENIED", "Caller is not assigned to this store");
     }
+  }
+
+  /**
+   * Whether the caller may act at a store: assigned to it, or assigned to no store at all (an
+   * owner, a manager of the whole business, a service).
+   *
+   * @param storeId the store
+   * @return true when the caller is held to no store or to this one
+   */
+  public boolean hasStoreAccess(UUID storeId) {
+    return storeIds.isEmpty() || storeIds.contains(storeId);
+  }
+
+  /**
+   * Requires access to either of two stores — the two ends of a transfer, where the sender's keeper
+   * and the receiver's may each read the order.
+   *
+   * @param first one store
+   * @param second the other
+   * @throws ApiException 403 STORE_ACCESS_DENIED when the caller keeps neither
+   */
+  public void requireAnyStoreAccess(UUID first, UUID second) {
+    if (!hasStoreAccess(first) && !hasStoreAccess(second)) {
+      throw ApiException.forbidden("STORE_ACCESS_DENIED", "Caller is not assigned to this store");
+    }
+  }
+
+  /**
+   * The store a read is scoped to (SJ-D74). A store that is named is checked against the caller's
+   * stores; when none is named, a caller assigned to one store reads that store, a caller assigned
+   * to several must say which, and a caller assigned to none reads them all.
+   *
+   * @param requested the store named on the request, or null
+   * @return the store to read, or null for every store
+   * @throws ApiException 403 STORE_ACCESS_DENIED for a store the caller does not keep; 400
+   *     STORE_REQUIRED when a caller of several stores names none
+   */
+  public UUID scopeStore(UUID requested) {
+    if (requested != null) {
+      requireStoreAccess(requested);
+      return requested;
+    }
+    if (storeIds.isEmpty()) {
+      return null;
+    }
+    if (storeIds.size() == 1) {
+      return storeIds.iterator().next();
+    }
+    throw ApiException.badRequest(
+        "STORE_REQUIRED", "Name one of the stores you are assigned to (store=...)");
   }
 
   /**

@@ -4,12 +4,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/tenant_data_providers.dart';
 import 'package:storeql_app/features/admin/tenant_data_screen.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // Data export and leaving (21.14). The owner sees what every service holds and
 // what each leaves out, and why; the export reads every page into one bundle;
@@ -61,6 +63,9 @@ class _Server implements HttpClientAdapter {
   int failStatus = 0;
   String failMessage = '';
   String? refuseTable;
+
+  /// How many rows product-svc says its products table holds.
+  int productRows = 3;
 
   bool called(String method, String pathEnd) =>
       requests.any((o) => o.method == method && o.path.endsWith(pathEnd));
@@ -160,7 +165,7 @@ class _Server implements HttpClientAdapter {
           'format': 'storeql-tenant-data/1',
           'tables': svc == 'product-svc'
               ? [
-                  {'name': 'products', 'rows': 3, 'checksum': 'x'},
+                  {'name': 'products', 'rows': productRows, 'checksum': 'x'},
                 ]
               : svc == 'tenant-svc'
               ? [
@@ -201,17 +206,25 @@ Future<_Server> _pump(
   WidgetTester tester, {
   List<String> roles = const ['OWNER'],
   Map<String, dynamic>? switching,
+  int productRows = 3,
+  String? refuseTable,
+  String? bundle,
 }) async {
   tester.view.physicalSize = const Size(1200, 2400);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  final server = _Server()..switching = switching;
+  final server = _Server()
+    ..switching = switching
+    ..productRows = productRows
+    ..refuseTable = refuseTable;
   await tester.pumpWidget(
     ProviderScope(
       key: UniqueKey(),
       overrides: [
         apiClientProvider.overrideWithValue(_FakeApiClient(_dio(server))),
         authNotifierProvider.overrideWith(() => _Auth(roles)),
+        if (bundle != null)
+          tenantBundlePickerProvider.overrideWithValue(() async => bundle),
       ],
       child: const MaterialApp(home: Scaffold(body: TenantDataScreen())),
     ),
@@ -226,6 +239,14 @@ String _bundle(List<Map<String, Object?>> lines) => [
 ].join('\n');
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  setUpAll(initializeDateFormatting);
+
   testWidgets('anyone but the owner is told so and the API is never called', (
     tester,
   ) async {
@@ -242,21 +263,40 @@ void main() {
     (tester) async {
       final server = await _pump(tester);
       expect(find.textContaining('15 rows in 12 services'), findsOneWidget);
-      expect(find.text('product-svc'), findsOneWidget);
-      expect(find.text('3 rows · 1 tables'), findsOneWidget);
+      // Each service by what it holds, in words an owner knows — never the
+      // platform's name for it.
+      expect(find.text('Products'), findsOneWidget);
+      expect(find.text('Staff sign-ins'), findsOneWidget);
+      expect(find.text('Reports'), findsOneWidget);
+      expect(find.text('Shopping carts'), findsOneWidget);
+      expect(find.textContaining('-svc'), findsNothing);
+      expect(find.text('3 rows · 1 table'), findsOneWidget);
+      expect(find.text('2 rows · 2 tables'), findsOneWidget);
       expect(server.called('GET', '/cart-svc/admin/tenant-data'), isTrue);
       await tester.tap(find.text('What is left out, and why'));
       await tester.pumpAndSettle();
-      expect(find.text('iam-svc: users.password_hash'), findsOneWidget);
+      expect(find.text('Staff sign-ins: users.password_hash'), findsOneWidget);
       expect(find.textContaining('a credential'), findsWidgets);
-      expect(find.text('iam-svc: refresh_tokens'), findsOneWidget);
-      expect(find.text('tenant-svc: tenants, kept at erasure'), findsOneWidget);
+      expect(find.text('Staff sign-ins: refresh_tokens'), findsOneWidget);
+      expect(
+        find.text('Business and stores: tenants, kept at erasure'),
+        findsOneWidget,
+      );
       // The machinery every service leaves out is named once, not twelve times.
-      expect(find.text('iam-svc: outbox'), findsNothing);
+      expect(find.text('Staff sign-ins: outbox'), findsNothing);
       expect(find.textContaining('Every service: outbox'), findsOneWidget);
       expect(find.text('No notice given.'), findsOneWidget);
     },
   );
+
+  testWidgets('row counts are grouped, as every other number is', (
+    tester,
+  ) async {
+    await _pump(tester, productRows: 138469);
+    expect(find.text('138,469 rows · 1 table'), findsOneWidget);
+    expect(find.textContaining('138,481 rows in 12 services'), findsOneWidget);
+    expect(find.textContaining('138469'), findsNothing);
+  });
 
   test('the export reads every page of every table into one bundle', () async {
     final server = _Server();
@@ -288,6 +328,34 @@ void main() {
     expect(pages.length, 2);
     expect(pages[1].queryParameters['after'], 'c1');
   });
+
+  testWidgets(
+    'an import that stops names the table in words, never the service id',
+    (tester) async {
+      await _pump(
+        tester,
+        refuseTable: 'stores',
+        bundle: _bundle([
+          {
+            'service': 'tenant-svc',
+            'table': 'stores',
+            'row': {'id': 's'},
+          },
+        ]),
+      );
+      final start = find.text('Import a bundle');
+      await tester.ensureVisible(start);
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Import'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('then Business and stores: stores was refused'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('-svc'), findsNothing);
+    },
+  );
 
   test(
     'an import pages its rows, leaves out what is not imported, and stops at a refusal',
@@ -440,7 +508,7 @@ void main() {
     (tester) async {
       final server = await _pump(tester, switching: _status('NOTICE'));
       expect(find.textContaining('Notice is running'), findsOneWidget);
-      expect(find.text('2026-12-15'), findsOneWidget);
+      expect(find.text('15 Dec 2026'), findsOneWidget);
       expect(find.text('Extend transition'), findsOneWidget);
       await tester.tap(find.widgetWithText(TextButton, 'Withdraw notice'));
       await tester.pumpAndSettle();
@@ -460,8 +528,8 @@ void main() {
 
       await _pump(tester, switching: _status('ERASING', intent: 'ERASE'));
       expect(find.textContaining('waiting for every service'), findsOneWidget);
-      expect(find.text('Waiting for: order-svc'), findsOneWidget);
-      expect(find.text('tenant-svc: 12 rows erased'), findsOneWidget);
+      expect(find.text('Waiting for: Orders'), findsOneWidget);
+      expect(find.text('Business and stores: 12 rows erased'), findsOneWidget);
       expect(find.text('Withdraw notice'), findsNothing);
       expect(find.text('Extend transition'), findsNothing);
     },

@@ -128,7 +128,7 @@ class PaymentServiceTest {
 
   private static RecordTenderRequest req(UUID orderId, BigDecimal amount) {
     return new RecordTenderRequest(
-        orderId.toString(), amount, "CARD", null, null, null, null, null, null);
+        orderId.toString(), amount, "CARD", null, null, null, null, null, null, null);
   }
 
   @Test
@@ -328,7 +328,8 @@ class PaymentServiceTest {
         null,
         null,
         customerId == null ? null : customerId.toString(),
-        "GBP");
+        "GBP",
+        null);
   }
 
   @Test

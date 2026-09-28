@@ -8,13 +8,136 @@
   "fieldEmailInvalid": "Enter a valid email",
   "fieldPhoneOptional": "Phone (optional)",
   "fieldPassword": "Password",
-  "fieldPasswordTooShort": "Minimum 8 characters",
+  "fieldPasswordRequired": "Enter your password",
+  "@fieldPasswordRequired": { "description": "Sign-in: the only check a password gets before it is sent" },
+  "fieldPasswordTooShort": "Use at least {min} characters. A phrase of a few words is easiest to remember and hardest to guess; spaces are fine.",
+  "@fieldPasswordTooShort": {
+    "description": "Sign-up: iam-svc's PasswordPolicy minimum (PASSWORD_TOO_SHORT); also shown under the field as the rule",
+    "placeholders": { "min": { "type": "int" } }
+  },
+  "fieldPasswordTooLong": "Use at most {max} characters.",
+  "@fieldPasswordTooLong": {
+    "description": "Sign-up: iam-svc's PasswordPolicy maximum (PASSWORD_TOO_LONG)",
+    "placeholders": { "max": { "type": "int" } }
+  },
+  "errPasswordIsIdentity": "The password must not be, or contain, your email address.",
+  "@errPasswordIsIdentity": { "description": "Sign-up refused with PASSWORD_IS_IDENTITY" },
+  "errPasswordBreached": "This password appears in known data breaches and would be guessed. Choose another.",
+  "@errPasswordBreached": { "description": "Sign-up refused with PASSWORD_BREACHED" },
+  "showPassword": "Show password",
+  "@showPassword": { "description": "Tooltip of the eye button on a password field" },
+  "hidePassword": "Hide password",
+  "@hidePassword": { "description": "Tooltip of the eye button on a password field" },
+  "signInWithBusiness": "Sign in with your business",
+  "@signInWithBusiness": { "description": "Single sign-on through the business's identity provider: the button and its dialog's title" },
+  "continueWithBusiness": "Continue with {business}",
+  "@continueWithBusiness": {
+    "description": "A password refused because the business signs its staff in through its provider; the server names the business's sign-in name",
+    "placeholders": { "business": { "type": "String", "example": "acme-foods" } }
+  },
+  "businessSignInNameHelp": "Your business's sign-in name. Your manager has it.",
+  "fieldBusinessSignInName": "Sign-in name",
+  "fieldBusinessSignInNameHint": "e.g. acme-foods",
   "actionSignIn": "Sign in",
   "actionCreateAccount": "Create account",
+  "actionCancel": "Cancel",
+  "actionContinue": "Continue",
   "toggleHaveAccount": "Already have an account? Sign in",
   "toggleNewHere": "New here? Create an account",
   "errInvalidCredentials": "Invalid email or password.",
   "errEmailExists": "An account with this email already exists.",
   "errNetwork": "Cannot reach the server. Check your connection.",
-  "errGeneric": "Something went wrong. Please try again."
+  "errGeneric": "Something went wrong. Please try again.",
+  "ssoErrNotFound": "No business signs in with that name. Check it with your manager.",
+  "@ssoErrNotFound": {
+    "description": "Sign-in: single sign-on refusal (SSO_NOT_FOUND)"
+  },
+  "ssoErrRequired": "Your business signs you in through its own sign-in page. Use \"Sign in with your business\" below.",
+  "@ssoErrRequired": {
+    "description": "Sign-in: single sign-on refusal (SSO_REQUIRED)"
+  },
+  "ssoErrNoAccount": "You signed in with your business, but it has not added you here yet. Ask your manager to add you as staff.",
+  "@ssoErrNoAccount": {
+    "description": "Sign-in: single sign-on refusal (SSO_NO_ACCOUNT)"
+  },
+  "ssoErrEmailUnverified": "Your business's sign-in page has not verified your email address, so it could not be matched to your login.",
+  "@ssoErrEmailUnverified": {
+    "description": "Sign-in: single sign-on refusal (SSO_EMAIL_UNVERIFIED)"
+  },
+  "ssoErrEmailMissing": "Your business's sign-in page did not share your email address.",
+  "@ssoErrEmailMissing": {
+    "description": "Sign-in: single sign-on refusal (SSO_EMAIL_MISSING)"
+  },
+  "ssoErrAlreadyLinked": "Your login is linked to someone else at your business. Ask the owner to unlink it.",
+  "@ssoErrAlreadyLinked": {
+    "description": "Sign-in: single sign-on refusal (SSO_ALREADY_LINKED)"
+  },
+  "ssoErrAccountUnavailable": "This login can no longer sign in here.",
+  "@ssoErrAccountUnavailable": {
+    "description": "Sign-in: single sign-on refusal (SSO_ACCOUNT_UNAVAILABLE)"
+  },
+  "ssoErrCancelled": "Sign-in was cancelled.",
+  "@ssoErrCancelled": {
+    "description": "Sign-in: single sign-on refusal (SSO_CANCELLED)"
+  },
+  "ssoErrExpired": "That sign-in took too long or was already used. Start again.",
+  "@ssoErrExpired": {
+    "description": "Sign-in: single sign-on refusal (SSO_STATE_INVALID and SSO_TICKET_INVALID)"
+  },
+  "ssoErrReauthRequired": "Sign in with your business again.",
+  "@ssoErrReauthRequired": {
+    "description": "Sign-in: single sign-on refusal (SSO_REAUTH_REQUIRED)"
+  },
+  "ssoErrNotReady": "Your business's single sign-on is not finished. Ask its owner.",
+  "@ssoErrNotReady": {
+    "description": "Sign-in: single sign-on refusal (SSO_NOT_READY)"
+  },
+  "ssoErrUnavailable": "Signing in with your business is not available here.",
+  "@ssoErrUnavailable": {
+    "description": "Sign-in: single sign-on refusal (SSO_UNAVAILABLE)"
+  },
+  "ssoErrProviderUnreachable": "Your business's sign-in page could not be reached. Try again shortly.",
+  "@ssoErrProviderUnreachable": {
+    "description": "Sign-in: single sign-on refusal (SSO_PROVIDER_UNREACHABLE)"
+  },
+  "errTenantInactive": "This business account is suspended. Contact support.",
+  "@errTenantInactive": {
+    "description": "Sign-in: single sign-on refusal (TENANT_INACTIVE)"
+  },
+  "ssoErrGeneric": "Your business's sign-in page could not sign you in. Ask its owner to check the settings.",
+  "@ssoErrGeneric": {
+    "description": "Sign-in: single sign-on refusal (any other single sign-on refusal)"
+  },
+  "forgotPassword": "Forgot password?",
+  "@forgotPassword": {
+    "description": "Sign-in card / storefront sign-in dialog: link to the forgot-password request page (not shown on the platform console's login)"
+  },
+  "forgotPasswordTitle": "Forgot your password?",
+  "@forgotPasswordTitle": { "description": "Forgot-password request page: heading" },
+  "forgotPasswordIntro": "Enter your email address. If an account uses it, we'll send a link to reset the password.",
+  "@forgotPasswordIntro": { "description": "Forgot-password request page: subheading, shown before anything is submitted" },
+  "forgotPasswordSubmit": "Send link",
+  "@forgotPasswordSubmit": { "description": "Forgot-password request page: submit button" },
+  "forgotPasswordSent": "If an account uses that address, we have sent a link. It works for 30 minutes, once.",
+  "@forgotPasswordSent": {
+    "description": "Forgot-password request page: shown after ANY answer (known address, unknown, suspended, throttled, even a 400) — never a different word for a different case. Only a network failure (no answer at all) shows errNetwork instead."
+  },
+  "resetPasswordTitle": "Choose a new password",
+  "@resetPasswordTitle": { "description": "Reset-password page (/reset-password/:token): heading" },
+  "resetPasswordNewLabel": "New password",
+  "@resetPasswordNewLabel": { "description": "Reset-password page: the new password field" },
+  "resetPasswordConfirmLabel": "Confirm new password",
+  "@resetPasswordConfirmLabel": { "description": "Reset-password page: the confirmation field" },
+  "resetPasswordMismatch": "This does not match the new password above.",
+  "@resetPasswordMismatch": { "description": "Reset-password page: the confirmation field does not match the new password" },
+  "resetPasswordSubmit": "Change password",
+  "@resetPasswordSubmit": { "description": "Reset-password page: submit button" },
+  "resetPasswordDone": "Password changed — sign in with it.",
+  "@resetPasswordDone": { "description": "Reset-password page: success (200 reset:true) — no session is issued, so this leads to sign-in" },
+  "resetPasswordDoneStorefront": "Shopping from the storefront? You can sign in from the shop.",
+  "@resetPasswordDoneStorefront": { "description": "Reset-password page: success — a note for a shopper login, whose sign-in lives in the storefront, not the sign-in button shown alongside" },
+  "resetPasswordTokenInvalid": "This link has expired or was already used — ask for a new one.",
+  "@resetPasswordTokenInvalid": { "description": "Reset-password page: 400 PASSWORD_RESET_TOKEN_INVALID (unknown, expired, used or replaced — one code, so the page cannot tell which)" },
+  "resetPasswordRequestNew": "Ask for a new link",
+  "@resetPasswordRequestNew": { "description": "Reset-password page: button on the token-invalid state, to the forgot-password request page" }
 }

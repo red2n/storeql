@@ -13,6 +13,7 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 
+import '../../l10n/gen/app_localizations.dart';
 import 'sso_io.dart' if (dart.library.js_interop) 'sso_web.dart' as impl;
 
 /// What the browser came back from the provider with.
@@ -81,26 +82,22 @@ String newSsoVerifier() {
 String ssoChallenge(String verifier) =>
     base64Url.encode(sha256.convert(ascii.encode(verifier)).bytes).replaceAll('=', '');
 
-/// What to tell a person about a sign-in that did not work, by its stable code.
-String ssoMessage(String? code) => switch (code) {
-      'SSO_NOT_FOUND' => 'No business signs in with that name. Check it with your manager.',
-      'SSO_REQUIRED' =>
-        'Your business signs you in through its own sign-in page. Use "Sign in with your business" below.',
-      'SSO_NO_ACCOUNT' =>
-        'You signed in with your business, but it has not added you here yet. Ask your manager to add you as staff.',
-      'SSO_EMAIL_UNVERIFIED' =>
-        "Your business's sign-in page has not verified your email address, so it could not be matched to your login.",
-      'SSO_EMAIL_MISSING' => "Your business's sign-in page did not share your email address.",
-      'SSO_ALREADY_LINKED' =>
-        'Your login is linked to someone else at your business. Ask the owner to unlink it.',
-      'SSO_ACCOUNT_UNAVAILABLE' => 'This login can no longer sign in here.',
-      'SSO_CANCELLED' => 'Sign-in was cancelled.',
-      'SSO_STATE_INVALID' || 'SSO_TICKET_INVALID' =>
-        'That sign-in took too long or was already used. Start again.',
-      'SSO_REAUTH_REQUIRED' => 'Sign in with your business again.',
-      'SSO_NOT_READY' => "Your business's single sign-on is not finished. Ask its owner.",
-      'SSO_UNAVAILABLE' => 'Signing in with your business is not available here.',
-      'SSO_PROVIDER_UNREACHABLE' => "Your business's sign-in page could not be reached. Try again shortly.",
-      'TENANT_INACTIVE' => 'This business account is suspended. Contact support.',
-      _ => "Your business's sign-in page could not sign you in. Ask its owner to check the settings.",
+/// What to tell a person about a sign-in that did not work, by its stable
+/// code, in the language the sign-in card is in.
+String ssoMessage(String? code, AppLocalizations l) => switch (code) {
+      'SSO_NOT_FOUND' => l.ssoErrNotFound,
+      'SSO_REQUIRED' => l.ssoErrRequired,
+      'SSO_NO_ACCOUNT' => l.ssoErrNoAccount,
+      'SSO_EMAIL_UNVERIFIED' => l.ssoErrEmailUnverified,
+      'SSO_EMAIL_MISSING' => l.ssoErrEmailMissing,
+      'SSO_ALREADY_LINKED' => l.ssoErrAlreadyLinked,
+      'SSO_ACCOUNT_UNAVAILABLE' => l.ssoErrAccountUnavailable,
+      'SSO_CANCELLED' => l.ssoErrCancelled,
+      'SSO_STATE_INVALID' || 'SSO_TICKET_INVALID' => l.ssoErrExpired,
+      'SSO_REAUTH_REQUIRED' => l.ssoErrReauthRequired,
+      'SSO_NOT_READY' => l.ssoErrNotReady,
+      'SSO_UNAVAILABLE' => l.ssoErrUnavailable,
+      'SSO_PROVIDER_UNREACHABLE' => l.ssoErrProviderUnreachable,
+      'TENANT_INACTIVE' => l.errTenantInactive,
+      _ => l.ssoErrGeneric,
     };

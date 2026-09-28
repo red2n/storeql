@@ -35,6 +35,7 @@ class PaymentEventHandler {
     UUID eventId;
     BigDecimal amount;
     String method;
+    String kind;
     try {
       JsonObject obj = Json.createReader(new StringReader(payload)).readObject();
       eventType = stringOrNull(obj, "eventType");
@@ -54,6 +55,9 @@ class PaymentEventHandler {
       // How the tender was paid (18.5): the German fiscal file lists every payment as cash or
       // not, and the security module signs that split. Absent from events older than this field.
       method = stringOrNull(obj, "method");
+      // What kind of refund (substitutions for out-of-stock online lines): ORDER_ADJUSTMENT for a
+      // line closed short or substituted; absent from a return's or a cancellation's.
+      kind = stringOrNull(obj, "kind");
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "Malformed payment event skipped: " + e.getMessage());
       return;
@@ -65,7 +69,10 @@ class PaymentEventHandler {
       } else if ("PaymentFailed".equals(eventType)) {
         svc.handlePaymentFailed(tenantId, orderId);
       } else if ("PaymentRefunded".equals(eventType)) {
-        svc.applyRefund(eventId, tenantId, orderId, amount);
+        // An adjustment refund — a line closed short or substituted — records the money but moves
+        // no status: the order's total was lowered by as much and the goods are still to be handed
+        // over (substitutions for out-of-stock online lines).
+        svc.applyRefund(eventId, tenantId, orderId, amount, "ORDER_ADJUSTMENT".equals(kind));
       }
     } catch (ApiException e) {
       if (e.status() >= 500) {

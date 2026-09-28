@@ -41,9 +41,27 @@ class OrderEventConsumer extends BaseKafkaConsumer {
       defaultValue = "storeql.order.order-voided")
   String voidedTopic;
 
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.order-line-short-closed",
+      defaultValue = "storeql.order.order-line-short-closed")
+  String lineShortClosedTopic;
+
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.order-line-substituted",
+      defaultValue = "storeql.order.order-line-substituted")
+  String lineSubstitutedTopic;
+
   @Override
   protected List<String> topics() {
-    return List.of(fulfilledTopic, returnedTopic, cancelledTopic, voidedTopic);
+    return List.of(
+        fulfilledTopic,
+        returnedTopic,
+        cancelledTopic,
+        voidedTopic,
+        lineShortClosedTopic,
+        lineSubstitutedTopic);
   }
 
   @Override

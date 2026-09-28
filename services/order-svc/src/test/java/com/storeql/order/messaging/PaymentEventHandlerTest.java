@@ -177,4 +177,33 @@ class PaymentEventHandlerTest {
 
     org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> handler.handle(payload));
   }
+
+  // ── substitutions for out-of-stock online lines ────────────────────────────
+
+  /**
+   * A refund for a line closed short or substituted rides a {@code PaymentRefunded} of kind {@code
+   * ORDER_ADJUSTMENT}: the money is recorded and no status moves. A plain refund still moves the
+   * order towards REFUNDED.
+   */
+  @Test
+  void anAdjustmentRefundIsAppliedWithoutMovingTheStatusAndAPlainOneWithIt() {
+    UUID eventId = Ids.newId();
+    String head =
+        "{\"eventType\":\"PaymentRefunded\",\"eventId\":\""
+            + eventId
+            + "\",\"orderId\":\""
+            + ORDER
+            + "\",\"tenantId\":\""
+            + TENANT
+            + "\",\"amount\":4.00";
+    handler.handle(head + ",\"kind\":\"ORDER_ADJUSTMENT\"}");
+    verify(svc).applyRefund(eventId, TENANT, ORDER, new BigDecimal("4.00"), true);
+
+    UUID plain = Ids.newId();
+    handler.handle(head.replace(eventId.toString(), plain.toString()) + ",\"kind\":\"RETURN\"}");
+    verify(svc).applyRefund(plain, TENANT, ORDER, new BigDecimal("4.00"), false);
+    UUID bare = Ids.newId();
+    handler.handle(head.replace(eventId.toString(), bare.toString()) + "}");
+    verify(svc).applyRefund(bare, TENANT, ORDER, new BigDecimal("4.00"), false);
+  }
 }

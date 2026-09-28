@@ -29,7 +29,7 @@ IDENTITY="^https://github.com/${REPO}/\.github/workflows/docker-publish\.yml@ref
 ISSUER="https://token.actions.githubusercontent.com"
 
 IMAGES=(gateway config iam-svc tenant-svc product-svc inventory-svc purchase-svc pricing-svc
-  cart-svc order-svc payment-svc customer-svc notification-svc reporting-svc web)
+  cart-svc order-svc payment-svc customer-svc notification-svc reporting-svc web backup)
 [ -n "$ONLY" ] && IMAGES=("$ONLY")
 
 for tool in cosign gh; do

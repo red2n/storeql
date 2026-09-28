@@ -174,17 +174,13 @@ else
     # No local Flutter SDK — a fresh machine shouldn't need one installed by hand.
     # Docker is already a hard requirement for this script (docker compose below),
     # so build the bundle in a throwaway Flutter container instead of failing.
-    cyan "flutter not found on PATH — building web UI in a Docker container (ghcr.io/cirruslabs/flutter:stable), no local install needed…"
-    PUB_CACHE_DIR="$ROOT/.cache/flutter-pub-cache"
-    mkdir -p "$PUB_CACHE_DIR"
-    docker run --rm \
-      --user "$(id -u):$(id -g)" \
-      -e HOME=/tmp \
-      -v "$ROOT/frontends/storeql-app:/app" \
-      -v "$PUB_CACHE_DIR:/tmp/.pub-cache" \
-      -w /app \
-      ghcr.io/cirruslabs/flutter:stable \
-      bash -lc "flutter pub get && flutter build web --release --no-web-resources-cdn --dart-define=STOREQL_API_BASE='$UI_API_BASE'"
+    # The container step lives in scripts/lib/flutter-in-docker.sh, proved by
+    # scripts/flutter-docker-selftest.sh (it once failed on git's ownership check of the SDK).
+    # shellcheck source=lib/flutter-in-docker.sh
+    source "$ROOT/scripts/lib/flutter-in-docker.sh"
+    cyan "flutter not found on PATH — building web UI in a Docker container ($FLUTTER_IMAGE), no local install needed…"
+    flutter_in_docker "$ROOT/frontends/storeql-app" "$ROOT/.cache/flutter-pub-cache" \
+      "flutter pub get && flutter build web --release --no-web-resources-cdn --dart-define=STOREQL_API_BASE='$UI_API_BASE'"
   fi
 fi
 

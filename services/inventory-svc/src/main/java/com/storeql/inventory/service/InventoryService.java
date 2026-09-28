@@ -87,8 +87,11 @@ import java.util.UUID;
 @ApplicationScoped
 public class InventoryService {
 
+  private static final System.Logger LOG = System.getLogger(InventoryService.class.getName());
+
   @Inject ServiceConfig config;
   @Inject InventoryRepository repo;
+  @Inject com.storeql.inventory.repo.BondRepository bonds;
   @Inject com.storeql.inventory.repo.ShrinkageRepository shrinkageRepo;
   @Inject com.storeql.inventory.repo.ValuationRepository valuationRepo;
   @Inject com.storeql.inventory.repo.LowStockRepository lowStockRepo;
@@ -146,6 +149,89 @@ public class InventoryService {
       UUID refId,
       UUID zoneId,
       String idempotencyKey) {
+    return receive(
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        batchNo,
+        costPrice,
+        expiry,
+        refType,
+        refId,
+        zoneId,
+        idempotencyKey,
+        Batch.OWNERSHIP_OWNED,
+        null);
+  }
+
+  /**
+   * Receives stock that may be the supplier's: {@code ownership} OWNED (the default) or
+   * CONSIGNMENT, in which case the owning supplier is named (consignment stock ownership).
+   *
+   * @throws ApiException 400 {@code INVENTORY_OWNERSHIP_INVALID} for an ownership nobody defined;
+   *     400 {@code INVENTORY_CONSIGNMENT_SUPPLIER_REQUIRED} for consignment stock with no supplier
+   */
+  public Batch receive(
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String batchNo,
+      BigDecimal costPrice,
+      LocalDate expiry,
+      String refType,
+      UUID refId,
+      UUID zoneId,
+      String idempotencyKey,
+      String ownership,
+      UUID ownerSupplierId) {
+    return receive(
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        batchNo,
+        costPrice,
+        expiry,
+        refType,
+        refId,
+        zoneId,
+        idempotencyKey,
+        ownership,
+        ownerSupplierId,
+        Batch.DUTY_PAID);
+  }
+
+  /**
+   * As above, for excise goods that may arrive into bond: {@code dutyStatus} DUTY_PAID (the
+   * default) or DUTY_SUSPENDED, the latter only at a store approved as a bonded warehouse.
+   *
+   * @throws ApiException 400 {@code INVENTORY_DUTY_STATUS_INVALID}; 400 {@code
+   *     INVENTORY_STORE_NOT_BONDED} for suspended stock at a store nobody approved
+   */
+  public Batch receive(
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String batchNo,
+      BigDecimal costPrice,
+      LocalDate expiry,
+      String refType,
+      UUID refId,
+      UUID zoneId,
+      String idempotencyKey,
+      String ownership,
+      UUID ownerSupplierId,
+      String dutyStatus) {
+    String owned = ownershipOf(ownership, ownerSupplierId);
+    String duty = dutyStatusOf(dutyStatus);
+    if (Batch.DUTY_SUSPENDED.equals(duty) && !bonds.isBonded(tenantId, storeId)) {
+      throw ApiException.badRequest(
+          "INVENTORY_STORE_NOT_BONDED",
+          "duty-suspended stock may be held only at a store approved as a bonded warehouse");
+    }
     UUID batchId = Ids.newId();
     var batch =
         new Batch(
@@ -163,7 +249,10 @@ public class InventoryService {
             Batch.MATERIAL_AVAILABLE,
             null,
             null,
-            zoneId);
+            zoneId,
+            owned,
+            Batch.OWNERSHIP_CONSIGNMENT.equals(owned) ? ownerSupplierId : null,
+            duty);
     var event =
         new OutboxRow(
             "StockReceived",
@@ -265,10 +354,13 @@ public class InventoryService {
   // ---- Gap #50: POS→SIM receipt (order returned) ----
 
   /**
-   * Books returned goods back into stock as a return batch.
+   * Books returned goods back into stock under the lot they were sold from (SJ-D71).
    *
-   * <p>Returns land in their own batch rather than rejoining the one they were sold from: the
-   * original batch's cost and expiry are not necessarily what came back.
+   * <p>Returns land in their own batch rather than rejoining the one they were sold from, but as
+   * its child: the sale's draws say which batches the goods came from, and each share comes back
+   * carrying that batch's lot, use-by date and cost, so the expiring view, a recall and the margin
+   * report see returned stock as what it is. Goods the sale's draws cannot account for come back as
+   * the anonymous return they always were.
    *
    * @param tenantId owning tenant
    * @param storeId the store taking the goods back
@@ -278,8 +370,18 @@ public class InventoryService {
    */
   public void receiveReturnFromOrder(
       UUID tenantId, UUID storeId, UUID variantId, BigDecimal qty, UUID orderId) {
-    Batch batch = returnBatch(tenantId, storeId, variantId, qty, orderId);
-    repo.receive(batch, "RETURN", orderId, stockReceivedEvent(batch), null);
+    repo.receiveBackOnce(
+        null,
+        null,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        orderId,
+        "RETURN",
+        "RET-" + Ids.shortRef(orderId),
+        InventoryService::stockReceivedEvent,
+        true);
   }
 
   /** {@link #receiveReturnFromOrder} deduped on {@code dedupeId} (see deductSaleFromOrderOnce). */
@@ -291,9 +393,18 @@ public class InventoryService {
       UUID variantId,
       BigDecimal qty,
       UUID orderId) {
-    Batch batch = returnBatch(tenantId, storeId, variantId, qty, orderId);
-    return repo.receiveReturnOnce(
-        dedupeId, consumerName, batch, orderId, stockReceivedEvent(batch));
+    return repo.receiveBackOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        orderId,
+        "RETURN",
+        "RET-" + Ids.shortRef(orderId),
+        InventoryService::stockReceivedEvent,
+        true);
   }
 
   /**
@@ -315,9 +426,18 @@ public class InventoryService {
       UUID variantId,
       BigDecimal qty,
       UUID orderId) {
-    Batch batch = returnBatch(tenantId, storeId, variantId, qty, orderId);
-    return repo.receiveOnce(
-        dedupeId, consumerName, batch, "VOID", orderId, stockReceivedEvent(batch));
+    return repo.receiveBackOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        orderId,
+        "VOID",
+        "RET-" + Ids.shortRef(orderId),
+        InventoryService::stockReceivedEvent,
+        false);
   }
 
   /**
@@ -335,6 +455,85 @@ public class InventoryService {
       LocalDate expiry,
       String refType,
       UUID refId) {
+    return receiveOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        batchNo,
+        costPrice,
+        expiry,
+        refType,
+        refId,
+        Batch.OWNERSHIP_OWNED,
+        null);
+  }
+
+  /** As {@link #receiveOnce}, for stock that may be the supplier's (consignment). */
+  public boolean receiveOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String batchNo,
+      BigDecimal costPrice,
+      LocalDate expiry,
+      String refType,
+      UUID refId,
+      String ownership,
+      UUID ownerSupplierId) {
+    return receiveOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        batchNo,
+        costPrice,
+        expiry,
+        refType,
+        refId,
+        ownership,
+        ownerSupplierId,
+        Batch.DUTY_PAID);
+  }
+
+  /**
+   * As {@link #receiveOnce}, for a delivery that may arrive into bond. A supplier's word that the
+   * goods are under bond is kept even at a store nobody approved — misstating the duty would be
+   * worse — and the approval gap is logged for a person.
+   */
+  public boolean receiveOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String batchNo,
+      BigDecimal costPrice,
+      LocalDate expiry,
+      String refType,
+      UUID refId,
+      String ownership,
+      UUID ownerSupplierId,
+      String dutyStatus) {
+    String owned = ownershipOf(ownership, ownerSupplierId);
+    String duty = dutyStatusOf(dutyStatus);
+    if (Batch.DUTY_SUSPENDED.equals(duty) && !bonds.isBonded(tenantId, storeId)) {
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "duty-suspended delivery {0} received at store {1} of tenant {2}, which is not approved"
+              + " as a bonded warehouse",
+          refId,
+          storeId,
+          tenantId);
+    }
     var batch =
         new Batch(
             Ids.newId(),
@@ -351,9 +550,41 @@ public class InventoryService {
             Batch.MATERIAL_AVAILABLE,
             null,
             null,
-            null);
+            null,
+            owned,
+            Batch.OWNERSHIP_CONSIGNMENT.equals(owned) ? ownerSupplierId : null,
+            duty);
     return repo.receiveOnce(
         dedupeId, consumerName, batch, refType, refId, stockReceivedEvent(batch));
+  }
+
+  /** DUTY_PAID when unsaid; DUTY_SUSPENDED for goods held in bond. */
+  static String dutyStatusOf(String dutyStatus) {
+    if (dutyStatus == null || dutyStatus.isBlank()) return Batch.DUTY_PAID;
+    String code = dutyStatus.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!Batch.DUTY_PAID.equals(code) && !Batch.DUTY_SUSPENDED.equals(code)) {
+      throw ApiException.badRequest(
+          "INVENTORY_DUTY_STATUS_INVALID",
+          "dutyStatus must be DUTY_PAID or DUTY_SUSPENDED; got " + dutyStatus);
+    }
+    return code;
+  }
+
+  /** OWNED when unsaid; CONSIGNMENT only with the supplier it belongs to. */
+  static String ownershipOf(String ownership, UUID ownerSupplierId) {
+    if (ownership == null || ownership.isBlank()) return Batch.OWNERSHIP_OWNED;
+    String code = ownership.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!Batch.OWNERSHIP_OWNED.equals(code) && !Batch.OWNERSHIP_CONSIGNMENT.equals(code)) {
+      throw ApiException.badRequest(
+          "INVENTORY_OWNERSHIP_INVALID",
+          "ownership must be OWNED or CONSIGNMENT; got " + ownership);
+    }
+    if (Batch.OWNERSHIP_CONSIGNMENT.equals(code) && ownerSupplierId == null) {
+      throw ApiException.badRequest(
+          "INVENTORY_CONSIGNMENT_SUPPLIER_REQUIRED",
+          "consignment stock belongs to a supplier: give supplierId");
+    }
+    return code;
   }
 
   /**
@@ -420,27 +651,7 @@ public class InventoryService {
         sourceId);
   }
 
-  private static Batch returnBatch(
-      UUID tenantId, UUID storeId, UUID variantId, BigDecimal qty, UUID orderId) {
-    return new Batch(
-        Ids.newId(),
-        tenantId,
-        storeId,
-        variantId,
-        "RET-" + Ids.shortRef(orderId),
-        qty,
-        qty,
-        null,
-        null,
-        Instant.now(),
-        Batch.STATUS_ACTIVE,
-        Batch.MATERIAL_AVAILABLE,
-        null,
-        null,
-        null);
-  }
-
-  private static OutboxRow stockReceivedEvent(Batch batch) {
+  static OutboxRow stockReceivedEvent(Batch batch) {
     return new OutboxRow(
         "StockReceived",
         "storeql.inventory.stock-received",
@@ -749,6 +960,37 @@ public class InventoryService {
     return repo.release(tenantId, reservationId, event);
   }
 
+  /**
+   * A line of an online order closed short or substituted (substitutions for out-of-stock online
+   * lines): {@code qty} of the order's hold on the variant goes back to the shelf and the order
+   * waits for that much less, once per event; a hold released in full publishes {@code
+   * StockReleased} as a cancellation's would.
+   *
+   * @return false when the event was already applied
+   */
+  public boolean lineClosedOnce(
+      UUID eventId,
+      String consumerName,
+      UUID tenantId,
+      UUID orderId,
+      UUID variantId,
+      BigDecimal qty) {
+    return repo.lineClosedOnce(
+        eventId,
+        consumerName,
+        tenantId,
+        orderId,
+        variantId,
+        qty,
+        reservationId ->
+            new OutboxRow(
+                "StockReleased",
+                "storeql.inventory.stock-released",
+                tenantId,
+                reservationId,
+                Events.reservationEvent("StockReleased", tenantId, reservationId)));
+  }
+
   // ---- reads ----
   /**
    * On-hand levels per variant for a store.
@@ -759,6 +1001,67 @@ public class InventoryService {
    */
   public List<Level> levels(UUID tenantId, UUID storeId) {
     return repo.levels(tenantId, storeId);
+  }
+
+  /** What every store holds of the products named (order orchestration's read). */
+  public List<Level> levelsForVariants(UUID tenantId, List<UUID> variantIds) {
+    return repo.levelsForVariants(tenantId, variantIds);
+  }
+
+  /** The products the supplier fulfils per order (dropship). */
+  public List<UUID> dropshipVariants(UUID tenantId) {
+    return repo.dropshipVariants(tenantId);
+  }
+
+  /**
+   * What a shopper can buy at a store: each variant with stock available on the shelf, and each
+   * variant the supplier fulfils per order (dropship) — available with none on the shelf.
+   *
+   * <p>Carries each level's raw available quantity too, so a caller with a store and a threshold in
+   * hand can turn it into "only N left" via {@link com.storeql.inventory.domain.OnlyLeft#compute}
+   * without a second read of the levels this method already loaded.
+   */
+  public List<com.storeql.inventory.domain.Domain.Availability> availability(
+      UUID tenantId, UUID storeId) {
+    List<com.storeql.inventory.domain.Domain.Availability> out = new java.util.ArrayList<>();
+    java.util.Set<UUID> seen = new java.util.HashSet<>();
+    for (Level l : repo.levels(tenantId, storeId)) {
+      seen.add(l.variantId());
+      out.add(
+          new com.storeql.inventory.domain.Domain.Availability(
+              l.variantId(),
+              l.available() != null && l.available().signum() > 0,
+              false,
+              l.available()));
+    }
+    for (UUID variantId : repo.dropshipVariants(tenantId)) {
+      if (seen.add(variantId)) {
+        out.add(new com.storeql.inventory.domain.Domain.Availability(variantId, true, true, null));
+      }
+    }
+    return out;
+  }
+
+  /** Records purchase-svc's word on how a variant is fulfilled, once per event. */
+  public boolean recordSourcingOnce(
+      UUID eventId,
+      String consumerName,
+      UUID tenantId,
+      UUID variantId,
+      String fulfilment,
+      UUID supplierId) {
+    String code = fulfilment == null ? "" : fulfilment.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!"STOCK".equals(code) && !"DROPSHIP".equals(code)) {
+      throw ApiException.badRequest(
+          "INVENTORY_SOURCING_INVALID", "fulfilment must be STOCK or DROPSHIP; got " + fulfilment);
+    }
+    return repo.upsertSourcingOnce(
+        eventId,
+        consumerName,
+        tenantId,
+        variantId,
+        code,
+        "DROPSHIP".equals(code) ? supplierId : null);
   }
 
   /** One page of stock levels plus the opaque cursor for the next page (null when exhausted). */
@@ -1427,6 +1730,8 @@ public class InventoryService {
             notes,
             now,
             null,
+            null,
+            TransferOrder.SOURCE_MANUAL,
             null);
     List<TransferOrderLine> withIds =
         lines.stream()
@@ -1442,7 +1747,7 @@ public class InventoryService {
                         null))
             .toList();
     repo.createTransferOrder(order, withIds);
-    return new TransferOrderWithLines(order, repo.listTransferOrderLines(orderId));
+    return new TransferOrderWithLines(order, repo.listTransferOrderLines(tenantId, orderId));
   }
 
   /**
@@ -1472,7 +1777,7 @@ public class InventoryService {
         repo.findTransferOrder(tenantId, id)
             .orElseThrow(
                 () -> ApiException.notFound("TRANSFER_ORDER_NOT_FOUND", "No such transfer order"));
-    return new TransferOrderWithLines(order, repo.listTransferOrderLines(id));
+    return new TransferOrderWithLines(order, repo.listTransferOrderLines(tenantId, id));
   }
 
   /**
@@ -1502,8 +1807,12 @@ public class InventoryService {
                 tenantId,
                 id,
                 Events.transferOrderShipped(
-                    tenantId, id, existing.fromStoreId(), existing.toStoreId())));
-    return new TransferOrderWithLines(shipped, repo.listTransferOrderLines(id));
+                    tenantId,
+                    id,
+                    existing.fromStoreId(),
+                    existing.toStoreId(),
+                    repo.listTransferOrderLines(tenantId, id))));
+    return new TransferOrderWithLines(shipped, repo.listTransferOrderLines(tenantId, id));
   }
 
   /**
@@ -1531,8 +1840,13 @@ public class InventoryService {
                 "storeql.inventory.transfer-order-received",
                 tenantId,
                 id,
-                Events.transferOrderReceived(tenantId, id, existing.toStoreId())));
-    return new TransferOrderWithLines(received, repo.listTransferOrderLines(id));
+                Events.transferOrderReceived(
+                    tenantId,
+                    id,
+                    existing.fromStoreId(),
+                    existing.toStoreId(),
+                    repo.listTransferOrderLines(tenantId, id))));
+    return new TransferOrderWithLines(received, repo.listTransferOrderLines(tenantId, id));
   }
 
   /**
@@ -1558,7 +1872,7 @@ public class InventoryService {
             () ->
                 ApiException.unprocessable(
                     "TRANSFER_ORDER_NOT_CANCELLABLE",
-                    "Only PENDING transfer orders can be cancelled"));
+                    "Only DRAFT or PENDING transfer orders can be cancelled"));
   }
 
   // ---- cycle counting (Gap #10) ----
@@ -2760,7 +3074,9 @@ public class InventoryService {
             Batch.MATERIAL_AVAILABLE,
             null,
             source.grade(),
-            source.zoneId());
+            source.zoneId(),
+            source.ownership(),
+            source.ownerSupplierId());
     OutboxRow splitEvent =
         new OutboxRow(
             "LotSplit",

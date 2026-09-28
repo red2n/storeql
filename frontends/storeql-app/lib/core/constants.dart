@@ -36,6 +36,11 @@ class StorageKeys {
   static const String accessToken = 'access_token';
   static const String refreshToken = 'refresh_token';
 
+  /// The live business's tokens, kept aside while the owner is in the sandbox
+  /// (22.8), so "Back to live" needs no sign-in.
+  static const String liveAccessToken = 'live_access_token';
+  static const String liveRefreshToken = 'live_refresh_token';
+
   /// Device-local history of orders placed from the (guest) storefront.
   static const String storefrontOrders = 'sf_orders';
 

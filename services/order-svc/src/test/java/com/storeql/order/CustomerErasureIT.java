@@ -130,13 +130,18 @@ class CustomerErasureIT {
   @DisplayName("A finished sale loses the customer's details at once, and keeps the sale")
   void settledOrdersAreRedactedNow() {
     String customer = Ids.newId().toString();
-    UUID order = place(customer, "POS", "INSTORE", "\"contactPhone\":\"07700900999\",");
+    UUID order = place(customer, "POS", "INSTORE", "\"contactPhone\":\"07400900999\",");
     pay(order); // a till sale: FULFILLED
-    assertThat(column("orders", order, "contact_phone"), is("07700900999"));
+    assertThat(column("orders", order, "contact_phone"), is("07400900999"));
+    assertThat(column("orders", order, "contact_phone_e164"), is("+447400900999"));
 
     orderService.handleCustomerErased(Ids.parse(T), Ids.parse(customer), null, Ids.newId());
 
     assertThat(column("orders", order, "contact_phone"), nullValue());
+    assertThat(
+        "both forms go (a phone at the till)",
+        column("orders", order, "contact_phone_e164"),
+        nullValue());
     // The tax record stays.
     assertThat(column("orders", order, "total"), notNullValue());
     assertThat(column("orders", order, "status"), is("FULFILLED"));
@@ -181,13 +186,14 @@ class CustomerErasureIT {
   void onlyTheErasedCustomer() {
     String erased = Ids.newId().toString();
     String kept = Ids.newId().toString();
-    UUID theirs = place(kept, "POS", "INSTORE", "\"contactPhone\":\"07700900555\",");
+    UUID theirs = place(kept, "POS", "INSTORE", "\"contactPhone\":\"07400900555\",");
     pay(theirs);
 
     orderService.handleCustomerErased(Ids.parse(T), Ids.parse(erased), null, Ids.newId());
     orderService.sweepErasures();
 
-    assertThat(column("orders", theirs, "contact_phone"), is("07700900555"));
+    assertThat(column("orders", theirs, "contact_phone"), is("07400900555"));
+    assertThat(column("orders", theirs, "contact_phone_e164"), is("+447400900555"));
   }
 
   /**

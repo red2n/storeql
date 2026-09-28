@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 
 // ── Models ───────────────────────────────────────────────────────────────────
@@ -79,23 +80,164 @@ class CustomerAddress {
       );
 }
 
+/// The next rung of the ladder and how far it is.
+class NextTier {
+  final String name;
+  final double threshold;
+  final double pointsToGo;
+  const NextTier({required this.name, required this.threshold, required this.pointsToGo});
+
+  factory NextTier.fromJson(Map<String, dynamic> j) => NextTier(
+        name: j['name'] as String? ?? '',
+        threshold: (j['threshold'] as num?)?.toDouble() ?? 0,
+        pointsToGo: (j['pointsToGo'] as num?)?.toDouble() ?? 0,
+      );
+}
+
+/// Points that die within thirty days, and the first day any do.
+class ExpiringSoon {
+  final double points;
+  final String on;
+  const ExpiringSoon({required this.points, required this.on});
+
+  factory ExpiringSoon.fromJson(Map<String, dynamic> j) => ExpiringSoon(
+        points: (j['points'] as num?)?.toDouble() ?? 0,
+        on: j['on'] as String? ?? '',
+      );
+
+  /// The day, for a sentence: `2026-10-23`.
+  String get day => on.length >= 10 ? on.substring(0, 10) : on;
+}
+
+/// A customer's points under the business's programme (13.x).
 class LoyaltyAccount {
   final double pointsBalance;
   final double lifetimePoints;
   final String? tier;
+  final String? tierSince;
+  final double qualifyingPoints;
+  final double multiplier;
+  final NextTier? nextTier;
+  final ExpiringSoon? expiringSoon;
+  final int? expiryMonths;
 
   const LoyaltyAccount({
     required this.pointsBalance,
     required this.lifetimePoints,
     this.tier,
+    this.tierSince,
+    this.qualifyingPoints = 0,
+    this.multiplier = 1,
+    this.nextTier,
+    this.expiringSoon,
+    this.expiryMonths,
   });
 
   factory LoyaltyAccount.fromJson(Map<String, dynamic> j) => LoyaltyAccount(
         pointsBalance: (j['pointsBalance'] as num?)?.toDouble() ?? 0,
         lifetimePoints: (j['lifetimePoints'] as num?)?.toDouble() ?? 0,
         tier: j['tier'] as String?,
+        tierSince: j['tierSince'] as String?,
+        qualifyingPoints: (j['qualifyingPoints'] as num?)?.toDouble() ?? 0,
+        multiplier: (j['multiplier'] as num?)?.toDouble() ?? 1,
+        nextTier: j['nextTier'] is Map<String, dynamic>
+            ? NextTier.fromJson(j['nextTier'] as Map<String, dynamic>)
+            : null,
+        expiringSoon: j['expiringSoon'] is Map<String, dynamic>
+            ? ExpiringSoon.fromJson(j['expiringSoon'] as Map<String, dynamic>)
+            : null,
+        expiryMonths: (j['expiryMonths'] as num?)?.toInt(),
+      );
+
+  /// `SILVER · GOLD in 38 pts · ×1.5` — the tier, the way up, the benefit.
+  String get tierLine {
+    final parts = <String>[
+      if (tier != null && tier!.isNotEmpty) tier!,
+      if (nextTier != null) '${nextTier!.name} in ${_pts(nextTier!.pointsToGo)}',
+      if (multiplier != 1) '×${_trim(multiplier)}',
+    ];
+    return parts.join(' · ');
+  }
+
+  /// `20 pts expire 23 Oct 2026`, or empty when nothing is about to.
+  String get expiringLine => expiringSoon == null
+      ? ''
+      : '${_pts(expiringSoon!.points)} expire ${AppFormat.date(expiringSoon!.on)}';
+
+  static String _pts(double v) => '${_trim(v)} pts';
+  static String _trim(double v) => v == v.roundToDouble()
+      ? v.toStringAsFixed(0)
+      : v.toStringAsFixed(2).replaceFirst(RegExp(r'0+$'), '');
+}
+
+/// One rung of the business's ladder.
+class LoyaltyTier {
+  final String name;
+  final double threshold;
+  final double multiplier;
+  const LoyaltyTier({required this.name, required this.threshold, required this.multiplier});
+
+  factory LoyaltyTier.fromJson(Map<String, dynamic> j) => LoyaltyTier(
+        name: j['name'] as String? ?? '',
+        threshold: (j['threshold'] as num?)?.toDouble() ?? 0,
+        multiplier: (j['multiplier'] as num?)?.toDouble() ?? 1,
+      );
+
+  Map<String, dynamic> toJson() => {'name': name, 'threshold': threshold, 'multiplier': multiplier};
+}
+
+/// The business's loyalty programme (13.x), or the platform's default.
+class LoyaltyProgramme {
+  final int? expiryMonths;
+  final int? qualifyingMonths;
+  final List<LoyaltyTier> tiers;
+  final String? reason;
+  final String? setAt;
+  final bool isDefault;
+
+  const LoyaltyProgramme({
+    this.expiryMonths,
+    this.qualifyingMonths,
+    required this.tiers,
+    this.reason,
+    this.setAt,
+    this.isDefault = true,
+  });
+
+  factory LoyaltyProgramme.fromJson(Map<String, dynamic> j) => LoyaltyProgramme(
+        expiryMonths: (j['expiryMonths'] as num?)?.toInt(),
+        qualifyingMonths: (j['qualifyingMonths'] as num?)?.toInt(),
+        tiers: ((j['tiers'] as List?) ?? [])
+            .map((e) => LoyaltyTier.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        reason: j['reason'] as String?,
+        setAt: j['setAt'] as String?,
+        isDefault: j['isDefault'] as bool? ?? true,
       );
 }
+
+/// What a loyalty sweep did.
+class LoyaltySweepResult {
+  final int customers;
+  final double points;
+  final int retiered;
+  const LoyaltySweepResult({required this.customers, required this.points, required this.retiered});
+
+  factory LoyaltySweepResult.fromJson(Map<String, dynamic> j) => LoyaltySweepResult(
+        customers: (j['customers'] as num?)?.toInt() ?? 0,
+        points: (j['points'] as num?)?.toDouble() ?? 0,
+        retiered: (j['retiered'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// The programme in force; management reads it.
+final loyaltyProgrammeProvider = FutureProvider.autoDispose<LoyaltyProgramme>((ref) async {
+  final resp = await ref
+      .read(apiClientProvider)
+      .dio
+      .get('/${ApiConstants.customer}/admin/loyalty/programme');
+  return LoyaltyProgramme.fromJson(resp.data['data'] as Map<String, dynamic>);
+});
 
 class LoyaltyLedgerEntry {
   final String type;

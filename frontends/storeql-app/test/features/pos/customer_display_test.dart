@@ -50,8 +50,9 @@ const _crisps = PosLine(
   currency: 'EUR',
 );
 
-Future<_FakeChannel> _pump(WidgetTester tester) async {
-  tester.view.physicalSize = const Size(1200, 900);
+Future<_FakeChannel> _pump(WidgetTester tester,
+    {Size size = const Size(1200, 900)}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -97,11 +98,11 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('display-sale')), findsOneWidget);
     expect(find.text('3 × Cola 500 ml'), findsOneWidget);
-    expect(find.text('EUR 4.50'), findsOneWidget);
+    expect(find.text('€4.50'), findsOneWidget);
     expect(find.byKey(const Key('display-deposit')), findsOneWidget);
-    expect(find.text('EUR 0.75'), findsOneWidget);
+    expect(find.text('€0.75'), findsOneWidget);
     expect(find.byKey(const Key('display-discount')), findsOneWidget);
-    expect(find.text('EUR 6.25'), findsOneWidget);
+    expect(find.text('€6.25'), findsOneWidget);
   });
 
   testWidgets('paid shows the change and holds over the till clearing, until the next customer',
@@ -114,7 +115,7 @@ void main() {
     expect(find.byKey(const Key('display-paid')), findsOneWidget);
     expect(find.text('Thank you'), findsOneWidget);
     expect(find.byKey(const Key('display-change')), findsOneWidget);
-    expect(find.text('EUR 3.75'), findsOneWidget);
+    expect(find.text('€3.75'), findsOneWidget);
 
     // The till clears its cart the moment the sale completes: the display keeps the change up.
     channel.controller.add(customerDisplaySale(storeName: 'Berlin Mitte', currency: '', lines: const [], discount: 0));
@@ -143,5 +144,62 @@ void main() {
     await tester.pump(customerDisplayPaidHold + const Duration(seconds: 1));
     expect(find.byKey(const Key('display-idle')), findsOneWidget);
     expect(find.text('Berlin Mitte'), findsOneWidget);
+  });
+
+  testWidgets('money reads as the back office writes it, with the symbol',
+      (tester) async {
+    final channel = await _pump(tester);
+    channel.controller.add(customerDisplaySale(
+        storeName: 'Berlin Mitte', currency: 'EUR', lines: const [_crisps], discount: 0));
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('EUR'), findsNothing,
+        reason: 'a currency code is data; the customer reads €');
+    expect(find.text('€2.00'), findsWidgets);
+  });
+
+  testWidgets('the store name stays at the top while the sale is rung up',
+      (tester) async {
+    final channel = await _pump(tester);
+    channel.controller.add(customerDisplaySale(
+        storeName: 'Berlin Mitte', currency: 'EUR', lines: const [_crisps], discount: 0));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('display-sale')), findsOneWidget);
+    final header = find.byKey(const Key('display-store-name'));
+    expect(header, findsOneWidget);
+    expect(find.descendant(of: header, matching: find.text('Berlin Mitte')),
+        findsOneWidget);
+    // A header: above the line, not wherever the basket happens to end.
+    expect(tester.getRect(header).bottom,
+        lessThanOrEqualTo(tester.getRect(find.text('2 × Crisps')).top));
+  });
+
+  testWidgets('in a narrow window a long name never runs into its price',
+      (tester) async {
+    final channel = await _pump(tester, size: const Size(420, 800));
+    const rice = PosLine(
+      variantId: 'v-rice',
+      sku: 'RICE',
+      name: 'Tilda Pure Original Basmati Rice 1kg family pack',
+      qty: 1,
+      unitPrice: 5.5,
+      currency: 'GBP',
+    );
+    channel.controller.add(customerDisplaySale(
+        storeName: 'High Street', currency: 'GBP', lines: const [rice], discount: 0));
+    await tester.pump();
+    await tester.pump();
+
+    final name = tester.getRect(find.textContaining('1 × Tilda'));
+    final price = tester.getRect(find.text('£5.50').first);
+    expect(price.left - name.right, greaterThanOrEqualTo(16),
+        reason: 'the ellipsis stops short of the amount');
+
+    final label = tester.getRect(find.text('Subtotal'));
+    final subtotal = tester.getRect(find.descendant(
+        of: find.ancestor(of: find.text('Subtotal'), matching: find.byType(Row)),
+        matching: find.text('£5.50')));
+    expect(subtotal.left - label.right, greaterThanOrEqualTo(16));
   });
 }

@@ -101,6 +101,13 @@ class LedgerIT {
     JsonObject cr = grir.getJsonObject(0);
     assertThat(cr.getJsonNumber("credit").bigDecimalValue(), is(new BigDecimal("10.00")));
     assertThat(cr.getString("journalId"), is(dr.getString("journalId")));
+    // A person reads this in the accounting package and on the Integrations screen: the order is
+    // named as the procurement screen names it ("PO #" and the last eight of its id), never by
+    // the whole id, which nobody can read or match by eye.
+    String handle = po.substring(po.length() - 8);
+    assertThat(dr.getString("description"), is("Goods received against PO #" + handle));
+    assertThat(cr.getString("description"), is("Goods received against PO #" + handle));
+    assertThat(dr.getString("description"), not(containsString(po)));
 
     // The receipt is idempotent on its key, and so is its posting.
     String key = Ids.newId().toString();

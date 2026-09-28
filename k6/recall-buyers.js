@@ -89,7 +89,7 @@ export default function ({ gb, rival, store, variantId, spare, cashier, manager,
     // who leaves a number at the till.
     const guest = call('POST', '/api/order-svc/orders', {
       token: cashier.token, idem: true,
-      body: { storeId: store.id, channel: 'POS', fulfilmentType: 'INSTORE', paymentMethod: 'CASH', currency: 'GBP', contactPhone: '+447700900123', items: [{ variantId, qty: 1 }] },
+      body: { storeId: store.id, channel: 'POS', fulfilmentType: 'INSTORE', paymentMethod: 'CASH', currency: 'GBP', contactPhone: '+447400900123', items: [{ variantId, qty: 1 }] },
     });
     guestOrder = data(guest);
     expect(guest, '[+] a walk-in buys one at the till, leaving a number', 201);

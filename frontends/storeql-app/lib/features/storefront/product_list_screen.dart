@@ -6,9 +6,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../core/format.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
+import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
-import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/skeleton.dart';
+import 'product_card.dart';
 import 'storefront_providers.dart';
 import 'storefront_widgets.dart';
 import 'survey_widgets.dart';
@@ -71,14 +76,10 @@ class _ProductListScreenState extends ConsumerState<ProductListScreen> {
     final productsAsync = ref.watch(
       storefrontProductsProvider((query: _query, categoryId: selectedCategory)),
     );
-    final width = MediaQuery.sizeOf(context).width;
-    final cols = width < 600
-        ? 1
-        : width < 900
-            ? 2
-            : width < 1280
-                ? 3
-                : (width ~/ 320);
+    final gutter = context.pageGutter;
+    // How far the shopper enlarged their text: a grid card's lines get room that grows with it.
+    final textScale =
+        (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(1.0, 3.0);
 
     return CustomScrollView(
       slivers: [
@@ -91,7 +92,7 @@ class _ProductListScreenState extends ConsumerState<ProductListScreen> {
         // Search
         SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+            padding: EdgeInsets.fromLTRB(gutter, 4, gutter, 8),
             // The bar's own tap target carries no name, and the field inside only a hint (12.11).
             child: Semantics(
               label: 'Search products',
@@ -109,10 +110,9 @@ class _ProductListScreenState extends ConsumerState<ProductListScreen> {
 
         // Products
         productsAsync.when(
-          loading: () => const SliverFillRemaining(
-            hasScrollBody: false,
-            child: LoadingView(label: 'Loading products…'),
-          ),
+          // The first load in grey, shaped like the cards or rows to come,
+          // so the page doesn't jump when they arrive.
+          loading: () => _ShopSkeleton(textScale: textScale),
           error: (e, _) => SliverFillRemaining(
             hasScrollBody: false,
             child: ErrorView(
@@ -132,7 +132,7 @@ class _ProductListScreenState extends ConsumerState<ProductListScreen> {
                   final variant =
                       ref.watch(productFirstVariantProvider(p.id)).value;
                   if (variant == null) return true; // include while loading
-                  return availMap[variant.id] ?? true;
+                  return availMap[variant.id]?.inStock ?? true;
                 }).toList();
               }
             }
@@ -153,49 +153,123 @@ class _ProductListScreenState extends ConsumerState<ProductListScreen> {
             final items = <Object>[...displayProducts]
               ..insert(_adIndex!, const _AdSlot());
 
-            if (cols == 1) {
-              return SliverPadding(
-                padding: const EdgeInsets.all(16),
-                sliver: SliverList.separated(
-                  itemCount: items.length,
-                  separatorBuilder: (_, _) => const SizedBox(height: 12),
-                  itemBuilder: (_, i) {
-                    final item = items[i];
-                    return item is _AdSlot
-                        ? const _AdRow()
-                        : _ProductRow(
-                            key: ValueKey((item as StoreProduct).id),
-                            product: item,
-                          );
-                  },
-                ),
-              );
-            }
-            return SliverPadding(
-              padding: const EdgeInsets.all(16),
-              sliver: SliverGrid.builder(
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: cols,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  childAspectRatio: 0.78,
-                ),
-                itemCount: items.length,
-                itemBuilder: (_, i) {
-                  final item = items[i];
-                  return item is _AdSlot
-                      ? const _AdCard()
-                      : _ProductCard(
-                          key: ValueKey((item as StoreProduct).id),
-                          product: item,
-                        );
-                },
-              ),
+            // Laid out for the width the shop actually has — the rail takes some
+            // of the window: rows on a phone, then as many columns of cards as
+            // keep each near 180–220 wide, wider with enlarged text.
+            return SliverLayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.crossAxisExtent;
+                if (_listsRows(width)) {
+                  return SliverPadding(
+                    padding: EdgeInsets.all(gutter),
+                    sliver: SliverList.separated(
+                      itemCount: items.length,
+                      separatorBuilder: (_, _) =>
+                          const SizedBox(height: AppSpacing.md),
+                      itemBuilder: (_, i) {
+                        final item = items[i];
+                        return item is _AdSlot
+                            ? const _AdRow()
+                            : _ProductRow(
+                                key: ValueKey((item as StoreProduct).id),
+                                product: item,
+                              );
+                      },
+                    ),
+                  );
+                }
+                final grid = ProductCard.gridFor(width - 2 * gutter,
+                    textScale: textScale);
+                return SliverPadding(
+                  padding: EdgeInsets.all(gutter),
+                  sliver: SliverGrid.builder(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: grid.columns,
+                      crossAxisSpacing: AppSpacing.md,
+                      mainAxisSpacing: AppSpacing.md,
+                      // A square picture, and room under it for the name,
+                      // price and stock that grows with the text size, so
+                      // enlarged text is never cut off (WCAG 1.4.4).
+                      mainAxisExtent: grid.tileHeight,
+                    ),
+                    itemCount: items.length,
+                    itemBuilder: (_, i) {
+                      final item = items[i];
+                      return item is _AdSlot
+                          ? const _AdCard()
+                          : ProductCard(
+                              key: ValueKey((item as StoreProduct).id),
+                              product: item,
+                            );
+                    },
+                  ),
+                );
+              },
             );
           },
         ),
       ],
     );
+  }
+}
+
+/// Whether the shop lists its products as rows in [width]: a phone's width
+/// reads better as a list than as two narrow columns of cards.
+bool _listsRows(double width) =>
+    AppBreakpoints.classOf(width) == WindowClass.compact;
+
+/// The shop's first load: grey rows on a phone, a grid of grey cards wider,
+/// laid out exactly as the products will be.
+class _ShopSkeleton extends StatelessWidget {
+  final double textScale;
+  const _ShopSkeleton({required this.textScale});
+
+  @override
+  Widget build(BuildContext context) {
+    final gutter = context.pageGutter;
+    return SliverLayoutBuilder(builder: (context, constraints) {
+      final width = constraints.crossAxisExtent;
+      final Widget shape;
+      if (_listsRows(width)) {
+        shape = Column(
+          children: [
+            for (var i = 0; i < 4; i++) ...[
+              if (i > 0) const SizedBox(height: AppSpacing.md),
+              const _ProductRowSkeleton(),
+            ],
+          ],
+        );
+      } else {
+        final grid =
+            ProductCard.gridFor(width - 2 * gutter, textScale: textScale);
+        // Two rows of the grid to come, each tile its size and spacing.
+        Widget gridRow() => SizedBox(
+              height: grid.tileHeight,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var c = 0; c < grid.columns; c++) ...[
+                    if (c > 0) const SizedBox(width: AppSpacing.md),
+                    const Expanded(child: ProductCardSkeleton()),
+                  ],
+                ],
+              ),
+            );
+        shape = Column(
+          children: [
+            gridRow(),
+            const SizedBox(height: AppSpacing.md),
+            gridRow(),
+          ],
+        );
+      }
+      return SliverPadding(
+        padding: EdgeInsets.all(gutter),
+        sliver: SliverToBoxAdapter(
+          child: Skeleton(label: 'Loading products', child: shape),
+        ),
+      );
+    });
   }
 }
 
@@ -216,8 +290,9 @@ class _StoreSwitcher extends ConsumerWidget {
       data: (stores) {
         if (stores.length < 2) return const SizedBox.shrink();
         final value = stores.any((s) => s.id == current) ? current : stores.first.id;
+        final gutter = context.pageGutter;
         return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          padding: EdgeInsets.fromLTRB(gutter, 12, gutter, 0),
           child: Row(
             children: [
               Icon(Icons.storefront_outlined, size: 18, color: cs.primary),
@@ -234,7 +309,8 @@ class _StoreSwitcher extends ConsumerWidget {
                       DropdownMenuItem(
                         value: s.id,
                         child: Text(
-                          s.name,
+                          // A dark store sells delivery-only: said where the shopper chooses.
+                          s.pickupOffered ? s.name : '${s.name} · delivery only',
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
@@ -264,48 +340,57 @@ class _OffersCarousel extends ConsumerStatefulWidget {
   ConsumerState<_OffersCarousel> createState() => _OffersCarouselState();
 }
 
+/// The theme's container pair a banner is drawn in: flat fills with their own
+/// ink, so a banner reads as calmly in dark mode as in light.
+enum _OfferTone { primary, secondary, tertiary }
+
 class _Offer {
   final String title;
   final String subtitle;
   final IconData icon;
-  final List<Color> colors;
-  const _Offer(this.title, this.subtitle, this.icon, this.colors);
+  final _OfferTone tone;
+  const _Offer(this.title, this.subtitle, this.icon, this.tone);
 }
 
 class _OffersCarouselState extends ConsumerState<_OffersCarousel> {
   // Evergreen content shown when the tenant has no live promotions configured.
-  static const _fallbackOffers = [
-    _Offer(
-      'Everyday Low Prices',
-      'Stock up and save on the essentials',
-      Icons.local_offer_outlined,
-      [Color(0xFF1A5276), Color(0xFF2E86C1)],
-    ),
-    _Offer(
-      'Free Delivery over £25',
-      'On all online orders, no code needed',
-      Icons.local_shipping_outlined,
-      [Color(0xFF117A65), Color(0xFF45B39D)],
-    ),
-    _Offer(
-      'Fresh New Arrivals',
-      'Just landed in store — shop the latest',
-      Icons.auto_awesome_outlined,
-      [Color(0xFF7D3C98), Color(0xFFAF7AC5)],
-    ),
-  ];
-
-  // Rotating palette for live promotions so each banner reads distinctly.
-  static const _palette = [
-    [Color(0xFFB9770E), Color(0xFFE67E22)],
-    [Color(0xFF1A5276), Color(0xFF2E86C1)],
-    [Color(0xFF117A65), Color(0xFF45B39D)],
-    [Color(0xFF7D3C98), Color(0xFFAF7AC5)],
-  ];
+  // Never a price, a currency or a threshold: no delivery charge exists
+  // anywhere in the platform for this to promise against, and a business
+  // trading in yen or rupees is not a business that spends "over £25".
+  static List<_Offer> _fallbackOffers(String? storeName) {
+    final name = storeName?.trim();
+    return [
+      const _Offer(
+        'Everyday low prices',
+        'Stock up and save on the essentials',
+        Icons.local_offer_outlined,
+        _OfferTone.primary,
+      ),
+      (name == null || name.isEmpty || name == '-')
+          ? const _Offer(
+              'Welcome',
+              'Thanks for shopping with us',
+              Icons.storefront_outlined,
+              _OfferTone.secondary,
+            )
+          : _Offer(
+              name,
+              'Thanks for shopping with us',
+              Icons.storefront_outlined,
+              _OfferTone.secondary,
+            ),
+      const _Offer(
+        'Fresh new arrivals',
+        'Just landed in store — shop the latest',
+        Icons.auto_awesome_outlined,
+        _OfferTone.tertiary,
+      ),
+    ];
+  }
 
   // Current offers shown; updated each build from the promotions provider so the
   // rotation timer always reads a valid length.
-  List<_Offer> _offers = _fallbackOffers;
+  List<_Offer> _offers = _fallbackOffers(null);
 
   // A PageView (not CarouselView) so every banner keeps the full viewport
   // width instead of being squeezed by the Material "uncontained" carousel
@@ -357,26 +442,38 @@ class _OffersCarouselState extends ConsumerState<_OffersCarousel> {
     super.dispose();
   }
 
-  List<_Offer> _offersFrom(List<StorePromotion> all) {
+  List<_Offer> _offersFrom(
+      List<StorePromotion> all, String? currency, String? storeName) {
     final promos = advertisedPromotions(all);
-    if (promos.isEmpty) return _fallbackOffers;
+    if (promos.isEmpty) return _fallbackOffers(storeName);
     return [
       for (var i = 0; i < promos.length; i++)
         _Offer(
-          promos[i].headline,
+          promos[i].headlineIn(currency),
           promos[i].minOrderAmount != null && promos[i].minOrderAmount! > 0
-              ? '${promos[i].name} · spend ${promos[i].minOrderAmount!.toStringAsFixed(2)}+'
+              ? '${promos[i].name} · spend ${AppFormat.money(promos[i].minOrderAmount!, currencyCode: currency)}+'
               : promos[i].name,
           Icons.local_offer_outlined,
-          _palette[i % _palette.length],
+          // Rotated so neighbouring banners read distinctly.
+          _OfferTone.values[i % _OfferTone.values.length],
         ),
     ];
   }
 
+  /// A banner's fill and the ink on it.
+  static (Color, Color) _toneColors(ColorScheme cs, _OfferTone tone) => switch (tone) {
+        _OfferTone.primary => (cs.primaryContainer, cs.onPrimaryContainer),
+        _OfferTone.secondary => (cs.secondaryContainer, cs.onSecondaryContainer),
+        _OfferTone.tertiary => (cs.tertiaryContainer, cs.onTertiaryContainer),
+      };
+
   @override
   Widget build(BuildContext context) {
     final promos = ref.watch(storefrontPromotionsProvider).value ?? const [];
-    _offers = _offersFrom(promos);
+    // Promotions are set in the shop's own currency.
+    final currency = ref.watch(storefrontCurrenciesProvider).value?.home;
+    final storeName = ref.watch(storefrontConfigProvider).value?.storeName;
+    _offers = _offersFrom(promos, currency, storeName);
     if (_page >= _offers.length) {
       // Promotions arrived/expired and shrank the list under the current page —
       // snap back to the first banner once this frame is laid out.
@@ -385,150 +482,145 @@ class _OffersCarouselState extends ConsumerState<_OffersCarousel> {
         if (mounted && _controller.hasClients) _controller.jumpToPage(0);
       });
     }
-    // Give the banner more room on wide viewports so it doesn't read as a
-    // squashed strip across a desktop-width shell.
-    final width = MediaQuery.sizeOf(context).width;
+    final cs = Theme.of(context).colorScheme;
     // Enlarged text makes the banner taller rather than cutting its words off (WCAG 1.4.4).
     final textScale =
         (MediaQuery.textScalerOf(context).scale(20) / 20).clamp(1.0, 2.0);
-    final height =
-        (width < 600 ? 150.0 : (width < 1024 ? 170.0 : 190.0)) * textScale;
-    return Column(
-      children: [
-        const SizedBox(height: 12),
-        SizedBox(
-          height: height,
-          child: NotificationListener<ScrollNotification>(
-            onNotification: (n) {
-              if (n is ScrollStartNotification && n.dragDetails != null) {
-                _paused = true;
-              } else if (n is ScrollEndNotification) {
-                _paused = false;
-              }
-              return false;
-            },
-            // Flutter's default web/desktop scroll behaviour excludes the mouse
-            // from drag devices, which left this carousel unswipeable in the
-            // browser. Opt the pointer devices back in.
-            child: ScrollConfiguration(
-              behavior: ScrollConfiguration.of(context).copyWith(
-                dragDevices: const {
-                  PointerDeviceKind.touch,
-                  PointerDeviceKind.mouse,
-                  PointerDeviceKind.trackpad,
-                  PointerDeviceKind.stylus,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Give the banner more room on a wide shop so it doesn't read as a
+        // squashed strip; judged by the width the shop has, not the window's.
+        final base = switch (AppBreakpoints.classOf(constraints.maxWidth)) {
+          WindowClass.compact => 150.0,
+          WindowClass.medium => 170.0,
+          WindowClass.expanded || WindowClass.large => 190.0,
+        };
+        return Column(
+          children: [
+            const SizedBox(height: 12),
+            SizedBox(
+              height: base * textScale,
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (n) {
+                  if (n is ScrollStartNotification && n.dragDetails != null) {
+                    _paused = true;
+                  } else if (n is ScrollEndNotification) {
+                    _paused = false;
+                  }
+                  return false;
                 },
-                scrollbars: false,
-                overscroll: false,
-              ),
-              child: PageView.builder(
-                controller: _controller,
-                itemCount: _offers.length,
-                onPageChanged: (i) => setState(() => _page = i),
-                itemBuilder: (context, i) {
-                  final o = _offers[i];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(16),
-                        gradient: LinearGradient(
-                          colors: o.colors,
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
+                // Flutter's default web/desktop scroll behaviour excludes the mouse
+                // from drag devices, which left this carousel unswipeable in the
+                // browser. Opt the pointer devices back in.
+                child: ScrollConfiguration(
+                  behavior: ScrollConfiguration.of(context).copyWith(
+                    dragDevices: const {
+                      PointerDeviceKind.touch,
+                      PointerDeviceKind.mouse,
+                      PointerDeviceKind.trackpad,
+                      PointerDeviceKind.stylus,
+                    },
+                    scrollbars: false,
+                    overscroll: false,
+                  ),
+                  child: PageView.builder(
+                    controller: _controller,
+                    itemCount: _offers.length,
+                    onPageChanged: (i) => setState(() => _page = i),
+                    itemBuilder: (context, i) {
+                      final o = _offers[i];
+                      final (bg, fg) = _toneColors(cs, o.tone);
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: bg,
+                            borderRadius: AppRadius.card,
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(20),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        o.title,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: fg,
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        o.subtitle,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(color: fg, fontSize: 13),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Icon(o.icon, color: fg, size: 48),
+                              ],
+                            ),
+                          ),
                         ),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(20),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    o.title,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    o.subtitle,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: Colors.white.withAlpha(220),
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ...List.generate(_offers.length, (i) {
+                  final active = i == _page;
+                  return Semantics(
+                    button: true,
+                    label: 'Offer ${i + 1} of ${_offers.length}',
+                    child: InkWell(
+                      onTap: () => _goTo(i),
+                      customBorder: const CircleBorder(),
+                      // At least 24 by 24 to hit, however small the dot (WCAG 2.2, 2.5.8).
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: Center(
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 250),
+                            width: active ? 18 : 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: active ? cs.primary : cs.outlineVariant,
+                              borderRadius: AppRadius.badge,
                             ),
-                            Icon(
-                              o.icon,
-                              color: Colors.white.withAlpha(220),
-                              size: 48,
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ),
                   );
-                },
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 10),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            ...List.generate(_offers.length, (i) {
-              final active = i == _page;
-              return Semantics(
-                button: true,
-                label: 'Offer ${i + 1} of ${_offers.length}',
-                child: InkWell(
-                  onTap: () => _goTo(i),
-                  customBorder: const CircleBorder(),
-                  // At least 24 by 24 to hit, however small the dot (WCAG 2.2, 2.5.8).
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: Center(
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 250),
-                        width: active ? 18 : 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          color: active
-                              ? Theme.of(context).colorScheme.primary
-                              : Theme.of(context).colorScheme.outlineVariant,
-                          borderRadius: BorderRadius.circular(3),
-                        ),
-                      ),
-                    ),
+                }),
+                if (_offers.length > 1)
+                  IconButton(
+                    key: const Key('offers-pause'),
+                    iconSize: 18,
+                    tooltip: _stopped ? 'Play offers' : 'Pause offers',
+                    icon: Icon(_stopped ? Icons.play_arrow : Icons.pause),
+                    onPressed: () => setState(() => _stopped = !_stopped),
                   ),
-                ),
-              );
-            }),
-            if (_offers.length > 1)
-              IconButton(
-                key: const Key('offers-pause'),
-                iconSize: 18,
-                tooltip: _stopped ? 'Play offers' : 'Pause offers',
-                icon: Icon(_stopped ? Icons.play_arrow : Icons.pause),
-                onPressed: () => setState(() => _stopped = !_stopped),
-              ),
+              ],
+            ),
           ],
-        ),
-      ],
+        );
+      },
     );
   }
 }
@@ -544,55 +636,71 @@ class _FilterRow extends ConsumerWidget {
     final selected = ref.watch(selectedStorefrontCategoryProvider);
     final cs = Theme.of(context).colorScheme;
 
-    return SizedBox(
-      height: 48,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        children: [
-          // Category chips
-          ...categoriesAsync.when(
-            loading: () => const [],
-            error: (_, _) => const [],
-            data: (categories) => [
-              _categoryChip(
-                context,
-                ref,
-                label: 'All',
-                value: null,
-                selected: selected == null,
-              ),
-              for (final c in categories)
+    // As tall as its chips: a fixed height cut them off top and bottom at
+    // 200% text. Every chip is built, so the in-stock one at the end is there
+    // to reach, however long the category list.
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      // A little room above and below, so a desktop's compact chips (about
+      // 30px, no 48px tap target) still sit clear of the search bar.
+      padding: EdgeInsetsDirectional.symmetric(
+          horizontal: context.pageGutter, vertical: AppSpacing.xs),
+      child: IntrinsicHeight(
+        child: Row(
+          children: [
+            // Category chips
+            ...categoriesAsync.when(
+              loading: () => const [],
+              error: (_, _) => const [],
+              data: (categories) => [
                 _categoryChip(
                   context,
                   ref,
-                  label: c.name,
-                  value: c.id,
-                  selected: selected == c.id,
+                  label: 'All',
+                  value: null,
+                  selected: selected == null,
                 ),
-            ],
-          ),
-          // Divider spacer
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-            child: VerticalDivider(width: 1, color: cs.outlineVariant),
-          ),
-          // In-stock toggle
-          Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: FilterChip(
-              avatar: Icon(
-                Icons.inventory_2_outlined,
-                size: 16,
-                color: inStockOnly ? cs.onSecondaryContainer : cs.onSurfaceVariant,
-              ),
-              label: const Text('In stock'),
-              selected: inStockOnly,
-              onSelected: (v) =>
-                  ref.read(storefrontInStockOnlyProvider.notifier).state = v,
+                for (final c in categories)
+                  _categoryChip(
+                    context,
+                    ref,
+                    label: c.name,
+                    value: c.id,
+                    selected: selected == c.id,
+                  ),
+              ],
             ),
-          ),
-        ],
+            // Divider spacer, a little shorter than the row: it follows the
+            // chips' height on touch (48px targets) and on desktop alike.
+            Padding(
+              padding: const EdgeInsetsDirectional.symmetric(
+                  horizontal: AppSpacing.xs),
+              child: VerticalDivider(
+                width: 1,
+                indent: AppSpacing.xs,
+                endIndent: AppSpacing.xs,
+                color: cs.outlineVariant,
+              ),
+            ),
+            // In-stock toggle
+            Padding(
+              padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
+              child: FilterChip(
+                avatar: Icon(
+                  Icons.inventory_2_outlined,
+                  size: 16,
+                  color: inStockOnly
+                      ? cs.onSecondaryContainer
+                      : cs.onSurfaceVariant,
+                ),
+                label: const Text('In stock'),
+                selected: inStockOnly,
+                onSelected: (v) =>
+                    ref.read(storefrontInStockOnlyProvider.notifier).state = v,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -605,7 +713,7 @@ class _FilterRow extends ConsumerWidget {
     required bool selected,
   }) {
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsetsDirectional.only(end: AppSpacing.sm),
       child: ChoiceChip(
         label: Text(label),
         selected: selected,
@@ -621,68 +729,12 @@ class _EmptyProducts extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final cs = Theme.of(context).colorScheme;
     final filtered = ref.watch(selectedStorefrontCategoryProvider) != null;
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.storefront_outlined, size: 64, color: cs.outlineVariant),
-          const SizedBox(height: 16),
-          Text(
-            filtered
-                ? 'No products in this category'
-                : 'No products available yet',
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ProductCard extends ConsumerWidget {
-  final StoreProduct product;
-  const _ProductCard({super.key, required this.product});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Semantics(
-      button: true,
-      hint: 'Opens the product details',
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () => context.go('/store/products/${product.id}'),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: ProductImageThumb(
-                  productId: product.id,
-                  label: product.name,
-                  fontSize: 36,
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 6, 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      product.name,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 4),
-                    OfferPriceAdd(product: product),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+    return EmptyState(
+      icon: Icons.storefront_outlined,
+      title: filtered
+          ? 'No products in this category'
+          : 'No products available yet',
     );
   }
 }
@@ -714,7 +766,7 @@ class _ProductRow extends ConsumerWidget {
                     productId: product.id,
                     label: product.name,
                     fontSize: 24,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: AppRadius.chip,
                   ),
                 ),
                 const SizedBox(width: 14),
@@ -746,15 +798,42 @@ class _ProductRow extends ConsumerWidget {
   }
 }
 
+/// A [_ProductRow] while the shop loads: the thumbnail, the name and the
+/// price, in grey.
+class _ProductRowSkeleton extends StatelessWidget {
+  const _ProductRowSkeleton();
+
+  @override
+  Widget build(BuildContext context) => const Card(
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: EdgeInsets.all(10),
+          child: Row(
+            children: [
+              SkeletonBlock(width: 72, height: 72, borderRadius: AppRadius.chip),
+              SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SkeletonLine(widthFactor: 0.7, fontSize: 15),
+                    SizedBox(height: AppSpacing.sm),
+                    SkeletonLine(widthFactor: 0.3, fontSize: 16),
+                    SizedBox(height: AppSpacing.sm),
+                    SkeletonLine(widthFactor: 0.4, fontSize: 12),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
 // ── Sponsored ad widgets ──────────────────────────────────────────────────────
 
 const _kAdUrl = 'https://featurefragment.com/';
 const _kAdBrand = 'FeatureFragment';
-const _kAdGradient = LinearGradient(
-  colors: [Color(0xFF1A237E), Color(0xFF3F51B5)],
-  begin: Alignment.topLeft,
-  end: Alignment.bottomRight,
-);
 
 Future<void> _openAd() =>
     launchUrl(Uri.parse(_kAdUrl), mode: LaunchMode.externalApplication);
@@ -788,16 +867,22 @@ class _AdCard extends StatelessWidget {
               Expanded(
                 child: Stack(
                   children: [
+                    // A flat theme fill, not a bright gradient, so the tile sits
+                    // among the product pictures in dark mode too.
                     Container(
-                      decoration: const BoxDecoration(gradient: _kAdGradient),
+                      color: cs.tertiaryContainer,
                       alignment: Alignment.center,
                       child: Icon(
                         Icons.inventory_2_outlined,
                         size: 48,
-                        color: Colors.white.withAlpha(180),
+                        color: cs.onTertiaryContainer,
                       ),
                     ),
-                    Positioned(top: 8, right: 8, child: _AdBadge(cs: cs)),
+                    PositionedDirectional(
+                      top: 8,
+                      end: 8,
+                      child: _AdBadge(cs: cs),
+                    ),
                   ],
                 ),
               ),
@@ -852,14 +937,14 @@ class _AdRow extends StatelessWidget {
                   height: 72,
                   child: Container(
                     decoration: BoxDecoration(
-                      gradient: _kAdGradient,
-                      borderRadius: BorderRadius.circular(8),
+                      color: cs.tertiaryContainer,
+                      borderRadius: AppRadius.chip,
                     ),
                     alignment: Alignment.center,
-                    child: const Icon(
+                    child: Icon(
                       Icons.inventory_2_outlined,
                       size: 32,
-                      color: Colors.white,
+                      color: cs.onTertiaryContainer,
                     ),
                   ),
                 ),
@@ -914,7 +999,7 @@ class _AdBadge extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: cs.secondaryContainer,
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: AppRadius.badge,
       ),
       child: Text(
         'AD',
@@ -933,34 +1018,10 @@ class _NoStorefront extends StatelessWidget {
   const _NoStorefront();
 
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.store_mall_directory_outlined,
-              size: 64,
-              color: cs.outlineVariant,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'No store selected',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Open this storefront with a tenant in the URL, e.g.\n'
-              '/?tenant=<tenantId>#/store/products',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: cs.outline),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const EmptyState(
+        icon: Icons.store_mall_directory_outlined,
+        title: 'No store selected',
+        message: 'Open this storefront with a tenant in the URL, e.g.\n'
+            '/?tenant=<tenantId>#/store/products',
+      );
 }

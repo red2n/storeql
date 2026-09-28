@@ -194,5 +194,12 @@ void main() {
       expect(sale.reference, '123456');
       expect(OfflineSale.fromJson(sale.toJson()).reference, '123456');
     });
+
+    test('the reference is upper-cased, as order references are elsewhere', () {
+      // A real id is a UUIDv7: its random tail is lower-case hex.
+      expect(_sale(id: '01a0c830-0e7a-7b3c-9d2e-5f1a2b7c41ae').reference,
+          '7C41AE');
+      expect(_sale(id: 'ab12').reference, 'AB12');
+    });
   });
 }

@@ -143,6 +143,7 @@ public class AppliedPriceService {
             store == null ? null : store.toString(),
             channel,
             BigDecimal.ONE,
+            null,
             null);
     try {
       ResolvedPrice offered = pricing.resolveAsRecorded(e.tenantId(), req, true, e.asOf());

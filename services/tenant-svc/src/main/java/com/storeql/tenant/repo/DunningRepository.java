@@ -1,10 +1,12 @@
 package com.storeql.tenant.repo;
 
-import com.storeql.service.BaseJdbcRepository;
+import com.storeql.service.BaseOutboxRepository;
+import com.storeql.service.OutboxRow;
 import com.storeql.tenant.domain.Dunning;
 import com.storeql.tenant.domain.Dunning.Event;
 import com.storeql.tenant.domain.Dunning.Overdue;
 import com.storeql.tenant.domain.Dunning.Policy;
+import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -29,7 +31,7 @@ import java.util.UUID;
  * one an administrator did, or money would quietly overrule a decision somebody took.
  */
 @ApplicationScoped
-public class DunningRepository extends BaseJdbcRepository {
+public class DunningRepository extends BaseOutboxRepository {
 
   // ── the policy ──────────────────────────────────────────────────────────────
 
@@ -105,6 +107,57 @@ public class DunningRepository extends BaseJdbcRepository {
           }
         },
         "claim dunning step");
+  }
+
+  /**
+   * Records a notice step, once — and with it, in the same transaction, the pay link the notice
+   * carries and the event that writes it (golden rule 6).
+   *
+   * <p>Three writes that must agree: a step recorded with no notice behind it would suspend a
+   * business the platform never told; a notice with no step would tell it twice on the next run; a
+   * link nobody was sent is a link that pays nothing. One transaction, so a run that dies halfway
+   * leaves all three or none.
+   *
+   * @param tokenHash the hash of the link's token; the newest link is the one that pays, so an
+   *     older notice's stops working
+   * @return false when this invoice has already had this step, so the caller does nothing
+   * @throws ApiException 409 {@code INVOICE_NOT_OPEN} when the invoice can no longer be paid: a
+   *     notice asking for money on it would lead nowhere, and the step is not recorded
+   */
+  public boolean claimNotice(
+      UUID id,
+      UUID tenantId,
+      UUID invoiceId,
+      String step,
+      String detail,
+      String tokenHash,
+      OutboxRow notice) {
+    return inTx(
+        c -> {
+          try (PreparedStatement ps = c.prepareStatement(INSERT_EVENT)) {
+            ps.setObject(1, id);
+            ps.setObject(2, tenantId);
+            ps.setObject(3, invoiceId);
+            ps.setString(4, step);
+            ps.setString(5, detail);
+            ps.setObject(6, null);
+            ps.setObject(7, Instant.now().atOffset(ZoneOffset.UTC));
+            if (ps.executeUpdate() != 1) return false;
+          }
+          try (PreparedStatement ps = c.prepareStatement(STORE_PAY_TOKEN)) {
+            ps.setString(1, tokenHash);
+            ps.setObject(2, Instant.now().atOffset(ZoneOffset.UTC));
+            ps.setObject(3, invoiceId);
+            if (ps.executeUpdate() != 1) {
+              throw ApiException.conflict(
+                  "INVOICE_NOT_OPEN",
+                  "This invoice cannot be paid, so a notice about it would lead nowhere");
+            }
+          }
+          insertOutbox(c, notice);
+          return true;
+        },
+        "claim dunning notice");
   }
 
   public List<Event> eventsOf(UUID invoiceId) {

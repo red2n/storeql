@@ -61,6 +61,24 @@ public final class SmtpChannel implements NotificationChannel {
    * @throws IllegalStateException when the message cannot be handed to the SMTP server, so the
    *     consumer loop retries the delivery
    */
+  /**
+   * An email address, strictly: a store alert is addressed to the store's id and a device push to a
+   * login's, and neither is somebody's mailbox — handing one to the server would fail the send and,
+   * with it, the in-app copy beside it.
+   */
+  @Override
+  public boolean reaches(String recipient) {
+    if (recipient == null || recipient.indexOf('@') < 1) {
+      return false;
+    }
+    try {
+      new InternetAddress(recipient, true).validate();
+      return true;
+    } catch (jakarta.mail.internet.AddressException e) {
+      return false;
+    }
+  }
+
   @Override
   public void send(UUID tenantId, String recipient, String subject, String body) {
     // The recipient is already a globally-unique email address, so email needs no tenant scoping.

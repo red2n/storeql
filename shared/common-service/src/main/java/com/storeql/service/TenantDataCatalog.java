@@ -141,7 +141,14 @@ public final class TenantDataCatalog {
             .ifPresent(
                 t -> {
                   built.put(name, t);
-                  erasable.put(name, t.tenantPredicate());
+                  // A table exported by one predicate may be erased by a wider one: iam-svc's
+                  // sandbox pair is the live business's to export and goes with either business
+                  // when erased. The spec's erasure predicate, where it names one, is the one
+                  // used — declared and ignored, it left a deleted sandbox reachable.
+                  exportedErasure(spec, name, tenantColumn, problems)
+                      .ifPresentOrElse(
+                          p -> erasable.put(name, p),
+                          () -> erasable.put(name, t.tenantPredicate()));
                 });
       } else if (!TenantDataSpec.INFRASTRUCTURE.containsKey(name)) {
         excludedErasure(spec, name, tenantColumn, problems).ifPresent(p -> erasable.put(name, p));
@@ -235,6 +242,25 @@ public final class TenantDataCatalog {
             spec.derivedTables().contains(name),
             spec.importSkipped().get(name),
             Set.of()));
+  }
+
+  /**
+   * An exported table's own erasure predicate, when the spec names one: never beside a tenant_id
+   * (the column says it all), and with exactly one parameter.
+   */
+  private static Optional<String> exportedErasure(
+      TenantDataSpec spec, String name, boolean tenantColumn, List<Problem> problems) {
+    String predicate = spec.erasurePredicates().get(name);
+    if (predicate == null) return Optional.empty();
+    if (tenantColumn) {
+      problems.add(new Problem(name, "has tenant_id, so it needs no erasure predicate"));
+      return Optional.empty();
+    }
+    if (!oneParameter(predicate)) {
+      problems.add(new Problem(name, "its erasure predicate must take exactly one parameter"));
+      return Optional.empty();
+    }
+    return Optional.of(predicate);
   }
 
   /** A left-out table is erased by its tenant_id, or by the spec's predicate, or not at all. */

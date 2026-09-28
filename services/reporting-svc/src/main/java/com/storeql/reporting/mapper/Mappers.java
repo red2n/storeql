@@ -3,6 +3,7 @@ package com.storeql.reporting.mapper;
 import com.storeql.reporting.domain.Domain.InventoryProjection;
 import com.storeql.reporting.domain.Domain.MovementStat;
 import com.storeql.reporting.domain.Domain.OpenSupplyLine;
+import com.storeql.reporting.domain.Domain.SalesCategoryStat;
 import com.storeql.reporting.domain.Domain.SalesDayStat;
 import com.storeql.reporting.domain.Domain.SalesSummary;
 import com.storeql.reporting.dto.Dtos.MovementStatRow;
@@ -11,12 +12,16 @@ import com.storeql.reporting.dto.Dtos.NettingReport;
 import com.storeql.reporting.dto.Dtos.NettingRow;
 import com.storeql.reporting.dto.Dtos.OnHandReport;
 import com.storeql.reporting.dto.Dtos.OnHandRow;
+import com.storeql.reporting.dto.Dtos.SalesByCategoryReport;
 import com.storeql.reporting.dto.Dtos.SalesByDayReport;
+import com.storeql.reporting.dto.Dtos.SalesCategoryRow;
 import com.storeql.reporting.dto.Dtos.SalesDayRow;
 import com.storeql.reporting.dto.Dtos.SalesSummaryReport;
 import com.storeql.reporting.dto.Dtos.SalesSummaryRow;
 import com.storeql.reporting.service.ReportingService.NettingResult;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -128,6 +133,38 @@ public final class Mappers {
    * @param rows sales totals bucketed by day and currency
    * @return the report rows, one per day/currency pair
    */
+  /**
+   * Sales by category on the wire, each row with its share of the currency's total: the figure a
+   * buyer reads first, and one the client should not have to compute from a page of rows.
+   */
+  public static SalesByCategoryReport toSalesByCategoryReport(
+      String level, List<SalesCategoryStat> rows) {
+    Map<String, BigDecimal> totals = new HashMap<>();
+    for (SalesCategoryStat r : rows) {
+      totals.merge(r.currency(), r.gross(), BigDecimal::add);
+    }
+    var dtoRows =
+        rows.stream()
+            .map(
+                r ->
+                    new SalesCategoryRow(
+                        r.categoryId() == null ? null : r.categoryId().toString(),
+                        r.currency(),
+                        r.orders(),
+                        r.units(),
+                        r.gross(),
+                        share(r.gross(), totals.get(r.currency()))))
+            .toList();
+    return new SalesByCategoryReport(level, dtoRows);
+  }
+
+  private static BigDecimal share(BigDecimal part, BigDecimal total) {
+    if (total == null || total.signum() == 0) {
+      return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
+    }
+    return part.multiply(BigDecimal.valueOf(100)).divide(total, 2, RoundingMode.HALF_UP);
+  }
+
   public static SalesByDayReport toSalesByDayReport(List<SalesDayStat> rows) {
     var dtoRows =
         rows.stream()

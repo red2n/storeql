@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.comparesEqualTo;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
@@ -15,6 +16,7 @@ import jakarta.ws.rs.client.Entity;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.math.BigDecimal;
 import java.sql.DriverManager;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -717,6 +719,210 @@ class PricingIT {
     assertThat(
         quote("{\"lines\":[{\"variantId\":\"" + V + "\",\"qty\":1}]}"),
         containsString("\"totalDiscount\":50.00"));
+  }
+
+  /**
+   * Prices shown in another currency (03.x): a resolve and a quote carry the figures in the display
+   * currency at the business's own rate beside the ones charged; the currencies a shop can show are
+   * its own and those it keeps a rate for; a currency without a rate is refused by name.
+   */
+  @Test
+  void pricesShownInAnotherCurrency() {
+    TENANTS.withFxRate(T, "USD", "0.80");
+    assertThat(
+        post(
+                "/vat-rates",
+                "{\"code\":\"T1\",\"name\":\"Standard Rate\",\"rate\":0.20,\"exempt\":false,"
+                    + "\"description\":\"UK Standard VAT\",\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
+                T)
+            .getStatus(),
+        is(201));
+    // A £100 price list item, standard-rated: £120 with VAT — $125 / $150 at 0.80 GBP per USD.
+    Response plR =
+        post(
+            "/admin/price-lists",
+            "{\"name\":\"Shown in dollars\",\"channel\":\"ALL\",\"currency\":\"GBP\","
+                + "\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
+            T);
+    String plId = extractId(plR.readEntity(String.class));
+    post(
+        "/admin/price-lists/" + plId + "/items",
+        "{\"variantId\":\"" + V + "\",\"price\":100.00,\"minQty\":1}",
+        T);
+    Response shownR =
+        post(
+            "/prices/resolve",
+            "{\"variantId\":\""
+                + V
+                + "\",\"channel\":\"ALL\",\"qty\":1,\"displayCurrency\":\"usd\"}",
+            T);
+    String shown = shownR.readEntity(String.class);
+    assertThat(shown, shownR.getStatus(), is(200));
+    jakarta.json.JsonObject price =
+        jakarta.json.Json.createReader(new java.io.StringReader(shown))
+            .readObject()
+            .getJsonObject("data");
+    assertThat(shown, price.getString("currency"), is("GBP"));
+    assertThat(
+        shown,
+        price.getJsonNumber("unitPrice").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("100.00")));
+    jakarta.json.JsonObject display = price.getJsonObject("display");
+    assertThat(shown, display.getString("currency"), is("USD"));
+    assertThat(
+        display.getJsonNumber("rate").bigDecimalValue(), comparesEqualTo(new BigDecimal("0.80")));
+    assertThat(
+        display.getJsonNumber("unitPrice").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("125.00")));
+    assertThat(
+        display.getJsonNumber("totalWithVat").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("150.00")));
+    // Without a display currency nothing is displayed; the home currency displays as itself.
+    String plain =
+        post("/prices/resolve", "{\"variantId\":\"" + V + "\",\"channel\":\"ALL\",\"qty\":1}", T)
+            .readEntity(String.class);
+    assertThat(plain, not(containsString("\"display\"")));
+    String same =
+        post(
+                "/prices/resolve",
+                "{\"variantId\":\""
+                    + V
+                    + "\",\"channel\":\"ALL\",\"qty\":1,\"displayCurrency\":\"GBP\"}",
+                T)
+            .readEntity(String.class);
+    assertThat(same, containsString("\"rate\":1"));
+
+    // A basket of two: £240 with VAT, shown as $300.
+    String basket =
+        quote("{\"lines\":[{\"variantId\":\"" + V + "\",\"qty\":2}],\"displayCurrency\":\"USD\"}");
+    jakarta.json.JsonObject bd =
+        jakarta.json.Json.createReader(new java.io.StringReader(basket))
+            .readObject()
+            .getJsonObject("data")
+            .getJsonObject("display");
+    assertThat(basket, bd.getString("currency"), is("USD"));
+    assertThat(
+        bd.getJsonNumber("total").bigDecimalValue(), comparesEqualTo(new BigDecimal("300.00")));
+    assertThat(
+        bd.getJsonNumber("subtotal").bigDecimalValue(), comparesEqualTo(new BigDecimal("250.00")));
+
+    // The currencies a shop can show: its own, then the ones with a rate.
+    String currencies = get("/prices/currencies", T).readEntity(String.class);
+    assertThat(currencies, containsString("\"home\":\"GBP\""));
+    assertThat(currencies, containsString("\"currencies\":[\"GBP\",\"USD\"]"));
+    assertThat(currencies, containsString("\"rates\":[{\"currency\":\"USD\",\"rate\":0.80}]"));
+
+    // No rate for the euro: refused by name, and so is a code nobody knows.
+    Response euro =
+        post(
+            "/prices/resolve",
+            "{\"variantId\":\""
+                + V
+                + "\",\"channel\":\"ALL\",\"qty\":1,\"displayCurrency\":\"EUR\"}",
+            T);
+    String euroBody = euro.readEntity(String.class);
+    assertThat(euroBody, euro.getStatus(), is(400));
+    assertThat(euroBody, containsString("FX_RATE_MISSING"));
+    Response nonsense =
+        post(
+            "/prices/resolve",
+            "{\"variantId\":\""
+                + V
+                + "\",\"channel\":\"ALL\",\"qty\":1,\"displayCurrency\":\"POUNDS\"}",
+            T);
+    assertThat(nonsense.readEntity(String.class), nonsense.getStatus(), is(400));
+  }
+
+  /**
+   * The promotion windows inventory-svc reads for its forecast (06.x): every promotion that touches
+   * the store since {@code from}, its scope resolved to variants, a switched-off one ending the
+   * moment it was switched off, and a promotion of another store left out. Staff may read it — it
+   * is one service's read of another — and a shopper may not.
+   */
+  @Test
+  void promotionWindowsForTheForecast() {
+    // createPromotion scopes to ALL; the beans and the other store's promotion are made bare.
+    String everything =
+        createPromotion(
+            "{\"name\":\"Everything\",\"type\":\"PERCENT\",\"value\":10,"
+                + "\"startsAt\":\"2026-01-01T00:00:00Z\"}");
+    Response beansR =
+        post(
+            "/admin/promotions",
+            "{\"name\":\"Beans\",\"type\":\"PERCENT\",\"value\":20,\"storeId\":\""
+                + S
+                + "\",\"startsAt\":\"2026-02-01T00:00:00Z\",\"endsAt\":\"2027-02-01T00:00:00Z\"}",
+            T);
+    assertThat(beansR.getStatus(), is(201));
+    String beans = extractId(beansR.readEntity(String.class));
+    assertThat(
+        post(
+                "/admin/promotions/" + beans + "/items",
+                "{\"scopeType\":\"VARIANT\",\"scopeId\":\"" + V + "\"}",
+                T)
+            .getStatus(),
+        is(201));
+    assertThat(
+        post("/admin/promotions/" + beans + "/deactivate", "{\"reason\":\"stopped\"}", T)
+            .getStatus(),
+        is(200));
+    Response elsewhereR =
+        post(
+            "/admin/promotions",
+            "{\"name\":\"Elsewhere\",\"type\":\"PERCENT\",\"value\":5,\"storeId\":\""
+                + YEN
+                + "\",\"startsAt\":\"2026-01-01T00:00:00Z\"}",
+            T);
+    assertThat(elsewhereR.getStatus(), is(201));
+
+    Response r =
+        getAs("/admin/promotions/windows?store=" + S + "&from=2026-01-01", T, "STOREKEEPER");
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(200));
+    jakarta.json.JsonArray windows =
+        jakarta.json.Json.createReader(new java.io.StringReader(body))
+            .readObject()
+            .getJsonArray("data");
+    assertThat(body, windows.size(), is(2));
+    jakarta.json.JsonObject all = null;
+    jakarta.json.JsonObject stopped = null;
+    for (jakarta.json.JsonObject w : windows.getValuesAs(jakarta.json.JsonObject.class)) {
+      if (w.getString("promotionId").equals(everything)) all = w;
+      if (w.getString("promotionId").equals(beans)) stopped = w;
+    }
+    assertThat(body, all, not(nullValue()));
+    assertThat(body, stopped, not(nullValue()));
+    assertThat(all.getBoolean("allVariants"), is(true));
+    assertThat(all.containsKey("storeId") && !all.isNull("storeId"), is(false));
+    assertThat(all.containsKey("endsAt") && !all.isNull("endsAt"), is(false));
+    assertThat(all.getBoolean("active"), is(true));
+    assertThat(stopped.getBoolean("allVariants"), is(false));
+    assertThat(stopped.getJsonArray("variantIds").getString(0), is(V));
+    assertThat(stopped.getString("storeId"), is(S));
+    assertThat(stopped.getBoolean("active"), is(false));
+    // Switched off today, so its window ends today rather than next February.
+    assertThat(
+        stopped.getString("endsAt"),
+        containsString(java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString()));
+
+    // From tomorrow, the stopped one is over; the open-ended one is still a window.
+    Response later =
+        getAs(
+            "/admin/promotions/windows?store="
+                + S
+                + "&from="
+                + java.time.LocalDate.now(java.time.ZoneOffset.UTC).plusDays(1),
+            T,
+            "OWNER");
+    String laterBody = later.readEntity(String.class);
+    assertThat(laterBody, later.getStatus(), is(200));
+    assertThat(laterBody, containsString(everything));
+    assertThat(laterBody, not(containsString(beans)));
+
+    assertThat(getAs("/admin/promotions/windows?store=" + S, T, "CUSTOMER").getStatus(), is(403));
+    assertThat(
+        getAs("/admin/promotions/windows?store=" + S + "&from=yesterday", T, "OWNER").getStatus(),
+        is(400));
   }
 
   /** Both directions need a reason, and the trail keeps every switch. */

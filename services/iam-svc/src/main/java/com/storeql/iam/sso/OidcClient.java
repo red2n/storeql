@@ -1,6 +1,7 @@
 package com.storeql.iam.sso;
 
 import com.storeql.iam.config.ServiceConfig;
+import com.storeql.service.Egress;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientRequest;
 import io.helidon.webclient.api.HttpClientResponse;
@@ -80,6 +81,18 @@ public class OidcClient {
             .build();
   }
 
+  /** An address held to the egress rule, refused in this service's own words. */
+  private URI check(String url) {
+    try {
+      return egress.check(url);
+    } catch (Egress.Refused e) {
+      throw new SsoRefused(
+          e.kind() == Egress.Kind.UNRESOLVED ? SsoRefused.UNREACHABLE : SsoRefused.ADDRESS_REFUSED,
+          "provider " + e.getMessage(),
+          e);
+    }
+  }
+
   /** The provider's discovery document, from the cache when it is fresh. */
   public Discovery discover(String issuer) {
     Cached<Discovery> hit = discoveries.get(issuer);
@@ -91,10 +104,10 @@ public class OidcClient {
   public Discovery discoverFresh(String issuer) {
     Discovery d = Discovery.parse(get(Discovery.location(issuer)), issuer);
     // Every address it names is one this service will call: each is held to the same rule.
-    egress.check(d.authorizationEndpoint());
-    egress.check(d.tokenEndpoint());
-    egress.check(d.jwksUri());
-    d.userinfoEndpoint().ifPresent(egress::check);
+    check(d.authorizationEndpoint());
+    check(d.tokenEndpoint());
+    check(d.jwksUri());
+    d.userinfoEndpoint().ifPresent(this::check);
     discoveries.put(issuer, new Cached<>(d, clock.instant()));
     return d;
   }
@@ -146,7 +159,7 @@ public class OidcClient {
     form.put("redirect_uri", redirectUri);
     form.put("code_verifier", verifier);
     HttpClientRequest request =
-        http.post(egress.check(d.tokenEndpoint()).toString())
+        http.post(check(d.tokenEndpoint()).toString())
             .header(HeaderNames.CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(HeaderNames.ACCEPT, "application/json");
     if (Discovery.BASIC.equals(d.tokenAuthMethod())) {
@@ -193,7 +206,7 @@ public class OidcClient {
 
   private IdToken contact(String userinfo, String accessToken, IdToken proved) {
     try (HttpClientResponse res =
-        http.get(egress.check(userinfo).toString())
+        http.get(check(userinfo).toString())
             .header(HeaderNames.AUTHORIZATION, "Bearer " + accessToken)
             .header(HeaderNames.ACCEPT, "application/json")
             .request()) {
@@ -222,7 +235,7 @@ public class OidcClient {
   }
 
   private String get(String url) {
-    URI checked = egress.check(url);
+    URI checked = check(url);
     try (HttpClientResponse res =
         http.get(checked.toString()).header(HeaderNames.ACCEPT, "application/json").request()) {
       int status = res.status().code();

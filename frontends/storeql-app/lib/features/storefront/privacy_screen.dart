@@ -1,58 +1,15 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import 'privacy_rights.dart';
 import 'storefront_providers.dart';
 import 'storefront_shell.dart' show StorefrontAuthDialog;
-
-/// One marketing channel as the shop currently has it recorded.
-class MarketingPreference {
-  final String channel;
-  final bool granted;
-  final String basis;
-
-  const MarketingPreference({
-    required this.channel,
-    required this.granted,
-    required this.basis,
-  });
-
-  factory MarketingPreference.fromJson(Map<String, dynamic> json) =>
-      MarketingPreference(
-        channel: json['channel'] as String? ?? '',
-        granted: json['granted'] as bool? ?? false,
-        basis: json['basis'] as String? ?? 'NONE',
-      );
-}
-
-/// The shopper's marketing preferences at the shop they are browsing.
-///
-/// A channel the shop has never recorded simply has no entry: silence is not
-/// consent, so the screen shows it off and sending is refused server-side.
-final marketingPreferencesProvider =
-    FutureProvider.autoDispose<List<MarketingPreference>?>((ref) async {
-  final auth = ref.watch(storefrontAuthProvider);
-  if (!auth.isSignedIn) return null;
-  final dio = ref.watch(storefrontDioProvider);
-  try {
-    final resp = await dio.get('/${ApiConstants.customer}/customers/me/marketing');
-    final data = (resp.data['data'] as List?) ?? const [];
-    return data
-        .map((e) => MarketingPreference.fromJson(e as Map<String, dynamic>))
-        .toList();
-  } on DioException catch (e) {
-    // 404 means this shop holds no record of them yet — which is not an error,
-    // it is a shopper who has never bought here and consented to nothing.
-    if (e.response?.statusCode == 404) return const <MarketingPreference>[];
-    rethrow;
-  }
-});
 
 /// Privacy and marketing: what the shop may send, and everything it holds.
 ///
@@ -72,55 +29,7 @@ class StorefrontPrivacyScreen extends ConsumerStatefulWidget {
 
 class _StorefrontPrivacyScreenState
     extends ConsumerState<StorefrontPrivacyScreen> {
-  static const _notice =
-      'Email me about offers, new lines and events at this shop. '
-      'I can stop this at any time, from here or from any message.';
-
-  static const _channels = <String, ({String label, String detail})>{
-    'EMAIL': (label: 'Email', detail: 'Offers and news by email'),
-    'SMS': (label: 'Text message', detail: 'Short updates by SMS'),
-    'PHONE': (label: 'Phone', detail: 'Marketing calls'),
-    'POST': (label: 'Post', detail: 'Leaflets and catalogues'),
-  };
-
-  bool _saving = false;
   String? _exporting;
-
-  Future<void> _setChannel(String channel, bool granted) async {
-    setState(() => _saving = true);
-    final dio = ref.read(storefrontDioProvider);
-    try {
-      await dio.put(
-        '/${ApiConstants.customer}/customers/me/marketing',
-        data: {
-          'channels': [
-            {'channel': channel, 'granted': granted}
-          ],
-          'notice': granted ? _notice : null,
-        },
-      );
-      ref.invalidate(marketingPreferencesProvider);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(granted
-                ? 'Saved. We will only send what you have agreed to.'
-                : 'Saved. We will stop sending you these.'),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(
-                  friendlyError(e, fallback: 'Could not save that just now.'))),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
 
   Future<void> _download() async {
     setState(() => _exporting = 'working');
@@ -153,99 +62,83 @@ class _StorefrontPrivacyScreenState
     }
   }
 
+  void _refresh() {
+    ref.invalidate(privacyNoticeProvider);
+    ref.invalidate(myPrivacyProvider);
+    ref.invalidate(marketingPreferencesProvider);
+    ref.invalidate(myPrivacyRequestsProvider);
+  }
+
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(storefrontAuthProvider);
     if (!auth.isSignedIn) {
       return _SignInFirst();
     }
-    final async = ref.watch(marketingPreferencesProvider);
     final theme = Theme.of(context);
+    final muted = theme.textTheme.bodyMedium
+        ?.copyWith(color: theme.colorScheme.onSurfaceVariant);
+    // Marketing is asked once. When the consents carry the Marketing purpose its channels are
+    // chosen beneath it there; only when they cannot be read do the channels stand on their own
+    // here, so an opt-out is never hidden behind a failed load.
+    final privacy = ref.watch(myPrivacyProvider);
+    final underPurpose = privacy.value?.consents
+            .any((c) => c.purpose == marketingPurpose) ??
+        false;
+    final standalone = !underPurpose && (privacy.hasValue || privacy.hasError);
 
     return RefreshIndicator(
-      onRefresh: () async => ref.invalidate(marketingPreferencesProvider),
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const PrivacyNoticeSection(),
-          const SizedBox(height: 28),
-          const ConsentsSection(),
-          const SizedBox(height: 28),
-          Text('Marketing', style: theme.textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text(
-            'You decide what this shop may send you. Nothing is on unless you '
-            'turn it on, and you can turn it off again at any time — here, or '
-            'from the link in any message we send.',
-            style: theme.textTheme.bodyMedium
-                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 12),
-          async.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24),
-              child: Center(child: CircularProgressIndicator()),
+      onRefresh: () async => _refresh(),
+      // About 80 characters a line (WCAG 1.4.8), so the notice does not run 900px wide on the web.
+      child: ContentBounds.reading(
+        child: ListView(
+          padding: context.pagePadding,
+          children: [
+            const PrivacyNoticeSection(),
+            const SizedBox(height: AppSpacing.xl),
+            const ConsentsSection(),
+            if (standalone) ...[
+              const SizedBox(height: AppSpacing.xl),
+              Text('Marketing',
+                  key: const Key('marketing-section'),
+                  style: theme.textTheme.titleLarge),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                'You decide what this shop may send you. Nothing is on unless you '
+                'turn it on, and you can turn it off again at any time — here, or '
+                'from the link in any message we send.',
+                style: muted,
+              ),
+              const SizedBox(height: AppSpacing.md),
+              const Card(child: MarketingChannels()),
+            ],
+            const SizedBox(height: AppSpacing.xl),
+            Text('Your data', style: theme.textTheme.titleLarge),
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              'You can have a copy of everything this shop holds about you: your '
+              'details, your addresses, your loyalty and store credit with their '
+              'full history, what you have agreed to be sent, and every order you '
+              'have placed here.',
+              style: muted,
             ),
-            error: (e, _) => _InlineError(
-              message: friendlyError(e,
-                  fallback: 'Could not load your preferences.'),
-              onRetry: () => ref.invalidate(marketingPreferencesProvider),
+            const SizedBox(height: AppSpacing.md),
+            FilledButton.icon(
+              onPressed: _exporting == null ? _download : null,
+              icon: _exporting == null
+                  ? const Icon(Icons.download_outlined)
+                  : const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2)),
+              label: Text(_exporting == null
+                  ? 'Download my data'
+                  : 'Gathering your data…'),
             ),
-            data: (prefs) {
-              final byChannel = {
-                for (final p in prefs ?? const <MarketingPreference>[])
-                  p.channel: p,
-              };
-              return Card(
-                child: Column(
-                  children: [
-                    for (final entry in _channels.entries)
-                      SwitchListTile(
-                        value: byChannel[entry.key]?.granted ?? false,
-                        onChanged: _saving
-                            ? null
-                            : (v) => _setChannel(entry.key, v),
-                        title: Text(entry.value.label),
-                        subtitle: Text(entry.value.detail),
-                      ),
-                  ],
-                ),
-              );
-            },
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _notice,
-            style: theme.textTheme.bodySmall
-                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 28),
-          Text('Your data', style: theme.textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text(
-            'You can have a copy of everything this shop holds about you: your '
-            'details, your addresses, your loyalty and store credit with their '
-            'full history, what you have agreed to be sent, and every order you '
-            'have placed here.',
-            style: theme.textTheme.bodyMedium
-                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 12),
-          FilledButton.icon(
-            onPressed: _exporting == null ? _download : null,
-            icon: _exporting == null
-                ? const Icon(Icons.download_outlined)
-                : const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2)),
-            label: Text(_exporting == null
-                ? 'Download my data'
-                : 'Gathering your data…'),
-          ),
-          const SizedBox(height: 28),
-          const RequestsSection(),
-        ],
+            const SizedBox(height: AppSpacing.xl),
+            const RequestsSection(),
+          ],
+        ),
       ),
     );
   }
@@ -303,12 +196,12 @@ class _SignInFirst extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Icon(Icons.privacy_tip_outlined, size: 48),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             const Text(
               'Sign in to see what this shop may send you, and to ask for a '
               'copy of your data.',
@@ -323,24 +216,6 @@ class _SignInFirst extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _InlineError extends StatelessWidget {
-  const _InlineError({required this.message, required this.onRetry});
-
-  final String message;
-  final VoidCallback onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: ListTile(
-        leading: const Icon(Icons.error_outline),
-        title: Text(message),
-        trailing: TextButton(onPressed: onRetry, child: const Text('Retry')),
       ),
     );
   }

@@ -66,6 +66,33 @@ public class CashManagementRepository extends BaseOutboxRepository {
   }
 
   /**
+   * The open session one person opened at one store — the latest, should there be more than one.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param storeId the store the till is at
+   * @param openedBy the person who opened it
+   * @return the open session, or empty when that person has none open there in this tenant
+   */
+  public Optional<TillSession> findOpenSession(UUID tenantId, UUID storeId, UUID openedBy) {
+    return query(
+            "SELECT id, tenant_id, store_id, opened_by, float_amount, status,"
+                + " counted_cash, over_short, opened_at, closed_at"
+                + " FROM till_sessions"
+                + " WHERE tenant_id = ? AND store_id = ? AND status = ? AND opened_by = ?"
+                + " ORDER BY opened_at DESC, id DESC LIMIT 1",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, storeId);
+              ps.setString(3, TillSession.STATUS_OPEN);
+              ps.setObject(4, openedBy);
+            },
+            CashManagementRepository::mapSession,
+            "find open till session")
+        .stream()
+        .findFirst();
+  }
+
+  /**
    * Records a mid-shift cash drop against a session.
    *
    * @param drop the drop to persist; its {@code id} must already be a UUIDv7

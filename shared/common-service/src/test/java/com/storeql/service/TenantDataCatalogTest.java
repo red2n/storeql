@@ -123,6 +123,70 @@ class TenantDataCatalogTest {
             .predicate());
   }
 
+  /**
+   * iam-svc's sandbox pair is exported by the live business alone but erased with either business:
+   * the erasure predicate an exported table declares is the one erasure uses. Ignored, it left the
+   * pair behind when a sandbox was erased, and the deleted sandbox could be entered again (found by
+   * k6 sandbox-flow).
+   */
+  @Test
+  @DisplayName("An exported table's own erasure predicate is the one its erasure uses")
+  void exportedTablesEraseByTheirOwnErasurePredicate() {
+    shop();
+    columns.removeIf(c -> c.table().equals("allergens"));
+    keys.remove("allergens");
+    table("sandboxes", "id", "live_tenant_id", "sandbox_tenant_id");
+    TenantDataCatalog cat =
+        build(
+            new Shop() {
+              @Override
+              public Map<String, String> tenantPredicates() {
+                return Map.of("user_roles", OWN_USERS, "sandboxes", "live_tenant_id = ?");
+              }
+
+              @Override
+              public Map<String, String> erasurePredicates() {
+                return Map.of(
+                    "tokens", OWN_USERS, "sandboxes", "? IN (sandbox_tenant_id, live_tenant_id)");
+              }
+            });
+    assertEquals(List.of(), cat.problems());
+    assertEquals("live_tenant_id = ?", cat.table("sandboxes").orElseThrow().tenantPredicate());
+    assertEquals(
+        "? IN (sandbox_tenant_id, live_tenant_id)",
+        cat.erasureOrder().stream()
+            .filter(e -> e.name().equals("sandboxes"))
+            .findFirst()
+            .orElseThrow()
+            .predicate());
+    // A table with no erasure predicate of its own is erased by its export predicate, as before.
+    assertEquals(
+        OWN_USERS,
+        cat.erasureOrder().stream()
+            .filter(e -> e.name().equals("user_roles"))
+            .findFirst()
+            .orElseThrow()
+            .predicate());
+  }
+
+  @Test
+  @DisplayName("An erasure predicate on an exported table with tenant_id is a problem")
+  void anExportedTenantTableNeedsNoErasurePredicate() {
+    shop();
+    TenantDataCatalog cat =
+        build(
+            new Shop() {
+              @Override
+              public Map<String, String> erasurePredicates() {
+                return Map.of("tokens", OWN_USERS, "orders", "tenant_id = ?");
+              }
+            });
+    assertTrue(
+        cat.problems().stream()
+            .anyMatch(p -> p.toString().contains("orders") && p.toString().contains("tenant_id")),
+        cat.problems().toString());
+  }
+
   @Test
   @DisplayName("What is left out stays out, with its reason, and every other column goes")
   void exclusions() {

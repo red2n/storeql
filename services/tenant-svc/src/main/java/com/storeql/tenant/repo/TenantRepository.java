@@ -23,6 +23,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -35,7 +36,7 @@ public class TenantRepository extends BaseOutboxRepository {
 
   private static final String TENANT_SELECT =
       "SELECT id, name, legal_name, status, plan_id, owner_user_id, country, currency,"
-          + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason FROM tenants";
+          + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of FROM tenants";
 
   // ─────────────────────────────────────────────── create (atomic with outbox)
 
@@ -134,10 +135,31 @@ public class TenantRepository extends BaseOutboxRepository {
    * @param tenantId the tenant to fetch
    * @return the tenant, or empty when no such tenant exists
    */
+  /**
+   * The business a login owns, if any (21.13: one login, one business). The live one: a sandbox is
+   * owned by the same login and is not a second business (22.8).
+   */
+  public Optional<Tenant> findByOwner(UUID ownerUserId) {
+    return one(
+        TENANT_SELECT + " WHERE owner_user_id = ? AND mode = 'LIVE' ORDER BY created_at LIMIT 1",
+        ownerUserId,
+        TenantRepository::mapTenant);
+  }
+
+  /** The business's active sandbox, if it has one (22.8). */
+  public Optional<Tenant> findActiveSandbox(UUID liveTenantId) {
+    return one(
+        TENANT_SELECT
+            + " WHERE sandbox_of = ? AND mode = 'SANDBOX' AND status = 'ACTIVE'"
+            + " ORDER BY created_at DESC LIMIT 1",
+        liveTenantId,
+        TenantRepository::mapTenant);
+  }
+
   public Optional<Tenant> findTenant(UUID tenantId) {
     return one(
         "SELECT id, name, legal_name, status, plan_id, owner_user_id, country, currency,"
-            + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason FROM tenants WHERE id = ?",
+            + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of FROM tenants WHERE id = ?",
         tenantId,
         TenantRepository::mapTenant);
   }
@@ -217,6 +239,17 @@ public class TenantRepository extends BaseOutboxRepository {
    */
   public Tenant updateTenantStatusWithOutbox(
       UUID tenantId, String status, String reason, UUID actorId, OutboxRow event) {
+    return updateTenantStatusWithOutbox(tenantId, status, reason, actorId, List.of(event));
+  }
+
+  /**
+   * The same, announcing more than one thing in the transaction — a sandbox removed is switched off
+   * and its erasure started at once (22.8).
+   *
+   * @param events the outbox rows to commit with the change, in order
+   */
+  public Tenant updateTenantStatusWithOutbox(
+      UUID tenantId, String status, String reason, UUID actorId, List<OutboxRow> events) {
     Instant now = Instant.now();
     boolean off = !"ACTIVE".equals(status);
     inTx(
@@ -269,7 +302,9 @@ public class TenantRepository extends BaseOutboxRepository {
               }
             }
           }
-          insertOutbox(c, event);
+          for (OutboxRow event : events) {
+            insertOutbox(c, event);
+          }
           return null;
         },
         "update tenant status");
@@ -321,7 +356,8 @@ public class TenantRepository extends BaseOutboxRepository {
   public List<Store> listStores(UUID tenantId) {
     return many(
         "SELECT id, tenant_id, name, code, type, line1, line2, city, state, country, pincode,"
-            + " geo_lat, geo_lng, timezone, business_hours, status, is_default, show_prices, enabled_payment_methods, created_at, updated_at"
+            + " geo_lat, geo_lng, timezone, business_hours, status, is_default, show_prices, enabled_payment_methods, till_phone, created_at,"
+            + " updated_at"
             + " FROM stores WHERE tenant_id = ? ORDER BY created_at",
         tenantId,
         TenantRepository::mapStore);
@@ -341,7 +377,7 @@ public class TenantRepository extends BaseOutboxRepository {
         new StringBuilder(
             "SELECT id, tenant_id, name, code, type, line1, line2, city, state, country, pincode,"
                 + " geo_lat, geo_lng, timezone, business_hours, status, is_default, show_prices,"
-                + " enabled_payment_methods, created_at, updated_at"
+                + " enabled_payment_methods, till_phone, created_at, updated_at"
                 + " FROM stores WHERE tenant_id = ?");
     if (afterCreatedAt != null && afterId != null) sql.append(" AND (created_at, id) > (?, ?)");
     sql.append(" ORDER BY created_at, id LIMIT ?");
@@ -372,7 +408,8 @@ public class TenantRepository extends BaseOutboxRepository {
   public Optional<Store> findStore(UUID tenantId, UUID storeId) {
     return query(
             "SELECT id, tenant_id, name, code, type, line1, line2, city, state, country, pincode,"
-                + " geo_lat, geo_lng, timezone, business_hours, status, is_default, show_prices, enabled_payment_methods, created_at, updated_at"
+                + " geo_lat, geo_lng, timezone, business_hours, status, is_default, show_prices, enabled_payment_methods, till_phone, created_at,"
+                + " updated_at"
                 + " FROM stores WHERE tenant_id = ? AND id = ?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -405,6 +442,7 @@ public class TenantRepository extends BaseOutboxRepository {
    * @param businessHours opening hours, may be {@code null}
    * @param showPrices whether the storefront shows prices or runs as a catalogue
    * @param enabledPaymentMethods the canonicalised comma-separated tender list
+   * @param tillPhone what the till asks for the customer's phone: REQUIRED, OPTIONAL or OFF
    * @return the store as stored
    */
   public Store updateStore(
@@ -422,12 +460,13 @@ public class TenantRepository extends BaseOutboxRepository {
       String timezone,
       String businessHours,
       boolean showPrices,
-      String enabledPaymentMethods) {
+      String enabledPaymentMethods,
+      String tillPhone) {
     Instant now = Instant.now();
     exec(
         "UPDATE stores SET name=?, line1=?, line2=?, city=?, state=?, country=?, pincode=?,"
             + " geo_lat=?, geo_lng=?, timezone=?, business_hours=?, show_prices=?,"
-            + " enabled_payment_methods=?, updated_at=?"
+            + " enabled_payment_methods=?, till_phone=?, updated_at=?"
             + " WHERE tenant_id=? AND id=?",
         ps -> {
           ps.setString(1, name);
@@ -443,9 +482,10 @@ public class TenantRepository extends BaseOutboxRepository {
           ps.setString(11, businessHours);
           ps.setBoolean(12, showPrices);
           ps.setString(13, enabledPaymentMethods);
-          ps.setObject(14, now.atOffset(ZoneOffset.UTC));
-          ps.setObject(15, tenantId);
-          ps.setObject(16, storeId);
+          ps.setString(14, tillPhone);
+          ps.setObject(15, now.atOffset(ZoneOffset.UTC));
+          ps.setObject(16, tenantId);
+          ps.setObject(17, storeId);
         },
         "update store");
     return findStore(tenantId, storeId)
@@ -638,17 +678,22 @@ public class TenantRepository extends BaseOutboxRepository {
    * Keyset page of staff assignments: rows strictly after the cursor in (created_at, id) order.
    *
    * @param tenantId owning tenant; the first condition of the query
+   * @param storeIds the caller's stores; empty means unrestricted (an owner, a business-wide
+   *     manager, the platform admin) and every assignment is a candidate. Non-empty restricts to
+   *     assignments at one of those stores or a business-wide one ({@code store_id IS NULL}) — the
+   *     same rule iam-svc applies to {@code GET /auth/admin/staff-users}.
    * @param afterCreatedAt cursor timestamp, or {@code null} for the first page
    * @param afterId cursor id, breaking ties on identical timestamps
    * @param limit maximum rows; callers pass one more than the page size to detect a next page
    * @return the page of assignments
    */
   public List<StaffAssignment> listStaff(
-      UUID tenantId, Instant afterCreatedAt, UUID afterId, int limit) {
+      UUID tenantId, Set<UUID> storeIds, Instant afterCreatedAt, UUID afterId, int limit) {
     StringBuilder sql =
         new StringBuilder(
             "SELECT id, tenant_id, user_id, store_id, role, base_tier, created_at"
                 + " FROM staff_assignments WHERE tenant_id = ?");
+    if (!storeIds.isEmpty()) sql.append(" AND (store_id = ANY(?) OR store_id IS NULL)");
     if (afterCreatedAt != null && afterId != null) sql.append(" AND (created_at, id) > (?, ?)");
     sql.append(" ORDER BY created_at, id LIMIT ?");
     return query(
@@ -656,6 +701,9 @@ public class TenantRepository extends BaseOutboxRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
+          if (!storeIds.isEmpty()) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", storeIds.toArray()));
+          }
           if (afterCreatedAt != null && afterId != null) {
             ps.setObject(i++, afterCreatedAt.atOffset(ZoneOffset.UTC));
             ps.setObject(i++, afterId);
@@ -912,7 +960,7 @@ public class TenantRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "INSERT INTO tenants"
                 + " (id, name, legal_name, status, plan_id, owner_user_id, country, currency,"
-                + " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")) {
+                + " created_at, updated_at, mode, sandbox_of) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, t.id());
       ps.setString(2, t.name());
       ps.setString(3, t.legalName());
@@ -923,6 +971,8 @@ public class TenantRepository extends BaseOutboxRepository {
       ps.setString(8, t.currency());
       ps.setObject(9, t.createdAt().atOffset(ZoneOffset.UTC));
       ps.setObject(10, t.createdAt().atOffset(ZoneOffset.UTC));
+      ps.setString(11, t.mode() == null ? Tenant.MODE_LIVE : t.mode());
+      ps.setObject(12, t.sandboxOf());
       ps.executeUpdate();
     }
   }
@@ -933,8 +983,8 @@ public class TenantRepository extends BaseOutboxRepository {
             "INSERT INTO stores"
                 + " (id, tenant_id, name, code, type, line1, line2, city, state, country, pincode,"
                 + " geo_lat, geo_lng, timezone, business_hours, status, is_default, show_prices,"
-                + " enabled_payment_methods, created_at, updated_at)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + " enabled_payment_methods, till_phone, created_at, updated_at)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, s.id());
       ps.setObject(2, s.tenantId());
       ps.setString(3, s.name());
@@ -954,8 +1004,9 @@ public class TenantRepository extends BaseOutboxRepository {
       ps.setBoolean(17, s.isDefault());
       ps.setBoolean(18, s.showPrices());
       ps.setString(19, s.enabledPaymentMethods());
-      ps.setObject(20, s.createdAt().atOffset(ZoneOffset.UTC));
+      ps.setString(20, s.tillPhone());
       ps.setObject(21, s.createdAt().atOffset(ZoneOffset.UTC));
+      ps.setObject(22, s.createdAt().atOffset(ZoneOffset.UTC));
       ps.executeUpdate();
     }
   }
@@ -1034,7 +1085,9 @@ public class TenantRepository extends BaseOutboxRepository {
         rs.getString("vat_number"),
         rs.getString("einvoice_scheme"),
         rs.getString("einvoice_id"),
-        rs.getString("deactivated_reason"));
+        rs.getString("deactivated_reason"),
+        rs.getString("mode"),
+        rs.getObject("sandbox_of", UUID.class));
   }
 
   private static Store mapStore(ResultSet rs) throws SQLException {
@@ -1058,6 +1111,7 @@ public class TenantRepository extends BaseOutboxRepository {
         rs.getBoolean("is_default"),
         rs.getBoolean("show_prices"),
         rs.getString("enabled_payment_methods"),
+        rs.getString("till_phone"),
         rs.getObject("created_at", OffsetDateTime.class).toInstant(),
         rs.getObject("updated_at", OffsetDateTime.class).toInstant());
   }
@@ -1190,7 +1244,7 @@ public class TenantRepository extends BaseOutboxRepository {
     StringBuilder sql =
         new StringBuilder(
             "SELECT id, name, legal_name, status, plan_id, owner_user_id, country, currency,"
-                + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason FROM tenants");
+                + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of FROM tenants");
     if (afterCreatedAt != null && afterId != null) sql.append(" WHERE (created_at, id) > (?, ?)");
     sql.append(" ORDER BY created_at, id LIMIT ?");
     return query(

@@ -63,6 +63,9 @@ public class PaymentResource {
       RecordTenderRequest req) {
     ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
     Validations.validate(req);
+    if (req.orderId() == null || req.orderId().isBlank()) {
+      throw com.storeql.web.ApiException.badRequest("VALIDATION_FAILED", "orderId: is required");
+    }
     var tender = svc.recordTender(req, ctx, effectiveKey(idempotencyKey, req.idempotencyKey()));
     return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(tender))).build();
   }
@@ -90,12 +93,23 @@ public class PaymentResource {
           "Cashless-only payment for a guest/customer storefront order. Verifies the order exists,"
               + " is ONLINE, is PENDING, belongs to the caller when authenticated, and the amount"
               + " matches the order total before capturing.")
-  @APIResponse(responseCode = "201", description = "Tender captured")
-  @APIResponse(responseCode = "400", description = "Cash tendered online, or amount mismatch")
+  @APIResponse(
+      responseCode = "201",
+      description =
+          "Tender captured; for a split checkout (groupId), a GroupPaymentResponse with a tender"
+              + " per part")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "Cash tendered online, amount mismatch, or PAYMENT_GROUP_AMOUNT_MISMATCH for a checkout")
   @APIResponse(
       responseCode = "404",
-      description = "Order not found, not ONLINE, or not the caller's")
-  @APIResponse(responseCode = "409", description = "Order is not awaiting payment")
+      description = "Order or checkout not found, not ONLINE, or not the caller's")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Order is not awaiting payment, or PAYMENT_ORDER_IN_GROUP: a part of a split checkout"
+              + " is paid with its checkout")
   @POST
   @Path("/online")
   public Response payOnline(
@@ -108,8 +122,26 @@ public class PaymentResource {
           "Online payments must be cashless (CARD, UPI or WALLET); cash is settled in person"
               + " at pickup/delivery");
     }
-    var tender =
-        svc.recordOnlinePayment(req, ctx, effectiveKey(idempotencyKey, req.idempotencyKey()));
+    boolean order = req.orderId() != null && !req.orderId().isBlank();
+    boolean checkout = req.groupId() != null && !req.groupId().isBlank();
+    if (order == checkout) {
+      throw com.storeql.web.ApiException.badRequest(
+          "VALIDATION_FAILED",
+          "name the order (orderId) or the split checkout (groupId), not both");
+    }
+    String key = effectiveKey(idempotencyKey, req.idempotencyKey());
+    if (checkout) {
+      var paid = svc.recordOnlineGroupPayment(req, ctx, key);
+      return Response.status(201)
+          .entity(
+              ApiResponse.ok(
+                  new com.storeql.payment.dto.Dtos.GroupPaymentResponse(
+                      paid.groupId(),
+                      paid.total(),
+                      paid.tenders().stream().map(Mappers::toDto).toList())))
+          .build();
+    }
+    var tender = svc.recordOnlinePayment(req, ctx, key);
     return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(tender))).build();
   }
 

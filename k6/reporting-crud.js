@@ -7,6 +7,7 @@ import {
   call,
   data,
   expect,
+  must,
   onboardTenant,
   poll,
   priceVariants,
@@ -15,6 +16,7 @@ import {
   sellableVariant,
   staffUser,
   truthy,
+  uniq,
 } from './lib/storeql.js';
 
 export const options = { vus: 1, iterations: 1, thresholds: ALL_CHECKS_PASS, setupTimeout: '4m' };
@@ -25,7 +27,10 @@ const SALES = '/api/reporting-svc/admin/reports/sales';
 export function setup() {
   const tenant = onboardTenant('report', { country: 'IN', currency: 'INR', stores: 1 });
   const rival = onboardTenant('report-rival', { stores: 1 });
-  tenant.variantId = sellableVariant(tenant, 'Reported rice').variantId;
+  // A category tree two deep, so the report can be read by the leaf and rolled up to the top.
+  tenant.topCategoryId = must(call('POST', '/api/product-svc/admin/categories', { token: tenant.owner.token, body: { name: `Grocery ${uniq()}` } }), 201, 'top category').id;
+  tenant.categoryId = must(call('POST', '/api/product-svc/admin/categories', { token: tenant.owner.token, body: { name: `Rice ${uniq()}`, parentId: tenant.topCategoryId } }), 201, 'leaf category').id;
+  tenant.variantId = sellableVariant(tenant, 'Reported rice', { categoryId: tenant.categoryId }).variantId;
   priceVariants(tenant, [tenant.variantId], '80.00');
   tenant.keeper = staffUser(tenant, 'STOREKEEPER', [tenant.stores[0].id]);
   return { tenant, rival };
@@ -109,9 +114,26 @@ export default function ({ tenant, rival }) {
   truthy('[+] ...today has the sale', rowsOf(days).some((r) => r.orders >= 1), data(days));
   expect(call('GET', `${SALES}/summary?from=yesterday`, { token: t }), '[-] sales summary: from must be a date', 400);
 
+  // ── sales by category: the sale line by line, placed by the catalogue ────────
+  let rice = null;
+  poll(60, () => {
+    rice = rowsOf(call('GET', `${SALES}/by-category`, { token: t })).find((r) => r.categoryId === tenant.categoryId);
+    return !!rice;
+  });
+  truthy('[+] sales by category: the rice category took the sale — one order, two units, 160', rice && rice.orders === 1 && Number(rice.units) === 2 && Number(rice.gross) >= 160 && rice.currency === 'INR', rice);
+  truthy('[+] ...and it is the whole of the currency: share 100', rice && Number(rice.share) === 100, rice);
+  const top = call('GET', `${SALES}/by-category?level=top`, { token: t });
+  expect(top, '[+] rolled up to the top of the tree', 200);
+  truthy('[+] ...the leaf\'s takings sit under its parent', rowsOf(top).some((r) => r.categoryId === tenant.topCategoryId && Number(r.gross) >= 160) && !rowsOf(top).some((r) => r.categoryId === tenant.categoryId), data(top));
+  truthy('[+] ...by store and channel too', rowsOf(call('GET', `${SALES}/by-category?storeId=${storeId}&channel=POS`, { token: t })).some((r) => r.categoryId === tenant.categoryId), 'filtered');
+  expect(call('GET', `${SALES}/by-category?level=sideways`, { token: t }), '[-] a level that is not leaf or top is refused', 400, 'REPORT_LEVEL_INVALID');
+  expect(call('GET', `${SALES}/by-category?from=yesterday`, { token: t }), '[-] from must be a date here too', 400);
+
   // ── who may read reports ───────────────────────────────────────────────────
   truthy("[-] a rival's on-hand has none of our stock", !rowsOf(call('GET', `${INVENTORY}/on-hand`, { token: rival.owner.token })).some((r) => r.variantId === variantId));
   truthy("[-] a rival's sales summary is empty", rowsOf(call('GET', `${SALES}/summary`, { token: rival.owner.token })).every((r) => r.orders === 0));
+  truthy("[-] a rival's sales by category has no category of ours", !rowsOf(call('GET', `${SALES}/by-category`, { token: rival.owner.token })).some((r) => r.categoryId === tenant.categoryId));
+  expect(call('GET', `${SALES}/by-category`, { token: tenant.keeper.token }), '[-] a storekeeper cannot read sales by category', 403);
   expect(call('GET', `${INVENTORY}/on-hand`, { token: tenant.keeper.token }), '[-] a storekeeper cannot read management reports', 403);
   expect(call('GET', `${SALES}/summary`, { token: register('report-shopper').token }), '[-] a customer cannot read reports', 403);
   expect(call('GET', `${SALES}/summary`), '[-] no token', 401);

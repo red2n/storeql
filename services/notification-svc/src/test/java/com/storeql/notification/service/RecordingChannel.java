@@ -18,9 +18,12 @@ public final class RecordingChannel implements NotificationChannel {
   public boolean fail;
   public UUID lastTenantId;
 
+  /** What this channel calls itself; FAKE unless a test names it after a real one. */
+  public String channelName = "FAKE";
+
   @Override
   public String name() {
-    return "FAKE";
+    return channelName;
   }
 
   @Override

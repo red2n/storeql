@@ -127,6 +127,25 @@ class ShelfTargetIT {
     return body;
   }
 
+  /**
+   * Every combination the shelf-gap read cares about: a role, an optional {@code X-Store-Ids}
+   * assignment, and the store named on the query — with no assertion on the status, so a caller can
+   * check a refusal as well as a success.
+   */
+  private Response gapsAs(String role, String storeIds, String store, String tenant) {
+    var b =
+        target
+            .path("/admin/inventory/reports/shelf-gaps")
+            .queryParam("storeId", store)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-Roles", role);
+    if (storeIds != null) {
+      b = b.header("X-Store-Ids", storeIds);
+    }
+    return b.get();
+  }
+
   // ── the point of the row ───────────────────────────────────────────────────
 
   @Test
@@ -277,5 +296,79 @@ class ShelfTargetIT {
         capacityEvent(T, store, Ids.newId().toString(), 1, "[" + position(variant, 20, 5) + "]"));
     assertThat(
         "same store id, different business", gaps(store, RIVAL), not(containsString(variant)));
+  }
+
+  // ── Who may read a store's shelf gaps ─────────────────────
+
+  @Test
+  @DisplayName("OWNER, MANAGER and STOREKEEPER read it; a store-held caller only at their stores")
+  void ownerManagerAndStorekeeperReadItAStorekeeperOnlyAtTheirOwnStore() {
+    String storeKept = Ids.newId().toString();
+    String storeNotKept = Ids.newId().toString();
+    String variant = Ids.newId().toString();
+    handler.handle(
+        capacityEvent(
+            T, storeKept, Ids.newId().toString(), 1, "[" + position(variant, 20, 5) + "]"));
+
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER"}) {
+      Response ok = gapsAs(role, storeKept, storeKept, T);
+      String body = ok.readEntity(String.class);
+      assertThat(role + ": " + body, ok.getStatus(), is(200));
+      assertThat(role + " reads their own store's gaps", body, containsString(variant));
+    }
+
+    // A storekeeper held to storeKept names a store they do not keep: refused before the query
+    // that would otherwise have found nothing to report anyway.
+    Response deniedElsewhere = gapsAs("STOREKEEPER", storeKept, storeNotKept, T);
+    String deniedBody = deniedElsewhere.readEntity(String.class);
+    assertThat(deniedBody, deniedElsewhere.getStatus(), is(403));
+    assertThat(deniedBody, containsString("STORE_ACCESS_DENIED"));
+
+    // A manager and an owner, held to no store, read any of the business's stores.
+    Response byManager = gapsAs("MANAGER", null, storeKept, T);
+    assertThat(byManager.getStatus(), is(200));
+  }
+
+  @Test
+  @DisplayName("A cashier is refused, even at a store they keep")
+  void cashierIsRefusedEvenAtTheirOwnStore() {
+    String store = Ids.newId().toString();
+    String variant = Ids.newId().toString();
+    handler.handle(
+        capacityEvent(T, store, Ids.newId().toString(), 1, "[" + position(variant, 20, 5) + "]"));
+
+    Response denied = gapsAs("CASHIER", store, store, T);
+    String body = denied.readEntity(String.class);
+    assertThat(body, denied.getStatus(), is(403));
+
+    // Held to no store at all changes nothing: a cashier is refused this report outright.
+    Response deniedUnrestricted = gapsAs("CASHIER", null, store, T);
+    assertThat(deniedUnrestricted.getStatus(), is(403));
+  }
+
+  @Test
+  @DisplayName(
+      "Another business's OWNER naming this store sees no rows; its STOREKEEPER is refused before"
+          + " the query runs")
+  void anotherBusinesssRolesOnThisBusinesssStoreId() {
+    String store = Ids.newId().toString();
+    String variant = Ids.newId().toString();
+    handler.handle(
+        capacityEvent(T, store, Ids.newId().toString(), 1, "[" + position(variant, 20, 5) + "]"));
+
+    // Business-wide (held to no store): the tenant filter in the query alone decides — no rows,
+    // never a 403 or 404 that would let a caller learn the store id belongs to somebody else.
+    Response byOwner = gapsAs("OWNER", null, store, RIVAL);
+    String ownerBody = byOwner.readEntity(String.class);
+    assertThat(ownerBody, byOwner.getStatus(), is(200));
+    assertThat("same store id, RIVAL's own business", ownerBody, not(containsString(variant)));
+
+    // Held to its own store(s), RIVAL's storekeeper names a store that is not one of them: SJ-D74
+    // refuses it before the (otherwise empty) query ever runs.
+    String rivalsOwnStore = Ids.newId().toString();
+    Response byStorekeeper = gapsAs("STOREKEEPER", rivalsOwnStore, store, RIVAL);
+    String storekeeperBody = byStorekeeper.readEntity(String.class);
+    assertThat(storekeeperBody, byStorekeeper.getStatus(), is(403));
+    assertThat(storekeeperBody, containsString("STORE_ACCESS_DENIED"));
   }
 }

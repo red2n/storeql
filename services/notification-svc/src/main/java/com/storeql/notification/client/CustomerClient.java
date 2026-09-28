@@ -89,13 +89,16 @@ public class CustomerClient {
 
   /**
    * The phone number on a customer record, for a recall notice by text when there is no email
-   * (05.10). Empty when the record has none or customer-svc cannot be reached.
+   * (05.10): its international form ({@code phoneE164}, read in the business's own countries), so a
+   * number typed {@code 07400 123456} is texted at {@code +447400123456}; the number as typed only
+   * when the record has no international form, which a text then refuses unless it already is one.
+   * Empty when the record has none or customer-svc cannot be reached.
    */
   @Retry(maxRetries = 2, delay = 200)
   @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
   @Fallback(fallbackMethod = "phoneUnavailable")
   public Optional<String> phoneOf(UUID tenantId, UUID customerId) {
-    return read(tenantId, customerId, "phone");
+    return read(tenantId, customerId, "phoneE164", "phone");
   }
 
   @SuppressWarnings({"PMD.UnusedFormalParameter", "PMD.UnusedPrivateMethod"})
@@ -123,7 +126,8 @@ public class CustomerClient {
   }
 
   /** One string field of the customer record, empty when absent, null or blank. */
-  private Optional<String> read(UUID tenantId, UUID customerId, String field) {
+  /** The first of {@code fields} the customer record holds, from one read of it. */
+  private Optional<String> read(UUID tenantId, UUID customerId, String... fields) {
     ServiceInstance instance = registry.resolve(CUSTOMER_SERVICE).orElse(null);
     if (instance == null) {
       return Optional.empty();
@@ -143,14 +147,7 @@ public class CustomerClient {
       }
       try (JsonReader reader = Json.createReader(new StringReader(res.as(String.class)))) {
         JsonObject data = reader.readObject().getJsonObject("data");
-        // containsKey first: JSON-B omits a null field from the DTO rather than serialising it
-        // as null, and isNull throws on an absent key. A customer with no email address is
-        // ordinary (POS walk-ins are created from a phone number).
-        if (data == null || !data.containsKey(field) || data.isNull(field)) {
-          return Optional.empty();
-        }
-        String value = data.getString(field, null);
-        return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);
+        return data == null ? Optional.empty() : firstOf(data, fields);
       }
     }
   }
@@ -163,6 +160,23 @@ public class CustomerClient {
         Level.WARNING,
         "customer email lookup skipped for {0}: unreachable or circuit open",
         customerId);
+    return Optional.empty();
+  }
+
+  /**
+   * The first of {@code fields} set on the record. containsKey first: JSON-B omits a null field
+   * from the DTO rather than serialising it as null, and isNull throws on an absent key. A customer
+   * with no email address is ordinary (POS walk-ins are created from a phone number).
+   */
+  static Optional<String> firstOf(JsonObject data, String... fields) {
+    for (String field : fields) {
+      if (data.containsKey(field) && !data.isNull(field)) {
+        String value = data.getString(field, null);
+        if (value != null && !value.isBlank()) {
+          return Optional.of(value);
+        }
+      }
+    }
     return Optional.empty();
   }
 }

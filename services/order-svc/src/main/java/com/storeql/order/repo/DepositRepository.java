@@ -84,6 +84,52 @@ public class DepositRepository extends BaseOutboxRepository {
           + " GROUP BY l.material ORDER BY l.material";
 
   /** Writes one deposit line inside the order's transaction. */
+  /**
+   * A line closed short or substituted (substitutions for out-of-stock online lines) carries a
+   * smaller deposit: the container deposit on the line shrinks to what stands of it, the qty first
+   * and the amount from the qty, so the deposit stays qty × deposit_each as charged.
+   */
+  static void shrinkDepositTx(
+      Connection c,
+      UUID tenantId,
+      UUID orderItemId,
+      BigDecimal standingAfter,
+      BigDecimal standingBefore)
+      throws SQLException {
+    if (standingBefore.signum() <= 0) return;
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE order_deposits SET"
+                + " qty = ROUND(qty * ? / ?, 3),"
+                + " amount = ROUND(ROUND(qty * ? / ?, 3) * deposit_each, 2),"
+                + " vat_amount = ROUND(vat_amount * ? / ?, 2)"
+                + " WHERE tenant_id = ? AND order_item_id = ?")) {
+      ps.setBigDecimal(1, standingAfter);
+      ps.setBigDecimal(2, standingBefore);
+      ps.setBigDecimal(3, standingAfter);
+      ps.setBigDecimal(4, standingBefore);
+      ps.setBigDecimal(5, standingAfter);
+      ps.setBigDecimal(6, standingBefore);
+      ps.setObject(7, tenantId);
+      ps.setObject(8, orderItemId);
+      ps.executeUpdate();
+    }
+  }
+
+  /** The deposits an order carries, added up, inside a transaction. */
+  static BigDecimal depositTotalTx(Connection c, UUID tenantId, UUID orderId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT COALESCE(SUM(amount), 0) FROM order_deposits"
+                + " WHERE tenant_id = ? AND order_id = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getBigDecimal(1) : BigDecimal.ZERO;
+      }
+    }
+  }
+
   static void insertDeposit(Connection c, OrderDeposit d) throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(INSERT_DEPOSIT)) {
       ps.setObject(1, d.id());

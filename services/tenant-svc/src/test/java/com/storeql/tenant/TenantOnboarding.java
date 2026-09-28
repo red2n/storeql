@@ -14,12 +14,22 @@ final class TenantOnboarding {
 
   private TenantOnboarding() {}
 
+  /**
+   * The address the owner signed up with, which is where the business's notices go until it says
+   * otherwise.
+   */
+  static String ownerEmail(String name) {
+    return name.strip().toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9]+", "-")
+        + "@example.test";
+  }
+
   static String onboard(WebTarget target, String name, String country, String currency) {
     Response r =
         target
             .path("/onboarding/tenants")
             .request(MediaType.APPLICATION_JSON)
             .header("X-User-Id", Ids.newId().toString())
+            .header("X-User-Email", ownerEmail(name))
             .post(
                 Entity.entity(
                     "{\"businessName\":\""

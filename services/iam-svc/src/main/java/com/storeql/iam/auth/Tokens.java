@@ -15,9 +15,14 @@ public final class Tokens {
 
   /** A new high-entropy opaque token (returned to the client; never stored raw). */
   public static String newOpaqueToken() {
-    byte[] bytes = new byte[32];
-    RNG.nextBytes(bytes);
-    return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    return newOpaqueToken(32);
+  }
+
+  /** A new opaque token of {@code bytes} random bytes, base64url without padding. */
+  public static String newOpaqueToken(int bytes) {
+    byte[] random = new byte[bytes];
+    RNG.nextBytes(random);
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(random);
   }
 
   /** SHA-256 hash of a token (what we store / look up by). */

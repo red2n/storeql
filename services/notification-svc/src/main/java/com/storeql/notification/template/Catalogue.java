@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 /**
  * Every message a business can put in its own words (13.x, message templates): what each is for,
@@ -84,7 +84,12 @@ public final class Catalogue {
       String why,
       List<Variable> variables,
       List<FormSpec> forms,
-      Supplier<Values> sample) {
+      /**
+       * The sample values a preview or a check is written out with, given the currency to show a
+       * money value in: the business's own home currency, or the platform's neutral one when it
+       * cannot be read. Never bakes in a literal currency itself.
+       */
+      Function<String, Values> sample) {
 
     public MessageType {
       variables = List.copyOf(variables);
@@ -133,22 +138,171 @@ public final class Catalogue {
           List.of(
               v("order", "TEXT", "The order's reference"),
               v("total", "MONEY", "What the order came to"),
+              v(
+                  "window",
+                  "TEXT",
+                  "The delivery or collection window, in the store's own time, when the order has"
+                      + " one; absent otherwise"),
               SHOP),
           List.of(
               new FormSpec(
                   Form.EMAIL,
                   "Your order is confirmed",
-                  "Thanks for your order!\n\nOrder {{order}}\nTotal: {{total}}\n\n— {{shop}}",
+                  "Thanks for your order!\n\nOrder {{order}}\nTotal:"
+                      + " {{total}}{{#window}}\n{{window}}{{/window}}\n\n— {{shop}}",
                   List.of(Set.of("order"))),
               new FormSpec(
                   Form.PUSH,
                   "Your order is confirmed",
                   "Order {{order}} — {{total}}",
                   List.of(Set.of("order")))),
-          () ->
+          currency ->
               Values.of()
                   .text("order", "01a0c42a-11a0-76f6-a69f-c3297150342e")
-                  .money("total", new BigDecimal("24.60"), "GBP")
+                  .money("total", new BigDecimal("24.60"), currency)
+                  .window(
+                      "window",
+                      true,
+                      Instant.parse("2026-09-26T16:00:00Z"),
+                      Instant.parse("2026-09-26T18:00:00Z"),
+                      "Europe/London")
+                  .text("shop", "Hollins Grocers"));
+
+  /**
+   * Ship-from-store and dark-store picking: a pickup order picked and packed in full is ready for
+   * its shopper to collect.
+   */
+  static final MessageType ORDER_READY_FOR_COLLECTION =
+      new MessageType(
+          "ORDER_READY_FOR_COLLECTION",
+          "Order ready for collection",
+          Audience.CUSTOMER,
+          "Sent to a shopper with an account when their pickup order is picked, packed and"
+              + " waiting for them at the counter.",
+          List.of(v("order", "TEXT", "The order's reference"), SHOP),
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "Your order is ready to collect",
+                  "Your order {{order}} is ready to collect.\n\nBring this message or your order"
+                      + " number to the counter.\n\n— {{shop}}",
+                  List.of(Set.of("order"))),
+              new FormSpec(
+                  Form.PUSH,
+                  "Ready to collect",
+                  "Order {{order}} is ready to collect",
+                  List.of(Set.of("order")))),
+          currency ->
+              Values.of()
+                  .text("order", "01a0c42a-11a0-76f6-a69f-c3297150342e")
+                  .text("shop", "Hollins Grocers"));
+
+  /** Ship-from-store: a picked delivery order left the store with a carrier. */
+  static final MessageType ORDER_DISPATCHED =
+      new MessageType(
+          "ORDER_DISPATCHED",
+          "Order on its way",
+          Audience.CUSTOMER,
+          "Sent to a shopper with an account when their delivery order leaves the store with a"
+              + " carrier, naming the carrier and its reference when the store noted one.",
+          List.of(
+              v("order", "TEXT", "The order's reference"),
+              v("carrier", "TEXT", "Who is carrying it"),
+              v("reference", "TEXT", "The carrier's reference or tracking number, when known"),
+              SHOP),
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "Your order is on its way",
+                  "Your order {{order}} left with {{carrier}}.{{#reference}}\nReference:"
+                      + " {{reference}}{{/reference}}\n\n— {{shop}}",
+                  List.of(Set.of("order"), Set.of("carrier"))),
+              new FormSpec(
+                  Form.PUSH,
+                  "On its way",
+                  "Order {{order}} left with {{carrier}}{{#reference}} — {{reference}}{{/reference}}",
+                  List.of(Set.of("order")))),
+          currency ->
+              Values.of()
+                  .text("order", "01a0c42a-11a0-76f6-a69f-c3297150342e")
+                  .text("carrier", "DPD")
+                  .text("reference", "15501234567890")
+                  .text("shop", "Hollins Grocers"));
+
+  /** Substitutions for out-of-stock online lines: an item the store could not include. */
+  static final MessageType ORDER_LINE_SHORT =
+      new MessageType(
+          "ORDER_LINE_SHORT",
+          "Item unavailable",
+          Audience.CUSTOMER,
+          "Sent to a shopper with an account when the store closes a line of their online order"
+              + " short: what they will not get, and what goes back to them for it.",
+          List.of(
+              v("order", "TEXT", "The order's reference"),
+              v("item", "TEXT", "The product the store could not include"),
+              v("qty", "TEXT", "How many of it"),
+              v("refund", "MONEY", "What goes back to the shopper, when anything does"),
+              SHOP),
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "An item in your order was unavailable",
+                  "We could not include {{qty}} × {{item}} in your order {{order}}.{{#refund}}\n"
+                      + "{{refund}} goes back to the way you paid.{{/refund}}\n\n— {{shop}}",
+                  List.of(Set.of("order"), Set.of("item"))),
+              new FormSpec(
+                  Form.PUSH,
+                  "Item unavailable",
+                  "{{item}} was unavailable for order {{order}}{{#refund}} — {{refund}}"
+                      + " refunded{{/refund}}",
+                  List.of(Set.of("order")))),
+          currency ->
+              Values.of()
+                  .text("order", "01a0c42a-11a0-76f6-a69f-c3297150342e")
+                  .text("item", "Braeburn apples 1kg")
+                  .text("qty", "2")
+                  .money("refund", new BigDecimal("3.80"), currency)
+                  .text("shop", "Hollins Grocers"));
+
+  /** Substitutions for out-of-stock online lines: a stand-in went in the bag. */
+  static final MessageType ORDER_LINE_SUBSTITUTED =
+      new MessageType(
+          "ORDER_LINE_SUBSTITUTED",
+          "Item substituted",
+          Audience.CUSTOMER,
+          "Sent to a shopper with an account when the store puts a substitute in their online"
+              + " order for a line it could not fill: what was swapped for what, that they pay no"
+              + " more, and what goes back when the substitute cost less.",
+          List.of(
+              v("order", "TEXT", "The order's reference"),
+              v("item", "TEXT", "The product that was unavailable"),
+              v("substitute", "TEXT", "What went in the bag instead"),
+              v("qty", "TEXT", "How many"),
+              v("refund", "MONEY", "The difference going back, when the substitute cost less"),
+              SHOP),
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "We substituted an item in your order",
+                  "{{item}} was unavailable, so your order {{order}} has {{qty}} × {{substitute}}"
+                      + " instead. You pay no more than you did{{#refund}}, and {{refund}} goes"
+                      + " back to the way you paid{{/refund}}.\n\nIf you would rather not keep it,"
+                      + " hand it back when you collect or to the driver and it is refunded.\n\n—"
+                      + " {{shop}}",
+                  List.of(Set.of("order"), Set.of("item"), Set.of("substitute"))),
+              new FormSpec(
+                  Form.PUSH,
+                  "Item substituted",
+                  "{{substitute}} replaces {{item}} in order {{order}}{{#refund}} — {{refund}}"
+                      + " refunded{{/refund}}",
+                  List.of(Set.of("order")))),
+          currency ->
+              Values.of()
+                  .text("order", "01a0c42a-11a0-76f6-a69f-c3297150342e")
+                  .text("item", "Braeburn apples 1kg")
+                  .text("substitute", "Gala apples 1kg")
+                  .text("qty", "2")
+                  .money("refund", new BigDecimal("0.40"), currency)
                   .text("shop", "Hollins Grocers"));
 
   /** GPSR (EU) 2023/988 art.36(2): the parts a recall notice to a buyer must have. */
@@ -249,7 +403,7 @@ public final class Catalogue {
                   "Product safety recall — {{reference}}",
                   "Stop using {{product}}. Open the app for what to do and your remedy.",
                   List.of(Set.of("products", "product")))),
-          () ->
+          currency ->
               Values.of()
                   .text("reference", "RC-2026-014")
                   .items(
@@ -310,7 +464,7 @@ public final class Catalogue {
                       + "\nTotal paid: {{total}}\n\n"
                       + "Please quote {{reference}} in any query about this payment.\n",
                   List.of(Set.of("reference"), Set.of("total")))),
-          () ->
+          currency ->
               Values.of()
                   .text("reference", "PR-000031")
                   .day("payment_date", LocalDate.of(2026, 9, 24))
@@ -321,14 +475,14 @@ public final class Catalogue {
                           Values.of()
                               .text("reference", "INV-4410")
                               .day("document_date", LocalDate.of(2026, 8, 30))
-                              .money("amount", new BigDecimal("1250.00"), "GBP")
+                              .money("amount", new BigDecimal("1250.00"), currency)
                               .flag("credit", false),
                           Values.of()
                               .text("reference", "CN-118")
                               .day("document_date", LocalDate.of(2026, 9, 2))
-                              .money("amount", new BigDecimal("40.00"), "GBP")
+                              .money("amount", new BigDecimal("40.00"), currency)
                               .flag("credit", true)))
-                  .money("total", new BigDecimal("1210.00"), "GBP")
+                  .money("total", new BigDecimal("1210.00"), currency)
                   .text("shop", "Hollins Grocers"));
 
   // ── staff
@@ -352,7 +506,7 @@ public final class Catalogue {
                   "Variant {{variant}} at store {{store}}: available {{available}} (threshold"
                       + " {{threshold}})",
                   NONE)),
-          () ->
+          currency ->
               Values.of()
                   .text("variant", "01a0c42a-3d45-70cf-b661-39c95b6b542b")
                   .text("store", "01a0c42a-fede-7391-982e-4b81b74bdce4")
@@ -381,7 +535,7 @@ public final class Catalogue {
                       + "{{^reading}}{{point}} was recorded as failed.{{/reading}}"
                       + " Record what was done about it on the Food safety screen.",
                   List.of(Set.of("point")))),
-          () ->
+          currency ->
               Values.of()
                   .text("point", "Dairy chiller")
                   .number("reading", new BigDecimal("8.5"))
@@ -404,7 +558,7 @@ public final class Catalogue {
                   "{{point}} was due a check at {{due_since}} and none has been recorded. Take it"
                       + " now on the Food safety screen.",
                   List.of(Set.of("point")))),
-          () ->
+          currency ->
               Values.of()
                   .text("point", "Dairy chiller")
                   .moment("due_since", Instant.parse("2026-09-21T08:00:00Z")));
@@ -431,7 +585,7 @@ public final class Catalogue {
                       + "{{#required}}, and it is required{{/required}}."
                       + " Do it now if it still can be, or record why it was skipped.",
                   List.of(Set.of("title")))),
-          () ->
+          currency ->
               Values.of()
                   .text("title", "Lock up")
                   .flag("opening", false)
@@ -455,7 +609,8 @@ public final class Catalogue {
                   "Management has published \"{{title}}\". Read it on the notices screen"
                       + "{{#acknowledge}} and acknowledge it.{{/acknowledge}}{{^acknowledge}}.{{/acknowledge}}",
                   List.of(Set.of("title")))),
-          () -> Values.of().text("title", "Freezer 3 is out of use").flag("acknowledge", true));
+          currency ->
+              Values.of().text("title", "Freezer 3 is out of use").flag("acknowledge", true));
 
   static final MessageType RECALL_OPENED =
       new MessageType(
@@ -479,7 +634,7 @@ public final class Catalogue {
                       + "{{#recall}}, and display the recall notice at the tills.{{/recall}}"
                       + "{{^recall}}.{{/recall}}",
                   List.of(Set.of("reference")))),
-          () ->
+          currency ->
               Values.of()
                   .text("reference", "RC-2026-014")
                   .flag("recall", true)
@@ -506,12 +661,166 @@ public final class Catalogue {
                       + " is lost.{{/due_by}}{{^due_by}}Answer it on the Disputes screen as soon as"
                       + " you can.{{/due_by}}",
                   List.of(Set.of("amount")))),
-          () ->
+          currency ->
               Values.of()
-                  .money("amount", new BigDecimal("42.50"), "GBP")
+                  .money("amount", new BigDecimal("42.50"), currency)
                   .text("reason", "fraudulent")
                   .text("reason_code", "FRAUDULENT")
                   .moment("due_by", Instant.parse("2026-10-05T23:59:00Z")));
+
+  // ── the business, from the platform (21.12)
+  // ─────────────────────────────────────────────────────────────────────────────────────
+
+  /** What every billing notice must keep: which invoice, how much, and the way to pay it. */
+  private static final List<Set<String>> BILLING_PARTS =
+      List.of(Set.of("invoice"), Set.of("amount_due"), Set.of("pay_link"));
+
+  private static final Variable PLATFORM =
+      v("shop", "TEXT", "The platform's name, as it invoices — this notice is from it");
+
+  private static final List<Variable> BILLING_VARIABLES =
+      List.of(
+          v("invoice", "TEXT", "The invoice's number"),
+          v("amount_due", "MONEY", "What is left to pay on it"),
+          v("due_date", "DAY", "The day it was due"),
+          v("days_overdue", "NUMBER", "How many days past that day the notice went"),
+          v(
+              "pay_link",
+              "TEXT",
+              "A link that pays the invoice with no sign-in; the newest one is the one that works"),
+          v(
+              "suspend_on",
+              "DAY",
+              "The day the service is interrupted if it stays unpaid; absent once it has been"),
+          PLATFORM);
+
+  private static Values billingSample(String currency) {
+    return Values.of()
+        .text("invoice", "INV-2026-000041")
+        .money("amount_due", new BigDecimal("29.00"), currency)
+        .day("due_date", LocalDate.of(2026, 9, 15))
+        .number("days_overdue", new BigDecimal("3"))
+        .text("pay_link", "https://app.example/#/pay/9m2xKq1vT8sHc4bYw7Lp3Q")
+        .day("suspend_on", LocalDate.of(2026, 9, 29))
+        .text("shop", "StoreQL Platform Ltd");
+  }
+
+  static final MessageType INVOICE_OVERDUE =
+      new MessageType(
+          "INVOICE_OVERDUE",
+          "Invoice overdue",
+          Audience.STAFF,
+          "From the platform to the business's billing address when an invoice for the platform"
+              + " itself is past its date: a reminder at each day the dunning policy names.",
+          BILLING_VARIABLES,
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "Invoice {{invoice}} is overdue: {{amount_due}}",
+                  "Invoice {{invoice}} for {{amount_due}} was due on {{due_date}} and has not been"
+                      + " paid.\n\nPay it here, no sign-in needed:\n{{pay_link}}\n\n{{#suspend_on}}If"
+                      + " it is still unpaid on {{suspend_on}}, your service will be interrupted"
+                      + " until it is paid.{{/suspend_on}}{{^suspend_on}}Paying it brings your service"
+                      + " back at once.{{/suspend_on}}\n\nIf you have already paid, or need more"
+                      + " time, reply to this message.\n\n— {{shop}}",
+                  BILLING_PARTS)),
+          Catalogue::billingSample);
+
+  static final MessageType SERVICE_SUSPENDED =
+      new MessageType(
+          "SERVICE_SUSPENDED",
+          "Service interrupted",
+          Audience.STAFF,
+          "From the platform to the business's billing address the day its service is interrupted"
+              + " for non-payment: what is owed, and the link that brings the service back.",
+          BILLING_VARIABLES,
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "Your service is interrupted: invoice {{invoice}} is unpaid",
+                  "Invoice {{invoice}} for {{amount_due}}, due on {{due_date}}, is still unpaid, so"
+                      + " your service is interrupted: your staff cannot sign in and your storefront"
+                      + " is closed.\n\nPaying it brings everything back at once, no sign-in"
+                      + " needed:\n{{pay_link}}\n\nIf you believe this is a mistake, reply to this"
+                      + " message.\n\n— {{shop}}",
+                  BILLING_PARTS)),
+          Catalogue::billingSample);
+
+  // ── the trial (21.13), from the platform
+  // ─────────────────────────────────────────────────────────────────────────────────────
+
+  private static final List<Variable> TRIAL_VARIABLES =
+      List.of(
+          v("plan", "TEXT", "The plan the trial is of"),
+          v("trial_end", "DAY", "The day the trial ends"),
+          v("price", "MONEY", "What the plan costs from then, each period"),
+          v("interval", "TEXT", "How often it is billed: MONTH or YEAR"),
+          PLATFORM);
+
+  private static final List<Variable> TRIAL_ENDED_VARIABLES =
+      List.of(
+          v("plan", "TEXT", "The plan the trial was of"),
+          v("trial_end", "DAY", "The day the trial ended"),
+          v("price", "MONEY", "What the plan costs, each period"),
+          v("interval", "TEXT", "How often it is billed: MONTH or YEAR"),
+          v("invoice", "TEXT", "The first invoice's number"),
+          v("amount_due", "MONEY", "What the first invoice comes to"),
+          v("due_date", "DAY", "The day it is due"),
+          v("pay_link", "TEXT", "A link that pays it with no sign-in"),
+          PLATFORM);
+
+  static final MessageType TRIAL_ENDING =
+      new MessageType(
+          "TRIAL_ENDING",
+          "Trial ending",
+          Audience.STAFF,
+          "From the platform to the business's billing address a few days before its free trial"
+              + " ends: the day, and what the plan costs from then.",
+          TRIAL_VARIABLES,
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "Your trial of {{plan}} ends on {{trial_end}}",
+                  "Your free trial of {{plan}} ends on {{trial_end}}. From then it is {{price}} a"
+                      + " {{interval}}, billed in advance; the first invoice comes on that day.\n\nIf"
+                      + " you would rather not continue, cancel before then from Billing and nothing"
+                      + " is owed.\n\n— {{shop}}",
+                  List.of(Set.of("plan"), Set.of("trial_end"), Set.of("price")))),
+          currency ->
+              Values.of()
+                  .text("plan", "Starter")
+                  .day("trial_end", LocalDate.of(2026, 10, 6))
+                  .money("price", new BigDecimal("49.00"), currency)
+                  .text("interval", "MONTH")
+                  .text("shop", "StoreQL Platform Ltd"));
+
+  static final MessageType TRIAL_ENDED =
+      new MessageType(
+          "TRIAL_ENDED",
+          "Trial ended",
+          Audience.STAFF,
+          "From the platform to the business's billing address the day its trial ends: the first"
+              + " invoice, and the link that pays it.",
+          TRIAL_ENDED_VARIABLES,
+          List.of(
+              new FormSpec(
+                  Form.EMAIL,
+                  "Your trial has ended: invoice {{invoice}} for {{amount_due}}",
+                  "Your free trial of {{plan}} has ended, and your first invoice, {{invoice}} for"
+                      + " {{amount_due}}, is due on {{due_date}}.\n\nPay it here, no sign-in"
+                      + " needed:\n{{pay_link}}\n\nThank you for staying with us.\n\n— {{shop}}",
+                  List.of(Set.of("invoice"), Set.of("amount_due"), Set.of("pay_link")))),
+          currency ->
+              Values.of()
+                  .text("plan", "Starter")
+                  .day("trial_end", LocalDate.of(2026, 10, 6))
+                  .money("price", new BigDecimal("49.00"), currency)
+                  .text("interval", "MONTH")
+                  .text("invoice", "INV-2026-000042")
+                  .money("amount_due", new BigDecimal("60.27"), currency)
+                  .day("due_date", LocalDate.of(2026, 10, 13))
+                  .text("pay_link", "https://app.example/#/pay/9m2xKq1vT8sHc4bYw7Lp3Q")
+                  .text("shop", "StoreQL Platform Ltd"));
 
   private static final Map<String, MessageType> ALL = new LinkedHashMap<>();
 
@@ -519,6 +828,10 @@ public final class Catalogue {
     for (MessageType t :
         List.of(
             ORDER_CONFIRMED,
+            ORDER_READY_FOR_COLLECTION,
+            ORDER_DISPATCHED,
+            ORDER_LINE_SHORT,
+            ORDER_LINE_SUBSTITUTED,
             RECALL_NOTICE,
             SUPPLIER_REMITTANCE,
             STOCK_BELOW_THRESHOLD,
@@ -527,7 +840,11 @@ public final class Catalogue {
             STORE_TASK_MISSED,
             STORE_NOTICE_URGENT,
             RECALL_OPENED,
-            PAYMENT_DISPUTE_OPENED)) {
+            PAYMENT_DISPUTE_OPENED,
+            INVOICE_OVERDUE,
+            SERVICE_SUSPENDED,
+            TRIAL_ENDING,
+            TRIAL_ENDED)) {
       ALL.put(t.key(), t);
     }
   }

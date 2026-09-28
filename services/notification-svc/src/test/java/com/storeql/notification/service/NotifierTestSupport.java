@@ -13,6 +13,26 @@ public final class NotifierTestSupport {
 
   private NotifierTestSupport() {}
 
+  /** A live business, as tenant-svc would say of nearly every business: never a sandbox. */
+  public static Businesses live() {
+    return new Businesses() {
+      @Override
+      public java.util.Optional<String> country(java.util.UUID tenantId) {
+        return java.util.Optional.of("GB");
+      }
+
+      @Override
+      public java.util.Optional<String> name(java.util.UUID tenantId) {
+        return java.util.Optional.of("Hollins Grocers");
+      }
+
+      @Override
+      public boolean sandbox(java.util.UUID tenantId) {
+        return false;
+      }
+    };
+  }
+
   public static Notifier notifierOf(NotificationChannel channel, NotificationRepository repo) {
     return notifierOf(channel, repo, null);
   }
@@ -37,6 +57,7 @@ public final class NotifierTestSupport {
     notifier.repo = repo;
     notifier.channels = channels;
     notifier.messages = messages;
+    notifier.businesses = live();
     return notifier;
   }
 }

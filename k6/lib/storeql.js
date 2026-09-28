@@ -267,6 +267,7 @@ const STORE_DEFAULTS = {
   DE: { city: 'Berlin', pincode: '10117', timezone: 'Europe/Berlin' },
   PT: { city: 'Lisboa', pincode: '1100-148', timezone: 'Europe/Lisbon' },
   FR: { city: 'Paris', pincode: '75001', timezone: 'Europe/Paris' },
+  PL: { city: 'Warszawa', pincode: '00-001', timezone: 'Europe/Warsaw' },
 };
 
 /**
@@ -336,13 +337,13 @@ export const SAFETY_INFORMATION = {
   noWarnings: true,
 };
 
-export function sellableVariant(tenant, name) {
+export function sellableVariant(tenant, name, extra = {}) {
   const t = tenant.owner.token;
   const run = uniq();
   const product = must(
     call('POST', '/api/product-svc/admin/products', {
       token: t,
-      body: { name: `${name} ${run}`, sellableOnline: true, sellablePos: true, safetyInformation: SAFETY_INFORMATION },
+      body: { name: `${name} ${run}`, sellableOnline: true, sellablePos: true, safetyInformation: SAFETY_INFORMATION, ...extra },
     }),
     201,
     `create product ${name}`
@@ -365,7 +366,7 @@ export function sellableVariant(tenant, name) {
  */
 // The standard VAT rate a test business in each country charges. pricing-svc never assumes one
 // (SJ-D56): a business sets its own, exempt if it charges none — as Kuwait's and a US seller's do.
-const STANDARD_VAT = { GB: 0.2, IN: 0.18, US: 0, DE: 0.19, PT: 0.23, FR: 0.2, JP: 0.1, KW: 0 };
+const STANDARD_VAT = { GB: 0.2, IN: 0.18, US: 0, DE: 0.19, PT: 0.23, FR: 0.2, JP: 0.1, KW: 0, PL: 0.23 };
 
 /** Sets the business's standard VAT rate (T1) unless it already has one: nothing is quoted without it. */
 export function ensureStandardVat(tenant) {

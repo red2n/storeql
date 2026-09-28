@@ -26,7 +26,108 @@ public final class Domain {
       String materialStatus,
       String materialStatusReason,
       String grade,
-      UUID zoneId) {
+      UUID zoneId,
+      /** OWNED (the business's own) or CONSIGNMENT (the supplier's until it sells). */
+      String ownership,
+      /** The supplier that owns a CONSIGNMENT batch; purchase-svc's id, referenced never joined. */
+      UUID ownerSupplierId,
+      /** DUTY_PAID, or DUTY_SUSPENDED for excise goods held in bond: on hand, never for sale. */
+      String dutyStatus) {
+
+    /** A batch whose duty is paid. */
+    public Batch(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID variantId,
+        String batchNo,
+        BigDecimal receivedQty,
+        BigDecimal remainingQty,
+        BigDecimal costPrice,
+        LocalDate expiryDate,
+        Instant createdAt,
+        String status,
+        String materialStatus,
+        String materialStatusReason,
+        String grade,
+        UUID zoneId,
+        String ownership,
+        UUID ownerSupplierId) {
+      this(
+          id,
+          tenantId,
+          storeId,
+          variantId,
+          batchNo,
+          receivedQty,
+          remainingQty,
+          costPrice,
+          expiryDate,
+          createdAt,
+          status,
+          materialStatus,
+          materialStatusReason,
+          grade,
+          zoneId,
+          ownership,
+          ownerSupplierId,
+          DUTY_PAID);
+    }
+
+    public static final String DUTY_PAID = "DUTY_PAID";
+    public static final String DUTY_SUSPENDED = "DUTY_SUSPENDED";
+
+    /** Whether the duty on this batch is still suspended (it sits in bond). */
+    public boolean inBond() {
+      return DUTY_SUSPENDED.equals(dutyStatus);
+    }
+
+    /** A batch of the business's own stock. */
+    public Batch(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID variantId,
+        String batchNo,
+        BigDecimal receivedQty,
+        BigDecimal remainingQty,
+        BigDecimal costPrice,
+        LocalDate expiryDate,
+        Instant createdAt,
+        String status,
+        String materialStatus,
+        String materialStatusReason,
+        String grade,
+        UUID zoneId) {
+      this(
+          id,
+          tenantId,
+          storeId,
+          variantId,
+          batchNo,
+          receivedQty,
+          remainingQty,
+          costPrice,
+          expiryDate,
+          createdAt,
+          status,
+          materialStatus,
+          materialStatusReason,
+          grade,
+          zoneId,
+          OWNERSHIP_OWNED,
+          null,
+          DUTY_PAID);
+    }
+
+    public static final String OWNERSHIP_OWNED = "OWNED";
+    public static final String OWNERSHIP_CONSIGNMENT = "CONSIGNMENT";
+
+    /** Whether the supplier, not the business, owns what is left of this batch. */
+    public boolean consigned() {
+      return OWNERSHIP_CONSIGNMENT.equals(ownership);
+    }
+
     public static final String STATUS_ACTIVE = "ACTIVE";
     public static final String STATUS_DEPLETED = "DEPLETED";
     public static final String STATUS_EXPIRED = "EXPIRED";
@@ -40,7 +141,13 @@ public final class Domain {
 
   /** Stock level rollup for a (store, variant). */
   public record Level(
-      UUID storeId, UUID variantId, BigDecimal onHand, BigDecimal reserved, BigDecimal available) {}
+      UUID storeId,
+      UUID variantId,
+      BigDecimal onHand,
+      BigDecimal reserved,
+      BigDecimal available,
+      /** How much of onHand sits in bond with its duty suspended: on hand, never available. */
+      BigDecimal inBond) {}
 
   /**
    * Aggregate counts over levels: total distinct SKUs and how many are at/below the low threshold.
@@ -56,10 +163,72 @@ public final class Domain {
       UUID orderId,
       String status,
       Instant expiresAt,
-      Instant createdAt) {
+      Instant createdAt,
+      /**
+       * STOCK: a hold on the shelf. DROPSHIP: the supplier fulfils it; nothing on the shelf is
+       * held.
+       */
+      String fulfilment) {
+
+    /** A hold on stock from the shelf. */
+    public Reservation(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID variantId,
+        BigDecimal qty,
+        UUID orderId,
+        String status,
+        Instant expiresAt,
+        Instant createdAt) {
+      this(id, tenantId, storeId, variantId, qty, orderId, status, expiresAt, createdAt, STOCK);
+    }
+
     public static final String HELD = "HELD";
     public static final String CONSUMED = "CONSUMED";
     public static final String RELEASED = "RELEASED";
+    public static final String STOCK = "STOCK";
+    public static final String DROPSHIP = "DROPSHIP";
+
+    /** Whether the supplier fulfils this, so nothing on the shelf is held or drawn. */
+    public boolean dropship() {
+      return DROPSHIP.equals(fulfilment);
+    }
+
+    /** The same hold, fulfilled by the supplier. */
+    public Reservation asDropship() {
+      return new Reservation(
+          id, tenantId, storeId, variantId, qty, orderId, status, expiresAt, createdAt, DROPSHIP);
+    }
+  }
+
+  /**
+   * Whether a shopper can buy a variant at a store: from the shelf, or from the supplier per order
+   * (dropship — stock the business never holds).
+   *
+   * @param available the shelf quantity available at the store named on the read (on hand less
+   *     reservations and bonded stock, {@code Level.available()}); null for a dropship line, which
+   *     holds no shelf stock, and whenever the read named no store. Feeds {@link OnlyLeft#compute}
+   *     for the storefront's "only N left"; never returned to the storefront as a number itself.
+   */
+  public record Availability(
+      UUID variantId, boolean inStock, boolean dropship, BigDecimal available) {}
+
+  /**
+   * "Only N left" on the storefront: the business-wide threshold, off until an owner or a
+   * business-wide manager sets one. One row per tenant.
+   *
+   * @param lowStockThreshold 1..1000, or null while the feature is off
+   * @param updatedBy who last changed it, or null when it has never been set
+   * @param updatedAt when, or null when it has never been set
+   */
+  public record StorefrontStockSettings(
+      UUID tenantId, Integer lowStockThreshold, UUID updatedBy, Instant updatedAt) {
+
+    /** The default before any business has ever set a threshold: off, and by nobody. */
+    public static StorefrontStockSettings off(UUID tenantId) {
+      return new StorefrontStockSettings(tenantId, null, null, null);
+    }
   }
 
   /**
@@ -132,7 +301,246 @@ public final class Domain {
       String method,
       BigDecimal onHandQty,
       BigDecimal unvaluedQty,
-      BigDecimal value) {}
+      BigDecimal value,
+      /** How much of onHandQty the supplier still owns (consignment): not the business's asset. */
+      BigDecimal consignmentQty,
+      /** What that consignment holding is worth at the cost the supplier will be owed. */
+      BigDecimal consignmentValue,
+      /** How much of onHandQty is held in bond with its duty suspended. */
+      BigDecimal dutySuspendedQty,
+      /** The duty that stock would crystallise on release, at the variants' rates. */
+      BigDecimal dutyPotential) {}
+
+  // ── Bonded and duty-suspended stock ─────────────────────────────────────────
+
+  /** A store approved as a bonded warehouse: the only place duty-suspended stock may be held. */
+  public record BondApproval(
+      UUID tenantId,
+      UUID storeId,
+      String approvalNumber,
+      String regime,
+      boolean active,
+      UUID createdBy,
+      Instant createdAt,
+      Instant endedAt) {
+    public static final String REGIME_EXCISE = "EXCISE";
+    public static final String REGIME_CUSTOMS = "CUSTOMS";
+  }
+
+  /** The duty one unit of a variant crystallises on release, in the home currency. */
+  public record ExciseDutyRate(
+      UUID tenantId,
+      UUID variantId,
+      BigDecimal dutyPerUnit,
+      String currency,
+      String note,
+      UUID updatedBy,
+      Instant updatedAt) {}
+
+  /** One release to home use: what left bond, at what rate, owing what. */
+  public record BondRelease(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      BigDecimal dutyPerUnit,
+      BigDecimal dutyAmount,
+      String currency,
+      String reference,
+      UUID releasedBy,
+      Instant releasedAt) {}
+
+  // ── Wave picking and directed putaway ──────────────────────────────────────
+
+  /** A confirmed online order waiting to be picked at its store, and what it still needs. */
+  public record AwaitingOrder(
+      UUID orderId,
+      UUID tenantId,
+      UUID storeId,
+      String fulfilmentType,
+      Instant confirmedAt,
+      UUID waveId,
+      List<AwaitingLine> lines) {}
+
+  public record AwaitingLine(UUID variantId, BigDecimal qtyOutstanding) {}
+
+  /** One walk through the zones for the orders it gathered. */
+  public record PickWave(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      String status,
+      UUID createdBy,
+      Instant createdAt,
+      UUID completedBy,
+      Instant completedAt,
+      Instant cancelledAt,
+      int orderCount,
+      List<PickWaveLine> lines) {
+    public static final String OPEN = "OPEN";
+    public static final String COMPLETED = "COMPLETED";
+    public static final String CANCELLED = "CANCELLED";
+  }
+
+  /** One pick line: one batch, what to take from it, what was taken, whom it serves. */
+  public record PickWaveLine(
+      UUID id,
+      UUID waveId,
+      int walkOrder,
+      UUID zoneId,
+      UUID batchId,
+      String batchNo,
+      UUID variantId,
+      BigDecimal directedQty,
+      BigDecimal pickedQty,
+      List<PickWaveAllocation> orders) {}
+
+  public record PickWaveAllocation(UUID orderId, BigDecimal qty, BigDecimal pickedQty) {}
+
+  /**
+   * Where a product goes when it arrives with no zone; a rule with no variant is the store default.
+   */
+  public record PutawayRule(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      UUID zoneId,
+      UUID createdBy,
+      Instant createdAt) {}
+
+  /**
+   * A batch that arrived with no zone and no rule to place it; {@code batchNo} is the batch's own
+   * number, read with the task.
+   */
+  public record PutawayTask(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID batchId,
+      String batchNo,
+      UUID variantId,
+      BigDecimal qty,
+      UUID suggestedZoneId,
+      String status,
+      UUID placedZoneId,
+      UUID placedBy,
+      Instant placedAt,
+      Instant createdAt) {
+    public static final String OPEN = "OPEN";
+    public static final String PLACED = "PLACED";
+  }
+
+  // ── Fresh yield, preparation and butchery loss ─────────────────────────────
+
+  /** One cut a template expects: its share of the input, of the cost, and its own shelf life. */
+  public record YieldOutputSpec(
+      UUID variantId, BigDecimal expectedPct, BigDecimal costShare, Integer shelfLifeDays) {}
+
+  /** What a primal should break into, and by difference what is expected to be lost. */
+  public record YieldTemplate(
+      UUID id,
+      UUID tenantId,
+      String name,
+      UUID inputVariantId,
+      String unit,
+      String notes,
+      boolean active,
+      UUID createdBy,
+      Instant createdAt,
+      List<YieldOutputSpec> outputs) {
+
+    public BigDecimal expectedLossPct() {
+      return Yield.expectedLossPct(outputs.stream().map(YieldOutputSpec::expectedPct).toList());
+    }
+  }
+
+  /**
+   * One cut of a breakdown: what came out against what was expected, at what cost, as which batch.
+   */
+  public record YieldRunOutput(
+      UUID variantId,
+      BigDecimal qty,
+      BigDecimal expectedQty,
+      BigDecimal costShare,
+      Integer shelfLifeDays,
+      BigDecimal unitCost,
+      UUID batchId) {
+
+    public YieldRunOutput made(BigDecimal unitCost, UUID batchId) {
+      return new YieldRunOutput(
+          variantId, qty, expectedQty, costShare, shelfLifeDays, unitCost, batchId);
+    }
+  }
+
+  /** A breakdown made at a store: the primal consumed, the cuts made, the loss known. */
+  public record YieldRun(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID templateId,
+      String templateName,
+      UUID inputVariantId,
+      BigDecimal inputQty,
+      BigDecimal inputCost,
+      BigDecimal outputQty,
+      BigDecimal lossQty,
+      BigDecimal expectedLossQty,
+      BigDecimal lossAtCost,
+      String reference,
+      String notes,
+      UUID recordedBy,
+      Instant recordedAt,
+      List<YieldRunOutput> outputs) {
+
+    public BigDecimal lossPct() {
+      return Yield.lossPct(inputQty, outputQty);
+    }
+
+    /** Positive when more was lost than expected. */
+    public BigDecimal lossVariance() {
+      return lossQty.subtract(expectedLossQty);
+    }
+
+    public YieldRun costed(BigDecimal inputCost, BigDecimal lossAtCost, List<YieldRunOutput> made) {
+      return new YieldRun(
+          id,
+          tenantId,
+          storeId,
+          templateId,
+          templateName,
+          inputVariantId,
+          inputQty,
+          inputCost,
+          outputQty,
+          lossQty,
+          expectedLossQty,
+          lossAtCost,
+          reference,
+          notes,
+          recordedBy,
+          recordedAt,
+          made);
+    }
+  }
+
+  /** A period's breakdowns added up: the butchery-loss report's bottom line. */
+  public record YieldTotals(
+      int runs,
+      BigDecimal inputQty,
+      BigDecimal outputQty,
+      BigDecimal lossQty,
+      BigDecimal expectedLossQty,
+      BigDecimal lossAtCost) {}
+
+  /** What sits in bond for one variant at one store, and the duty it carries. */
+  public record BondStock(
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      BigDecimal dutyPerUnit,
+      BigDecimal dutyPotential) {}
 
   /** How a shrinkage report groups its rows. An enum, so no request text ever reaches the SQL. */
   public enum ShrinkageGrouping {
@@ -405,13 +813,62 @@ public final class Domain {
       String notes,
       Instant createdAt,
       Instant shippedAt,
-      Instant receivedAt) {
+      Instant receivedAt,
+      /** MANUAL (raised by a person) or PROPOSAL (raised by a depot replenishment run). */
+      String source,
+      /** The run that proposed it, or null for a manual transfer. */
+      UUID proposalRunId,
+      /** A cross-dock transfer's purchase order (purchase-svc's, referenced), else null. */
+      UUID purchaseOrderId,
+      /** A cross-dock transfer's goods receipt (purchase-svc's, referenced), else null. */
+      UUID goodsReceiptId) {
+
+    /** A transfer that did not come across a dock. */
+    public TransferOrder(
+        UUID id,
+        UUID tenantId,
+        UUID fromStoreId,
+        UUID toStoreId,
+        String transferType,
+        String status,
+        String notes,
+        Instant createdAt,
+        Instant shippedAt,
+        Instant receivedAt,
+        String source,
+        UUID proposalRunId) {
+      this(
+          id,
+          tenantId,
+          fromStoreId,
+          toStoreId,
+          transferType,
+          status,
+          notes,
+          createdAt,
+          shippedAt,
+          receivedAt,
+          source,
+          proposalRunId,
+          null,
+          null);
+    }
+
     public static final String TYPE_DIRECT = "DIRECT";
     public static final String TYPE_INTRANSIT = "INTRANSIT";
+
+    /** Proposed by a run, waiting for a person to release it. */
+    public static final String DRAFT = "DRAFT";
+
     public static final String PENDING = "PENDING";
     public static final String SHIPPED = "SHIPPED";
     public static final String RECEIVED = "RECEIVED";
     public static final String CANCELLED = "CANCELLED";
+    public static final String SOURCE_MANUAL = "MANUAL";
+    public static final String SOURCE_PROPOSAL = "PROPOSAL";
+
+    /** Raised at a warehouse's receipt for the shops a purchase order was allocated to. */
+    public static final String SOURCE_CROSSDOCK = "CROSSDOCK";
   }
 
   /** One SKU line on a transfer order. */
@@ -422,7 +879,97 @@ public final class Domain {
       UUID variantId,
       BigDecimal requestedQty,
       BigDecimal shippedQty,
-      BigDecimal receivedQty) {}
+      BigDecimal receivedQty,
+      /** Why a proposal asked for this quantity; null on a manual line. */
+      String reason,
+      /** The batch a cross-dock line ships from, drawn first; null otherwise. */
+      UUID sourceBatchId) {
+
+    /** A line with a reason and no batch of its own. */
+    public TransferOrderLine(
+        UUID id,
+        UUID tenantId,
+        UUID transferOrderId,
+        UUID variantId,
+        BigDecimal requestedQty,
+        BigDecimal shippedQty,
+        BigDecimal receivedQty,
+        String reason) {
+      this(
+          id,
+          tenantId,
+          transferOrderId,
+          variantId,
+          requestedQty,
+          shippedQty,
+          receivedQty,
+          reason,
+          null);
+    }
+
+    /** A line as a person asks for it: no reason. */
+    public TransferOrderLine(
+        UUID id,
+        UUID tenantId,
+        UUID transferOrderId,
+        UUID variantId,
+        BigDecimal requestedQty,
+        BigDecimal shippedQty,
+        BigDecimal receivedQty) {
+      this(
+          id,
+          tenantId,
+          transferOrderId,
+          variantId,
+          requestedQty,
+          shippedQty,
+          receivedQty,
+          null,
+          null);
+    }
+  }
+
+  // ── Depot / DC replenishment (intent/depot-dc-replenishment.md) ─────────────
+
+  /**
+   * A shop served by a warehouse of the same business.
+   *
+   * @param leadTimeDays days from the warehouse to the shop
+   */
+  public record Serving(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID warehouseId,
+      int leadTimeDays,
+      UUID createdBy,
+      Instant createdAt,
+      Instant updatedAt) {}
+
+  /**
+   * A product a served shop buys direct from its supplier, not from its warehouse: an exception to
+   * its serving.
+   */
+  public record DirectPurchase(
+      UUID id, UUID tenantId, UUID storeId, UUID variantId, UUID createdBy, Instant createdAt) {}
+
+  /** One run of a warehouse's transfer proposal, with what it raised. */
+  public record TransferProposalRun(
+      UUID id,
+      UUID tenantId,
+      UUID warehouseId,
+      UUID runBy,
+      Instant runAt,
+      int coverDays,
+      int shops,
+      int transfers,
+      int lines,
+      int shortLines,
+      List<UUID> transferIds) {
+    public TransferProposalRun {
+      transferIds = List.copyOf(transferIds);
+    }
+  }
 
   /**
    * Safety stock parameters + last computed result for a (store, variant) pair (Gap #8). method MAD
@@ -539,6 +1086,13 @@ public final class Domain {
     public static final String RTV = "RTV";
 
     public static final String RESERVE = "RESERVE";
+
+    /** Duty-suspended stock released to home use: out of the bonded batch, into a duty-paid one. */
+    public static final String BOND_RELEASE = "BOND_RELEASE";
+
+    /** A breakdown: out of the primal's batch, into a batch per cut. */
+    public static final String YIELD = "YIELD";
+
     public static final String RELEASE = "RELEASE";
   }
 
@@ -743,5 +1297,41 @@ public final class Domain {
     public static final String OPEN = "OPEN";
     public static final String COUNTED = "COUNTED";
     public static final String ADJUSTED = "ADJUSTED";
+  }
+
+  /**
+   * One item's demand forecast at one store as stored (06.x): the history it was read from and the
+   * {@link Forecasting.Forecast} it produced. One row per (tenant, store, variant), replaced on
+   * each run.
+   */
+  public record DemandForecast(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      LocalDate historyFrom,
+      LocalDate historyTo,
+      int horizonDays,
+      Forecasting.Forecast forecast,
+      Instant computedAt,
+      FreshProfile fresh) {}
+
+  /**
+   * What the batches say about an item's life (06.x): the median days from receipt to expiry, and
+   * how much of what was received went out of date unsold. An item that lives fourteen days or
+   * fewer is fresh; an order for it should cover no more days than it lives.
+   */
+  public record FreshProfile(Integer shelfLifeDays, BigDecimal wasteRate) {
+    public static final int FRESH_MAX_DAYS = 14;
+    public static final FreshProfile KEEPS = new FreshProfile(null, null);
+
+    public boolean fresh() {
+      return shelfLifeDays != null && shelfLifeDays <= FRESH_MAX_DAYS;
+    }
+
+    /** The longest cover an order should be given: the shelf life, or none when the item keeps. */
+    public Integer maxCoverDays() {
+      return shelfLifeDays;
+    }
   }
 }

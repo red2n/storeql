@@ -75,35 +75,49 @@ public class ReorderPointRepository extends BaseOutboxRepository {
   public int computeRopPlans(UUID tenantId, UUID storeId) {
     return inTx(
         c -> {
+          // Expected daily demand: the forecast's, over the lead time, when a forecast exists
+          // (06.x); the monthly average, as before, when it does not. A plan with neither is left
+          // as it is rather than zeroed.
           String sql =
               "UPDATE reorder_point_plans rp"
-                  + " SET avg_daily_demand = sub.avg_daily,"
-                  + "     rop = ROUND(sub.avg_daily * rp.lead_time_days"
-                  + "           + COALESCE(sub.safety_stock_qty, 0), 3),"
+                  + " SET avg_daily_demand = src.avg_daily,"
+                  + "     rop = ROUND(src.avg_daily * rp.lead_time_days"
+                  + "           + COALESCE(src.safety_stock_qty, 0), 3),"
                   + "     eoq = CASE WHEN rp.unit_cost > 0 AND rp.holding_cost_pct > 0"
-                  + "               THEN ROUND(SQRT(2.0 * sub.avg_daily * 365"
+                  + "               THEN ROUND(SQRT(2.0 * src.avg_daily * 365"
                   + "                    * rp.ordering_cost"
                   + "                    / (rp.unit_cost * rp.holding_cost_pct)), 3)"
                   + "               ELSE NULL END,"
                   + "     computed_at = now()"
                   + " FROM ("
-                  + "   SELECT d.variant_id,"
-                  + "          COALESCE(AVG(d.demand_qty), 0) / 30.0 AS avg_daily,"
-                  + "          MAX(ss.safety_stock_qty) AS safety_stock_qty"
-                  + "   FROM demand_history d"
+                  + "   SELECT p.id,"
+                  + "          COALESCE("
+                  + "            (SELECT SUM(x) / p.lead_time_days"
+                  + "             FROM unnest(f.points[1:p.lead_time_days]) AS x),"
+                  + "            m.avg_daily) AS avg_daily,"
+                  + "          ss.safety_stock_qty"
+                  + "   FROM reorder_point_plans p"
+                  + "   LEFT JOIN demand_forecasts f"
+                  + "     ON f.tenant_id = p.tenant_id AND f.store_id = p.store_id"
+                  + "     AND f.variant_id = p.variant_id"
+                  + "   LEFT JOIN ("
+                  + "     SELECT d.variant_id, COALESCE(AVG(d.demand_qty), 0) / 30.0 AS avg_daily"
+                  + "     FROM demand_history d"
+                  + "     WHERE d.tenant_id = ? AND d.store_id = ? AND d.bucket_type = 'MONTH'"
+                  + "     GROUP BY d.variant_id"
+                  + "   ) m ON m.variant_id = p.variant_id"
                   + "   LEFT JOIN safety_stock_params ss"
-                  + "     ON ss.tenant_id=d.tenant_id AND ss.store_id=d.store_id"
-                  + "     AND ss.variant_id=d.variant_id"
-                  + "   WHERE d.tenant_id=? AND d.store_id=? AND d.bucket_type='MONTH'"
-                  + "   GROUP BY d.variant_id"
-                  + " ) sub"
-                  + " WHERE rp.tenant_id=? AND rp.store_id=?"
-                  + "   AND rp.variant_id = sub.variant_id";
+                  + "     ON ss.tenant_id = p.tenant_id AND ss.store_id = p.store_id"
+                  + "     AND ss.variant_id = p.variant_id"
+                  + "   WHERE p.tenant_id = ? AND p.store_id = ?"
+                  + " ) src"
+                  + " WHERE rp.tenant_id = ? AND rp.store_id = ? AND rp.id = src.id"
+                  + "   AND src.avg_daily IS NOT NULL";
           try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setObject(1, tenantId);
-            ps.setObject(2, storeId);
-            ps.setObject(3, tenantId);
-            ps.setObject(4, storeId);
+            for (int i = 0; i < 3; i++) {
+              ps.setObject(2 * i + 1, tenantId);
+              ps.setObject(2 * i + 2, storeId);
+            }
             return ps.executeUpdate();
           }
         },

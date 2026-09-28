@@ -1,6 +1,9 @@
 package com.storeql.order.dto;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
@@ -107,7 +110,25 @@ public final class Dtos {
                       + " one assistant sells and another takes the money, and a shop paying"
                       + " commission pays the seller. POS only, and the operator when omitted; an"
                       + " online sale is credited to nobody.")
-          String sellerUserId) {}
+          String sellerUserId,
+      @Schema(
+              description =
+                  "Whether the store may substitute a line it cannot fill (substitutions for"
+                      + " out-of-stock online lines). On unless the shopper turns it off.")
+          Boolean allowSubstitutions,
+      @Schema(
+              description =
+                  "The delivery or collection window chosen at checkout (delivery and collection"
+                      + " slots): the fulfilment_windows id, from GET /storefront/fulfilment-slots."
+                      + " Both this and slotStartsAt are required together, only for an online"
+                      + " delivery or pickup order, and only where the fulfilling store offers"
+                      + " windows of that type.")
+          String slotWindowId,
+      @Schema(
+              description =
+                  "The chosen occurrence's start (ISO instant), exactly as"
+                      + " GET /storefront/fulfilment-slots gave it.")
+          String slotStartsAt) {}
 
   @Schema(
       name = "PriceOrderRequest",
@@ -141,7 +162,16 @@ public final class Dtos {
                       + " placed with server-side pricing off.")
           BigDecimal vatAmount,
       @Schema(description = "The markdown a scanned sticker priced this line at (05.4), if any.")
-          String markdownId) {}
+          String markdownId,
+      @Schema(
+              description =
+                  "How much of qty will never be handed over: closed short or replaced by a"
+                      + " substitute (substitutions for out-of-stock online lines).")
+          BigDecimal shortQty,
+      @Schema(description = "qty less what was handed over and what was closed short.")
+          BigDecimal outstandingQty,
+      @Schema(description = "The line this one stands in for, when it is a substitute.")
+          String substitutesItemId) {}
 
   @Schema(
       name = "FulfilRequest",
@@ -213,7 +243,173 @@ public final class Dtos {
               description =
                   "Who is credited with the sale, which is not who rang it up. Absent for a sale"
                       + " credited to nobody, which is the ordinary case online.")
-          String sellerUserId) {}
+          String sellerUserId,
+      @Schema(
+              description =
+                  "The checkout this order is a part of, when a delivery was split across shops"
+                      + " (order orchestration). Absent for an order never split, and on lists.")
+          OrderGroupResponse group,
+      @Schema(
+              description =
+                  "How a picked online order was handed over (ship-from-store): dispatched to a"
+                      + " carrier, or collected by its shopper. Absent until it is.")
+          HandoverResponse handover,
+      @Schema(
+              description =
+                  "Whether the shopper allows the store to substitute a line it cannot fill;"
+                      + " their choice at checkout.")
+          Boolean allowSubstitutions,
+      @Schema(
+              description =
+                  "The delivery or collection window this order holds (delivery and collection"
+                      + " slots); null for a till sale or an order at a store with no windows.")
+          SlotResponse slot,
+      @Schema(
+              description =
+                  "contactPhone in international form, e.g. +919886021001 (a phone at the till):"
+                      + " read in the store's own country, then the business's. Absent when no"
+                      + " number was given, or the one given could not be read.")
+          String contactPhoneE164) {}
+
+  @Schema(
+      name = "SlotResponse",
+      description =
+          "The delivery or collection window an order holds: the chosen occurrence's UTC instants"
+              + " and the store's own zone, plus date/startTime/endTime already computed in that"
+              + " zone so a client shows the store's own local time without converting anything.")
+  public record SlotResponse(
+      String startsAt,
+      String endsAt,
+      @Schema(description = "IANA zone id, e.g. Europe/Warsaw.") String timeZone,
+      @Schema(description = "The occurrence's date in the store's own zone, yyyy-MM-dd.")
+          String date,
+      @Schema(description = "The occurrence's start, HH:mm in the store's own zone.")
+          String startTime,
+      @Schema(description = "The occurrence's end, HH:mm in the store's own zone.")
+          String endTime) {}
+
+  @Schema(
+      name = "DispatchRequest",
+      description = "Hand a picked (FULFILLED) delivery order to a carrier (ship-from-store).")
+  public record DispatchRequest(
+      @Schema(description = "The carrier's name as the store knows it.") @NotBlank @Size(max = 80)
+          String carrier,
+      @Schema(description = "The carrier's reference or tracking number, when it gave one.")
+          @Size(max = 80)
+          String reference,
+      @Schema(description = "How many parcels left, when counted.") @Min(1) @Max(999)
+          Integer parcels) {}
+
+  @Schema(
+      name = "CollectRequest",
+      description = "Hand a picked (FULFILLED) pickup order to its shopper at the counter.")
+  public record CollectRequest(
+      @Schema(description = "Who took it, when staff noted it.") @Size(max = 120)
+          String collectedBy) {}
+
+  @Schema(
+      name = "ShortCloseRequest",
+      description =
+          "Close a line short (substitutions for out-of-stock online lines): the quantity that will"
+              + " never be handed over comes off the order and the money for it goes back.")
+  public record ShortCloseRequest(
+      @Schema(description = "How much to close; everything still outstanding when omitted.")
+          @DecimalMin("0.001")
+          BigDecimal qty,
+      @Schema(description = "Why, for the history.") @Size(max = 200) String reason) {}
+
+  @Schema(
+      name = "SubstituteRequest",
+      description =
+          "Put a substitute in the bag for a line the store cannot fill: a new line, charged at no"
+              + " more than the original, the original closed short for the quantity.")
+  public record SubstituteRequest(
+      @Schema(description = "The variant put in the bag.") @NotBlank String substituteVariantId,
+      @Schema(description = "How much; everything still outstanding when omitted.")
+          @DecimalMin("0.001")
+          BigDecimal qty,
+      @Schema(
+              description =
+                  "The substitute's net unit price, only when server-side pricing is off; ignored"
+                      + " otherwise.")
+          BigDecimal unitPrice,
+      @Schema(description = "Why, for the history.") @Size(max = 200) String reason) {}
+
+  @Schema(
+      name = "SubstituteSuggestionResponse",
+      description =
+          "A stand-in the business declared for a line's product, with what the order's store has"
+              + " of it.")
+  public record SubstituteSuggestionResponse(
+      String variantId, String productName, String sku, BigDecimal available) {}
+
+  @Schema(
+      name = "OwingLineResponse",
+      description = "A line of an online order the store still owes something on.")
+  public record OwingLineResponse(
+      String variantId,
+      BigDecimal qty,
+      BigDecimal fulfilledQty,
+      BigDecimal shortQty,
+      BigDecimal outstandingQty) {}
+
+  @Schema(
+      name = "OwingOrderResponse",
+      description =
+          "An online order at the store still owing something — confirmed or part-picked — with"
+              + " the lines it owes and whether the shopper allows substitutions.")
+  public record OwingOrderResponse(
+      String orderId,
+      String status,
+      String fulfilmentType,
+      boolean allowSubstitutions,
+      String createdAt,
+      List<OwingLineResponse> lines) {}
+
+  @Schema(
+      name = "HandoverResponse",
+      description =
+          "The one handover of a picked online order: DISPATCHED to a carrier, or COLLECTED by"
+              + " the shopper.")
+  public record HandoverResponse(
+      String kind,
+      String carrier,
+      String reference,
+      Integer parcels,
+      String collectedBy,
+      String at,
+      @Schema(description = "The member of staff who recorded it.") String by) {}
+
+  @Schema(
+      name = "OrderGroupResponse",
+      description =
+          "One checkout placed as several orders, one per shop, paid once: its total is the"
+              + " parts' totals added up.")
+  public record OrderGroupResponse(
+      String id,
+      @Schema(
+              description =
+                  "The login that placed the checkout; payment-svc checks a shopper pays only"
+                      + " their own.")
+          String loginId,
+      BigDecimal total,
+      String currency,
+      String createdAt,
+      @Schema(description = "The parts, the delivery-area store's first.")
+          List<OrderPartResponse> parts) {}
+
+  @Schema(name = "OrderPartResponse", description = "One order of a split checkout.")
+  public record OrderPartResponse(
+      String orderId,
+      String storeId,
+      String status,
+      BigDecimal total,
+      @Schema(description = "How many items the part carries.") BigDecimal units,
+      @Schema(
+              description =
+                  "The delivery or collection window the checkout holds; the same for every"
+                      + " part, since it takes one place (delivery and collection slots).")
+          SlotResponse slot) {}
 
   @Schema(name = "OrderStatusHistoryResponse", description = "Append-only order status transition.")
   public record OrderStatusHistoryResponse(
@@ -286,7 +482,27 @@ public final class Dtos {
       String currency,
       String createdAt,
       String updatedAt,
-      String paymentMethod) {}
+      String paymentMethod,
+      @Schema(
+              description =
+                  "The split checkout this order is a part of (order orchestration); absent for an"
+                      + " order never split.")
+          String groupId,
+      @Schema(
+              description =
+                  "How a picked online order was handed over (ship-from-store); absent until it"
+                      + " is.")
+          HandoverResponse handover,
+      @Schema(
+              description =
+                  "Whether the shopper allows the store to substitute a line it cannot fill;"
+                      + " their choice at checkout.")
+          Boolean allowSubstitutions,
+      @Schema(
+              description =
+                  "The delivery or collection window this order holds (delivery and collection"
+                      + " slots); null for a till sale or an order at a store with no windows.")
+          SlotResponse slot) {}
 
   @Schema(name = "VoidRequest")
   public record VoidRequest(
@@ -967,4 +1183,83 @@ public final class Dtos {
       BigDecimal refundedAmount,
       BigDecimal unredeemedAmount,
       List<DepositReportRowResponse> byMaterial) {}
+
+  // ── Delivery and collection slots ─────────────────────────────────────────
+
+  @Schema(
+      name = "FulfilmentWindowResponse",
+      description = "One weekly window a store offers, for delivery or for collection.")
+  public record FulfilmentWindowResponse(
+      String id,
+      String storeId,
+      @Schema(description = "DELIVERY or PICKUP.") String fulfilmentType,
+      @Schema(description = "ISO weekday: 1=Monday .. 7=Sunday.") int weekday,
+      @Schema(description = "The store's own local time, HH:mm.") String startTime,
+      String endTime,
+      @Schema(description = "How many orders this occurrence takes.") int capacity,
+      @Schema(description = "Minutes before the start orders stop.") int cutoffMinutes,
+      boolean active,
+      @Schema(description = "The store's own IANA zone at the moment this was set.")
+          String timeZone,
+      String updatedAt,
+      String updatedBy) {}
+
+  @Schema(
+      name = "CreateFulfilmentWindowRequest",
+      description = "A new weekly window for one store and fulfilment type.")
+  public record CreateFulfilmentWindowRequest(
+      @NotBlank String storeId,
+      @Schema(description = "DELIVERY or PICKUP.") @NotBlank String fulfilmentType,
+      @Schema(description = "ISO weekday: 1=Monday .. 7=Sunday.") @NotNull Integer weekday,
+      @Schema(description = "The store's own local time, HH:mm.") @NotBlank String startTime,
+      @NotBlank String endTime,
+      @Schema(description = "How many orders this occurrence takes; at least 1.") @NotNull
+          Integer capacity,
+      @Schema(description = "Minutes before the start orders stop; 0 when omitted.")
+          Integer cutoffMinutes,
+      @Schema(description = "On when omitted.") Boolean active) {}
+
+  @Schema(
+      name = "UpdateFulfilmentWindowRequest",
+      description = "A window's shape. Its store and fulfilment type cannot be changed.")
+  public record UpdateFulfilmentWindowRequest(
+      @Schema(description = "ISO weekday: 1=Monday .. 7=Sunday.") @NotNull Integer weekday,
+      @NotBlank String startTime,
+      @NotBlank String endTime,
+      @NotNull Integer capacity,
+      Integer cutoffMinutes,
+      Boolean active) {}
+
+  @Schema(
+      name = "FulfilmentSlotResponse",
+      description = "One occurrence of a window, with what it has left.")
+  public record FulfilmentSlotResponse(
+      String windowId,
+      String startsAt,
+      String endsAt,
+      @Schema(description = "The occurrence's start, HH:mm in the store's own zone.")
+          String startTime,
+      @Schema(description = "The occurrence's end, HH:mm in the store's own zone.") String endTime,
+      @Schema(description = "Places still free; never above capacity.") int left,
+      boolean full) {}
+
+  @Schema(name = "FulfilmentSlotDayResponse", description = "One of the next seven days.")
+  public record FulfilmentSlotDayResponse(
+      @Schema(description = "yyyy-MM-dd in the store's own zone.") String date,
+      @Schema(description = "This day's occurrences, earliest first; empty when none is left.")
+          List<FulfilmentSlotResponse> slots) {}
+
+  @Schema(
+      name = "FulfilmentSlotsResponse",
+      description =
+          "The next seven days of a store's windows of one fulfilment type, in the store's own"
+              + " time, with what each occurrence has left.")
+  public record FulfilmentSlotsResponse(
+      String storeId,
+      @Schema(description = "DELIVERY or PICKUP.") String fulfilmentType,
+      @Schema(description = "IANA zone id, e.g. Europe/Warsaw.") String timeZone,
+      @Schema(description = "Whether the store offers at least one active window of this type.")
+          boolean offered,
+      @Schema(description = "Always exactly seven entries, today first.")
+          List<FulfilmentSlotDayResponse> days) {}
 }

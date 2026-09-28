@@ -1,14 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../shared/util/short_ref.dart';
+import '../../shared/util/status_labels.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
 import 'retention_providers.dart';
 
 // ---------------------------------------------------------------------------
@@ -22,8 +24,11 @@ import 'retention_providers.dart';
 // every purge a service ran is on the register below.
 // ---------------------------------------------------------------------------
 
-final _day = DateFormat('d MMM yyyy');
-final _moment = DateFormat('d MMM yyyy HH:mm');
+/// A day as [AppFormat] writes it everywhere else (*11 Sept 2026*).
+String _day(DateTime d) => AppFormat.date(d.toIso8601String());
+
+/// A moment as [AppFormat] writes it (*11 Sept 2026 14:05*).
+String _moment(DateTime d) => AppFormat.dateTime(d.toIso8601String());
 
 class RetentionScreen extends ConsumerWidget {
   const RetentionScreen({super.key});
@@ -36,6 +41,16 @@ class RetentionScreen extends ConsumerWidget {
     final runs = ref.watch(retentionRunsProvider);
     final text = Theme.of(context).textTheme;
     final cs = Theme.of(context).colorScheme;
+    // A class by its name, looked up from the sheet; a code the sheet does not
+    // name (or before it has loaded) reads as words, never as a constant.
+    final classNames = {
+      for (final c in sheet.value?.classes ?? const <RetentionClass>[])
+        c.code: c.name,
+    };
+    String className(String code) {
+      final name = classNames[code];
+      return name == null || name.isEmpty ? humanizeCode(code) : name;
+    }
 
     void refresh() {
       ref.invalidate(retentionSheetProvider);
@@ -43,17 +58,17 @@ class RetentionScreen extends ConsumerWidget {
     }
 
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      padding: context.pagePadding,
       children: [
-        Text('Data retention', style: text.headlineMedium),
-        const SizedBox(height: AppSpacing.sm),
-        Text(
-          'How long each class of data is kept. A period may be longer than the law of '
-          'the countries this business trades in requires, never shorter; a hold stops a '
-          'purge while a matter is open; every purge run is recorded below.',
-          style: TextStyle(color: cs.outline),
+        const PageHeader(
+          title: 'Data retention',
+          subtitle:
+              'How long each class of data is kept. A period may be longer than the law of '
+              'the countries this business trades in requires, never shorter; a hold stops a '
+              'purge while a matter is open; every purge run is recorded below.',
+          // The list is inset by the page gutter already.
+          padding: EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
         ),
-        const SizedBox(height: AppSpacing.lg),
         if (sheet.hasError)
           ErrorView(
             message: friendlyError(
@@ -69,11 +84,16 @@ class RetentionScreen extends ConsumerWidget {
             'Trading in ${sheet.value!.countries.join(', ')}',
             style: text.titleMedium,
           ),
+          // The theme's Card has no margin: each card stands 8 below the one
+          // above, so their outlines never touch.
           for (final c in sheet.value!.classes)
-            _ClassCard(
-              retentionClass: c,
-              canSet: isManager,
-              onChanged: refresh,
+            Padding(
+              padding: const EdgeInsetsDirectional.only(top: AppSpacing.sm),
+              child: _ClassCard(
+                retentionClass: c,
+                canSet: isManager,
+                onChanged: refresh,
+              ),
             ),
           const SizedBox(height: AppSpacing.lg),
           Text('Holds', style: text.titleMedium),
@@ -87,10 +107,10 @@ class RetentionScreen extends ConsumerWidget {
               key: Key('retention-hold-${h.id}'),
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.pause_circle_outline),
-              title: Text(_describeHold(h)),
+              title: Text(_describeHold(h, className)),
               subtitle: Text(
                 '${h.reason}'
-                '${h.placedAt == null ? '' : ' · placed ${_day.format(h.placedAt!)}'}',
+                '${h.placedAt == null ? '' : ' · placed ${_day(h.placedAt!)}'}',
               ),
               trailing: isManager
                   ? TextButton(
@@ -102,7 +122,7 @@ class RetentionScreen extends ConsumerWidget {
             ),
           if (isManager)
             Align(
-              alignment: Alignment.centerLeft,
+              alignment: AlignmentDirectional.centerStart,
               child: TextButton.icon(
                 key: const Key('retention-hold-place'),
                 icon: const Icon(Icons.add),
@@ -157,24 +177,28 @@ class RetentionScreen extends ConsumerWidget {
               contentPadding: EdgeInsets.zero,
               dense: true,
               leading: const Icon(Icons.history),
-              title: Text('${r.service} · ${r.dataClass}'),
+              title: Text(className(r.dataClass)),
               subtitle: Text(
                 '${r.rowsAffected} purged · ${r.heldSkipped} held'
-                '${r.cutoff == null ? '' : ' · older than ${_day.format(r.cutoff!)}'}'
-                '${r.finishedAt == null ? '' : ' · ${_moment.format(r.finishedAt!)}'}',
+                '${r.cutoff == null ? '' : ' · older than ${_day(r.cutoff!)}'}'
+                '${r.finishedAt == null ? '' : ' · ${_moment(r.finishedAt!)}'}',
               ),
             ),
       ],
     );
   }
 
-  static String _describeHold(RetentionHold h) {
+  static String _describeHold(
+    RetentionHold h,
+    String Function(String code) className,
+  ) {
     final what = switch (h.subjectKind) {
       'CUSTOMER' => 'Customer …${shortRef(h.subjectId ?? '')}',
       'ORDER' => 'Order …${shortRef(h.subjectId ?? '')}',
       _ => 'Everything',
     };
-    return '$what · ${h.dataClass ?? 'every class'}';
+    final dataClass = h.dataClass;
+    return '$what · ${dataClass == null ? 'every class' : className(dataClass)}';
   }
 
   Future<void> _release(

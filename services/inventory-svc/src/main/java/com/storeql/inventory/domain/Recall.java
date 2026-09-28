@@ -287,7 +287,13 @@ public final class Recall {
     }
   }
 
-  static boolean isSupplierLot(String batchNo) {
+  /**
+   * Whether a batch number is a supplier's lot, as opposed to one this service wrote itself for
+   * stock it could not tie to one ({@code ADJ}, or {@code CC-}/{@code MO-}/{@code TO-}/{@code RET-}
+   * and a short reference). Only a supplier's lot can be recalled by name, or carried across when
+   * the stock moves.
+   */
+  public static boolean isSupplierLot(String batchNo) {
     return batchNo != null && !batchNo.isBlank() && !SYSTEM_BATCH_NO.matcher(batchNo).matches();
   }
 

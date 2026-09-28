@@ -43,6 +43,9 @@ public class ProductClient {
   private static final System.Logger LOG = System.getLogger(ProductClient.class.getName());
   private static final String PRODUCT_SERVICE = "product-svc";
 
+  /** The role the relationships read is made with: a management read in product-svc. */
+  private static final String RELATIONSHIPS_ROLE = "MANAGER";
+
   @Inject ServiceConfig config;
 
   private ServiceRegistry registry;
@@ -160,6 +163,66 @@ public class ProductClient {
       }
       return Optional.of(out);
     }
+  }
+
+  /**
+   * The variants the business declared as stand-ins for one (product-svc's {@code SUBSTITUTE} item
+   * relationships), for a picker choosing a substitute (substitutions for out-of-stock online
+   * lines). product-svc keeps that read under its management roles, and the picker is a cashier or
+   * storekeeper whom order-svc has already checked against the order's store, so the read is made
+   * as the service ({@link #RELATIONSHIPS_ROLE}) with the picker's login forwarded for the record —
+   * the way {@code StockClient} reads inventory-svc as staff.
+   *
+   * @return the related variants, in the order product-svc lists them; empty when there are none or
+   *     product-svc could not be reached
+   */
+  @Retry(maxRetries = 2, delay = 200)
+  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
+  @Fallback(fallbackMethod = "noSubstitutes")
+  public java.util.List<UUID> substitutes(UUID tenantId, UUID variantId, TenantContext ctx) {
+    String base =
+        com.storeql.service.ServiceReader.configuredUrl(PRODUCT_SERVICE)
+            .orElseGet(
+                () -> registry.resolve(PRODUCT_SERVICE).map(ServiceInstance::baseUri).orElse(null));
+    if (base == null) {
+      return java.util.List.of();
+    }
+    var req =
+        webClient
+            .get(base + "/admin/products/variants/" + variantId + "/relationships")
+            .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
+            .header(HeaderNames.create(HttpHeaders.ROLES), RELATIONSHIPS_ROLE);
+    if (ctx.userId() != null) {
+      req = req.header(HeaderNames.create(HttpHeaders.USER_ID), ctx.userId().toString());
+    }
+    try (HttpClientResponse res = req.request()) {
+      String body = res.as(String.class);
+      if (res.status().code() != 200) {
+        LOG.log(
+            System.Logger.Level.WARNING, "relationships HTTP {0}: {1}", res.status().code(), body);
+        return java.util.List.of();
+      }
+      java.util.List<UUID> out = new java.util.ArrayList<>();
+      try (JsonReader reader = Json.createReader(new StringReader(body))) {
+        JsonArray data = reader.readObject().getJsonArray("data");
+        if (data != null) {
+          for (var r : data.getValuesAs(JsonObject.class)) {
+            if ("SUBSTITUTE".equals(r.getString("relationshipType", null))
+                && r.containsKey("relatedVariantId")
+                && !r.isNull("relatedVariantId")) {
+              out.add(Ids.parse(r.getString("relatedVariantId")));
+            }
+          }
+        }
+      }
+      return out;
+    }
+  }
+
+  @SuppressWarnings("unused")
+  java.util.List<UUID> noSubstitutes(UUID tenantId, UUID variantId, TenantContext ctx) {
+    LOG.log(System.Logger.Level.WARNING, "product-svc unavailable; no substitutes suggested");
+    return java.util.List.of();
   }
 
   // Only called reflectively by MicroProfile Fault Tolerance via @Fallback above.

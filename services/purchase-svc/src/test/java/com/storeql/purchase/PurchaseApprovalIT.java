@@ -39,7 +39,10 @@ class PurchaseApprovalIT {
   static {
     PG = PostgresSupport.start();
     // The tenants this suite acts for, as tenant-svc would describe them (SJ-D53).
-    TenantSvcStub.start().with(PurchaseApprovalIT.T, "GBP", "GB");
+    // Sterling at home, and a rate for the dollar (03.x): a dollar order is measured in sterling.
+    TenantSvcStub.start()
+        .with(PurchaseApprovalIT.T, "GBP", "GB")
+        .withFxRate(PurchaseApprovalIT.T, "USD", "0.79");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -94,6 +97,33 @@ class PurchaseApprovalIT {
     String body = r.readEntity(String.class);
     assertThat(body, containsString("\"status\":\"SUBMITTED\""));
     assertThat(body, not(containsString("PENDING_APPROVAL")));
+  }
+
+  @Test
+  @DisplayName(
+      "A dollar order, with no dollar ceiling, is measured in sterling at the business's rate — held or through by the translated figure, which the order keeps")
+  void aForeignOrderIsTranslatedIntoTheHomeCurrency() {
+    // $4,000 at 0.79 is £3,160: over a storekeeper's £500, and the reason says how it was measured.
+    String big = order("Dollar Supplies Inc", "USD", "1000", "4.00");
+    Response held = post("/purchase-orders/" + big + "/submit", "{}", "STOREKEEPER", BUYER);
+    assertThat(held.getStatus(), is(200));
+    String body = held.readEntity(String.class);
+    assertThat(body, containsString("\"status\":\"PENDING_APPROVAL\""));
+    assertThat(body, containsString("\"fxRate\":0.79"));
+    assertThat(body, containsString("\"totalNetHome\":3160.00"));
+    assertThat(body, containsString("\"homeCurrency\":\"GBP\""));
+    String trail =
+        get("/purchase-orders/" + big + "/approvals", "STOREKEEPER", BUYER)
+            .readEntity(String.class);
+    assertThat(trail, containsString("translated to GBP 3160.00 at 0.79 GBP per USD"));
+
+    // $500 is £395: inside the same storekeeper's authority.
+    String small = order("Dollar Sundries Inc", "USD", "125", "4.00");
+    Response through = post("/purchase-orders/" + small + "/submit", "{}", "STOREKEEPER", BUYER);
+    assertThat(through.getStatus(), is(200));
+    String ok = through.readEntity(String.class);
+    assertThat(ok, containsString("\"status\":\"SUBMITTED\""));
+    assertThat(ok, containsString("\"totalNetHome\":395.00"));
   }
 
   @Test
@@ -259,9 +289,11 @@ class PurchaseApprovalIT {
   @Test
   @DisplayName("A currency nobody configured fails CLOSED — even for an unlimited owner")
   void unconfiguredCurrencyIsHeld() {
-    // The dollar is deliberately absent from the limit table. The first order from a market nobody
-    // set up is exactly the order nobody reviewed, so it must not be the one that sails through.
-    String po = order("US Wholesale Inc", "USD", "1", "1.00"); // $1
+    // The euro is deliberately absent from the limit table, and the business keeps no rate for it
+    // either (the dollar has one, and is measured in sterling — see the translation test). The
+    // first order from a market nobody set up is exactly the order nobody reviewed, so it must not
+    // be the one that sails through.
+    String po = order("EU Wholesale GmbH", "EUR", "1", "1.00"); // €1
     Response r = post("/purchase-orders/" + po + "/submit", "{}", "OWNER", BUYER);
 
     assertThat(r.readEntity(String.class), containsString("\"status\":\"PENDING_APPROVAL\""));

@@ -1,12 +1,17 @@
 package com.storeql.customer.service;
 
+import com.storeql.customer.domain.CustomerSearch;
 import com.storeql.customer.domain.Domain.Customer;
 import com.storeql.customer.domain.Domain.CustomerAddress;
+import com.storeql.customer.domain.Domain.Expired;
 import com.storeql.customer.domain.Domain.LoyaltyAccount;
 import com.storeql.customer.domain.Domain.LoyaltyLedgerEntry;
+import com.storeql.customer.domain.Domain.LoyaltyView;
 import com.storeql.customer.domain.Domain.MarketingConsentEntry;
 import com.storeql.customer.domain.Domain.MarketingPreference;
 import com.storeql.customer.domain.Domain.StoreCreditAccount;
+import com.storeql.customer.domain.Domain.TierChange;
+import com.storeql.customer.domain.LoyaltyProgramme;
 import com.storeql.customer.dto.Dtos.AddAddressRequest;
 import com.storeql.customer.dto.Dtos.AddressResponse;
 import com.storeql.customer.dto.Dtos.AdjustPointsRequest;
@@ -26,9 +31,11 @@ import com.storeql.customer.dto.Dtos.StoreCreditLedgerEntryResponse;
 import com.storeql.customer.dto.Dtos.UpdateCustomerRequest;
 import com.storeql.customer.mapper.Mappers;
 import com.storeql.customer.repo.CustomerRepository;
+import com.storeql.customer.repo.LoyaltyProgrammeRepository;
 import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
+import com.storeql.web.ErrorCodes;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -53,6 +60,7 @@ public class CustomerService {
   public static final String ORDER_CONFIRMED_CONSUMER = "customer-svc/order-confirmed";
 
   @Inject CustomerRepository repo;
+  @Inject LoyaltyProgrammeRepository programmes;
   @Inject com.storeql.service.TenantProfiles profiles;
   @Inject com.storeql.customer.client.OrderClient orders;
   @Inject MarketingConsentService marketing;
@@ -83,6 +91,7 @@ public class CustomerService {
     }
     Instant now = Instant.now();
     UUID id = Ids.newId();
+    PhoneResult phoneResult = phoneE164For(tenantId, req.phone());
     var customer =
         new Customer(
             id,
@@ -99,7 +108,9 @@ public class CustomerService {
             null,
             now,
             now,
-            null);
+            null,
+            phoneResult.e164(),
+            phoneResult.checkedAt());
     String payload =
         Json.createObjectBuilder()
             .add("customerId", id.toString())
@@ -115,8 +126,11 @@ public class CustomerService {
     // the customer row: PECR asks what the person agreed to and UK GDPR art.7(1) asks for evidence
     // of it, and a single column can answer neither. Written after the customer exists rather than
     // with it — if this fails, the shop has a customer it may not market to, which is the safe way
-    // round for the failure to land.
-    if (Boolean.TRUE.equals(req.gdprConsent())) {
+    // round for the failure to land. The MARKETING purpose gate can refuse it outright — a
+    // business under a per-purpose consent law needs the purpose granted on its own, which a
+    // signup tick alone is not — and that is skipped quietly rather than failing the registration
+    // the tick rides with; the shop still has a customer, just not yet one it may market to.
+    if (Boolean.TRUE.equals(req.gdprConsent()) && !marketing.purposeGateBlocks(tenantId, id)) {
       marketing.setPreferences(
           tenantId,
           created,
@@ -372,16 +386,36 @@ public class CustomerService {
   }
 
   /**
-   * Lists a tenant's customers, one cursor page at a time.
+   * Lists a tenant's customers, one cursor page at a time, optionally narrowed to those whose name,
+   * email or phone holds {@code q}.
    *
    * @param tenantId owning tenant
+   * @param q text to find, case-insensitively, anywhere in the first, last or full name, the email
+   *     or the phone — a phone-shaped {@code q} of four digits or more on its digits alone,
+   *     whatever the spacing, and the same {@code q} parsed to E.164 against the business's own
+   *     countries, matched exactly; trimmed, and {@code null} or blank lists every customer as
+   *     before
    * @param afterId cursor — the last id from the previous page, or {@code null} to start
    * @param limit page size; silently capped at 100
    * @return the page of customers
+   * @throws ApiException {@code VALIDATION_FAILED} (400) when {@code q} is over 100 characters once
+   *     trimmed
    */
-  public List<Customer> list(UUID tenantId, String afterId, int limit) {
+  public List<Customer> list(UUID tenantId, String q, String afterId, int limit) {
+    String term = CustomerSearch.term(q);
+    if (CustomerSearch.tooLong(term)) {
+      throw new ApiException(
+          400,
+          ErrorCodes.VALIDATION_FAILED,
+          "Request validation failed",
+          List.of("q: at most " + CustomerSearch.MAX_LENGTH + " characters"));
+    }
     int cap = Math.min(limit, 100);
-    return repo.listCustomers(tenantId, afterId, cap);
+    // Only attempted when the term is already phone-shaped: an ordinary name search never needs
+    // the business's countries, and so never depends on tenant-svc being reachable to run at all.
+    String phoneE164 =
+        CustomerSearch.phonePattern(term) != null ? phoneE164Quietly(tenantId, term) : null;
+    return repo.listCustomers(tenantId, term, phoneE164, afterId, cap);
   }
 
   /**
@@ -401,6 +435,7 @@ public class CustomerService {
     Customer existing = get(tenantId, customerId);
     Instant now = Instant.now();
     Instant gdprConsent = Boolean.TRUE.equals(req.gdprConsent()) ? now : existing.gdprConsentAt();
+    PhoneResult phoneResult = phoneE164For(tenantId, req.phone());
     var updated =
         new Customer(
             existing.id(),
@@ -417,13 +452,15 @@ public class CustomerService {
             existing.anonymizedAt(),
             existing.createdAt(),
             now,
-            language(req.preferredLanguage(), existing.preferredLanguage()));
+            language(req.preferredLanguage(), existing.preferredLanguage()),
+            phoneResult.e164(),
+            phoneResult.checkedAt());
     return repo.updateCustomer(updated);
   }
 
   /**
-   * The language to keep (13.x): unchanged when the request does not say, cleared by an empty one.
-   * A client that has never heard of languages cannot wipe one the shopper chose.
+   * The language to keep: unchanged when the request does not say, cleared by an empty one. A
+   * client that has never heard of languages cannot wipe one the shopper chose.
    */
   static String language(String requested, String current) {
     if (requested == null) return current;
@@ -488,7 +525,7 @@ public class CustomerService {
               () -> ApiException.notFound("CUSTOMER_NOT_FOUND", "No customer with that email"));
     }
     if (phone != null && !phone.isBlank()) {
-      return repo.findByPhone(tenantId, phone)
+      return repo.findByPhone(tenantId, phone, phoneE164Quietly(tenantId, phone))
           .orElseThrow(
               () -> ApiException.notFound("CUSTOMER_NOT_FOUND", "No customer with that phone"));
     }
@@ -698,62 +735,65 @@ public class CustomerService {
                     customerId,
                     BigDecimal.ZERO,
                     BigDecimal.ZERO,
-                    LoyaltyAccount.TIER_BRONZE,
+                    programmeOf(tenantId).tiers().get(0).name(),
                     Instant.now(),
-                    Instant.now()));
+                    Instant.now(),
+                    BigDecimal.ZERO,
+                    null));
   }
 
-  /**
-   * Reads a loyalty account for the API: tenant scope plus object-level authorization.
-   *
-   * @param tenantId owning tenant
-   * @param customerId the customer whose account to read
-   * @param ctx caller context; staff may read anyone in the tenant, a customer only themselves
-   * @return the loyalty account, real or a zero-balance stand-in
-   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists or the
-   *     caller may not read it
-   */
   public LoyaltyAccount getLoyaltyAccount(UUID tenantId, UUID customerId, TenantContext ctx) {
     requireReadAccess(customerId, ctx);
     return getLoyaltyAccount(tenantId, customerId);
   }
 
+  /** Points that die within this many days are worth telling the customer about. */
+  public static final int EXPIRING_SOON_DAYS = 30;
+
   /**
-   * Awards loyalty points manually and publishes {@code LoyaltyEarned}.
-   *
-   * <p>The staff-initiated counterpart to {@link #accrueLoyaltyFromOrder}, and <strong>not</strong>
-   * idempotent — calling it twice awards twice.
-   *
-   * @param tenantId owning tenant
-   * @param customerId the customer to credit
-   * @param req the points, an optional originating order and a reason for the ledger
-   * @return the account with its new balance
-   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists in this
-   *     tenant
+   * A customer's loyalty as the API answers it: the account under the business's programme, with
+   * the next tier, the multiplier and the points about to expire.
    */
+  public LoyaltyView loyaltyView(UUID tenantId, UUID customerId, TenantContext ctx) {
+    requireReadAccess(customerId, ctx);
+    return loyaltyView(tenantId, customerId);
+  }
+
+  public LoyaltyView loyaltyView(UUID tenantId, UUID customerId) {
+    LoyaltyAccount account = getLoyaltyAccount(tenantId, customerId);
+    Instant within = Instant.now().plusSeconds(EXPIRING_SOON_DAYS * 86_400L);
+    return new LoyaltyView(
+        account,
+        programmeOf(tenantId),
+        programmes.expiringSoon(tenantId, customerId, within).orElse(null));
+  }
+
+  /** The signed-in shopper's own loyalty. */
+  public LoyaltyView myLoyalty(UUID tenantId, UUID loginId) {
+    return loyaltyView(tenantId, getByLogin(tenantId, loginId).id());
+  }
+
+  private LoyaltyProgramme programmeOf(UUID tenantId) {
+    return programmes.programme(tenantId);
+  }
+
   public LoyaltyAccount earnPoints(UUID tenantId, UUID customerId, EarnPointsRequest req) {
     get(tenantId, customerId);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     var event =
         loyaltyEvent(
             LOYALTY_EARNED, TOPIC_EARNED, tenantId, customerId, req.points(), orderId, null, null);
-    return repo.earnPoints(tenantId, customerId, req.points(), orderId, req.reason(), event);
+    return repo.earnPoints(
+        tenantId,
+        customerId,
+        req.points(),
+        orderId,
+        req.reason(),
+        programmeOf(tenantId),
+        event,
+        CustomerService::tierChangedEvent);
   }
 
-  /**
-   * Accrue loyalty points for a confirmed order, driven by the {@code OrderConfirmed} event and
-   * idempotent on its {@code eventId}. Points = order total × {@code
-   * storeql.customer.loyalty.points-per-unit}, rounded down so we never over-award. Zero/negative
-   * awards are a no-op; guest orders (no customerId) are filtered out before this is called.
-   *
-   * @param eventId the {@code OrderConfirmed} event id, the dedupe key for this accrual
-   * @param tenantId owning tenant
-   * @param customerId the customer to credit
-   * @param orderId the order the points are earned against
-   * @param total the order total the award is derived from
-   * @param taxAmount the VAT inside that total, carried on so the ledger can defer the points'
-   *     share of the sale's net revenue (17.11)
-   */
   public void accrueLoyaltyFromOrder(
       UUID eventId,
       UUID tenantId,
@@ -765,9 +805,6 @@ public class CustomerService {
     if (points.signum() <= 0) {
       return; // nothing to award
     }
-    var event =
-        loyaltyEvent(
-            LOYALTY_EARNED, TOPIC_EARNED, tenantId, customerId, points, orderId, total, taxAmount);
     repo.accrueFromOrderOnce(
         eventId,
         ORDER_CONFIRMED_CONSUMER,
@@ -775,17 +812,28 @@ public class CustomerService {
         customerId,
         orderId,
         points,
-        "Loyalty for order " + orderId,
-        event);
+        programmeOf(tenantId),
+        awarded ->
+            loyaltyEvent(
+                LOYALTY_EARNED,
+                TOPIC_EARNED,
+                tenantId,
+                customerId,
+                awarded,
+                orderId,
+                total,
+                taxAmount),
+        CustomerService::tierChangedEvent);
   }
 
   private static final String LOYALTY_EARNED = "LoyaltyEarned";
   private static final String TOPIC_EARNED = "storeql.customer.loyalty-earned";
+  static final String TOPIC_TIER_CHANGED = "storeql.customer.loyalty-tier-changed";
+  static final String TOPIC_EXPIRED = "storeql.customer.loyalty-expired";
 
   /**
    * A loyalty event. Each carries its own id, so the ledger that consumes them (purchase-svc,
-   * 17.11) posts each once; an accrual carries the sale's total and the VAT inside it, from which
-   * the points' share of the revenue is worked out.
+   * 17.11) can post each once however the topics interleave.
    */
   private static OutboxRow loyaltyEvent(
       String eventType,
@@ -811,6 +859,45 @@ public class CustomerService {
     return new OutboxRow(eventType, topic, tenantId, customerId, b.build().toString());
   }
 
+  /**
+   * {@code LoyaltyTierChanged}: a customer moved tier, up or down, and on what qualifying points.
+   */
+  static OutboxRow tierChangedEvent(TierChange change) {
+    var b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "LoyaltyTierChanged")
+            .add("tenantId", change.tenantId().toString())
+            .add("customerId", change.customerId().toString())
+            .add("fromTier", change.fromTier())
+            .add("toTier", change.toTier())
+            .add("qualifyingPoints", change.qualifyingPoints());
+    return new OutboxRow(
+        "LoyaltyTierChanged",
+        TOPIC_TIER_CHANGED,
+        change.tenantId(),
+        change.customerId(),
+        b.build().toString());
+  }
+
+  /** {@code LoyaltyExpired}: points that died, for the deferred revenue they carried (17.11). */
+  static OutboxRow expiredEvent(Expired expired) {
+    var b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "LoyaltyExpired")
+            .add("tenantId", expired.tenantId().toString())
+            .add("customerId", expired.customerId().toString())
+            .add("points", expired.points())
+            .add("expiredAt", expired.expiredAt().toString());
+    return new OutboxRow(
+        "LoyaltyExpired",
+        TOPIC_EXPIRED,
+        expired.tenantId(),
+        expired.customerId(),
+        b.build().toString());
+  }
+
   private BigDecimal pointsPerUnit() {
     try {
       return new BigDecimal(pointsPerUnitRaw.trim());
@@ -819,19 +906,6 @@ public class CustomerService {
     }
   }
 
-  /**
-   * Spends loyalty points and publishes {@code LoyaltyRedeemed}.
-   *
-   * <p>The balance check happens in the repository, inside the same transaction as the ledger
-   * write, so concurrent redemptions cannot together overdraw the account.
-   *
-   * @param tenantId owning tenant
-   * @param customerId the customer to debit
-   * @param req the points, an optional order being paid towards and a reason for the ledger
-   * @return the account with its new balance
-   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists; a conflict
-   *     when the balance is insufficient
-   */
   public LoyaltyAccount redeemPoints(UUID tenantId, UUID customerId, RedeemPointsRequest req) {
     get(tenantId, customerId);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
@@ -845,22 +919,10 @@ public class CustomerService {
             orderId,
             null,
             null);
-    return repo.redeemPoints(tenantId, customerId, req.points(), orderId, req.reason(), event);
+    return repo.redeemPoints(
+        tenantId, customerId, req.points(), orderId, req.reason(), programmeOf(tenantId), event);
   }
 
-  /**
-   * Applies a manual correction to a points balance and publishes {@code LoyaltyAdjusted}.
-   *
-   * <p>Signed: a negative value removes points. This is the goodwill/correction path, distinct from
-   * the earn and redeem ledgers.
-   *
-   * @param tenantId owning tenant
-   * @param customerId the customer whose balance to correct
-   * @param req the signed point delta and a reason for the ledger
-   * @return the account with its new balance
-   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists in this
-   *     tenant
-   */
   public LoyaltyAccount adjustPoints(UUID tenantId, UUID customerId, AdjustPointsRequest req) {
     get(tenantId, customerId);
     var event =
@@ -873,20 +935,16 @@ public class CustomerService {
             null,
             null,
             null);
-    return repo.adjustPoints(tenantId, customerId, req.points(), req.reason(), event);
+    return repo.adjustPoints(
+        tenantId,
+        customerId,
+        req.points(),
+        req.reason(),
+        programmeOf(tenantId),
+        event,
+        CustomerService::tierChangedEvent);
   }
 
-  /**
-   * Reads the append-only loyalty ledger, with tenant scoping but <strong>no</strong> object-level
-   * authorization.
-   *
-   * @param tenantId owning tenant
-   * @param customerId the customer whose ledger to read
-   * @param limit page size; silently capped at 100
-   * @return the ledger entries, newest first
-   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists in this
-   *     tenant
-   */
   public List<LoyaltyLedgerEntry> getLedger(UUID tenantId, UUID customerId, int limit) {
     get(tenantId, customerId);
     return repo.listLedger(tenantId, customerId, Math.min(limit, 100));
@@ -1049,5 +1107,62 @@ public class CustomerService {
 
   private static LocalDate parseDate(String s) {
     return s == null || s.isBlank() ? null : com.storeql.web.Parsing.date(s, "dob");
+  }
+
+  // ── phones to E.164 ────────────────────────────────────────────
+
+  /**
+   * A write of {@code phone}: its E.164 form, and whether that was derived against regions that
+   * were actually readable (which decides {@code phoneE164CheckedAt} — see {@link Customer}).
+   */
+  private record PhoneResult(String e164, Instant checkedAt) {}
+
+  /**
+   * Normalises a phone being written, trying the business's home country then its stores' — no
+   * country is ever named here. Never fails the write it rides with. {@code checkedAt} is set only
+   * when the home country was actually read (store countries are the enhancement — a store list
+   * that could not be read falls back to none rather than abandoning the home country); left null,
+   * the phone is kept as typed and the row stays a candidate for the start-up backfill.
+   */
+  private PhoneResult phoneE164For(UUID tenantId, String rawPhone) {
+    if (rawPhone == null || rawPhone.isBlank()) {
+      return new PhoneResult(null, null);
+    }
+    String home = readableCountry(tenantId);
+    java.util.Collection<String> stores = readableStoreCountries(tenantId);
+    String e164 = com.storeql.service.PhoneNumbers.toE164(rawPhone, home, stores);
+    return new PhoneResult(e164, home == null ? null : Instant.now());
+  }
+
+  /**
+   * The same normalisation for a read (search {@code q=}, lookup {@code phone=}): never throws, and
+   * never marks anything, so a tenant-svc hiccup degrades to today's plain-text matching rather
+   * than failing the read. A number typed with a leading "+" still resolves even then — it needs no
+   * region at all.
+   */
+  private String phoneE164Quietly(UUID tenantId, String rawPhone) {
+    String home = readableCountry(tenantId);
+    java.util.Collection<String> stores = readableStoreCountries(tenantId);
+    return com.storeql.service.PhoneNumbers.toE164(rawPhone, home, stores);
+  }
+
+  private String readableCountry(UUID tenantId) {
+    try {
+      return profiles.requireCountry(tenantId);
+    } catch (ApiException e) {
+      return null;
+    }
+  }
+
+  /**
+   * The countries the business's stores are in, or none when they could not be read: the stores
+   * only add readings to the home country's, so a read that failed costs nothing but those.
+   */
+  private java.util.Collection<String> readableStoreCountries(UUID tenantId) {
+    try {
+      return profiles.stores(tenantId, null).countries().values();
+    } catch (ApiException e) {
+      return List.of();
+    }
   }
 }

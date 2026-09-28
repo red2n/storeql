@@ -1,5 +1,6 @@
 package com.storeql.customer.repo;
 
+import com.storeql.customer.domain.CustomerSearch;
 import com.storeql.customer.domain.Domain.Customer;
 import com.storeql.customer.domain.Domain.CustomerAddress;
 import com.storeql.customer.domain.Domain.LoyaltyAccount;
@@ -8,12 +9,15 @@ import com.storeql.customer.domain.Domain.MarketingConsentEntry;
 import com.storeql.customer.domain.Domain.MarketingPreference;
 import com.storeql.customer.domain.Domain.StoreCreditAccount;
 import com.storeql.customer.domain.Domain.StoreCreditLedgerEntry;
+import com.storeql.customer.domain.Domain.TierChange;
+import com.storeql.customer.domain.LoyaltyProgramme;
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,9 +26,12 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Function;
 
 /**
  * Persistence for customers, addresses, loyalty, and store credit. Every query on tenant-owned data
@@ -63,7 +70,8 @@ public class CustomerRepository extends BaseOutboxRepository {
   public Optional<Customer> findById(UUID tenantId, UUID customerId) {
     return query(
             "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
+                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language,"
+                + " phone_e164, phone_e164_checked_at"
                 + " FROM customers WHERE tenant_id = ? AND id = ?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -81,7 +89,8 @@ public class CustomerRepository extends BaseOutboxRepository {
     try (PreparedStatement ps =
         conn.prepareStatement(
             "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
+                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language,"
+                + " phone_e164, phone_e164_checked_at"
                 + " FROM customers WHERE tenant_id = ? AND id = ?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, customerId);
@@ -101,7 +110,8 @@ public class CustomerRepository extends BaseOutboxRepository {
   public Optional<Customer> findByEmail(UUID tenantId, String email) {
     return query(
             "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
+                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language,"
+                + " phone_e164, phone_e164_checked_at"
                 + " FROM customers WHERE tenant_id = ? AND email = ?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -123,7 +133,8 @@ public class CustomerRepository extends BaseOutboxRepository {
   public Optional<Customer> findByLogin(UUID tenantId, UUID loginId) {
     return query(
             "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
+                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language,"
+                + " phone_e164, phone_e164_checked_at"
                 + " FROM customers WHERE tenant_id = ? AND login_id = ?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -206,6 +217,8 @@ public class CustomerRepository extends BaseOutboxRepository {
                   null,
                   now,
                   now,
+                  null,
+                  null,
                   null);
           insertCustomer(conn, created);
           insertOutbox(conn, event);
@@ -220,7 +233,8 @@ public class CustomerRepository extends BaseOutboxRepository {
     try (PreparedStatement ps =
         conn.prepareStatement(
             "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
+                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language,"
+                + " phone_e164, phone_e164_checked_at"
                 + " FROM customers WHERE tenant_id = ? AND login_id = ?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, loginId);
@@ -427,6 +441,128 @@ public class CustomerRepository extends BaseOutboxRepository {
   }
 
   /**
+   * The marketing-consent cascade: withdrawing the MARKETING purpose switches off every channel
+   * that is currently on, on the caller's own transaction, one {@code marketing_consent_log} row
+   * per channel with source {@link MarketingConsentEntry#SOURCE_PURPOSE_WITHDRAWN}. Called from
+   * {@code PrivacyRepository}, in the same package, so the purpose withdrawal and the channel
+   * switch-off commit or roll back together.
+   *
+   * @param c the open connection of the caller's own transaction
+   * @param tenantId owning tenant
+   * @param customerId the person whose channels to switch off
+   * @param actorId the staff member acting, or {@code null} when the person acted themselves —
+   *     carried over from the purpose withdrawal that caused this
+   * @param at when the withdrawal was recorded — carried over so the cascade dates with it
+   * @return how many channels were switched off
+   */
+  static int cascadeWithdrawMarketingInTx(
+      Connection c, UUID tenantId, UUID customerId, UUID actorId, Instant at) throws SQLException {
+    List<String> onChannels = new ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT channel FROM marketing_preferences"
+                + " WHERE tenant_id = ? AND customer_id = ? AND granted = TRUE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, customerId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          onChannels.add(rs.getString("channel"));
+        }
+      }
+    }
+    for (String channel : onChannels) {
+      MarketingConsentEntry e =
+          new MarketingConsentEntry(
+              Ids.newId(),
+              tenantId,
+              customerId,
+              channel,
+              false,
+              MarketingPreference.BASIS_NONE,
+              MarketingConsentEntry.SOURCE_PURPOSE_WITHDRAWN,
+              null,
+              actorId,
+              at);
+      upsertPreferenceInTx(c, e);
+      insertConsentLogInTx(c, e);
+    }
+    return onChannels.size();
+  }
+
+  /**
+   * The tenants with a customer row still needing the marketing-consent-cascade reconciliation : a
+   * channel recorded as granted whose MARKETING purpose stands withdrawn — predating this rule, or
+   * from a gap before the cascade covered every path.
+   *
+   * @param limit the most tenants to name at once
+   * @return distinct tenant ids, in no particular order
+   */
+  public List<UUID> distinctTenantsNeedingMarketingReconciliation(int limit) {
+    return query(
+        "SELECT DISTINCT mp.tenant_id FROM marketing_preferences mp"
+            + " WHERE mp.granted = TRUE AND EXISTS ("
+            + "   SELECT 1 FROM purpose_consents pc"
+            + "    WHERE pc.tenant_id = mp.tenant_id AND pc.customer_id = mp.customer_id"
+            + "      AND pc.purpose = 'MARKETING' AND pc.granted = FALSE)"
+            + " LIMIT ?",
+        ps -> ps.setInt(1, limit),
+        rs -> rs.getObject("tenant_id", UUID.class),
+        "tenants needing marketing purpose reconciliation");
+  }
+
+  /**
+   * One batch of the start-up reconciliation, for one tenant: a customer whose MARKETING purpose
+   * stands withdrawn but who still has a channel recorded as granted gets that channel switched off
+   * the same way {@link #cascadeWithdrawMarketingInTx} does it live, with its own {@code
+   * marketing_consent_log} row. Idempotent: once a channel is off, this stops finding it, so
+   * running this twice in a row does the second time as nothing.
+   *
+   * @param tenantId the tenant to reconcile; every row touched is this tenant's
+   * @param limit the most channels this batch corrects
+   * @return how many channels were switched off in this batch
+   */
+  public int reconcileMarketingPurposeWithdrawalsBatchForTenant(UUID tenantId, int limit) {
+    return inTx(
+        c -> {
+          List<MarketingConsentEntry> toFix = new ArrayList<>();
+          Instant now = Instant.now();
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT mp.customer_id, mp.channel FROM marketing_preferences mp"
+                      + " WHERE mp.tenant_id = ? AND mp.granted = TRUE AND EXISTS ("
+                      + "   SELECT 1 FROM purpose_consents pc"
+                      + "    WHERE pc.tenant_id = mp.tenant_id AND pc.customer_id = mp.customer_id"
+                      + "      AND pc.purpose = 'MARKETING' AND pc.granted = FALSE)"
+                      + " ORDER BY mp.customer_id, mp.channel LIMIT ?")) {
+            ps.setObject(1, tenantId);
+            ps.setInt(2, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                toFix.add(
+                    new MarketingConsentEntry(
+                        Ids.newId(),
+                        tenantId,
+                        rs.getObject("customer_id", UUID.class),
+                        rs.getString("channel"),
+                        false,
+                        MarketingPreference.BASIS_NONE,
+                        MarketingConsentEntry.SOURCE_PURPOSE_WITHDRAWN,
+                        null,
+                        null,
+                        now));
+              }
+            }
+          }
+          for (MarketingConsentEntry e : toFix) {
+            upsertPreferenceInTx(c, e);
+            insertConsentLogInTx(c, e);
+          }
+          return toFix.size();
+        },
+        "reconcile marketing purpose withdrawals for tenant");
+  }
+
+  /**
    * The evidence trail behind one person's marketing preferences.
    *
    * @param tenantId owning tenant; the first condition of the query
@@ -537,17 +673,42 @@ public class CustomerRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Looks a customer up by phone within a tenant.
+   * Looks a customer up by phone within a tenant: {@code phoneE164} — the same query parsed against
+   * the business's own countries — matched exactly, first; a number that does not parse still finds
+   * a match by today's exact-as-stored rule, kept as the fallback.
    *
-   * @param tenantId owning tenant; the first condition of the query
-   * @param phone the phone number to match exactly, as stored
-   * @return the customer, or empty when nothing matches
+   * @param tenantId owning tenant; the first condition of every query here
+   * @param phone the phone number as typed, matched exactly against the stored column when the
+   *     E.164 match finds nothing
+   * @param phoneE164 {@code phone} parsed to E.164 against the business's own countries, or {@code
+   *     null} when it does not parse under any of them
+   * @return the customer, or empty when nothing matches either way
    */
-  public Optional<Customer> findByPhone(UUID tenantId, String phone) {
+  public Optional<Customer> findByPhone(UUID tenantId, String phone, String phoneE164) {
+    if (phoneE164 != null) {
+      Optional<Customer> byE164 =
+          query(
+                  "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob,"
+                      + " gender, status, gdpr_consent_at, anonymized_at, created_at, updated_at,"
+                      + " preferred_language, phone_e164, phone_e164_checked_at FROM customers"
+                      + " WHERE tenant_id = ? AND phone_e164 = ?",
+                  ps -> {
+                    ps.setObject(1, tenantId);
+                    ps.setString(2, phoneE164);
+                  },
+                  CustomerRepository::mapCustomer,
+                  "find customer by phone e164")
+              .stream()
+              .findFirst();
+      if (byE164.isPresent()) {
+        return byE164;
+      }
+    }
     return query(
             "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
-                + " FROM customers WHERE tenant_id = ? AND phone = ?",
+                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at,"
+                + " preferred_language, phone_e164, phone_e164_checked_at FROM customers"
+                + " WHERE tenant_id = ? AND phone = ?",
             ps -> {
               ps.setObject(1, tenantId);
               ps.setString(2, phone);
@@ -564,37 +725,70 @@ public class CustomerRepository extends BaseOutboxRepository {
    * <p>The extra row is the caller's next-page signal, not data to render: whoever calls this must
    * trim to {@code limit} before returning it.
    *
+   * <p>A search term matches, case-insensitively, anywhere in the full name (so in the first or the
+   * last name too), the email or the phone. It is bound as a pattern with its wildcards escaped,
+   * never written into the SQL, and narrows the same tenant-first, cursor-paged query as the plain
+   * list, so a search pages exactly as the list does. A phone-shaped term of four digits or more
+   * also matches the phone reduced to its digits ({@link CustomerSearch#phonePattern}), so the
+   * spacing and punctuation of neither the term nor the stored number stand in the way; the same
+   * term parsed to E.164 against the business's own countries is matched exactly against {@code
+   * phone_e164}, so a Polish shop typing "512 345 678" finds "+48 512 345 678" however it was
+   * stored.
+   *
    * @param tenantId owning tenant; the first condition of the query
+   * @param term trimmed text to find, or {@code null} to list every customer
+   * @param phoneE164 {@code term} parsed to E.164 against the business's own countries, or {@code
+   *     null} when {@code term} is not phone-shaped or none of the business's countries parse it
    * @param afterId cursor — the last id from the previous page, or {@code null} to start
    * @param limit page size; one extra row is fetched beyond it
    * @return up to {@code limit + 1} customers, newest first; anonymized customers are excluded
    */
-  public List<Customer> listCustomers(UUID tenantId, String afterId, int limit) {
-    if (afterId == null) {
-      return query(
-          "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-              + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
-              + " FROM customers WHERE tenant_id = ? AND status != 'ANONYMIZED'"
-              + " ORDER BY created_at DESC, id LIMIT ?",
-          ps -> {
-            ps.setObject(1, tenantId);
-            ps.setInt(2, limit + 1);
-          },
-          CustomerRepository::mapCustomer,
-          "list customers");
+  public List<Customer> listCustomers(
+      UUID tenantId, String term, String phoneE164, String afterId, int limit) {
+    StringBuilder sql =
+        new StringBuilder(
+            "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
+                + " status, gdpr_consent_at, anonymized_at, created_at, updated_at,"
+                + " preferred_language, phone_e164, phone_e164_checked_at FROM customers"
+                + " WHERE tenant_id = ? AND status != 'ANONYMIZED'");
+    UUID after = afterId == null ? null : Ids.parse(afterId);
+    if (after != null) sql.append(" AND id < ?");
+    String pattern = term == null ? null : CustomerSearch.pattern(term);
+    String digits = term == null ? null : CustomerSearch.phonePattern(term);
+    if (pattern != null) {
+      // concat_ws skips a null half, so a record with only a first or a last name still matches.
+      sql.append(
+          " AND (concat_ws(' ', first_name, last_name) ILIKE ? ESCAPE '\\'"
+              + " OR email ILIKE ? ESCAPE '\\' OR phone ILIKE ? ESCAPE '\\'");
+      // The stored phone as its ASCII digits, against the term's digits — both bound, so however
+      // either was spaced or punctuated, the same number is found. Kept alongside the E.164 exact
+      // match below, never replaced by it: a number that does not parse still deserves this.
+      if (digits != null) sql.append(" OR regexp_replace(phone, '[^0-9]', '', 'g') LIKE ?");
+      if (phoneE164 != null) sql.append(" OR phone_e164 = ?");
+      sql.append(')');
     }
+    sql.append(" ORDER BY created_at DESC, id LIMIT ?");
+    String label =
+        pattern != null
+            ? "search customers"
+            : after != null ? "list customers paged" : "list customers";
     return query(
-        "SELECT id, tenant_id, login_id, email, phone, first_name, last_name, dob, gender,"
-            + " status, gdpr_consent_at, anonymized_at, created_at, updated_at, preferred_language"
-            + " FROM customers WHERE tenant_id = ? AND status != 'ANONYMIZED'"
-            + " AND id < ? ORDER BY created_at DESC, id LIMIT ?",
+        sql.toString(),
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setObject(2, Ids.parse(afterId));
-          ps.setInt(3, limit + 1);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          if (after != null) ps.setObject(i++, after);
+          if (pattern != null) {
+            ps.setString(i++, pattern);
+            ps.setString(i++, pattern);
+            ps.setString(i++, pattern);
+            if (digits != null) ps.setString(i++, digits);
+            if (phoneE164 != null) ps.setString(i++, phoneE164);
+          }
+          ps.setInt(i, limit + 1);
         },
         CustomerRepository::mapCustomer,
-        "list customers paged");
+        label);
   }
 
   /**
@@ -613,7 +807,8 @@ public class CustomerRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               conn.prepareStatement(
                   "UPDATE customers SET phone=?, first_name=?, last_name=?, dob=?, gender=?,"
-                      + " gdpr_consent_at=?, updated_at=?, preferred_language=?"
+                      + " gdpr_consent_at=?, updated_at=?, preferred_language=?, phone_e164=?,"
+                      + " phone_e164_checked_at=?"
                       + " WHERE tenant_id=? AND id=? AND status != 'ANONYMIZED'")) {
             ps.setString(1, c.phone());
             ps.setString(2, c.firstName());
@@ -624,8 +819,14 @@ public class CustomerRepository extends BaseOutboxRepository {
                 6, c.gdprConsentAt() == null ? null : c.gdprConsentAt().atOffset(ZoneOffset.UTC));
             ps.setObject(7, c.updatedAt().atOffset(ZoneOffset.UTC));
             ps.setString(8, c.preferredLanguage());
-            ps.setObject(9, c.tenantId());
-            ps.setObject(10, c.id());
+            ps.setString(9, c.phoneE164());
+            ps.setObject(
+                10,
+                c.phoneE164CheckedAt() == null
+                    ? null
+                    : c.phoneE164CheckedAt().atOffset(ZoneOffset.UTC));
+            ps.setObject(11, c.tenantId());
+            ps.setObject(12, c.id());
             rows = ps.executeUpdate();
           }
           if (rows == 0) {
@@ -639,6 +840,80 @@ public class CustomerRepository extends BaseOutboxRepository {
           return findById(conn, c.tenantId(), c.id());
         },
         "update customer");
+  }
+
+  /**
+   * The tenants with a customer row still needing the phone-to-E.164 backfill: a phone on file that
+   * has never been checked against readable regions, whether because this row predates the feature
+   * or because a tenant's regions could not be read the last time it was tried.
+   *
+   * @param limit the most tenants to name at once
+   * @return distinct tenant ids, in no particular order
+   */
+  public List<UUID> distinctTenantsNeedingPhoneBackfill(int limit) {
+    return query(
+        "SELECT DISTINCT tenant_id FROM customers"
+            + " WHERE phone IS NOT NULL AND phone_e164 IS NULL AND phone_e164_checked_at IS NULL"
+            + " LIMIT ?",
+        ps -> ps.setInt(1, limit),
+        rs -> rs.getObject("tenant_id", UUID.class),
+        "tenants needing phone backfill");
+  }
+
+  /**
+   * One batch of the phone-to-E.164 backfill for one tenant, whose regions the caller has already
+   * read successfully: every candidate row is stamped with {@code phone_e164_checked_at} whatever
+   * it finds, so a genuinely unparseable number is tried once and left alone rather than retried on
+   * every future batch or start.
+   *
+   * @param tenantId the tenant to backfill; every row touched is this tenant's
+   * @param homeCountry the business's own country, tried first; {@code null} when not known
+   * @param storeCountries the business's stores' countries, tried next
+   * @param limit the most rows this batch corrects
+   * @return how many rows were stamped in this batch
+   */
+  public int phoneBackfillBatchForTenant(
+      UUID tenantId, String homeCountry, Collection<String> storeCountries, int limit) {
+    return inTx(
+        c -> {
+          record Candidate(UUID id, String phone) {}
+          List<Candidate> candidates = new ArrayList<>();
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT id, phone FROM customers"
+                      + " WHERE tenant_id = ? AND phone IS NOT NULL AND phone_e164 IS NULL"
+                      + " AND phone_e164_checked_at IS NULL LIMIT ?")) {
+            ps.setObject(1, tenantId);
+            ps.setInt(2, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                candidates.add(
+                    new Candidate(rs.getObject("id", UUID.class), rs.getString("phone")));
+              }
+            }
+          }
+          Instant now = Instant.now();
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE customers SET phone_e164 = ?, phone_e164_checked_at = ?"
+                      + " WHERE tenant_id = ? AND id = ?")) {
+            for (Candidate candidate : candidates) {
+              String e164 =
+                  com.storeql.service.PhoneNumbers.toE164(
+                      candidate.phone(), homeCountry, storeCountries);
+              ps.setString(1, e164);
+              ps.setObject(2, now.atOffset(ZoneOffset.UTC));
+              ps.setObject(3, tenantId);
+              ps.setObject(4, candidate.id());
+              ps.addBatch();
+            }
+            if (!candidates.isEmpty()) {
+              ps.executeBatch();
+            }
+          }
+          return candidates.size();
+        },
+        "phone backfill batch");
   }
 
   /**
@@ -711,7 +986,8 @@ public class CustomerRepository extends BaseOutboxRepository {
           try (var ps =
               conn.prepareStatement(
                   "UPDATE customers SET email = 'anon-' || id || '@deleted', phone = NULL,"
-                      + " first_name = 'Deleted', last_name = 'User', dob = NULL, gender = NULL,"
+                      + " phone_e164 = NULL, first_name = 'Deleted', last_name = 'User',"
+                      + " dob = NULL, gender = NULL,"
                       + " gdpr_consent_at = NULL, status = 'ANONYMIZED', anonymized_at = ?,"
                       + " updated_at = ? WHERE tenant_id = ? AND id = ? AND status <> 'ANONYMIZED'")) {
             ps.setObject(1, now.atOffset(ZoneOffset.UTC));
@@ -919,34 +1195,32 @@ public class CustomerRepository extends BaseOutboxRepository {
    * @param event the outbox row to commit alongside
    * @return the account with its new balance and tier
    */
+  /**
+   * Awards points by hand: a lot under the programme's expiry, the ledger entry, the tier the
+   * qualifying points now reach (announced when it moves), and the event.
+   */
   public LoyaltyAccount earnPoints(
       UUID tenantId,
       UUID customerId,
       BigDecimal points,
       UUID orderId,
       String reason,
-      OutboxRow event) {
+      LoyaltyProgramme programme,
+      OutboxRow event,
+      Function<TierChange, OutboxRow> tierEvent) {
     return inTx(
         conn -> {
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
-          BigDecimal newBalance = account.pointsBalance().add(points);
-          BigDecimal newLifetime = account.lifetimePoints().add(points);
-          String newTier = LoyaltyAccount.tierFor(newLifetime);
           LoyaltyAccount updated =
-              updateLoyaltyAccount(conn, tenantId, customerId, newBalance, newLifetime, newTier);
-          UUID entryId = Ids.newId();
-          insertLedgerEntry(
-              conn,
-              new LoyaltyLedgerEntry(
-                  entryId,
-                  tenantId,
-                  customerId,
-                  LoyaltyLedgerEntry.TYPE_EARN,
+              credit(
+                  conn,
+                  account,
                   points,
-                  newBalance,
+                  LoyaltyLedgerEntry.TYPE_EARN,
                   orderId,
                   reason,
-                  Instant.now()));
+                  programme,
+                  tierEvent);
           insertOutbox(conn, event);
           return updated;
         },
@@ -954,11 +1228,8 @@ public class CustomerRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Accrue loyalty points from a confirmed order — idempotently. The processed_events mark and the
-   * accrual commit in one transaction (golden rule #7), so a redelivered OrderConfirmed accrues at
-   * most once. Returns {@code null} when the event was already processed, or when the order's
-   * customer is unknown to this service (e.g. since anonymized) — the dedupe mark still stands so
-   * the consumer does not loop; otherwise the updated account.
+   * Accrues a confirmed order's points once: the base points at the customer's tier multiplier,
+   * said so in the reason, with the event built for the points actually awarded.
    */
   public LoyaltyAccount accrueFromOrderOnce(
       UUID eventId,
@@ -966,9 +1237,10 @@ public class CustomerRepository extends BaseOutboxRepository {
       UUID tenantId,
       UUID customerId,
       UUID orderId,
-      BigDecimal points,
-      String reason,
-      OutboxRow event) {
+      BigDecimal basePoints,
+      LoyaltyProgramme programme,
+      Function<BigDecimal, OutboxRow> eventFor,
+      Function<TierChange, OutboxRow> tierEvent) {
     return inTx(
         conn -> {
           if (!markProcessedIfNewTx(conn, eventId, consumerName)) {
@@ -978,24 +1250,28 @@ public class CustomerRepository extends BaseOutboxRepository {
             return null; // order referenced a customer this service doesn't hold — skip, no loop
           }
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
-          BigDecimal newBalance = account.pointsBalance().add(points);
-          BigDecimal newLifetime = account.lifetimePoints().add(points);
-          String newTier = LoyaltyAccount.tierFor(newLifetime);
+          BigDecimal multiplier = programme.multiplierFor(account.tier());
+          BigDecimal points = basePoints.multiply(multiplier).setScale(2, RoundingMode.DOWN);
+          String reason =
+              "Loyalty for order "
+                  + orderId
+                  + (multiplier.compareTo(BigDecimal.ONE) == 0
+                      ? ""
+                      : " · "
+                          + account.tier()
+                          + " ×"
+                          + multiplier.stripTrailingZeros().toPlainString());
           LoyaltyAccount updated =
-              updateLoyaltyAccount(conn, tenantId, customerId, newBalance, newLifetime, newTier);
-          insertLedgerEntry(
-              conn,
-              new LoyaltyLedgerEntry(
-                  Ids.newId(),
-                  tenantId,
-                  customerId,
-                  LoyaltyLedgerEntry.TYPE_EARN,
+              credit(
+                  conn,
+                  account,
                   points,
-                  newBalance,
+                  LoyaltyLedgerEntry.TYPE_EARN,
                   orderId,
                   reason,
-                  Instant.now()));
-          insertOutbox(conn, event);
+                  programme,
+                  tierEvent);
+          insertOutbox(conn, eventFor.apply(points));
           return updated;
         },
         "accrue loyalty from order");
@@ -1014,26 +1290,14 @@ public class CustomerRepository extends BaseOutboxRepository {
     }
   }
 
-  /**
-   * Debits points, appends the ledger entry and writes the event — atomically.
-   *
-   * <p>The balance check happens inside the transaction, so concurrent redemptions cannot together
-   * overdraw the account. Lifetime points are untouched, so the tier does not fall.
-   *
-   * @param tenantId owning tenant
-   * @param customerId the customer to debit
-   * @param points the points to spend
-   * @param orderId the order being paid towards, or {@code null}
-   * @param reason free-text reason recorded on the ledger entry
-   * @param event the outbox row to commit alongside
-   * @return the account with its new balance
-   */
+  /** Spends points from the lot that dies first; refused when the balance is short. */
   public LoyaltyAccount redeemPoints(
       UUID tenantId,
       UUID customerId,
       BigDecimal points,
       UUID orderId,
       String reason,
+      LoyaltyProgramme programme,
       OutboxRow event) {
     return inTx(
         conn -> {
@@ -1045,10 +1309,20 @@ public class CustomerRepository extends BaseOutboxRepository {
                 "Insufficient loyalty points",
                 java.util.List.of());
           }
+          Instant now = Instant.now();
+          LoyaltyLots.consume(
+              conn, tenantId, LoyaltyLots.openLots(conn, account, programme, now), points);
           BigDecimal newBalance = account.pointsBalance().subtract(points);
           LoyaltyAccount updated =
               updateLoyaltyAccount(
-                  conn, tenantId, customerId, newBalance, account.lifetimePoints(), account.tier());
+                  conn,
+                  tenantId,
+                  customerId,
+                  newBalance,
+                  account.lifetimePoints(),
+                  account.tier(),
+                  account.qualifyingPoints(),
+                  account.tierSince());
           insertLedgerEntry(
               conn,
               new LoyaltyLedgerEntry(
@@ -1060,7 +1334,7 @@ public class CustomerRepository extends BaseOutboxRepository {
                   newBalance,
                   orderId,
                   reason,
-                  Instant.now()));
+                  now));
           insertOutbox(conn, event);
           return updated;
         },
@@ -1068,41 +1342,61 @@ public class CustomerRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Applies a signed manual correction to a points balance, atomically with its ledger entry and
-   * event.
-   *
-   * @param tenantId owning tenant
-   * @param customerId the customer whose balance to correct
-   * @param points the signed delta; negative removes points
-   * @param reason free-text reason recorded on the ledger entry
-   * @param event the outbox row to commit alongside
-   * @return the account with its new balance
+   * A correction: an award is a lot like any earning and may move the tier; a deduction comes out
+   * of the lots that die first, and never below zero.
    */
   public LoyaltyAccount adjustPoints(
-      UUID tenantId, UUID customerId, BigDecimal points, String reason, OutboxRow event) {
+      UUID tenantId,
+      UUID customerId,
+      BigDecimal points,
+      String reason,
+      LoyaltyProgramme programme,
+      OutboxRow event,
+      Function<TierChange, OutboxRow> tierEvent) {
     return inTx(
         conn -> {
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
-          BigDecimal newBalance = account.pointsBalance().add(points).max(BigDecimal.ZERO);
-          BigDecimal newLifetime =
-              points.compareTo(BigDecimal.ZERO) > 0
-                  ? account.lifetimePoints().add(points)
-                  : account.lifetimePoints();
-          String newTier = LoyaltyAccount.tierFor(newLifetime);
-          LoyaltyAccount updated =
-              updateLoyaltyAccount(conn, tenantId, customerId, newBalance, newLifetime, newTier);
-          insertLedgerEntry(
-              conn,
-              new LoyaltyLedgerEntry(
-                  Ids.newId(),
-                  tenantId,
-                  customerId,
-                  LoyaltyLedgerEntry.TYPE_ADJUST,
-                  points,
-                  newBalance,
-                  null,
-                  reason,
-                  Instant.now()));
+          LoyaltyAccount updated;
+          if (points.signum() > 0) {
+            updated =
+                credit(
+                    conn,
+                    account,
+                    points,
+                    LoyaltyLedgerEntry.TYPE_ADJUST,
+                    null,
+                    reason,
+                    programme,
+                    tierEvent);
+          } else {
+            Instant now = Instant.now();
+            BigDecimal taken = points.negate().min(account.pointsBalance());
+            LoyaltyLots.consume(
+                conn, tenantId, LoyaltyLots.openLots(conn, account, programme, now), taken);
+            BigDecimal newBalance = account.pointsBalance().subtract(taken);
+            updated =
+                updateLoyaltyAccount(
+                    conn,
+                    tenantId,
+                    customerId,
+                    newBalance,
+                    account.lifetimePoints(),
+                    account.tier(),
+                    account.qualifyingPoints(),
+                    account.tierSince());
+            insertLedgerEntry(
+                conn,
+                new LoyaltyLedgerEntry(
+                    Ids.newId(),
+                    tenantId,
+                    customerId,
+                    LoyaltyLedgerEntry.TYPE_ADJUST,
+                    points,
+                    newBalance,
+                    null,
+                    reason,
+                    now));
+          }
           insertOutbox(conn, event);
           return updated;
         },
@@ -1110,16 +1404,66 @@ public class CustomerRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Reads a customer's loyalty account.
-   *
-   * @param tenantId owning tenant; the first condition of the query
-   * @param customerId the customer whose account to read
-   * @return the account, or empty when the customer has never earned points
+   * Credits points: the lot, the ledger entry, the balances, and the tier the qualifying points now
+   * reach — announced through {@code tierEvent} when it moves.
    */
+  private LoyaltyAccount credit(
+      Connection conn,
+      LoyaltyAccount account,
+      BigDecimal points,
+      String type,
+      UUID orderId,
+      String reason,
+      LoyaltyProgramme programme,
+      Function<TierChange, OutboxRow> tierEvent)
+      throws SQLException {
+    Instant now = Instant.now();
+    UUID tenantId = account.tenantId();
+    UUID customerId = account.customerId();
+    if (points.signum() > 0) {
+      // A balance from before lots existed becomes an opening lot first, so spending order holds.
+      LoyaltyLots.openLots(conn, account, programme, now);
+    }
+    BigDecimal newBalance = account.pointsBalance().add(points);
+    BigDecimal newLifetime = account.lifetimePoints().add(points);
+    UUID entryId = Ids.newId();
+    insertLedgerEntry(
+        conn,
+        new LoyaltyLedgerEntry(
+            entryId, tenantId, customerId, type, points, newBalance, orderId, reason, now));
+    LoyaltyLots.insertLot(
+        conn, tenantId, customerId, entryId, points, now, programme.expiryFor(now));
+    LoyaltyAccount provisional =
+        new LoyaltyAccount(
+            account.id(),
+            tenantId,
+            customerId,
+            newBalance,
+            newLifetime,
+            account.tier(),
+            account.createdAt(),
+            now,
+            account.qualifyingPoints(),
+            account.tierSince());
+    BigDecimal qualifying = LoyaltyLots.qualifyingPoints(conn, provisional, programme, now);
+    String tier = programme.tierFor(qualifying).name();
+    Instant tierSince =
+        tier.equals(account.tier()) && account.tierSince() != null ? account.tierSince() : now;
+    LoyaltyAccount updated =
+        updateLoyaltyAccount(
+            conn, tenantId, customerId, newBalance, newLifetime, tier, qualifying, tierSince);
+    if (!tier.equals(account.tier()) && tierEvent != null) {
+      insertOutbox(
+          conn,
+          tierEvent.apply(new TierChange(tenantId, customerId, account.tier(), tier, qualifying)));
+    }
+    return updated;
+  }
+
   public Optional<LoyaltyAccount> findLoyaltyAccount(UUID tenantId, UUID customerId) {
     return query(
             "SELECT id, tenant_id, customer_id, points_balance, lifetime_points, tier,"
-                + " created_at, updated_at"
+                + " created_at, updated_at, qualifying_points, tier_since"
                 + " FROM loyalty_accounts WHERE tenant_id = ? AND customer_id = ?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -1321,8 +1665,9 @@ public class CustomerRepository extends BaseOutboxRepository {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO customers (id, tenant_id, login_id, email, phone, first_name, last_name,"
-                + " dob, gender, status, gdpr_consent_at, created_at, updated_at, preferred_language)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + " dob, gender, status, gdpr_consent_at, created_at, updated_at, preferred_language,"
+                + " phone_e164, phone_e164_checked_at)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, customer.id());
       ps.setObject(2, customer.tenantId());
       ps.setObject(3, customer.loginId());
@@ -1341,6 +1686,12 @@ public class CustomerRepository extends BaseOutboxRepository {
       ps.setObject(12, customer.createdAt().atOffset(ZoneOffset.UTC));
       ps.setObject(13, customer.createdAt().atOffset(ZoneOffset.UTC));
       ps.setString(14, customer.preferredLanguage());
+      ps.setString(15, customer.phoneE164());
+      ps.setObject(
+          16,
+          customer.phoneE164CheckedAt() == null
+              ? null
+              : customer.phoneE164CheckedAt().atOffset(ZoneOffset.UTC));
       ps.executeUpdate();
     }
   }
@@ -1413,7 +1764,8 @@ public class CustomerRepository extends BaseOutboxRepository {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO loyalty_accounts (id, tenant_id, customer_id, points_balance,"
-                + " lifetime_points, tier, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)"
+                + " lifetime_points, tier, created_at, updated_at, qualifying_points, tier_since)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?)"
                 + " ON CONFLICT (tenant_id, customer_id) DO NOTHING")) {
       ps.setObject(1, Ids.newId());
       ps.setObject(2, tenantId);
@@ -1423,6 +1775,8 @@ public class CustomerRepository extends BaseOutboxRepository {
       ps.setString(6, LoyaltyAccount.TIER_BRONZE);
       ps.setObject(7, now.atOffset(ZoneOffset.UTC));
       ps.setObject(8, now.atOffset(ZoneOffset.UTC));
+      ps.setBigDecimal(9, BigDecimal.ZERO);
+      ps.setObject(10, now.atOffset(ZoneOffset.UTC));
       ps.executeUpdate();
     }
     // FOR UPDATE: this row is read-modify-written by earn/redeem/adjust. Locking it for the
@@ -1432,7 +1786,7 @@ public class CustomerRepository extends BaseOutboxRepository {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT id, tenant_id, customer_id, points_balance, lifetime_points, tier,"
-                + " created_at, updated_at"
+                + " created_at, updated_at, qualifying_points, tier_since"
                 + " FROM loyalty_accounts WHERE tenant_id = ? AND customer_id = ? FOR UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, customerId);
@@ -1450,25 +1804,30 @@ public class CustomerRepository extends BaseOutboxRepository {
       UUID customerId,
       BigDecimal balance,
       BigDecimal lifetime,
-      String tier)
+      String tier,
+      BigDecimal qualifying,
+      Instant tierSince)
       throws SQLException {
     Instant now = Instant.now();
     try (PreparedStatement ps =
         c.prepareStatement(
-            "UPDATE loyalty_accounts SET points_balance=?, lifetime_points=?, tier=?, updated_at=?"
+            "UPDATE loyalty_accounts SET points_balance=?, lifetime_points=?, tier=?, updated_at=?,"
+                + " qualifying_points=?, tier_since=?"
                 + " WHERE tenant_id=? AND customer_id=?")) {
       ps.setBigDecimal(1, balance);
       ps.setBigDecimal(2, lifetime);
       ps.setString(3, tier);
       ps.setObject(4, now.atOffset(ZoneOffset.UTC));
-      ps.setObject(5, tenantId);
-      ps.setObject(6, customerId);
+      ps.setBigDecimal(5, qualifying);
+      ps.setObject(6, tierSince == null ? null : tierSince.atOffset(ZoneOffset.UTC));
+      ps.setObject(7, tenantId);
+      ps.setObject(8, customerId);
       ps.executeUpdate();
     }
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT id, tenant_id, customer_id, points_balance, lifetime_points, tier,"
-                + " created_at, updated_at"
+                + " created_at, updated_at, qualifying_points, tier_since"
                 + " FROM loyalty_accounts WHERE tenant_id = ? AND customer_id = ?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, customerId);
@@ -1592,6 +1951,7 @@ public class CustomerRepository extends BaseOutboxRepository {
     OffsetDateTime gdpr = rs.getObject("gdpr_consent_at", OffsetDateTime.class);
     OffsetDateTime anon = rs.getObject("anonymized_at", OffsetDateTime.class);
     LocalDate dob = rs.getObject("dob", LocalDate.class);
+    OffsetDateTime phoneChecked = rs.getObject("phone_e164_checked_at", OffsetDateTime.class);
     return new Customer(
         rs.getObject("id", UUID.class),
         rs.getObject("tenant_id", UUID.class),
@@ -1607,7 +1967,9 @@ public class CustomerRepository extends BaseOutboxRepository {
         anon == null ? null : anon.toInstant(),
         rs.getObject("created_at", OffsetDateTime.class).toInstant(),
         rs.getObject("updated_at", OffsetDateTime.class).toInstant(),
-        rs.getString("preferred_language"));
+        rs.getString("preferred_language"),
+        rs.getString("phone_e164"),
+        phoneChecked == null ? null : phoneChecked.toInstant());
   }
 
   private static CustomerAddress mapAddress(ResultSet rs) throws SQLException {
@@ -1626,7 +1988,8 @@ public class CustomerRepository extends BaseOutboxRepository {
         rs.getObject("created_at", OffsetDateTime.class).toInstant());
   }
 
-  private static LoyaltyAccount mapLoyaltyAccount(ResultSet rs) throws SQLException {
+  static LoyaltyAccount mapLoyaltyAccount(ResultSet rs) throws SQLException {
+    OffsetDateTime tierSince = rs.getObject("tier_since", OffsetDateTime.class);
     return new LoyaltyAccount(
         rs.getObject("id", UUID.class),
         rs.getObject("tenant_id", UUID.class),
@@ -1635,7 +1998,9 @@ public class CustomerRepository extends BaseOutboxRepository {
         rs.getBigDecimal("lifetime_points"),
         rs.getString("tier"),
         rs.getObject("created_at", OffsetDateTime.class).toInstant(),
-        rs.getObject("updated_at", OffsetDateTime.class).toInstant());
+        rs.getObject("updated_at", OffsetDateTime.class).toInstant(),
+        rs.getBigDecimal("qualifying_points"),
+        tierSince == null ? null : tierSince.toInstant());
   }
 
   private static LoyaltyLedgerEntry mapLedgerEntry(ResultSet rs) throws SQLException {

@@ -75,23 +75,37 @@ public class CustomerResource {
   }
 
   /**
-   * Cursor-paginated list of the tenant's customers.
+   * Cursor-paginated list of the tenant's customers, optionally narrowed by a search.
    *
+   * @param q text to find in the name, email or phone, case-insensitively; trimmed, at most 100
+   *     characters, and blank or absent lists every customer. A phone number of four digits or more
+   *     is matched on its digits alone, however it or the stored number is spaced
    * @param after cursor — the {@code nextCursor} from the previous page, or {@code null} to start
    * @param limit page size; capped at 100
    * @return the page plus a {@code nextCursor}, which is {@code null} on the last page
+   * @throws com.storeql.web.ApiException {@code 400 VALIDATION_FAILED} when {@code q} is over 100
+   *     characters once trimmed
    */
   @Operation(
-      summary = "List customers",
-      description = "Cursor-paginated list of customers for the caller's tenant.")
+      summary = "List or search customers",
+      description =
+          "Cursor-paginated list of customers for the caller's tenant, newest first. With q, only"
+              + " those whose first, last or full name, email or phone holds it, ignoring case;"
+              + " q is trimmed, a blank q lists everything, and % or _ match themselves. A q of"
+              + " only digits, spaces and + - ( ) . / holding four digits or more also matches the"
+              + " phone on its digits alone, so 07700 900111 finds 07700900111 and the other way"
+              + " about. The cursor pages a search exactly as it pages the list.")
   @APIResponse(responseCode = "200", description = "Page of customers")
+  @APIResponse(responseCode = "400", description = "q is over 100 characters")
   @Tag(name = "Customers")
   @GET
   public ApiResponse<CustomerListResponse> list(
-      @QueryParam("after") String after, @QueryParam("limit") @DefaultValue("20") int limit) {
+      @QueryParam("q") String q,
+      @QueryParam("after") String after,
+      @QueryParam("limit") @DefaultValue("20") int limit) {
     UUID tenantId = ctx.requireTenantId();
     int cap = Math.min(limit, 100);
-    var page = service.list(tenantId, after, cap);
+    var page = service.list(tenantId, q, after, cap);
     String nextCursor = page.size() > cap ? page.get(cap - 1).id().toString() : null;
     var items = page.stream().limit(cap).map(Mappers::toCustomer).collect(Collectors.toList());
     return ApiResponse.ok(
@@ -672,7 +686,31 @@ public class CustomerResource {
   public ApiResponse<?> getLoyalty(@PathParam("id") UUID customerId) {
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
-        Mappers.toLoyalty(service.getLoyaltyAccount(tenantId, customerId, ctx)),
+        Mappers.toLoyalty(service.loyaltyView(tenantId, customerId, ctx)),
+        ApiResponse.Meta.of(ctx.requestId()));
+  }
+
+  /**
+   * The signed-in shopper's own points (13.x): balance, tier, the next tier, and the points about
+   * to expire — what a customer is owed a warning about.
+   *
+   * @return the shopper's loyalty
+   * @throws com.storeql.web.ApiException {@code 404 CUSTOMER_NOT_FOUND} before the shopper has a
+   *     record in this shop
+   */
+  @Operation(
+      summary = "My loyalty",
+      description =
+          "The signed-in shopper's points in this shop: balance, tier and since when, the next tier"
+              + " and how far, the earn multiplier, and any points dying within thirty days.")
+  @APIResponse(responseCode = "200", description = "The shopper's loyalty")
+  @APIResponse(responseCode = "404", description = "No record of the shopper in this shop yet")
+  @Tag(name = "Loyalty")
+  @GET
+  @Path("/me/loyalty")
+  public ApiResponse<?> myLoyalty() {
+    return ApiResponse.ok(
+        Mappers.toLoyalty(service.myLoyalty(ctx.requireTenantId(), ctx.requireUserId())),
         ApiResponse.Meta.of(ctx.requestId()));
   }
 

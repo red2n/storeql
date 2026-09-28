@@ -58,7 +58,13 @@ public final class Dtos {
           @Size(max = 8)
           String einvoiceScheme,
       @Schema(description = "The supplier's identifier within that scheme.") @Size(max = 128)
-          String einvoiceId) {}
+          String einvoiceId,
+      @Schema(
+              description =
+                  "The supplier's quoted lead time in days: the promise a delivery is measured"
+                      + " against when an order names no date.")
+          @Min(0)
+          Integer leadTimeDays) {}
 
   @Schema(
       name = "UpdateSupplierRequest",
@@ -97,7 +103,9 @@ public final class Dtos {
           @Size(max = 8)
           String einvoiceScheme,
       @Schema(description = "The supplier's identifier within that scheme.") @Size(max = 128)
-          String einvoiceId) {}
+          String einvoiceId,
+      @Schema(description = "Quoted lead time in days; unchanged when omitted.") @Min(0)
+          Integer leadTimeDays) {}
 
   @Schema(name = "SupplierResponse")
   public record SupplierResponse(
@@ -124,7 +132,90 @@ public final class Dtos {
       @Schema(description = "When the bank details last changed; a run flags a recent change.")
           Instant bankDetailsChangedAt,
       @Schema(description = "The e-invoicing address scheme (EAS), or null.") String einvoiceScheme,
-      @Schema(description = "The identifier within that scheme, or null.") String einvoiceId) {}
+      @Schema(description = "The identifier within that scheme, or null.") String einvoiceId,
+      @Schema(description = "The supplier's quoted lead time in days, or null.")
+          Integer leadTimeDays) {}
+
+  // ── Supplier lead times and scorecards ─────────────────────────────────────
+
+  @Schema(
+      name = "SupplierDeliveryResponse",
+      description = "One delivery as measured on its receipt.")
+  public record SupplierDeliveryResponse(
+      UUID id,
+      UUID supplierId,
+      UUID poId,
+      UUID grId,
+      UUID storeId,
+      @Schema(description = "When the order went to the supplier.") Instant orderedAt,
+      @Schema(
+              description =
+                  "The date the goods were due: the order's, or the quoted lead time from the order; null when nothing was promised.")
+          LocalDate promisedDate,
+      Instant receivedAt,
+      @Schema(description = "Whole days from order to arrival.") int leadDays,
+      @Schema(
+              description =
+                  "Days after the promise, negative when early; null when nothing was promised.")
+          Integer lateDays,
+      @Schema(description = "Whether this receipt completed the order.") boolean complete,
+      BigDecimal receivedQty) {}
+
+  @Schema(name = "DeliveryStatsResponse")
+  public record DeliveryStatsResponse(
+      int count,
+      BigDecimal avgLeadDays,
+      BigDecimal medianLeadDays,
+      Integer maxLeadDays,
+      @Schema(description = "Deliveries that had a promise to be judged against.") int promised,
+      int onTime,
+      int late,
+      @Schema(description = "On or before the promise, over those promised; null when none.")
+          BigDecimal onTimePct,
+      @Schema(description = "Average days late over the late ones; null when none.")
+          BigDecimal avgDaysLate,
+      BigDecimal receivedQty) {}
+
+  @Schema(
+      name = "FillStatsResponse",
+      description = "Ordered against received over the orders finished in the period.")
+  public record FillStatsResponse(
+      int orders,
+      BigDecimal orderedQty,
+      BigDecimal receivedQty,
+      BigDecimal fillRatePct,
+      @Schema(description = "Orders closed short: the balance was never going to come.")
+          int shortClosed) {}
+
+  @Schema(name = "QualityStatsResponse", description = "What went back against what arrived.")
+  public record QualityStatsResponse(
+      int returns, BigDecimal returnedQty, BigDecimal returnRatePct) {}
+
+  @Schema(
+      name = "InvoiceStatsResponse",
+      description = "Invoices that matched the order and the receipt, against all of them.")
+  public record InvoiceStatsResponse(int invoices, int flagged, BigDecimal accuracyPct) {}
+
+  @Schema(
+      name = "SupplierScorecardResponse",
+      description = "One supplier's performance over a period, weighed into a score.")
+  public record SupplierScorecardResponse(
+      UUID supplierId,
+      String supplierName,
+      @Schema(description = "The supplier's quoted lead time in days, or null.")
+          Integer leadTimeDays,
+      LocalDate from,
+      LocalDate to,
+      DeliveryStatsResponse deliveries,
+      FillStatsResponse fill,
+      QualityStatsResponse quality,
+      InvoiceStatsResponse invoices,
+      @Schema(
+              description =
+                  "0 to 100: on time 40, fill 30, quality 20, invoice accuracy 10, over the parts known; null when nothing is.")
+          BigDecimal score,
+      @Schema(description = "A from 90, B from 75, C from 60, D below; null for no score.")
+          String grade) {}
 
   // ── Purchase Order ────────────────────────────────────────────────────────────
   @Schema(name = "CreatePurchaseOrderRequest", description = "Create a DRAFT purchase order.")
@@ -142,7 +233,18 @@ public final class Dtos {
               description =
                   "Date the goods are expected to arrive, as yyyy-MM-dd (e.g. 2026-01-31). A"
                       + " value carrying a time is rejected with INVALID_DATE.")
-          String expectedDelivery) {}
+          String expectedDelivery,
+      @Schema(
+              description =
+                  "OWNED (the default): the business owns the goods on arrival. CONSIGNMENT: the"
+                      + " supplier owns them until they sell — the receipt posts nothing, and"
+                      + " each sale is owed to the supplier at this order's price.")
+          String ownership,
+      @Schema(
+              description =
+                  "DUTY_PAID (the default), or DUTY_SUSPENDED for excise goods arriving into bond"
+                      + " at an approved warehouse: the duty is owed only on release to home use.")
+          String dutyStatus) {}
 
   @Schema(name = "AddPurchaseOrderLineRequest")
   public record AddPurchaseOrderLineRequest(
@@ -203,7 +305,27 @@ public final class Dtos {
                       + " SUBMITTED.")
           UUID approvedBy,
       @Schema(description = "When it was approved; null unless it needed and received approval.")
-          Instant approvedAt) {}
+          Instant approvedAt,
+      @Schema(description = "MANUAL, or PROPOSAL when a proposal run raised it (06.x).")
+          String source,
+      @Schema(
+              description =
+                  "Home units per one unit of the order's currency, as used when its spend authority"
+                      + " was measured (03.x); null while unsubmitted or when no translation applied.")
+          BigDecimal fxRate,
+      @Schema(
+              description =
+                  "The net translated into the home currency at fxRate; null without one.")
+          BigDecimal totalNetHome,
+      @Schema(description = "The home currency the translation was into; null without one.")
+          String homeCurrency,
+      @Schema(description = "OWNED, or CONSIGNMENT when the supplier owns the goods until sold.")
+          String ownership,
+      @Schema(description = "For a DROPSHIP order, the sale it fulfils.") UUID salesOrderId,
+      @Schema(description = "For a DROPSHIP order, the customer the supplier ships to.")
+          String shipTo,
+      @Schema(description = "DUTY_PAID, or DUTY_SUSPENDED when the goods arrive into bond.")
+          String dutyStatus) {}
 
   @Schema(
       name = "PurchaseOrderLineProgressResponse",
@@ -229,7 +351,9 @@ public final class Dtos {
       BigDecimal qty,
       BigDecimal unitPrice,
       String vatCode,
-      Instant createdAt) {}
+      Instant createdAt,
+      @Schema(description = "Why a proposal put this line here; null on a line a person typed.")
+          String proposalReason) {}
 
   // ── Goods Receipt ─────────────────────────────────────────────────────────────
   @Schema(
@@ -901,4 +1025,116 @@ public final class Dtos {
       UUID reversedBy,
       String reversedReason,
       List<LandedCostLineResponse> lines) {}
+
+  // ── Automatic order proposal (06.x) ──────────────────────────────────────────
+
+  @Schema(name = "ProposalRunRequest")
+  public record ProposalRunRequest(
+      @NotNull UUID storeId,
+      @Schema(description = "Days an order without an EOQ should cover, 1 to 365; 28 when omitted.")
+          Integer coverDays) {}
+
+  @Schema(name = "ProposedOrder")
+  public record ProposedOrderResponse(
+      UUID poId,
+      UUID supplierId,
+      String supplierName,
+      String currency,
+      int lines,
+      BigDecimal totalNet) {}
+
+  @Schema(name = "SkippedItem")
+  public record SkippedItemResponse(UUID variantId, String reason) {}
+
+  @Schema(name = "ProposalRun")
+  public record ProposalRunResponse(
+      UUID id,
+      UUID storeId,
+      String ranAt,
+      int coverDays,
+      @Schema(description = "Items with a reorder plan at the store.") int considered,
+      List<ProposedOrderResponse> orders,
+      List<SkippedItemResponse> skipped) {}
+
+  // ── Consignment stock, the buyer's side ─────────────────────────────────────
+
+  @Schema(name = "CreateConsignmentSettlementRequest")
+  public record CreateConsignmentSettlementRequest(
+      @NotNull UUID supplierId,
+      @Schema(description = "First day of the period, yyyy-MM-dd.") @NotBlank String from,
+      @Schema(description = "Last day of the period, yyyy-MM-dd.") @NotBlank String to) {}
+
+  @Schema(name = "ConsignmentSaleResponse")
+  public record ConsignmentSaleResponse(
+      UUID id,
+      UUID supplierId,
+      UUID storeId,
+      UUID variantId,
+      UUID batchId,
+      UUID orderId,
+      BigDecimal qty,
+      @Schema(description = "The order's price per unit: what the supplier is owed for each.")
+          BigDecimal unitCost,
+      BigDecimal amount,
+      String currency,
+      LocalDate soldOn,
+      boolean settled,
+      UUID settlementId,
+      Instant recordedAt) {}
+
+  @Schema(name = "ConsignmentSettlementResponse")
+  public record ConsignmentSettlementResponse(
+      UUID id,
+      UUID supplierId,
+      @Schema(description = "What the supplier invoices against.") String reference,
+      LocalDate periodFrom,
+      LocalDate periodTo,
+      String currency,
+      BigDecimal total,
+      int salesCount,
+      Instant createdAt,
+      @Schema(description = "The sales gathered; present when one settlement is read.")
+          List<ConsignmentSaleResponse> sales) {}
+
+  // ── Dropship: stock the business never holds ────────────────────────────────
+
+  @Schema(name = "CreateDropshipArrangementRequest")
+  public record CreateDropshipArrangementRequest(
+      @NotNull UUID variantId,
+      @NotNull UUID supplierId,
+      @Schema(description = "What the supplier charges per unit, in its own currency.")
+          @NotNull
+          @DecimalMin("0")
+          BigDecimal unitCost,
+      @Schema(description = "VAT code for the supplier's line; T1 by default.") String vatCode) {}
+
+  @Schema(name = "DropshipArrangementResponse")
+  public record DropshipArrangementResponse(
+      UUID id,
+      UUID variantId,
+      UUID supplierId,
+      BigDecimal unitCost,
+      String vatCode,
+      boolean active,
+      Instant createdAt,
+      Instant endedAt) {}
+
+  // ── Excise duty on releases from bond ──────────────────────────────────────
+
+  @Schema(name = "DutyReleaseResponse")
+  public record DutyReleaseResponse(
+      UUID id,
+      UUID releaseId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      BigDecimal dutyPerUnit,
+      BigDecimal dutyAmount,
+      String currency,
+      String reference,
+      LocalDate releasedOn) {}
+
+  @Schema(name = "DutyReleasesResponse", description = "The releases of a period and their duty.")
+  public record DutyReleasesResponse(
+      List<DutyReleaseResponse> releases, BigDecimal totalDuty, String currency) {}
 }

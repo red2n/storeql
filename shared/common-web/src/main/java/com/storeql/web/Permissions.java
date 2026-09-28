@@ -29,6 +29,7 @@ public final class Permissions {
   public static final String TILL_NO_SALE = "till.no_sale";
   public static final String TILL_MANAGE = "till.manage";
   public static final String STOCK_ADJUST = "stock.adjust";
+  public static final String STOCK_TRANSFER = "stock.transfer";
   public static final String PURCHASING_APPROVE = "purchasing.approve";
   public static final String PURCHASING_INVOICES_DECIDE = "purchasing.invoices.decide";
   public static final String FINANCE_JOURNAL = "finance.journal";
@@ -47,6 +48,10 @@ public final class Permissions {
     m.put(TILL_NO_SALE, "Open the cash drawer without a sale");
     m.put(TILL_MANAGE, "Close a till, record cash drops and movements, run the Z report");
     m.put(STOCK_ADJUST, "Adjust stock levels and write stock off");
+    m.put(
+        STOCK_TRANSFER,
+        "Move stock between stores and zones: raise, ship, receive and cancel transfer and move"
+            + " orders");
     m.put(
         PURCHASING_APPROVE,
         "Approve a purchase order awaiting approval, within the spend ceiling configured for the"
@@ -74,7 +79,10 @@ public final class Permissions {
   // tier, decides who may approve how much (storeql.purchase.approval.limits names roles and
   // amounts, and a storekeeper with a ceiling is a legitimate approver). The permission is what a
   // custom role can take away; the ceiling is what it still has to clear.
-  private static final Set<String> STOREKEEPER_DEFAULTS = Set.of(STOCK_ADJUST, PURCHASING_APPROVE);
+  // Moving stock is the storekeeper's job and never the till's (SJ-D73: a cashier could raise and
+  // ship a transfer to another store, because nothing under /admin/inventory asked who they were).
+  private static final Set<String> STOREKEEPER_DEFAULTS =
+      Set.of(STOCK_ADJUST, STOCK_TRANSFER, PURCHASING_APPROVE);
   private static final Set<String> CASHIER_DEFAULTS = Set.of(TILL_NO_SALE, PURCHASING_APPROVE);
 
   /**

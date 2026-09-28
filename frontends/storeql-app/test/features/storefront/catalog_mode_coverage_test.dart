@@ -156,7 +156,7 @@ void main() {
         overrides: [
           _catalogConfig(),
           storefrontAvailabilityProvider.overrideWith(
-              (ref) async => {'v1': true}),
+              (ref) async => {'v1': const StockInfo(inStock: true)}),
           productFirstVariantProvider('p1').overrideWith(
               (ref) async => const StoreVariant(id: 'v1', sku: 'SKU-001')),
         ],
@@ -176,7 +176,7 @@ void main() {
         overrides: [
           _catalogConfig(),
           storefrontAvailabilityProvider.overrideWith(
-              (ref) async => {'v1': false}),
+              (ref) async => {'v1': const StockInfo(inStock: false)}),
           productFirstVariantProvider('p1').overrideWith(
               (ref) async => const StoreVariant(id: 'v1', sku: 'SKU-001')),
         ],
@@ -196,7 +196,7 @@ void main() {
         overrides: [
           _catalogConfig(),
           storefrontAvailabilityProvider.overrideWith(
-              (ref) async => {'v1': true}),
+              (ref) async => {'v1': const StockInfo(inStock: true)}),
           productFirstVariantProvider('p1').overrideWith(
               (ref) async => const StoreVariant(id: 'v1', sku: 'SKU-001')),
         ],
@@ -234,7 +234,7 @@ void main() {
           storefrontVariantsProvider(pid).overrideWith(
               (ref) async => [const StoreVariant(id: 'v1', sku: 'SKU-001')]),
           storefrontAvailabilityProvider.overrideWith(
-              (ref) async => {'v1': true}),
+              (ref) async => {'v1': const StockInfo(inStock: true)}),
         ],
       ));
       await tester.pumpAndSettle();
@@ -244,6 +244,7 @@ void main() {
       // Priced path never runs — no price or currency text should appear
       expect(find.textContaining(RegExp(r'\d+\.\d{2}')), findsNothing);
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
     });
   });
 
@@ -298,6 +299,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
     });
 
     testWidgets(
@@ -319,6 +321,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
     });
   });
 
@@ -352,6 +355,7 @@ void main() {
       // Cart bar must display "2 items", not a price
       expect(find.textContaining('2 item'), findsOneWidget);
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
     });
   });
 
@@ -386,6 +390,7 @@ void main() {
 
       expect(find.textContaining('19.99'), findsNothing);
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
       expect(
         find.textContaining(RegExp(r'Price in store|Price on delivery')),
         findsOneWidget,
@@ -417,6 +422,7 @@ void main() {
 
       expect(find.textContaining('12.00'), findsNothing);
       expect(find.textContaining('GBP'), findsNothing);
+      expect(find.textContaining('£'), findsNothing); // money reads £, not GBP
       expect(
         find.textContaining(RegExp(r'Price in store|Price on delivery')),
         findsOneWidget,

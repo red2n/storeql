@@ -7,6 +7,27 @@ import '../../../shared/util/short_ref.dart';
 
 // ── Models ──────────────────────────────────────────────────────────────────
 
+/// The window an order holds (delivery-and-collection-slots), in the store's
+/// own local date and clock — computed server-side; the app never converts a
+/// time. Null for an order with none.
+class OrderSlot {
+  final String date;
+  final String startTime;
+  final String endTime;
+
+  const OrderSlot({required this.date, required this.startTime, required this.endTime});
+
+  factory OrderSlot.fromJson(Map<String, dynamic> j) => OrderSlot(
+        date: j['date'] as String? ?? '',
+        startTime: j['startTime'] as String? ?? '',
+        endTime: j['endTime'] as String? ?? '',
+      );
+
+  /// [raw] read as an [OrderSlot] when it is a map; null otherwise.
+  static OrderSlot? maybe(Object? raw) =>
+      raw is Map<String, dynamic> ? OrderSlot.fromJson(raw) : null;
+}
+
 class OrderSummary {
   final String id;
   final String storeId;
@@ -21,6 +42,10 @@ class OrderSummary {
   /// legacy orders and POS split-tender sales.
   final String? paymentMethod;
 
+  /// The window this order holds (delivery-and-collection-slots); null for an
+  /// order with none. Never on a till sale.
+  final OrderSlot? slot;
+
   const OrderSummary({
     required this.id,
     this.storeId = '',
@@ -31,6 +56,7 @@ class OrderSummary {
     required this.currency,
     required this.createdAt,
     this.paymentMethod,
+    this.slot,
   });
 
   factory OrderSummary.fromJson(Map<String, dynamic> j) => OrderSummary(
@@ -43,6 +69,7 @@ class OrderSummary {
         currency: j['currency'] as String? ?? '',
         createdAt: j['createdAt'] as String? ?? '',
         paymentMethod: j['paymentMethod'] as String?,
+        slot: OrderSlot.maybe(j['slot']),
       );
 }
 
@@ -53,12 +80,16 @@ class InventoryLevel {
   final double reserved;
   final double available;
 
+  /// How much of onHand sits in bond with its duty suspended: on hand, never available.
+  final double inBond;
+
   const InventoryLevel({
     required this.variantId,
     required this.storeId,
     required this.onHand,
     required this.reserved,
     required this.available,
+    this.inBond = 0,
   });
 
   factory InventoryLevel.fromJson(Map<String, dynamic> j) => InventoryLevel(
@@ -67,6 +98,7 @@ class InventoryLevel {
         onHand: (j['onHand'] as num?)?.toDouble() ?? 0,
         reserved: (j['reserved'] as num?)?.toDouble() ?? 0,
         available: (j['available'] as num?)?.toDouble() ?? 0,
+        inBond: (j['inBond'] as num?)?.toDouble() ?? 0,
       );
 
   /// Default low-stock heuristic when no reorder threshold is configured.
@@ -169,6 +201,12 @@ class StoreInfo {
   /// Tenders the owner enabled for this store (subset of CASH, CARD, UPI, WALLET).
   final List<String> enabledPaymentMethods;
 
+  /// Whether this store's till asks for the customer's phone (phone-at-the-till):
+  /// REQUIRED, OPTIONAL or OFF (don't ask). Always normalised — an absent, null
+  /// or unrecognised value already reads as OPTIONAL, the data-minimising
+  /// default and what an older server with no opinion means.
+  final String tillPhone;
+
   const StoreInfo({
     required this.id,
     required this.name,
@@ -187,6 +225,7 @@ class StoreInfo {
     this.businessHours,
     this.showPrices = true,
     this.enabledPaymentMethods = const ['CASH', 'CARD'],
+    this.tillPhone = 'OPTIONAL',
   });
 
   factory StoreInfo.fromJson(Map<String, dynamic> j) => StoreInfo(
@@ -210,7 +249,17 @@ class StoreInfo {
                 ?.map((e) => e.toString().toUpperCase())
                 .toList() ??
             const ['CASH', 'CARD'],
+        tillPhone: normaliseTillPhone(j['tillPhone']),
       );
+}
+
+/// A store's till-phone choice, read the same way everywhere it arrives from
+/// the server (phone-at-the-till): REQUIRED, OPTIONAL or OFF. Absent, null or
+/// anything else this app does not know yet reads as OPTIONAL — an older
+/// server has no opinion, and Optional is the data-minimising default.
+String normaliseTillPhone(Object? raw) {
+  final v = (raw as String? ?? '').toUpperCase();
+  return const {'REQUIRED', 'OPTIONAL', 'OFF'}.contains(v) ? v : 'OPTIONAL';
 }
 
 class ZoneInfo {
@@ -256,6 +305,13 @@ class BatchInfo {
   final String? grade;
   final String? zoneId;
 
+  /// OWNED, or CONSIGNMENT when the supplier still owns what is left.
+  final String ownership;
+  final String? ownerSupplierId;
+
+  /// DUTY_PAID, or DUTY_SUSPENDED while the batch sits in bond.
+  final String dutyStatus;
+
   const BatchInfo({
     required this.id,
     required this.storeId,
@@ -271,6 +327,9 @@ class BatchInfo {
     this.materialStatusReason,
     this.grade,
     this.zoneId,
+    this.ownership = 'OWNED',
+    this.ownerSupplierId,
+    this.dutyStatus = 'DUTY_PAID',
   });
 
   factory BatchInfo.fromJson(Map<String, dynamic> j) => BatchInfo(
@@ -288,6 +347,9 @@ class BatchInfo {
         materialStatusReason: j['materialStatusReason'] as String?,
         grade: j['grade'] as String?,
         zoneId: j['zoneId'] as String?,
+        ownership: j['ownership'] as String? ?? 'OWNED',
+        ownerSupplierId: j['ownerSupplierId'] as String?,
+        dutyStatus: j['dutyStatus'] as String? ?? 'DUTY_PAID',
       );
 }
 
@@ -460,6 +522,8 @@ class TransferOrderLine {
   final double requestedQty;
   final double? shippedQty;
   final double? receivedQty;
+  /// Why a warehouse's replenishment proposal asked for this quantity; null when a person did.
+  final String? reason;
 
   const TransferOrderLine({
     this.id,
@@ -467,6 +531,7 @@ class TransferOrderLine {
     required this.requestedQty,
     this.shippedQty,
     this.receivedQty,
+    this.reason,
   });
 
   factory TransferOrderLine.fromJson(Map<String, dynamic> j) => TransferOrderLine(
@@ -475,6 +540,7 @@ class TransferOrderLine {
         requestedQty: (j['requestedQty'] as num?)?.toDouble() ?? 0,
         shippedQty: (j['shippedQty'] as num?)?.toDouble(),
         receivedQty: (j['receivedQty'] as num?)?.toDouble(),
+        reason: j['reason'] as String?,
       );
 }
 
@@ -488,6 +554,10 @@ class TransferOrder {
   final String? createdAt;
   final String? shippedAt;
   final String? receivedAt;
+  /// MANUAL, PROPOSAL (a warehouse's replenishment run) or CROSSDOCK (a delivery's allocation).
+  final String? source;
+  /// A cross-dock transfer's purchase order.
+  final String? purchaseOrderId;
   final List<TransferOrderLine> lines;
 
   const TransferOrder({
@@ -500,6 +570,8 @@ class TransferOrder {
     this.createdAt,
     this.shippedAt,
     this.receivedAt,
+    this.source,
+    this.purchaseOrderId,
     required this.lines,
   });
 
@@ -513,6 +585,8 @@ class TransferOrder {
         createdAt: j['createdAt'] as String?,
         shippedAt: j['shippedAt'] as String?,
         receivedAt: j['receivedAt'] as String?,
+        source: j['source'] as String?,
+        purchaseOrderId: j['purchaseOrderId'] as String?,
         lines: ((j['lines'] as List?) ?? [])
             .map((e) => TransferOrderLine.fromJson(e as Map<String, dynamic>))
             .toList(),
@@ -735,6 +809,12 @@ class PlatformTenant {
   final String currency;
   final String createdAt;
 
+  /// LIVE, or SANDBOX for a business's test double (22.8).
+  final String mode;
+
+  /// For a sandbox, the live business it stands in for.
+  final String? sandboxOf;
+
   const PlatformTenant({
     required this.id,
     required this.name,
@@ -743,7 +823,11 @@ class PlatformTenant {
     required this.country,
     required this.currency,
     required this.createdAt,
+    this.mode = 'LIVE',
+    this.sandboxOf,
   });
+
+  bool get sandbox => mode.toUpperCase() == 'SANDBOX';
 
   factory PlatformTenant.fromJson(Map<String, dynamic> j) => PlatformTenant(
         id: j['id'] as String? ?? '',
@@ -753,6 +837,8 @@ class PlatformTenant {
         country: j['country'] as String? ?? '-',
         currency: j['currency'] as String? ?? '-',
         createdAt: j['createdAt'] as String? ?? '',
+        mode: j['mode'] as String? ?? 'LIVE',
+        sandboxOf: j['sandboxOf'] as String?,
       );
 }
 
@@ -1305,6 +1391,199 @@ final salesByDayReportProvider =
   return rows.map((e) => SalesDayRow.fromJson(e as Map<String, dynamic>)).toList();
 });
 
+/// What one category took, from the sale lines (19.x). [categoryId] is null for
+/// lines the catalogue cannot place: a product with no category, or a variant
+/// it has not announced yet.
+class SalesCategoryRow {
+  final String? categoryId;
+  final String currency;
+  final int orders;
+  final double units;
+  final double gross;
+  final double share;
+
+  const SalesCategoryRow({
+    required this.categoryId,
+    required this.currency,
+    required this.orders,
+    required this.units,
+    required this.gross,
+    required this.share,
+  });
+
+  factory SalesCategoryRow.fromJson(Map<String, dynamic> j) => SalesCategoryRow(
+        categoryId: j['categoryId'] as String?,
+        currency: j['currency'] as String? ?? '-',
+        orders: (j['orders'] as num?)?.toInt() ?? 0,
+        units: (j['units'] as num?)?.toDouble() ?? 0,
+        gross: (j['gross'] as num?)?.toDouble() ?? 0,
+        share: (j['share'] as num?)?.toDouble() ?? 0,
+      );
+}
+
+/// 'leaf' groups by the product's own category; 'top' rolls each up to the
+/// top of the tree. The server does the grouping, so the choice is a request.
+final salesByCategoryLevelProvider = StateProvider<String>((ref) => 'leaf');
+
+/// Sales by category over the report date range, largest first.
+final salesByCategoryReportProvider =
+    FutureProvider.autoDispose<List<SalesCategoryRow>>((ref) async {
+  final range = ref.watch(reportDateRangeProvider);
+  final level = ref.watch(salesByCategoryLevelProvider);
+  final params = <String, dynamic>{'level': level};
+  if (range.from != null && range.from!.isNotEmpty) params['from'] = range.from;
+  if (range.to != null && range.to!.isNotEmpty) params['to'] = range.to;
+  final resp = await ref.read(apiClientProvider).dio.get(
+        '/${ApiConstants.reporting}/admin/reports/sales/by-category',
+        queryParameters: params,
+      );
+  final rows = (resp.data['data']?['rows'] as List?) ?? [];
+  return rows
+      .map((e) => SalesCategoryRow.fromJson(e as Map<String, dynamic>))
+      .toList();
+});
+
+/// One item's demand forecast at a store (06.x): what it expects, how it was
+/// made, and what it says about its own accuracy. Accuracy figures are null
+/// when the server could not honestly compute them, and the UI shows a dash.
+class DemandForecastRow {
+  final String id;
+  final String storeId;
+  final String variantId;
+  final String method;
+  final bool intermittent;
+  final double? alpha;
+  final double level;
+  final List<double> weekdayProfile;
+  final int historyDays;
+  final int horizonDays;
+  final String fromDay;
+  final double next7;
+  final double next28;
+  final int holdoutDays;
+  final double? mape;
+  final double? bias;
+  final double? mase;
+  final List<({String day, double qty})> points;
+  final String computedAt;
+  /// Lives fourteen days or fewer, by its dated batches (06.x).
+  final bool fresh;
+  final int? shelfLifeDays;
+  final double? wasteRatePct;
+
+  /// Twelve monthly indices, January first; empty under thirteen months of history.
+  final List<double> seasonalIndices;
+
+  /// What a promotion does to the item (promoted-day demand over ordinary); null when unmeasured.
+  final double? uplift;
+
+  /// ITEM from its own promotions, STORE pooled across the store's; null with no uplift.
+  final String? upliftSource;
+  final int promotedHistoryDays;
+  final int promotedAheadDays;
+
+  const DemandForecastRow({
+    required this.id,
+    required this.storeId,
+    required this.variantId,
+    required this.method,
+    required this.intermittent,
+    required this.alpha,
+    required this.level,
+    required this.weekdayProfile,
+    required this.historyDays,
+    required this.horizonDays,
+    required this.fromDay,
+    required this.next7,
+    required this.next28,
+    required this.holdoutDays,
+    required this.mape,
+    required this.bias,
+    required this.mase,
+    required this.points,
+    required this.computedAt,
+    this.fresh = false,
+    this.shelfLifeDays,
+    this.wasteRatePct,
+    this.seasonalIndices = const [],
+    this.uplift,
+    this.upliftSource,
+    this.promotedHistoryDays = 0,
+    this.promotedAheadDays = 0,
+  });
+
+  /// One line for the year's shape: `Jan 0.92 · Feb 0.95 · …`.
+  String get seasonLine => seasonalIndices.length != 12
+      ? ''
+      : const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+          .asMap()
+          .entries
+          .map((e) => '${e.value} ${seasonalIndices[e.key].toStringAsFixed(2)}')
+          .join(' · ');
+
+  factory DemandForecastRow.fromJson(Map<String, dynamic> j) => DemandForecastRow(
+        id: j['id'] as String? ?? '',
+        storeId: j['storeId'] as String? ?? '',
+        variantId: j['variantId'] as String? ?? '',
+        method: j['method'] as String? ?? '-',
+        intermittent: j['intermittent'] as bool? ?? false,
+        alpha: (j['alpha'] as num?)?.toDouble(),
+        level: (j['level'] as num?)?.toDouble() ?? 0,
+        weekdayProfile: ((j['weekdayProfile'] as List?) ?? [])
+            .map((e) => (e as num).toDouble())
+            .toList(),
+        historyDays: (j['historyDays'] as num?)?.toInt() ?? 0,
+        horizonDays: (j['horizonDays'] as num?)?.toInt() ?? 0,
+        fromDay: j['fromDay'] as String? ?? '-',
+        next7: (j['next7'] as num?)?.toDouble() ?? 0,
+        next28: (j['next28'] as num?)?.toDouble() ?? 0,
+        holdoutDays: (j['holdoutDays'] as num?)?.toInt() ?? 0,
+        mape: (j['mape'] as num?)?.toDouble(),
+        bias: (j['bias'] as num?)?.toDouble(),
+        mase: (j['mase'] as num?)?.toDouble(),
+        points: ((j['points'] as List?) ?? [])
+            .map((e) => e as Map<String, dynamic>)
+            .map((e) => (
+                  day: e['day'] as String? ?? '-',
+                  qty: (e['qty'] as num?)?.toDouble() ?? 0,
+                ))
+            .toList(),
+        computedAt: j['computedAt'] as String? ?? '',
+        fresh: j['fresh'] as bool? ?? false,
+        shelfLifeDays: (j['shelfLifeDays'] as num?)?.toInt(),
+        wasteRatePct: (j['wasteRatePct'] as num?)?.toDouble(),
+        seasonalIndices: ((j['seasonalIndices'] as List?) ?? [])
+            .map((e) => (e as num).toDouble())
+            .toList(),
+        uplift: (j['uplift'] as num?)?.toDouble(),
+        upliftSource: j['upliftSource'] as String?,
+        promotedHistoryDays: (j['promotedHistoryDays'] as num?)?.toInt() ?? 0,
+        promotedAheadDays: (j['promotedAheadDays'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// The forecasts at a store, newest run first.
+final forecastsProvider = FutureProvider.autoDispose
+    .family<List<DemandForecastRow>, String>((ref, storeId) async {
+  final resp = await ref.read(apiClientProvider).dio.get(
+        '/${ApiConstants.inventory}/admin/inventory/forecasts',
+        queryParameters: {'store': storeId},
+      );
+  final data = (resp.data['data'] as List?) ?? [];
+  return data
+      .map((e) => DemandForecastRow.fromJson(e as Map<String, dynamic>))
+      .toList();
+});
+
+/// One forecast with its daily points; the key is `storeId/variantId`.
+final forecastDetailProvider = FutureProvider.autoDispose
+    .family<DemandForecastRow, String>((ref, key) async {
+  final resp = await ref.read(apiClientProvider).dio.get(
+        '/${ApiConstants.inventory}/admin/inventory/forecasts/$key',
+      );
+  return DemandForecastRow.fromJson(resp.data['data'] as Map<String, dynamic>);
+});
+
 /// Delivery area (pincode coverage) for a store.
 class DeliveryArea {
   final String id;
@@ -1433,12 +1712,19 @@ class ValuationRow {
   final double unvaluedQty;
   final double value;
 
+  /// Stock the supplier still owns (consignment): not the business's asset,
+  /// reported apart at the cost the supplier will be owed.
+  final double consignmentQty;
+  final double consignmentValue;
+
   const ValuationRow({
     required this.groupKey,
     required this.method,
     required this.onHandQty,
     required this.unvaluedQty,
     required this.value,
+    this.consignmentQty = 0,
+    this.consignmentValue = 0,
   });
 
   factory ValuationRow.fromJson(Map<String, dynamic> j) => ValuationRow(
@@ -1447,6 +1733,8 @@ class ValuationRow {
         onHandQty: (j['onHandQty'] as num?)?.toDouble() ?? 0,
         unvaluedQty: (j['unvaluedQty'] as num?)?.toDouble() ?? 0,
         value: (j['value'] as num?)?.toDouble() ?? 0,
+        consignmentQty: (j['consignmentQty'] as num?)?.toDouble() ?? 0,
+        consignmentValue: (j['consignmentValue'] as num?)?.toDouble() ?? 0,
       );
 }
 

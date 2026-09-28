@@ -5,9 +5,12 @@ import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/reference/iso_reference.dart';
 import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
+import '../../shared/widgets/status_badge.dart';
 
 // ---------------------------------------------------------------------------
 // The laws this business trades under.
@@ -101,7 +104,7 @@ class ObligationSheet {
           for (final o in (j['obligations'] as List?) ?? const [])
             LegalObligation.fromJson(o as Map<String, dynamic>)
         ],
-  cashLimits: [
+        cashLimits: [
           for (final l in (j['cashLimits'] as List?) ?? const [])
             CashLimit.fromJson(l as Map<String, dynamic>)
         ],
@@ -122,65 +125,80 @@ class ObligationsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
     final sheet = ref.watch(obligationsProvider);
+    final gutter = context.pageGutter;
     return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
+      padding: EdgeInsetsDirectional.only(bottom: gutter),
       children: [
-        Text('Legal obligations', style: theme.textTheme.headlineMedium),
-        const SizedBox(height: 4),
-        Text(
-          'The laws this business trades under, from its country and, where '
-          'it applies, EU law — with the day each takes effect and the '
-          'instrument behind it. The platform checks features against this '
-          'list. It is not legal advice.',
-          style: theme.textTheme.bodyMedium
-              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-        ),
-        const SizedBox(height: AppSpacing.lg),
-        sheet.when(
-          loading: () => const LoadingView(label: 'Loading obligations…'),
-          error: (e, _) => ErrorView(
-            message: friendlyError(e,
-                fallback: 'Could not load the legal obligations.'),
-            onRetry: () => ref.invalidate(obligationsProvider),
+        ContentBounds(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const PageHeader(
+                title: 'Legal obligations',
+                subtitle: 'The laws this business trades under, from its '
+                    'country and, where it applies, EU law — with the day each '
+                    'takes effect and the instrument behind it. The platform '
+                    'checks features against this list. It is not legal advice.',
+              ),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: gutter),
+                child: sheet.when(
+                  loading: () =>
+                      const LoadingView(label: 'Loading obligations…'),
+                  error: (e, _) => ErrorView(
+                    message: friendlyError(e,
+                        fallback: 'Could not load the legal obligations.'),
+                    onRetry: () => ref.invalidate(obligationsProvider),
+                  ),
+                  data: (s) => _Sheet(sheet: s),
+                ),
+              ),
+            ],
           ),
-          data: (s) {
-            final inForce = s.obligations.where((o) => o.inForce).toList();
-            final coming = s.obligations.where((o) => !o.inForce).toList();
-            final cash = [
-              if (s.cashLimits.isNotEmpty) ...[
-                const SizedBox(height: AppSpacing.lg),
-                _CashLimits(limits: s.cashLimits, country: s.country),
-              ],
-            ];
-            if (s.obligations.isEmpty) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                      'No obligations are recorded for ${s.country}. That means '
-                      'the platform tracks none for this country yet, not that '
-                      'none apply.'),
-                  ...cash,
-                ],
-              );
-            }
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (inForce.isNotEmpty)
-                  _ObligationGroup(
-                      title: 'In force in ${s.country}', items: inForce),
-                if (coming.isNotEmpty) ...[
-                  const SizedBox(height: AppSpacing.lg),
-                  _ObligationGroup(title: 'Coming', items: coming),
-                ],
-                ...cash,
-              ],
-            );
-          },
         ),
+      ],
+    );
+  }
+}
+
+class _Sheet extends StatelessWidget {
+  final ObligationSheet sheet;
+  const _Sheet({required this.sheet});
+
+  @override
+  Widget build(BuildContext context) {
+    final s = sheet;
+    final country = countryInSentence(s.country);
+    final inForce = s.obligations.where((o) => o.inForce).toList();
+    final coming = s.obligations.where((o) => !o.inForce).toList();
+    final cash = [
+      if (s.cashLimits.isNotEmpty) ...[
+        const SizedBox(height: AppSpacing.lg),
+        _CashLimits(limits: s.cashLimits, country: country),
+      ],
+    ];
+    if (s.obligations.isEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('No obligations are recorded for $country. That means the '
+              'platform tracks none for this country yet, not that none '
+              'apply.'),
+          ...cash,
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (inForce.isNotEmpty)
+          _ObligationGroup(title: 'In force in $country', items: inForce),
+        if (coming.isNotEmpty) ...[
+          const SizedBox(height: AppSpacing.lg),
+          _ObligationGroup(title: 'Coming', items: coming),
+        ],
+        ...cash,
       ],
     );
   }
@@ -201,25 +219,57 @@ class _ObligationGroup extends StatelessWidget {
         Text(title, style: theme.textTheme.titleMedium),
         const SizedBox(height: AppSpacing.sm),
         Card(
-          child: Column(
-            children: [
-              for (final o in items)
-                ListTile(
-                  key: Key('obligation-${o.code}-${o.scope}'),
-                  title: Text(o.summary),
-                  subtitle: Text(
-                      '${o.citation} · ${o.scope == 'EU' ? 'EU law' : 'National law'}'
-                      '${o.effectiveTo != null ? ' · until ${AppFormat.date(o.effectiveTo)}' : ''}'),
-                  trailing: Chip(
-                    label: Text(o.inForce
-                        ? 'Since ${AppFormat.date(o.effectiveFrom)}'
-                        : 'From ${AppFormat.date(o.effectiveFrom)}'),
-                  ),
-                ),
-            ],
-          ),
+          child: LayoutBuilder(builder: (context, bc) {
+            // On a phone a date at the end of the row left the obligation a
+            // third of the width, six or seven lines a row: there the date
+            // goes above the text, which then takes the whole row.
+            final compact =
+                AppBreakpoints.classOf(bc.maxWidth) == WindowClass.compact;
+            return Column(
+              children: [
+                for (final o in items)
+                  _ObligationRow(obligation: o, compact: compact),
+              ],
+            );
+          }),
         ),
       ],
+    );
+  }
+}
+
+class _ObligationRow extends StatelessWidget {
+  final LegalObligation obligation;
+  final bool compact;
+  const _ObligationRow({required this.obligation, required this.compact});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final o = obligation;
+    // A date, not a control: plain words in the secondary ink, never a chip.
+    final date = Text(
+      o.inForce
+          ? 'Since ${AppFormat.date(o.effectiveFrom)}'
+          : 'From ${AppFormat.date(o.effectiveFrom)}',
+      key: Key('obligation-date-${o.code}-${o.scope}'),
+      style: theme.textTheme.labelMedium
+          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+    );
+    final summary = Text(o.summary);
+    return ListTile(
+      key: Key('obligation-${o.code}-${o.scope}'),
+      title: compact
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [date, const SizedBox(height: AppSpacing.xs), summary],
+            )
+          : summary,
+      subtitle: Text(
+          '${o.citation} · ${o.scope == 'EU' ? 'EU law' : 'National law'}'
+          '${o.effectiveTo != null ? ' · until ${AppFormat.date(o.effectiveTo)}' : ''}'),
+      trailing: compact ? null : date,
     );
   }
 }
@@ -229,6 +279,8 @@ class _ObligationGroup extends StatelessWidget {
 class _CashLimits extends StatelessWidget {
   const _CashLimits({required this.limits, required this.country});
   final List<CashLimit> limits;
+
+  /// The country in words, as it reads after "in".
   final String country;
 
   @override
@@ -253,11 +305,16 @@ class _CashLimits extends StatelessWidget {
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(l.inForce ? Icons.block : Icons.schedule),
-                title: Text('${l.currency} ${l.fromAmount} or more'
-                    '${l.inForce ? '' : ' — from ${l.effectiveFrom}'}'),
+                title: Text(
+                    '${AppFormat.money(l.fromAmount, currencyCode: l.currency)} or more'
+                    '${l.inForce ? '' : ' — from ${AppFormat.date(l.effectiveFrom)}'}'),
                 subtitle: Text('${l.summary}\n${l.citation}'),
                 isThreeLine: true,
-                trailing: Chip(label: Text(l.inForce ? 'In force' : 'Coming')),
+                // A state, in the one badge every list uses — not a chip,
+                // which reads as a filter to tap.
+                trailing: l.inForce
+                    ? const StatusBadge('In force', tone: StatusTone.success)
+                    : const StatusBadge('Coming', tone: StatusTone.info),
               ),
           ],
         ),

@@ -541,12 +541,15 @@ public class PrivacyService {
     int failures = 0;
     for (Reachable p : people) {
       boolean email = p.email() != null && !p.email().isBlank();
+      // The SMS channel only accepts E.164: the normalised form when there is one, the
+      // number as typed only when it never normalised.
+      String phone = p.phoneE164() != null ? p.phoneE164() : p.phone();
       boolean sent =
           notifications.send(
               tenantId,
               actor,
               email ? "EMAIL" : "SMS",
-              email ? p.email() : p.phone(),
+              email ? p.email() : phone,
               s,
               b,
               INTIMATION_TYPE,
@@ -564,6 +567,33 @@ public class PrivacyService {
 
   public List<Intimation> intimations(UUID tenantId) {
     return repo.intimations(tenantId, LOG_PAGE);
+  }
+
+  // ── the marketing-channel gate ────────────────────────────────────────
+
+  /**
+   * Whether the MARKETING purpose gate refuses a channel being switched on, or a marketing message
+   * being sent, right now.
+   *
+   * <p>Refused while the purpose stands withdrawn — its latest entry {@code granted = false},
+   * whatever the country. Where nobody has ever answered it, refused only where a per-purpose
+   * consent law binds the business ({@link #dpdp}); elsewhere a channel's own consent stands on its
+   * own (PECR-style channel consent / soft opt-in) — no country is named here, only the business's
+   * own jurisdiction data. Granted, never refused.
+   *
+   * @param tenantId owning tenant
+   * @param customerId the person a channel would be switched on, or sent to
+   * @return {@code true} when the gate refuses
+   * @throws ApiException 503 {@code TENANT_PROFILE_UNAVAILABLE} / {@code OBLIGATIONS_UNAVAILABLE}
+   *     when nobody has answered the purpose and whether a per-purpose law binds cannot be read —
+   *     refuses rather than guesses, same as every other {@link Jurisdictions} caller
+   */
+  public boolean marketingChannelBlocked(UUID tenantId, UUID customerId) {
+    return repo.consents(tenantId, customerId).stream()
+        .filter(p -> Privacy.PURPOSE_MARKETING.equals(p.purpose()))
+        .findFirst()
+        .map(p -> !p.granted())
+        .orElseGet(() -> dpdp(tenantId));
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

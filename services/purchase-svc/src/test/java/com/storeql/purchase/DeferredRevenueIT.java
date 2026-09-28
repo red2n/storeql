@@ -237,6 +237,34 @@ class DeferredRevenueIT {
 
   @Test
   @DisplayName(
+      "Points that expire leave the pool as a lapse, and the income they carried is breakage once nothing is outstanding")
+  void expiredPointsAreBreakage() {
+    data(put(ESTIMATES, T, "OWNER"));
+    handler.loyalty(earnedOnSale("200", "120.00", "20.00"));
+    BigDecimal deferred = data(get(T, "OWNER")).getJsonNumber("deferredIncome").bigDecimalValue();
+    assertThat(deferred.signum(), is(1));
+    // Sixty spent: released as redeemed income, the pool keeping its share for the rest.
+    handler.loyalty(loyalty("LoyaltyRedeemed", "60"));
+    BigDecimal afterSpend = data(get(T, "OWNER")).getJsonNumber("deferredIncome").bigDecimalValue();
+    // The other 140 die under the expiry rule: nothing outstanding, so what is left is breakage,
+    // and none of it is redeemed income.
+    handler.loyalty(loyalty("LoyaltyExpired", "140"));
+    assertThat(net("LOYALTY_RELEASE", "4030"), comparesEqualTo(afterSpend.negate()));
+    JsonObject view = data(get(T, "OWNER"));
+    assertThat(
+        view.getJsonNumber("deferredIncome").bigDecimalValue(), comparesEqualTo(BigDecimal.ZERO));
+    assertThat(
+        view.getJsonNumber("pointsOutstanding").bigDecimalValue(),
+        comparesEqualTo(BigDecimal.ZERO));
+    assertThat(trialBalance().getBoolean("balanced"), is(true));
+    // Redelivered, it posts nothing twice.
+    int lines = lines("LOYALTY_RELEASE").size();
+    handler.loyalty(loyalty("LoyaltyExpired", "140"));
+    assertThat(lines("LOYALTY_RELEASE").size(), is(lines));
+  }
+
+  @Test
+  @DisplayName(
       "Twenty redemptions at once release what their shares say, and never the same income twice")
   void concurrentRedemptionsKeepThePoolWhole() throws Exception {
     data(put(ESTIMATES, T, "OWNER"));

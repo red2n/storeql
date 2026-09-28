@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -60,6 +61,9 @@ class SupplierEInvoiceIT {
   /** A third business, holding the same address as the second: a delivery to it lands nowhere. */
   private static final String T3 = Ids.newId().toString();
 
+  /** A business whose plan keeps no e-invoice documents at all (21.11). */
+  private static final String T_CAPPED = Ids.newId().toString();
+
   private static final String SHARED_GLN = "5790000435975";
 
   static {
@@ -71,7 +75,9 @@ class SupplierEInvoiceIT {
         .with(T2, "GBP", "GB")
         .withIdentity(T2, "GB222222222", "0088", SHARED_GLN)
         .with(T3, "GBP", "GB")
-        .withIdentity(T3, "GB333333333", "0088", SHARED_GLN);
+        .withIdentity(T3, "GB333333333", "0088", SHARED_GLN)
+        .with(T_CAPPED, "GBP", "GB")
+        .withLimit(T_CAPPED, "documents.mb.max", 0);
   }
 
   @Inject WebTarget target;
@@ -697,6 +703,22 @@ class SupplierEInvoiceIT {
   }
 
   // ── steps ─────────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A plan's cap on documents refuses the one there is no room for, before it is read")
+  void theDocumentCapRefusesBeforeParsing() {
+    // Refused before it is read, so it need not even be a real document.
+    byte[] pdf = "%PDF-1.7 not really".getBytes(StandardCharsets.UTF_8);
+    Response refused = send(pdf, "application/pdf", T_CAPPED, "OWNER");
+    String body = refused.readEntity(String.class);
+    assertThat(body, refused.getStatus(), is(409));
+    assertThat(body, containsString("PLAN_LIMIT_REACHED"));
+    assertThat(body, containsString("allows 0 MB of supplier e-invoice documents"));
+    assertThat(
+        "nothing was kept",
+        as("/e-invoices?limit=50", T_CAPPED, "OWNER").get().readEntity(String.class),
+        containsString("\"data\":[]"));
+  }
 
   private Invocation.Builder as(String pathAndQuery, String tenant, String role) {
     return WebTargets.at(target, pathAndQuery)

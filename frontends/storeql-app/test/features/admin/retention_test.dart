@@ -4,11 +4,15 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
+import 'package:storeql_app/core/format.dart';
 import 'package:storeql_app/core/network/api_client.dart';
+import 'package:storeql_app/core/theme.dart';
 import 'package:storeql_app/features/admin/retention_screen.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // Data retention (21.16), from the admin screen.
 //
@@ -90,7 +94,12 @@ Future<_Adapter> _pump(WidgetTester tester, {String role = 'MANAGER', _Adapter? 
       apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
       authNotifierProvider.overrideWith(() => _Auth(role)),
     ],
-    child: const MaterialApp(home: Scaffold(body: RetentionScreen())),
+    // The app's own theme: its Card has no margin, so any gap between the
+    // class cards is the screen's.
+    child: MaterialApp(
+      theme: AppTheme.light,
+      home: const Scaffold(body: RetentionScreen()),
+    ),
   ));
   await tester.pumpAndSettle();
   return a;
@@ -100,6 +109,14 @@ Map<String, dynamic> _body(RequestOptions o) =>
     (o.data is String ? jsonDecode(o.data as String) : o.data) as Map<String, dynamic>;
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
+  setUpAll(initializeDateFormatting);
+
   testWidgets('the schedule shows the law\'s floor, what is set, and what is not', (tester) async {
     await _pump(tester);
     expect(find.text('Trading in DE, GB'), findsOneWidget);
@@ -112,8 +129,41 @@ void main() {
     expect(find.text('Anonymised at once, by order-svc.'), findsOneWidget);
     expect(find.text('Deleted after 1 year, by notification-svc.'), findsOneWidget);
     expect(find.textContaining('Customer …'), findsOneWidget);
-    expect(find.text('order-svc · ORDER_PERSONAL_DATA'), findsOneWidget);
     expect(find.textContaining('12 purged · 2 held'), findsOneWidget);
+  });
+
+  testWidgets('holds and purge runs name the class, not its code', (tester) async {
+    await _pump(tester);
+    expect(find.textContaining('· Customer records'), findsOneWidget);
+    expect(find.text('Personal details on settled orders'), findsWidgets);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('retention-run-row-r-1')),
+        matching: find.text('Personal details on settled orders'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('CUSTOMER_RECORDS'), findsNothing);
+    expect(find.textContaining('ORDER_PERSONAL_DATA'), findsNothing);
+  });
+
+  testWidgets('dates are written as AppFormat writes them everywhere else', (tester) async {
+    await _pump(tester);
+    final placed = AppFormat.date('2026-09-10T09:00:00Z');
+    final cutoff = AppFormat.date('2026-09-14T03:00:00Z');
+    final finished = AppFormat.dateTime('2026-09-14T03:00:03Z');
+    // en_GB abbreviates September "Sept"; a DateFormat with no locale says "Sep".
+    expect(placed, contains('Sept 2026'));
+    expect(find.textContaining('placed $placed'), findsOneWidget);
+    expect(find.textContaining('older than $cutoff · $finished'), findsOneWidget);
+    expect(find.textContaining('Sep 2026'), findsNothing);
+  });
+
+  testWidgets('the class cards stand 8 apart instead of touching', (tester) async {
+    await _pump(tester);
+    final first = tester.getRect(find.byKey(const Key('retention-class-CUSTOMER_RECORDS')));
+    final second = tester.getRect(find.byKey(const Key('retention-class-NOTIFICATION_LOG')));
+    expect(second.top - first.bottom, 8);
   });
 
   testWidgets('a period under the floor never leaves the screen; one above it is saved', (tester) async {

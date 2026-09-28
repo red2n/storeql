@@ -43,6 +43,16 @@ public class OrderResource {
   @Inject OrderService svc;
   @Inject TenantContext ctx;
 
+  /** A page of orders in list form, each naming the split checkout it is a part of. */
+  private List<OrderSummaryResponse> summaries(List<com.storeql.order.domain.Domain.Order> orders) {
+    UUID tenantId = ctx.requireTenantId();
+    var groups = svc.groupIdsOf(tenantId, orders);
+    var handovers = svc.handoversOf(tenantId, orders);
+    return orders.stream()
+        .map(o -> Mappers.toSummary(o, groups.get(o.id()), handovers.get(o.id())))
+        .toList();
+  }
+
   /**
    * List orders for this tenant. All filters are optional.
    *
@@ -54,8 +64,16 @@ public class OrderResource {
    * @param store restrict to one store, or {@code null}
    * @param channel restrict to {@code ONLINE} or {@code POS}, or {@code null}
    * @param status restrict to one order status, or {@code null}
+   * @param handover {@code PENDING} or {@code DONE}, or {@code null} for either
+   * @param handedFrom inclusive ISO-8601 lower bound on when the order was handed over, or {@code
+   *     null}; implies {@code handover=DONE}
+   * @param handedTo exclusive ISO-8601 upper bound on when the order was handed over, or {@code
+   *     null}; implies {@code handover=DONE}
    * @param from inclusive ISO-8601 lower bound on creation time, or {@code null}
    * @param to exclusive ISO-8601 upper bound, or {@code null}
+   * @param sort {@code "slot"} to order by the delivery or collection window's start (soonest
+   *     first, a windowless order last, then id) instead of the usual newest-first; {@code null} or
+   *     anything else keeps the usual order
    * @param after cursor from the previous page's {@code meta.nextCursor}, or {@code null} to start
    * @param limit page size, 1..100; clamped when absent or out of range
    * @return the page of order summaries, with the next cursor in {@code meta}
@@ -63,29 +81,69 @@ public class OrderResource {
   @Operation(
       summary = "List orders",
       description =
-          "List orders for the caller's tenant, optionally filtered by store, channel, status, and"
-              + " creation-date range. Cursor-paginated.")
+          "List orders for the caller's tenant, optionally filtered by store, channel, status,"
+              + " fulfilment type, whether handed over (ship-from-store: handover=PENDING is the"
+              + " picked orders awaiting the courier or the shopper, DONE those handed over), when"
+              + " handed over (handedFrom inclusive, handedTo exclusive; either implies"
+              + " handover=DONE), and creation-date range (from/to). sort=slot (delivery and"
+              + " collection slots) orders by the window's start instead of newest-first, for the"
+              + " Fulfilment queue. Cursor-paginated.")
   @APIResponse(responseCode = "200", description = "Page of order summaries")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "ORDER_HANDOVER_FILTER_INVALID (handover not PENDING or DONE, or a handedFrom/handedTo"
+              + " with handover=PENDING); INVALID_DATE (a bound that is not an ISO-8601 instant)")
   @GET
   public ApiResponse<List<OrderSummaryResponse>> list(
       @QueryParam("store") String store,
       @QueryParam("channel") String channel,
       @QueryParam("status") String status,
+      @QueryParam("fulfilmentType") String fulfilmentType,
+      @QueryParam("handover") String handover,
+      @QueryParam("handedFrom") String handedFrom,
+      @QueryParam("handedTo") String handedTo,
       @QueryParam("from") String from,
       @QueryParam("to") String to,
+      @QueryParam("sort") String sort,
       @QueryParam("after") String after,
       @QueryParam("limit") Integer limit) {
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = store != null && !store.isBlank() ? Parsing.uuid(store, "store") : null;
     Instant fromInst = parseInstant(from, "from");
     Instant toInst = parseInstant(to, "to");
+    Instant handedFromInst = parseInstant(handedFrom, "handedFrom");
+    Instant handedToInst = parseInstant(handedTo, "handedTo");
     int clamped = Cursor.clampLimit(limit);
+    Boolean handedOver = null;
+    if (handover != null && !handover.isBlank()) {
+      switch (handover.toUpperCase(java.util.Locale.ROOT)) {
+        case "PENDING" -> handedOver = false;
+        case "DONE" -> handedOver = true;
+        default ->
+            throw ApiException.badRequest(
+                "ORDER_HANDOVER_FILTER_INVALID", "handover must be PENDING or DONE");
+      }
+    }
     var page =
         svc.listOrders(
-            tenantId, storeId, null, null, channel, status, fromInst, toInst, after, clamped);
+            tenantId,
+            storeId,
+            null,
+            null,
+            channel,
+            status,
+            fulfilmentType == null || fulfilmentType.isBlank() ? null : fulfilmentType,
+            handedOver,
+            handedFromInst,
+            handedToInst,
+            fromInst,
+            toInst,
+            sort,
+            after,
+            clamped);
     return ApiResponse.ok(
-        page.orders().stream().map(Mappers::toSummary).toList(),
-        new ApiResponse.Meta(ctx.requestId(), page.nextCursor()));
+        summaries(page.orders()), new ApiResponse.Meta(ctx.requestId(), page.nextCursor()));
   }
 
   /**
@@ -165,8 +223,7 @@ public class OrderResource {
     var page =
         svc.listOrders(tenantId, null, null, loginId, null, null, null, null, after, clamped);
     return ApiResponse.ok(
-        page.orders().stream().map(Mappers::toSummary).toList(),
-        new ApiResponse.Meta(ctx.requestId(), page.nextCursor()));
+        summaries(page.orders()), new ApiResponse.Meta(ctx.requestId(), page.nextCursor()));
   }
 
   /**
@@ -200,7 +257,10 @@ public class OrderResource {
   @APIResponse(responseCode = "403", description = "Non-staff caller attempted to apply a discount")
   @APIResponse(
       responseCode = "409",
-      description = "Tenant or store is suspended/closed, or insufficient stock to reserve")
+      description =
+          "Tenant or store is suspended/closed, insufficient stock to reserve, or"
+              + " ORDER_UNFULFILLABLE: no combination of the business's shops holds a delivery"
+              + " order")
   @POST
   public Response place(
       @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
@@ -220,7 +280,11 @@ public class OrderResource {
     return Response.status(201)
         .entity(
             ApiResponse.ok(
-                Mappers.toDto(order, items, svc.depositsOf(order.tenantId(), order.id()))))
+                Mappers.toDto(
+                    order,
+                    items,
+                    svc.depositsOf(order.tenantId(), order.id()),
+                    svc.groupOf(order.tenantId(), order.id()).orElse(null))))
         .build();
   }
 
@@ -248,7 +312,12 @@ public class OrderResource {
     var items = svc.getOrderItems(ctx.tenantId(), order.id());
     return Response.ok(
             ApiResponse.ok(
-                Mappers.toDto(order, items, svc.depositsOf(order.tenantId(), order.id()))))
+                Mappers.toDto(
+                    order,
+                    items,
+                    svc.depositsOf(order.tenantId(), order.id()),
+                    svc.groupOf(order.tenantId(), order.id()).orElse(null),
+                    svc.handoverOf(order.tenantId(), order.id()).orElse(null))))
         .build();
   }
 
@@ -396,6 +465,231 @@ public class OrderResource {
     return Response.ok(
             ApiResponse.ok(
                 Mappers.toDto(order, items, svc.depositsOf(order.tenantId(), order.id()))))
+        .build();
+  }
+
+  /**
+   * Closes a line short (substitutions for out-of-stock online lines).
+   *
+   * @param id the confirmed or part-picked online order
+   * @param variantId the line's product
+   * @param req how much, and why; an empty body closes everything the line still owes
+   * @return the order as it now stands
+   */
+  @Operation(
+      summary = "Close a line short",
+      description =
+          "The quantity a store cannot fill comes off a confirmed or part-picked online order: its"
+              + " charge and VAT shrink pro rata, the shopper is refunded the difference, and the"
+              + " order becomes FULFILLED once every line is picked or closed. Any member of staff"
+              + " at the order's store; once per Idempotency-Key.")
+  @APIResponse(responseCode = "200", description = "Closed; the order as it stands")
+  @APIResponse(responseCode = "400", description = "ORDER_LINE_UNKNOWN, or a bad quantity")
+  @APIResponse(responseCode = "403", description = "Not assigned to the order's store")
+  @APIResponse(responseCode = "404", description = "Order not found")
+  @APIResponse(
+      responseCode = "409",
+      description = "ORDER_LINE_NOT_ADJUSTABLE, ORDER_LINE_QTY_EXCEEDS_OUTSTANDING")
+  @POST
+  @Path("/{id}/lines/{variantId}/short")
+  public Response shortClose(
+      @PathParam("id") String id,
+      @PathParam("variantId") String variantId,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
+      com.storeql.order.dto.Dtos.ShortCloseRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    if (req != null) Validations.validate(req);
+    var order =
+        svc.shortClose(
+            ctx.requireTenantId(),
+            Parsing.uuid(id, "id"),
+            Parsing.uuid(variantId, "variantId"),
+            req,
+            ctx,
+            IdempotencyKeys.effective(idempotencyKey, null));
+    return orderAnswer(order);
+  }
+
+  /**
+   * Puts a substitute in the bag for a line the store cannot fill.
+   *
+   * @param id the confirmed or part-picked online order
+   * @param variantId the line's product
+   * @param req the substitute, how much, and — with server-side pricing off — its unit price
+   * @return the order as it now stands, the substitute among its lines
+   */
+  @Operation(
+      summary = "Substitute a line",
+      description =
+          "Where the shopper allowed substitutions: a new line for the substitute, priced at the"
+              + " store and charged at no more than the original, picked at once; the original"
+              + " closed short for the quantity; the difference refunded; the shopper told. Any"
+              + " member of staff at the order's store; once per Idempotency-Key.")
+  @APIResponse(responseCode = "200", description = "Substituted; the order as it stands")
+  @APIResponse(
+      responseCode = "400",
+      description = "ORDER_LINE_UNKNOWN, ORDER_SUBSTITUTE_SAME_VARIANT, ORDER_PRICE_REQUIRED")
+  @APIResponse(responseCode = "403", description = "Not assigned to the order's store")
+  @APIResponse(responseCode = "404", description = "Order not found")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "ORDER_LINE_NOT_ADJUSTABLE, ORDER_LINE_QTY_EXCEEDS_OUTSTANDING,"
+              + " ORDER_SUBSTITUTION_NOT_ALLOWED, ORDER_SUBSTITUTE_NOT_SELLABLE")
+  @POST
+  @Path("/{id}/lines/{variantId}/substitute")
+  public Response substitute(
+      @PathParam("id") String id,
+      @PathParam("variantId") String variantId,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
+      com.storeql.order.dto.Dtos.SubstituteRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    Validations.validate(req);
+    var order =
+        svc.substitute(
+            ctx.requireTenantId(),
+            Parsing.uuid(id, "id"),
+            Parsing.uuid(variantId, "variantId"),
+            req,
+            ctx,
+            IdempotencyKeys.effective(idempotencyKey, null));
+    return orderAnswer(order);
+  }
+
+  @Operation(
+      summary = "Stand-ins for a line",
+      description =
+          "The substitutes the business declared for the line's product (product-svc), each with"
+              + " what the order's store has of it, most available first.")
+  @APIResponse(responseCode = "200", description = "The suggestions, possibly none")
+  @GET
+  @Path("/{id}/lines/{variantId}/substitutes")
+  public Response substitutes(
+      @PathParam("id") String id, @PathParam("variantId") String variantId) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    return Response.ok(
+            ApiResponse.ok(
+                svc
+                    .substituteSuggestions(
+                        ctx.requireTenantId(),
+                        Parsing.uuid(id, "id"),
+                        Parsing.uuid(variantId, "variantId"),
+                        ctx)
+                    .stream()
+                    .map(Mappers::toDto)
+                    .toList()))
+        .build();
+  }
+
+  @Operation(
+      summary = "The store's orders still owing something",
+      description =
+          "Confirmed and part-picked online orders at the store with the lines each still owes and"
+              + " whether the shopper allows substitutions — the Fulfilment screen's outstanding"
+              + " lines. Staff at the store.")
+  @APIResponse(responseCode = "200", description = "The orders, oldest first")
+  @APIResponse(responseCode = "400", description = "store is required")
+  @GET
+  @Path("/owing")
+  public Response owing(@QueryParam("store") String store) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    if (store == null || store.isBlank()) {
+      throw ApiException.badRequest("VALIDATION_FAILED", "store: is required");
+    }
+    return Response.ok(
+            ApiResponse.ok(
+                svc.owingLines(ctx.requireTenantId(), Parsing.uuid(store, "store"), ctx).stream()
+                    .map(Mappers::toDto)
+                    .toList()))
+        .build();
+  }
+
+  private Response orderAnswer(com.storeql.order.domain.Domain.Order order) {
+    var items = svc.getOrderItems(order.tenantId(), order.id());
+    return Response.ok(
+            ApiResponse.ok(
+                Mappers.toDto(
+                    order,
+                    items,
+                    svc.depositsOf(order.tenantId(), order.id()),
+                    svc.groupOf(order.tenantId(), order.id()).orElse(null),
+                    svc.handoverOf(order.tenantId(), order.id()).orElse(null))))
+        .build();
+  }
+
+  /**
+   * Hands a picked delivery order to a carrier (ship-from-store and dark-store picking).
+   *
+   * @param id the FULFILLED delivery order
+   * @param req the carrier, and its reference and the parcel count when known
+   * @return the order with its handover
+   */
+  @Operation(
+      summary = "Dispatch a picked delivery order",
+      description =
+          "Records that a FULFILLED (picked and packed) online delivery order left with a carrier,"
+              + " once; the shopper is told it is on its way. Any member of staff assigned to the"
+              + " order's store.")
+  @APIResponse(responseCode = "200", description = "Dispatched; the order with its handover")
+  @APIResponse(responseCode = "400", description = "No carrier, or a field too long")
+  @APIResponse(responseCode = "403", description = "Not assigned to the order's store")
+  @APIResponse(responseCode = "404", description = "Order not found")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "ORDER_NOT_PICKED (not yet FULFILLED), ORDER_HANDOVER_KIND_MISMATCH (not an online"
+              + " delivery), ORDER_ALREADY_HANDED_OVER")
+  @POST
+  @Path("/{id}/dispatch")
+  public Response dispatch(
+      @PathParam("id") String id, com.storeql.order.dto.Dtos.DispatchRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    Validations.validate(req);
+    var handover = svc.dispatch(ctx.requireTenantId(), Parsing.uuid(id, "id"), req, ctx);
+    return handedOver(handover);
+  }
+
+  /**
+   * Hands a picked pickup order to its shopper at the counter.
+   *
+   * @param id the FULFILLED pickup order
+   * @param req who took it, when noted; the body may be empty
+   * @return the order with its handover
+   */
+  @Operation(
+      summary = "Record a picked pickup order collected",
+      description =
+          "Records that a FULFILLED (picked and packed) online pickup order was collected by its"
+              + " shopper, once. Any member of staff assigned to the order's store.")
+  @APIResponse(responseCode = "200", description = "Collected; the order with its handover")
+  @APIResponse(responseCode = "403", description = "Not assigned to the order's store")
+  @APIResponse(responseCode = "404", description = "Order not found")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "ORDER_NOT_PICKED, ORDER_HANDOVER_KIND_MISMATCH (not an online pickup),"
+              + " ORDER_ALREADY_HANDED_OVER")
+  @POST
+  @Path("/{id}/collect")
+  public Response collect(
+      @PathParam("id") String id, com.storeql.order.dto.Dtos.CollectRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    if (req != null) Validations.validate(req);
+    var handover = svc.collect(ctx.requireTenantId(), Parsing.uuid(id, "id"), req, ctx);
+    return handedOver(handover);
+  }
+
+  private Response handedOver(com.storeql.order.domain.Handover h) {
+    var order = svc.getOrder(h.tenantId(), h.orderId());
+    var items = svc.getOrderItems(h.tenantId(), h.orderId());
+    return Response.ok(
+            ApiResponse.ok(
+                Mappers.toDto(
+                    order,
+                    items,
+                    svc.depositsOf(h.tenantId(), h.orderId()),
+                    svc.groupOf(h.tenantId(), h.orderId()).orElse(null),
+                    h)))
         .build();
   }
 

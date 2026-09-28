@@ -361,6 +361,100 @@ jobs:
           IMAGE_REF: ${{ env.IMAGE_PREFIX }}-web@${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE_REF}"
 
+  backup:
+    name: Build & publish backup image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless signing and attestations
+      attestations: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_PREFIX }}-backup
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: infra/backup/Dockerfile
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Known vulnerabilities (22.11), before anything vouches for the image — as for the services.
+      - name: Install grype
+        id: grype
+        uses: anchore/scan-action/download-grype@v7
+
+      - name: Scan the pushed image
+        env:
+          GRYPE: ${{ steps.grype.outputs.cmd }}
+          IMAGE_REF: ${{ env.IMAGE_PREFIX }}-backup@${{ steps.build.outputs.digest }}
+        run: |
+          python3 -m pip install --quiet pyyaml
+          scripts/vuln-scan.sh image "registry:${IMAGE_REF}"
+
+      # The Postgres image's own tools plus age and jq: one SBOM, of the image as pushed.
+      - name: SBOM of the pushed image (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_PREFIX }}-backup@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest the image SBOM
+        uses: actions/attest-sbom@v4
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}-backup
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.cdx.json
+          push-to-registry: true
+
+      - name: Attest build provenance to the image
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}-backup
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Sign the image
+        env:
+          IMAGE_REF: ${{ env.IMAGE_PREFIX }}-backup@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE_REF}"
+
   # ── Prune old GHCR versions: keep current + previous build per package ──────
   # A push never deletes the old image — it only moves the latest/main tags, so
   # every prior version lingers (still carrying its unique sha-<commit> tag) and
@@ -375,7 +469,7 @@ jobs:
   # published this run.
   cleanup:
     name: Prune old GHCR versions
-    needs: [services, web]
+    needs: [services, web, backup]
     runs-on: ubuntu-latest
     if: >
       always() &&
@@ -401,6 +495,7 @@ jobs:
           - storeql-notification-svc
           - storeql-reporting-svc
           - storeql-web
+          - storeql-backup
 
     steps:
       - name: Keep last 2 versions of ${{ matrix.package }}

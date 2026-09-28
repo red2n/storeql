@@ -8,6 +8,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 
 import com.storeql.ids.Ids;
+import com.storeql.notification.service.RetentionPurgeService;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
 import com.storeql.test.WebTargets;
@@ -58,6 +59,7 @@ class RetentionPurgeIT {
   }
 
   @Inject WebTarget target;
+  @Inject RetentionPurgeService retentionService;
 
   @AfterAll
   static void stopDb() {
@@ -142,5 +144,38 @@ class RetentionPurgeIT {
         .header("X-Roles", roles)
         .header("X-User-Id", OWNER)
         .post(Entity.entity("{}", MediaType.APPLICATION_JSON));
+  }
+
+  // ── The platform's own password-reset purge, no tenant, no schedule ────────────
+
+  /** A password-reset row, dated {@code age} ago — {@code tenant_id} is always null. */
+  private static String passwordReset(String age) {
+    String id = Ids.newId().toString();
+    exec(
+        PG,
+        "INSERT INTO notification.notification_log (id, tenant_id, event_id, type, channel,"
+            + " recipient, subject, body, status, created_at) VALUES ('"
+            + id
+            + "', NULL, '"
+            + Ids.newId()
+            + "', 'PASSWORD_RESET', 'EMAIL', 'a@example.com', 'Reset your password',"
+            + "'Shopper account: [link removed]', 'SENT', now() - interval '"
+            + age
+            + "')");
+    return id;
+  }
+
+  @Test
+  void passwordResetRowsOlderThanTheConfiguredPeriodAreDeletedWhateverTheLogin() {
+    String old = passwordReset("31 days");
+    String recent = passwordReset("1 days");
+
+    int purged = retentionService.purgePasswordResets();
+
+    assertThat(purged, is(1));
+    assertThat(exists(old), is("0"));
+    assertThat(exists(recent), is("1"));
+    // Idempotent: a second sweep the same moment finds nothing left due.
+    assertThat(retentionService.purgePasswordResets(), is(0));
   }
 }

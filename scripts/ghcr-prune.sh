@@ -44,7 +44,7 @@ PACKAGES=(
   storeql-iam-svc storeql-tenant-svc storeql-product-svc storeql-inventory-svc storeql-purchase-svc
   storeql-pricing-svc storeql-cart-svc storeql-order-svc storeql-payment-svc
   storeql-customer-svc storeql-notification-svc storeql-reporting-svc
-  storeql-web
+  storeql-web storeql-backup
 )
 
 # ── args ──────────────────────────────────────────────────────────────────

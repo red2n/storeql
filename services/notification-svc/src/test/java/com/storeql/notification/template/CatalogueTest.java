@@ -32,7 +32,7 @@ class CatalogueTest {
           assertTrue(group.stream().anyMatch(used::contains), where + " leaves out " + group);
           assertTrue(t.names().containsAll(group), where + " requires what it does not have");
         }
-        var scope = t.sample().get().in(Locale.forLanguageTag("en-GB"));
+        var scope = t.sample().apply("EUR").in(Locale.forLanguageTag("en-GB"));
         String writtenBody = body.render(scope);
         assertFalse(writtenBody.isBlank(), where);
         assertTrue(writtenBody.length() <= f.form().bodyMax, where + " is too long");
@@ -48,7 +48,7 @@ class CatalogueTest {
   @DisplayName("Every sample fills every value its message declares, so a preview shows them all")
   void everySampleIsComplete() {
     for (Catalogue.MessageType t : Catalogue.all()) {
-      Values sample = t.sample().get();
+      Values sample = t.sample().apply("EUR");
       for (Catalogue.Variable v : t.variables()) {
         // shop is the business's own; a single remedy's reason exists only when one is offered.
         if (v.name().contains(".") || v.name().equals("shop")) continue;
@@ -76,5 +76,33 @@ class CatalogueTest {
       assertTrue(email.body().endsWith("— {{shop}}"), key);
       assertFalse(email.body().contains("StoreQL"), key);
     }
+  }
+
+  /**
+   * No sample bakes in a currency of its own any more — every one that carries a MONEY value writes
+   * it out in whichever currency it is given, so a PLN business's preview never shows a GBP amount
+   * and an INR business's never shows a PLN one.
+   */
+  @Test
+  @DisplayName("Every sample with a money value writes it in the currency it is given, not GBP")
+  void everyMoneySampleFollowsTheCurrencyItIsGiven() {
+    for (Catalogue.MessageType t : Catalogue.all()) {
+      boolean hasMoney = t.variables().stream().anyMatch(v -> "MONEY".equals(v.kind()));
+      if (!hasMoney) continue;
+      String pln = renderedWith(t, "PLN");
+      String inr = renderedWith(t, "INR");
+      assertFalse(pln.contains("£"), t.key() + " a PLN preview must never show £: " + pln);
+      assertFalse(pln.contains("GBP"), t.key() + " a PLN preview must never show GBP: " + pln);
+      assertTrue(pln.contains("PLN") || pln.contains("zł"), t.key() + " should show PLN: " + pln);
+      assertTrue(inr.contains("₹") || inr.contains("INR"), t.key() + " should show INR: " + inr);
+      assertFalse(pln.equals(inr), t.key() + " two different currencies must render differently");
+    }
+  }
+
+  /** The one form a message goes out in — its email, or its only form when it has no email. */
+  private static String renderedWith(Catalogue.MessageType t, String currency) {
+    Catalogue.FormSpec spec = t.form(Catalogue.Form.EMAIL).orElseGet(() -> t.forms().get(0));
+    var scope = t.sample().apply(currency).in(Locale.forLanguageTag("en"));
+    return Template.parse(spec.body()).render(scope);
   }
 }

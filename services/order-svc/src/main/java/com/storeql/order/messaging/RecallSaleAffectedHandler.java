@@ -11,6 +11,9 @@ import com.storeql.order.domain.RecallNotice.Status;
 import com.storeql.order.repo.OrderRepository;
 import com.storeql.order.repo.RecallNoticeRepository;
 import com.storeql.order.service.Events;
+import com.storeql.order.service.TillPhone;
+import com.storeql.service.TenantProfiles;
+import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.json.Json;
@@ -45,6 +48,7 @@ public class RecallSaleAffectedHandler {
   @Inject OrderRepository orders;
   @Inject RecallNoticeRepository notices;
   @Inject ProductClient products;
+  @Inject TenantProfiles profiles;
 
   /**
    * Handles one event.
@@ -80,7 +84,7 @@ public class RecallSaleAffectedHandler {
     Notice notice;
     List<Line> lines;
     try {
-      notice = notice(obj, order);
+      notice = notice(obj, order, buyerPhoneOf(order));
       lines = lines(obj, tenantId);
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "Malformed RecallSaleAffected payload skipped: " + e.getMessage());
@@ -99,7 +103,45 @@ public class RecallSaleAffectedHandler {
     return issued;
   }
 
-  private static Notice notice(JsonObject obj, Order order) {
+  /**
+   * The number a recall notice reaches the buyer at (a phone at the till): the order's own
+   * international form; for an order placed before that was kept, its number as typed, read now in
+   * the store's own country, then the business's; else the number as typed — never dropped, so
+   * notification-svc can still fall back to the customer's own when it cannot text it.
+   */
+  private String buyerPhoneOf(Order order) {
+    if (order.contactPhoneE164() != null) return order.contactPhoneE164();
+    String typed = order.contactPhone();
+    if (typed == null || typed.isBlank()) return null;
+    Map<UUID, String> countries = storeCountries(order);
+    String e164 =
+        TillPhone.read(
+                typed,
+                countries.get(order.storeId()),
+                homeCountry(order.tenantId()),
+                countries.values())
+            .e164();
+    return e164 != null ? e164 : typed;
+  }
+
+  private Map<UUID, String> storeCountries(Order order) {
+    try {
+      var stores = profiles.stores(order.tenantId(), order.storeId());
+      return stores == null ? Map.of() : stores.countries();
+    } catch (ApiException e) {
+      return Map.of();
+    }
+  }
+
+  private String homeCountry(UUID tenantId) {
+    try {
+      return profiles.requireCountry(tenantId);
+    } catch (ApiException e) {
+      return null;
+    }
+  }
+
+  private static Notice notice(JsonObject obj, Order order, String buyerPhone) {
     Set<Remedy> remedies =
         Set.copyOf(
             obj.getJsonArray("remedies").getValuesAs(JsonString.class).stream()
@@ -108,7 +150,6 @@ public class RecallSaleAffectedHandler {
     if (remedies.isEmpty()) {
       throw new IllegalArgumentException("a recall notice offers a remedy");
     }
-    String buyerPhone = order.contactPhone();
     boolean identified = Notice.identifies(order.customerId(), order.loginId(), buyerPhone);
     return new Notice(
         Ids.newId(),

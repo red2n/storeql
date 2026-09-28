@@ -160,4 +160,16 @@ class CardDataGuardFilterTest {
     verify(ctx, never()).abortWith(any());
     verify(ctx, never()).getEntityStream();
   }
+
+  @Test
+  @DisplayName("Two ids whose digit groups line up as a card, and a role, are a staff assignment")
+  void letsIdsThroughWhateverTheirDigitsAddUpTo() throws IOException {
+    // SJ-D67: 5100 7069 8187 0918 is Luhn-valid in Mastercard's range; the id is not a card.
+    String json =
+        "{\"userId\":\"019993e0-5100-7069-8187-0918e7284e47\","
+            + "\"storeId\":\"01998bcd-4236-7684-9322-3069a2373271\",\"role\":\"CASHIER\"}";
+    body(json);
+    filter.filter(ctx);
+    verify(ctx, never()).abortWith(any());
+  }
 }

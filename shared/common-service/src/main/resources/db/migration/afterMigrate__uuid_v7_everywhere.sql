@@ -13,24 +13,29 @@
 -- Postgres 16 has no uuid_extract_version (17 does), so the version and variant are read from the
 -- bytes: byte 6's high nibble is the version, byte 8's top two bits the variant.
 
+-- The guards are SQL-standard function bodies (BEGIN ATOMIC), parsed once at creation: what they
+-- name is bound then, and recorded as a dependency. A body kept as a string ($$ ... $$) is parsed at
+-- every call under the caller's search_path — and pg_restore runs with an empty one, so a guard that
+-- named its sibling unqualified failed every COPY into a table it checks, and a backup could not be
+-- restored. The backup drill found it; PostgresSupport's audit now refuses a guard defined that way.
 CREATE OR REPLACE FUNCTION uuid_is_v7(u uuid) RETURNS boolean
     LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
-AS $$
-    SELECT (get_byte(uuid_send(u), 6) >> 4) = 7 AND (get_byte(uuid_send(u), 8) >> 6) = 2
-$$;
+BEGIN ATOMIC
+    SELECT (get_byte(uuid_send(u), 6) >> 4) = 7 AND (get_byte(uuid_send(u), 8) >> 6) = 2;
+END;
 
 CREATE OR REPLACE FUNCTION uuid_all_v7(us uuid[]) RETURNS boolean
     LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
-AS $$
-    SELECT coalesce(bool_and(uuid_is_v7(u)), true) FROM unnest(us) AS u
-$$;
+BEGIN ATOMIC
+    SELECT coalesce(bool_and(uuid_is_v7(u)), true) FROM unnest(us) AS u;
+END;
 
 -- Canonical text only: lowercase, hyphenated, 36 characters — so one key is never two rows.
 CREATE OR REPLACE FUNCTION uuid_text_is_v7(t text) RETURNS boolean
     LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
-AS $$
-    SELECT t ~ '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-$$;
+BEGIN ATOMIC
+    SELECT t ~ '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+END;
 
 DO
 $$

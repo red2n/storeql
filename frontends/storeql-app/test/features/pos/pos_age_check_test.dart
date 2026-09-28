@@ -5,6 +5,7 @@ import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/features/pos/pos_age_check.dart';
 import 'package:storeql_app/features/pos/pos_providers.dart';
 
+import 'package:intl/intl.dart';
 // ---------------------------------------------------------------------------
 // The till's age check. The cases that matter most are the ones where the
 // answer is "couldn't tell": each of them must keep the item out of the sale,
@@ -34,6 +35,12 @@ Dio _dio(_Stub stub) =>
     Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = stub;
 
 void main() {
+  // This file's UI dates (e.g. day-before-month, "Sept") are about
+  // AppFormat writing en_GB correctly, not about which locale the app
+  // defaults to (core/l10n/app_locales_test.dart owns that) — pinned
+  // explicitly so it stays true whatever the app's own fallback is.
+  setUp(() => Intl.defaultLocale = 'en_GB');
+  tearDown(() => Intl.defaultLocale = null);
   // The cut-off is shown as a date in the app's own locale, as the app does.
   setUpAll(initializeDateFormatting);
 
@@ -177,7 +184,7 @@ void main() {
       expect(find.text('Rioja 75cl'), findsOneWidget);
       expect(find.text('Alcohol'), findsOneWidget);
       expect(find.text('The customer must be 18 or over.'), findsOneWidget);
-      expect(find.text('Legal minimum in GB.'), findsOneWidget);
+      expect(find.text('Legal minimum in the United Kingdom.'), findsOneWidget);
     });
 
     testWidgets('a stricter store policy is shown as policy, not as law',
@@ -191,7 +198,7 @@ void main() {
                       minimumAge: 25,
                       country: 'GB',
                       storePolicy: true)))));
-      expect(find.textContaining('Store policy in GB'), findsOneWidget);
+      expect(find.textContaining('Store policy in the United Kingdom'), findsOneWidget);
       expect(find.text('Checked — 25+'), findsOneWidget);
     });
 

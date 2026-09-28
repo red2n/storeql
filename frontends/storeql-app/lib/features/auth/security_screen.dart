@@ -2,7 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/passkeys.dart';
+import '../../core/format.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
+import '../../core/theme.dart';
+import '../../shared/widgets/error_view.dart';
+import '../../shared/widgets/loading_view.dart';
 import 'mfa_api.dart';
 import 'mfa_widgets.dart';
 
@@ -18,14 +23,14 @@ class SecurityScreen extends ConsumerWidget {
     final status = ref.watch(mfaStatusProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('Sign-in security')),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 640),
-          child: status.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => Center(child: Text(friendlyError(e))),
-            data: (s) => _Factors(status: s),
+      body: ContentBounds.form(
+        child: status.when(
+          loading: () => const LoadingView(),
+          error: (e, _) => ErrorView(
+            message: friendlyError(e),
+            onRetry: () => ref.invalidate(mfaStatusProvider),
           ),
+          data: (s) => _Factors(status: s),
         ),
       ),
     );
@@ -42,13 +47,85 @@ class _Factors extends ConsumerWidget {
     final api = ref.watch(mfaApiProvider);
     final text = Theme.of(context).textTheme;
     final cs = Theme.of(context).colorScheme;
+    final info = context.status;
     void refresh() => ref.invalidate(mfaStatusProvider);
 
+    final cards = <Widget>[
+      Card(
+        child: ListTile(
+          leading: const Icon(Icons.phonelink_lock_outlined),
+          title: const Text('Authenticator app'),
+          subtitle: Text(status.totp ? 'Set up' : 'Not set up'),
+          trailing: status.totp
+              ? TextButton(
+                  key: const Key('totp-remove'),
+                  onPressed: () => _withPassword(context, 'Remove the authenticator app', api.removeTotp, refresh),
+                  child: const Text('Remove'),
+                )
+              : FilledButton.tonal(
+                  key: const Key('totp-setup'),
+                  onPressed: () => _setUpTotp(context, api, refresh),
+                  child: const Text('Set up'),
+                ),
+        ),
+      ),
+      if (passkeys.supported || status.passkeys.isNotEmpty)
+        Card(
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.fingerprint),
+                title: const Text('Passkeys'),
+                subtitle: const Text('Cannot be phished: a passkey only answers the real site.'),
+                trailing: passkeys.supported
+                    ? FilledButton.tonal(
+                        key: const Key('passkey-add'),
+                        onPressed: () => _addPasskey(context, api, refresh),
+                        child: const Text('Add'),
+                      )
+                    : null,
+              ),
+              for (final p in status.passkeys)
+                ListTile(
+                  dense: true,
+                  // Under the title, clear of the leading icon.
+                  contentPadding: const EdgeInsetsDirectional.only(start: 72, end: AppSpacing.lg),
+                  title: Text(p.name),
+                  subtitle: Text(p.lastUsedAt == null ? 'Never used' : 'Last used ${AppFormat.date(p.lastUsedAt)}'),
+                  trailing: IconButton(
+                    tooltip: 'Remove this passkey',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => _withPassword(
+                      context,
+                      'Remove "${p.name}"',
+                      (password) => api.removePasskey(p.id, password),
+                      refresh,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      if (status.enrolled)
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.key_outlined),
+            title: const Text('Recovery codes'),
+            subtitle: Text('${status.recoveryCodesLeft} left. Each signs you in once if you lose your phone.'),
+            trailing: TextButton(
+              key: const Key('recovery-new'),
+              onPressed: () => _newCodes(context, api, refresh),
+              child: const Text('New codes'),
+            ),
+          ),
+        ),
+    ];
+
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: context.pagePadding,
       children: [
         Text('Second step at sign-in', style: text.titleLarge),
-        const SizedBox(height: 4),
+        const SizedBox(height: AppSpacing.xs),
         Text(
           status.enrolled
               ? 'You are asked for a second step every time you sign in.'
@@ -57,85 +134,34 @@ class _Factors extends ConsumerWidget {
           style: text.bodyMedium?.copyWith(color: cs.outline),
         ),
         if (status.required) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: AppSpacing.md),
+          // Information, not success: the info container, with its icon.
           Container(
             key: const Key('mfa-required'),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: cs.secondaryContainer, borderRadius: BorderRadius.circular(8)),
-            child: Text(
-              'A second step is required of this login, so the last one cannot be removed.',
-              style: TextStyle(color: cs.onSecondaryContainer),
-            ),
-          ),
-        ],
-        const SizedBox(height: 24),
-        Card(
-          child: ListTile(
-            leading: const Icon(Icons.phonelink_lock_outlined),
-            title: const Text('Authenticator app'),
-            subtitle: Text(status.totp ? 'Set up' : 'Not set up'),
-            trailing: status.totp
-                ? TextButton(
-                    key: const Key('totp-remove'),
-                    onPressed: () => _withPassword(context, 'Remove the authenticator app', api.removeTotp, refresh),
-                    child: const Text('Remove'),
-                  )
-                : FilledButton.tonal(
-                    key: const Key('totp-setup'),
-                    onPressed: () => _setUpTotp(context, api, refresh),
-                    child: const Text('Set up'),
-                  ),
-          ),
-        ),
-        if (passkeys.supported || status.passkeys.isNotEmpty)
-          Card(
-            child: Column(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            decoration: BoxDecoration(color: info.infoContainer, borderRadius: AppRadius.chip),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ListTile(
-                  leading: const Icon(Icons.fingerprint),
-                  title: const Text('Passkeys'),
-                  subtitle: const Text('Cannot be phished: a passkey only answers the real site.'),
-                  trailing: passkeys.supported
-                      ? FilledButton.tonal(
-                          key: const Key('passkey-add'),
-                          onPressed: () => _addPasskey(context, api, refresh),
-                          child: const Text('Add'),
-                        )
-                      : null,
-                ),
-                for (final p in status.passkeys)
-                  ListTile(
-                    dense: true,
-                    contentPadding: const EdgeInsets.only(left: 72, right: 16),
-                    title: Text(p.name),
-                    subtitle: Text(p.lastUsedAt == null ? 'Never used' : 'Last used ${p.lastUsedAt!.substring(0, 10)}'),
-                    trailing: IconButton(
-                      tooltip: 'Remove this passkey',
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () => _withPassword(
-                        context,
-                        'Remove "${p.name}"',
-                        (password) => api.removePasskey(p.id, password),
-                        refresh,
-                      ),
-                    ),
+                Icon(Icons.info_outline, size: 20, color: info.onInfoContainer),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Text(
+                    'A second step is required of this login, so the last one cannot be removed.',
+                    style: text.bodyMedium?.copyWith(color: info.onInfoContainer),
                   ),
+                ),
               ],
             ),
           ),
-        if (status.enrolled)
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.key_outlined),
-              title: const Text('Recovery codes'),
-              subtitle: Text('${status.recoveryCodesLeft} left. Each signs you in once if you lose your phone.'),
-              trailing: TextButton(
-                key: const Key('recovery-new'),
-                onPressed: () => _newCodes(context, api, refresh),
-                child: const Text('New codes'),
-              ),
-            ),
-          ),
+        ],
+        const SizedBox(height: AppSpacing.xl),
+        // The theme's cards have no margin: a gap between each keeps their
+        // hairlines from doubling up.
+        for (var i = 0; i < cards.length; i++) ...[
+          if (i > 0) const SizedBox(height: AppSpacing.md),
+          cards[i],
+        ],
       ],
     );
   }

@@ -6,6 +6,7 @@ import com.storeql.inventory.dto.Dtos.TransferOrderResponse;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -35,6 +36,7 @@ public class TransferOrderResource {
 
   @Inject InventoryService service;
   @Inject TenantContext ctx;
+  @Inject com.storeql.inventory.service.NetworkService network;
 
   /**
    * Creates a transfer order.
@@ -51,6 +53,9 @@ public class TransferOrderResource {
   @POST
   @Path("/transfers")
   public Response createTransfer(CreateTransferOrderRequest req) {
+    // SJ-D73: moving stock is the storekeeper's, never the till's. The sending store is held to the
+    // caller by StoreScopeFilter (fromStoreId); the receiving store's keeper is held at receipt.
+    ctx.requirePermission(Permissions.STOCK_TRANSFER);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID fromStore = uuid(req.fromStoreId(), "fromStoreId");
@@ -94,7 +99,7 @@ public class TransferOrderResource {
       @QueryParam("status") String status,
       @QueryParam("limit") Integer limitParam) {
     UUID tenantId = ctx.requireTenantId();
-    UUID storeId = store == null || store.isBlank() ? null : uuid(store, "store");
+    UUID storeId = ctx.scopeStore(store == null || store.isBlank() ? null : uuid(store, "store"));
     int limit = limitParam == null || limitParam < 1 ? 20 : Math.min(limitParam, 100);
     return ApiResponse.ok(
         service.listTransferOrders(tenantId, storeId, status, limit).stream()
@@ -115,6 +120,7 @@ public class TransferOrderResource {
   @Path("/transfers/{id}")
   public ApiResponse<TransferOrderResponse> getTransfer(@PathParam("id") UUID id) {
     var wl = service.getTransferOrder(ctx.requireTenantId(), id);
+    ctx.requireAnyStoreAccess(wl.order().fromStoreId(), wl.order().toStoreId());
     return ApiResponse.ok(Mappers.toTransferOrder(wl.order(), wl.lines()));
   }
 
@@ -135,7 +141,10 @@ public class TransferOrderResource {
   @POST
   @Path("/transfers/{id}/ship")
   public ApiResponse<TransferOrderResponse> shipTransfer(@PathParam("id") UUID id) {
-    var wl = service.shipTransferOrder(ctx.requireTenantId(), id);
+    ctx.requirePermission(Permissions.STOCK_TRANSFER);
+    UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getTransferOrder(tenantId, id).order().fromStoreId());
+    var wl = service.shipTransferOrder(tenantId, id);
     return ApiResponse.ok(Mappers.toTransferOrder(wl.order(), wl.lines()));
   }
 
@@ -156,27 +165,53 @@ public class TransferOrderResource {
   @POST
   @Path("/transfers/{id}/receive")
   public ApiResponse<TransferOrderResponse> receiveTransfer(@PathParam("id") UUID id) {
-    var wl = service.receiveTransferOrder(ctx.requireTenantId(), id);
+    ctx.requirePermission(Permissions.STOCK_TRANSFER);
+    UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getTransferOrder(tenantId, id).order().toStoreId());
+    var wl = service.receiveTransferOrder(tenantId, id);
     return ApiResponse.ok(Mappers.toTransferOrder(wl.order(), wl.lines()));
   }
 
   /**
    * Cancels a transfer order.
    *
-   * <p>Only PENDING transfer orders can be cancelled.
+   * <p>Only DRAFT or PENDING transfer orders can be cancelled.
    *
    * @param id the id (path parameter)
    * @throws com.storeql.web.ApiException {@code 422} only PENDING transfer orders can be cancelled
    */
   @Operation(
       summary = "Cancel a transfer order",
-      description = "Only PENDING transfer orders can be cancelled.")
-  @APIResponse(responseCode = "422", description = "Only PENDING transfer orders can be cancelled")
+      description = "Only DRAFT or PENDING transfer orders can be cancelled.")
+  @APIResponse(
+      responseCode = "422",
+      description = "Only DRAFT or PENDING transfer orders can be cancelled")
   @POST
   @Path("/transfers/{id}/cancel")
   public ApiResponse<TransferOrderResponse> cancelTransfer(@PathParam("id") UUID id) {
+    ctx.requirePermission(Permissions.STOCK_TRANSFER);
+    var open = service.getTransferOrder(ctx.requireTenantId(), id).order();
+    ctx.requireAnyStoreAccess(open.fromStoreId(), open.toStoreId());
     var cancelled = service.cancelTransferOrder(ctx.requireTenantId(), id);
     var wl = service.getTransferOrder(ctx.requireTenantId(), cancelled.id());
+    return ApiResponse.ok(Mappers.toTransferOrder(wl.order(), wl.lines()));
+  }
+
+  /**
+   * Releases a transfer a replenishment run proposed: DRAFT becomes PENDING, for the warehouse to
+   * ship.
+   *
+   * @param id the id (path parameter)
+   */
+  @Operation(
+      summary = "Release a proposed transfer",
+      description = "A DRAFT raised by a warehouse's replenishment run becomes PENDING.")
+  @APIResponse(responseCode = "404", description = "TRANSFER_ORDER_NOT_FOUND")
+  @APIResponse(responseCode = "409", description = "INVENTORY_TRANSFER_NOT_DRAFT")
+  @POST
+  @Path("/transfers/{id}/release")
+  public ApiResponse<TransferOrderResponse> releaseTransfer(@PathParam("id") UUID id) {
+    var wl = network.release(ctx, id);
     return ApiResponse.ok(Mappers.toTransferOrder(wl.order(), wl.lines()));
   }
 

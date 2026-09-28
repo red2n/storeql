@@ -1,17 +1,22 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
+import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../core/theme.dart';
 import '../../shared/util/file_download.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../shared/widgets/page_header.dart';
 import 'food_safety_providers.dart';
 import 'providers/admin_providers.dart';
+import '../../shared/widgets/empty_state.dart';
 
 /// Temperature monitoring and HACCP checks for one store: what is due today,
 /// the diary an inspector reads, and — for managers — the points and the
@@ -27,12 +32,7 @@ class FoodSafetyScreen extends ConsumerWidget {
         auth is AuthAuthenticated ? auth.storeIds : const <String>[];
     final storesAsync = ref.watch(storesProvider);
 
-    final header = Padding(
-      padding:
-          const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.xl, AppSpacing.xl, 0),
-      child: Text('Food safety',
-          style: Theme.of(context).textTheme.headlineMedium),
-    );
+    const header = PageHeader(title: 'Food safety');
 
     if (storesAsync.hasError) {
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -54,12 +54,17 @@ class FoodSafetyScreen extends ConsumerWidget {
         .where((s) => allowedStores.isEmpty || allowedStores.contains(s.id))
         .toList();
     if (stores.isEmpty) {
-      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        header,
-        const Expanded(
-          child: Center(child: Text('Add a store before setting up checks.')),
-        ),
-      ]);
+      return const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            header,
+            Expanded(
+              child: EmptyState(
+                icon: Icons.store_outlined,
+                title: 'Add a store before setting up checks.',
+              ),
+            ),
+          ]);
     }
     final chosen = ref.watch(foodSafetyStoreProvider);
     final storeId = stores.any((s) => s.id == chosen) ? chosen! : stores.first.id;
@@ -77,34 +82,35 @@ class FoodSafetyScreen extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-                AppSpacing.xl, AppSpacing.xl, AppSpacing.xl, 0),
-            child: Wrap(
-              spacing: AppSpacing.lg,
-              runSpacing: AppSpacing.sm,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text('Food safety',
-                    style: Theme.of(context).textTheme.headlineMedium),
-                if (stores.length > 1)
-                  DropdownButton<String>(
-                    key: const Key('fs-store'),
-                    value: storeId,
-                    items: [
-                      for (final s in stores)
-                        DropdownMenuItem(value: s.id, child: Text(s.name)),
-                    ],
-                    onChanged: (v) =>
-                        ref.read(foodSafetyStoreProvider.notifier).state = v,
-                  )
-                else
-                  Text(stores.first.name,
-                      style: Theme.of(context).textTheme.titleMedium),
-              ],
-            ),
+          // One store is named under the title; several are picked from the
+          // header's action.
+          PageHeader(
+            title: 'Food safety',
+            subtitle: stores.length > 1 ? null : stores.first.name,
+            actions: [
+              if (stores.length > 1)
+                DropdownButton<String>(
+                  key: const Key('fs-store'),
+                  value: storeId,
+                  items: [
+                    for (final s in stores)
+                      DropdownMenuItem(value: s.id, child: Text(s.name)),
+                  ],
+                  onChanged: (v) =>
+                      ref.read(foodSafetyStoreProvider.notifier).state = v,
+                ),
+            ],
           ),
-          TabBar(isScrollable: true, tabs: tabs),
+          // The tabs start at the page's edge, not M3's 52px scroll offset,
+          // and the first label lines up under the title: the gutter less the
+          // tab's own 16 of label padding.
+          TabBar(
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            padding: EdgeInsetsDirectional.only(
+                start: math.max(0, context.pageGutter - AppSpacing.lg)),
+            tabs: tabs,
+          ),
           Expanded(
             child: TabBarView(children: [
               _TodayTab(storeId: storeId),
@@ -134,7 +140,8 @@ String _every(int hours) => switch (hours) {
       _ => 'every $hours hours',
     };
 
-final _whenFormat = DateFormat('d MMM HH:mm');
+/// A moment as [AppFormat] writes it everywhere else (*11 Sept 2026 08:00*).
+String _when(DateTime at) => AppFormat.dateTime(at.toIso8601String());
 
 // ── Today ────────────────────────────────────────────────────────────────────
 
@@ -165,32 +172,43 @@ class _TodayTab extends ConsumerWidget {
         return byStatus != 0 ? byStatus : a.name.compareTo(b.name);
       });
     if (points.isEmpty) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(AppSpacing.xl),
-          child: Text(
-              'No checks are set up for this store. A manager adds chillers, '
-              'freezers and daily checklists on the Setup tab.',
-              textAlign: TextAlign.center),
-        ),
+      return const EmptyState(
+        icon: Icons.thermostat_outlined,
+        title: 'No checks are set up for this store',
+        message: 'A manager adds chillers, freezers and daily checklists on '
+            'the Setup tab.',
       );
     }
     final overdue = points.where((p) => p.dueStatus == 'OVERDUE').length;
     final due = points.where((p) => p.dueStatus == 'DUE').length;
     final open = points.fold<int>(0, (n, p) => n + p.openFailures);
 
-    return ListView(
-      padding: const EdgeInsets.all(AppSpacing.xl),
-      children: [
-        Wrap(spacing: AppSpacing.sm, runSpacing: AppSpacing.sm, children: [
-          _CountChip(label: '$overdue overdue', alert: overdue > 0),
-          _CountChip(label: '$due due soon', alert: false),
-          _CountChip(label: '$open open failures', alert: open > 0),
-        ]),
-        const SizedBox(height: AppSpacing.lg),
-        for (final p in points) _PointTile(point: p),
-      ],
-    );
+    // The width the list really has decides the tile's layout: below 600 the
+    // Record button goes under the check's text.
+    return LayoutBuilder(builder: (context, constraints) {
+      final compact = AppBreakpoints.classOf(constraints.maxWidth) ==
+          WindowClass.compact;
+      return ListView(
+        padding: context.pagePadding,
+        children: [
+          Wrap(spacing: AppSpacing.sm, runSpacing: AppSpacing.sm, children: [
+            _CountChip(label: '$overdue overdue', alert: overdue > 0),
+            _CountChip(label: '$due due soon', alert: false),
+            _CountChip(
+              label: '$open open failure${open == 1 ? '' : 's'}',
+              alert: open > 0,
+            ),
+          ]),
+          const SizedBox(height: AppSpacing.lg),
+          // The theme's Card has no margin: 8 between cards keeps their
+          // outlines and rounded corners apart.
+          for (var i = 0; i < points.length; i++) ...[
+            if (i > 0) const SizedBox(height: AppSpacing.sm),
+            _PointTile(point: points[i], compact: compact),
+          ],
+        ],
+      );
+    });
   }
 }
 
@@ -210,57 +228,86 @@ class _CountChip extends StatelessWidget {
   }
 }
 
+/// One check on the Today tab: what it is, when it was last taken, whether it
+/// is due, and the button that takes it. From tablet width the state and the
+/// button sit at the end of the row; on a phone ([compact]) they go on a line
+/// of their own under the text, which then has the card's whole width.
 class _PointTile extends ConsumerWidget {
   final FsPoint point;
-  const _PointTile({required this.point});
+  final bool compact;
+  const _PointTile({required this.point, this.compact = false});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final cs = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
     final last = point.lastRecordedAt == null
         ? 'Not checked yet'
         : 'Last: ${point.lastValue != null ? '${point.lastValue!.toStringAsFixed(2)} °C ' : ''}'
-            '${point.lastResult == 'FAIL' ? 'failed' : 'passed'} · ${_whenFormat.format(point.lastRecordedAt!)}';
+            '${point.lastResult == 'FAIL' ? 'failed' : 'passed'} · ${_when(point.lastRecordedAt!)}';
     final limit = point.limitLabel;
+    // The state in its status colour — never the ink or accent roles — and
+    // at label size, not the trailing slot's 11px.
     final (statusText, statusColor) = switch (point.dueStatus) {
-      'OVERDUE' => ('Overdue', cs.error),
-      'DUE' => ('Due', cs.tertiary),
-      _ => ('Done', cs.primary),
+      'OVERDUE' => ('Overdue', theme.colorScheme.error),
+      'DUE' => ('Due', context.status.warning),
+      _ => ('Done', context.status.success),
     };
-    return Card(
-      child: ListTile(
-        leading: Icon(point.checkType.isTemperature
-            ? Icons.thermostat_outlined
-            : Icons.checklist_outlined),
-        title: Text(point.name),
-        subtitle: Text([
-          point.checkType.name,
-          ?limit,
-          _every(point.frequencyHours),
-          last,
-          if (point.openFailures > 0)
-            '${point.openFailures} failure${point.openFailures == 1 ? '' : 's'} without a corrective action',
-        ].join(' · ')),
-        isThreeLine: true,
-        trailing: Wrap(
-          spacing: AppSpacing.sm,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Text(statusText,
-                style: TextStyle(color: statusColor, fontWeight: FontWeight.w600)),
-            FilledButton.tonal(
-              onPressed: () async {
-                await showDialog<void>(
-                  context: context,
-                  barrierDismissible: false,
-                  builder: (_) => RecordCheckDialog(point: point),
-                );
-                _refreshChecks(ref);
-              },
-              child: const Text('Record'),
+    final status = Text(
+      statusText,
+      style: theme.textTheme.labelLarge
+          ?.copyWith(color: statusColor, fontWeight: FontWeight.w600),
+    );
+    final record = FilledButton.tonal(
+      onPressed: () async {
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => RecordCheckDialog(point: point),
+        );
+        _refreshChecks(ref);
+      },
+      child: const Text('Record'),
+    );
+    final tile = ListTile(
+      leading: Icon(point.checkType.isTemperature
+          ? Icons.thermostat_outlined
+          : Icons.checklist_outlined),
+      title: Text(point.name),
+      subtitle: Text([
+        point.checkType.name,
+        ?limit,
+        _every(point.frequencyHours),
+        last,
+        if (point.openFailures > 0)
+          '${point.openFailures} failure${point.openFailures == 1 ? '' : 's'} without a corrective action',
+      ].join(' · ')),
+      isThreeLine: true,
+      trailing: compact
+          ? null
+          : Wrap(
+              spacing: AppSpacing.sm,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [status, record],
             ),
-          ],
-        ),
+    );
+    if (!compact) return Card(child: tile);
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          tile,
+          Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(
+                AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.md),
+            child: Row(
+              children: [
+                Expanded(child: status),
+                const SizedBox(width: AppSpacing.sm),
+                record,
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -387,7 +434,9 @@ class _RecordCheckDialogState extends ConsumerState<RecordCheckDialog> {
                   child: Text(
                     preview == 'PASS' ? 'Within the limit' : 'Outside the limit — this will be recorded as a failure',
                     style: TextStyle(
-                      color: preview == 'PASS' ? cs.primary : cs.error,
+                      color: preview == 'PASS'
+                          ? context.status.success
+                          : cs.error,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -586,9 +635,8 @@ class _DiaryTabState extends ConsumerState<_DiaryTab> {
           r.notes,
         ].map(cell).join(','),
     ];
-    final day = DateFormat('yyyy-MM-dd');
     downloadTextFile(
-      'food-safety-diary-${day.format(q.fromDay)}-to-${day.format(q.toDay)}.csv',
+      'food-safety-diary-${yyyyMmDd(q.fromDay)}-to-${yyyyMmDd(q.toDay)}.csv',
       '${rows.join('\n')}\n',
       mimeType: 'text/csv;charset=utf-8',
     );
@@ -600,9 +648,10 @@ class _DiaryTabState extends ConsumerState<_DiaryTab> {
     final async = ref.watch(foodSafetyDiaryProvider(q));
     final cs = Theme.of(context).colorScheme;
 
+    final gutter = context.pageGutter;
     final controls = Padding(
-      padding: const EdgeInsets.fromLTRB(
-          AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 0),
+      padding:
+          EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.lg, gutter, 0),
       child: Wrap(
         spacing: AppSpacing.sm,
         runSpacing: AppSpacing.sm,
@@ -638,14 +687,15 @@ class _DiaryTabState extends ConsumerState<_DiaryTab> {
     } else if (!async.hasValue) {
       body = const LoadingView(label: 'Loading the diary…');
     } else if (async.value!.isEmpty) {
-      body = Center(
-        child: Text(_openOnly
+      body = EmptyState(
+        icon: Icons.event_note_outlined,
+        title: _openOnly
             ? 'No failures are waiting for a corrective action.'
-            : 'No checks recorded in this period.'),
+            : 'No checks recorded in this period.',
       );
     } else {
       body = ListView.separated(
-        padding: const EdgeInsets.all(AppSpacing.xl),
+        padding: context.pagePadding,
         itemCount: async.value!.length,
         separatorBuilder: (_, _) => const Divider(height: 1),
         itemBuilder: (context, i) {
@@ -653,11 +703,11 @@ class _DiaryTabState extends ConsumerState<_DiaryTab> {
           return ListTile(
             leading: Icon(
               r.failed ? Icons.error_outline : Icons.check_circle_outline,
-              color: r.failed ? cs.error : cs.primary,
+              color: r.failed ? cs.error : context.status.success,
             ),
             title: Text('${r.pointName} · ${r.reading}'),
             subtitle: Text([
-              if (r.recordedAt != null) _whenFormat.format(r.recordedAt!),
+              if (r.recordedAt != null) _when(r.recordedAt!),
               r.checkTypeName,
               if (r.failed && !r.openFailure)
                 '${r.correctiveActionCount} corrective action${r.correctiveActionCount == 1 ? '' : 's'}',
@@ -704,9 +754,11 @@ class _SetupTab extends ConsumerWidget {
     } else {
       final points = [...async.value!]..sort((a, b) => a.name.compareTo(b.name));
       list = ListView(
-        padding: const EdgeInsets.all(AppSpacing.xl),
+        padding: context.pagePadding,
         children: [
-          for (final p in points)
+          // 8 between cards, as on Today: the theme's Card has no margin.
+          for (final (i, p) in points.indexed) ...[
+            if (i > 0) const SizedBox(height: AppSpacing.sm),
             Card(
               child: ListTile(
                 title: Text(p.active ? p.name : '${p.name} (switched off)'),
@@ -715,33 +767,60 @@ class _SetupTab extends ConsumerWidget {
                   ?p.limitLabel,
                   _every(p.frequencyHours),
                 ].join(' · ')),
-                trailing: Wrap(spacing: AppSpacing.sm, children: [
-                  TextButton(
-                    onPressed: () async {
-                      await showDialog<void>(
-                        context: context,
-                        builder: (_) => PointDialog(storeId: storeId, point: p),
-                      );
-                      _refreshChecks(ref);
-                    },
-                    child: const Text('Edit'),
-                  ),
-                  TextButton(
-                    onPressed: () => _switch(context, ref, p),
-                    child: Text(p.active ? 'Switch off' : 'Switch on'),
-                  ),
-                ]),
+                // Two buttons where there is room; one menu on a phone, so
+                // the point's name keeps the width.
+                trailing: context.isCompact
+                    ? PopupMenuButton<String>(
+                        key: Key('point-actions-${p.id}'),
+                        tooltip: 'Edit or switch ${p.active ? 'off' : 'on'}',
+                        onSelected: (a) async {
+                          if (a == 'edit') {
+                            await showDialog<void>(
+                              context: context,
+                              builder: (_) => PointDialog(storeId: storeId, point: p),
+                            );
+                            _refreshChecks(ref);
+                          } else if (context.mounted) {
+                            await _switch(context, ref, p);
+                          }
+                        },
+                        itemBuilder: (_) => [
+                          const PopupMenuItem(value: 'edit', child: Text('Edit')),
+                          PopupMenuItem(
+                            value: 'switch',
+                            child: Text(p.active ? 'Switch off' : 'Switch on'),
+                          ),
+                        ],
+                      )
+                    : Wrap(spacing: AppSpacing.sm, children: [
+                        TextButton(
+                          onPressed: () async {
+                            await showDialog<void>(
+                              context: context,
+                              builder: (_) => PointDialog(storeId: storeId, point: p),
+                            );
+                            _refreshChecks(ref);
+                          },
+                          child: const Text('Edit'),
+                        ),
+                        TextButton(
+                          onPressed: () => _switch(context, ref, p),
+                          child: Text(p.active ? 'Switch off' : 'Switch on'),
+                        ),
+                      ]),
               ),
             ),
+          ],
         ],
       );
     }
+    final gutter = context.pageGutter;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(
-              AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 0),
+          padding:
+              EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.lg, gutter, 0),
           child: FilledButton.icon(
             onPressed: () async {
               await showDialog<void>(
@@ -1009,7 +1088,7 @@ class _ReviewsTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(foodSafetyReviewsProvider(storeId));
-    final day = DateFormat('d MMM');
+    String day(DateTime d) => AppFormat.date(d.toIso8601String());
     final Widget list;
     if (async.hasError) {
       list = ErrorView(
@@ -1019,17 +1098,18 @@ class _ReviewsTab extends ConsumerWidget {
     } else if (!async.hasValue) {
       list = const LoadingView(label: 'Loading reviews…');
     } else if (async.value!.isEmpty) {
-      list = const Center(child: Text('No reviews signed off for this store yet.'));
+      list = const EmptyState(title: 'No reviews signed off for this store yet.');
     } else {
       list = ListView(
-        padding: const EdgeInsets.all(AppSpacing.xl),
+        padding: context.pagePadding,
         children: [
-          for (final r in async.value!)
+          for (final (i, r) in async.value!.indexed) ...[
+            if (i > 0) const SizedBox(height: AppSpacing.sm),
             Card(
               child: ListTile(
                 title: Text(
-                    '${r.periodFrom != null ? day.format(r.periodFrom!) : '?'} – '
-                    '${r.periodTo != null ? day.format(r.periodTo!.subtract(const Duration(days: 1))) : '?'}'),
+                    '${r.periodFrom != null ? day(r.periodFrom!) : '?'} – '
+                    '${r.periodTo != null ? day(r.periodTo!.subtract(const Duration(days: 1))) : '?'}'),
                 subtitle: Text([
                   '${r.recordsCount} checks, ${r.failuresCount} failed, '
                       '${r.openFailuresCount} without a corrective action at sign-off',
@@ -1037,18 +1117,20 @@ class _ReviewsTab extends ConsumerWidget {
                 ].join(' · ')),
                 trailing: r.reviewedAt == null
                     ? null
-                    : Text('Signed ${_whenFormat.format(r.reviewedAt!)}'),
+                    : Text('Signed ${_when(r.reviewedAt!)}'),
               ),
             ),
+          ],
         ],
       );
     }
+    final gutter = context.pageGutter;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(
-              AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 0),
+          padding:
+              EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.lg, gutter, 0),
           child: FilledButton.icon(
             onPressed: () => _signOff(context, ref),
             icon: const Icon(Icons.verified_outlined),

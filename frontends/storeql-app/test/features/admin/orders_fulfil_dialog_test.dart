@@ -85,7 +85,7 @@ void main() {
 
     // One mug now, all three plates.
     await tester.enterText(find.byKey(const Key('fulfil-qty-01a090ae-611e-7011-ae7d-1bd68c966ff6')), '1');
-    await tester.tap(find.widgetWithText(FilledButton, 'Hand over'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
     await tester.pumpAndSettle();
 
     final body = _postBody(server)!;
@@ -94,28 +94,28 @@ void main() {
       {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966aa1', 'qty': 3},
     ]);
     expect(server.requests.singleWhere((r) => r.method == 'POST').path, endsWith('/orders/o-1/fulfil'));
-    expect(find.text('Part of the order handed over.'), findsOneWidget);
+    expect(find.text('Part of the order picked.'), findsOneWidget);
   });
 
   testWidgets('everything outstanding is the plain fulfilment: no body', (tester) async {
     final server = await _pump(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Hand over'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
     await tester.pumpAndSettle();
     expect(_postBody(server), isNull);
-    expect(find.text('Order fulfilled.'), findsOneWidget);
+    expect(find.text('Order picked and packed.'), findsOneWidget);
   });
 
   testWidgets('more than is outstanding is stopped here; zero for a line leaves it out',
       (tester) async {
     final server = await _pump(tester);
     await tester.enterText(find.byKey(const Key('fulfil-qty-01a090ae-611e-7011-ae7d-1bd68c966ff6')), '4');
-    await tester.tap(find.widgetWithText(FilledButton, 'Hand over'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
     await tester.pumpAndSettle();
     expect(find.textContaining('Only 3 outstanding'), findsOneWidget);
     expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
 
     await tester.enterText(find.byKey(const Key('fulfil-qty-01a090ae-611e-7011-ae7d-1bd68c966ff6')), '0');
-    await tester.tap(find.widgetWithText(FilledButton, 'Hand over'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
     await tester.pumpAndSettle();
     expect(_postBody(server)!['lines'], [
       {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966aa1', 'qty': 3},
@@ -124,10 +124,10 @@ void main() {
 
   testWidgets("the server's refusal is shown in words and the dialog stays open", (tester) async {
     final server = await _pump(tester)..postStatus = 409;
-    await tester.tap(find.widgetWithText(FilledButton, 'Hand over'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
     await tester.pumpAndSettle();
     expect(find.textContaining('3 still outstanding'), findsOneWidget);
-    expect(find.text('Hand over'), findsWidgets);
+    expect(find.text('Picked & packed'), findsWidgets);
     expect(server.requests.where((r) => r.method == 'POST'), hasLength(1));
   });
 }

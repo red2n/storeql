@@ -103,6 +103,20 @@ jobs:
   # digest; the release carrying its SBOM, checksums and provenance; the scan running on pull
   # requests, main and nightly; an update bot on all four ecosystems. The check reads the workflows; its self-test breaks each promise in memory and
   # fails unless the check notices. actionlint keeps the workflows themselves well-formed.
+  # ── Backups ────────────────────────────────────────────────────────────────
+  # The backup-restore drill's machinery, proved against throwaway containers: a backup from one
+  # snapshot with its manifest, encrypted to a key the host cannot read with, a changed byte caught,
+  # restored row for row, retention, and a base backup plus archived WAL recovered to a moment.
+  backup:
+    name: Backup self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Drive the backup, verify, restore and point-in-time recovery against throwaway containers
+        run: scripts/backup-selftest.sh
+
   supply-chain:
     name: Supply chain promises
     runs-on: ubuntu-latest

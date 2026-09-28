@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import '../../core/constants.dart';
+import '../../core/format.dart';
 import '../../core/storage/app_storage.dart';
 import '../../shared/util/image_byte_cache.dart';
 
@@ -232,6 +233,10 @@ class ResolvedPrice {
   /// where the law needs a prior price it cannot prove.
   final bool reductionAnnounceable;
 
+  /// The same price in the currency the shopper chose to see (03.x), at the
+  /// shop's own rate; null when they see the shop's currency. Shown, never charged.
+  final DisplayPrice? display;
+
   const ResolvedPrice({
     required this.unitPrice,
     required this.totalWithVat,
@@ -240,7 +245,15 @@ class ResolvedPrice {
     this.promotionApplied,
     this.priorPrice,
     this.reductionAnnounceable = false,
+    this.display,
   });
+
+  /// `≈ US$15.00` when the shopper sees another currency; empty otherwise.
+  String get shownLine {
+    final d = display;
+    if (d == null || d.currency == currency) return '';
+    return '≈ ${AppFormat.money(d.totalWithVat, currencyCode: d.currency)}';
+  }
 
   factory ResolvedPrice.fromJson(Map<String, dynamic> j) => ResolvedPrice(
         unitPrice: (j['unitPrice'] as num?)?.toDouble() ?? 0,
@@ -250,8 +263,73 @@ class ResolvedPrice {
         promotionApplied: j['promotionApplied'] as String?,
         priorPrice: (j['priorPrice'] as num?)?.toDouble(),
         reductionAnnounceable: j['reductionAnnounceable'] as bool? ?? false,
+        display: j['display'] is Map<String, dynamic>
+            ? DisplayPrice.fromJson(j['display'] as Map<String, dynamic>)
+            : null,
       );
 }
+
+/// A price in another currency at the shop's own rate (03.x): what a shopper
+/// sees beside the price they pay.
+class DisplayPrice {
+  final String currency;
+  final double rate;
+  final double unitPrice;
+  final double totalWithVat;
+  const DisplayPrice({
+    required this.currency,
+    required this.rate,
+    required this.unitPrice,
+    required this.totalWithVat,
+  });
+
+  factory DisplayPrice.fromJson(Map<String, dynamic> j) => DisplayPrice(
+        currency: j['currency'] as String? ?? '',
+        rate: (j['rate'] as num?)?.toDouble() ?? 1,
+        unitPrice: (j['unitPrice'] as num?)?.toDouble() ?? 0,
+        totalWithVat: (j['totalWithVat'] as num?)?.toDouble() ?? 0,
+      );
+}
+
+/// The currencies this shop can show prices in (03.x): its own first, then
+/// those it keeps a rate for, with the rates (home units per one unit).
+class ShopCurrencies {
+  final String home;
+  final List<String> currencies;
+  final Map<String, double> rates;
+  const ShopCurrencies({required this.home, required this.currencies, required this.rates});
+
+  factory ShopCurrencies.fromJson(Map<String, dynamic> j) => ShopCurrencies(
+        home: j['home'] as String? ?? '',
+        currencies: ((j['currencies'] as List?) ?? []).map((e) => e.toString()).toList(),
+        rates: {
+          for (final r in ((j['rates'] as List?) ?? []))
+            (r as Map<String, dynamic>)['currency'] as String: ((r['rate'] as num?)?.toDouble() ?? 1),
+        },
+      );
+
+  /// A home-currency amount shown in [currency]; null without a rate.
+  double? shown(double homeAmount, String currency) {
+    if (currency == home) return homeAmount;
+    final rate = rates[currency];
+    return rate == null || rate <= 0 ? null : homeAmount / rate;
+  }
+}
+
+/// The currencies the shop offers; empty when it could not be asked.
+final storefrontCurrenciesProvider = FutureProvider<ShopCurrencies?>((ref) async {
+  final dio = ref.watch(storefrontDioProvider);
+  try {
+    final resp = await dio.get('/${ApiConstants.pricing}/prices/currencies');
+    final data = resp.data is Map ? resp.data['data'] : null;
+    return data is Map<String, dynamic> ? ShopCurrencies.fromJson(data) : null;
+  } on DioException {
+    return null;
+  }
+});
+
+/// The currency the shopper chose to see prices in; null for the shop's own.
+final displayCurrencyProvider = StateProvider<String?>((ref) => null);
 
 class StoreCategory {
   final String id;
@@ -280,11 +358,16 @@ class StorefrontConfig {
   /// null. The deposit is put on the order by the server as its own line.
   final DepositScheme? depositScheme;
 
+  /// Whether a shopper may collect an order here; false at a dark store, which
+  /// fills online orders for delivery only.
+  final bool pickupOffered;
+
   const StorefrontConfig({
     required this.showPrices,
     this.storeName = '-',
     this.enabledPaymentMethods = const ['CASH', 'CARD'],
     this.depositScheme,
+    this.pickupOffered = true,
   });
 }
 
@@ -359,14 +442,43 @@ class StoreSummary {
   final String id;
   final String name;
   final bool showPrices;
+
+  /// STORE, WAREHOUSE or DARK_STORE.
+  final String type;
+
+  /// Whether a shopper may collect here. A dark store — a shop with no shop
+  /// floor — sells delivery-only (ship-from-store and dark-store picking).
+  final bool pickupOffered;
+
+  /// The business the store belongs to (the tenant's legal name, else its
+  /// name), when tenant-svc sends it; null otherwise. The accessibility
+  /// statement speaks for the business, never for one of its stores.
+  final String? businessName;
+
   const StoreSummary(
-      {required this.id, required this.name, required this.showPrices});
+      {required this.id,
+      required this.name,
+      required this.showPrices,
+      this.type = 'STORE',
+      this.pickupOffered = true,
+      this.businessName});
 
   factory StoreSummary.fromJson(Map<String, dynamic> j) => StoreSummary(
         id: j['storeId'] as String? ?? '',
         name: j['storeName'] as String? ?? '-',
         showPrices: j['showPrices'] as bool? ?? true,
+        type: j['type'] as String? ?? 'STORE',
+        pickupOffered: j['pickupOffered'] as bool? ?? true,
+        businessName: _knownName(j['businessName']),
       );
+}
+
+/// A name as sent, trimmed; null when missing, blank, or the '-' the
+/// storefront sends for a name it does not have.
+String? _knownName(Object? raw) {
+  if (raw is! String) return null;
+  final trimmed = raw.trim();
+  return trimmed.isEmpty || trimmed == '-' ? null : trimmed;
 }
 
 /// True when the storefront's tenant has been deactivated (gateway returns 403
@@ -420,6 +532,7 @@ final storefrontConfigProvider =
               ?.map((e) => e.toString().toUpperCase())
               .toList() ??
           const ['CASH', 'CARD'],
+      pickupOffered: d['pickupOffered'] as bool? ?? true,
     );
   } catch (_) {
     return const StorefrontConfig(showPrices: true);
@@ -432,9 +545,33 @@ final storefrontPaymentMethodsProvider = Provider<List<String>>((ref) =>
     ref.watch(storefrontConfigProvider).value?.enabledPaymentMethods ??
     const ['CASH', 'CARD']);
 
-/// variantId → in-stock at the current store (real inventory). Empty/failed = treat as available.
+/// A variant's stock at the current store: whether it can be sold at all, and
+/// — only when the business set a storefront stock-signal threshold and this
+/// variant is at or under it — the whole units left. Never a count above the
+/// threshold, and never one at all with no threshold, out of stock, or a
+/// weighed good.
+class StockInfo {
+  final bool inStock;
+  final int? onlyLeft;
+
+  /// True when the supplier ships it per order: available with none on the
+  /// shelf (inventory-svc's own words for it). A variant sourced this way is
+  /// never held back from Add for being "out of stock" — there is no shelf
+  /// to be out of.
+  final bool dropship;
+
+  const StockInfo({required this.inStock, this.onlyLeft, this.dropship = false});
+
+  factory StockInfo.fromJson(Map<String, dynamic> j) => StockInfo(
+        inStock: j['inStock'] as bool? ?? false,
+        onlyLeft: (j['onlyLeft'] as num?)?.toInt(),
+        dropship: j['dropship'] as bool? ?? false,
+      );
+}
+
+/// variantId → stock at the current store (real inventory). Empty/failed = treat as available.
 final storefrontAvailabilityProvider =
-    FutureProvider.autoDispose<Map<String, bool>>((ref) async {
+    FutureProvider.autoDispose<Map<String, StockInfo>>((ref) async {
   final dio = ref.watch(storefrontDioProvider);
   final store = ref.watch(storefrontStoreProvider);
   if (store.isEmpty) return {};
@@ -443,9 +580,180 @@ final storefrontAvailabilityProvider =
   final data = (resp.data['data'] as List?) ?? [];
   return {
     for (final e in data)
-      (e['variantId'] as String): (e['inStock'] as bool? ?? false)
+      (e['variantId'] as String): StockInfo.fromJson(e as Map<String, dynamic>)
   };
 });
+
+// ── Delivery and collection slots ────────────────────────────────────────────
+//
+// A store's next seven days of delivery/collection windows, in the store's own
+// time (order-svc computes date/startTime/endTime server-side; the app never
+// converts them — a device in one time zone must show a store in another its
+// own hours, not the device's).
+
+/// The store's own bare calendar date ("2026-09-27"), read as its year/month/day
+/// only — never run through a timezone conversion, so a store on the other
+/// side of the world keeps its own day. Null when [ymd] is not that shape.
+DateTime? localYmd(String ymd) {
+  final parts = ymd.split('-');
+  if (parts.length != 3) return null;
+  final y = int.tryParse(parts[0]);
+  final m = int.tryParse(parts[1]);
+  final d = int.tryParse(parts[2]);
+  if (y == null || m == null || d == null) return null;
+  return DateTime(y, m, d);
+}
+
+/// One occurrence of a window a shopper may choose at checkout.
+class SlotOption {
+  final String windowId;
+
+  /// The store's own calendar day this occurrence falls on ("2026-09-27"),
+  /// from the day the server listed it under.
+  final String date;
+  final DateTime startsAt;
+  final DateTime endsAt;
+
+  /// The store's own local clock, exactly as the server sent it — never
+  /// converted on the device.
+  final String startTime;
+  final String endTime;
+  final int left;
+  final bool full;
+
+  const SlotOption({
+    required this.windowId,
+    this.date = '',
+    required this.startsAt,
+    required this.endsAt,
+    required this.startTime,
+    required this.endTime,
+    required this.left,
+    required this.full,
+  });
+
+  /// "17:00–19:00", the store's own local clock.
+  String get timeRange => '$startTime–$endTime';
+
+  factory SlotOption.fromJson(Map<String, dynamic> j, {String date = ''}) => SlotOption(
+        windowId: j['windowId'] as String? ?? '',
+        date: date,
+        startsAt: DateTime.tryParse(j['startsAt'] as String? ?? '') ?? DateTime.now(),
+        endsAt: DateTime.tryParse(j['endsAt'] as String? ?? '') ?? DateTime.now(),
+        startTime: j['startTime'] as String? ?? '',
+        endTime: j['endTime'] as String? ?? '',
+        left: (j['left'] as num?)?.toInt() ?? 0,
+        full: j['full'] as bool? ?? false,
+      );
+}
+
+/// One of the next seven days, and what it offers.
+class SlotDay {
+  final String date;
+  final List<SlotOption> slots;
+
+  const SlotDay({required this.date, required this.slots});
+
+  DateTime? get localDate => localYmd(date);
+
+  factory SlotDay.fromJson(Map<String, dynamic> j) {
+    final date = j['date'] as String? ?? '';
+    return SlotDay(
+      date: date,
+      slots: [
+        for (final s in (j['slots'] as List?) ?? const [])
+          if (s is Map<String, dynamic>) SlotOption.fromJson(s, date: date),
+      ],
+    );
+  }
+}
+
+/// A store's answer to "what windows can a shopper choose, and what is left".
+class FulfilmentSlots {
+  final String storeId;
+  final String fulfilmentType;
+  final String timeZone;
+
+  /// Whether the store offers windows of this type at all; false ⇒ no picker,
+  /// checkout exactly as before.
+  final bool offered;
+  final List<SlotDay> days;
+
+  const FulfilmentSlots({
+    required this.storeId,
+    required this.fulfilmentType,
+    required this.timeZone,
+    required this.offered,
+    required this.days,
+  });
+
+  factory FulfilmentSlots.fromJson(Map<String, dynamic> j) => FulfilmentSlots(
+        storeId: j['storeId'] as String? ?? '',
+        fulfilmentType: j['fulfilmentType'] as String? ?? '',
+        timeZone: j['timeZone'] as String? ?? '',
+        offered: j['offered'] as bool? ?? false,
+        days: [
+          for (final d in (j['days'] as List?) ?? const [])
+            if (d is Map<String, dynamic>) SlotDay.fromJson(d),
+        ],
+      );
+}
+
+/// Which store's windows, of which fulfilment type.
+typedef SlotsQuery = ({String store, String type});
+
+/// The next seven days of [q.store]'s windows for [q.type] (DELIVERY | PICKUP),
+/// with what each has left. Public storefront read; autoDispose.family — this
+/// is scoped to the checkout screen, unlike [storefrontConfigProvider].
+final fulfilmentSlotsProvider =
+    FutureProvider.autoDispose.family<FulfilmentSlots, SlotsQuery>((ref, q) async {
+  final dio = ref.watch(storefrontDioProvider);
+  final resp = await dio.get('/${ApiConstants.order}/storefront/fulfilment-slots',
+      queryParameters: {'store': q.store, 'type': q.type});
+  return FulfilmentSlots.fromJson(resp.data['data'] as Map<String, dynamic>);
+});
+
+/// The window an order was placed for (null when it has none): the store's own
+/// local date and clock, computed server-side — the app never converts a time.
+class OrderSlot {
+  final DateTime startsAt;
+  final DateTime endsAt;
+  final String timeZone;
+  final String date;
+  final String startTime;
+  final String endTime;
+
+  const OrderSlot({
+    required this.startsAt,
+    required this.endsAt,
+    required this.timeZone,
+    required this.date,
+    required this.startTime,
+    required this.endTime,
+  });
+
+  factory OrderSlot.fromJson(Map<String, dynamic> j) => OrderSlot(
+        startsAt: DateTime.tryParse(j['startsAt'] as String? ?? '') ?? DateTime.now(),
+        endsAt: DateTime.tryParse(j['endsAt'] as String? ?? '') ?? DateTime.now(),
+        timeZone: j['timeZone'] as String? ?? '',
+        date: j['date'] as String? ?? '',
+        startTime: j['startTime'] as String? ?? '',
+        endTime: j['endTime'] as String? ?? '',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'startsAt': startsAt.toIso8601String(),
+        'endsAt': endsAt.toIso8601String(),
+        'timeZone': timeZone,
+        'date': date,
+        'startTime': startTime,
+        'endTime': endTime,
+      };
+
+  /// [raw] read as an [OrderSlot] when it is a map; null otherwise (no window).
+  static OrderSlot? maybe(Object? raw) =>
+      raw is Map<String, dynamic> ? OrderSlot.fromJson(raw) : null;
+}
 
 // ── Promotions (storefront offers banner) ────────────────────────────────────
 
@@ -475,10 +783,14 @@ class StorePromotion {
         reductionAnnounceable: j['reductionAnnounceable'] == true,
       );
 
-  /// Short headline, e.g. "20% off" or "£5 off".
-  String get headline => type == 'PERCENT'
-      ? '${value.toStringAsFixed(value % 1 == 0 ? 0 : 2)}% off'
-      : '${value.toStringAsFixed(2)} off';
+  /// Short headline, e.g. "20% off" or "£5.00 off", in the shop's
+  /// [currency] (the amount alone, grouped, while it is not known).
+  String headlineIn(String? currency) => type == 'PERCENT'
+      ? '${AppFormat.count(value)}% off'
+      : '${AppFormat.money(value, currencyCode: currency)} off';
+
+  /// [headlineIn] with the currency not known.
+  String get headline => headlineIn(null);
 }
 
 /// The promotions the banner may show (03.12): only those pricing-svc says may be
@@ -640,9 +952,15 @@ final productFirstVariantProvider =
 final variantPriceProvider =
     FutureProvider.family<ResolvedPrice, String>((ref, variantId) async {
   final dio = ref.watch(storefrontDioProvider);
+  final shownIn = ref.watch(displayCurrencyProvider);
   final resp = await dio.post(
     '/${ApiConstants.pricing}/prices/resolve',
-    data: {'variantId': variantId, 'channel': 'ONLINE', 'qty': 1},
+    data: {
+      'variantId': variantId,
+      'channel': 'ONLINE',
+      'qty': 1,
+      'displayCurrency': ?shownIn,
+    },
   );
   return ResolvedPrice.fromJson(resp.data['data'] as Map<String, dynamic>);
 });
@@ -677,6 +995,11 @@ final productCardOfferProvider =
 
 class CartLine {
   final String variantId;
+
+  /// The product the variant belongs to, so the cart shows the same picture
+  /// (and placeholder colour) as the shop. Null for a line added before lines
+  /// knew their product.
+  final String? productId;
   final String productName;
   final String sku;
   final double unitPrice;
@@ -685,6 +1008,7 @@ class CartLine {
 
   CartLine({
     required this.variantId,
+    this.productId,
     required this.productName,
     required this.sku,
     required this.unitPrice,
@@ -719,6 +1043,7 @@ class CartNotifier extends StateNotifier<List<CartLine>> {
         if (l.variantId == variantId)
           (CartLine(
             variantId: l.variantId,
+            productId: l.productId,
             productName: l.productName,
             sku: l.sku,
             unitPrice: l.unitPrice,
@@ -732,6 +1057,13 @@ class CartNotifier extends StateNotifier<List<CartLine>> {
 
   void remove(String variantId) =>
       state = state.where((l) => l.variantId != variantId).toList();
+
+  /// Puts [line] back at [index] (the end, past it) — *Undo* after a removal —
+  /// unless its variant is in the cart again already.
+  void insert(int index, CartLine line) {
+    if (state.any((l) => l.variantId == line.variantId)) return;
+    state = [...state]..insert(index.clamp(0, state.length), line);
+  }
 
   void clear() => state = [];
 
@@ -757,6 +1089,10 @@ class StorefrontOrderRecord {
   final String storeName;
   final String fulfilmentType;
 
+  /// The window this order was placed for (delivery-and-collection-slots); null
+  /// for an order with none.
+  final OrderSlot? slot;
+
   const StorefrontOrderRecord({
     required this.orderId,
     required this.total,
@@ -765,6 +1101,7 @@ class StorefrontOrderRecord {
     required this.placedAt,
     this.storeName = '-',
     this.fulfilmentType = 'PICKUP',
+    this.slot,
   });
 
   Map<String, dynamic> toJson() => {
@@ -775,6 +1112,7 @@ class StorefrontOrderRecord {
         'placedAt': placedAt.toIso8601String(),
         'storeName': storeName,
         'fulfilmentType': fulfilmentType,
+        if (slot != null) 'slot': slot!.toJson(),
       };
 
   factory StorefrontOrderRecord.fromJson(Map<String, dynamic> j) =>
@@ -787,6 +1125,7 @@ class StorefrontOrderRecord {
             DateTime.tryParse(j['placedAt'] as String? ?? '') ?? DateTime.now(),
         storeName: j['storeName'] as String? ?? '-',
         fulfilmentType: j['fulfilmentType'] as String? ?? 'PICKUP',
+        slot: OrderSlot.maybe(j['slot']),
       );
 }
 
@@ -844,6 +1183,20 @@ class ServerOrderSummary {
   final String currency;
   final DateTime placedAt;
 
+  /// The checkout this order is a part of, when a delivery came from several shops (order
+  /// orchestration); null for an order never split.
+  final String? groupId;
+
+  /// How a picked order was handed over (ship-from-store): DISPATCHED to a carrier, or
+  /// COLLECTED at the counter; null until it is.
+  final String? handoverKind;
+  final String? handoverCarrier;
+  final String? handoverReference;
+
+  /// The window this order was placed for (delivery-and-collection-slots); null
+  /// for an order with none.
+  final OrderSlot? slot;
+
   const ServerOrderSummary({
     required this.id,
     required this.storeId,
@@ -852,7 +1205,29 @@ class ServerOrderSummary {
     required this.total,
     required this.currency,
     required this.placedAt,
+    this.groupId,
+    this.handoverKind,
+    this.handoverCarrier,
+    this.handoverReference,
+    this.slot,
   });
+
+  /// Where the order is, in the shopper's words: a picked pickup is *Ready to collect*, a picked
+  /// delivery *Packed* until it is *On its way · DPD 1Z…*, a collected one *Collected*; anything
+  /// else reads as its status.
+  String get stageLabel {
+    if (handoverKind == 'COLLECTED') return 'Collected';
+    if (handoverKind == 'DISPATCHED') {
+      final ref = [handoverCarrier, handoverReference]
+          .where((e) => e != null && e.isNotEmpty)
+          .join(' ');
+      return ref.isEmpty ? 'On its way' : 'On its way · $ref';
+    }
+    if (status.toUpperCase() == 'FULFILLED') {
+      return fulfilmentType.toUpperCase() == 'PICKUP' ? 'Ready to collect' : 'Packed';
+    }
+    return status;
+  }
 
   factory ServerOrderSummary.fromJson(Map<String, dynamic> j) =>
       ServerOrderSummary(
@@ -864,7 +1239,49 @@ class ServerOrderSummary {
         currency: j['currency'] as String? ?? '',
         placedAt: DateTime.tryParse(j['createdAt'] as String? ?? '')?.toLocal() ??
             DateTime.now(),
+        groupId: j['groupId'] as String?,
+        handoverKind: (j['handover'] as Map<String, dynamic>?)?['kind'] as String?,
+        handoverCarrier: (j['handover'] as Map<String, dynamic>?)?['carrier'] as String?,
+        handoverReference: (j['handover'] as Map<String, dynamic>?)?['reference'] as String?,
+        slot: OrderSlot.maybe(j['slot']),
       );
+}
+
+/// One part of a delivery split across shops (order orchestration), as the answer to placing it
+/// names it: its own order at its own shop, with its total and how many items it carries.
+class CheckoutPart {
+  final String orderId;
+  final String storeId;
+  final double total;
+  final int units;
+
+  const CheckoutPart({
+    required this.orderId,
+    required this.storeId,
+    required this.total,
+    required this.units,
+  });
+
+  factory CheckoutPart.fromJson(Map<String, dynamic> j) => CheckoutPart(
+        orderId: j['orderId'] as String? ?? '',
+        storeId: j['storeId'] as String? ?? '',
+        total: (j['total'] as num?)?.toDouble() ?? 0,
+        units: (j['units'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// "Arrives in 2 parts: 3 items from Leeds, 1 from York" — a split delivery in the shopper's
+/// words; a shop the list does not name is called by the end of its id.
+String splitSummary(List<CheckoutPart> parts, Map<String, String> storeNames) {
+  final bits = <String>[];
+  for (var i = 0; i < parts.length; i++) {
+    final p = parts[i];
+    final name = storeNames[p.storeId] ?? 'shop ${p.storeId.length > 4 ? p.storeId.substring(p.storeId.length - 4) : p.storeId}';
+    bits.add(i == 0
+        ? '${p.units} item${p.units == 1 ? '' : 's'} from $name'
+        : '${p.units} from $name');
+  }
+  return 'Arrives in ${parts.length} parts: ${bits.join(', ')}';
 }
 
 /// The signed-in customer's real order history. Returns null when not signed in
@@ -876,6 +1293,9 @@ class ServerOrderSummary {
 /// network fetch of the customer's whole order history. Staying alive lets that reuse the
 /// already-fetched list; `ref.watch(storefrontAuthProvider)` below still recomputes it on
 /// sign-in/sign-out, and call sites already `ref.invalidate` it after placing or refreshing.
+///
+/// Never retried behind the page: a refused read shows its error at once, with
+/// Retry and Refresh, instead of grey cards through half a minute of retries.
 final serverOrdersProvider = FutureProvider<List<ServerOrderSummary>?>((ref) async {
   final auth = ref.watch(storefrontAuthProvider);
   if (!auth.isSignedIn) return null;
@@ -886,7 +1306,7 @@ final serverOrdersProvider = FutureProvider<List<ServerOrderSummary>?>((ref) asy
   return data
       .map((e) => ServerOrderSummary.fromJson(e as Map<String, dynamic>))
       .toList();
-});
+}, retry: (_, _) => null);
 
 // ── Product safety recalls (05.10) ───────────────────────────────────────────
 
@@ -995,7 +1415,7 @@ final myRecallNoticesProvider =
     for (final e in data)
       if (e is Map) MyRecallNotice.fromJson(e.cast<String, dynamic>()),
   ];
-});
+}, retry: (_, _) => null);
 
 /// The shopper chooses their remedy, once.
 Future<MyRecallNotice> chooseMyRecallRemedy(

@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/auth/auth_notifier.dart';
+import '../../core/format.dart';
 import '../../core/network/api_error.dart';
 import '../../core/offline/offline_queue.dart';
+import '../../core/spacing.dart';
 import '../../core/theme.dart';
+import '../../shared/widgets/adaptive_actions.dart';
 import '../../shared/widgets/adaptive_nav_shell.dart';
 import 'pos_providers.dart';
 import 'pos_session_providers.dart';
@@ -77,7 +80,10 @@ class _PosShellState extends ConsumerState<PosShell> {
     super.dispose();
   }
 
-  int get _selectedIndex => widget.currentLocation.startsWith('/pos/pending')
+  bool get _pendingSelected =>
+      widget.currentLocation.startsWith('/pos/pending');
+
+  int get _selectedIndex => _pendingSelected
       ? 3
       : widget.currentLocation.startsWith('/pos/cash')
           ? 2
@@ -118,89 +124,107 @@ class _PosShellState extends ConsumerState<PosShell> {
       child: AdaptiveNavShell(
         title: 'POS Terminal',
         leadingIcon: Icons.point_of_sale,
-        // 3 flat destinations — a bottom bar, per Material's compact-width guidance.
+        // Four flat destinations — a bottom bar, per Material's compact-width guidance.
         compactStyle: CompactNavStyle.bottomBar,
         destinations: _destinations(pending),
         selectedIndex: _selectedIndex,
         onDestinationSelected: (i) => context.go(_routes[i]),
+        // Six commands: all on the bar from tablet width, but on a phone only
+        // Returns stays — the rest go into ⋮ so the title keeps its room.
         actions: [
-          if (session != null &&
-              ref.read(customerDisplayChannelProvider).supported)
-            IconButton(
-              key: const Key('pos-customer-display'),
-              tooltip: "Customer display: a second window for the customer's side of the counter",
-              icon: const Icon(Icons.desktop_windows_outlined),
-              onPressed: () {
-                ref.read(customerDisplayChannelProvider).openWindow();
-                _tellDisplay();
-              },
-            ),
-          if (session != null)
-            TextButton.icon(
-              key: const Key('pos-container-return'),
-              onPressed: () async {
-                final amount = await showContainerReturnDialog(context);
-                if (amount == null || !context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    content: Text(
-                        'Deposit refunded: hand back ${amount.toStringAsFixed(2)}')));
-              },
-              icon: const Icon(Icons.recycling),
-              label: const Text('Returns'),
-            ),
-          if (session != null)
-            TextButton.icon(
-              onPressed: () async {
-                final ok = await showDialog<bool>(
+          AdaptiveActions(actions: [
+            if (session != null &&
+                ref.read(customerDisplayChannelProvider).supported)
+              AdaptiveAction(
+                key: const Key('pos-customer-display'),
+                label: 'Customer display',
+                icon: Icons.desktop_windows_outlined,
+                onPressed: () {
+                  ref.read(customerDisplayChannelProvider).openWindow();
+                  _tellDisplay();
+                },
+              ),
+            if (session != null)
+              AdaptiveAction(
+                key: const Key('pos-container-return'),
+                label: 'Returns',
+                icon: Icons.recycling,
+                showLabel: true,
+                keepOnCompact: true,
+                onPressed: () async {
+                  final amount = await showContainerReturnDialog(context);
+                  if (amount == null || !context.mounted) return;
+                  // In the scheme's currency, which the dialog has just read.
+                  final storeId = ref.read(posStoreProvider);
+                  final currency = storeId == null
+                      ? null
+                      : ref
+                          .read(posDepositSchemeProvider(storeId))
+                          .value
+                          ?.currency;
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text('Deposit refunded: hand back '
+                          '${AppFormat.money(amount, currencyCode: currency)}')));
+                },
+              ),
+            if (session != null)
+              AdaptiveAction(
+                label: 'Clock out',
+                icon: Icons.logout,
+                showLabel: true,
+                onPressed: () async {
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: const Text('Clock out?'),
+                      content: Text(pending == 0
+                          ? 'This ends your POS session. Any sale in progress is kept.'
+                          : 'This ends your POS session. $pending sale'
+                              '${pending == 1 ? '' : 's'} still '
+                              "haven't reached the server — they stay on this till "
+                              'and are sent when the network is back.'),
+                      actions: [
+                        TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text('Cancel')),
+                        FilledButton(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            child: const Text('Clock out')),
+                      ],
+                    ),
+                  );
+                  if (ok == true) {
+                    await ref.read(posSessionProvider.notifier).clockOut();
+                  }
+                },
+              ),
+            AdaptiveAction(
+              key: const Key('pos-printer'),
+              label: 'Receipt printer',
+              icon: Icons.print_outlined,
+              onPressed: () => showDialog<void>(
                   context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: const Text('Clock out?'),
-                    content: Text(pending == 0
-                        ? 'This ends your POS session. Any sale in progress is kept.'
-                        : 'This ends your POS session. $pending sale'
-                            '${pending == 1 ? '' : 's'} still '
-                            "haven't reached the server — they stay on this till "
-                            'and are sent when the network is back.'),
-                    actions: [
-                      TextButton(
-                          onPressed: () => Navigator.pop(ctx, false),
-                          child: const Text('Cancel')),
-                      FilledButton(
-                          onPressed: () => Navigator.pop(ctx, true),
-                          child: const Text('Clock out')),
-                    ],
-                  ),
-                );
-                if (ok == true) {
-                  await ref.read(posSessionProvider.notifier).clockOut();
-                }
-              },
-              // No explicit colour: TextButton.icon already resolves to
-              // colorScheme.primary, which reads correctly on the amber app bar.
-              icon: const Icon(Icons.logout, size: 18),
-              label: const Text('Clock out'),
+                  builder: (_) => const PrinterSettingsDialog()),
             ),
-          IconButton(
-            key: const Key('pos-printer'),
-            icon: const Icon(Icons.print_outlined),
-            tooltip: 'Receipt printer',
-            onPressed: () => showDialog<void>(
-                context: context, builder: (_) => const PrinterSettingsDialog()),
-          ),
-          IconButton(
-            key: const Key('pos-security'),
-            icon: const Icon(Icons.verified_user_outlined),
-            tooltip: 'Sign-in security',
-            onPressed: () => context.push('/account/security'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.exit_to_app),
-            tooltip: 'Sign out',
-            onPressed: () => ref.read(authNotifierProvider.notifier).logout(),
-          ),
+            AdaptiveAction(
+              key: const Key('pos-security'),
+              label: 'Sign-in security',
+              icon: Icons.verified_user_outlined,
+              onPressed: () => context.push('/account/security'),
+            ),
+            AdaptiveAction(
+              label: 'Sign out',
+              icon: Icons.exit_to_app,
+              onPressed: () => ref.read(authNotifierProvider.notifier).logout(),
+            ),
+          ]),
         ],
-        // Gate the whole terminal: no selling until a cashier clocks in.
-        child: session == null ? const _ClockInView() : widget.child,
+        // Gate the terminal: no selling until a cashier clocks in. Pending is
+        // the exception — sales taken offline are money the server has not
+        // been told about, and must stay in view (and syncable) clocked out.
+        child: session == null && !_pendingSelected
+            ? const _ClockInView()
+            : widget.child,
       ),
     );
   }
@@ -229,6 +253,9 @@ class _ClockInViewState extends ConsumerState<_ClockInView> {
     try {
       await ref.read(posSessionProvider.notifier).clockIn(_storeId!);
     } catch (e) {
+      // The card can be gone by now: Pending stays reachable while clocked
+      // out, and leaving for it unmounts this.
+      if (!mounted) return;
       setState(
           () => _error = friendlyError(e, fallback: 'Could not clock in.'));
     } finally {
@@ -240,82 +267,103 @@ class _ClockInViewState extends ConsumerState<_ClockInView> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final storesAsync = ref.watch(posStoresProvider);
+    final pending = ref.watch(offlineQueueCountProvider);
 
     return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
-        child: Card(
-          margin: const EdgeInsets.all(24),
-          child: Padding(
-            padding: const EdgeInsets.all(28),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Icon(Icons.point_of_sale,
-                    size: 48, color: context.channelAccent.color),
-                const SizedBox(height: 12),
-                Text('Clock in',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.headlineSmall),
-                const SizedBox(height: 4),
-                Text('Open a POS session to start selling.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: cs.outline)),
-                const SizedBox(height: 24),
-                storesAsync.when(
-                  loading: () => const Center(
-                      child: Padding(
-                          padding: EdgeInsets.all(8),
-                          child: CircularProgressIndicator())),
-                  error: (e, _) => Text(
-                      friendlyError(e, fallback: 'Could not load stores.'),
-                      style: TextStyle(color: cs.error)),
-                  data: (stores) {
-                    if (stores.isEmpty) {
-                      return Text('No stores configured.',
-                          style: TextStyle(color: cs.error));
-                    }
-                    _storeId ??= stores.first.id;
-                    return DropdownButtonFormField<String>(
-                      initialValue: _storeId,
-                      decoration: const InputDecoration(
-                        labelText: 'Store / terminal',
-                        prefixIcon: Icon(Icons.store_outlined),
-                      ),
-                      items: [
-                        for (final s in stores)
-                          DropdownMenuItem(value: s.id, child: Text(s.name)),
-                      ],
-                      onChanged:
-                          _busy ? null : (v) => setState(() => _storeId = v),
-                    );
-                  },
-                ),
-                if (_error != null) ...[
-                  const SizedBox(height: 12),
-                  Text(_error!, style: TextStyle(color: cs.error)),
-                ],
-                const SizedBox(height: 24),
-                FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: context.channelAccent.color,
-                    foregroundColor: context.channelAccent.onColor,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
+      // Scrolls when a phone on its side or large text leaves it too little
+      // height, rather than overflowing.
+      child: SingleChildScrollView(
+        padding: context.pagePadding,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Card(
+            margin: EdgeInsets.zero,
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.xl),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Icon(Icons.point_of_sale,
+                      size: 48, color: Theme.of(context).colorScheme.primary),
+                  const SizedBox(height: AppSpacing.md),
+                  Text('Clock in',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.headlineSmall),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text('Open a POS session to start selling.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: cs.onSurfaceVariant)),
+                  const SizedBox(height: AppSpacing.xl),
+                  storesAsync.when(
+                    loading: () => const Center(
+                        child: Padding(
+                            padding: EdgeInsets.all(AppSpacing.sm),
+                            child: CircularProgressIndicator())),
+                    error: (e, _) => Text(
+                        friendlyError(e, fallback: 'Could not load stores.'),
+                        style: TextStyle(color: cs.error)),
+                    data: (stores) {
+                      if (stores.isEmpty) {
+                        return Text('No stores configured.',
+                            style: TextStyle(color: cs.error));
+                      }
+                      _storeId ??= stores.first.id;
+                      return DropdownButtonFormField<String>(
+                        initialValue: _storeId,
+                        decoration: const InputDecoration(
+                          labelText: 'Store / terminal',
+                          prefixIcon: Icon(Icons.store_outlined),
+                        ),
+                        items: [
+                          for (final s in stores)
+                            DropdownMenuItem(value: s.id, child: Text(s.name)),
+                        ],
+                        onChanged:
+                            _busy ? null : (v) => setState(() => _storeId = v),
+                      );
+                    },
                   ),
-                  onPressed: _busy ? null : _clockIn,
-                  icon: _busy
-                      ? SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: context.channelAccent.onColor))
-                      : const Icon(Icons.login),
-                  label: Text(_busy ? 'Opening…' : 'Clock in',
-                      style: const TextStyle(fontSize: 16)),
-                ),
-              ],
+                  if (_error != null) ...[
+                    const SizedBox(height: AppSpacing.md),
+                    Text(_error!, style: TextStyle(color: cs.error)),
+                  ],
+                  const SizedBox(height: AppSpacing.xl),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: context.channelAccent.color,
+                      foregroundColor: context.channelAccent.onColor,
+                      padding:
+                          const EdgeInsets.symmetric(vertical: AppSpacing.md),
+                    ),
+                    onPressed: _busy ? null : _clockIn,
+                    icon: _busy
+                        ? SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: context.channelAccent.onColor))
+                        : const Icon(Icons.login),
+                    label: Text(_busy ? 'Opening…' : 'Clock in',
+                        style: const TextStyle(fontSize: 16)),
+                  ),
+                  // Sales taken offline stay in view while clocked out.
+                  if (pending > 0) ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    TextButton.icon(
+                      key: const Key('pos-clocked-out-pending'),
+                      // Not while a clock-in is in flight: it would leave the
+                      // card, and come back to a second Clock in.
+                      onPressed:
+                          _busy ? null : () => context.go('/pos/pending'),
+                      icon: const Icon(Icons.cloud_off_outlined),
+                      label: Text('$pending sale${pending == 1 ? '' : 's'} '
+                          'waiting to sync'),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
         ),

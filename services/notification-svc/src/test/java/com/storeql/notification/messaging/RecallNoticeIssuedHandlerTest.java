@@ -133,6 +133,15 @@ class RecallNoticeIssuedHandlerTest {
   }
 
   @Test
+  void anOrderNumberThatCannotBeTextedFallsBackToTheCustomersOwn() {
+    // A phone at the till: an order placed before its number was kept in international form still
+    // carries it as typed. That cannot be texted, but the buyer's own record has a number that can.
+    customers.phone = "+447400123456";
+    handler.handle(payload(CUSTOMER, null, "07400 123456", "REFUND"));
+    assertEquals(List.of("+447400123456"), channels.sms.recipients);
+  }
+
+  @Test
   void aRecordWithNoEmailFallsBackToItsPhoneALoginGetsAPushAndAMalformedPayloadIsSkipped() {
     customers.phone = "+447700900999";
     handler.handle(payload(CUSTOMER, LOGIN, null, "REFUND"));

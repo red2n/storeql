@@ -52,6 +52,9 @@ class OnboardingNotifier extends StateNotifier<OnboardingState> {
     String? legalName,
     required String country,
     required String currency,
+    // The plan chosen from the price list (21.13); none means the platform's
+    // default, which the service picks.
+    String? planId,
   }) async {
     state = state.copyWith(loading: true, error: null);
     try {
@@ -63,6 +66,7 @@ class OnboardingNotifier extends StateNotifier<OnboardingState> {
           if (legalName != null && legalName.isNotEmpty) 'legalName': legalName,
           'country': country,
           'currency': currency,
+          'planId': ?planId,
         },
       );
       final tenantId = resp.data['data']['id'] as String;
@@ -126,7 +130,12 @@ class OnboardingNotifier extends StateNotifier<OnboardingState> {
 
   String _friendly(Object e) {
     if (e is DioException && e.response?.statusCode == 409) {
-      return 'A tenant already exists for this account.';
+      // A login owns one business (21.13); any other refusal says why itself.
+      final body = e.response?.data;
+      final code = body is Map ? body['code'] : null;
+      if (code == null || code == 'TENANT_ALREADY_OWNED') {
+        return 'This login already owns a business. Sign in to it, or sign up with another login.';
+      }
     }
     return friendlyError(e,
         fallback: 'Something went wrong. Please try again.');

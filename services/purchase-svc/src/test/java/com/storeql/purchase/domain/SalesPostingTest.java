@@ -1,7 +1,9 @@
 package com.storeql.purchase.domain;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.purchase.domain.Domain.NominalLedgerEntry;
@@ -71,6 +73,45 @@ class SalesPostingTest {
       assertThat(l.sourceRef(), is(ORDER));
       assertThat(l.storeId(), is(STORE));
       assertThat(l.entryDate(), is(DAY));
+    }
+  }
+
+  @Test
+  @DisplayName("Every sales journal names the sale by '#' and its handle, never its whole id")
+  void everySalesJournalNamesTheSaleByItsHandle() {
+    // Read in the accounting package and on the Integrations screen, beside the order screens'
+    // "Order #00000001": a whole id can be neither read nor matched by eye. The id stays in
+    // sourceRef, which is what anything matches on.
+    var sale = SalesPosting.sale(TENANT, ORDER, STORE, d("12.00"), d("2.00"), DAY);
+    var tender = SalesPosting.tender(TENANT, ORDER, STORE, "CARD", d("12.00"), DAY);
+    var unrecorded = SalesPosting.tender(TENANT, ORDER, STORE, " ", d("1.00"), DAY);
+    var refund =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CARD", d("6.00"))),
+            d("12.00"),
+            d("2.00"),
+            true,
+            DAY);
+    var taken = SalesPosting.chargebackWithdrawn(TENANT, ORDER, STORE, d("12.00"), d("15"), DAY);
+    var won = SalesPosting.chargebackClosed(TENANT, ORDER, STORE, d("12.00"), true, true, DAY);
+    var lost = SalesPosting.chargebackClosed(TENANT, ORDER, STORE, d("12.00"), false, true, DAY);
+
+    assertThat(sale.get(0).description(), is("Sale #00000001"));
+    assertThat(tender.get(0).description(), is("Tender (CARD) for sale #00000001"));
+    assertThat(
+        unrecorded.get(0).description(), is("Tender (an unrecorded method) for sale #00000001"));
+    assertThat(refund.get(0).description(), is("Refund for sale #00000001"));
+    assertThat(taken.get(0).description(), is("Chargeback on sale #00000001"));
+    assertThat(won.get(0).description(), is("Chargeback won on sale #00000001"));
+    assertThat(lost.get(0).description(), is("Chargeback lost on sale #00000001"));
+    for (var posting : List.of(sale, tender, unrecorded, refund, taken, won, lost)) {
+      for (var l : posting) {
+        assertThat(l.description(), not(containsString(ORDER.toString())));
+        assertThat(l.sourceRef(), is(ORDER));
+      }
     }
   }
 

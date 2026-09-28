@@ -29,9 +29,11 @@ class OrderPlacedHandler {
     UUID tenantId;
     UUID customerId;
     UUID storeId;
+    boolean online;
     try (var reader = Json.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       tenantId = Ids.parse(obj.getString("tenantId"));
+      online = "ONLINE".equals(obj.getString("channel", null));
       // A cart is held under the login the shopper signed in with, which is not the shop's
       // customer id (SJ-D44) — before that was unpicked, one value stood in both places. loginId
       // is what matches a cart; customerId is the fallback for events published before the split.
@@ -47,6 +49,13 @@ class OrderPlacedHandler {
       return;
     }
 
+    // An online order closes the shopper's cart whichever store it went to: a delivery resolves
+    // to the store serving the postcode, and a split one goes to several (order orchestration).
+    if (online && customerId != null) {
+      cartService.onOnlineOrderPlaced(tenantId, customerId);
+      LOG.log(Level.INFO, "Cart marked CHECKED_OUT for shopper {0}", customerId);
+      return;
+    }
     if (customerId == null || storeId == null) {
       return; // POS or anonymous order — no cart to close
     }
