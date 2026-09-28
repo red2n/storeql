@@ -39,7 +39,7 @@
              resolve to this property's value while testcontainers-core/jdbc resolve to Helidon's,
              producing a mixed-version Testcontainers classpath (unsupported; caused flaky
              GenericContainer port-wait timeouts against containers that were demonstrably up). -->
-        <testcontainers.version>1.21.4</testcontainers.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
         <junit.version>5.11.3</junit.version>
         <lettuce.version>6.5.1.RELEASE</lettuce.version>
         <pdfbox.version>3.0.8</pdfbox.version>
