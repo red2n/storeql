@@ -1,5 +1,6 @@
 package com.storeql.inventory.api;
 
+import com.storeql.inventory.domain.Recall.ActiveItem;
 import com.storeql.inventory.domain.Recall.Disposition;
 import com.storeql.inventory.domain.Recall.Status;
 import com.storeql.inventory.dto.RecallDtos.ActiveRecallItemResponse;
@@ -26,7 +27,11 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -78,19 +83,52 @@ public class RecallResource {
    *
    * <p>Every scope line of every open recall. The till keeps this list and checks each item against
    * it, so a scan never waits on the network.
+   *
+   * <p>With {@code endedSince}, also every scope line of a recall closed or cancelled at or after
+   * that moment, each with {@code endedAt} and {@code endedAs}. order-svc asks this for a till sale
+   * replayed from an offline queue, which is judged against every recall open when it was rung up —
+   * one that has ended since included. Without it the answer is the till's list, unchanged.
+   *
+   * @param endedSince an ISO instant with its offset, or absent for the open recalls only
+   * @throws ApiException {@code 400 RECALL_ENDED_SINCE_INVALID} for a value that is not an instant
    */
   @Operation(
       summary = "The items under an open recall",
       description =
           "Every scope line of every open recall. The till keeps this list and checks each item"
-              + " against it, so a scan never waits on the network.")
+              + " against it, so a scan never waits on the network. With ?endedSince=<ISO"
+              + " instant>, also the lines of every recall closed or cancelled at or after it,"
+              + " each with endedAt and endedAs (CLOSED or CANCELLED): what order-svc judges a"
+              + " till sale replayed from an offline queue against.")
   @APIResponse(responseCode = "200", description = "The items under an open recall")
+  @APIResponse(
+      responseCode = "400",
+      description = "RECALL_ENDED_SINCE_INVALID: endedSince is not an instant")
   @GET
   @Path("/active")
-  public ApiResponse<List<ActiveRecallItemResponse>> active() {
-    var items =
-        service.active(ctx.requireTenantId()).stream().map(RecallMappers::toActiveItem).toList();
-    return ApiResponse.ok(items, ApiResponse.Meta.of(ctx.requestId()));
+  public ApiResponse<List<ActiveRecallItemResponse>> active(
+      @QueryParam("endedSince") String endedSince) {
+    UUID tenantId = ctx.requireTenantId();
+    List<ActiveItem> lines =
+        endedSince == null || endedSince.isBlank()
+            ? service.active(tenantId)
+            : service.openOrEndedSince(tenantId, instantOf(endedSince));
+    return ApiResponse.ok(
+        lines.stream().map(RecallMappers::toActiveItem).toList(),
+        ApiResponse.Meta.of(ctx.requestId()));
+  }
+
+  private static Instant instantOf(String text) {
+    try {
+      return OffsetDateTime.parse(text.strip()).toInstant();
+    } catch (DateTimeException e) {
+      throw new ApiException(
+          400,
+          "RECALL_ENDED_SINCE_INVALID",
+          "endedSince must be an instant with its offset, e.g. 2026-09-29T10:15:30Z",
+          List.of(),
+          e);
+    }
   }
 
   /**

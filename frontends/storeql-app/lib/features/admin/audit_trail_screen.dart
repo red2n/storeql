@@ -23,6 +23,14 @@ import 'providers/staff_names.dart';
 // services that record those actions, newest first, naming the member of
 // staff. Read-only by design: every row comes from an append-only log and
 // nothing on this screen can change one.
+//
+// It also carries the offline sales a manager must look at: a till that lost
+// its network finished the sale anyway, and when it replayed it order-svc
+// recorded it — the goods had gone and the money was taken — although a line
+// was under a recall, or weighed on a scale not fit for trade, when it was
+// rung up; or on a scale nobody can show was fit then. Each such line is one
+// row, at the moment the cashier rang it up, naming who rang it up (or an
+// unknown member of staff) and, when somebody else synced the till, who.
 
 /// The event types the trail shows, with the words used for them.
 const auditTypeLabels = <String, String>{
@@ -32,7 +40,22 @@ const auditTypeLabels = <String, String>{
   'CANCEL': 'Cancel',
   'RETURN': 'Return',
   'STOCK_ADJUSTMENT': 'Stock adjustment',
+  'OFFLINE_SALE_OF_RECALLED_ITEM': 'Offline sale of a recalled item',
+  'OFFLINE_SALE_ON_UNFIT_SCALE': 'Offline sale on an unfit scale',
 };
+
+/// The Action filter's words for a kind that does not simply take an "s".
+const _auditTypePlurals = <String, String>{
+  'OFFLINE_SALE_OF_RECALLED_ITEM': 'Offline sales of recalled items',
+  'OFFLINE_SALE_ON_UNFIT_SCALE': 'Offline sales on unfit scales',
+};
+
+/// Whether an event is an offline sale flagged for a manager.
+bool _isOfflineSale(String type) => _auditTypePlurals.containsKey(type);
+
+/// The standing order-svc keeps for a scale the register cannot show was fit
+/// for trade when the sale was rung up.
+const _unknownAtSale = 'UNKNOWN_AT_SALE';
 
 /// How a return's money went back, finishing "£4.20 refunded …".
 String _refundedHow(String method) => switch (method.toUpperCase()) {
@@ -76,9 +99,15 @@ class AuditEvent {
   final String? reason;
   final String? detail;
 
-  /// Stock adjustments only: the signed quantity and what was adjusted.
+  /// Stock adjustments only: the signed quantity.
   final double? qty;
+
+  /// What was adjusted, or what an offline sale's flagged line sold.
   final String? variantId;
+
+  /// Offline sales only: who synced the till's queue, which may be somebody
+  /// other than who rang the sale up ([actorId]).
+  final String? replayedBy;
 
   const AuditEvent({
     required this.id,
@@ -92,6 +121,7 @@ class AuditEvent {
     this.detail,
     this.qty,
     this.variantId,
+    this.replayedBy,
   });
 
   bool get fromStock => type == 'STOCK_ADJUSTMENT';
@@ -107,6 +137,8 @@ class AuditEvent {
         amount: (j['amount'] as num?)?.toDouble(),
         reason: j['reason'] as String?,
         detail: j['detail'] as String?,
+        variantId: j['variantId'] as String?,
+        replayedBy: j['replayedBy'] as String?,
       );
 
   /// An inventory movement of type ADJUST, read as an event on the trail.
@@ -364,6 +396,7 @@ class AuditTrailScreen extends ConsumerWidget {
           for (final e in trail.events) ...[
             ?e.actorId,
             if (e.type == 'NO_SALE') ?e.detail,
+            ?e.replayedBy,
           ],
         ]));
     // Products by name, for the stock adjustments.
@@ -456,7 +489,13 @@ class AuditTrailScreen extends ConsumerWidget {
                 items: [
                   const DropdownMenuItem<String?>(value: null, child: Text('Everything')),
                   for (final e in auditTypeLabels.entries)
-                    DropdownMenuItem<String?>(value: e.key, child: Text('${e.value}s')),
+                    DropdownMenuItem<String?>(
+                      value: e.key,
+                      child: Text(
+                        _auditTypePlurals[e.key] ?? '${e.value}s',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                 ],
                 onChanged: (v) => setFilter(filter.copyWith(type: v)),
               ),
@@ -542,7 +581,7 @@ class AuditTrailScreen extends ConsumerWidget {
   }
 
   static void _exportCsv(List<AuditEvent> events) {
-    final buf = StringBuffer('occurredAt,type,actorId,storeId,orderId,amount,qty,variantId,reason,detail\n');
+    final buf = StringBuffer('occurredAt,type,actorId,storeId,orderId,amount,qty,variantId,reason,detail,replayedBy\n');
     for (final e in events) {
       buf.writeln([
         e.occurredAt?.toUtc().toIso8601String() ?? '',
@@ -555,6 +594,7 @@ class AuditTrailScreen extends ConsumerWidget {
         e.variantId ?? '',
         e.reason ?? '',
         e.detail ?? '',
+        e.replayedBy ?? '',
       ].map(_csv).join(','));
     }
     downloadTextFile('audit-trail.csv', buf.toString(), mimeType: 'text/csv;charset=utf-8');
@@ -597,6 +637,8 @@ class _AuditRow extends StatelessWidget {
       'NO_SALE' => (Icons.point_of_sale_outlined, cs.secondary),
       'CANCEL' => (Icons.cancel_outlined, cs.error),
       'RETURN' => (Icons.assignment_return_outlined, cs.primary),
+      'OFFLINE_SALE_OF_RECALLED_ITEM' => (Icons.report_outlined, cs.error),
+      'OFFLINE_SALE_ON_UNFIT_SCALE' => (Icons.scale_outlined, cs.error),
       _ => (Icons.inventory_outlined, cs.secondary),
     };
     final label = auditTypeLabels[e.type] ?? humanizeCode(e.type);
@@ -625,10 +667,31 @@ class _AuditRow extends StatelessWidget {
       'NO_SALE' => detail == null ? label : '$label · authorised by ${nameOf(detail)}',
       'STOCK_ADJUSTMENT' =>
         '$label · ${_signed(e.qty)}${e.variantId != null ? ' × ${productOf(e.variantId!)}' : ''}',
+      // The product the flagged line sold; the reason below says which item,
+      // which recall or scale, and why. A scale nobody can show was fit when
+      // the sale was rung up is not called unfit: it may not have been.
+      _ when _isOfflineSale(e.type) => [
+          e.type == 'OFFLINE_SALE_ON_UNFIT_SCALE' && detail == _unknownAtSale
+              ? 'Offline sale on a scale that may not have been fit'
+              : label,
+          if (e.variantId != null) productOf(e.variantId!),
+        ].join(' · '),
       _ => label,
     };
     final when = e.occurredAt == null ? '' : AppFormat.dateTime(e.occurredAt!.toIso8601String());
-    final who = e.actorId == null ? 'Unattributed' : 'by ${nameOf(e.actorId!)}';
+    final who = switch ((e.actorId, _isOfflineSale(e.type))) {
+      // An offline sale names who rang it up only when the business holds
+      // them at the store; otherwise the till's word is not taken.
+      (null, true) => 'rung up by an unknown member of staff',
+      (final String id, true) => 'rung up by ${nameOf(id)}',
+      (null, false) => 'Unattributed',
+      (final String id, false) => 'by ${nameOf(id)}',
+    };
+    // Who synced the till, where that was somebody else: a queue outlives a
+    // sign-out, and a manager may send a cashier's sales.
+    final synced = e.replayedBy == null || e.replayedBy == e.actorId
+        ? null
+        : 'synced by ${nameOf(e.replayedBy!)}';
     // A till reason is the cashier's own words; the stockroom's is a code.
     final reason = (e.reason ?? '').isEmpty
         ? null
@@ -638,6 +701,7 @@ class _AuditRow extends StatelessWidget {
     final subtitle = [
       if (when.isNotEmpty) when,
       who,
+      ?synced,
       if (e.orderId != null) 'order ${shortRef(e.orderId!)}',
       ?reason,
     ].join(' · ');

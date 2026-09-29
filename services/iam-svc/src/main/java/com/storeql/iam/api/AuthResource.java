@@ -1,5 +1,6 @@
 package com.storeql.iam.api;
 
+import com.storeql.iam.dto.Dtos.BusinessRegisterRequest;
 import com.storeql.iam.dto.Dtos.ChangePasswordRequest;
 import com.storeql.iam.dto.Dtos.LoginRequest;
 import com.storeql.iam.dto.Dtos.LogoutRequest;
@@ -48,7 +49,10 @@ public class AuthResource {
 
   /**
    * Admin endpoint. Find-or-create a staff account by email and return the userId the caller
-   * assigns a store role to via tenant-svc. Tenant comes from the JWT, never the body.
+   * assigns a store role to via tenant-svc. Tenant comes from the JWT, never the body. The login
+   * found is only ever the business's own; one made is made in the business, so a shopper's
+   * account, an unfinished business sign-up or another business's login with the same email is
+   * never taken over, and none of them refuses the request.
    *
    * <p>Also gated by AdminAuthorizationFilter on the {@code /admin/} path prefix, but asserted here
    * too rather than relying on that alone — a future rename/move of this path off {@code /admin/}
@@ -57,8 +61,14 @@ public class AuthResource {
   @Operation(
       summary = "Provision a staff account",
       description =
-          "Find-or-create a staff account by email. Returns the userId the caller assigns a store"
-              + " role to via tenant-svc. Requires PLATFORM_ADMIN, OWNER, or MANAGER.")
+          "Find-or-create a staff account by email within the caller's business: the business's"
+              + " own login with this email (created: false), or a new staff login made in the"
+              + " business with the given password (created: true). A shopper's account, an"
+              + " unfinished business sign-up or another business's login with the same email is"
+              + " a separate identity and is left untouched: a person may work for several"
+              + " businesses, each with its own login. Returns the userId the caller assigns a"
+              + " store role to via tenant-svc, which binds only a login already in the business."
+              + " Requires PLATFORM_ADMIN, OWNER, or MANAGER.")
   @APIResponse(responseCode = "200", description = "Staff user found or created")
   @APIResponse(responseCode = "403", description = "Caller lacks an admin/owner/manager role")
   @POST
@@ -111,14 +121,16 @@ public class AuthResource {
    *
    * @param req the email, password and optional phone to register
    * @return {@code 201} with the new account's access and refresh tokens
-   * @throws com.storeql.web.ApiException {@code USER_ALREADY_EXISTS} (409) when the email or phone
-   *     is already registered in this scope
+   * @throws com.storeql.web.ApiException {@code USER_ALREADY_EXISTS} (409) when another shopper's
+   *     login already holds the email or phone; the same person's business account does not count
    */
   @Operation(
       summary = "Register a new customer",
       description = "Public self-signup. No JWT required — this endpoint mints identity.")
   @APIResponse(responseCode = "201", description = "Account created, tokens issued")
-  @APIResponse(responseCode = "409", description = "Email already bound to a different tenant")
+  @APIResponse(
+      responseCode = "409",
+      description = "USER_ALREADY_EXISTS: another shopper's account holds the email or phone")
   @POST
   @Path("/register")
   public Response register(RegisterRequest req) {
@@ -128,25 +140,72 @@ public class AuthResource {
   }
 
   /**
+   * Public business sign-up ("Start a business"): the login a new business will be run with.
+   *
+   * <p>A STAFF login with no tenant and no role, signed in at once. It is not a shopper's account —
+   * {@link #register} stays for those — and it reaches no business's data: it creates its own
+   * business next (tenant-svc {@code POST /onboarding}), whose {@code TenantCreated} makes it that
+   * business's OWNER.
+   *
+   * @param req the email, password and optional phone to sign up with
+   * @return {@code 201} with the new login's access and refresh tokens
+   * @throws com.storeql.web.ApiException {@code USER_ALREADY_EXISTS} (409) when the email or phone
+   *     is already used by another business login of no business (a sign-up not yet onboarded, or
+   *     the platform administrator's) — a shopper's account with it is a separate identity and does
+   *     not count; the password policy's own codes (400) for a password it refuses
+   */
+  @Operation(
+      summary = "Sign up to start a business",
+      description =
+          "Public. Creates a staff login with no business and no role yet and returns its token"
+              + " pair; the business is created next (tenant-svc POST /onboarding), which makes"
+              + " this login its OWNER. The password policy applies (GET /auth/password-policy)."
+              + " A phone is optional and kept as POST /auth/register keeps one. A shopper signs"
+              + " up at POST /auth/register instead; an address or phone the person already shops"
+              + " with may sign up here too, as a separate account.")
+  @APIResponse(responseCode = "201", description = "Login created, tokens issued")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED, or the password policy's PASSWORD_TOO_SHORT, PASSWORD_TOO_LONG,"
+              + " PASSWORD_IS_IDENTITY, PASSWORD_BREACHED")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "USER_ALREADY_EXISTS: another business sign-up of no business holds the email or phone")
+  @POST
+  @Path("/register/business")
+  public Response registerBusiness(BusinessRegisterRequest req) {
+    Validations.validate(req);
+    TokenResponse tokens = auth.registerBusiness(req.email(), req.password(), req.phone());
+    return Response.status(Response.Status.CREATED).entity(ApiResponse.ok(tokens)).build();
+  }
+
+  /**
    * Tenant staff and customer login.
    *
-   * <p>An email can exist in more than one tenant scope, so the password is what disambiguates
-   * which account is being signed into.
+   * <p>An email can name several logins — one per business it works for, and outside any business a
+   * shopper's account and a business account — so {@code accountType} chooses the kind (the
+   * storefront sends CUSTOMER; none means STAFF) and the password which login of that kind.
    *
-   * @param req the email and password to authenticate
+   * @param req the email and password to authenticate, and where the person is signing in
    * @return the access and refresh token pair
    * @throws com.storeql.web.ApiException {@code 401} when the credentials do not match
    */
   @Operation(
       summary = "Log in with email and password",
-      description = "Public tenant/customer login. No JWT required.")
+      description =
+          "Public tenant/customer login. No JWT required. accountType chooses between a shopper's"
+              + " account and a business account on one address: CUSTOMER from a storefront, STAFF"
+              + " (the default) for the admin console and the till. A login of the other kind is"
+              + " signed in only when the address holds none of the kind asked for.")
   @APIResponse(responseCode = "200", description = "Credentials valid, tokens issued")
   @APIResponse(responseCode = "401", description = "Invalid email or password")
   @POST
   @Path("/login")
   public ApiResponse<TokenResponse> login(LoginRequest req) {
     Validations.validate(req);
-    return ApiResponse.ok(auth.login(req.email(), req.password()));
+    return ApiResponse.ok(auth.login(req.email(), req.password(), req.accountType()));
   }
 
   /**

@@ -40,6 +40,8 @@ class StoreScopeIT {
   private static final String V = "01a090ae-7c1e-7e04-bde4-50df0324c37c";
   private static final String KEEPER_A = "01a090ae-7c1e-7f05-bde4-50df0324c37c";
   private static final String KEEPER_B = "01a090ae-7c1e-7f06-bde4-50df0324c37c";
+  private static final String OTHER_TENANT = "01a090ae-7c1e-7d3c-a97b-d1b8025478e2";
+  private static final String STRANGER = "01a090ae-7c1e-7f07-bde4-50df0324c37c";
 
   @Inject WebTarget target;
 
@@ -71,6 +73,24 @@ class StoreScopeIT {
     return send(as(path, "OWNER", KEEPER_A, null), method, json);
   }
 
+  /** A manager held to the named stores (comma-separated), or the whole business when null. */
+  private Response managerOf(String stores, String method, String path, String json) {
+    return send(as(path, "MANAGER", KEEPER_A, stores), method, json);
+  }
+
+  /** Staff of another business, held to a store id that happens to be one of ours. */
+  private Response stranger(String role, String method, String path, String json) {
+    var b =
+        WebTargets.at(target, path)
+            .request()
+            .header("X-Tenant-Id", OTHER_TENANT)
+            .header("X-User-Id", STRANGER)
+            .header("X-Roles", role)
+            .header("X-Store-Ids", A)
+            .header("Idempotency-Key", Ids.newId().toString());
+    return send(b, method, json);
+  }
+
   private static Response send(Invocation.Builder b, String method, String json) {
     return switch (method) {
       case "GET" -> b.get();
@@ -99,6 +119,14 @@ class StoreScopeIT {
         + "\",\"transferType\":\"INTRANSIT\",\"lines\":[{\"variantId\":\""
         + V
         + "\",\"requestedQty\":1}]}";
+  }
+
+  private static String countBody(String store) {
+    return "{\"storeId\":\"" + store + "\",\"name\":\"Aisle 4\"}";
+  }
+
+  private String statusOfCount(String id) {
+    return data(owner("GET", "/admin/inventory/cycle-counts/" + id, null)).getString("status");
   }
 
   private static JsonObject data(Response r) {
@@ -202,5 +230,281 @@ class StoreScopeIT {
         send(as("/admin/inventory/transfers/" + id, "STOREKEEPER", KEEPER_B, C), "GET", null),
         "a keeper of C reading a transfer between A and B");
     assertThat(keeperOfB("GET", "/admin/inventory/transfers/" + id, null).getStatus(), is(200));
+  }
+
+  /**
+   * A cycle count names its store once, on the header; every later step names only the count. A
+   * keeper of A could read, count, approve and post B's count by its id, and list every store's.
+   */
+  @Test
+  @DisplayName("A cycle count is opened, read, counted and posted only at a store the caller keeps")
+  void cycleCountsHoldToTheCallersStores() {
+    String atB = data(owner("POST", "/admin/inventory/cycle-counts", countBody(B))).getString("id");
+    String atA =
+        data(keeperOfA("POST", "/admin/inventory/cycle-counts", countBody(A))).getString("id");
+    String countsOfB = "/admin/inventory/cycle-counts/" + atB;
+
+    refusedForStore(
+        keeperOfA("POST", "/admin/inventory/cycle-counts", countBody(B)), "opening a count at B");
+    refusedForStore(keeperOfA("GET", countsOfB, null), "B's count by id");
+    refusedForStore(
+        keeperOfA("POST", countsOfB + "/lines/" + V + "/count", "{\"countedQty\":3}"),
+        "counting at B");
+    refusedForStore(keeperOfA("POST", countsOfB + "/approve", ""), "approving B's count");
+    refusedForStore(keeperOfA("POST", countsOfB + "/adjust", ""), "posting B's count");
+    refusedForStore(
+        keeperOfA("GET", "/admin/inventory/cycle-counts?storeId=" + B, null), "listing B's counts");
+    assertThat(statusOfCount(atB), is("OPEN"));
+
+    // Naming no store, a keeper of A lists A's counts and not B's.
+    Response mine = keeperOfA("GET", "/admin/inventory/cycle-counts", null);
+    String listed = mine.readEntity(String.class);
+    assertThat(listed, mine.getStatus(), is(200));
+    assertThat(listed, containsString(atA));
+    assertThat(listed, not(containsString(atB)));
+
+    assertThat(keeperOfB("GET", countsOfB, null).getStatus(), is(200));
+    assertThat(keeperOfB("POST", countsOfB + "/approve", "").getStatus(), is(200));
+  }
+
+  @Test
+  @DisplayName("Another business's staff never see or move a cycle count, even naming our store")
+  void cycleCountsStayInTheirBusiness() {
+    String ours =
+        data(owner("POST", "/admin/inventory/cycle-counts", countBody(A))).getString("id");
+    String path = "/admin/inventory/cycle-counts/" + ours;
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      Response read = stranger(role, "GET", path, null);
+      assertThat(role + " reading", read.getStatus(), is(404));
+      read.close();
+      Response counted =
+          stranger(role, "POST", path + "/lines/" + V + "/count", "{\"countedQty\":3}");
+      assertThat(role + " counting", counted.getStatus(), is(404));
+      counted.close();
+      // A cashier is refused the permission before the count is looked up; everyone else finds
+      // none.
+      int expected = "CASHIER".equals(role) ? 403 : 404;
+      for (String step : new String[] {"approve", "adjust"}) {
+        Response r = stranger(role, "POST", path + "/" + step, "");
+        assertThat(role + " " + step, r.getStatus(), is(expected));
+        r.close();
+      }
+      for (String list :
+          new String[] {
+            "/admin/inventory/cycle-counts", "/admin/inventory/cycle-counts?storeId=" + A
+          }) {
+        Response listed = stranger(role, "GET", list, null);
+        String body = listed.readEntity(String.class);
+        assertThat(role + " " + list + ": " + body, listed.getStatus(), is(200));
+        assertThat(role + " " + list, body, not(containsString(ours)));
+      }
+    }
+    assertThat(statusOfCount(ours), is("OPEN"));
+  }
+
+  private static String inventoryBody(String store) {
+    return "{\"storeId\":\"" + store + "\",\"notes\":\"Year end\"}";
+  }
+
+  private static final String TAG = "{\"variantId\":\"" + V + "\",\"systemQty\":2}";
+
+  private String statusOfInventory(String id) {
+    return data(owner("GET", "/admin/inventory/physical-inventories/" + id, null))
+        .getString("status");
+  }
+
+  @Test
+  @DisplayName("A physical inventory is started, read, tagged and completed only at a kept store")
+  void physicalInventoriesHoldToTheCallersStores() {
+    String atB =
+        data(owner("POST", "/admin/inventory/physical-inventories", inventoryBody(B)))
+            .getString("id");
+    String atA =
+        data(keeperOfA("POST", "/admin/inventory/physical-inventories", inventoryBody(A)))
+            .getString("id");
+    String ofB = "/admin/inventory/physical-inventories/" + atB;
+
+    refusedForStore(
+        keeperOfA("POST", "/admin/inventory/physical-inventories", inventoryBody(B)),
+        "starting one at B");
+    refusedForStore(keeperOfA("GET", ofB, null), "B's by id");
+    refusedForStore(keeperOfA("POST", ofB + "/tags", TAG), "tagging at B");
+    refusedForStore(
+        keeperOfA("POST", ofB + "/tags/" + V + "/count", "{\"countedQty\":3}"), "counting at B");
+    refusedForStore(keeperOfA("POST", ofB + "/complete", ""), "completing B's");
+    refusedForStore(
+        keeperOfA("GET", "/admin/inventory/physical-inventories?store=" + B, null), "listing B's");
+    assertThat(statusOfInventory(atB), is("OPEN"));
+
+    Response mine = keeperOfA("GET", "/admin/inventory/physical-inventories", null);
+    String listed = mine.readEntity(String.class);
+    assertThat(listed, mine.getStatus(), is(200));
+    assertThat(listed, containsString(atA));
+    assertThat(listed, not(containsString(atB)));
+
+    assertThat(keeperOfB("GET", ofB, null).getStatus(), is(200));
+    assertThat(keeperOfB("POST", ofB + "/tags", TAG).getStatus(), is(200));
+  }
+
+  /**
+   * The stock reports under {@code /reports/*} (management-only) take an optional store. Named, it
+   * is checked exactly as any other route; unnamed, a manager held to no store still reads the
+   * whole business (as before this fix), and one held to some stores reads exactly those, added
+   * together — never a store they do not keep, and never nothing at all (SJ-D74 follow-up).
+   */
+  @Test
+  @DisplayName("Stock valuation, unnamed, sums exactly the stores a manager keeps")
+  void valuationScopedToTheCallersStores() {
+    assertThat(
+        owner("POST", "/admin/inventory/receive", receiveBody(A, 10, "VAL-A")).getStatus(),
+        is(201));
+    assertThat(
+        owner("POST", "/admin/inventory/receive", receiveBody(B, 20, "VAL-B")).getStatus(),
+        is(201));
+    assertThat(
+        owner("POST", "/admin/inventory/receive", receiveBody(C, 30, "VAL-C")).getStatus(),
+        is(201));
+
+    String path = "/admin/inventory/reports/valuation";
+
+    // A manager held to A alone, naming none, reads A and only A.
+    Response mine = managerOf(A, "GET", path, null);
+    String mineBody = mine.readEntity(String.class);
+    assertThat(mineBody, mine.getStatus(), is(200));
+    assertThat(mineBody, containsString(A));
+    assertThat(mineBody, not(containsString(B)));
+    assertThat(mineBody, not(containsString(C)));
+
+    // Naming a store they don't keep is refused, whatever the answer for "none named" would be.
+    refusedForStore(managerOf(A, "GET", path + "?storeId=" + B, null), "a manager of A naming B");
+
+    // Held to A and B, naming none: both, combined -- never C.
+    Response combined = managerOf(A + "," + B, "GET", path, null);
+    String combinedBody = combined.readEntity(String.class);
+    assertThat(combinedBody, combined.getStatus(), is(200));
+    assertThat(combinedBody, containsString(A));
+    assertThat(combinedBody, containsString(B));
+    assertThat(combinedBody, not(containsString(C)));
+
+    // The owner, held to no store, still reads the whole business.
+    Response whole = owner("GET", path, null);
+    String wholeBody = whole.readEntity(String.class);
+    assertThat(wholeBody, whole.getStatus(), is(200));
+    assertThat(wholeBody, containsString(A));
+    assertThat(wholeBody, containsString(B));
+    assertThat(wholeBody, containsString(C));
+
+    // Another business's staff, even naming our store A, see none of our figures; a cashier or
+    // storekeeper is refused by the management tier before any store is even looked at.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER"}) {
+      Response read = stranger(role, "GET", path, null);
+      String body = read.readEntity(String.class);
+      assertThat(role + ": " + body, read.getStatus(), is(200));
+      assertThat(role, body, not(containsString(A)));
+      assertThat(role, body, not(containsString(C)));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      Response read = stranger(role, "GET", path, null);
+      assertThat(role, read.getStatus(), is(403));
+      read.close();
+    }
+  }
+
+  @Test
+  @DisplayName("The shrinkage report, unnamed, sums exactly the stores a manager keeps")
+  void shrinkageScopedToTheCallersStores() {
+    for (String store : new String[] {A, B, C}) {
+      assertThat(
+          owner("POST", "/admin/inventory/receive", receiveBody(store, 10, "SHR-" + store))
+              .getStatus(),
+          is(201));
+      assertThat(
+          owner(
+                  "POST",
+                  "/admin/inventory/adjust",
+                  "{\"storeId\":\""
+                      + store
+                      + "\",\"variantId\":\""
+                      + V
+                      + "\",\"delta\":-1,\"reason\":\"DAMAGED\",\"reasonCode\":\"DAMAGED\"}")
+              .getStatus(),
+          is(200));
+    }
+
+    String path = "/admin/inventory/reports/shrinkage?groupBy=STORE";
+
+    Response mine = managerOf(A, "GET", path, null);
+    String mineBody = mine.readEntity(String.class);
+    assertThat(mineBody, mine.getStatus(), is(200));
+    assertThat(mineBody, containsString(A));
+    assertThat(mineBody, not(containsString(B)));
+    assertThat(mineBody, not(containsString(C)));
+
+    refusedForStore(managerOf(A, "GET", path + "&storeId=" + B, null), "a manager of A naming B");
+
+    Response combined = managerOf(A + "," + B, "GET", path, null);
+    String combinedBody = combined.readEntity(String.class);
+    assertThat(combinedBody, combined.getStatus(), is(200));
+    assertThat(combinedBody, containsString(A));
+    assertThat(combinedBody, containsString(B));
+    assertThat(combinedBody, not(containsString(C)));
+
+    Response whole = owner("GET", path, null);
+    String wholeBody = whole.readEntity(String.class);
+    assertThat(wholeBody, whole.getStatus(), is(200));
+    assertThat(wholeBody, containsString(A));
+    assertThat(wholeBody, containsString(B));
+    assertThat(wholeBody, containsString(C));
+
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER"}) {
+      Response read = stranger(role, "GET", path, null);
+      String body = read.readEntity(String.class);
+      assertThat(role + ": " + body, read.getStatus(), is(200));
+      assertThat(role, body, not(containsString(A)));
+      assertThat(role, body, not(containsString(C)));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      Response read = stranger(role, "GET", path, null);
+      assertThat(role, read.getStatus(), is(403));
+      read.close();
+    }
+  }
+
+  @Test
+  @DisplayName("Another business's staff never see or move a physical inventory, even naming ours")
+  void physicalInventoriesStayInTheirBusiness() {
+    String ours =
+        data(owner("POST", "/admin/inventory/physical-inventories", inventoryBody(A)))
+            .getString("id");
+    String path = "/admin/inventory/physical-inventories/" + ours;
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      Response read = stranger(role, "GET", path, null);
+      assertThat(role + " reading", read.getStatus(), is(404));
+      read.close();
+      Response counted =
+          stranger(role, "POST", path + "/tags/" + V + "/count", "{\"countedQty\":3}");
+      assertThat(role + " counting", counted.getStatus(), is(404));
+      counted.close();
+      // A cashier is refused the permission before the count is looked up; everyone else finds
+      // none.
+      int expected = "CASHIER".equals(role) ? 403 : 404;
+      Response tagged = stranger(role, "POST", path + "/tags", TAG);
+      assertThat(role + " tagging", tagged.getStatus(), is(expected));
+      tagged.close();
+      Response completed = stranger(role, "POST", path + "/complete", "");
+      assertThat(role + " completing", completed.getStatus(), is(expected));
+      completed.close();
+      for (String list :
+          new String[] {
+            "/admin/inventory/physical-inventories",
+            "/admin/inventory/physical-inventories?store=" + A
+          }) {
+        Response listed = stranger(role, "GET", list, null);
+        String body = listed.readEntity(String.class);
+        assertThat(role + " " + list + ": " + body, listed.getStatus(), is(200));
+        assertThat(role + " " + list, body, not(containsString(ours)));
+      }
+    }
+    assertThat(statusOfInventory(ours), is("OPEN"));
   }
 }

@@ -100,9 +100,13 @@ public class PasswordResetService {
 
     for (User user : users.findAllByEmail(email)) {
       Set<String> roles = users.rolesOf(user.id());
-      boolean staff = user.tenantId() != null;
-      boolean businessActive = !staff || tenantStatus.isActive(user.tenantId());
-      boolean ssoRequired = staff && ssoRequired(user.tenantId(), roles);
+      UUID business = user.tenantId();
+      // A business account even before it has a business: a sign-up not yet onboarded sits beside
+      // the same person's shopper account on one address (separate identities, 29 Sep 2026), and
+      // an email offering two "shopper account" links would not say which is which.
+      boolean staff = business != null || !User.TYPE_CUSTOMER.equals(user.type());
+      boolean businessActive = business == null || tenantStatus.isActive(business);
+      boolean ssoRequired = business != null && ssoRequired(business, roles);
       PasswordReset.Kind kind =
           PasswordReset.kindOf(
               User.STATUS_ACTIVE.equals(user.status()),
@@ -115,7 +119,7 @@ public class PasswordResetService {
       }
       anyEntry = true;
       String businessName =
-          staff ? tenantProfiles.businessName(user.tenantId()).orElse(null) : null;
+          business != null ? tenantProfiles.businessName(business).orElse(null) : null;
       // The login's own id on every entry (SHOPPER, STAFF, STAFF_SSO alike): notification-svc
       // records its log row against it (AccountDeleted carries only the id, by design), so an
       // erased account's log erases too.

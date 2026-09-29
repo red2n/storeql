@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'auth/auth_notifier.dart';
 import 'auth/auth_state.dart';
 import '../features/auth/login_screen.dart';
+import '../features/auth/business_sign_up_screen.dart';
 import '../features/auth/second_factor_screen.dart';
 import '../features/auth/second_factor_setup_screen.dart';
 import '../features/auth/security_screen.dart';
@@ -59,15 +60,21 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (auth is AuthEnrolmentOwed) return loc == '/mfa/setup' ? null : '/mfa/setup';
 
       if (auth is AuthUnauthenticated) {
-        if (loc == '/login' || loc == '/platform/login') return null;
+        // "Start a business" is a sign-up, so it is reached before any session.
+        if (loc == '/login' || loc == '/platform/login' || loc == '/start-business') return null;
         // /platform/* (other than the login page) has no unauthenticated access —
         // bounce to the platform login, not the store/POS one.
         return loc.startsWith('/platform') ? '/platform/login' : '/login';
       }
 
       if (auth is AuthAuthenticated) {
-        // send logged-in users away from login/root
-        if (loc == '/login' || loc == '/platform/login' || loc == '/' || loc.startsWith('/mfa')) {
+        // send logged-in users away from login/root — and from the business
+        // sign-up, whose new login's home is the setup wizard
+        if (loc == '/login' ||
+            loc == '/platform/login' ||
+            loc == '/start-business' ||
+            loc == '/' ||
+            loc.startsWith('/mfa')) {
           return auth.homeRoute;
         }
         // Every login's own sign-in security, whichever shell it works in.
@@ -109,6 +116,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     },
     routes: [
       GoRoute(path: '/login', builder: (_, _) => const LoginScreen()),
+      GoRoute(path: '/start-business', builder: (_, _) => const BusinessSignUpScreen()),
       GoRoute(path: '/platform/login', builder: (_, _) => const PlatformLoginScreen()),
       GoRoute(path: '/mfa', builder: (_, _) => const SecondFactorScreen()),
       GoRoute(path: '/mfa/setup', builder: (_, _) => const SecondFactorSetupScreen()),

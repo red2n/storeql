@@ -36,4 +36,7 @@ export default function ({ victim, bystander }) {
   expect(login(bystander), 'another account from the same IP is refused too', 429, 'LOGIN_LOCKED');
   expect(call('POST', '/api/iam-svc/auth/refresh', { body: { refreshToken: bystander.refreshToken } }), 'token refresh is not a login and still works', 200);
   expect(call('POST', '/api/iam-svc/auth/register', { body: { email: `after-lockout-${Date.now()}@k6.storeql.test`, password: PASSWORD } }), 'registration still works', 201);
+  // Starting a business is a sign-up too, not a login: the lockout leaves it alone, as it does the
+  // shopper's (both sit under the per-IP rate limit every path has).
+  expect(call('POST', '/api/iam-svc/auth/register/business', { body: { email: `business-after-lockout-${Date.now()}@k6.storeql.test`, password: PASSWORD } }), 'starting a business still works', 201);
 }

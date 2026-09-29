@@ -23,6 +23,7 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -347,6 +348,60 @@ class RecallIT {
     assertThat(line.getString("batchNo"), is("L1"));
     assertThat(line.getString("kind"), is("RECALL"));
     assertThat(line.getString("customerNotice"), containsString("Do not eat"));
+    // When it opened: order-svc judges a sale replayed from an offline till by the recalls open
+    // when it was rung up.
+    assertThat(line.getString("openedAt"), is(recall.getString("openedAt")));
+  }
+
+  /**
+   * order-svc judges a till sale replayed from an offline queue against every recall open when it
+   * was rung up, one closed or cancelled since included, so the read it makes carries those too;
+   * the till's own list is the open ones, unchanged. Another business's recalls never appear.
+   */
+  @Test
+  void aReadSinceAMomentAlsoCarriesTheRecallsEndedSinceThen() {
+    Instant before = Instant.now().minusSeconds(1);
+    String variant = uuid();
+    String line = "{\"variantId\":\"" + variant + "\"}";
+    String closed = created(open("ENDED-CLOSED", "WITHDRAWAL", line)).getString("id");
+    assertThat(close(closed).getStatus(), is(200));
+    String cancelled = created(open("ENDED-CANCELLED", "WITHDRAWAL", line)).getString("id");
+    assertThat(cancel(cancelled).getStatus(), is(200));
+    String stillOpen = created(open("STILL-OPEN", "WITHDRAWAL", line)).getString("id");
+
+    JsonArray tills =
+        okArray(send("GET", "/admin/inventory/recalls/active", null, T, "CASHIER", STAFF, null));
+    assertThat("the till's list: open recalls only", ids(tills).contains(closed), is(false));
+    assertThat(ids(tills).contains(cancelled), is(false));
+    JsonObject openLine = find(tills, "recallId", stillOpen);
+    assertThat("and no end on it", openLine.containsKey("endedAt"), is(false));
+    assertThat(openLine.containsKey("endedAs"), is(false));
+
+    JsonArray since = okArray(activeSince(before.toString(), T));
+    JsonObject closedLine = find(since, "recallId", closed);
+    assertThat(closedLine.getString("endedAs"), is("CLOSED"));
+    assertThat(closedLine.getString("endedAt"), is(get(closed).getString("endedAt")));
+    assertThat(closedLine.getString("openedAt"), is(get(closed).getString("openedAt")));
+    assertThat(closedLine.getString("variantId"), is(variant));
+    JsonObject cancelledLine = find(since, "recallId", cancelled);
+    assertThat(cancelledLine.getString("endedAs"), is("CANCELLED"));
+    assertThat(cancelledLine.getString("endedAt"), is(get(cancelled).getString("endedAt")));
+    assertThat(find(since, "recallId", stillOpen).containsKey("endedAt"), is(false));
+
+    Instant afterBoth = Instant.parse(get(cancelled).getString("endedAt")).plusMillis(1);
+    JsonArray later = okArray(activeSince(afterBoth.toString(), T));
+    assertThat("ended before the moment asked about", ids(later).contains(closed), is(false));
+    assertThat(ids(later).contains(cancelled), is(false));
+    assertThat("still open: always there", ids(later).contains(stillOpen), is(true));
+
+    List<String> theirs = ids(okArray(activeSince(before.toString(), OTHER)));
+    assertThat(
+        "another business asking since the same moment sees none of it",
+        theirs.contains(closed) || theirs.contains(cancelled) || theirs.contains(stillOpen),
+        is(false));
+    Response notAnInstant = activeSince("yesterday", T);
+    assertThat(notAnInstant.getStatus(), is(400));
+    assertThat(notAnInstant.readEntity(String.class), containsString("RECALL_ENDED_SINCE_INVALID"));
   }
 
   @Test
@@ -631,6 +686,22 @@ class RecallIT {
 
   private static String lotLine(String variant, String lot) {
     return "{\"variantId\":\"" + variant + "\",\"batchNo\":\"" + lot + "\"}";
+  }
+
+  /** The active read as order-svc makes it for a replayed till sale, as a storekeeper. */
+  private Response activeSince(String endedSince, String tenant) {
+    return target
+        .path("/admin/inventory/recalls/active")
+        .queryParam("endedSince", endedSince)
+        .request()
+        .header("X-Tenant-Id", tenant)
+        .header("X-Roles", "STOREKEEPER")
+        .header("X-User-Id", STAFF)
+        .get();
+  }
+
+  private static List<String> ids(JsonArray lines) {
+    return lines.getValuesAs(JsonObject.class).stream().map(o -> o.getString("recallId")).toList();
   }
 
   private JsonObject get(String recallId) {

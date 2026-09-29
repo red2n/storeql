@@ -394,17 +394,30 @@ public final class Recall {
       BigDecimal qtyHeld,
       Reach reach) {}
 
-  /** One scope line of an open recall, as the till checks a scanned item against it. */
+  /**
+   * One scope line of an open recall, as the till checks a scanned item against it — or of one
+   * ended since a given moment, which only order-svc's judgement of a replayed till sale asks for.
+   *
+   * @param openedAt when the recall was opened: order-svc judges a till sale replayed from an
+   *     offline queue by the recalls open when it was rung up, not by one opened after
+   * @param endedAt when it was closed or cancelled; null while it is open. A recall ended since a
+   *     sale was rung up still covered it then, so a replay is judged against it too
+   * @param status OPEN, or how it ended
+   */
   public record ActiveItem(
       UUID recallId,
       String reference,
       Kind kind,
       Hazard hazard,
       String customerNotice,
+      Instant openedAt,
+      Instant endedAt,
+      Status status,
       Scope scope) {
 
     public ActiveItem {
       Objects.requireNonNull(scope, "scope");
+      Objects.requireNonNull(status, "status");
     }
   }
 }

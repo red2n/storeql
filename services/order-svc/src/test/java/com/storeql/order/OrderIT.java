@@ -49,7 +49,8 @@ class OrderIT {
             .with("01a090ae-611e-7016-a809-076a3374b722", "USD", "US")
             .with("01a090ae-611e-7017-bdd9-d7612c647032", "USD", "US")
             .with("01a090ae-611e-7019-ba7e-5901486ca70a", "USD", "US")
-            .with("01a090ae-611e-701b-8b9c-fe24949dad64", "USD", "US");
+            .with("01a090ae-611e-701b-8b9c-fe24949dad64", "USD", "US")
+            .with(OrderIT.T_RS, "USD", "US");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -67,6 +68,14 @@ class OrderIT {
   private static final String S = "01a090ae-611e-700f-b645-a14095230b77";
   private static final String USER = "01a090ae-611e-7099-8000-000000000001";
   private static final String V = "01a090ae-611e-7011-ae7d-1bd68c966ff6";
+
+  // ── Report store scoping (SJ-D74) ────────────────────────────────────────
+  // A tenant of its own, with three stores, so a report's storeId handling can be pinned without
+  // disturbing the sales figures every other test in this class reads at T/S.
+  private static final String T_RS = "01a090ae-611e-7030-8aa1-2b3c4d5e6f70";
+  private static final String STORE_A = "01a090ae-611e-7031-9aa1-2b3c4d5e6f71";
+  private static final String STORE_B = "01a090ae-611e-7032-aaa1-2b3c4d5e6f72";
+  private static final String STORE_C = "01a090ae-611e-7033-baa1-2b3c4d5e6f73";
 
   @Inject WebTarget target;
   @Inject OrderService orderService;
@@ -1178,6 +1187,122 @@ class OrderIT {
         is(200));
   }
 
+  /**
+   * A cancel releases the holds and refunds whatever was captured, so it is scoped like the void
+   * and the return beside it: by tenant first, then by store. Staff held to another store could
+   * cancel any order in the business by its id.
+   */
+  @Test
+  @DisplayName("An order is cancelled only by staff at its store; another business finds none")
+  void cancelIsScopedByTenantThenStore() {
+    UUID order = placeOnlinePickup(1);
+    String why = "{\"reason\":\"not mine\"}";
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "MANAGER"}) {
+      Response elsewhere =
+          target
+              .path("/orders/" + order + "/cancel")
+              .request()
+              .header("X-Tenant-Id", T)
+              .header("X-User-Id", Ids.newId().toString())
+              .header("X-Roles", role)
+              .header("X-Store-Ids", Ids.newId().toString())
+              .post(Entity.entity(why, MediaType.APPLICATION_JSON));
+      String body = elsewhere.readEntity(String.class);
+      assertThat(role + ": " + body, elsewhere.getStatus(), is(403));
+      assertThat(role, body, containsString("STORE_ACCESS_DENIED"));
+    }
+    // Another business's staff of every role, even held to our store's id, find no such order.
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      Response rival =
+          target
+              .path("/orders/" + order + "/cancel")
+              .request()
+              .header("X-Tenant-Id", "01a090ae-611e-7014-8cd5-baf0862fa319")
+              .header("X-User-Id", Ids.newId().toString())
+              .header("X-Roles", role)
+              .header("X-Store-Ids", S)
+              .post(Entity.entity(why, MediaType.APPLICATION_JSON));
+      assertThat(role, rival.getStatus(), is(404));
+      rival.close();
+    }
+    assertThat(statusOf(order), is("PENDING"));
+    assertThat(outboxCount(order, "OrderCancelled"), is(0L));
+
+    Response atItsStore =
+        target
+            .path("/orders/" + order + "/cancel")
+            .request()
+            .header("X-Tenant-Id", T)
+            .header("X-User-Id", Ids.newId().toString())
+            .header("X-Roles", "CASHIER")
+            .header("X-Store-Ids", S)
+            .post(
+                Entity.entity(
+                    "{\"reason\":\"customer changed mind\"}", MediaType.APPLICATION_JSON));
+    assertThat(atItsStore.getStatus(), is(200));
+    assertThat(statusOf(order), is("CANCELLED"));
+    assertThat(outboxCount(order, "OrderCancelled"), is(1L));
+  }
+
+  private BigDecimal totalOf(UUID orderId) {
+    String body = get("/orders/" + orderId, T).readEntity(String.class);
+    var m = java.util.regex.Pattern.compile("\"total\":([0-9.]+)").matcher(body);
+    assertThat(body, m.find(), is(true));
+    return new BigDecimal(m.group(1));
+  }
+
+  /**
+   * Once a tender is captured, a cancel refunds it (payment-svc on OrderCancelled), which is a void
+   * by another name, so it asks what the void asks. An order nobody paid for is still any staff's
+   * at its store to cancel.
+   */
+  @Test
+  @DisplayName("Cancelling an order that was paid for needs sales.void; an unpaid one does not")
+  void cancellingAPaidOrderIsAVoid() {
+    UUID paid = placeOnlinePickup(1);
+    orderService.handlePaymentCaptured(Ids.parse(T), paid, Ids.newId(), totalOf(paid));
+    assertThat(statusOf(paid), is("CONFIRMED"));
+    // One tender of a split payment: still PENDING, but money was taken.
+    UUID part = placeOnlinePickup(1);
+    orderService.handlePaymentCaptured(Ids.parse(T), part, Ids.newId(), new BigDecimal("1.00"));
+    assertThat(statusOf(part), is("PENDING"));
+    String why = "{\"reason\":\"customer changed mind\"}";
+    for (UUID order : new UUID[] {paid, part}) {
+      Response cashier =
+          postAs("/orders/" + order + "/cancel", why, T, Ids.newId().toString(), "CASHIER", null);
+      String body = cashier.readEntity(String.class);
+      assertThat(body, cashier.getStatus(), is(403));
+      assertThat(body, containsString("PERMISSION_DENIED"));
+      assertThat(body, containsString("sales.void"));
+      // A manager whose role was narrowed out of voids is refused the same way.
+      Response narrowed =
+          target
+              .path("/orders/" + order + "/cancel")
+              .request()
+              .header("X-Tenant-Id", T)
+              .header("X-User-Id", Ids.newId().toString())
+              .header("X-Roles", "MANAGER")
+              .header("X-Permissions", "sales.refund")
+              .post(Entity.entity(why, MediaType.APPLICATION_JSON));
+      assertThat(narrowed.getStatus(), is(403));
+      narrowed.close();
+      assertThat(outboxCount(order, "OrderCancelled"), is(0L));
+    }
+    assertThat(statusOf(paid), is("CONFIRMED"));
+    assertThat(statusOf(part), is("PENDING"));
+
+    Response manager =
+        postAs("/orders/" + paid + "/cancel", why, T, Ids.newId().toString(), "MANAGER", null);
+    assertThat(manager.getStatus(), is(200));
+    assertThat(outboxCount(paid, "OrderCancelled"), is(1L));
+
+    UUID unpaid = placeOnlinePickup(1);
+    Response cashier =
+        postAs("/orders/" + unpaid + "/cancel", why, T, Ids.newId().toString(), "CASHIER", null);
+    assertThat(cashier.getStatus(), is(200));
+    assertThat(statusOf(unpaid), is("CANCELLED"));
+  }
+
   // ── Sales by hour / by staff ───────────────────────────────────────────────
 
   /**
@@ -1325,6 +1450,79 @@ class OrderIT {
     }
   }
 
+  /**
+   * A store that is named is read only if the caller may act there; with none named, a caller held
+   * to no store reads the whole business and a caller held to some reads exactly those, added
+   * together — never a fourth (SJ-D74's {@code reportStores}).
+   */
+  @Test
+  @DisplayName("Sales by hour is scoped to the caller's own stores, never a store outside them")
+  void salesByHourIsScopedByTheCallersStores() {
+    placeConfirmedPosOrder(T_RS, STORE_A, "10.00");
+    placeConfirmedPosOrder(T_RS, STORE_B, "20.00");
+    placeConfirmedPosOrder(T_RS, STORE_C, "40.00");
+
+    // Held to A alone, naming none: only A's takings.
+    String atA =
+        getReportAsStores("/admin/reports/sales-by-hour", T_RS, "MANAGER", STORE_A, null)
+            .readEntity(String.class);
+    assertThat(atA, containsString("\"grossAmount\":10.00"));
+    assertThat(atA, not(containsString("30.00")));
+    assertThat(atA, not(containsString("70.00")));
+
+    // Held to A alone, naming B: refused rather than shown B's.
+    Response deniedB =
+        getReportAsStores("/admin/reports/sales-by-hour", T_RS, "MANAGER", STORE_A, STORE_B);
+    assertThat(deniedB.getStatus(), is(403));
+    assertThat(deniedB.readEntity(String.class), containsString("STORE_ACCESS_DENIED"));
+
+    // Held to A and B, naming none: the two added together, never C's.
+    String atAB =
+        getReportAsStores(
+                "/admin/reports/sales-by-hour", T_RS, "MANAGER", STORE_A + "," + STORE_B, null)
+            .readEntity(String.class);
+    assertThat(atAB, containsString("\"grossAmount\":30.00"));
+
+    // Held to no store (OWNER): the whole business, exactly as before this fix.
+    String wholeBusiness =
+        getReportAsStores("/admin/reports/sales-by-hour", T_RS, "OWNER", null, null)
+            .readEntity(String.class);
+    assertThat(wholeBusiness, containsString("\"grossAmount\":70.00"));
+
+    // Another tenant's staff, even naming our own store id, reads none of our figures. The tier
+    // admits OWNER and MANAGER; STOREKEEPER and CASHIER are refused before the resource runs.
+    String rival = "01a090ae-611e-7014-8cd5-baf0862fa319";
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response theirs =
+          getReportAsStores("/admin/reports/sales-by-hour", rival, role, STORE_A, null);
+      assertThat(role, theirs.getStatus(), is(200));
+      assertThat(role, theirs.readEntity(String.class), not(containsString("70.00")));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      Response refused =
+          getReportAsStores("/admin/reports/sales-by-hour", rival, role, STORE_A, null);
+      assertThat(role, refused.getStatus(), is(403));
+    }
+  }
+
+  /** Places and confirms a one-line POS sale at a named store, so it counts as revenue. */
+  private void placeConfirmedPosOrder(String tenant, String store, String amount) {
+    Response placed =
+        post(
+            "/orders",
+            "{\"storeId\":\""
+                + store
+                + "\",\"channel\":\"POS\",\"items\":[{\"variantId\":\""
+                + V
+                + "\",\"qty\":1,\"unitPrice\":"
+                + amount
+                + "}]}",
+            tenant,
+            Ids.newId().toString());
+    assertThat(placed.getStatus(), is(201));
+    confirm(tenant, extractId(placed.readEntity(String.class)));
+  }
+
   /** Move a placed order to CONFIRMED, which is what makes it revenue. */
   private void confirm(String tenant, String orderId) {
     assertThat(post("/orders/" + orderId + "/confirm", "{}", tenant).getStatus(), is(200));
@@ -1442,6 +1640,82 @@ class OrderIT {
   }
 
   /**
+   * Grouped by store, the exception report names the store in {@code groupKey} — the same rule as
+   * sales by hour, pinned here on a report that groups by the thing being scoped (SJ-D74's {@code
+   * reportStores}).
+   */
+  @Test
+  @DisplayName(
+      "The exception report is scoped to the caller's own stores, never a store outside them")
+  void exceptionReportIsScopedByTheCallersStores() {
+    for (String store : new String[] {STORE_A, STORE_B, STORE_C}) {
+      Response ns =
+          postAs(
+              "/pos/no-sale",
+              "{\"storeId\":\"" + store + "\",\"reason\":\"drawer check\"}",
+              T_RS,
+              Ids.newId().toString(),
+              "CASHIER",
+              null);
+      assertThat(store, ns.getStatus(), is(201));
+    }
+
+    // Held to A alone, naming none: only A's row.
+    String atA =
+        getReportAsStores("/admin/reports/exceptions", T_RS, "MANAGER", STORE_A, null, "STORE")
+            .readEntity(String.class);
+    assertThat(atA, containsString(STORE_A));
+    assertThat(atA, not(containsString(STORE_B)));
+    assertThat(atA, not(containsString(STORE_C)));
+
+    // Held to A alone, naming B: refused rather than shown B's.
+    Response deniedB =
+        getReportAsStores("/admin/reports/exceptions", T_RS, "MANAGER", STORE_A, STORE_B, "STORE");
+    assertThat(deniedB.getStatus(), is(403));
+    assertThat(deniedB.readEntity(String.class), containsString("STORE_ACCESS_DENIED"));
+
+    // Held to A and B, naming none: both rows, never C's.
+    String atAB =
+        getReportAsStores(
+                "/admin/reports/exceptions",
+                T_RS,
+                "MANAGER",
+                STORE_A + "," + STORE_B,
+                null,
+                "STORE")
+            .readEntity(String.class);
+    assertThat(atAB, containsString(STORE_A));
+    assertThat(atAB, containsString(STORE_B));
+    assertThat(atAB, not(containsString(STORE_C)));
+
+    // Held to no store (OWNER): the whole business, exactly as before this fix.
+    String wholeBusiness =
+        getReportAsStores("/admin/reports/exceptions", T_RS, "OWNER", null, null, "STORE")
+            .readEntity(String.class);
+    assertThat(wholeBusiness, containsString(STORE_A));
+    assertThat(wholeBusiness, containsString(STORE_B));
+    assertThat(wholeBusiness, containsString(STORE_C));
+
+    // Another tenant's staff, even naming our own store id, reads none of our rows. The tier
+    // admits OWNER and MANAGER; STOREKEEPER and CASHIER are refused before the resource runs.
+    String rival = "01a090ae-611e-7014-8cd5-baf0862fa319";
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response theirs =
+          getReportAsStores("/admin/reports/exceptions", rival, role, STORE_A, null, "STORE");
+      assertThat(role, theirs.getStatus(), is(200));
+      String body = theirs.readEntity(String.class);
+      assertThat(role, body, not(containsString(STORE_A)));
+      assertThat(role, body, not(containsString(STORE_B)));
+      assertThat(role, body, not(containsString(STORE_C)));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      Response refused =
+          getReportAsStores("/admin/reports/exceptions", rival, role, STORE_A, null, "STORE");
+      assertThat(role, refused.getStatus(), is(403));
+    }
+  }
+
+  /**
    * The journal write used to sit under /admin/, which is management-gated — so the cashier who
    * took the sale could not journal it and nothing ever did. It is now on the till's own path.
    */
@@ -1500,6 +1774,36 @@ class OrderIT {
             .header("X-Roles", roles);
     if (idempotencyKey != null) req = req.header("Idempotency-Key", idempotencyKey);
     return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  /**
+   * A report read as a named role, optionally held to stores (SJ-D74's {@code reportStores}) and
+   * optionally naming one store on the query.
+   *
+   * @param storeIds the caller's own {@code X-Store-Ids}, comma-separated, or {@code null} for a
+   *     caller held to none (owner, whole-business manager)
+   * @param requestedStore the {@code storeId} query param, or {@code null} to name none
+   */
+  private Response getReportAsStores(
+      String path, String tenant, String roles, String storeIds, String requestedStore) {
+    return getReportAsStores(path, tenant, roles, storeIds, requestedStore, null);
+  }
+
+  /** As above, with one more query param (e.g. {@code groupBy}) than the common case needs. */
+  private Response getReportAsStores(
+      String path,
+      String tenant,
+      String roles,
+      String storeIds,
+      String requestedStore,
+      String groupBy) {
+    WebTarget t = target.path(path);
+    if (requestedStore != null) t = t.queryParam("storeId", requestedStore);
+    if (groupBy != null) t = t.queryParam("groupBy", groupBy);
+    var req = t.request().header("X-Tenant-Id", tenant).header("X-User-Id", Ids.newId().toString());
+    req = req.header("X-Roles", roles);
+    if (storeIds != null) req = req.header("X-Store-Ids", storeIds);
+    return req.get();
   }
 
   private Response getAs(String path, String tenant, String userId, String roles) {

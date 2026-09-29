@@ -9,6 +9,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -23,15 +24,18 @@ public class TenderMixService {
   @Inject TenderMixRepository repo;
 
   /**
+   * @param stores restrict to these stores, or {@code null} for every store in the tenant — never a
+   *     store the caller cannot act in, which {@link com.storeql.web.TenantContext#reportStores}
+   *     has already checked
    * @param from inclusive lower bound, or null for all time
    * @param to exclusive upper bound, or null for all time
    */
-  public List<TenderMixRow> tenderMix(UUID tenantId, Instant from, Instant to) {
+  public List<TenderMixRow> tenderMix(UUID tenantId, Set<UUID> stores, Instant from, Instant to) {
     if (from != null && to != null && !from.isBefore(to))
       throw ApiException.badRequest(
           "PAYMENT_INVALID_PERIOD", "from must be before to — got " + from + " and " + to);
 
-    List<TenderMixRow> raw = repo.tenderMix(tenantId, from, to);
+    List<TenderMixRow> raw = repo.tenderMix(tenantId, stores, from, to);
     BigDecimal total =
         raw.stream()
             .map(r -> r.capturedAmount().subtract(r.refundedAmount()))

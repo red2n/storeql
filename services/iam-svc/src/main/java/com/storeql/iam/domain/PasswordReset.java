@@ -51,7 +51,8 @@ public final class PasswordReset {
    *     platform administrator")
    * @param businessActive its business is active (irrelevant, and always true, for a shopper login,
    *     which belongs to none)
-   * @param staff whether the login belongs to a business, rather than being a shopper's
+   * @param staff whether the login is a business account — one that belongs to a business, or a
+   *     business sign-up that has none yet — rather than a shopper's
    * @param ssoRequired the login's business now signs its staff in through its own identity
    *     provider (irrelevant for a shopper)
    * @return the kind of entry the login gets, {@link Kind#NONE} for no entry at all

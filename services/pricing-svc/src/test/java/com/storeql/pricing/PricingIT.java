@@ -107,6 +107,14 @@ class PricingIT {
 
   /** A GET carrying roles — the financial reports are gated, so callers must state who they are. */
   private Response getAs(String pathAndQuery, String tenant, String roles) {
+    return getAs(pathAndQuery, tenant, roles, null);
+  }
+
+  /**
+   * A GET carrying roles and, optionally, the caller's store assignment — {@code X-Store-Ids} is
+   * how the gateway tells a service which stores a manager is held to (comma-separated).
+   */
+  private Response getAs(String pathAndQuery, String tenant, String roles, String storeIds) {
     int q = pathAndQuery.indexOf('?');
     WebTarget t = target.path(q < 0 ? pathAndQuery : pathAndQuery.substring(0, q));
     if (q >= 0) {
@@ -115,7 +123,9 @@ class PricingIT {
         t = t.queryParam(param.substring(0, eq), param.substring(eq + 1));
       }
     }
-    return t.request().header("X-Tenant-Id", tenant).header("X-Roles", roles).get();
+    var req = t.request().header("X-Tenant-Id", tenant).header("X-Roles", roles);
+    if (storeIds != null) req = req.header("X-Store-Ids", storeIds);
+    return req.get();
   }
 
   private Response put(String path, String json, String tenant) {
@@ -464,6 +474,66 @@ class PricingIT {
     assertThat(
         getAs("/admin/reports/tax-summary?" + period + "&storeId=nope", T, "OWNER").getStatus(),
         is(400));
+  }
+
+  /**
+   * The decided rule: a store named is refused unless the caller may act there; no store named
+   * means the whole business for a caller held to none, or exactly the caller's own stores added
+   * together, never any other; and another tenant's data never shows regardless of what {@code
+   * X-Store-Ids} claims.
+   */
+  @Test
+  void taxSummaryIsScopedToTheCallersStores() {
+    String storeA = com.storeql.ids.Ids.newId().toString();
+    String storeB = com.storeql.ids.Ids.newId().toString();
+    String storeC = com.storeql.ids.Ids.newId().toString();
+    recordTax(
+        ORDER_ID, storeA, "T1", "0.20", "100.00", "20.00", "120.00", false, "2023-02-01T10:00:00Z");
+    recordTax(
+        ORDER_ID, storeB, "T1", "0.20", "200.00", "40.00", "240.00", false, "2023-02-02T10:00:00Z");
+    recordTax(
+        ORDER_ID, storeC, "T1", "0.20", "400.00", "80.00", "480.00", false, "2023-02-03T10:00:00Z");
+    // A month no other test writes to, so the whole business is exactly these three.
+    String period = "from=2023-02-01T00:00:00Z&to=2023-03-01T00:00:00Z";
+    String path = "/admin/reports/tax-summary?" + period;
+
+    // OWNER is held to no store: naming none is the whole business, A+B+C.
+    Response owner = getAs(path, T, "OWNER");
+    assertThat(owner.getStatus(), is(200));
+    assertThat(owner.readEntity(String.class), containsString("\"outputVat\":140.00"));
+
+    // MANAGER held to A alone: naming none is A only, not A+B+C.
+    Response managerAtA = getAs(path, T, "MANAGER", storeA);
+    assertThat(managerAtA.getStatus(), is(200));
+    assertThat(managerAtA.readEntity(String.class), containsString("\"outputVat\":20.00"));
+
+    // Naming a store the caller is not held to is refused outright, whatever it would have shown.
+    Response managerNamesB = getAs(path + "&storeId=" + storeB, T, "MANAGER", storeA);
+    assertThat(managerNamesB.getStatus(), is(403));
+    assertThat(managerNamesB.readEntity(String.class), containsString("STORE_ACCESS_DENIED"));
+
+    // Naming the store the caller is held to still works.
+    Response managerNamesA = getAs(path + "&storeId=" + storeA, T, "MANAGER", storeA);
+    assertThat(managerNamesA.getStatus(), is(200));
+    assertThat(managerNamesA.readEntity(String.class), containsString("\"outputVat\":20.00"));
+
+    // MANAGER held to A and B: naming none is A+B, never C.
+    Response managerAtAB = getAs(path, T, "MANAGER", storeA + "," + storeB);
+    assertThat(managerAtAB.getStatus(), is(200));
+    assertThat(managerAtAB.readEntity(String.class), containsString("\"outputVat\":60.00"));
+
+    // Another tenant's staff, even naming our own store id, sees nothing of ours: OWNER/MANAGER
+    // clear the tier gate but the tenant filter leaves them an empty (zero) report; STOREKEEPER
+    // and CASHIER never clear the tier gate at all under /admin/.
+    String other = "01a090ae-611e-701d-9d60-a9d7516ed03b";
+    Response otherOwner = getAs(path + "&storeId=" + storeA, other, "OWNER", storeA);
+    assertThat(otherOwner.getStatus(), is(200));
+    assertThat(otherOwner.readEntity(String.class), containsString("\"outputVat\":0.00"));
+    Response otherManager = getAs(path, other, "MANAGER", storeA);
+    assertThat(otherManager.getStatus(), is(200));
+    assertThat(otherManager.readEntity(String.class), containsString("\"outputVat\":0.00"));
+    assertThat(getAs(path, other, "STOREKEEPER", storeA).getStatus(), is(403));
+    assertThat(getAs(path, other, "CASHIER", storeA).getStatus(), is(403));
   }
 
   /**

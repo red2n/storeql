@@ -63,8 +63,12 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
     final ob = ref.watch(onboardingNotifierProvider);
     final plans = ref.watch(publicPlansProvider);
 
-    // When step 2 is done, router redirect will pick it up via auth state change
+    // Nothing is created until the store step is submitted, so the router —
+    // which leaves the wizard once the token names a business — can only move
+    // on after both exist. When step 2 is done, the router redirect will pick
+    // it up via auth state change.
     ref.listen<OnboardingState>(onboardingNotifierProvider, (_, next) {
+      if (next.step == 0 && !next.loading) _animateTo(0);
       if (next.step == 1 && !next.loading) _animateTo(1);
       if (next.step == 2 && !next.loading) context.go('/admin/dashboard');
     });
@@ -146,14 +150,7 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
                         loading: ob.loading,
                         onNext: () {
                           if (!_step1Key.currentState!.validate()) return;
-                          ref.read(onboardingNotifierProvider.notifier).createTenant(
-                                businessName: _bizNameCtrl.text.trim(),
-                                legalName: _legalNameCtrl.text.trim(),
-                                country: _country!,
-                                currency: _currency!,
-                                planId: _planId ??
-                                    PublicPlan.defaultId(plans.value ?? const []),
-                              );
+                          ref.read(onboardingNotifierProvider.notifier).toFirstStore();
                         },
                       ),
                       _Step2StoreForm(
@@ -171,17 +168,27 @@ class _OnboardingWizardState extends ConsumerState<OnboardingWizard> {
                         onTimezoneChanged: (v) => setState(() => _timezone = v!),
                         onTypeChanged: (v) => setState(() => _storeType = v!),
                         loading: ob.loading,
+                        created: ob.tenantId != null,
+                        onBack: () => ref.read(onboardingNotifierProvider.notifier).backToDetails(),
                         onSubmit: () {
                           if (!_step2Key.currentState!.validate()) return;
-                          ref.read(onboardingNotifierProvider.notifier).createStore(
-                                name: _storeNameCtrl.text.trim(),
-                                code: _storeCodeCtrl.text.trim().toUpperCase(),
-                                type: _storeType,
-                                line1: _line1Ctrl.text.trim(),
-                                city: _cityCtrl.text.trim(),
-                                country: _storeCountry ?? _country,
-                                pincode: _pincodeCtrl.text.trim(),
-                                timezone: _timezone,
+                          // The business details from step 1 go with the store:
+                          // one call creates both.
+                          ref.read(onboardingNotifierProvider.notifier).finish(
+                                businessName: _bizNameCtrl.text.trim(),
+                                legalName: _legalNameCtrl.text.trim(),
+                                country: _country!,
+                                currency: _currency!,
+                                planId: _planId ??
+                                    PublicPlan.defaultId(plans.value ?? const []),
+                                storeName: _storeNameCtrl.text.trim(),
+                                storeCode: _storeCodeCtrl.text.trim().toUpperCase(),
+                                storeType: _storeType,
+                                storeLine1: _line1Ctrl.text.trim(),
+                                storeCity: _cityCtrl.text.trim(),
+                                storeCountry: _storeCountry ?? _country,
+                                storePincode: _pincodeCtrl.text.trim(),
+                                storeTimezone: _timezone,
                               );
                         },
                       ),
@@ -370,6 +377,10 @@ class _Step2StoreForm extends StatelessWidget {
   final ValueChanged<String?> onTimezoneChanged;
   final ValueChanged<String?> onTypeChanged;
   final bool loading;
+  // The business and its store exist and only the sign-in is catching up:
+  // the button finishes, it no longer creates.
+  final bool created;
+  final VoidCallback onBack;
   final VoidCallback onSubmit;
 
   const _Step2StoreForm({
@@ -386,6 +397,8 @@ class _Step2StoreForm extends StatelessWidget {
     required this.onTimezoneChanged,
     required this.onTypeChanged,
     required this.loading,
+    required this.created,
+    required this.onBack,
     required this.onSubmit,
   });
 
@@ -475,8 +488,19 @@ class _Step2StoreForm extends StatelessWidget {
                   ?  SizedBox(
                       height: 20, width: 20,
                       child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
-                  : const Text('Create store & finish setup'),
+                  : Text(created ? 'Finish setup' : 'Create store & finish setup'),
             ),
+            // Nothing exists until the button above is pressed, so the
+            // business details can still be changed; once it has, they cannot.
+            if (!created) ...[
+              const SizedBox(height: AppSpacing.sm),
+              TextButton.icon(
+                key: const Key('onboarding-back'),
+                onPressed: loading ? null : onBack,
+                icon: const Icon(Icons.arrow_back),
+                label: const Text('Back to business details'),
+              ),
+            ],
           ],
         ),
       ),

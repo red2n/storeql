@@ -56,5 +56,10 @@
   "resetPasswordDone": "પાસવર્ડ બદલાયો — તેનાથી સાઇન ઇન કરો.",
   "resetPasswordDoneStorefront": "સ્ટોરફ્રન્ટ પરથી ખરીદી કરી રહ્યાં છો? તમે દુકાનમાંથી સાઇન ઇન કરી શકો છો.",
   "resetPasswordTokenInvalid": "આ લિંકની મુદત પૂરી થઈ ગઈ છે અથવા તે પહેલેથી જ વપરાઈ ગઈ છે — નવી માટે વિનંતી કરો.",
-  "resetPasswordRequestNew": "નવી લિંક માટે વિનંતી કરો"
+  "resetPasswordRequestNew": "નવી લિંક માટે વિનંતી કરો",
+  "startBusiness": "વ્યવસાય શરૂ કરો",
+  "startBusinessTitle": "તમારો વ્યવસાય શરૂ કરો",
+  "startBusinessIntro": "જે લોગિનથી તમે તમારો વ્યવસાય ચલાવશો તે બનાવો. પછી તમે વ્યવસાય અને તેની પહેલી દુકાન ગોઠવશો.",
+  "fieldPasswordConfirm": "પાસવર્ડની પુષ્ટિ કરો",
+  "fieldPasswordMismatch": "આ ઉપર આપેલા પાસવર્ડ સાથે મેળ ખાતું નથી."
 }

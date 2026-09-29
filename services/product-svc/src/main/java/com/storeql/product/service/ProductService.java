@@ -795,12 +795,14 @@ public class ProductService {
    * then looks up by <b>the GTIN form</b>, which is what lets a packet whose 2D code says {@code
    * 05012345678900} find the variant a shop entered as {@code 5012345678900}.
    *
-   * <p>Two fallbacks, in this order, because the codes a shop scans are not all GS1 codes:
+   * <p>Three lookups, in this order, because the codes a shop scans are not all GS1 codes:
    *
    * <ol>
    *   <li>the GTIN form, when the reading produced one;
    *   <li>the barcode column exactly — which is how an internal code, a PLU and a shelf label have
-   *       always worked, and must go on working.
+   *       always worked, and must go on working;
+   *   <li>the SKU, which a cashier types from under a label the till cannot read — as written, else
+   *       in any case when only one variant answers to it.
    * </ol>
    *
    * <p>The raw string is tried even when the code <em>did</em> read as GS1: a shop is entitled to
@@ -816,7 +818,11 @@ public class ProductService {
         reading == null || reading.gtin() == null
             ? java.util.Optional.<com.storeql.product.domain.Domain.VariantWithProduct>empty()
             : repo.findVariantByGtin(tenantId, reading.gtin());
-    var found = byGtin.or(() -> repo.findVariantByBarcode(tenantId, scanned.trim()));
+    // Then the barcode as entered, then a SKU a cashier typed because the label would not scan.
+    var found =
+        byGtin
+            .or(() -> repo.findVariantByBarcode(tenantId, scanned.trim()))
+            .or(() -> repo.findVariantBySku(tenantId, scanned.trim()));
     // A code that read as GS1 but matches nothing names the GTIN in the refusal, not the raw
     // string:
     // "no variant carries GTIN 05012345678900" is something a shopkeeper can act on, where the
@@ -829,7 +835,7 @@ public class ProductService {
                     "VARIANT_NOT_FOUND",
                     reading != null && reading.gtin() != null
                         ? "No active variant carries GTIN " + reading.gtin()
-                        : "No active variant found for barcode: " + scanned.trim()));
+                        : "No active variant found for barcode or SKU: " + scanned.trim()));
     requireOnSale(variant);
     return new ScanResult(variant, reading);
   }

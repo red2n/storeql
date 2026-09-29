@@ -21,7 +21,8 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
 /**
  * The business audit trail (20.11): every discount, void, no-sale, cancellation and return this
- * service recorded, newest first, naming who did it.
+ * service recorded, and every offline till sale recorded although a recall or an unfit scale would
+ * have stopped it, newest first, naming who did it.
  *
  * <p>Under {@code /admin/} so the shared {@code AdminAuthorizationFilter} gates it by path: a
  * cashier or storekeeper is refused before this class is reached, and a method added later cannot
@@ -42,7 +43,8 @@ public class AuditTrailResource {
    *
    * @param store one store, or every store the caller may see
    * @param actor one member of staff, by user id
-   * @param type DISCOUNT, VOID, NO_SALE, CANCEL or RETURN; every log when omitted
+   * @param type DISCOUNT, VOID, NO_SALE, CANCEL, RETURN, OFFLINE_SALE_OF_RECALLED_ITEM or
+   *     OFFLINE_SALE_ON_UNFIT_SCALE; every log when omitted
    * @param from inclusive start as an ISO-8601 instant
    * @param to exclusive end as an ISO-8601 instant
    * @param after the previous page's {@code meta.nextCursor}
@@ -56,7 +58,10 @@ public class AuditTrailResource {
       summary = "The business audit trail",
       description =
           "Every discount granted, sale voided, drawer opened without a sale, order cancelled and"
-              + " return taken, newest first, each naming the member of staff responsible."
+              + " return taken, and every till sale replayed from the offline queue that was"
+              + " recorded although a recall covered a line, or a scale not fit for trade weighed"
+              + " one, when it was rung up — newest first, each naming the member of staff"
+              + " responsible."
               + " Filterable by store, actor, type and period; cursor-paginated. Management-only.")
   @APIResponse(responseCode = "200", description = "A page of events")
   @APIResponse(

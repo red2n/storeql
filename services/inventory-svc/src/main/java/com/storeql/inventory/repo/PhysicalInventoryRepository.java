@@ -1,28 +1,46 @@
 package com.storeql.inventory.repo;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.domain.Domain.Batch;
+import com.storeql.inventory.domain.Domain.MoveType;
+import com.storeql.inventory.domain.Domain.MovementAttribution;
 import com.storeql.inventory.domain.Domain.PhysicalInventory;
 import com.storeql.inventory.domain.Domain.PhysicalInventoryTag;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.math.BigDecimal;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Physical inventory counts (Gap #16). Extracted from {@code InventoryRepository}: self-contained —
- * {@code completePhysicalInventory} writes {@code stock_movements} directly by SQL rather than
- * through the core repo's shared internals, so it doesn't have that coupling.
+ * Physical inventory counts (Gap #16). Extracted from {@code InventoryRepository}.
+ *
+ * <p>Completion posts through the core repo's batch internals, as a cycle count does: a gain is a
+ * new batch where it was found and a loss is drawn from the batches, each an ADJUST movement
+ * against the count and the person completing it. It once wrote {@code stock_movements} rows by SQL
+ * alone, which no level reads — the ledger said the stock moved and every screen said it had not.
  */
 @ApplicationScoped
 public class PhysicalInventoryRepository extends BaseOutboxRepository {
+
+  private static final String REF_TYPE = "PHYSICAL_INVENTORY";
+
+  private static final String TAG_COLUMNS =
+      "id, tenant_id, physical_inventory_id, variant_id, zone_id, system_qty, counted_qty,"
+          + " adjustment_qty, status, counted_at";
+
+  @Inject InventoryRepository inventory;
 
   /**
    * Inserts a physical inventory.
@@ -36,7 +54,8 @@ public class PhysicalInventoryRepository extends BaseOutboxRepository {
         c -> {
           String sql =
               "INSERT INTO physical_inventories (id, tenant_id, store_id, status, notes)"
-                  + " VALUES (?,?,?,?,?) RETURNING *";
+                  + " VALUES (?,?,?,?,?)"
+                  + " RETURNING id, tenant_id, store_id, status, notes, started_at, completed_at";
           try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setObject(1, pi.id());
             ps.setObject(2, pi.tenantId());
@@ -117,32 +136,105 @@ public class PhysicalInventoryRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Adds a count tag to a physical inventory, snapshotting the system quantity to count against.
+   * Adds a count tag, recording what the books hold for it now as the quantity to count against:
+   * AVAILABLE stock at the count's store, in the zone when one is named — what a loss on completion
+   * may draw. A variant is tagged once per count, for the whole store or per zone, never both, so
+   * no unit is counted twice.
    *
-   * @param tag the tag to persist; its {@code id} must already be a UUIDv7
-   * @return the tag as stored
+   * @param id the new tag's id, a UUIDv7
+   * @param tenantId owning tenant; the first condition of every query
+   * @param physicalInventoryId the count
+   * @param variantId the variant to count
+   * @param zoneId the zone it is counted in, or {@code null} for the whole store
+   * @return the tag as stored, or empty when the count is already completed
+   * @throws ApiException 404 {@code PI_NOT_FOUND}; 409 {@code PI_TAG_EXISTS}
    */
-  public PhysicalInventoryTag addTag(PhysicalInventoryTag tag) {
+  public Optional<PhysicalInventoryTag> addTag(
+      UUID id, UUID tenantId, UUID physicalInventoryId, UUID variantId, UUID zoneId) {
     return inTx(
         c -> {
-          String sql =
-              "INSERT INTO physical_inventory_tags"
-                  + " (id, tenant_id, physical_inventory_id, variant_id, zone_id, system_qty)"
-                  + " VALUES (?,?,?,?,?,?) RETURNING *";
-          try (PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setObject(1, tag.id());
-            ps.setObject(2, tag.tenantId());
-            ps.setObject(3, tag.physicalInventoryId());
-            ps.setObject(4, tag.variantId());
-            ps.setObject(5, tag.zoneId());
-            ps.setBigDecimal(6, tag.systemQty());
+          UUID storeId = lockOpen(c, tenantId, physicalInventoryId);
+          if (storeId == null) return Optional.<PhysicalInventoryTag>empty();
+          refuseOverlap(c, tenantId, physicalInventoryId, variantId, zoneId);
+          BigDecimal onHand = onHand(c, tenantId, storeId, variantId, zoneId);
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "INSERT INTO physical_inventory_tags"
+                      + " (id, tenant_id, physical_inventory_id, variant_id, zone_id, system_qty)"
+                      + " VALUES (?,?,?,?,?,?) RETURNING "
+                      + TAG_COLUMNS)) {
+            ps.setObject(1, id);
+            ps.setObject(2, tenantId);
+            ps.setObject(3, physicalInventoryId);
+            ps.setObject(4, variantId);
+            ps.setObject(5, zoneId);
+            ps.setBigDecimal(6, onHand);
             try (ResultSet rs = ps.executeQuery()) {
               if (!rs.next()) throw dbError("add pi tag", new SQLException());
-              return mapTag(rs);
+              return Optional.of(mapTag(rs));
             }
           }
         },
         "add physical inventory tag");
+  }
+
+  /** Locks the count's header; its store, or {@code null} once it is completed. */
+  private static UUID lockOpen(Connection c, UUID tenantId, UUID piId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT store_id, status FROM physical_inventories"
+                + " WHERE tenant_id=? AND id=? FOR UPDATE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, piId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) throw ApiException.notFound("PI_NOT_FOUND", "Physical inventory not found");
+        return PhysicalInventory.COMPLETED.equals(rs.getString("status"))
+            ? null
+            : rs.getObject("store_id", UUID.class);
+      }
+    }
+  }
+
+  private static void refuseOverlap(
+      Connection c, UUID tenantId, UUID piId, UUID variantId, UUID zoneId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT 1 FROM physical_inventory_tags"
+                + " WHERE tenant_id=? AND physical_inventory_id=? AND variant_id=?"
+                + " AND (zone_id IS NULL OR CAST(? AS uuid) IS NULL OR zone_id = CAST(? AS uuid))"
+                + " LIMIT 1")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, piId);
+      ps.setObject(3, variantId);
+      ps.setObject(4, zoneId);
+      ps.setObject(5, zoneId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next())
+          throw ApiException.conflict(
+              "PI_TAG_EXISTS",
+              "This variant is already tagged in this count, for the whole store or this zone");
+      }
+    }
+  }
+
+  /** AVAILABLE stock of a variant at a store, in one zone when one is named. */
+  private static BigDecimal onHand(
+      Connection c, UUID tenantId, UUID storeId, UUID variantId, UUID zoneId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT COALESCE(SUM(remaining_qty), 0) AS q FROM inventory_batches"
+                + " WHERE tenant_id=? AND store_id=? AND variant_id=?"
+                + " AND material_status='AVAILABLE'"
+                + " AND (CAST(? AS uuid) IS NULL OR zone_id = CAST(? AS uuid))")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, storeId);
+      ps.setObject(3, variantId);
+      ps.setObject(4, zoneId);
+      ps.setObject(5, zoneId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getBigDecimal("q") : BigDecimal.ZERO;
+      }
+    }
   }
 
   /**
@@ -158,9 +250,14 @@ public class PhysicalInventoryRepository extends BaseOutboxRepository {
       UUID tenantId, UUID physicalInventoryId, UUID tagId, BigDecimal countedQty) {
     return inTx(
         c -> {
+          // A completed count's tags are posted; counting one again would reopen it on paper.
+          if (lockOpen(c, tenantId, physicalInventoryId) == null)
+            throw ApiException.conflict(
+                "PI_ALREADY_COMPLETED", "Physical inventory already completed");
           String sql =
               "UPDATE physical_inventory_tags SET counted_qty=?, status='COUNTED', counted_at=now()"
-                  + " WHERE tenant_id=? AND physical_inventory_id=? AND id=? RETURNING *";
+                  + " WHERE tenant_id=? AND physical_inventory_id=? AND id=? RETURNING "
+                  + TAG_COLUMNS;
           try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setBigDecimal(1, countedQty);
             ps.setObject(2, tenantId);
@@ -177,53 +274,33 @@ public class PhysicalInventoryRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Completes a physical inventory, posting each tag's variance and writing the event — atomically.
+   * Completes a physical inventory, posting each counted tag's variance and writing the event —
+   * atomically. A gain is a new AVAILABLE batch where it was found; a loss is drawn from the
+   * batches (the tag's zone only, when it has one); both are ADJUST movements against the count,
+   * attributed to who completed it, so the levels move with the ledger.
    *
    * @param tenantId owning tenant; the first condition of the query
    * @param piId the physical inventory to complete
    * @param event the outbox row to commit alongside
+   * @param actorId who completed it
    * @return the completed physical inventory
+   * @throws ApiException 404 {@code PI_NOT_FOUND}; 409 {@code PI_ALREADY_COMPLETED}; 422 {@code
+   *     INSUFFICIENT_STOCK} when stock left since a tag was added and there is less to take than
+   *     the count found missing — counted again, it posts
    */
-  public PhysicalInventory completePhysicalInventory(UUID tenantId, UUID piId, OutboxRow event) {
+  public PhysicalInventory completePhysicalInventory(
+      UUID tenantId, UUID piId, OutboxRow event, UUID actorId) {
+    MovementAttribution attribution =
+        MovementAttribution.by(actorId, MovementAttribution.PHYSICAL_INVENTORY_VARIANCE);
     return inTx(
         c -> {
-          // Create stock_movement for each COUNTED tag where adjustment != 0
-          String tagSql =
-              "SELECT id, tenant_id, physical_inventory_id, variant_id, zone_id, system_qty,"
-                  + " counted_qty, adjustment_qty, status, counted_at"
-                  + " FROM physical_inventory_tags"
-                  + " WHERE tenant_id=? AND physical_inventory_id=?"
-                  + " AND status='COUNTED' AND counted_qty IS NOT NULL"
-                  + " AND counted_qty <> system_qty";
-          try (PreparedStatement ps = c.prepareStatement(tagSql)) {
-            ps.setObject(1, tenantId);
-            ps.setObject(2, piId);
-            try (ResultSet rs = ps.executeQuery()) {
-              while (rs.next()) {
-                PhysicalInventoryTag tag = mapTag(rs);
-                BigDecimal adj = tag.adjustmentQty();
-                String moveType = adj.compareTo(BigDecimal.ZERO) > 0 ? "RECEIVE" : "ISSUE";
-                UUID movId = Ids.newId();
-                try (PreparedStatement mps =
-                    c.prepareStatement(
-                        "INSERT INTO stock_movements"
-                            + " (id, tenant_id, store_id, variant_id, qty, type, ref_type, ref_id)"
-                            + " SELECT ?,?,store_id,?,?,?,?,?"
-                            + " FROM physical_inventories WHERE id=?")) {
-                  mps.setObject(1, movId);
-                  mps.setObject(2, tenantId);
-                  mps.setObject(3, tag.variantId());
-                  mps.setBigDecimal(4, adj.abs());
-                  mps.setString(5, moveType);
-                  mps.setString(6, "PHYSICAL_INVENTORY");
-                  mps.setObject(7, piId);
-                  mps.setObject(8, piId);
-                  mps.executeUpdate();
-                }
-              }
-            }
+          UUID storeId = lockOpen(c, tenantId, piId);
+          if (storeId == null)
+            throw ApiException.conflict(
+                "PI_ALREADY_COMPLETED", "Physical inventory already completed");
+          for (PhysicalInventoryTag tag : variances(c, tenantId, piId)) {
+            post(c, tenantId, storeId, piId, tag, attribution);
           }
-          // Mark all COUNTED tags as ADJUSTED
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE physical_inventory_tags SET status='ADJUSTED'"
@@ -232,21 +309,16 @@ public class PhysicalInventoryRepository extends BaseOutboxRepository {
             ps.setObject(2, piId);
             ps.executeUpdate();
           }
-          // Mark header COMPLETED
-          String doneSql =
-              "UPDATE physical_inventories SET status='COMPLETED', completed_at=now()"
-                  + " WHERE tenant_id=? AND id=? AND status<>'COMPLETED' RETURNING *";
-          try (PreparedStatement ps = c.prepareStatement(doneSql)) {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE physical_inventories SET status='COMPLETED', completed_at=now()"
+                      + " WHERE tenant_id=? AND id=?"
+                      + " RETURNING id, tenant_id, store_id, status, notes, started_at,"
+                      + " completed_at")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, piId);
             try (ResultSet rs = ps.executeQuery()) {
-              if (!rs.next())
-                throw new ApiException(
-                    409,
-                    "PI_ALREADY_COMPLETED",
-                    "Physical inventory already completed",
-                    List.of(),
-                    null);
+              if (!rs.next()) throw dbError("complete physical inventory", new SQLException());
               PhysicalInventory done = mapPhysicalInventory(rs);
               insertOutbox(c, event);
               return done;
@@ -254,6 +326,91 @@ public class PhysicalInventoryRepository extends BaseOutboxRepository {
           }
         },
         "complete physical inventory");
+  }
+
+  private static List<PhysicalInventoryTag> variances(Connection c, UUID tenantId, UUID piId)
+      throws SQLException {
+    List<PhysicalInventoryTag> tags = new ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT "
+                + TAG_COLUMNS
+                + " FROM physical_inventory_tags"
+                + " WHERE tenant_id=? AND physical_inventory_id=?"
+                + " AND status='COUNTED' AND counted_qty IS NOT NULL"
+                + " AND counted_qty <> system_qty")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, piId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) tags.add(mapTag(rs));
+      }
+    }
+    return tags;
+  }
+
+  private void post(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID piId,
+      PhysicalInventoryTag tag,
+      MovementAttribution attribution)
+      throws SQLException {
+    BigDecimal adj = tag.adjustmentQty();
+    if (adj.signum() > 0) {
+      Batch found =
+          new Batch(
+              Ids.newId(),
+              tenantId,
+              storeId,
+              tag.variantId(),
+              "PI-" + Ids.shortRef(piId),
+              adj,
+              adj,
+              null,
+              null,
+              Instant.now(),
+              Batch.STATUS_ACTIVE,
+              Batch.MATERIAL_AVAILABLE,
+              null,
+              null,
+              tag.zoneId());
+      inventory.insertBatch(c, found);
+      InventoryRepository.insertMovement(
+          c,
+          tenantId,
+          storeId,
+          tag.variantId(),
+          found.id(),
+          MoveType.ADJUST,
+          adj,
+          REF_TYPE,
+          piId,
+          attribution);
+      return;
+    }
+    BigDecimal loss = adj.negate();
+    if (tag.zoneId() != null) {
+      // The draw orders by zone but does not stop at it: a zone's loss is never taken elsewhere.
+      BigDecimal inZone = onHand(c, tenantId, storeId, tag.variantId(), tag.zoneId());
+      if (inZone.compareTo(loss) < 0)
+        throw ApiException.unprocessable(
+            "INSUFFICIENT_STOCK",
+            "Short by " + loss.subtract(inZone).toPlainString() + " in the zone; count it again");
+    }
+    inventory.deductBatches(
+        c,
+        tenantId,
+        storeId,
+        tag.variantId(),
+        loss,
+        MoveType.ADJUST,
+        REF_TYPE,
+        piId,
+        null,
+        null,
+        tag.zoneId() == null ? null : List.of(tag.zoneId()),
+        attribution);
   }
 
   private static PhysicalInventory mapPhysicalInventory(ResultSet rs) throws SQLException {

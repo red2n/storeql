@@ -43,9 +43,9 @@ class PosLine {
   final double? originalPrice;
 
   /// The lot the pack itself declared, from a GS1 2D code (07.15). Null for a
-  /// linear barcode, which carries no lot. Sent with the order so a later recall
-  /// can find the sale, and used at the till so a lot-scoped recall stops the
-  /// recalled pack and nothing else.
+  /// linear barcode, which carries no lot. Used at the till so a lot-scoped
+  /// recall stops the recalled pack and nothing else, and sent with the order so
+  /// order-svc stops it too (it reads it for that check and does not keep it).
   final String? batchNo;
 
   /// The expiry the pack declared (AI 17). Null for a linear barcode.

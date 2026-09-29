@@ -17,7 +17,7 @@ import {
   expect,
   must,
   onboardTenant,
-  register,
+  provisionStaff,
   sellableVariant,
   signInUntil,
   staffUser,
@@ -37,7 +37,7 @@ export function setup() {
   const cashier = staffUser(tenant, 'CASHIER', [store.id]);
   const manager = staffUser(tenant, 'MANAGER', [store.id]);
   const { variantId } = sellableVariant(tenant, 'Role widget');
-  return { tenant, rival, store, storekeeper, cashier, manager, variantId, lead: register('roles-lead'), trainee: register('roles-trainee') };
+  return { tenant, rival, store, storekeeper, cashier, manager, variantId, lead: provisionStaff(tenant, 'roles-lead'), trainee: provisionStaff(tenant, 'roles-trainee') };
 }
 
 export default function ({ tenant, rival, store, storekeeper, cashier, manager, lead, trainee }) {
@@ -120,7 +120,8 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   expect(call('DELETE', `${ROLES}/TRAINEE`, { token: owner }), '[-] a role someone holds cannot be deleted', 409, 'ROLE_IN_USE');
   expect(call('DELETE', `${STAFF}/${trainee.userId}?store=${store.id}`, { token: owner }), '[+] the trainee is taken off the store', 200);
   const gone = signInUntil(trainee, (c) => !(c.roles || []).includes('CASHIER'));
-  truthy('[+] ...and at the next sign-in is no longer a cashier (SJ-D51)', !(gone.roles || []).includes('CASHIER') && !gone.tenant, gone);
+  // Made in the business, the login stays in it holding no role — opening nothing, never a login of no business.
+  truthy('[+] ...and at the next sign-in is no longer a cashier, holding no role at all (SJ-D51)', !(gone.roles || []).includes('CASHIER') && (gone.roles || []).length === 0, gone);
   expect(call('DELETE', `${ROLES}/TRAINEE`, { token: owner }), '[+] now the role can go', 204);
   expect(call('GET', `${ROLES}/TRAINEE`, { token: owner }), '[-] and is gone', 404, 'ROLE_NOT_FOUND');
   expect(call('DELETE', `${ROLES}/JUNIOR`, { token: storekeeper.token }), '[-] a storekeeper cannot delete a role', 403);

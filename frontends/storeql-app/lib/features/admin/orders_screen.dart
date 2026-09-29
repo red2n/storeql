@@ -805,7 +805,10 @@ class OrderActionsMenu extends StatelessWidget {
             Flexible(child: Text('Collect payment')),
           ])));
     }
-    if (s == 'PENDING' || s == 'CONFIRMED') {
+    // A confirmed order was paid for, and cancelling it refunds the money, which is a void by
+    // another name: the server asks sales.void for it, so the menu offers it only to those who
+    // hold it. An unpaid order is anyone's at its store to cancel.
+    if (s == 'PENDING' || (s == 'CONFIRMED' && canVoid)) {
       final cs = Theme.of(context).colorScheme;
       items.add(PopupMenuItem(
           value: 'cancel',

@@ -83,4 +83,42 @@ class PermissionsIT {
     gate().assertGated("POST", "/admin/inventory/move-orders", body, "stock.transfer");
     gate().assertTierRefused("POST", "/admin/inventory/move-orders", body, "CASHIER");
   }
+
+  /**
+   * A cycle count ends in stock adjustments, so opening one, approving its variances and posting
+   * them is stock.adjust, the same as adjusting stock by hand. A cashier could do all three.
+   */
+  @Test
+  @DisplayName("Opening, approving and posting a cycle count needs stock.adjust; a cashier cannot")
+  void cycleCountsAreGated() {
+    String body = "{\"storeId\":\"" + ID + "\",\"name\":\"Aisle 4\"}";
+    gate().assertGated("POST", "/admin/inventory/cycle-counts", body, "stock.adjust");
+    gate().assertTierNarrows("POST", "/admin/inventory/cycle-counts", body, "STOREKEEPER");
+    gate().assertTierRefused("POST", "/admin/inventory/cycle-counts", body, "CASHIER");
+    for (String step : new String[] {"approve", "adjust"}) {
+      String path = "/admin/inventory/cycle-counts/" + ID + "/" + step;
+      gate().assertGated("POST", path, "", "stock.adjust");
+      gate().assertTierRefused("POST", path, "", "CASHIER");
+    }
+  }
+
+  /**
+   * A physical inventory's completion posts the variances, measured from each tag's system
+   * quantity, so starting one, adding a tag and completing are stock.adjust too.
+   */
+  @Test
+  @DisplayName("Starting, tagging and completing a physical inventory needs stock.adjust")
+  void physicalInventoriesAreGated() {
+    String body = "{\"storeId\":\"" + ID + "\",\"notes\":\"Year end\"}";
+    gate().assertGated("POST", "/admin/inventory/physical-inventories", body, "stock.adjust");
+    gate().assertTierNarrows("POST", "/admin/inventory/physical-inventories", body, "STOREKEEPER");
+    gate().assertTierRefused("POST", "/admin/inventory/physical-inventories", body, "CASHIER");
+    String tags = "/admin/inventory/physical-inventories/" + ID + "/tags";
+    String tag = "{\"variantId\":\"" + ID + "\",\"systemQty\":1}";
+    gate().assertGated("POST", tags, tag, "stock.adjust");
+    gate().assertTierRefused("POST", tags, tag, "CASHIER");
+    String complete = "/admin/inventory/physical-inventories/" + ID + "/complete";
+    gate().assertGated("POST", complete, "", "stock.adjust");
+    gate().assertTierRefused("POST", complete, "", "CASHIER");
+  }
 }

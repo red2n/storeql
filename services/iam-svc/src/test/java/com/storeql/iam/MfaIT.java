@@ -13,6 +13,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.storeql.iam.mfa.MfaTestAuthenticator;
 import com.storeql.iam.mfa.Totp;
 import com.storeql.iam.repo.UserRepository;
+import com.storeql.iam.service.AuthService;
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -63,6 +64,7 @@ class MfaIT {
 
   @Inject WebTarget target;
   @Inject UserRepository users;
+  @Inject AuthService auth;
 
   @AfterAll
   static void stopDb() {
@@ -116,6 +118,14 @@ class MfaIT {
     Answer a = call("POST", "/auth/register", Caller.NOBODY, credentials(email));
     assertThat(a.body().toString(), a.status(), is(201));
     return Ids.parse(JWT.decode(a.data().getString("accessToken")).getSubject());
+  }
+
+  /**
+   * A staff login made in the business the one way there is — staff provisioning — with {@link
+   * #PASSWORD}; a StaffAssigned then binds it, as it binds only a login already there.
+   */
+  private UUID provisioned(UUID tenant, String email) {
+    return Ids.parse(auth.provisionStaff(tenant, email, PASSWORD).userId());
   }
 
   private Answer login(String email) {
@@ -356,7 +366,7 @@ class MfaIT {
     UUID tenant = Ids.newId();
     UUID store = Ids.newId();
     UUID ownerId = register("mfa-owner@example.com");
-    UUID cashierId = register("mfa-cashier@example.com");
+    UUID cashierId = provisioned(tenant, "mfa-cashier@example.com");
     users.bindOwnerOnce(Ids.newId(), CONSUMER, ownerId, tenant, "OWNER");
     users.bindStaffOnce(Ids.newId(), CONSUMER, cashierId, tenant, "CASHIER", store);
     Caller owner = new Caller(ownerId, "OWNER,CUSTOMER", tenant, null);
@@ -464,8 +474,8 @@ class MfaIT {
     UUID other = Ids.newId();
     UUID store = Ids.newId();
     UUID ownerId = register("mfa-reset-owner@example.com");
-    UUID staffId = register("mfa-reset-staff@example.com");
-    UUID strangerId = register("mfa-reset-stranger@example.com");
+    UUID staffId = provisioned(tenant, "mfa-reset-staff@example.com");
+    UUID strangerId = provisioned(other, "mfa-reset-stranger@example.com");
     users.bindOwnerOnce(Ids.newId(), CONSUMER, ownerId, tenant, "OWNER");
     users.bindStaffOnce(Ids.newId(), CONSUMER, staffId, tenant, "CASHIER", store);
     users.bindStaffOnce(Ids.newId(), CONSUMER, strangerId, other, "CASHIER", Ids.newId());

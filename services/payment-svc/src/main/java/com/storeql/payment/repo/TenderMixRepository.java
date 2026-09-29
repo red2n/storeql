@@ -8,6 +8,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -41,17 +42,38 @@ public class TenderMixRepository extends BaseJdbcRepository {
    * currency. If per-tenant multi-currency ever arrives, this is one of the places that has to
    * learn about it.
    *
+   * <p>{@code refund_tenders.store_id} is only ever populated by hand — every insert path this
+   * service has never writes it — so a refund's store is read as {@code COALESCE(r.store_id,
+   * t.store_id)} through a left join back to the payment tender it refunds, exactly as the
+   * settlement matcher already resolves it ({@code SettlementRepository.REFUND_TARGET}). A refund
+   * whose payment has since been deleted (never happens today) is store-less and so is counted only
+   * when every store is being read.
+   *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
+   * @param stores restrict to these stores, or {@code null} for every store in the tenant (a caller
+   *     held to no store, or an OWNER/PLATFORM_ADMIN) — never a store the caller cannot act in,
+   *     which {@link com.storeql.web.TenantContext#reportStores} has already checked
    * @param from inclusive lower bound on tender time, or null for no lower bound
    * @param to exclusive upper bound, or null for no upper bound
    * @return one row per method, largest net first
    */
-  public List<TenderMixRow> tenderMix(UUID tenantId, Instant from, Instant to) {
+  public List<TenderMixRow> tenderMix(UUID tenantId, Set<UUID> stores, Instant from, Instant to) {
     // Each side contributes signed columns so the outer aggregate is a plain SUM. Written this
     // way rather than as two subqueries joined on method so that a method appearing on only one
     // side still produces a row.
+    //
+    // The store filter is appended only when there is one to apply: pgjdbc has no SQL type to
+    // infer for a bound null array, and "CAST(? AS uuid[]) IS NULL OR ..." with a setNull throws
+    // rather than matching every row, so a caller held to no store gets the plain, unfiltered
+    // clause instead — the same shape the window clauses already use below.
+    String storeFilter = stores == null ? "" : " AND store_id = ANY(?)";
+    String refundStoreFilter =
+        stores == null ? "" : " AND COALESCE(r.store_id, t.store_id) = ANY(?)";
     String window =
         (from != null ? " AND created_at >= ?" : "") + (to != null ? " AND created_at < ?" : "");
+    String refundWindow =
+        (from != null ? " AND r.created_at >= ?" : "")
+            + (to != null ? " AND r.created_at < ?" : "");
 
     String sql =
         "SELECT method,"
@@ -68,14 +90,22 @@ public class TenderMixRepository extends BaseJdbcRepository {
             + "          CASE WHEN status <> 'CAPTURED' THEN 1 ELSE 0 END AS failed_n"
             + "     FROM payment_tenders"
             + "    WHERE tenant_id = ?"
+            // Absent (a caller held to no store) matches every row; otherwise only the caller's
+            // own stores — never a store named that access has not already checked.
+            + storeFilter
             + window
             + "   UNION ALL"
-            // refund_tenders has no status column: a row here is a refund that happened.
-            + "   SELECT method, 0, 0, amount, 1, 0"
-            + "     FROM refund_tenders"
-            + "    WHERE tenant_id = ?"
-            + window
-            + " ) t"
+            // refund_tenders has no status column: a row here is a refund that happened. Its own
+            // store_id is filled in only when a caller set it by hand, so the payment it refunds
+            // is the fallback (see the javadoc above).
+            + "   SELECT r.method, 0, 0, r.amount, 1, 0"
+            + "     FROM refund_tenders r"
+            + "     LEFT JOIN payment_tenders t"
+            + "       ON t.tenant_id = r.tenant_id AND t.id = r.payment_id"
+            + "    WHERE r.tenant_id = ?"
+            + refundStoreFilter
+            + refundWindow
+            + " ) agg"
             + " GROUP BY method"
             + " ORDER BY (SUM(captured) - SUM(refunded)) DESC, method ASC";
 
@@ -85,9 +115,12 @@ public class TenderMixRepository extends BaseJdbcRepository {
         sql,
         ps -> {
           int i = 1;
-          // The same window binds twice, once per side of the UNION.
+          // The same tenant, store filter and window bind twice, once per side of the UNION.
           for (int side = 0; side < 2; side++) {
             ps.setObject(i++, tenantId);
+            if (stores != null) {
+              ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+            }
             if (fromTs != null) ps.setObject(i++, fromTs);
             if (toTs != null) ps.setObject(i++, toTs);
           }

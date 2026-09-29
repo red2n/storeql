@@ -825,6 +825,66 @@ class JwtAuthFilterTest {
     }
   }
 
+  // ── business sign-up ("Start a business") ─────────────────────────────────
+
+  @Test
+  void aBusinessSignsUpWithoutAToken() throws IOException {
+    for (String path :
+        new String[] {
+          "api/iam-svc/auth/register/business",
+          "api/v1/iam-svc/auth/register/business",
+          // The shopper's sign-up beside it is as public as it was.
+          "api/iam-svc/auth/register"
+        }) {
+      org.mockito.Mockito.reset(requestContext);
+      lenient().when(requestContext.getUriInfo()).thenReturn(uriInfo);
+      lenient().when(requestContext.getHeaders()).thenReturn(headers);
+      when(uriInfo.getPath()).thenReturn(path);
+      lenient().when(requestContext.getMethod()).thenReturn("POST");
+
+      filter.filter(requestContext);
+
+      verify(requestContext, never()).abortWith(any());
+    }
+  }
+
+  @Test
+  void nothingBesideTheBusinessSignUpIsPublic() throws IOException {
+    for (String path :
+        new String[] {
+          "api/iam-svc/auth/register/business/owner",
+          "api/iam-svc/auth/register/businesses",
+          "api/tenant-svc/auth/register/business",
+          "api/product-svc/x/iam-svc/auth/register/business"
+        }) {
+      org.mockito.Mockito.reset(requestContext);
+      lenient().when(requestContext.getUriInfo()).thenReturn(uriInfo);
+      lenient().when(requestContext.getHeaders()).thenReturn(headers);
+      when(uriInfo.getPath()).thenReturn(path);
+      lenient().when(requestContext.getMethod()).thenReturn("POST");
+
+      filter.filter(requestContext);
+
+      org.junit.jupiter.api.Assertions.assertEquals(401, abortedStatus(), path);
+    }
+  }
+
+  @Test
+  void identityHeadersAreStrippedFromABusinessSignUp() throws IOException {
+    // Nobody names their own business, or their own role, by sending the gateway's headers.
+    headers.putSingle("X-Tenant-Id", "01a090ae-611e-702c-a97b-d1b8025478e1");
+    headers.putSingle("X-User-Id", "spoofed");
+    headers.putSingle("X-Roles", "OWNER");
+    when(uriInfo.getPath()).thenReturn("api/iam-svc/auth/register/business");
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Tenant-Id"));
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-User-Id"));
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Roles"));
+  }
+
   // ── delivery and collection slots ─────────────────────────────────────────
 
   @Test

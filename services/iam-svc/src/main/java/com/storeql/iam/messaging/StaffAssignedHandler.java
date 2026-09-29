@@ -12,11 +12,11 @@ import java.lang.System.Logger.Level;
 import java.util.UUID;
 
 /**
- * Business handler for {@code storeql.tenant.staff-assigned} events. Stamps {@code tenant_id} + the
- * assigned store-scoped role on the staff user, idempotently. Without this, staff assigned via
- * tenant-svc never get a tenant on their iam-svc row and their JWTs carry {@code tenant=null}.
- * Separated from {@link StaffAssignedConsumer} so Kafka lifecycle and domain logic each have a
- * single reason to change (SRP).
+ * Business handler for {@code storeql.tenant.staff-assigned} events. Binds the assigned
+ * store-scoped role to the staff login, idempotently — only a login already in the business (made
+ * there by staff provisioning, or its owner); any other is refused and audited, never stamped in
+ * (see {@code bindStaffOnce}). Separated from {@link StaffAssignedConsumer} so Kafka lifecycle and
+ * domain logic each have a single reason to change (SRP).
  *
  * <p>The dedupe mark and the bind commit in one transaction (see {@code bindStaffOnce}); a
  * malformed payload is logged and skipped, while a failed write propagates so the consumer loop
@@ -70,7 +70,8 @@ public class StaffAssignedHandler {
     if (processed) {
       LOG.log(
           Level.INFO,
-          "Bound user {0} as {1}{2} of tenant {3} store {4}",
+          "StaffAssigned handled (bound, or refused and audited): user {0} as {1}{2} of tenant {3}"
+              + " store {4}",
           userId,
           role,
           roleCode == null ? "" : " (" + roleCode + ")",

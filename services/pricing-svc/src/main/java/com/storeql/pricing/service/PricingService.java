@@ -1653,26 +1653,23 @@ public class PricingService {
    * @param ctx caller context; tenant comes from the verified JWT, never the request
    * @param fromStr inclusive ISO-8601 lower bound on the tax point
    * @param toStr exclusive ISO-8601 upper bound
-   * @param storeIdStr restrict to one store, or null/blank for all
+   * @param stores restrict to these stores, or {@code null} for every store the caller may see —
+   *     already resolved by {@link TenantContext#reportStores} against the caller's own store
+   *     assignment, never a raw request value
    * @param groupByStr CODE, STORE or MONTH; defaults to CODE
    * @return the grouped rows with folded totals and the period they cover
    * @throws ApiException 400 when the period is malformed or not strictly increasing, or {@code
    *     groupBy} is not one of the three groupings
    */
   public TaxSummary taxSummary(
-      TenantContext ctx, String fromStr, String toStr, String storeIdStr, String groupByStr) {
+      TenantContext ctx, String fromStr, String toStr, Set<UUID> stores, String groupByStr) {
     Instant from = Parsing.instant(fromStr, "from");
     Instant to = Parsing.instant(toStr, "to");
     if (!from.isBefore(to))
       throw ApiException.badRequest("PRICING_INVALID_PERIOD", "from must be before to");
 
     List<TaxSummaryRow> rows =
-        taxReportRepo.aggregate(
-            ctx.tenantId(),
-            Parsing.optionalUuid(storeIdStr, "storeId"),
-            from,
-            to,
-            grouping(groupByStr));
+        taxReportRepo.aggregate(ctx.tenantId(), stores, from, to, grouping(groupByStr));
 
     BigDecimal net = BigDecimal.ZERO;
     BigDecimal vat = BigDecimal.ZERO;
@@ -1717,9 +1714,9 @@ public class PricingService {
   /**
    * Computes HMRC MTD VAT return boxes 1-9 for a period.
    *
-   * <p>Box 4 (input VAT on purchases) and boxes 7-9 are still zero: they need purchase-side figures
-   * this service does not yet consume (Gap #20), so a return filed from this is incomplete for a
-   * business that reclaims input VAT.
+   * <p>Box 4 (input VAT on purchases) and box 7 (net purchases) come from the supplier invoices
+   * purchase-svc captured, by invoice date (SJ-D39). Boxes 8 and 9, goods traded with the EU, are
+   * zero: nothing records that trade.
    *
    * @param ctx caller context; supplies the tenant
    * @param fromStr inclusive ISO-8601 lower bound on the tax point

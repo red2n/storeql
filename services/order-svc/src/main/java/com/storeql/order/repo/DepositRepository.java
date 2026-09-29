@@ -66,22 +66,22 @@ public class DepositRepository extends BaseOutboxRepository {
       "SELECT material, volume_ml, count, deposit_each, amount FROM container_refund_lines"
           + " WHERE tenant_id = ? AND refund_id = ? ORDER BY material, volume_ml";
 
-  private static final String REPORT_CHARGED =
+  private static final String REPORT_CHARGED_BASE =
       "SELECT d.material, COALESCE(SUM(d.qty), 0), COALESCE(SUM(d.amount), 0),"
           + " COALESCE(SUM(d.vat_amount), 0)"
           + " FROM order_deposits d JOIN orders o ON o.tenant_id = d.tenant_id AND o.id = d.order_id"
-          + " WHERE d.tenant_id = ? AND d.created_at >= ? AND d.created_at < ?"
-          + " AND (CAST(? AS uuid) IS NULL OR o.store_id = CAST(? AS uuid))"
-          + " AND o.status <> 'CANCELLED' AND o.status <> 'VOIDED'"
-          + " GROUP BY d.material ORDER BY d.material";
+          + " WHERE d.tenant_id = ? AND d.created_at >= ? AND d.created_at < ?";
 
-  private static final String REPORT_REFUNDED =
+  private static final String REPORT_CHARGED_TAIL =
+      " AND o.status <> 'CANCELLED' AND o.status <> 'VOIDED' GROUP BY d.material ORDER BY d.material";
+
+  private static final String REPORT_REFUNDED_BASE =
       "SELECT l.material, COALESCE(SUM(l.count), 0), COALESCE(SUM(l.amount), 0)"
           + " FROM container_refund_lines l"
           + " JOIN container_refunds r ON r.tenant_id = l.tenant_id AND r.id = l.refund_id"
-          + " WHERE l.tenant_id = ? AND r.created_at >= ? AND r.created_at < ?"
-          + " AND (CAST(? AS uuid) IS NULL OR r.store_id = CAST(? AS uuid))"
-          + " GROUP BY l.material ORDER BY l.material";
+          + " WHERE l.tenant_id = ? AND r.created_at >= ? AND r.created_at < ?";
+
+  private static final String REPORT_REFUNDED_TAIL = " GROUP BY l.material ORDER BY l.material";
 
   /** Writes one deposit line inside the order's transaction. */
   /**
@@ -275,14 +275,25 @@ public class DepositRepository extends BaseOutboxRepository {
   /**
    * Deposits charged on sales that stand and refunded at the till, by material, over [from, to).
    *
-   * @param storeId one store, or null for the whole business
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for the
+   *     whole business, else these stores added together — never a store the caller has not already
+   *     been checked against
    */
-  public List<DepositReportRow> report(UUID tenantId, UUID storeId, Instant from, Instant to) {
+  public List<DepositReportRow> report(
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to) {
+    String chargedSql =
+        REPORT_CHARGED_BASE
+            + (stores != null ? " AND o.store_id = ANY(?)" : "")
+            + REPORT_CHARGED_TAIL;
+    String refundedSql =
+        REPORT_REFUNDED_BASE
+            + (stores != null ? " AND r.store_id = ANY(?)" : "")
+            + REPORT_REFUNDED_TAIL;
     Map<String, DepositReportRow> rows = new LinkedHashMap<>();
     for (var r :
         query(
-            REPORT_CHARGED,
-            ps -> bindPeriod(ps, tenantId, storeId, from, to),
+            chargedSql,
+            ps -> bindPeriod(ps, tenantId, stores, from, to),
             rs ->
                 new DepositReportRow(
                     rs.getString(1),
@@ -296,8 +307,8 @@ public class DepositRepository extends BaseOutboxRepository {
     }
     for (var r :
         query(
-            REPORT_REFUNDED,
-            ps -> bindPeriod(ps, tenantId, storeId, from, to),
+            refundedSql,
+            ps -> bindPeriod(ps, tenantId, stores, from, to),
             rs ->
                 new DepositReportRow(
                     rs.getString(1),
@@ -324,13 +335,14 @@ public class DepositRepository extends BaseOutboxRepository {
   }
 
   private static void bindPeriod(
-      PreparedStatement ps, UUID tenantId, UUID storeId, Instant from, Instant to)
+      PreparedStatement ps, UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to)
       throws SQLException {
     ps.setObject(1, tenantId);
     ps.setObject(2, from.atOffset(java.time.ZoneOffset.UTC));
     ps.setObject(3, to.atOffset(java.time.ZoneOffset.UTC));
-    ps.setObject(4, storeId);
-    ps.setObject(5, storeId);
+    if (stores != null) {
+      ps.setArray(4, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+    }
   }
 
   private static OrderDeposit mapDeposit(ResultSet rs) throws SQLException {

@@ -18,6 +18,8 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -47,14 +49,17 @@ public class ExceptionReportResource {
    * Check {@code journalCoverage} first: when it is false nothing journalled any sale in the
    * period, every sales figure is zero, and the counts have no denominator to be judged against.
    *
-   * @param storeId restrict to one store, or {@code null}
+   * @param storeId a store that is named is checked against the caller's own (SJ-D74's {@code
+   *     reportStores}) and refused with {@code 403 STORE_ACCESS_DENIED} otherwise; with none named,
+   *     a caller held to no store reads the whole business and a caller held to some reads exactly
+   *     those, added together
    * @param from inclusive start as an ISO-8601 instant, or {@code null}
    * @param to exclusive end as an ISO-8601 instant, or {@code null}
    * @param groupBy group by the staff member responsible or by store
    * @return one row per group, most exceptions first
    * @throws com.storeql.web.ApiException {@code 400} for an unknown {@code groupBy}, an unparseable
    *     timestamp, or a storeId that is not a UUID; {@code 403} when the caller is not OWNER or
-   *     MANAGER
+   *     MANAGER, or names a store they are not assigned to
    */
   @Operation(
       summary = "Staff exception report",
@@ -76,10 +81,12 @@ public class ExceptionReportResource {
       @QueryParam("from") String from,
       @QueryParam("to") String to,
       @QueryParam("groupBy") String groupBy) {
+    UUID requestedStore = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(requestedStore);
     var rows =
         svc.exceptionReport(
             ctx.requireTenantId(),
-            Parsing.optionalUuid(storeId, "storeId"),
+            stores,
             Parsing.optionalInstant(from, "from"),
             Parsing.optionalInstant(to, "to"),
             grouping(groupBy));

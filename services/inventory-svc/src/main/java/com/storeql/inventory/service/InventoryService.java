@@ -670,8 +670,8 @@ public class InventoryService {
    * from the last {@code POST /planning/run} and ignore safety stock and reorder points; and from
    * {@code levelsSummary}, which counts SKUs under one flat number for a dashboard tile.
    */
-  public List<LowStockRow> lowStockReport(UUID tenantId, UUID storeId, int limit) {
-    return lowStockRepo.lowStock(tenantId, storeId, limit);
+  public List<LowStockRow> lowStockReport(UUID tenantId, Set<UUID> stores, int limit) {
+    return lowStockRepo.lowStock(tenantId, stores, limit);
   }
 
   // ---- valuation report ----
@@ -684,8 +684,8 @@ public class InventoryService {
    * silently costing unknown stock at nothing understates it.
    */
   public List<ValuationRow> valuationReport(
-      UUID tenantId, UUID storeId, ValuationGrouping grouping, int limit) {
-    return valuationRepo.value(tenantId, storeId, grouping, limit);
+      UUID tenantId, Set<UUID> stores, ValuationGrouping grouping, int limit) {
+    return valuationRepo.value(tenantId, stores, grouping, limit);
   }
 
   // ---- shrinkage report ----
@@ -701,11 +701,11 @@ public class InventoryService {
    * @param grouping validated by the resource against {@link ShrinkageGrouping}
    */
   public List<ShrinkageRow> shrinkageReport(
-      UUID tenantId, UUID storeId, Instant from, Instant to, ShrinkageGrouping grouping) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, ShrinkageGrouping grouping) {
     if (from != null && to != null && !from.isBefore(to))
       throw ApiException.badRequest(
           "INVENTORY_INVALID_PERIOD", "from must be before to — got " + from + " and " + to);
-    return shrinkageRepo.aggregate(tenantId, storeId, from, to, grouping);
+    return shrinkageRepo.aggregate(tenantId, stores, from, to, grouping);
   }
 
   /**
@@ -714,7 +714,7 @@ public class InventoryService {
    */
   public List<ShrinkageRow> shrinkageByVariant(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       String reasonCode,
@@ -723,7 +723,7 @@ public class InventoryService {
     if (from != null && to != null && !from.isBefore(to))
       throw ApiException.badRequest(
           "INVENTORY_INVALID_PERIOD", "from must be before to — got " + from + " and " + to);
-    return shrinkageRepo.topVariants(tenantId, storeId, from, to, reasonCode, actorId, limit);
+    return shrinkageRepo.topVariants(tenantId, stores, from, to, reasonCode, actorId, limit);
   }
 
   // ---- stock turn & dead stock ----
@@ -743,7 +743,7 @@ public class InventoryService {
    */
   public StockTurnReport stockTurnReport(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       StockTurnGrouping grouping,
@@ -757,7 +757,7 @@ public class InventoryService {
     int windowDays = (int) Math.max(1, days);
 
     List<StockTurnRow> rows =
-        stockTurnRepo.stockTurn(tenantId, storeId, from, to, grouping, limit).stream()
+        stockTurnRepo.stockTurn(tenantId, stores, from, to, grouping, limit).stream()
             .map(r -> withDaysOnHand(r, windowDays))
             .toList();
 
@@ -765,7 +765,7 @@ public class InventoryService {
     // archive is asked whether the purge took any the window needed. Asking the archive rather
     // than inferring from the oldest retained movement is the difference between "history is
     // missing" and "there is no history yet", which a young tenant has plenty of.
-    boolean historyComplete = stockTurnRepo.historyComplete(tenantId, storeId, to);
+    boolean historyComplete = stockTurnRepo.historyComplete(tenantId, stores, to);
     return new StockTurnReport(rows, historyComplete, windowDays);
   }
 
@@ -800,9 +800,9 @@ public class InventoryService {
    * @param grouping validated by the resource against {@link DeadStockGrouping}
    */
   public List<DeadStockRow> deadStockReport(
-      UUID tenantId, UUID storeId, Instant asOf, DeadStockGrouping grouping, int limit) {
+      UUID tenantId, Set<UUID> stores, Instant asOf, DeadStockGrouping grouping, int limit) {
     return stockTurnRepo.deadStock(
-        tenantId, storeId, asOf == null ? Instant.now() : asOf, grouping, limit);
+        tenantId, stores, asOf == null ? Instant.now() : asOf, grouping, limit);
   }
 
   // ---- adjust ----
@@ -2466,10 +2466,6 @@ public class InventoryService {
     return repo.expiredHeldReservationsWithTenant(limit);
   }
 
-  static UUID parseUuid(String s, String field) {
-    return com.storeql.web.Parsing.uuid(s, field);
-  }
-
   // ── Gap #16: Physical Inventory ──────────────────────────────────────────
 
   /**
@@ -2516,38 +2512,34 @@ public class InventoryService {
    * @param storeId the store id
    * @return the matching rows
    */
-  public List<PhysicalInventory> listPhysicalInventories(UUID tenantId, String storeId) {
-    UUID storeUuid = storeId != null ? parseUuid(storeId, "storeId") : null;
-    return physicalInventoryRepo.listPhysicalInventories(tenantId, storeUuid);
+  public List<PhysicalInventory> listPhysicalInventories(UUID tenantId, UUID storeId) {
+    return physicalInventoryRepo.listPhysicalInventories(tenantId, storeId);
   }
 
   /**
-   * Adds a tag.
+   * Adds a tag, recording what the books hold for it now as the quantity the count is measured from
+   * — never a number the caller supplies, since the variance posted on completion is counted minus
+   * this.
    *
    * @param tenantId owning tenant
-   * @param piId the pi id
-   * @param variantId the product variant concerned
-   * @param zoneId the zone id
-   * @param systemQty the system qty
+   * @param piId the physical inventory
+   * @param variantId the product variant to count
+   * @param zoneId the zone it is counted in, or {@code null} for the whole store
    * @return the added tag
-   * @throws ApiException a 404 when no such tag exists in this tenant
+   * @throws ApiException 404 {@code PI_NOT_FOUND}; 409 {@code PI_ALREADY_COMPLETED}
    */
-  public PhysicalInventoryTag addTag(
-      UUID tenantId, UUID piId, UUID variantId, UUID zoneId, BigDecimal systemQty) {
-    getPhysicalInventory(tenantId, piId);
-    var tag =
-        new PhysicalInventoryTag(
-            Ids.newId(),
-            tenantId,
-            piId,
-            variantId,
-            zoneId,
-            systemQty,
-            null,
-            null,
-            PhysicalInventoryTag.OPEN,
-            null);
-    return physicalInventoryRepo.addTag(tag);
+  public PhysicalInventoryTag addTag(UUID tenantId, UUID piId, UUID variantId, UUID zoneId) {
+    PhysicalInventory pi = getPhysicalInventory(tenantId, piId);
+    if (PhysicalInventory.COMPLETED.equals(pi.status())) {
+      throw alreadyCompleted();
+    }
+    return physicalInventoryRepo
+        .addTag(Ids.newId(), tenantId, piId, variantId, zoneId)
+        .orElseThrow(InventoryService::alreadyCompleted);
+  }
+
+  private static ApiException alreadyCompleted() {
+    return ApiException.conflict("PI_ALREADY_COMPLETED", "Physical inventory already completed");
   }
 
   /**
@@ -2575,10 +2567,11 @@ public class InventoryService {
    *
    * @param tenantId owning tenant
    * @param piId the physical inventory to complete
+   * @param actorId who completed it, recorded on every adjustment it posts
    * @return the completed physical inventory
    * @throws ApiException a 404 when no such physical inventory exists in this tenant
    */
-  public PhysicalInventory completePhysicalInventory(UUID tenantId, UUID piId) {
+  public PhysicalInventory completePhysicalInventory(UUID tenantId, UUID piId, UUID actorId) {
     getPhysicalInventory(tenantId, piId);
     var event =
         new OutboxRow(
@@ -2587,7 +2580,7 @@ public class InventoryService {
             tenantId,
             piId,
             Events.physicalInventoryCompleted(tenantId, piId));
-    return physicalInventoryRepo.completePhysicalInventory(tenantId, piId, event);
+    return physicalInventoryRepo.completePhysicalInventory(tenantId, piId, event, actorId);
   }
 
   /**

@@ -251,6 +251,9 @@ public final class Domain {
      */
     public static final String CYCLE_COUNT_VARIANCE = "CYCLE_COUNT_VARIANCE";
 
+    /** Reason code for a physical-inventory variance, assigned by the engine like the above. */
+    public static final String PHYSICAL_INVENTORY_VARIANCE = "PHYSICAL_INVENTORY_VARIANCE";
+
     private static final MovementAttribution SYSTEM = new MovementAttribution(null, null);
 
     /** A movement caused by a system flow, traceable through its {@code refType}/{@code refId}. */

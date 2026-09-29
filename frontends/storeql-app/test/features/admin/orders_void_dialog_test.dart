@@ -142,6 +142,22 @@ void main() {
       expect(find.text('Void sale'), findsNothing);
       expect(find.text('Return / Refund'), findsOneWidget);
     });
+
+    testWidgets('a paid order is cancelled only by someone who may void — the cancel refunds it',
+        (tester) async {
+      await _pumpMenu(tester, status: 'CONFIRMED', channel: 'ONLINE', canVoid: false);
+      expect(find.text('Cancel'), findsNothing);
+    });
+
+    testWidgets('a paid order offers Cancel to a manager who may void', (tester) async {
+      await _pumpMenu(tester, status: 'CONFIRMED', channel: 'ONLINE');
+      expect(find.text('Cancel'), findsOneWidget);
+    });
+
+    testWidgets('an unpaid order is still anyone\'s to cancel', (tester) async {
+      await _pumpMenu(tester, status: 'PENDING', channel: 'ONLINE', canVoid: false);
+      expect(find.text('Cancel'), findsOneWidget);
+    });
   });
 
   group('the dialog', () {

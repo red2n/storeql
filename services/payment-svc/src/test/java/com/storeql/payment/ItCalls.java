@@ -11,7 +11,9 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * How this module's integration tests call the service: as somebody, the way the gateway would have
@@ -23,16 +25,26 @@ final class ItCalls {
 
   /**
    * Who is calling, as the gateway's identity headers say: the stores they are held to ride along
-   * as {@code X-Store-Ids}, none meaning the whole business.
+   * as {@code X-Store-Ids} (comma-separated when there is more than one), none meaning the whole
+   * business.
    */
-  record Caller(UUID tenantId, UUID userId, String roles, UUID store) {
+  record Caller(UUID tenantId, UUID userId, String roles, UUID store, List<UUID> stores) {
+
+    Caller(UUID tenantId, UUID userId, String roles, UUID store) {
+      this(tenantId, userId, roles, store, List.of());
+    }
 
     Caller(UUID tenantId, UUID userId, String roles) {
-      this(tenantId, userId, roles, null);
+      this(tenantId, userId, roles, null, List.of());
     }
 
     static Caller owner(UUID tenantId) {
       return new Caller(tenantId, Ids.newId(), "OWNER");
+    }
+
+    /** The same tenant and role, held to several stores added together. */
+    static Caller heldTo(UUID tenantId, String roles, UUID... storeIds) {
+      return new Caller(tenantId, Ids.newId(), roles, null, List.of(storeIds));
     }
 
     Caller as(String role) {
@@ -41,7 +53,15 @@ final class ItCalls {
 
     /** The same person, held to one store. */
     Caller at(UUID storeId) {
-      return new Caller(tenantId, userId, roles, storeId);
+      return new Caller(tenantId, userId, roles, storeId, List.of());
+    }
+
+    /** The {@code X-Store-Ids} header value the gateway would have stamped, or null for none. */
+    String storeIdsHeader() {
+      if (!stores.isEmpty()) {
+        return stores.stream().map(UUID::toString).collect(Collectors.joining(","));
+      }
+      return store == null ? null : store.toString();
     }
   }
 
@@ -83,7 +103,8 @@ final class ItCalls {
             .header("X-Tenant-Id", who.tenantId())
             .header("X-User-Id", who.userId())
             .header("X-Roles", who.roles());
-    if (who.store() != null) b = b.header("X-Store-Ids", who.store());
+    String storeIds = who.storeIdsHeader();
+    if (storeIds != null) b = b.header("X-Store-Ids", storeIds);
     if (idempotencyKey != null) b = b.header("Idempotency-Key", idempotencyKey);
     Response r =
         "GET".equals(method)

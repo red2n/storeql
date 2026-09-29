@@ -207,4 +207,21 @@ class AppLocalizationsBn extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'নতুন লিঙ্কের জন্য অনুরোধ করুন';
+
+  @override
+  String get startBusiness => 'একটি ব্যবসা শুরু করুন';
+
+  @override
+  String get startBusinessTitle => 'আপনার ব্যবসা শুরু করুন';
+
+  @override
+  String get startBusinessIntro =>
+      'যে লগইন দিয়ে আপনি আপনার ব্যবসা চালাবেন সেটি তৈরি করুন। এরপর আপনি ব্যবসা এবং তার প্রথম দোকান সেট আপ করবেন।';
+
+  @override
+  String get fieldPasswordConfirm => 'পাসওয়ার্ড নিশ্চিত করুন';
+
+  @override
+  String get fieldPasswordMismatch =>
+      'এটি উপরে দেওয়া পাসওয়ার্ডের সাথে মিলছে না।';
 }

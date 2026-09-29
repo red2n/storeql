@@ -19,6 +19,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -51,11 +53,14 @@ public class ValuationResource {
    * reported as unvaluedQty rather than valued at zero, so the figure is never silently
    * understated.
    *
-   * @param storeId the store id (query parameter)
+   * @param storeId a named store (query parameter): checked against the caller's stores, else 403;
+   *     unnamed, a caller held to no store reads the whole business and a caller held to some reads
+   *     exactly those, combined
    * @param groupBy the group by (query parameter)
    * @param limit the limit (query parameter)
    * @return rows ordered by value, largest holding first
-   * @throws com.storeql.web.ApiException {@code 400} unknown groupBy or malformed storeId
+   * @throws com.storeql.web.ApiException {@code 400} unknown groupBy or malformed storeId; {@code
+   *     403} STORE_ACCESS_DENIED for a named store the caller does not keep
    */
   @Operation(
       summary = "Value the stock on hand",
@@ -74,14 +79,10 @@ public class ValuationResource {
       @QueryParam("groupBy") String groupBy,
       @QueryParam("limit") Integer limit) {
     int clamped = limit == null ? DEFAULT_LIMIT : Math.max(1, Math.min(MAX_LIMIT, limit));
+    UUID parsed = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(parsed);
     List<ValuationRowResponse> rows =
-        service
-            .valuationReport(
-                ctx.requireTenantId(),
-                Parsing.optionalUuid(storeId, "storeId"),
-                grouping(groupBy),
-                clamped)
-            .stream()
+        service.valuationReport(ctx.requireTenantId(), stores, grouping(groupBy), clamped).stream()
             .map(Mappers::toValuationRow)
             .toList();
     return Response.ok(ApiResponse.ok(rows, ApiResponse.Meta.of(ctx.requestId()))).build();

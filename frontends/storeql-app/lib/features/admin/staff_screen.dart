@@ -476,11 +476,11 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
   }
 
   String _friendly(Object e) {
-    final code = apiErrorCode(e);
     final status = e is DioException ? e.response?.statusCode : null;
-    if (code == 'EMAIL_IN_OTHER_TENANT' || status == 409) {
-      return 'That email already belongs to another business, or the user '
-          'already has that role at this store.';
+    // Only the assignment can conflict: adding an address another business
+    // also uses makes this business a login of its own (iam-svc, 29 Sep 2026).
+    if (status == 409) {
+      return 'That person already has that role at this store.';
     }
     if (status == 400) return 'Check the email is valid.';
     return friendlyError(e, fallback: 'Could not assign staff.');

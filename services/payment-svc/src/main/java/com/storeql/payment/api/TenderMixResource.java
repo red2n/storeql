@@ -16,6 +16,8 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -47,11 +49,19 @@ public class TenderMixResource {
    * <p>Refunds are subtracted within their own method rather than netted globally, so the split
    * reconciles against a merchant statement.
    *
+   * <p>{@code storeId} is checked against the caller's own stores rather than trusted as named
+   * (golden rule #3): a store the caller may act in, else {@code 403 STORE_ACCESS_DENIED}. Naming
+   * none reads the whole business for a caller held to no store, or exactly the caller's own stores
+   * added together for one held to some — never a third ({@link
+   * com.storeql.web.TenantContext#reportStores}).
+   *
+   * @param storeId the store to restrict to, or {@code null} to read every store the caller may
    * @param from inclusive start as a full ISO-8601 instant, or {@code null} for no lower bound
    * @param to exclusive end as a full ISO-8601 instant, or {@code null} for no upper bound
    * @return one row per method, largest net first
    * @throws com.storeql.web.ApiException {@code 400} when a timestamp is unparseable or {@code
-   *     from} is not before {@code to}
+   *     from} is not before {@code to}; {@code 403 STORE_ACCESS_DENIED} when {@code storeId} names
+   *     a store the caller may not act in
    */
   @Operation(
       summary = "How the take split across payment methods",
@@ -62,18 +72,29 @@ public class TenderMixResource {
               + " a merchant statement reconciles against. Failed tenders are counted alongside,"
               + " because a method whose failures are climbing against healthy volume is a"
               + " terminal problem that no sales report would show. from and to are optional and"
-              + " take a full ISO-8601 instant (2026-01-31T00:00:00Z), not a bare date.")
+              + " take a full ISO-8601 instant (2026-01-31T00:00:00Z), not a bare date. storeId is"
+              + " optional and is checked against the caller's own stores; naming none reads every"
+              + " store the caller may act in.")
   @APIResponse(responseCode = "200", description = "One row per method, largest net first")
   @APIResponse(
       responseCode = "400",
       description = "Unparseable timestamp, or from is not before to")
+  @APIResponse(
+      responseCode = "403",
+      description = "storeId names a store the caller is not assigned to")
   @GET
   @Path("/tender-mix")
-  public Response tenderMix(@QueryParam("from") String from, @QueryParam("to") String to) {
+  public Response tenderMix(
+      @QueryParam("storeId") String storeId,
+      @QueryParam("from") String from,
+      @QueryParam("to") String to) {
+    UUID requestedStore = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(requestedStore);
     List<TenderMixRowResponse> rows =
         service
             .tenderMix(
                 ctx.requireTenantId(),
+                stores,
                 Parsing.optionalInstant(from, "from"),
                 Parsing.optionalInstant(to, "to"))
             .stream()

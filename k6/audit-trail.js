@@ -1,10 +1,14 @@
 // The business audit trail (20.11): every discount, void, no-sale, cancel and return on the shop
 // floor read back through the gateway as one stream naming who did it, the stock adjustment the
 // unified screen reads beside it — and the refusals around it: the wrong role, the wrong tenant,
-// the wrong input, a hammering cashier, a lifted cursor.
+// the wrong input, a hammering cashier, a lifted cursor. Then an offline till sale under a recall:
+// replayed within the grace it is placed and flagged for the store's manager, naming the cashier
+// who rang it up and the manager who synced the till; too old, it is refused; another business
+// sees none of it.
 //
 //   k6/run.sh audit-trail
 import http from 'k6/http';
+import { sleep } from 'k6';
 import {
   ALL_CHECKS_PASS,
   BASE,
@@ -20,6 +24,7 @@ import {
   sellableVariant,
   staffUser,
   truthy,
+  uniq,
 } from './lib/storeql.js';
 
 export const options = { vus: 1, iterations: 1, thresholds: ALL_CHECKS_PASS, setupTimeout: '4m' };
@@ -33,6 +38,11 @@ export function setup() {
   must(receive(tenant, storeId, tenant.variantId, 100), 201, 'receive stock');
   tenant.cashier = staffUser(tenant, 'CASHIER', [storeId]);
   tenant.keeper = staffUser(tenant, 'STOREKEEPER', [storeId]);
+  // For the offline sale: a store manager, a product nobody else sells, and a rival's manager.
+  tenant.manager = staffUser(tenant, 'MANAGER', [storeId]);
+  tenant.recalledVariant = sellableVariant(tenant, 'Recalled jam').variantId;
+  priceVariants(tenant, [tenant.recalledVariant], '4.00');
+  rival.manager = staffUser(rival, 'MANAGER', [rival.stores[0].id]);
   return { tenant, rival };
 }
 
@@ -126,4 +136,69 @@ export default function ({ tenant, rival }) {
   truthy('[-] a cursor lifted from this tenant gives the rival nothing', !!lifted && data(call('GET', `/api/order-svc/admin/audit/events?after=${lifted}`, { token: rival.owner.token })).length === 0);
   const huge = trail(t, '&limit=100000');
   truthy('[+] an absurd page size is clamped, not refused', huge.status === 200 && data(huge).length <= 100, String(huge.status));
+
+  // ── an offline till sale under a recall ──────────────────────────────────────
+  // A till that lost its network completes the sale and replays it later, saying when it was rung
+  // up and who rang it up. Within the grace (a day) it is placed whatever the recall says — the
+  // goods have gone — and flagged for a manager; older, it is judged as a sale made now.
+  const manager = tenant.manager;
+  const recalled = tenant.recalledVariant;
+  const opened = call('POST', '/api/inventory-svc/admin/recalls', {
+    token: manager.token,
+    body: {
+      reference: `K6-OFFLINE-${uniq()}`, kind: 'RECALL', hazard: 'ALLERGEN', reason: 'Undeclared peanut',
+      source: 'SUPPLIER', customerNotice: 'Do not eat. Bring it back for a full refund or a new one.',
+      items: [{ variantId: recalled }], remedies: ['REFUND', 'REPLACEMENT'], contactPhone: '0800 100 200',
+    },
+  });
+  expect(opened, '[+] a manager recalls every pack of a product', 201);
+  const recall = data(opened);
+  // order-svc keeps a business's recalls for ten seconds, so every sale below is judged with this one.
+  sleep(11);
+  const offlineSale = (capturedAt, rungUpBy) => call('POST', '/api/order-svc/orders', {
+    token: manager.token,
+    idem: true,
+    body: { storeId, channel: 'POS', fulfilmentType: 'INSTORE', paymentMethod: 'CASH', items: [{ variantId: recalled, qty: 1 }], capturedAt, rungUpBy },
+  });
+  const flagsFor = (token, orderId) => data(trail(token, '&type=OFFLINE_SALE_OF_RECALLED_ITEM&limit=100')).filter((e) => e.orderId === orderId);
+  // A second after the recall opened, by the server's own clock (its microseconds cut to what a date holds).
+  const openedMs = Date.parse(String(recall.openedAt).replace(/(\.\d{3})\d+/, '$1'));
+  const rungUp = new Date(Math.max(openedMs + 1000, Date.now() - 2000)).toISOString();
+
+  const flagged = offlineSale(rungUp, cashier.userId);
+  expect(flagged, '[+] rung up offline under the recall, synced by the manager: placed', 201);
+  const flags = flagsFor(manager.token, data(flagged).id);
+  const entry = flags[0] || {};
+  truthy('[+] one entry for the store\'s manager, at the moment it was rung up', flags.length === 1 && Date.parse(entry.occurredAt) === Date.parse(rungUp), flags);
+  truthy('[+] naming the cashier who rang it up, and the manager who synced it', entry.actorId === cashier.userId && entry.replayedBy === manager.userId, entry);
+  truthy('[+] and the recall, in words', entry.detail === recall.reference && String(entry.reason).includes('was under product recall'), entry);
+
+  const stranger = offlineSale(rungUp, rival.owner.userId);
+  expect(stranger, '[+] a till naming another business\'s login: placed all the same', 201);
+  const unnamed = flagsFor(manager.token, data(stranger).id)[0] || {};
+  truthy('[+] ...flagged as rung up by an unknown member of staff', !unnamed.actorId && unnamed.replayedBy === manager.userId && !!unnamed.id, unnamed);
+
+  const hourAgo = offlineSale(new Date(Date.now() - 3600e3).toISOString(), cashier.userId);
+  expect(hourAgo, '[+] rung up an hour ago, before the recall opened: placed', 201);
+  truthy('[+] ...with nothing to flag', flagsFor(manager.token, data(hourAgo).id).length === 0);
+
+  expect(
+    offlineSale(new Date(Date.now() - 3 * 86400e3).toISOString(), cashier.userId),
+    '[-] rung up three days ago: too old to take on the till\'s word, refused',
+    409,
+    'ORDER_LINE_RECALLED'
+  );
+  expect(offlineSale(undefined, undefined), '[-] a sale made now is refused as ever', 409, 'ORDER_LINE_RECALLED');
+
+  const rivals = data(call('GET', '/api/order-svc/admin/audit/events?type=OFFLINE_SALE_OF_RECALLED_ITEM', { token: rival.manager.token }));
+  truthy('[-] another business\'s manager sees none of it', Array.isArray(rivals) && rivals.every((e) => e.orderId !== data(flagged).id && e.orderId !== data(stranger).id), rivals);
+  const named = call('GET', `/api/order-svc/admin/audit/events?store=${storeId}&type=OFFLINE_SALE_OF_RECALLED_ITEM`, { token: rival.manager.token });
+  truthy('[-] ...not even naming this store', named.status === 403 || (Array.isArray(data(named)) && data(named).length === 0), named.status);
+
+  // Closed, so no later sale of the product — here or in a later suite — meets it.
+  expect(
+    call('POST', `/api/inventory-svc/admin/recalls/${recall.id}/close`, { token: manager.token, body: { notes: 'k6: nothing was stocked' } }),
+    '[+] the recall is closed',
+    200
+  );
 }

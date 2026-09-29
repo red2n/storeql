@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 
+import '../network/api_error.dart';
+
 /// A POS sale captured at the till but not yet accepted by the server.
 ///
 /// A till that stops selling when the network drops is not a POS. When the
@@ -21,7 +23,20 @@ class OfflineSale {
   /// Generated once at capture and persisted, so every replay presents the same
   /// keys — this is the whole reason replay is safe.
   final String id;
-  final DateTime capturedAt;
+
+  /// When the cashier completed the sale. Stored in UTC, so a till whose zone
+  /// or clock setting changes while the sale waits still says the same moment.
+  /// Null only for a sale read back from storage whose time could not be read:
+  /// it is never replaced with the time of reading, which would put an
+  /// invented moment on the audit trail as the till's word.
+  final DateTime? capturedAt;
+
+  /// Who was signed in at the till when the sale was made. The queue outlives
+  /// a sign-out and anybody may press Sync now, so the server is told who rang
+  /// the sale up rather than taking whoever sends it. Null for a sale queued by
+  /// a till that did not record it.
+  final String? rungUpBy;
+
   final String storeId;
   final String currency;
 
@@ -52,6 +67,7 @@ class OfflineSale {
   const OfflineSale({
     required this.id,
     required this.capturedAt,
+    this.rungUpBy,
     required this.storeId,
     required this.currency,
     required this.orderRequest,
@@ -95,6 +111,7 @@ class OfflineSale {
       OfflineSale(
         id: id,
         capturedAt: capturedAt,
+        rungUpBy: rungUpBy,
         storeId: storeId,
         currency: currency,
         orderRequest: orderRequest,
@@ -110,7 +127,8 @@ class OfflineSale {
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'capturedAt': capturedAt.toIso8601String(),
+        'capturedAt': capturedAt?.toUtc().toIso8601String(),
+        'rungUpBy': rungUpBy,
         'storeId': storeId,
         'currency': currency,
         'orderRequest': orderRequest,
@@ -126,8 +144,11 @@ class OfflineSale {
 
   factory OfflineSale.fromJson(Map<String, dynamic> j) => OfflineSale(
         id: j['id'] as String,
-        capturedAt:
-            DateTime.tryParse(j['capturedAt'] as String? ?? '') ?? DateTime.now(),
+        // Written in UTC; a sale queued by an older build kept local time with
+        // no offset, which still reads as the device's own moment. A value that
+        // cannot be read stays unknown rather than becoming now.
+        capturedAt: DateTime.tryParse(j['capturedAt'] as String? ?? ''),
+        rungUpBy: j['rungUpBy'] as String?,
         storeId: j['storeId'] as String? ?? '',
         currency: j['currency'] as String? ?? '',
         orderRequest: Map<String, dynamic>.from(j['orderRequest'] as Map),
@@ -232,17 +253,38 @@ bool isOfflineError(Object error) {
   }
 }
 
+/// Refusals of a replayed sale that the server will repeat on every attempt: a
+/// line under recall, or one weighed on a scale not fit for trade. The replay
+/// says when the cashier completed the sale (`capturedAt`). A sale made
+/// offline has already happened, so within order-svc's grace (a day unless
+/// configured) it is recorded whatever the recalls or the scales say, and what
+/// was wrong is put in front of a manager on the audit trail — none of these
+/// comes back. Only a replay whose time the server cannot take on the till's
+/// word (older than the grace, or more than a few minutes ahead of its own
+/// clock) — or one whose time the till could not read back and so sends
+/// none — is judged as a sale made now and refused, worded for a manager. A 409 like any conflict, but no
+/// retry changes the answer, and retrying would hold up every sale queued
+/// behind it — so it is parked for a manager, with the server's words, instead.
+const _permanentConflicts = {
+  'ORDER_LINE_RECALLED',
+  'ORDER_SCALE_NOT_CERTIFIED',
+};
+
 /// Whether a server *response* to a replay is permanent — retrying will not help,
 /// so the sale is parked for a human instead of looping forever.
 ///
 /// 401 is deliberately retryable: the till's token expires while it is offline,
 /// and the auth interceptor refreshes on the next attempt. 409 is retryable
 /// because payment-svc returns `IDEMPOTENCY_CONFLICT` for a concurrent same-key
-/// request and explicitly asks the caller to retry into the replay path.
+/// request and explicitly asks the caller to retry into the replay path — all
+/// but the refusals of the sale itself in [_permanentConflicts].
 bool isPermanentRejection(Object error) {
   if (error is! DioException) return false;
   final status = error.response?.statusCode;
   if (status == null) return false;
+  if (status == 409 && _permanentConflicts.contains(apiErrorCode(error))) {
+    return true;
+  }
   if (status == 401 || status == 408 || status == 409 || status == 429) return false;
   return status >= 400 && status < 500;
 }

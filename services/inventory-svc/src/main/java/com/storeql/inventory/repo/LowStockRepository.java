@@ -6,6 +6,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -70,11 +71,11 @@ public class LowStockRepository extends BaseJdbcRepository {
 
   /**
    * @param tenantId the owning tenant; the first filter on every branch (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param limit maximum rows, already clamped by the caller
    * @return items below their reorder level, deepest shortfall first
    */
-  public List<LowStockRow> lowStock(UUID tenantId, UUID storeId, int limit) {
+  public List<LowStockRow> lowStock(UUID tenantId, Set<UUID> stores, int limit) {
     // LEFT JOIN from the signals, not from the batches: an item that has run out has no batch rows
     // at all, and an inner join would silently drop exactly the most urgent case -- zero on hand
     // against a configured level.
@@ -100,7 +101,7 @@ public class LowStockRepository extends BaseJdbcRepository {
             // shortage however low it runs.
             + "  AND NOT EXISTS (SELECT 1 FROM catalog_lines_out o"
             + "                  WHERE o.tenant_id = ? AND o.variant_id = b.variant_id)"
-            + (storeId != null ? " AND b.store_id = ?" : "")
+            + (stores != null ? " AND b.store_id = ANY(?)" : "")
             + "  ORDER BY shortfall DESC, b.store_id, b.variant_id"
             + "  LIMIT ?";
 
@@ -117,7 +118,9 @@ public class LowStockRepository extends BaseJdbcRepository {
           ps.setObject(i++, tenantId);
           // lines out: the tenant again
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         LowStockRepository::mapRow,

@@ -11,6 +11,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * an unregistered tenant is {@code 404}, so a test that forgets to register one sees the refusal a
  * real unknown tenant would get rather than a borrowed default.
  *
+ * <p>Under a store, {@code GET /admin/stores/{id}/weighing-instruments/{instrumentId}} answers for
+ * one instrument of the store's register (certified scales), given with {@link #withInstrument}:
+ * {@code 404 INSTRUMENT_NOT_FOUND} for one the business did not register at that store.
+ *
  * <p>Start it in the test's static initialiser, before Helidon boots: it points {@code
  * storeql.clients.tenant-svc.url} at itself.
  */
@@ -27,6 +31,12 @@ public final class TenantSvcStub implements AutoCloseable {
   private final java.util.Map<String, String> retention =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final Map<String, java.util.List<String>> fxRates = new ConcurrentHashMap<>();
+
+  /** Each business's weighing instruments by id, as the register answers for one of them. */
+  private final Map<String, Map<String, String>> instruments = new ConcurrentHashMap<>();
+
+  /** Businesses whose register of weighing instruments answers 503, to prove a fail-open. */
+  private final java.util.Set<String> instrumentsDown = ConcurrentHashMap.newKeySet();
 
   /** Percentage of net each business's people earn, for the commission rating route. */
   private final Map<String, String> commissionPercent = new ConcurrentHashMap<>();
@@ -216,6 +226,28 @@ public final class TenantSvcStub implements AutoCloseable {
                   ? java.util.List.of()
                   : stub.stores.getOrDefault(tenant, java.util.List.of());
           String rest = exchange.getRequestURI().getPath().substring(STORES.length());
+          // One weighing instrument of a store's register (certified scales): 404
+          // INSTRUMENT_NOT_FOUND unless the business registered it at that store, as tenant-svc
+          // answers for another store's or another business's, and 503 where made unreadable.
+          String[] parts = rest.split("/");
+          if (parts.length == 4 && "weighing-instruments".equals(parts[2])) {
+            if (tenant != null && stub.instrumentsDown.contains(tenant)) {
+              JsonStub.reply(exchange, 503, "{\"error\":{\"code\":\"DOWN\",\"message\":\"no\"}}");
+              return;
+            }
+            Map<String, String> held =
+                tenant == null ? Map.of() : stub.instruments.getOrDefault(tenant, Map.of());
+            String found = held.get(parts[3]);
+            if (found == null || !found.contains("\"storeId\":\"" + parts[1] + "\"")) {
+              JsonStub.reply(
+                  exchange,
+                  404,
+                  "{\"error\":{\"code\":\"INSTRUMENT_NOT_FOUND\",\"message\":\"no such scale\"}}");
+            } else {
+              JsonStub.reply(exchange, 200, "{\"data\":" + found + "}");
+            }
+            return;
+          }
           if (rest.length() > 1) {
             String opening = "{\"id\":\"" + rest.substring(1) + "\"";
             String found = own.stream().filter(s -> s.startsWith(opening)).findFirst().orElse(null);
@@ -525,6 +557,72 @@ public final class TenantSvcStub implements AutoCloseable {
                 + ",\"geoLng\":"
                 + lng
                 + "}");
+    return this;
+  }
+
+  /**
+   * Registers a weighing instrument in a store's register (certified scales), as tenant-svc's
+   * {@code GET /admin/stores/{storeId}/weighing-instruments/{id}} answers for it: certified only
+   * when its standing is {@code CERTIFIED}.
+   *
+   * @param standing the register's word for it: CERTIFIED, NEVER_VERIFIED, FAILED, REPAIRED_SINCE,
+   *     OVERDUE, OUT_OF_SERVICE or RETIRED
+   */
+  public TenantSvcStub withInstrument(
+      String tenantId, String storeId, String instrumentId, String identifier, String standing) {
+    return withInstrument(tenantId, storeId, instrumentId, identifier, standing, null, null);
+  }
+
+  /**
+   * Registers a weighing instrument as {@link #withInstrument(String, String, String, String,
+   * String)} does, with what the register gives beside its standing, from which a client works out
+   * when an unfit scale lapsed.
+   *
+   * @param latestVerification the latest history entry as tenant-svc answers it, a JSON object such
+   *     as {@code {"kind":"RE_VERIFICATION","passed":true,"nextDue":"2026-09-28",
+   *     "recordedAt":"2025-09-28T10:00:00Z"}}; null to leave it out
+   * @param updatedAt when the instrument was last changed, an ISO instant; null to leave it out
+   */
+  public TenantSvcStub withInstrument(
+      String tenantId,
+      String storeId,
+      String instrumentId,
+      String identifier,
+      String standing,
+      String latestVerification,
+      String updatedAt) {
+    String status =
+        "OUT_OF_SERVICE".equals(standing) || "RETIRED".equals(standing) ? standing : "IN_SERVICE";
+    boolean certified = "CERTIFIED".equals(standing);
+    String latest =
+        latestVerification == null ? "" : ",\"latestVerification\":" + latestVerification;
+    String changed = updatedAt == null ? "" : ",\"updatedAt\":\"" + updatedAt + "\"";
+    instruments
+        .computeIfAbsent(tenantId, t -> new ConcurrentHashMap<>())
+        .put(
+            instrumentId,
+            "{\"id\":\""
+                + instrumentId
+                + "\",\"storeId\":\""
+                + storeId
+                + "\",\"identifier\":\""
+                + identifier
+                + "\",\"status\":\""
+                + status
+                + "\",\"certified\":"
+                + certified
+                + ",\"standing\":\""
+                + standing
+                + "\""
+                + latest
+                + changed
+                + "}");
+    return this;
+  }
+
+  /** Makes a business's register of weighing instruments unreadable (503), to prove a fail-open. */
+  public TenantSvcStub instrumentsUnreadable(String tenantId) {
+    instrumentsDown.add(tenantId);
     return this;
   }
 

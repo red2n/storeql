@@ -10,7 +10,9 @@ import {
   nextCursor,
   onboardTenant,
   platformAdmin,
+  provisionStaff,
   register,
+  registerBusiness,
   truthy,
   uniq,
 } from './lib/storeql.js';
@@ -28,7 +30,8 @@ export default function ({ admin, tenant, rival }) {
   const storeId = tenant.stores[0].id;
 
   // ── one-shot onboarding: tenant and first store together ───────────────────
-  const founder = register('tenant-founder');
+  // The founder signs up to start a business: a staff login of no business and no role yet.
+  const founder = registerBusiness('tenant-founder');
   const combined = call('POST', '/api/tenant-svc/onboarding', {
     token: founder.token,
     body: { businessName: `One Shot ${uniq()}`, country: 'GB', currency: 'GBP', storeName: 'Flagship', storeCode: `FLAG-${uniq()}`.slice(0, 24), storeCity: 'Leeds', storeCountry: 'GB', storeTimezone: 'Europe/London' },
@@ -52,7 +55,9 @@ export default function ({ admin, tenant, rival }) {
   expect(call('PUT', '/api/tenant-svc/admin/tenant', { token: t, body: { businessName: `Renamed ${uniq()}`, legalName: 'Renamed Ltd' } }), '[+] update tenant profile', 200);
   expect(call('PUT', '/api/tenant-svc/admin/tenant', { token: t, body: { legalName: 'No name' } }), '[-] update tenant: business name required', 400);
   expect(call('GET', '/api/tenant-svc/admin/tenant'), '[-] tenant profile: no token', 401);
-  expect(call('GET', '/api/tenant-svc/admin/tenant', { token: founder.token }), '[-] tenant profile: a customer token', 403);
+  // The founder's sign-up token still names no business (it gains one at the next sign-in): no role.
+  expect(call('GET', '/api/tenant-svc/admin/tenant', { token: founder.token }), '[-] tenant profile: a token of no business and no role', 403);
+  expect(call('GET', '/api/tenant-svc/admin/tenant', { token: register('tenant-shopper').token }), '[-] tenant profile: a shopper token', 403);
 
   // ── stores ──────────────────────────────────────────────────────────────────
   const code = `S2-${uniq()}`.slice(0, 24);
@@ -90,7 +95,7 @@ export default function ({ admin, tenant, rival }) {
   expect(call('POST', '/api/tenant-svc/admin/stores', { token: t, body: { name: 'No zone', code: `NZ-${uniq()}`.slice(0, 24) } }), '[-] create store: a time zone is required', 400, 'STORE_TIMEZONE_REQUIRED');
   expect(call('POST', '/api/tenant-svc/admin/stores', { token: t, body: { name: 'Bad zone', code: `BZ-${uniq()}`.slice(0, 24), timezone: 'Mars/Olympus' } }), '[-] create store: the zone must be a real one', 400, 'STORE_TIMEZONE_INVALID');
   expect(call('PUT', `/api/tenant-svc/admin/stores/${warehouseId}`, { token: t, body: { name: 'Main Warehouse', timezone: 'UTC+01:00' } }), '[-] update store: an offset is not a zone', 400, 'STORE_TIMEZONE_INVALID');
-  expect(call('POST', '/api/tenant-svc/onboarding', { token: register('zone-founder').token, body: { businessName: `No Zone ${uniq()}`, country: 'AU', currency: 'AUD', storeName: 'Sydney', storeCode: `SYD-${uniq()}`.slice(0, 24) } }), '[-] one-shot onboarding: the first store needs a zone', 400, 'STORE_TIMEZONE_REQUIRED');
+  expect(call('POST', '/api/tenant-svc/onboarding', { token: registerBusiness('zone-founder').token, body: { businessName: `No Zone ${uniq()}`, country: 'AU', currency: 'AUD', storeName: 'Sydney', storeCode: `SYD-${uniq()}`.slice(0, 24) } }), '[-] one-shot onboarding: the first store needs a zone', 400, 'STORE_TIMEZONE_REQUIRED');
   expect(call('PUT', `/api/tenant-svc/admin/stores/${UNKNOWN}`, { token: t, body: { name: 'Ghost' } }), '[-] update unknown store', 404);
   expect(call('PATCH', `/api/tenant-svc/admin/stores/${warehouseId}/status`, { token: t, body: { status: 'CLOSED' } }), '[+] close a store', 200);
   expect(call('PATCH', `/api/tenant-svc/admin/stores/${warehouseId}/status`, { token: t, body: { status: 'ACTIVE' } }), '[+] reopen a store', 200);
@@ -124,7 +129,8 @@ export default function ({ admin, tenant, rival }) {
   expect(call('DELETE', `/api/tenant-svc/admin/stores/${warehouseId}/delivery-areas/${data(area).id}`, { token: t }), '[+] unmap a delivery area', [200, 204]);
 
   // ── staff ───────────────────────────────────────────────────────────────────
-  const clerk = register('tenant-clerk');
+  // A login made in the business: the only kind an assignment binds (a shopper's sign-up is never staff).
+  const clerk = provisionStaff(tenant, 'tenant-clerk');
   expect(call('POST', '/api/tenant-svc/admin/staff', { token: t, body: { userId: clerk.userId, storeId } }), '[-] assign staff: role required', 400);
   expect(call('POST', '/api/tenant-svc/admin/staff', { token: t, body: { userId: clerk.userId, storeId: UNKNOWN, role: 'CASHIER' } }), '[-] assign staff: unknown store', 404);
   expect(

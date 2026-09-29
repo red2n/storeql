@@ -727,13 +727,17 @@ export default function (d) {
   );
 
   if (piId && variantId) {
-    // [+] Add a tag (snapshot system qty)
+    // [+] Add a tag: the service records what the books hold now; a number sent is not used
     const tagRes = http.post(
       `${baseUrl}/api/inventory-svc/admin/inventory/physical-inventories/${piId}/tags`,
-      JSON.stringify({ variantId: variantId, systemQty: 100 }),
+      JSON.stringify({ variantId: variantId, systemQty: 100000 }),
       { headers: hdrs }
     );
-    check(tagRes, { '[+] add physical inventory tag 200': (r) => r.status === 200 });
+    check(tagRes, {
+      '[+] add physical inventory tag 200': (r) => r.status === 200,
+      '[+] the tag counts against the books, not the number sent': (r) =>
+        r.status === 200 && Number(r.json('data.systemQty')) !== 100000,
+    });
     const tagId = tagRes.status === 200 ? tagRes.json('data.id') : null;
 
     // [+] Get physical inventory (with tags)

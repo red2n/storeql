@@ -12,6 +12,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -46,7 +47,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
    * question about last quarter with today's stock level.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param from inclusive start of the window; required — a turnover ratio has no meaning without
    *     one
    * @param to exclusive end of the window; required
@@ -56,7 +57,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
    */
   public List<StockTurnRow> stockTurn(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       StockTurnGrouping grouping,
@@ -112,7 +113,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
             + " FROM inventory_batches b"
             + " LEFT JOIN mv ON mv.batch_id = b.id"
             + " WHERE b.tenant_id = ?"
-            + (storeId != null ? " AND b.store_id = ?" : "")
+            + (stores != null ? " AND b.store_id = ANY(?)" : "")
             // A group that neither held nor sold anything in the window is not a stock-turn
             // finding, it is noise; every variant ever received would otherwise appear forever.
             + " GROUP BY 1"
@@ -136,7 +137,9 @@ public class StockTurnRepository extends BaseJdbcRepository {
           ps.setObject(i++, toTs);
           ps.setObject(i++, tenantId);
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         StockTurnRepository::mapTurnRow,
@@ -160,11 +163,11 @@ public class StockTurnRepository extends BaseJdbcRepository {
    * @param to the window's exclusive end — nothing archived after it could affect the replay
    * @return true when the archive holds nothing the replay needed
    */
-  public boolean historyComplete(UUID tenantId, UUID storeId, Instant to) {
+  public boolean historyComplete(UUID tenantId, Set<UUID> stores, Instant to) {
     String sql =
         "SELECT EXISTS (SELECT 1 FROM stock_movements_archive"
             + " WHERE tenant_id = ? AND created_at < ?"
-            + (storeId != null ? " AND store_id = ?" : "")
+            + (stores != null ? " AND store_id = ANY(?)" : "")
             + ") AS purged";
     List<Boolean> found =
         query(
@@ -173,7 +176,9 @@ public class StockTurnRepository extends BaseJdbcRepository {
               int i = 1;
               ps.setObject(i++, tenantId);
               ps.setObject(i++, to.atOffset(ZoneOffset.UTC));
-              if (storeId != null) ps.setObject(i, storeId);
+              if (stores != null) {
+                ps.setArray(i, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+              }
             },
             rs -> rs.getBoolean("purged"),
             "check movement history completeness");
@@ -193,7 +198,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
    * FIFO means a newly received batch of a briskly selling line would otherwise read as untouched.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param asOf the instant ages are measured back from — the caller's clock, so a report run
    *     against a fixed date is reproducible
    * @param grouping BUCKET for the ageing summary, STORE or VARIANT for the detail
@@ -201,7 +206,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
    * @return rows ordered by value at risk, largest first
    */
   public List<DeadStockRow> deadStock(
-      UUID tenantId, UUID storeId, Instant asOf, DeadStockGrouping grouping, int limit) {
+      UUID tenantId, Set<UUID> stores, Instant asOf, DeadStockGrouping grouping, int limit) {
     // Per (store, variant): what is left, what it is worth, and when it last sold.
     String perItem =
         "WITH holding AS ("
@@ -213,7 +218,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
             + "         MIN(b.created_at) AS oldest_receipt"
             + "    FROM inventory_batches b"
             + "   WHERE b.tenant_id = ? AND b.remaining_qty > 0"
-            + (storeId != null ? "     AND b.store_id = ?" : "")
+            + (stores != null ? "     AND b.store_id = ANY(?)" : "")
             + "   GROUP BY b.store_id, b.variant_id"
             + "), last_sale AS ("
             + "  SELECT m.store_id, m.variant_id, MAX(m.created_at) AS sold_at"
@@ -223,7 +228,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
             + "     AND NOT EXISTS (SELECT 1 FROM stock_movements v"
             + "                      WHERE v.tenant_id = m.tenant_id AND v.type = 'RECEIVE' AND v.ref_type = 'VOID'"
             + "                        AND v.ref_id = m.ref_id AND v.variant_id = m.variant_id)"
-            + (storeId != null ? "     AND m.store_id = ?" : "")
+            + (stores != null ? "     AND m.store_id = ANY(?)" : "")
             + "   GROUP BY m.store_id, m.variant_id"
             + "), aged AS ("
             + "  SELECT h.store_id, h.variant_id, h.on_hand_qty, h.value, h.uncosted_qty,"
@@ -276,9 +281,13 @@ public class StockTurnRepository extends BaseJdbcRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setObject(i++, asOfTs);
           ps.setInt(i, limit);
         },

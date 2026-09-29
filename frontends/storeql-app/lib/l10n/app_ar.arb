@@ -56,5 +56,10 @@
   "resetPasswordDone": "تم تغيير كلمة المرور — سجّل الدخول بها.",
   "resetPasswordDoneStorefront": "تتسوّق من المتجر الإلكتروني؟ يمكنك تسجيل الدخول من المتجر.",
   "resetPasswordTokenInvalid": "انتهت صلاحية هذا الرابط أو تم استخدامه من قبل — اطلب رابطًا جديدًا.",
-  "resetPasswordRequestNew": "طلب رابط جديد"
+  "resetPasswordRequestNew": "طلب رابط جديد",
+  "startBusiness": "ابدأ نشاطًا تجاريًا",
+  "startBusinessTitle": "ابدأ نشاطك التجاري",
+  "startBusinessIntro": "أنشئ حساب الدخول الذي ستدير به نشاطك التجاري. بعد ذلك تُعِدّ النشاط التجاري وأول متجر له.",
+  "fieldPasswordConfirm": "تأكيد كلمة المرور",
+  "fieldPasswordMismatch": "هذا لا يطابق كلمة المرور المذكورة أعلاه."
 }

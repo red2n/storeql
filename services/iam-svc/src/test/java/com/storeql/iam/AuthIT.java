@@ -8,6 +8,7 @@ import static org.hamcrest.Matchers.not;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.storeql.ids.Ids;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -641,6 +642,29 @@ class AuthIT {
   @Inject com.storeql.iam.messaging.StaffAssignedHandler staffAssigned;
   @Inject com.storeql.iam.messaging.StaffRemovedHandler staffRemoved;
   @Inject com.storeql.iam.messaging.RoleDefinedHandler roleDefined;
+  @Inject com.storeql.iam.service.AuthService auth;
+
+  /**
+   * A staff login made in the tenant the one way there is — staff provisioning — with the password
+   * {@link #claimsOf} signs in with; its id. A StaffAssigned binds only a login already there.
+   */
+  private String provisionedUserId(String tenant, String email) {
+    return auth.provisionStaff(Ids.parse(tenant), email, "strongpass1 for storeql").userId();
+  }
+
+  /**
+   * A login stamped into the tenant: as {@code TenantCreated} makes its owner's, and as a
+   * StaffAssigned made a shopper's before 29 Sep 2026.
+   */
+  private static void stampedInto(String userId, String tenant) {
+    Envelopes.exec(
+        PG,
+        "UPDATE iam.users SET tenant_id = '"
+            + tenant
+            + "', type = 'STAFF' WHERE id = '"
+            + userId
+            + "' AND tenant_id IS NULL");
+  }
 
   private static String staffEvent(
       String type,
@@ -727,7 +751,7 @@ class AuthIT {
     String tenant = com.storeql.ids.Ids.newId().toString();
     String store = com.storeql.ids.Ids.newId().toString();
     // A plain cashier: no claim at all — judged by the tier's defaults, as before.
-    String plain = registerAndGetUserId("plain-cashier@example.com");
+    String plain = provisionedUserId(tenant, "plain-cashier@example.com");
     staffAssigned.handle(
         staffEvent(
             "StaffAssigned",
@@ -745,7 +769,7 @@ class AuthIT {
 
     // A trainee: a cashier narrowed to nothing. The claim is present and empty, and /auth/me
     // shows nothing — not the cashier's drawer.
-    String trainee = registerAndGetUserId("trainee@example.com");
+    String trainee = provisionedUserId(tenant, "trainee@example.com");
     staffAssigned.handle(
         staffEvent(
             "StaffAssigned",
@@ -760,7 +784,7 @@ class AuthIT {
     assertThat(meOf("trainee@example.com"), containsString("\"permissions\":[]"));
 
     // A shift lead: a manager who may approve purchases and nothing else; sorted in the claim.
-    String lead = registerAndGetUserId("lead@example.com");
+    String lead = provisionedUserId(tenant, "lead@example.com");
     String assigned = com.storeql.ids.Ids.newId().toString();
     staffAssigned.handle(
         staffEvent(
@@ -795,7 +819,7 @@ class AuthIT {
     String tenant = com.storeql.ids.Ids.newId().toString();
     String other = com.storeql.ids.Ids.newId().toString();
     String store = com.storeql.ids.Ids.newId().toString();
-    String lead = registerAndGetUserId("redefined@example.com");
+    String lead = provisionedUserId(tenant, "redefined@example.com");
     staffAssigned.handle(
         staffEvent(
             "StaffAssigned",
@@ -848,7 +872,10 @@ class AuthIT {
     String tenant = com.storeql.ids.Ids.newId().toString();
     String store = com.storeql.ids.Ids.newId().toString();
     String otherStore = com.storeql.ids.Ids.newId().toString();
+    // A shopper taken on before 29 Sep 2026: the login that goes back to being a shopper's when
+    // its last role goes. (One made in the business by provisioning stays in it: BusinessSignUpIT.)
     String cashier = registerAndGetUserId("unassigned@example.com");
+    stampedInto(cashier, tenant);
     staffAssigned.handle(
         staffEvent(
             "StaffAssigned",
@@ -915,6 +942,8 @@ class AuthIT {
       ps.setObject(2, Ids.parse(owner));
       ps.executeUpdate();
     }
+    // The owner's login is the tenant's, or no StaffAssigned would bind it at all.
+    stampedInto(owner, tenant);
     // An owner who is also given a narrowed role somewhere still carries no claim: the owner is
     // the tenant's root, and a custom role narrows staff, not them.
     staffAssigned.handle(

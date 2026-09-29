@@ -11,6 +11,7 @@ import com.storeql.order.domain.Domain.GiftCardTransaction;
 import com.storeql.order.domain.Domain.Layaway;
 import com.storeql.order.domain.Domain.LayawayDeposit;
 import com.storeql.order.domain.Domain.LayawayItem;
+import com.storeql.order.domain.Domain.OfflineSaleFlag;
 import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderDeposit;
 import com.storeql.order.domain.Domain.OrderDiscount;
@@ -28,6 +29,7 @@ import com.storeql.order.domain.Domain.SpecialOrderItem;
 import com.storeql.order.domain.Handover;
 import com.storeql.order.domain.OrderSplit;
 import com.storeql.order.domain.Routing;
+import com.storeql.order.domain.StopSale;
 import com.storeql.order.domain.SubstitutePrice;
 import com.storeql.order.dto.Dtos.AddDepositRequest;
 import com.storeql.order.dto.Dtos.CreateLayawayRequest;
@@ -61,6 +63,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** Business logic for order-svc. Thin resource → this service → repository. */
@@ -89,6 +92,7 @@ public class OrderService {
   @Inject com.storeql.order.repo.DepositRepository depositRepo;
   @Inject OrderRouter router;
   @Inject FulfilmentWindowService windows;
+  @Inject SaleChecks saleChecks;
 
   // ── Orders ────────────────────────────────────────────────────────────────
 
@@ -388,6 +392,42 @@ public class OrderService {
 
     List<UUID> variantIds =
         req.items().stream().map(ir -> Parsing.uuid(ir.variantId(), "variantId")).toList();
+    // Stop-sale and certified scales, checked here as well as at the till, which is one client of
+    // this endpoint and not the only one: a line an open recall covers, or one weighed on a scale
+    // the store may not weigh for trade on, is refused before anything is priced, held or placed.
+    // Both fail open when inventory-svc or tenant-svc cannot answer. A till sale replayed from the
+    // till's offline queue within the grace has already happened — the goods have gone, the money
+    // was taken — so it is never refused: what would have stopped it when it was rung up comes
+    // back as entries for the audit trail, written with the order below, naming who the till says
+    // rang it up when the business holds them at this store. A replay whose capture time is not
+    // honoured is judged as a sale made now. Online neither field is even read, so an online
+    // order is never refused over a capture time it had no business sending.
+    List<UUID> instrumentIds = instrumentsOf(req);
+    Instant capturedAt = tillSale ? capturedAtOf(req.capturedAt()) : null;
+    UUID rungUpBy = tillSale ? Parsing.optionalUuid(req.rungUpBy(), "rungUpBy") : null;
+    List<OfflineSaleFlag> offlineFlags;
+    try {
+      offlineFlags =
+          saleChecks.check(
+              new SaleChecks.Sale(
+                  tenantId,
+                  storeId,
+                  orderId,
+                  rungUpBy,
+                  ctx.userId(),
+                  staffOfThisBusiness(ctx),
+                  packsOf(req, variantIds),
+                  instrumentIds),
+              capturedAt);
+    } catch (ApiException e) {
+      // A retried placement of a sale that already stands gets that sale back, as it would further
+      // down: a recall opened, or a certificate lapsed, after the sale was made does not unmake it.
+      if (idempotencyKey != null) {
+        var earlier = repo.findOrderByIdempotencyKey(tenantId, idempotencyKey);
+        if (earlier.isPresent()) return earlier.get();
+      }
+      throw e;
+    }
     // Gap #63: when enforcement is on, the price comes from pricing-svc — the client-supplied
     // unitPrice is ignored. When off (local dev / unseeded rigs), the client price is trusted.
     // One batched call resolves every line instead of one cross-service HTTP call per line.
@@ -458,10 +498,7 @@ public class OrderService {
       }
       BigDecimal line = quotedLineNet != null ? quotedLineNet : unitPrice.multiply(ir.qty());
       subtotal = subtotal.add(line);
-      UUID instrumentId =
-          ir.weighingInstrumentId() == null || ir.weighingInstrumentId().isBlank()
-              ? null
-              : Parsing.uuid(ir.weighingInstrumentId(), "weighingInstrumentId");
+      UUID instrumentId = instrumentIds.get(i);
       items.add(
           new OrderItem(
               Ids.newId(),
@@ -652,7 +689,8 @@ public class OrderService {
                   order.slotTimeZone()),
               discountAudit,
               quoted == null ? List.of() : quoted.applied(),
-              containerDeposits);
+              containerDeposits,
+              offlineFlags);
       // Spending the coupon is deliberately the last thing, and deliberately outside the order's
       // transaction. A basket is quoted on every change and must not burn a redemption by being
       // looked at; only a placed order spends one. If this call fails the order still stands — a
@@ -697,6 +735,78 @@ public class OrderService {
           e.code(),
           storeId);
       return false;
+    }
+  }
+
+  /** Each line's weighing instrument, null for a line sold by the each. */
+  private static List<UUID> instrumentsOf(PlaceOrderRequest req) {
+    List<UUID> out = new ArrayList<>(req.items().size());
+    for (var ir : req.items()) {
+      out.add(
+          isBlank(ir.weighingInstrumentId())
+              ? null
+              : Parsing.uuid(ir.weighingInstrumentId(), "weighingInstrumentId"));
+    }
+    return out;
+  }
+
+  /**
+   * Each line as its pack described itself: the lot and expiry a GS1 2D code carried, when the till
+   * read one. Used to check the line against open recalls, and not stored.
+   *
+   * @throws ApiException 400 {@code ORDER_LINE_EXPIRY_INVALID} for an expiry that is not a date
+   */
+  private static List<StopSale.Pack> packsOf(PlaceOrderRequest req, List<UUID> variantIds) {
+    List<StopSale.Pack> out = new ArrayList<>(variantIds.size());
+    for (int i = 0; i < variantIds.size(); i++) {
+      var ir = req.items().get(i);
+      out.add(new StopSale.Pack(i, variantIds.get(i), ir.batchNo(), expiryOf(ir.expiry(), i)));
+    }
+    return out;
+  }
+
+  /**
+   * When a replayed till sale says the cashier completed it; null when the request does not say.
+   *
+   * @throws ApiException 400 {@code ORDER_CAPTURED_AT_INVALID} for a time that is not an instant
+   */
+  private static Instant capturedAtOf(String text) {
+    if (isBlank(text)) return null;
+    try {
+      return java.time.OffsetDateTime.parse(text.strip()).toInstant();
+    } catch (DateTimeException e) {
+      throw new ApiException(
+          400,
+          "ORDER_CAPTURED_AT_INVALID",
+          "capturedAt must be an instant with its offset, e.g. 2026-09-29T10:15:30Z",
+          List.of(),
+          e);
+    }
+  }
+
+  /**
+   * Whether the caller's own sign-in is staff of this business. The store was checked already
+   * ({@link TenantContext#requireStoreAccess}), so a till naming the caller as who rang the sale up
+   * needs no second question; the platform's own administrator is no member of any business.
+   */
+  private static boolean staffOfThisBusiness(TenantContext ctx) {
+    return ctx.hasRole("OWNER")
+        || ctx.hasRole("MANAGER")
+        || ctx.hasRole("STOREKEEPER")
+        || ctx.hasRole("CASHIER");
+  }
+
+  private static java.time.LocalDate expiryOf(String text, int line) {
+    if (isBlank(text)) return null;
+    try {
+      return java.time.LocalDate.parse(text.strip());
+    } catch (DateTimeException e) {
+      throw new ApiException(
+          400,
+          "ORDER_LINE_EXPIRY_INVALID",
+          "items[" + line + "].expiry must be a date as the pack printed it, e.g. 2026-10-01",
+          List.of(),
+          e);
     }
   }
 
@@ -1372,7 +1482,9 @@ public class OrderService {
                     child.slotTimeZone()),
                 null,
                 promotions.get(k),
-                deposits));
+                deposits,
+                // A split checkout is online, and only a till sale is replayed from a queue.
+                List.of()));
       }
       repo.createOrderGroup(
           new com.storeql.order.domain.OrderGroup(
@@ -2243,14 +2355,24 @@ public class OrderService {
    * @param orderId the order to cancel
    * @param reason free-text reason recorded on the status transition
    * @param userId the staff member cancelling it
+   * @param ctx the caller, held to the order's store like the void and the return beside it
    * @return the cancelled order
    * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
-   *     ORDER_CANNOT_CANCEL} (409) when it is not PENDING or CONFIRMED
+   *     STORE_ACCESS_DENIED} (403) for staff held to other stores; {@code PERMISSION_DENIED} (403)
+   *     when money was taken and the caller may not void; {@code ORDER_CANNOT_CANCEL} (409) when it
+   *     is not PENDING or CONFIRMED
    */
-  public Order cancelOrder(UUID tenantId, UUID orderId, String reason, UUID userId) {
+  public Order cancelOrder(
+      UUID tenantId, UUID orderId, String reason, UUID userId, TenantContext ctx) {
     // PENDING covers pay-later online orders awaiting confirmation; both states must be
     // cancellable so their stock holds get released (inventory-svc reacts to OrderCancelled).
     Order order = getOrder(tenantId, orderId);
+    ctx.requireStoreAccess(order.storeId());
+    // Once a tender was captured, payment-svc refunds it on OrderCancelled: that is a void, and
+    // asks what a void asks. An order nobody paid for is still any staff's at its store to cancel.
+    if (repo.paidAmount(tenantId, orderId).signum() > 0) {
+      ctx.requirePermission(com.storeql.web.Permissions.SALES_VOID);
+    }
     if (Order.STATUS_PARTIALLY_FULFILLED.equals(order.status()))
       throw ApiException.conflict(
           "ORDER_PARTLY_FULFILLED",
@@ -3553,23 +3675,23 @@ public class OrderService {
    * is accountable for is the last thing this report should hide.
    */
   public List<ExceptionRow> exceptionReport(
-      UUID tenantId, UUID storeId, Instant from, Instant to, ExceptionGrouping grouping) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, ExceptionGrouping grouping) {
     boolean byActor = grouping == ExceptionGrouping.ACTOR;
     Map<String, BigDecimal[]> money = new LinkedHashMap<>();
     Map<String, long[]> counts = new LinkedHashMap<>();
 
-    for (Object[] r : repo.aggregateDiscounts(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateDiscounts(tenantId, stores, from, to, byActor)) {
       String k = key(r[0]);
       counts.computeIfAbsent(k, x -> new long[4])[0] = (Long) r[1];
       money.computeIfAbsent(k, x -> newMoney())[0] = (BigDecimal) r[2];
     }
-    for (Object[] r : repo.aggregateVoids(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateVoids(tenantId, stores, from, to, byActor)) {
       counts.computeIfAbsent(key(r[0]), x -> new long[4])[1] = (Long) r[1];
     }
-    for (Object[] r : repo.aggregateNoSales(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateNoSales(tenantId, stores, from, to, byActor)) {
       counts.computeIfAbsent(key(r[0]), x -> new long[4])[2] = (Long) r[1];
     }
-    for (Object[] r : repo.aggregateJournalledSales(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateJournalledSales(tenantId, stores, from, to, byActor)) {
       String k = key(r[0]);
       counts.computeIfAbsent(k, x -> new long[4])[3] = (Long) r[1];
       money.computeIfAbsent(k, x -> newMoney())[1] = (BigDecimal) r[2];
@@ -3610,14 +3732,17 @@ public class OrderService {
    * Postgres, which rejects it with an error that surfaces as a 500. {@link ZoneId#of} knows the
    * same tz database Postgres does, so validating with it turns that into the 400 it always was.
    *
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else these stores added together — never a store the caller has not
+   *     already been checked against
    * @param tz an IANA zone name such as {@code Europe/London}; defaults to UTC when absent
    */
   public List<SalesByHourRow> salesByHour(
-      UUID tenantId, UUID storeId, String channel, Instant from, Instant to, String tz) {
+      UUID tenantId, Set<UUID> stores, String channel, Instant from, Instant to, String tz) {
     requireOrderedPeriod(from, to);
     String normalisedChannel = normaliseChannel(channel);
     return salesAnalyticsRepo
-        .salesByHour(tenantId, storeId, normalisedChannel, from, to, zone(tz))
+        .salesByHour(tenantId, stores, normalisedChannel, from, to, zone(tz))
         .stream()
         .map(
             r ->
@@ -3637,11 +3762,15 @@ public class OrderService {
    *
    * <p>Online orders have no cashier and are therefore not here at all. That is a property of the
    * data rather than a filter — the journal only ever covers the till.
+   *
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else these stores added together — never a store the caller has not
+   *     already been checked against
    */
   public List<SalesByStaffRow> salesByStaff(
-      UUID tenantId, UUID storeId, Instant from, Instant to, int limit) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, int limit) {
     requireOrderedPeriod(from, to);
-    return salesAnalyticsRepo.salesByStaff(tenantId, storeId, from, to, limit).stream()
+    return salesAnalyticsRepo.salesByStaff(tenantId, stores, from, to, limit).stream()
         .map(OrderService::withStaffRatios)
         .toList();
   }
@@ -4097,7 +4226,12 @@ public class OrderService {
    * Deposits charged on sales that stand and paid back at the till over [from, to) (09.16), by
    * material; the difference is what the scheme holds unredeemed.
    *
-   * @throws ApiException {@code 400 ORDER_REPORT_PERIOD_INVALID} when from is not before to
+   * <p>A named store is checked against the caller's own (SJ-D74's {@code reportStores}); with none
+   * named, a caller held to no store reads the whole business as before, and a caller held to some
+   * reads exactly those, added together.
+   *
+   * @throws ApiException {@code 400 ORDER_REPORT_PERIOD_INVALID} when from is not before to; {@code
+   *     403 STORE_ACCESS_DENIED} for a named store the caller does not keep
    */
   public com.storeql.order.dto.Dtos.DepositReportResponse depositReport(
       TenantContext ctx, String storeIdRaw, String fromRaw, String toRaw) {
@@ -4109,8 +4243,8 @@ public class OrderService {
     }
     UUID storeId =
         storeIdRaw == null || storeIdRaw.isBlank() ? null : Parsing.uuid(storeIdRaw, "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
-    var rows = depositRepo.report(tenantId, storeId, from, to);
+    Set<UUID> stores = ctx.reportStores(storeId);
+    var rows = depositRepo.report(tenantId, stores, from, to);
     long chargedContainers = 0;
     long refundedContainers = 0;
     BigDecimal chargedAmount = BigDecimal.ZERO.setScale(2);

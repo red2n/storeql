@@ -1222,16 +1222,23 @@ public final class Dtos {
       @Schema(description = "UUID of the store being counted.") @NotBlank String storeId,
       String notes) {}
 
-  @Schema(name = "AddTagRequest", description = "Register a variant to be counted.")
+  /**
+   * A variant to count. There is no system quantity to send: the service records what the books
+   * hold at the store (and zone) when the tag is added, and the count is measured from that.
+   */
+  @Schema(
+      name = "AddTagRequest",
+      description =
+          "Register a variant to be counted. The tag's system quantity is what the books hold at"
+              + " the store (in the zone, when one is named) when it is added.")
   public record AddTagRequest(
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
-      @Schema(description = "UUID of the zone the variant is expected in.") String zoneId,
-      @Schema(description = "Quantity per system records at the time the tag is added.") @NotNull
-          BigDecimal systemQty) {}
+      @Schema(description = "UUID of the zone the variant is counted in.") String zoneId) {}
 
   @Schema(name = "CountTagRequest", description = "Record a counted quantity for a tag.")
   public record CountTagRequest(
-      @Schema(description = "Physically counted quantity.") @NotNull BigDecimal countedQty) {}
+      @Schema(description = "Physically counted quantity.") @NotNull @PositiveOrZero
+          BigDecimal countedQty) {}
 
   @Schema(
       name = "PhysicalInventoryTagResponse",

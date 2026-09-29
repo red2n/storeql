@@ -458,6 +458,23 @@ class AdminAuthorizationFilterTest {
     assertAborted(invoke("GET", "/auth/password-policy/x"), 403);
   }
 
+  // ── business sign-up ("Start a business") ───────────────────────────────────
+
+  @Test
+  void aBusinessSignsUpWithNoRoleAtAll() throws Exception {
+    assertNotAborted(invoke("POST", "/auth/register/business"));
+    // The shopper's sign-up is as open as it was.
+    assertNotAborted(invoke("POST", "/auth/register"));
+  }
+
+  @Test
+  void nothingBesideTheBusinessSignUpIsOpened() throws Exception {
+    assertAborted(invoke("POST", "/auth/register/business/owner"), 403);
+    assertAborted(invoke("POST", "/auth/register/businesses"), 403);
+    assertAborted(invoke("POST", "/auth/register/"), 403);
+    assertAborted(invoke("PUT", "/auth/register/business/x"), 403);
+  }
+
   @Test
   void cashierCanOpenTillSession() throws Exception {
     // Resource layer allows CASHIER on open; the filter must not management-block first.

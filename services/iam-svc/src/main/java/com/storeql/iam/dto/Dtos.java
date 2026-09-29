@@ -2,6 +2,7 @@ package com.storeql.iam.dto;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import org.eclipse.microprofile.openapi.annotations.media.Schema;
 
@@ -28,14 +29,41 @@ public final class Dtos {
       @Schema(description = "Optional contact phone number.") String phone) {}
 
   /**
-   * Admin provisions a staff account by email (find-or-create). The admin supplies the initial
-   * password and shares it with the new staff member out-of-band; it is never echoed back in the
-   * response.
+   * Business sign-up ("Start a business"): the login a new business will be run with. It carries no
+   * tenant and no role — the business is created next, through tenant-svc's onboarding, and binds
+   * this login as its owner. Nothing here names a business: which one the login belongs to is never
+   * the caller's to say.
+   */
+  @Schema(
+      name = "BusinessRegisterRequest",
+      description =
+          "Business sign-up: a staff login with no business and no role yet. The business is"
+              + " created next (tenant-svc POST /onboarding), which makes this login its owner.")
+  public record BusinessRegisterRequest(
+      @Schema(description = "Unique login email.") @Email @NotBlank String email,
+      @Schema(description = "Plaintext password (hashed server-side before storage).")
+          @NotBlank
+          @Size(min = 8, max = 128)
+          String password,
+      @Schema(
+              description =
+                  "Optional contact phone number, kept as the shopper's sign-up keeps one. Unique"
+                      + " among business sign-ups of no business; a shopper's account with the same"
+                      + " number is a separate identity and does not count.")
+          String phone) {}
+
+  /**
+   * Admin provisions a staff account by email (find-or-create within the business). The admin
+   * supplies the initial password and shares it with the new staff member out-of-band; it is never
+   * echoed back in the response.
    */
   @Schema(
       name = "ProvisionStaffRequest",
       description =
-          "Admin find-or-create of a staff account by email. tenantId is taken from the caller's"
+          "Admin find-or-create of a staff account by email, within the caller's business: the"
+              + " business's own login with this email, or a new one made in the business. A"
+              + " shopper's account, an unfinished business sign-up or another business's login"
+              + " with the same email is never taken over. tenantId is taken from the caller's"
               + " JWT, never from this body.")
   public record ProvisionStaffRequest(
       @Schema(description = "Staff member's login email.") @Email @NotBlank String email,
@@ -54,7 +82,10 @@ public final class Dtos {
   public record ProvisionStaffResponse(
       @Schema(description = "UUID of the staff user.") String userId,
       String email,
-      @Schema(description = "True if a new user was created; false if one already existed.")
+      @Schema(
+              description =
+                  "True if a new login was made in the business; false if the business already"
+                      + " had one with this email.")
           boolean created) {}
 
   /** One of the business's staff, named: what {@code GET /auth/admin/staff-users} answers. */
@@ -67,9 +98,27 @@ public final class Dtos {
       @Schema(description = "UUID of the staff user.") String userId,
       @Schema(description = "The login email.") String email) {}
 
-  /** Login with email + password. */
+  /**
+   * Login with email + password.
+   *
+   * <p>{@code accountType} says where the person is signing in, because one address may hold a
+   * shopper's account and a business account (separate identities, 29 Sep 2026): the storefront
+   * sends {@code CUSTOMER}; the admin console and the till send {@code STAFF}, which is also what
+   * no value means. The platform console's own sign-in ignores it.
+   */
   @Schema(name = "LoginRequest")
-  public record LoginRequest(@Email @NotBlank String email, @NotBlank String password) {}
+  public record LoginRequest(
+      @Email @NotBlank String email,
+      @NotBlank String password,
+      @Schema(
+              description =
+                  "Which account to sign in to when the address holds a shopper's and a"
+                      + " business's: CUSTOMER from a storefront, STAFF (the default) to run a"
+                      + " business. The other kind is signed in only when the address holds none"
+                      + " of this one.",
+              enumeration = {"CUSTOMER", "STAFF"})
+          @Pattern(regexp = "CUSTOMER|STAFF")
+          String accountType) {}
 
   // ── Forgotten password (public — no sign-in) ──────────────────────────────
 

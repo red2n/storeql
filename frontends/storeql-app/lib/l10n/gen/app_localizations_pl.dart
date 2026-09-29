@@ -206,4 +206,21 @@ class AppLocalizationsPl extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'Poproś o nowy link';
+
+  @override
+  String get startBusiness => 'Załóż firmę';
+
+  @override
+  String get startBusinessTitle => 'Załóż swoją firmę';
+
+  @override
+  String get startBusinessIntro =>
+      'Utwórz konto, którym będziesz prowadzić firmę. Następnie skonfigurujesz firmę i jej pierwszy sklep.';
+
+  @override
+  String get fieldPasswordConfirm => 'Potwierdź hasło';
+
+  @override
+  String get fieldPasswordMismatch =>
+      'To nie zgadza się z hasłem podanym powyżej.';
 }

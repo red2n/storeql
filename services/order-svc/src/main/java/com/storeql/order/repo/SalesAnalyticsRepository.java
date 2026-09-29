@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -58,7 +59,9 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
    * them, and a row of zeroes claims the shop was open and empty, which it may not have been.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else these stores added together — never a store the caller has not
+   *     already been checked against
    * @param channel ONLINE or POS to compare the two, or null for both together
    * @param from inclusive lower bound on order time, or null for no lower bound
    * @param to exclusive upper bound, or null for no upper bound
@@ -66,7 +69,7 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
    * @return one row per hour that traded, earliest hour first
    */
   public List<SalesByHourRow> salesByHour(
-      UUID tenantId, UUID storeId, String channel, Instant from, Instant to, ZoneId zone) {
+      UUID tenantId, Set<UUID> stores, String channel, Instant from, Instant to, ZoneId zone) {
     // A fixed offset (ZoneOffset) goes in as an interval; a region name goes in as text. Both
     // are still bound parameters -- the branch decides the cast, never the value.
     boolean fixedOffset = zone instanceof ZoneOffset;
@@ -81,7 +84,7 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
                 + " COALESCE(SUM(discount_amount),0)::numeric(18,2) AS discount_amount"
                 + " FROM orders WHERE tenant_id = ?"
                 + REVENUE_STATUSES);
-    if (storeId != null) sql.append(" AND store_id = ?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (channel != null) sql.append(" AND channel = ?");
     if (from != null) sql.append(" AND created_at >= ?");
     if (to != null) sql.append(" AND created_at < ?");
@@ -94,7 +97,9 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
           if (fixedOffset) ps.setInt(i++, ((ZoneOffset) zone).getTotalSeconds());
           else ps.setString(i++, zone.getId());
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           if (channel != null) ps.setString(i++, channel);
           bindPeriod(ps, i, from, to);
         },
@@ -114,11 +119,13 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
    * <p>It also means the report is only as complete as the journal, which was written by nobody at
    * all until SJ-D17 unlocked it for the one role that completes a sale.
    *
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else these stores added together — never a store the caller has not
+   *     already been checked against
    * @return one row per cashier, biggest taker first
    */
   public List<SalesByStaffRow> salesByStaff(
-      UUID tenantId, UUID storeId, Instant from, Instant to, int limit) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, int limit) {
     StringBuilder sql =
         new StringBuilder(
             // A journal entry with no cashier is bucketed, never dropped: an unattributed sale is
@@ -129,7 +136,7 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
                 + " COALESCE(SUM(total),0)::numeric(18,2) AS gross_amount,"
                 + " COALESCE(SUM(discount_amount),0)::numeric(18,2) AS discount_amount"
                 + " FROM pos_log_entries WHERE tenant_id = ?");
-    if (storeId != null) sql.append(" AND store_id = ?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND transaction_ts >= ?");
     if (to != null) sql.append(" AND transaction_ts < ?");
     sql.append(" GROUP BY 1 ORDER BY gross_amount DESC, group_key ASC LIMIT ?");
@@ -139,7 +146,9 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           i = bindPeriod(ps, i, from, to);
           ps.setInt(i, limit);
         },

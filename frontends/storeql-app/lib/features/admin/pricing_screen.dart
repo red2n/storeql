@@ -189,6 +189,14 @@ Widget _emptyInList(ColorScheme cs, IconData icon, String text) => Center(
   ),
 );
 
+/// When a price list or a VAT rate takes effect: the start of the chosen day,
+/// in UTC, whole seconds. A bare '2026-01-01' is refused with INVALID_DATE —
+/// the column is TIMESTAMPTZ — so the day is sent as an instant, converted
+/// here at the UI edge (golden rule 14).
+String effectiveFromInstant(DateTime day) => DateTime.utc(day.year, day.month, day.day)
+    .toIso8601String()
+    .replaceFirst(RegExp(r'\.\d+Z$'), 'Z');
+
 /// The day an ISO date names, as a date (`1 Apr 2026`), read as it is written
 /// — a period's `2026-04-01T00:00:00Z` stays 1 April in any time zone.
 String _isoDay(String iso) {
@@ -389,14 +397,7 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
               'channel': _channel,
               if (_currency != null) 'currency': _currency,
               if (_zoneId != null) 'zoneId': _zoneId,
-              // A bare '2026-01-01' is rejected with INVALID_DATE — the column is
-              // TIMESTAMPTZ. Sent as a UTC instant, which is also what golden rule
-              // 14 asks for: convert at the UI edge, store UTC.
-              'effectiveFrom': DateTime.utc(
-                _from.year,
-                _from.month,
-                _from.day,
-              ).toIso8601String().replaceFirst(RegExp(r'\.\d+Z$'), 'Z'),
+              'effectiveFrom': effectiveFromInstant(_from),
             },
           );
       if (!mounted) return;
@@ -1565,7 +1566,7 @@ class _VatRateDialogState extends ConsumerState<_VatRateDialog> {
       'description': _descCtrl.text.trim().isEmpty
           ? null
           : _descCtrl.text.trim(),
-      'effectiveFrom': _from.toIso8601String().split('T').first,
+      'effectiveFrom': effectiveFromInstant(_from),
     };
     try {
       if (_isEdit) {

@@ -9,6 +9,7 @@ import static org.hamcrest.Matchers.not;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.storeql.iam.repo.UserRepository;
+import com.storeql.iam.service.AuthService;
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -59,6 +60,7 @@ class SandboxAccessIT {
   @Inject WebTarget target;
   @Inject TenantCreatedHandler tenants;
   @Inject UserRepository users;
+  @Inject AuthService auth;
   @Inject com.storeql.service.TenantDataErasureHandler erasure;
 
   @AfterAll
@@ -348,8 +350,12 @@ class SandboxAccessIT {
     return sandbox;
   }
 
+  /**
+   * A member of staff made the one way there is: provisioned in the business, then bound, as a
+   * StaffAssigned binds only a login already there.
+   */
   private Caller staff(Business b, String email, String tier) {
-    UUID id = register(email);
+    UUID id = Ids.parse(auth.provisionStaff(b.tenant(), email, PASSWORD).userId());
     users.bindStaffOnce(Ids.newId(), "sandbox-access-it", id, b.tenant(), tier, Ids.newId());
     return new Caller(id, tier, b.tenant());
   }

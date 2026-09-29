@@ -17,6 +17,7 @@ import jakarta.ws.rs.core.MediaType;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
@@ -44,11 +45,16 @@ public class SalesReportResource {
           "Gross/refunded/net revenue and order count, grouped by currency, over the given"
               + " inclusive date range. Optionally filtered by store and/or channel"
               + " (ONLINE/POS). A till sale voided after the fact (OrderVoided) is left out,"
-              + " its refunds with it.")
+              + " its refunds with it. A store that is named must be one the caller may act at;"
+              + " naming none reads the caller's own stores added together, or the whole"
+              + " business for an unrestricted caller (SJ-D74).")
   @APIResponse(responseCode = "200", description = "Sales summary rows, one per currency")
   @APIResponse(
       responseCode = "400",
       description = "from/to is not a valid yyyy-MM-dd date, or storeId is not a valid UUID")
+  @APIResponse(
+      responseCode = "403",
+      description = "storeId names a store the caller is not assigned to")
   @GET
   @Path("/summary")
   public ApiResponse<Object> summary(
@@ -56,9 +62,10 @@ public class SalesReportResource {
       @QueryParam("to") String to,
       @QueryParam("storeId") String storeId,
       @QueryParam("channel") String channel) {
+    Set<UUID> stores = ctx.reportStores(optUuid(storeId));
     var rows =
         service.salesSummary(
-            ctx.tenantId(), fromDay(from), toDay(to), optUuid(storeId), blankToNull(channel));
+            ctx.requireTenantId(), fromDay(from), toDay(to), stores, blankToNull(channel));
     return ApiResponse.ok(Mappers.toSalesSummaryReport(rows));
   }
 
@@ -68,11 +75,16 @@ public class SalesReportResource {
       description =
           "Daily revenue buckets (per currency), newest day first, over the given inclusive date"
               + " range. Optionally filtered by store and/or channel (ONLINE/POS). A voided till"
-              + " sale is left out.")
+              + " sale is left out. A store that is named must be one the caller may act at;"
+              + " naming none reads the caller's own stores added together, or the whole"
+              + " business for an unrestricted caller (SJ-D74).")
   @APIResponse(responseCode = "200", description = "Daily sales rows")
   @APIResponse(
       responseCode = "400",
       description = "from/to is not a valid yyyy-MM-dd date, or storeId is not a valid UUID")
+  @APIResponse(
+      responseCode = "403",
+      description = "storeId names a store the caller is not assigned to")
   @GET
   @Path("/by-day")
   public ApiResponse<Object> byDay(
@@ -80,9 +92,10 @@ public class SalesReportResource {
       @QueryParam("to") String to,
       @QueryParam("storeId") String storeId,
       @QueryParam("channel") String channel) {
+    Set<UUID> stores = ctx.reportStores(optUuid(storeId));
     var rows =
         service.salesByDay(
-            ctx.tenantId(), fromDay(from), toDay(to), optUuid(storeId), blankToNull(channel));
+            ctx.requireTenantId(), fromDay(from), toDay(to), stores, blankToNull(channel));
     return ApiResponse.ok(Mappers.toSalesByDayReport(rows));
   }
 
@@ -122,12 +135,17 @@ public class SalesReportResource {
               + " (product-svc's re-announce fills that) — shown rather than dropped, because takings"
               + " that cannot be placed are still takings. Gross is before refunds: a refund is known"
               + " by order, not by line. The lines of a voided till sale are left out. Names are the"
-              + " catalogue's; this report answers in ids.")
+              + " catalogue's; this report answers in ids. A store that is named must be one the"
+              + " caller may act at; naming none reads the caller's own stores added together, or"
+              + " the whole business for an unrestricted caller (SJ-D74).")
   @APIResponse(responseCode = "200", description = "One row per category and currency")
   @APIResponse(
       responseCode = "400",
       description =
           "from/to is not a yyyy-MM-dd date, storeId is not a UUID, or level is not leaf or top")
+  @APIResponse(
+      responseCode = "403",
+      description = "storeId names a store the caller is not assigned to")
   @GET
   @Path("/by-category")
   public ApiResponse<Object> byCategory(
@@ -140,12 +158,13 @@ public class SalesReportResource {
     if (!"leaf".equals(chosen) && !"top".equals(chosen)) {
       throw ApiException.badRequest("REPORT_LEVEL_INVALID", "level must be leaf or top");
     }
+    Set<UUID> stores = ctx.reportStores(optUuid(storeId));
     var rows =
         service.salesByCategory(
-            ctx.tenantId(),
+            ctx.requireTenantId(),
             fromDay(from),
             toDay(to),
-            optUuid(storeId),
+            stores,
             blankToNull(channel),
             "top".equals(chosen));
     return ApiResponse.ok(Mappers.toSalesByCategoryReport(chosen, rows));
@@ -163,18 +182,24 @@ public class SalesReportResource {
               + " hours had no pay rate in force the cost is **null rather than zero**, and"
               + " `uncostedHours` says how much could not be costed: a Saturday shown as free labour"
               + " would be worse than one that says it does not know. A voided till sale is not"
-              + " takings and is left out.")
+              + " takings and is left out. A store that is named must be one the caller may act"
+              + " at; naming none reads the caller's own stores added together, or the whole"
+              + " business for an unrestricted caller (SJ-D74).")
   @APIResponse(responseCode = "200", description = "One row per day, newest first")
   @APIResponse(
       responseCode = "400",
       description = "from/to is not a yyyy-MM-dd date, or storeId is not a UUID")
+  @APIResponse(
+      responseCode = "403",
+      description = "storeId names a store the caller is not assigned to")
   @GET
   @Path("/labour")
   public ApiResponse<Object> labour(
       @QueryParam("from") String from,
       @QueryParam("to") String to,
       @QueryParam("storeId") String storeId) {
-    var rows = service.labourByDay(ctx.tenantId(), fromDay(from), toDay(to), optUuid(storeId));
+    Set<UUID> stores = ctx.reportStores(optUuid(storeId));
+    var rows = service.labourByDay(ctx.requireTenantId(), fromDay(from), toDay(to), stores);
     return ApiResponse.ok(Mappers.toLabourReport(rows));
   }
 }

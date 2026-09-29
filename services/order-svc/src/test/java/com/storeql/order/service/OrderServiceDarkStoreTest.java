@@ -74,6 +74,8 @@ class OrderServiceDarkStoreTest {
     // default null answer is exactly "no slot".
     svc.windows = windows;
     svc.jurisdictions = org.mockito.Mockito.mock(com.storeql.service.Jurisdictions.class);
+    // Stop-sale and certified scales: nothing here is recalled or weighed; a mock refuses nothing.
+    svc.saleChecks = org.mockito.Mockito.mock(SaleChecks.class);
     lenient().when(profiles.requireCurrency(TENANT)).thenReturn("USD");
     when(ctx.requireTenantId()).thenReturn(TENANT);
     when(tenantStatusRepo.isActive(any())).thenReturn(true);
@@ -95,7 +97,7 @@ class OrderServiceDarkStoreTest {
         fulfilmentType,
         List.of(
             new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null)),
+                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null, null, null)),
         null,
         null,
         null,
@@ -112,6 +114,8 @@ class OrderServiceDarkStoreTest {
         delivery ? "Sam Shopper" : null,
         delivery ? "07700900123" : null,
         "07700900123",
+        null,
+        null,
         null,
         null,
         null,
@@ -141,18 +145,19 @@ class OrderServiceDarkStoreTest {
 
   @Test
   void aDeliveryIsPlacedAtADarkStoreAsAtAnyShop() {
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList()))
         .thenAnswer(inv -> inv.getArgument(0));
     var order = svc.placeOrder(request("ONLINE", "DELIVERY"), ctx, null);
     assertEquals(DARK, order.storeId());
-    verify(repo, times(1)).createOrder(any(), anyList(), any(), any(), anyList(), anyList());
+    verify(repo, times(1))
+        .createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList());
   }
 
   @Test
   void storeTypesThatCannotBeReadRefuseNothing() {
     when(profiles.stores(TENANT, DARK))
         .thenThrow(new ApiException(503, "TENANT_STORES_UNAVAILABLE", "down", List.of()));
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList()))
         .thenAnswer(inv -> inv.getArgument(0));
     var order = svc.placeOrder(request("ONLINE", "PICKUP"), ctx, null);
     assertEquals("PICKUP", order.fulfilmentType());

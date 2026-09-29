@@ -49,6 +49,9 @@ public class JwtAuthFilter implements ContainerRequestFilter {
   private static final Set<String> PUBLIC_PATHS =
       Set.of(
           "api/iam-svc/auth/register",
+          // Business sign-up ("Start a business"): like a shopper's sign-up, it is how a person
+          // first gets a token, so it cannot ask for one.
+          "api/iam-svc/auth/register/business",
           // The price list a prospect reads before signing up (21.13): plans on sale, no identity.
           "api/tenant-svc/plans",
           // The API's versions and their policy (22.8): what an integrator reads before holding

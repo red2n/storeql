@@ -155,10 +155,22 @@ export function poll(seconds, fn, interval = 1) {
 
 // ── identities ────────────────────────────────────────────────────────────────
 
+/** A shopper's sign-up: a CUSTOMER login of no business, never anybody's staff (see provisionStaff). */
 export function register(label) {
   const email = `${label}-${uniq()}@k6.storeql.test`;
   const res = call('POST', '/api/iam-svc/auth/register', { body: { email, password: PASSWORD } });
   const d = must(res, 201, `register ${email}`);
+  return { email, password: PASSWORD, token: d.accessToken, refreshToken: d.refreshToken, userId: claims(d.accessToken).sub };
+}
+
+/**
+ * "Start a business": the sign-up of a login that is about to own a business — STAFF, with no
+ * tenant and no role until the business it creates makes it that business's OWNER.
+ */
+export function registerBusiness(label) {
+  const email = `${label}-${uniq()}@k6.storeql.test`;
+  const res = call('POST', '/api/iam-svc/auth/register/business', { body: { email, password: PASSWORD } });
+  const d = must(res, 201, `register a business login ${email}`);
   return { email, password: PASSWORD, token: d.accessToken, refreshToken: d.refreshToken, userId: claims(d.accessToken).sub };
 }
 
@@ -275,7 +287,8 @@ const STORE_DEFAULTS = {
  * then add `stores` stores (the first is the default store, with its DEFAULT zone).
  */
 export function onboardTenant(label, { country = 'GB', currency = 'GBP', stores = 1 } = {}) {
-  const owner = register(`${label}-owner`);
+  // An owner signs up as a business, never as a shopper (a shopper's login never reaches the wizard).
+  const owner = registerBusiness(`${label}-owner`);
   const run = uniq();
   const created = call('POST', '/api/tenant-svc/onboarding/tenants', {
     token: owner.token,
@@ -300,9 +313,23 @@ export function addStore(tenant, suffix, type = 'STORE') {
   return { id: store.id, code, name: store.name };
 }
 
+/**
+ * A staff login made in the tenant the one way there is (29 Sep 2026): the owner provisions the
+ * address in the business (`POST /auth/admin/staff-users`), and the login signs in — its token names
+ * the business and holds no role until an assignment binds one. A StaffAssigned binds only a login
+ * already in the business, so a shopper's sign-up (`register`) is never made anybody's staff.
+ */
+export function provisionStaff(tenant, label) {
+  const email = `${label}-${uniq()}@k6.storeql.test`;
+  const res = call('POST', '/api/iam-svc/auth/admin/staff-users', { token: tenant.owner.token, body: { email, password: PASSWORD } });
+  const { userId } = must(res, 200, `provision staff ${email}`);
+  const d = must(login({ email, password: PASSWORD }), 200, `sign in ${email}`);
+  return { email, password: PASSWORD, token: d.accessToken, refreshToken: d.refreshToken, userId };
+}
+
 /** A staff login in the tenant with `role` at `storeIds`, signed in with that role in its token. */
 export function staffUser(tenant, role, storeIds) {
-  const user = register(`${tenant.label}-${role.toLowerCase()}`);
+  const user = provisionStaff(tenant, `${tenant.label}-${role.toLowerCase()}`);
   for (const storeId of storeIds) {
     const res = call('POST', '/api/tenant-svc/admin/staff', {
       token: tenant.owner.token,

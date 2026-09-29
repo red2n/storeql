@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -36,12 +37,13 @@ public class ReportingService {
    * Cross-store on-hand quantities, projected from consumed stock-movement events.
    *
    * @param tenantId owning tenant
-   * @param storeId restrict to one store, or {@code null} for every store in the tenant
+   * @param stores the stores the read is scoped to (the caller's own, added together) — {@code
+   *     null} for every store in the tenant
    * @param variantId restrict to one variant, or {@code null} for every variant
    * @return one row per store/variant pair with stock on hand
    */
-  public List<InventoryProjection> onHand(UUID tenantId, UUID storeId, UUID variantId) {
-    return repo.queryOnHand(tenantId, storeId, variantId);
+  public List<InventoryProjection> onHand(UUID tenantId, Set<UUID> stores, UUID variantId) {
+    return repo.queryOnHand(tenantId, stores, variantId);
   }
 
   // ── Gap #48: Supply/demand netting ───────────────────────────────────────
@@ -58,14 +60,15 @@ public class ReportingService {
    * Nets on-hand stock against open in-transit supply to show net available.
    *
    * @param tenantId owning tenant
-   * @param storeId restrict to one store, or {@code null} for every store in the tenant
+   * @param stores the stores the read is scoped to (the caller's own, added together) — {@code
+   *     null} for every store in the tenant
    * @param variantId restrict to one variant, or {@code null} for every variant
    * @return the on-hand rows and the open supply lines to net them against
    */
-  public NettingResult supplyDemandNetting(UUID tenantId, UUID storeId, UUID variantId) {
+  public NettingResult supplyDemandNetting(UUID tenantId, Set<UUID> stores, UUID variantId) {
     return new NettingResult(
-        repo.queryOnHand(tenantId, storeId, variantId),
-        repo.querySupplyLines(tenantId, storeId, variantId));
+        repo.queryOnHand(tenantId, stores, variantId),
+        repo.querySupplyLines(tenantId, stores, variantId));
   }
 
   // ── Gap #49: Movement statistics ─────────────────────────────────────────
@@ -74,16 +77,17 @@ public class ReportingService {
    * Stock in/out/net totals bucketed over a fixed window.
    *
    * @param tenantId owning tenant
-   * @param storeId restrict to one store, or {@code null} for every store in the tenant
+   * @param stores the stores the read is scoped to (the caller's own, added together) — {@code
+   *     null} for every store in the tenant
    * @param variantId restrict to one variant, or {@code null} for every variant
    * @param bucketDays days per bucket (1 daily, 7 weekly, 30 monthly-ish); values outside 1..365
    *     are silently coerced to 7 rather than rejected, so a nonsense query still returns a report
    * @return one row per bucket per store/variant
    */
   public List<MovementStat> movementStats(
-      UUID tenantId, UUID storeId, UUID variantId, int bucketDays) {
+      UUID tenantId, Set<UUID> stores, UUID variantId, int bucketDays) {
     int days = (bucketDays < 1 || bucketDays > 365) ? 7 : bucketDays;
-    return repo.queryMovementStats(tenantId, storeId, variantId, days);
+    return repo.queryMovementStats(tenantId, stores, variantId, days);
   }
 
   // ── Projection update helpers (called by Kafka handlers) ─────────────────
@@ -217,11 +221,13 @@ public class ReportingService {
   /**
    * What each category took over a range, by leaf category or rolled up to the top of the tree.
    *
+   * @param stores the stores the read is scoped to (the caller's own, added together) — {@code
+   *     null} for every store in the tenant
    * @param top true to group by each category's top-level ancestor
    */
   public List<SalesCategoryStat> salesByCategory(
-      UUID tenantId, Instant from, Instant to, UUID storeId, String channel, boolean top) {
-    return repo.salesByCategory(tenantId, from, to, storeId, channel, top);
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel, boolean top) {
+    return repo.salesByCategory(tenantId, from, to, stores, channel, top);
   }
 
   /**
@@ -249,11 +255,12 @@ public class ReportingService {
    *
    * @param from inclusive start, UTC
    * @param to exclusive end, UTC
-   * @param storeId one store, or null for every store in the business
+   * @param stores the stores the read is scoped to (the caller's own, added together) — {@code
+   *     null} for every store in the business
    */
   public java.util.List<com.storeql.reporting.domain.Domain.LabourDayStat> labourByDay(
-      UUID tenantId, Instant from, Instant to, UUID storeId) {
-    return repo.labourByDay(tenantId, from, to, storeId);
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores) {
+    return repo.labourByDay(tenantId, from, to, stores);
   }
 
   /** Add a refund to a sale's projected total, deduped on the payment event's eventId. */
@@ -283,13 +290,14 @@ public class ReportingService {
    * @param tenantId owning tenant
    * @param from inclusive start of the period, UTC
    * @param to exclusive end of the period, UTC
-   * @param storeId restrict to one store, or {@code null} for every store in the tenant
+   * @param stores the stores the read is scoped to (the caller's own, added together) — {@code
+   *     null} for every store in the tenant
    * @param channel restrict to {@code ONLINE} or {@code POS}, or {@code null} for both
    * @return the summary rows, net of any refunds already projected; voided sales left out
    */
   public List<SalesSummary> salesSummary(
-      UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {
-    return repo.salesSummary(tenantId, from, to, storeId, channel);
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel) {
+    return repo.salesSummary(tenantId, from, to, stores, channel);
   }
 
   /**
@@ -298,12 +306,13 @@ public class ReportingService {
    * @param tenantId owning tenant
    * @param from inclusive start of the period, UTC
    * @param to exclusive end of the period, UTC
-   * @param storeId restrict to one store, or {@code null} for every store in the tenant
+   * @param stores the stores the read is scoped to (the caller's own, added together) — {@code
+   *     null} for every store in the tenant
    * @param channel restrict to {@code ONLINE} or {@code POS}, or {@code null} for both
    * @return one row per day in the period that saw a sale that stands (voided sales left out)
    */
   public List<SalesDayStat> salesByDay(
-      UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {
-    return repo.salesByDay(tenantId, from, to, storeId, channel);
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel) {
+    return repo.salesByDay(tenantId, from, to, stores, channel);
   }
 }

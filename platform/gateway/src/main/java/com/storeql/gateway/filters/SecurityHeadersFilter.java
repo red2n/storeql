@@ -35,8 +35,11 @@ public class SecurityHeadersFilter implements ContainerResponseFilter {
     h.putSingle("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
 
     String path = req.getUriInfo().getPath();
+    // A sign-up answers with a token pair just as a sign-in does, so it is never cached either:
+    // "/auth/register" covers the shopper's sign-up and the business's ("/auth/register/business").
     if (path != null
         && (path.contains("/auth/login")
+            || path.contains("/auth/register")
             || path.contains("/auth/refresh")
             || path.contains("/auth/password/"))) {
       h.putSingle("Cache-Control", "no-store");

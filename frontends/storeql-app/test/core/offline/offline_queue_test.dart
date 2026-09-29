@@ -56,13 +56,17 @@ class _FakeApiClient implements ApiClient {
 /// Records every request, and can be switched between "server reachable",
 /// "network gone", and "server rejects".
 class _ScriptedAdapter implements HttpClientAdapter {
-  final List<({String path, String? idempotencyKey})> calls = [];
+  final List<({String path, String? idempotencyKey, Object? data})> calls = [];
 
   /// When set, every request fails as if the network were gone.
   bool offline = false;
 
   /// path fragment → status to answer with instead of success.
   final Map<String, int> rejectWith = {};
+
+  /// The code and the words a rejection answers with.
+  String rejectCode = 'ORDER_BAD';
+  String rejectMessage = 'rejected';
 
   /// Fails only the Nth matching request, then behaves normally — used to cut
   /// the line partway through a sale.
@@ -80,6 +84,7 @@ class _ScriptedAdapter implements HttpClientAdapter {
     calls.add((
       path: options.path,
       idempotencyKey: options.headers['Idempotency-Key'] as String?,
+      data: options.data,
     ));
 
     if (offline) {
@@ -89,7 +94,7 @@ class _ScriptedAdapter implements HttpClientAdapter {
     for (final entry in rejectWith.entries) {
       if (options.path.contains(entry.key)) {
         return ResponseBody.fromString(
-          '{"data":null,"error":{"code":"ORDER_BAD","message":"rejected"}}',
+          '{"data":null,"error":{"code":"$rejectCode","message":"$rejectMessage"}}',
           entry.value,
           headers: {
             Headers.contentTypeHeader: [Headers.jsonContentType]
@@ -130,6 +135,23 @@ OfflineSale _sale({
       total: 5.0,
       itemCount: 1,
       orderId: orderId,
+    );
+
+/// Who was signed in at the till when a sale was made: a UUIDv7, as iam-svc mints them.
+const _cashier = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d60';
+
+/// A sale rung up at [capturedAt] (null: a time that could not be read back)
+/// by [rungUpBy].
+OfflineSale _captured(DateTime? capturedAt, String? rungUpBy) => OfflineSale(
+      id: _saleId,
+      capturedAt: capturedAt,
+      rungUpBy: rungUpBy,
+      storeId: 'store-1',
+      currency: 'GBP',
+      orderRequest: const {'storeId': 'store-1', 'channel': 'POS'},
+      tenders: const [OfflineTender(body: {'method': 'CASH'}, amount: 5.0)],
+      total: 5.0,
+      itemCount: 1,
     );
 
 ({ProviderContainer container, _ScriptedAdapter adapter, _MemStorage storage})
@@ -181,6 +203,60 @@ void main() {
     expect(h.container.read(offlineQueueProvider), isEmpty,
         reason: 'a fully accepted sale leaves the queue');
     expect(h.storage.data[StorageKeys.posOfflineSales], '[]');
+  });
+
+  test('a replayed order says when the cashier rang it up', () async {
+    // A sale made offline has already happened. Within its grace order-svc
+    // records the replay whatever the recalls and scales say, and flags what
+    // was wrong when it was rung up for a manager — so it has to know when that
+    // was, not just when the replay arrives.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale());
+    await notifier.sync();
+
+    final order = h.adapter.calls.first.data as Map<String, dynamic>;
+    expect(order['capturedAt'], '2026-09-08T11:30:00.000Z');
+    expect(order['channel'], 'POS', reason: 'the stored request, as it was');
+  });
+
+  test('a replayed order says who rang it up, as the till recorded at the sale',
+      () async {
+    // The queue outlives a sign-out and a manager may press Sync now: the
+    // audit trail must name the cashier who made the sale, not the sender.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_captured(DateTime.utc(2026, 9, 8, 11, 30), _cashier));
+    await notifier.sync();
+
+    final order = h.adapter.calls.first.data as Map<String, dynamic>;
+    expect(order['rungUpBy'], _cashier);
+    expect(order['capturedAt'], '2026-09-08T11:30:00.000Z');
+  });
+
+  test('a sale queued by a till that recorded nobody says nobody', () async {
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale());
+    await notifier.sync();
+
+    final order = h.adapter.calls.first.data as Map<String, dynamic>;
+    expect(order.containsKey('rungUpBy'), isFalse);
+  });
+
+  test('a sale whose capture time could not be read is sent with none, never '
+      'with now', () async {
+    // Now would be an invented moment taken on the till's word. With none,
+    // order-svc judges the sale as made now: refused over a recall that
+    // stands, and parked for a manager.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_captured(null, _cashier));
+    await notifier.sync();
+
+    final order = h.adapter.calls.first.data as Map<String, dynamic>;
+    expect(order.containsKey('capturedAt'), isFalse);
+    expect(order['rungUpBy'], _cashier, reason: 'who rang it up is still said');
   });
 
   test('a sale that lands is remembered as synced, with the order the server gave it',
@@ -320,6 +396,31 @@ void main() {
 
     await notifier.sync();
     expect(h.adapter.countOf('/orders'), 1, reason: 'not retried while failed');
+  });
+
+  test('a replay the server still refuses over a recall is parked for a manager, not retried',
+      () async {
+    // Within its grace order-svc never refuses a replay over a recall or a
+    // scale: it records the sale and flags it for a manager, and the till
+    // hears nothing of it. Only a sale whose time it will not take on the
+    // till's word (older than the grace) is judged as made now and refused —
+    // the same answer on every attempt, so it is parked with the server's
+    // words rather than retried.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    h.adapter.rejectWith['/orders'] = 409;
+    h.adapter.rejectCode = 'ORDER_LINE_RECALLED';
+    h.adapter.rejectMessage = 'Judged as a sale made now. Hand the sale to a manager.';
+    await notifier.enqueue(_sale());
+    await notifier.sync();
+
+    final parked = h.container.read(offlineQueueProvider).single;
+    expect(parked.status, OfflineSaleStatus.failed);
+    expect(parked.lastError, 'Judged as a sale made now. Hand the sale to a manager.');
+    expect(h.adapter.countOf('/payments'), 0, reason: 'no tender for an order that is not placed');
+
+    await notifier.sync();
+    expect(h.adapter.countOf('/orders'), 1, reason: 'not retried while parked');
   });
 
   test('one rejected sale does not block the ones behind it', () async {

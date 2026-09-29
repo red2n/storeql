@@ -10,6 +10,7 @@ import static org.hamcrest.Matchers.startsWith;
 
 import com.auth0.jwt.JWT;
 import com.storeql.iam.repo.UserRepository;
+import com.storeql.iam.service.AuthService;
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -62,6 +63,7 @@ class ApiKeyIT {
 
   @Inject WebTarget target;
   @Inject UserRepository users;
+  @Inject AuthService auth;
 
   @AfterAll
   static void stop() {
@@ -134,8 +136,12 @@ class ApiKeyIT {
     return new Business(tenant, Ids.newId(), ownerId, new Caller(ownerId, "OWNER", tenant));
   }
 
+  /**
+   * A member of staff made the one way there is: provisioned in the business, then bound at its
+   * store, as a StaffAssigned binds only a login already there.
+   */
   private Caller staff(Business b, String email, String tier) {
-    UUID id = register(email);
+    UUID id = Ids.parse(auth.provisionStaff(b.tenant(), email, PASSWORD).userId());
     users.bindStaffOnce(Ids.newId(), CONSUMER, id, b.tenant(), tier, b.store());
     return new Caller(id, tier, b.tenant());
   }

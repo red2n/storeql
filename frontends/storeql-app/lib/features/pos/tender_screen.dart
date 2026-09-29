@@ -265,6 +265,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     var sale = OfflineSale(
       id: idemBase,
       capturedAt: DateTime.now(),
+      rungUpBy: _signedInUserId(),
       storeId: storeId,
       currency: currency,
       total: _due,
@@ -293,6 +294,11 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
               if (l.weighingInstrumentId != null)
                 'weighingInstrumentId': l.weighingInstrumentId,
               if (l.markdownId != null) 'markdownId': l.markdownId,
+              // The pack's own lot and expiry, when a 2D code carried them:
+              // order-svc checks them against open recalls as the till does.
+              if (l.batchNo != null) 'batchNo': l.batchNo,
+              if (l.expiry != null)
+                'expiry': l.expiry!.toIso8601String().substring(0, 10),
             },
         ],
       },
@@ -623,6 +629,16 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     );
   }
 
+  /// Who is signed in at the till now, as the sale is made. Kept with a sale
+  /// that may be queued: the queue outlives a sign-out and anybody may press
+  /// Sync now, and the audit trail must name who rang the sale up.
+  String? _signedInUserId() {
+    final auth = ref.read(authNotifierProvider).value;
+    return auth is AuthAuthenticated && auth.userId.isNotEmpty
+        ? auth.userId
+        : null;
+  }
+
   PosReceiptData _buildReceiptData({
     required String orderId,
     required List<PosLine> cartSnapshot,
@@ -942,6 +958,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final sale = OfflineSale(
       id: idemBase,
       capturedAt: DateTime.now(),
+      rungUpBy: _signedInUserId(),
       storeId: storeId,
       currency: currency,
       total: 0,
@@ -966,6 +983,11 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
               if (l.weighingInstrumentId != null)
                 'weighingInstrumentId': l.weighingInstrumentId,
               if (l.markdownId != null) 'markdownId': l.markdownId,
+              // The pack's own lot and expiry, when a 2D code carried them:
+              // order-svc checks them against open recalls as the till does.
+              if (l.batchNo != null) 'batchNo': l.batchNo,
+              if (l.expiry != null)
+                'expiry': l.expiry!.toIso8601String().substring(0, 10),
             },
         ],
       },

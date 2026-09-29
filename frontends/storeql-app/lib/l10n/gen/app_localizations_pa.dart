@@ -205,4 +205,21 @@ class AppLocalizationsPa extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'ਨਵੇਂ ਲਿੰਕ ਲਈ ਬੇਨਤੀ ਕਰੋ';
+
+  @override
+  String get startBusiness => 'ਕਾਰੋਬਾਰ ਸ਼ੁਰੂ ਕਰੋ';
+
+  @override
+  String get startBusinessTitle => 'ਆਪਣਾ ਕਾਰੋਬਾਰ ਸ਼ੁਰੂ ਕਰੋ';
+
+  @override
+  String get startBusinessIntro =>
+      'ਉਹ ਲੌਗਇਨ ਬਣਾਓ ਜਿਸ ਨਾਲ ਤੁਸੀਂ ਆਪਣਾ ਕਾਰੋਬਾਰ ਚਲਾਓਗੇ। ਫਿਰ ਤੁਸੀਂ ਕਾਰੋਬਾਰ ਅਤੇ ਉਸਦੀ ਪਹਿਲੀ ਦੁਕਾਨ ਸੈੱਟ ਕਰੋਗੇ।';
+
+  @override
+  String get fieldPasswordConfirm => 'ਪਾਸਵਰਡ ਦੀ ਪੁਸ਼ਟੀ ਕਰੋ';
+
+  @override
+  String get fieldPasswordMismatch =>
+      'ਇਹ ਉੱਪਰ ਦਿੱਤੇ ਪਾਸਵਰਡ ਨਾਲ ਮੇਲ ਨਹੀਂ ਖਾਂਦਾ।';
 }

@@ -668,17 +668,51 @@ public class ProductRepository extends BaseOutboxRepository {
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
   }
 
+  /** A variant with its product, as the scan and resolve lookups read it; add the WHERE. */
+  private static final String VARIANT_WITH_PRODUCT =
+      "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
+          + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
+          + " v.created_at AS v_cat, v.updated_at AS v_uat,"
+          + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
+          + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
+          + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
+          + " FROM product_variants v"
+          + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id";
+
+  /**
+   * Looks a variant up by the SKU a cashier typed because its label would not scan: exactly as
+   * written, else in any case when only one variant answers to it. The unique index is on the SKU
+   * as written, so two that differ only in case can both exist, and neither is guessed at.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param sku what was typed, trimmed
+   * @return the variant, or empty when none or more than one answers to it
+   */
+  public Optional<VariantWithProduct> findVariantBySku(UUID tenantId, String sku) {
+    List<VariantWithProduct> rows =
+        query(
+            VARIANT_WITH_PRODUCT
+                + " WHERE v.tenant_id = ? AND upper(v.sku) = upper(?)"
+                + " AND v.status = 'ACTIVE' AND p.status <> 'DELISTED'"
+                + " ORDER BY (v.sku = ?) DESC LIMIT 2",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, sku);
+              ps.setString(3, sku);
+            },
+            ProductRepository::mapVariantWithProduct,
+            "find variant by sku");
+    if (rows.isEmpty()) return Optional.empty();
+    if (rows.size() == 1 || sku.equals(rows.get(0).variant().sku())) {
+      return Optional.of(rows.get(0));
+    }
+    return Optional.empty();
+  }
+
   /** Looks up a variant by barcode and returns it together with its parent product in one query. */
   public Optional<VariantWithProduct> findVariantByBarcode(UUID tenantId, String barcode) {
     return query(
-            "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
-                + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
-                + " v.created_at AS v_cat, v.updated_at AS v_uat,"
-                + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
-                + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
-                + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
-                + " FROM product_variants v"
-                + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id"
+            VARIANT_WITH_PRODUCT
                 + " WHERE v.tenant_id = ? AND v.barcode = ?"
                 + " AND v.status = 'ACTIVE' AND p.status <> 'DELISTED'",
             ps -> {
@@ -707,14 +741,7 @@ public class ProductRepository extends BaseOutboxRepository {
    */
   public Optional<VariantWithProduct> findVariantByGtin(UUID tenantId, String gtin14) {
     return query(
-            "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
-                + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
-                + " v.created_at AS v_cat, v.updated_at AS v_uat,"
-                + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
-                + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
-                + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
-                + " FROM product_variants v"
-                + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id"
+            VARIANT_WITH_PRODUCT
                 + " WHERE v.tenant_id = ? AND v.gtin14 = ?"
                 + " AND v.status = 'ACTIVE' AND p.status <> 'DELISTED'"
                 + " ORDER BY v.created_at, v.id LIMIT 1",
@@ -739,15 +766,7 @@ public class ProductRepository extends BaseOutboxRepository {
       return List.of();
     }
     return query(
-        "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
-            + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
-            + " v.created_at AS v_cat, v.updated_at AS v_uat,"
-            + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
-            + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
-            + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
-            + " FROM product_variants v"
-            + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id"
-            + " WHERE v.tenant_id = ? AND v.id = ANY(?)",
+        VARIANT_WITH_PRODUCT + " WHERE v.tenant_id = ? AND v.id = ANY(?)",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids.toArray()));

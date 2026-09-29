@@ -180,10 +180,27 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
     try {
       // 1. Place the order. Replays on the stored key: order-svc returns the
       //    original order for a duplicate rather than creating a second one.
+      //    It says when the cashier rang it up, and within order-svc's grace
+      //    the sale is recorded whatever the recalls and scales say — its goods
+      //    have gone — with anything that was wrong then flagged for a manager
+      //    on the audit trail. Only a sale older than the grace comes back
+      //    refused, and is parked (see isPermanentRejection).
       if (current.orderId == null) {
+        final capturedAt = current.capturedAt;
         final resp = await dio.post(
           '/${ApiConstants.order}/orders',
-          data: current.orderRequest,
+          data: {
+            ...current.orderRequest,
+            // A capture time that could not be read back is sent as none,
+            // never as now: the server then judges the sale as made now —
+            // refused over a recall that stands, and parked for a manager —
+            // rather than taking an invented moment on the till's word.
+            if (capturedAt != null)
+              'capturedAt': capturedAt.toUtc().toIso8601String(),
+            // Who rang it up, as the till recorded at the sale: whoever is
+            // signed in now may not be the cashier who made it.
+            if (current.rungUpBy != null) 'rungUpBy': current.rungUpBy,
+          },
           options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'order')}),
         );
         final order = resp.data['data'] as Map<String, dynamic>;

@@ -206,4 +206,21 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'نیا لنک طلب کریں';
+
+  @override
+  String get startBusiness => 'کاروبار شروع کریں';
+
+  @override
+  String get startBusinessTitle => 'اپنا کاروبار شروع کریں';
+
+  @override
+  String get startBusinessIntro =>
+      'وہ لاگ ان بنائیں جس سے آپ اپنا کاروبار چلائیں گے۔ اس کے بعد آپ کاروبار اور اس کی پہلی دکان ترتیب دیں گے۔';
+
+  @override
+  String get fieldPasswordConfirm => 'پاس ورڈ کی تصدیق کریں';
+
+  @override
+  String get fieldPasswordMismatch =>
+      'یہ اوپر دیے گئے پاس ورڈ سے میل نہیں کھاتا۔';
 }

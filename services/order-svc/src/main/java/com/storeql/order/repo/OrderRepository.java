@@ -8,6 +8,7 @@ import com.storeql.order.domain.Domain.GiftCardTransaction;
 import com.storeql.order.domain.Domain.Layaway;
 import com.storeql.order.domain.Domain.LayawayDeposit;
 import com.storeql.order.domain.Domain.LayawayItem;
+import com.storeql.order.domain.Domain.OfflineSaleFlag;
 import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderDiscount;
 import com.storeql.order.domain.Domain.OrderItem;
@@ -89,6 +90,23 @@ public class OrderRepository extends BaseOutboxRepository {
       OrderDiscount discount,
       List<com.storeql.order.client.PricingClient.AppliedPromotion> appliedPromotions,
       List<com.storeql.order.domain.Domain.OrderDeposit> deposits) {
+    return createOrder(order, items, event, discount, appliedPromotions, deposits, List.of());
+  }
+
+  /**
+   * @param offlineFlags what a till sale replayed from the offline queue sold that a recall
+   *     covered, or weighed on a scale not fit for trade, when it was rung up: written with the
+   *     order, so the audit trail names every such sale that stands and never one that does not,
+   *     and a retried replay whose order already stands writes none
+   */
+  public Order createOrder(
+      Order order,
+      List<OrderItem> items,
+      OutboxRow event,
+      OrderDiscount discount,
+      List<com.storeql.order.client.PricingClient.AppliedPromotion> appliedPromotions,
+      List<com.storeql.order.domain.Domain.OrderDeposit> deposits,
+      List<OfflineSaleFlag> offlineFlags) {
     return inTx(
         c -> {
           // Delivery and collection slots: the place is taken once, before the insert that would
@@ -108,7 +126,8 @@ public class OrderRepository extends BaseOutboxRepository {
           }
           return createOrderTx(
               c,
-              new NewOrder(order, items, event, discount, appliedPromotions, deposits),
+              new NewOrder(
+                  order, items, event, discount, appliedPromotions, deposits, offlineFlags),
               null,
               null);
         },
@@ -131,7 +150,8 @@ public class OrderRepository extends BaseOutboxRepository {
 
   /**
    * One order as a checkout writes it: the order, its lines, the discount audit, the promotions and
-   * deposits it carries, and its OrderPlaced.
+   * deposits it carries, the offline-sale entries a replayed till sale leaves on the audit trail,
+   * and its OrderPlaced.
    */
   public record NewOrder(
       Order order,
@@ -139,11 +159,13 @@ public class OrderRepository extends BaseOutboxRepository {
       OutboxRow event,
       OrderDiscount discount,
       List<com.storeql.order.client.PricingClient.AppliedPromotion> appliedPromotions,
-      List<com.storeql.order.domain.Domain.OrderDeposit> deposits) {
+      List<com.storeql.order.domain.Domain.OrderDeposit> deposits,
+      List<OfflineSaleFlag> offlineFlags) {
     public NewOrder {
       items = List.copyOf(items);
       appliedPromotions = List.copyOf(appliedPromotions);
       deposits = List.copyOf(deposits);
+      offlineFlags = List.copyOf(offlineFlags);
     }
   }
 
@@ -344,6 +366,7 @@ public class OrderRepository extends BaseOutboxRepository {
     for (var deposit : n.deposits()) DepositRepository.insertDeposit(c, deposit);
     appendStatusHistory(c, order.tenantId(), order.id(), null, order.status(), "created", null);
     if (n.discount() != null) insertOrderDiscount(c, n.discount());
+    for (OfflineSaleFlag flag : n.offlineFlags()) insertOfflineSaleFlag(c, flag);
     insertOrderPromotionsTx(c, order.tenantId(), order.id(), n.appliedPromotions());
     insertOutbox(c, n.event());
     return order;
@@ -368,6 +391,40 @@ public class OrderRepository extends BaseOutboxRepository {
       ps.setString(8, d.reason());
       ps.setObject(9, d.grantedBy());
       ps.setString(10, d.grantedRole());
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Append-only (golden rule #8): inserted with the order it flags, never updated or deleted. The
+   * order's own insert comes first, so a replay whose key already stands fails there and rolls this
+   * back with it.
+   */
+  private static void insertOfflineSaleFlag(Connection c, OfflineSaleFlag f) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO offline_sale_flags"
+                + " (id,tenant_id,order_id,store_id,kind,line_no,variant_id,batch_no,expiry,"
+                + "  recall_id,recall_reference,instrument_id,instrument_standing,rung_up_at,"
+                + "  reason,cashier_id,replayed_by)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, f.id());
+      ps.setObject(2, f.tenantId());
+      ps.setObject(3, f.orderId());
+      ps.setObject(4, f.storeId());
+      ps.setString(5, f.kind());
+      ps.setInt(6, f.lineNo());
+      ps.setObject(7, f.variantId());
+      ps.setString(8, f.batchNo());
+      ps.setObject(9, f.expiry());
+      ps.setObject(10, f.recallId());
+      ps.setString(11, f.recallReference());
+      ps.setObject(12, f.instrumentId());
+      ps.setString(13, f.instrumentStanding());
+      ps.setObject(14, java.sql.Timestamp.from(f.rungUpAt()));
+      ps.setString(15, f.reason());
+      ps.setObject(16, f.cashierId());
+      ps.setObject(17, f.replayedBy());
       ps.executeUpdate();
     }
   }
@@ -1135,6 +1192,26 @@ public class OrderRepository extends BaseOutboxRepository {
             rs -> mapOrder(rs),
             "find order");
     return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
+  }
+
+  /**
+   * What the order's captured tenders add up to — split tenders on a still-PENDING order included.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param orderId the order
+   * @return the amount paid, zero when nothing was taken or there is no such order
+   */
+  public BigDecimal paidAmount(UUID tenantId, UUID orderId) {
+    var list =
+        query(
+            "SELECT paid_amount FROM orders WHERE tenant_id=? AND id=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, orderId);
+            },
+            rs -> rs.getBigDecimal("paid_amount"),
+            "order paid amount");
+    return list.isEmpty() || list.get(0) == null ? BigDecimal.ZERO : list.get(0);
   }
 
   /**
@@ -3604,7 +3681,7 @@ public class OrderRepository extends BaseOutboxRepository {
 
   /** discounts: count and total value, keyed by actor or store. */
   public List<Object[]> aggregateDiscounts(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "granted_by" : "store_id";
     StringBuilder sql =
         new StringBuilder(
@@ -3612,54 +3689,54 @@ public class OrderRepository extends BaseOutboxRepository {
                 + key
                 + ", COUNT(*), COALESCE(SUM(discount_amount),0)"
                 + " FROM order_discounts WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND created_at >= ?");
     if (to != null) sql.append(" AND created_at < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2), rs.getBigDecimal(3)},
         "aggregate discounts");
   }
 
   /** voids: count only — a void has no money on it, only an order it removed. */
   public List<Object[]> aggregateVoids(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "voided_by" : "store_id";
     StringBuilder sql =
         new StringBuilder("SELECT " + key + ", COUNT(*) FROM pos_void_log WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND voided_at >= ?");
     if (to != null) sql.append(" AND voided_at < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2)},
         "aggregate voids");
   }
 
   /** no-sales: drawer opened with no transaction. */
   public List<Object[]> aggregateNoSales(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "cashier_id" : "store_id";
     StringBuilder sql =
         new StringBuilder("SELECT " + key + ", COUNT(*) FROM pos_no_sale_log WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND logged_at >= ?");
     if (to != null) sql.append(" AND logged_at < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2)},
         "aggregate no-sales");
   }
 
   /** The denominator: journalled sales, so exceptions can be read as a rate. */
   public List<Object[]> aggregateJournalledSales(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "cashier_id" : "store_id";
     StringBuilder sql =
         new StringBuilder(
@@ -3667,24 +3744,32 @@ public class OrderRepository extends BaseOutboxRepository {
                 + key
                 + ", COUNT(*), COALESCE(SUM(total),0)"
                 + " FROM pos_log_entries WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND transaction_ts >= ?");
     if (to != null) sql.append(" AND transaction_ts < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2), rs.getBigDecimal(3)},
         "aggregate journalled sales");
   }
 
-  /** tenant_id first (golden rule #3), then the optional store and period, in SQL order. */
+  /**
+   * tenant_id first (golden rule #3), then the optional stores and period, in SQL order.
+   *
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else bound as a {@code uuid[]} for {@code store_id = ANY(?)} — never a
+   *     store the caller has not already been checked against.
+   */
   private static void bindPeriod(
-      PreparedStatement ps, UUID tenantId, UUID storeId, Instant from, Instant to)
+      PreparedStatement ps, UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to)
       throws java.sql.SQLException {
     int i = 1;
     ps.setObject(i++, tenantId);
-    if (storeId != null) ps.setObject(i++, storeId);
+    if (stores != null) {
+      ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+    }
     if (from != null) ps.setObject(i++, from.atOffset(java.time.ZoneOffset.UTC));
     if (to != null) ps.setObject(i++, to.atOffset(java.time.ZoneOffset.UTC));
   }

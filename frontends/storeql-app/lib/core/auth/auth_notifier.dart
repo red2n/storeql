@@ -39,7 +39,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     state = await AsyncValue.guard(() async {
       final resp = await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.iam}/auth/login',
-        data: {'email': email, 'password': password},
+        // The business account, where the address also holds a shopper's:
+        // this card signs people in to run a business (the storefront asks
+        // for CUSTOMER). STAFF is also what iam-svc assumes when none is sent.
+        data: {'email': email, 'password': password, 'accountType': 'STAFF'},
       );
       return _afterPassword(resp.data['data'] as Map<String, dynamic>, platform: false);
     });
@@ -185,6 +188,23 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       );
       return _saveAndDecode(resp.data['data'] as Map<String, dynamic>);
     });
+  }
+
+  /// "Start a business": a staff login with no business and no role yet
+  /// (iam-svc `POST /auth/register/business`). Its token names no tenant, so
+  /// [AuthAuthenticated.needsOnboarding] holds and the router opens the setup
+  /// wizard, which creates the business and makes this login its owner.
+  ///
+  /// Unlike [register], a refusal is thrown to the caller rather than kept in
+  /// this notifier's state: the sign-up page says it in its own words, and the
+  /// sign-in card behind it is not left showing a sign-up's error.
+  Future<void> registerBusiness(String email, String password) async {
+    final resp = await ref.read(apiClientProvider).dio.post(
+      '/${ApiConstants.iam}/auth/register/business',
+      data: {'email': email, 'password': password},
+    );
+    state = AsyncValue.data(
+        await _saveAndDecode(resp.data['data'] as Map<String, dynamic>));
   }
 
   // Called after onboarding steps so the JWT picks up the new tenantId

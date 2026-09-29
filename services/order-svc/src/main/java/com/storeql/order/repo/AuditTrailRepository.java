@@ -16,7 +16,8 @@ import java.util.UUID;
 
 /**
  * Reads the business audit trail (20.11): the append-only logs this service writes — discounts,
- * voids, no-sales, cancellations and returns — as one time-ordered stream.
+ * voids, no-sales, cancellations, returns, and offline sales flagged for a manager — as one
+ * time-ordered stream.
  *
  * <p>Each log keeps its own shape and indexes. The stream is a {@code UNION ALL} of one branch per
  * log, every branch filtered by tenant first, projected onto one set of columns; the filters on
@@ -36,17 +37,20 @@ public class AuditTrailRepository extends BaseJdbcRepository {
               AuditEvent.TYPE_DISCOUNT,
               "SELECT id, tenant_id, 'DISCOUNT' AS type, created_at AS occurred_at,"
                   + " granted_by AS actor_id, store_id, order_id, discount_amount AS amount,"
-                  + " reason, granted_role AS detail FROM order_discounts WHERE tenant_id=?"),
+                  + " reason, granted_role AS detail, NULL::uuid AS variant_id,"
+                  + " NULL::uuid AS replayed_by FROM order_discounts WHERE tenant_id=?"),
           new Branch(
               AuditEvent.TYPE_VOID,
               "SELECT id, tenant_id, 'VOID' AS type, voided_at AS occurred_at,"
                   + " voided_by AS actor_id, store_id, order_id, NULL::numeric AS amount,"
-                  + " reason, NULL::text AS detail FROM pos_void_log WHERE tenant_id=?"),
+                  + " reason, NULL::text AS detail, NULL::uuid AS variant_id,"
+                  + " NULL::uuid AS replayed_by FROM pos_void_log WHERE tenant_id=?"),
           new Branch(
               AuditEvent.TYPE_NO_SALE,
               "SELECT id, tenant_id, 'NO_SALE' AS type, logged_at AS occurred_at,"
                   + " cashier_id AS actor_id, store_id, NULL::uuid AS order_id,"
-                  + " NULL::numeric AS amount, reason, authorised_by::text AS detail"
+                  + " NULL::numeric AS amount, reason, authorised_by::text AS detail,"
+                  + " NULL::uuid AS variant_id, NULL::uuid AS replayed_by"
                   + " FROM pos_no_sale_log WHERE tenant_id=?"),
           new Branch(
               AuditEvent.TYPE_CANCEL,
@@ -54,14 +58,34 @@ public class AuditTrailRepository extends BaseJdbcRepository {
               // schema, so the join is the honest way to put a cancel at its store.
               "SELECT h.id, h.tenant_id, 'CANCEL' AS type, h.changed_at AS occurred_at,"
                   + " h.changed_by AS actor_id, o.store_id, h.order_id, NULL::numeric AS amount,"
-                  + " h.reason, h.from_status AS detail FROM order_status_history h"
+                  + " h.reason, h.from_status AS detail, NULL::uuid AS variant_id,"
+                  + " NULL::uuid AS replayed_by FROM order_status_history h"
                   + " JOIN orders o ON o.tenant_id = h.tenant_id AND o.id = h.order_id"
                   + " WHERE h.tenant_id=? AND h.to_status='CANCELLED'"),
           new Branch(
               AuditEvent.TYPE_RETURN,
               "SELECT id, tenant_id, 'RETURN' AS type, created_at AS occurred_at,"
                   + " created_by AS actor_id, store_id, order_id, refund_amount AS amount,"
-                  + " reason, refund_method AS detail FROM returns WHERE tenant_id=?"));
+                  + " reason, refund_method AS detail, NULL::uuid AS variant_id,"
+                  + " NULL::uuid AS replayed_by FROM returns WHERE tenant_id=?"),
+          // An offline sale flagged for a manager is put at the moment it was rung up: the entry
+          // is about the sale, and that is when the cashier made it, whenever the till came back.
+          // Its actor is who rang it up (null when the till named nobody the business holds at
+          // the store), and replayed_by who sent it, which may be somebody else.
+          new Branch(
+              AuditEvent.TYPE_OFFLINE_SALE_OF_RECALLED_ITEM,
+              "SELECT id, tenant_id, 'OFFLINE_SALE_OF_RECALLED_ITEM' AS type,"
+                  + " rung_up_at AS occurred_at, cashier_id AS actor_id, store_id, order_id,"
+                  + " NULL::numeric AS amount, reason, recall_reference AS detail, variant_id,"
+                  + " replayed_by FROM offline_sale_flags"
+                  + " WHERE tenant_id=? AND kind='OFFLINE_SALE_OF_RECALLED_ITEM'"),
+          new Branch(
+              AuditEvent.TYPE_OFFLINE_SALE_ON_UNFIT_SCALE,
+              "SELECT id, tenant_id, 'OFFLINE_SALE_ON_UNFIT_SCALE' AS type,"
+                  + " rung_up_at AS occurred_at, cashier_id AS actor_id, store_id, order_id,"
+                  + " NULL::numeric AS amount, reason, instrument_standing AS detail, variant_id,"
+                  + " replayed_by FROM offline_sale_flags"
+                  + " WHERE tenant_id=? AND kind='OFFLINE_SALE_ON_UNFIT_SCALE'"));
 
   /**
    * One page of the trail, newest first.
@@ -94,7 +118,7 @@ public class AuditTrailRepository extends BaseJdbcRepository {
     StringBuilder sql =
         new StringBuilder(
             "SELECT id, tenant_id, type, occurred_at, actor_id, store_id, order_id, amount,"
-                + " reason, detail FROM (");
+                + " reason, detail, variant_id, replayed_by FROM (");
     boolean first = true;
     for (Branch b : BRANCHES) {
       if (type != null && !type.equals(b.type())) continue;
@@ -161,6 +185,8 @@ public class AuditTrailRepository extends BaseJdbcRepository {
         rs.getObject("order_id", UUID.class),
         rs.getBigDecimal("amount"),
         rs.getString("reason"),
-        rs.getString("detail"));
+        rs.getString("detail"),
+        rs.getObject("variant_id", UUID.class),
+        rs.getObject("replayed_by", UUID.class));
   }
 }

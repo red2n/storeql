@@ -249,6 +249,19 @@ public class RecallService {
   }
 
   /**
+   * Every variant under an open recall, and under one closed or cancelled at or after {@code
+   * endedSince}: what order-svc judges a till sale replayed from an offline queue against, since a
+   * recall that has ended since still covered the sale when it was rung up.
+   *
+   * @param tenantId owning tenant
+   * @param endedSince the earliest end to include
+   * @return the lines, each saying when its recall opened and, once ended, when and how
+   */
+  public List<ActiveItem> openOrEndedSince(UUID tenantId, Instant endedSince) {
+    return repo.listOpenOrEndedSince(tenantId, endedSince);
+  }
+
+  /**
    * @param requireStoreAccess refuses a caller not assigned to the store; passed in so this class
    *     stays free of the request context
    */

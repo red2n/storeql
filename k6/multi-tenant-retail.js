@@ -39,7 +39,7 @@ import { check, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import encoding from 'k6/encoding';
 import exec from 'k6/execution';
-import { newId, newKey } from './lib/storeql.js';
+import { PASSWORD, newId, newKey } from './lib/storeql.js';
 
 // ── Custom metrics ─────────────────────────────────────────────────────────────
 const errors              = new Counter('errors');
@@ -303,9 +303,13 @@ function apiReceiveStock(token, storeId, variantId, qty, costPrice, batchPrefix)
 
 // ── Setup helpers (called only in setup()) ─────────────────────────────────────
 
-function registerUser(email) {
-  const password = 'Retail@12345';
-  const res = post('/api/iam-svc/auth/register', {
+// A shopper's sign-up by default; an owner signs up to start a business instead
+// (/auth/register/business), a staff login of no business until TenantCreated makes it the owner.
+function registerUser(email, path = '/api/iam-svc/auth/register') {
+  // The suite-wide phrase: it meets the password policy (GET /auth/password-policy, 15 characters
+  // or more), which refuses every sign-up and provisioning with a shorter one.
+  const password = PASSWORD;
+  const res = post(path, {
     email,
     password,
     phone: `9${Date.now() % 10000000000}`,
@@ -316,6 +320,18 @@ function registerUser(email) {
   }
   const token = body(res).accessToken;
   return { userId: jwtPayload(token).sub, email, password, token };
+}
+
+// A staff login the owner makes in the business (/auth/admin/staff-users), with the password it
+// chooses; no token of its own is needed here.
+function provisionUser(email, ownerToken) {
+  const password = PASSWORD;
+  const res = post('/api/iam-svc/auth/admin/staff-users', { email, password }, ownerToken);
+  if (res.status < 200 || res.status >= 300) {
+    console.error(`provision failed [${email}] status=${res.status}`);
+    return null;
+  }
+  return { userId: body(res).userId, email, password };
 }
 
 function loginUser(email, password) {
@@ -353,10 +369,11 @@ function seedTenant(owner, tenantPayload, store1Payload, store2Payload, products
     return owner.token; // fallback: use registration token (no tenant claim)
   })();
 
-  // 2. Register cashiers (one per store)
+  // 2. Cashiers (one per store): logins the owner makes in the business — the only kind an
+  // assignment binds (a shopper's sign-up is never taken on as staff).
   const run = Date.now();
-  const cashier1 = registerUser(`${tag.toLowerCase()}-cashier1-${run}@storeql.test`);
-  const cashier2 = registerUser(`${tag.toLowerCase()}-cashier2-${run}@storeql.test`);
+  const cashier1 = provisionUser(`${tag.toLowerCase()}-cashier1-${run}@storeql.test`, ownerToken);
+  const cashier2 = provisionUser(`${tag.toLowerCase()}-cashier2-${run}@storeql.test`, ownerToken);
 
   // 3. Store 1 — via onboarding (auto-creates DEFAULT zone)
   const s1Res = post('/api/tenant-svc/onboarding/stores', store1Payload, ownerToken);
@@ -530,7 +547,7 @@ export function setup() {
   const run = Date.now();
 
   // ── India tenant ───────────────────────────────────────────────────────────
-  const inOwner = registerUser(`in-owner-${run}@storeql.test`);
+  const inOwner = registerUser(`in-owner-${run}@storeql.test`, '/api/iam-svc/auth/register/business');
   if (!inOwner) { console.error('India owner registration failed'); return null; }
 
   const india = seedTenant(
@@ -583,7 +600,7 @@ export function setup() {
   if (!india) { console.error('India seed failed'); return null; }
 
   // ── UK tenant ──────────────────────────────────────────────────────────────
-  const ukOwner = registerUser(`uk-owner-${run}@storeql.test`);
+  const ukOwner = registerUser(`uk-owner-${run}@storeql.test`, '/api/iam-svc/auth/register/business');
   if (!ukOwner) { console.error('UK owner registration failed'); return null; }
 
   const uk = seedTenant(

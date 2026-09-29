@@ -12,6 +12,7 @@ import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.storeql.iam.mfa.Totp;
 import com.storeql.iam.repo.UserRepository;
+import com.storeql.iam.service.AuthService;
 import com.storeql.iam.sso.FakeOidcProvider;
 import com.storeql.iam.sso.FakeOidcProvider.Person;
 import com.storeql.iam.sso.Pkce;
@@ -82,6 +83,7 @@ class SsoIT {
 
   @Inject WebTarget target;
   @Inject UserRepository users;
+  @Inject AuthService auth;
 
   @AfterAll
   static void stop() {
@@ -165,8 +167,12 @@ class SsoIT {
     return new Business(tenant, Ids.newId(), ownerId, new Caller(ownerId, "OWNER", tenant));
   }
 
+  /**
+   * A member of staff made the one way there is: provisioned in the business, then bound at its
+   * store, as a StaffAssigned binds only a login already there.
+   */
   private UUID staff(Business b, String email, String tier) {
-    UUID id = register(email);
+    UUID id = Ids.parse(auth.provisionStaff(b.tenant(), email, PASSWORD).userId());
     users.bindStaffOnce(Ids.newId(), CONSUMER, id, b.tenant(), tier, b.store());
     return id;
   }
@@ -510,6 +516,8 @@ class SsoIT {
     Business other = business("sso-who-other");
     staff(other, "sso-who-elsewhere@example.com", "CASHIER");
     register("sso-who-shopper@example.com");
+    // Made in the business and never assigned: nobody's staff yet.
+    auth.provisionStaff(b.tenant(), "sso-who-pending@example.com", PASSWORD);
     connect(b, "sso-who", "");
 
     assertThat(
@@ -523,6 +531,11 @@ class SsoIT {
     assertThat(
         "a shopper's login is nobody's staff",
         signIn("sso-who", Person.verified("s3", "sso-who-shopper@example.com"), null)
+            .get("sso_error"),
+        is("SSO_NO_ACCOUNT"));
+    assertThat(
+        "a login the business made and never assigned is nobody's staff yet",
+        signIn("sso-who", Person.verified("s8", "sso-who-pending@example.com"), null)
             .get("sso_error"),
         is("SSO_NO_ACCOUNT"));
     assertThat(

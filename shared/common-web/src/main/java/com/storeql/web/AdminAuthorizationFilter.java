@@ -82,6 +82,9 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
   private static final Set<String> IDENTITY_PATHS =
       Set.of(
           "/auth/register",
+          // Business sign-up ("Start a business"): the login a new business is run with, made
+          // before it holds any role — the business, and its OWNER role, come after it.
+          "/auth/register/business",
           "/auth/login",
           "/auth/platform-login",
           "/auth/refresh",

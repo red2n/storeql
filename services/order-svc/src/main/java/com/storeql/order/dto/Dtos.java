@@ -38,15 +38,28 @@ public final class Dtos {
               description =
                   "For a line sold by weight: the weighing instrument the reading came from, from"
                       + " tenant-svc's register (Weights and Measures Act 1985 s.11). The till"
-                      + " refuses to sell by weight from an instrument that is not certified, and"
-                      + " the line records which one it was.")
+                      + " offers only certified instruments, and the order is refused (409"
+                      + " ORDER_SCALE_NOT_CERTIFIED) when the order's store's register does not"
+                      + " hold it or it is not certified today. The line records which it was.")
           String weighingInstrumentId,
       @Schema(
               description =
                   "The reduce-to-clear markdown a scanned sticker named (05.4): the line is priced"
                       + " at the sticker and stands outside every promotion. pricing-svc checks it"
                       + " is live, in date, for this product at this store, with packs left.")
-          String markdownId) {}
+          String markdownId,
+      @Schema(
+              description =
+                  "The lot the pack declared, when a GS1 2D code carried it (AI 10). Checked"
+                      + " against open recalls: a pack of a recalled lot is refused (409"
+                      + " ORDER_LINE_RECALLED). Not stored.")
+          @Size(max = 64)
+          String batchNo,
+      @Schema(
+              description =
+                  "The expiry the pack declared (AI 17), as an ISO date. Checked against open"
+                      + " recalls with batchNo. Not stored.")
+          String expiry) {}
 
   @Schema(
       name = "PlaceOrderRequest",
@@ -128,7 +141,32 @@ public final class Dtos {
               description =
                   "The chosen occurrence's start (ISO instant), exactly as"
                       + " GET /storefront/fulfilment-slots gave it.")
-          String slotStartsAt) {}
+          String slotStartsAt,
+      @Schema(
+              description =
+                  "A till sale replayed from the till's offline queue: when the cashier completed"
+                      + " it (ISO instant). A sale made offline has already happened, so a replay"
+                      + " captured no later than now and no further back than"
+                      + " storeql.order.offline-replay.grace-hours (24) is always placed; a line"
+                      + " a recall covered, or a scale not fit for trade weighed, at that moment"
+                      + " is written on the audit trail for a manager"
+                      + " (OFFLINE_SALE_OF_RECALLED_ITEM, OFFLINE_SALE_ON_UNFIT_SCALE). A capture"
+                      + " time up to storeql.order.offline-replay.clock-skew-seconds (300) after"
+                      + " now is a till clock a little ahead, taken as captured now. A capture"
+                      + " time outside those bounds is"
+                      + " judged as a sale made now and refused as one, in words for a manager."
+                      + " POS only; not read online, and absent for a sale made now.")
+          String capturedAt,
+      @Schema(
+              description =
+                  "A till sale replayed from the till's offline queue: the user id of whoever was"
+                      + " signed in at the till when the sale was made, which may not be whoever"
+                      + " sends the queue. Its audit-trail entries name them only when they are a"
+                      + " login of this business allowed at this store; otherwise the entries"
+                      + " read as rung up by an unknown member of staff, and the sale is placed"
+                      + " all the same. A UUIDv7 or absent (400 INVALID_UUID otherwise). POS"
+                      + " only; not read online.")
+          String rungUpBy) {}
 
   @Schema(
       name = "PriceOrderRequest",
@@ -1088,8 +1126,15 @@ public final class Dtos {
               + " why.")
   public record AuditEventResponse(
       String id,
-      @Schema(description = "DISCOUNT, VOID, NO_SALE, CANCEL or RETURN.") String type,
-      String occurredAt,
+      @Schema(
+              description =
+                  "DISCOUNT, VOID, NO_SALE, CANCEL, RETURN, OFFLINE_SALE_OF_RECALLED_ITEM (a till"
+                      + " sale replayed from the offline queue, recorded although a recall"
+                      + " covered the line when it was rung up) or OFFLINE_SALE_ON_UNFIT_SCALE"
+                      + " (the same, for a line weighed on a scale not fit for trade then).")
+          String type,
+      @Schema(description = "When it happened; for an offline sale, when the cashier rang it up.")
+          String occurredAt,
       @Schema(description = "The member of staff responsible; null when the log recorded nobody.")
           String actorId,
       String storeId,
@@ -1101,8 +1146,19 @@ public final class Dtos {
               description =
                   "The log's own qualifier: the role that authorised a discount, the status a"
                       + " cancel came from, a return's refund method, the supervisor who"
-                      + " authorised a no-sale.")
-          String detail) {}
+                      + " authorised a no-sale, the reference of the recall an offline sale sold"
+                      + " under, the register's standing of the scale one was weighed on"
+                      + " (NOT_REGISTERED when the store's register does not hold it,"
+                      + " UNKNOWN_AT_SALE when the register cannot show it was fit then).")
+          String detail,
+      @Schema(description = "The product line an offline sale's entry is about; null for the rest.")
+          String variantId,
+      @Schema(
+              description =
+                  "Who sent an offline sale from the till's queue, which may be somebody other"
+                      + " than who rang it up (actorId, null when that was not a member of staff"
+                      + " the business holds at the store); null for the rest.")
+          String replayedBy) {}
 
   // ── Deposit return (09.16) ────────────────────────────
 

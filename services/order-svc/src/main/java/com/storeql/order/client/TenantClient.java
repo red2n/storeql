@@ -5,6 +5,7 @@ import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
 import com.storeql.ids.Ids;
 import com.storeql.order.config.ServiceConfig;
+import com.storeql.order.domain.TradeScales;
 import com.storeql.web.ApiException;
 import com.storeql.web.HttpHeaders;
 import com.storeql.web.TenantContext;
@@ -17,10 +18,13 @@ import jakarta.inject.Inject;
 import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
+import jakarta.json.JsonValue;
 import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -39,10 +43,14 @@ public class TenantClient {
   private static final Logger LOG = System.getLogger(TenantClient.class.getName());
   private static final String TENANT_SERVICE = "tenant-svc";
 
+  /** The staff role a read made on a sale's behalf carries: a shopper's checkout holds none. */
+  private static final String INTERNAL_ROLE = "STOREKEEPER";
+
   @Inject ServiceConfig config;
 
   private ServiceRegistry registry;
   private WebClient webClient;
+  private WebClient saleClient;
 
   @PostConstruct
   void init() {
@@ -51,6 +59,13 @@ public class TenantClient {
         WebClient.builder()
             .connectTimeout(Duration.ofSeconds(2))
             .readTimeout(Duration.ofSeconds(5))
+            .build();
+    // A sale waits on the scale register's answer and goes ahead without one, so it is not kept
+    // waiting long.
+    saleClient =
+        WebClient.builder()
+            .connectTimeout(Duration.ofSeconds(1))
+            .readTimeout(Duration.ofSeconds(2))
             .build();
   }
 
@@ -208,6 +223,129 @@ public class TenantClient {
                 d.getString("pincode", null)));
       }
     }
+  }
+
+  // ── the weighing-instrument register (certified scales) ─────────────────────
+
+  /**
+   * One weighing instrument as the store's register in tenant-svc holds it: whether the register
+   * holds it at that store, and whether it may weigh for trade today. Asked as a storekeeper with
+   * the order's tenant, since a shopper's checkout could not read the register itself; the register
+   * answers for an instrument of another store or another business as it answers for one nobody
+   * registered.
+   *
+   * @return the register's entry, not registered when tenant-svc answers {@code
+   *     INSTRUMENT_NOT_FOUND}; empty when the register could not be read, and the sale then goes
+   *     ahead
+   */
+  @Retry(maxRetries = 1, delay = 200)
+  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
+  @Fallback(fallbackMethod = "instrumentUnavailable")
+  public Optional<TradeScales.Entry> weighingInstrument(
+      UUID tenantId, UUID storeId, UUID instrumentId) {
+    String base = locate().orElse(null);
+    if (base == null) {
+      LOG.log(Level.WARNING, "tenant-svc not located; scale {0} not checked", instrumentId);
+      return Optional.empty();
+    }
+    try (HttpClientResponse res =
+        saleClient
+            .get(base + "/admin/stores/" + storeId + "/weighing-instruments/" + instrumentId)
+            .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
+            .header(HeaderNames.create(HttpHeaders.ROLES), INTERNAL_ROLE)
+            .request()) {
+      int status = res.status().code();
+      String body = res.as(String.class);
+      if (status == 200) return instrumentOf(instrumentId, storeId, body);
+      if (status == 404 && "INSTRUMENT_NOT_FOUND".equals(errorCode(body))) {
+        return Optional.of(TradeScales.Entry.notRegistered(instrumentId));
+      }
+      LOG.log(Level.WARNING, "weighing instrument {0}: HTTP {1}", instrumentId, status);
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * Reads the register's answer for one instrument. An answer for an instrument that stands in
+   * another store is taken as not held here, whatever route gave it: the store is the point. When
+   * its latest history entry was recorded, when that entry falls due and when the instrument was
+   * last changed are read too, so a till sale replayed from an offline queue can be judged as at
+   * the moment it was rung up ({@link TradeScales.Entry#atSale}).
+   */
+  static Optional<TradeScales.Entry> instrumentOf(UUID instrumentId, UUID storeId, String body) {
+    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+      JsonObject d = reader.readObject().getJsonObject("data");
+      String at = text(d, "storeId");
+      if (at != null && !storeId.equals(Ids.parse(at))) {
+        return Optional.of(TradeScales.Entry.notRegistered(instrumentId));
+      }
+      JsonObject latest = latestOf(d);
+      return Optional.of(
+          new TradeScales.Entry(
+              instrumentId,
+              true,
+              text(d, "identifier"),
+              d.getBoolean("certified", false),
+              text(d, "standing"),
+              latest == null ? null : instant(latest, "recordedAt"),
+              latest == null ? null : date(latest, "nextDue"),
+              instant(d, "updatedAt")));
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "unreadable scale {0}: {1}", instrumentId, e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /** The register's latest history entry for an instrument, or null when it gave none it read. */
+  private static JsonObject latestOf(JsonObject d) {
+    JsonValue v = d.get("latestVerification");
+    return v instanceof JsonObject latest ? latest : null;
+  }
+
+  /**
+   * A time the register gave, read leniently: one that cannot be read is taken as not said, and a
+   * replayed sale weighed on the scale is then flagged as one the register cannot show was fit —
+   * never let through for want of it.
+   */
+  static Instant instant(JsonObject o, String key) {
+    try {
+      String v = text(o, key);
+      return v == null ? null : Instant.parse(v.strip());
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
+  /** A date the register gave, read as leniently as {@link #instant}. */
+  static LocalDate date(JsonObject o, String key) {
+    try {
+      String v = text(o, key);
+      return v == null ? null : LocalDate.parse(v.strip());
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
+  /** A refusal's stable code: the problem's own member, else the legacy envelope's. */
+  static String errorCode(String body) {
+    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+      JsonObject root = reader.readObject();
+      String code = text(root, "code");
+      if (code != null) return code;
+      return root.containsKey("error") && !root.isNull("error")
+          ? text(root.getJsonObject("error"), "code")
+          : null;
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
+  // Only called reflectively by MicroProfile Fault Tolerance via @Fallback above.
+  @SuppressWarnings("unused")
+  Optional<TradeScales.Entry> instrumentUnavailable(
+      UUID tenantId, UUID storeId, UUID instrumentId) {
+    LOG.log(Level.WARNING, "tenant-svc unavailable; scale {0} not checked", instrumentId);
+    return Optional.empty();
   }
 
   // ── what a period of sales earns (store operations & workforce) ─────────────

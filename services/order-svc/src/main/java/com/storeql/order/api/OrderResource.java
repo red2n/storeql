@@ -238,7 +238,8 @@ public class OrderResource {
    * @return {@code 201} with the placed order
    * @throws com.storeql.web.ApiException {@code 400} when the order has no lines or the request is
    *     malformed; {@code 403} when a POS order is placed without a cashier/manager/owner role;
-   *     {@code 409} when the tenant or store is not trading
+   *     {@code 409} when the tenant or store is not trading, a line is stock an open recall says
+   *     must not be sold, or a line was weighed on a scale not certified at the store
    */
   @Operation(
       summary = "Place an order",
@@ -258,9 +259,13 @@ public class OrderResource {
   @APIResponse(
       responseCode = "409",
       description =
-          "Tenant or store is suspended/closed, insufficient stock to reserve, or"
+          "Tenant or store is suspended/closed, insufficient stock to reserve,"
               + " ORDER_UNFULFILLABLE: no combination of the business's shops holds a delivery"
-              + " order")
+              + " order, ORDER_LINE_RECALLED: a line is stock an open recall says must not be"
+              + " sold, or ORDER_SCALE_NOT_CERTIFIED: a line was weighed on a scale the store's"
+              + " register does not hold or that is not certified today. A till sale replayed"
+              + " from the offline queue within the grace is never refused for either: it is"
+              + " placed and flagged on the audit trail")
   @POST
   public Response place(
       @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
@@ -378,10 +383,11 @@ public class OrderResource {
     }
     var order =
         svc.cancelOrder(
-            ctx.tenantId(),
+            ctx.requireTenantId(),
             Parsing.uuid(id, "id"),
             req != null ? req.reason() : null,
-            ctx.userId());
+            ctx.userId(),
+            ctx);
     var items = svc.getOrderItems(ctx.tenantId(), order.id());
     return Response.ok(
             ApiResponse.ok(

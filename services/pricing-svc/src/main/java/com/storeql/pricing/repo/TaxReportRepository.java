@@ -9,6 +9,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -30,14 +31,16 @@ public class TaxReportRepository extends BaseJdbcRepository {
    * Sums tax transactions over a period, grouped as requested.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or {@code null} for every store in the tenant (a caller
+   *     held to no store, or an OWNER/PLATFORM_ADMIN) — never a store the caller cannot act in,
+   *     which {@link com.storeql.web.TenantContext#reportStores} has already checked
    * @param from inclusive lower bound on the tax point
    * @param to exclusive upper bound on the tax point
    * @param grouping which column to group by — an enum, never caller-supplied SQL
    * @return one row per (group, exempt) pair, largest VAT first
    */
   public List<TaxSummaryRow> aggregate(
-      UUID tenantId, UUID storeId, Instant from, Instant to, TaxGrouping grouping) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, TaxGrouping grouping) {
     // The grouped expression comes from the enum, never from request text, so it cannot carry
     // caller input into the statement; every value below is still bound as a parameter.
     String groupExpr =
@@ -63,7 +66,8 @@ public class TaxReportRepository extends BaseJdbcRepository {
                 + " COUNT(*) AS transactions"
                 + " FROM tax_transactions"
                 + " WHERE tenant_id = ? AND tax_point_date >= ? AND tax_point_date < ?");
-    if (storeId != null) sql.append(" AND store_id = ?");
+    // No set (a caller held to no store) reads every store; otherwise only the caller's own.
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     // No LIMIT: the grouping is bounded by design — a tenant's VAT codes, its stores, or the
     // months in the requested period. Unlike a by-variant drill-down, this cannot run away.
     sql.append(" GROUP BY 1, exempt ORDER BY vat_amount DESC, group_key ASC");
@@ -75,7 +79,9 @@ public class TaxReportRepository extends BaseJdbcRepository {
           ps.setObject(i++, tenantId);
           ps.setObject(i++, from.atOffset(ZoneOffset.UTC));
           ps.setObject(i++, to.atOffset(ZoneOffset.UTC));
-          if (storeId != null) ps.setObject(i, storeId);
+          if (stores != null) {
+            ps.setArray(i, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
         },
         TaxReportRepository::mapRow,
         "aggregate tax summary");

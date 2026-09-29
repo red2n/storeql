@@ -150,6 +150,63 @@ public class ServiceConfig extends BaseServiceConfig {
   }
 
   /**
+   * How long a business's open recalls are kept before inventory-svc is asked again, when an order
+   * is checked for stock that must not be sold. Seconds, not minutes: a recall opened now reaches
+   * every checkout within this, and the till checks its own copy of the list meanwhile.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.order.recall-check.cache-seconds", defaultValue = "10")
+  int recallCacheSeconds;
+
+  /**
+   * How long the checkout's recall check keeps a business's open recalls.
+   *
+   * @return seconds, ten unless overridden; zero asks inventory-svc on every order
+   */
+  public int recallCacheSeconds() {
+    return recallCacheSeconds;
+  }
+
+  /**
+   * How far back a till sale replayed from the till's offline queue is taken on the till's word.
+   * Within it the sale has already happened and is recorded whatever the recall and certified-scale
+   * checks say, each line they would have stopped when it was rung up flagged for a manager on the
+   * audit trail. A capture time further back (or later than now) cannot be told from a forged one,
+   * and is judged as a sale made now; so it earns a day's grace unless configured.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.order.offline-replay.grace-hours", defaultValue = "24")
+  int offlineReplayGraceHours;
+
+  /**
+   * How far back a replayed till sale's capture time is honoured.
+   *
+   * @return hours, 24 unless overridden; zero honours none, judging every sale as made now
+   */
+  public int offlineReplayGraceHours() {
+    return offlineReplayGraceHours;
+  }
+
+  /**
+   * How far after now a replayed till sale's capture time is still taken on the till's word: a
+   * till's clock a little ahead of ours is common and harmless, and refusing the sale over it would
+   * park a sale that happened. Within it the sale is honoured as captured now; beyond it the time
+   * cannot be told from a forged one, and the sale is judged as made now.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.order.offline-replay.clock-skew-seconds", defaultValue = "300")
+  int offlineReplayClockSkewSeconds;
+
+  /**
+   * How far ahead of now a replayed till sale's capture time is tolerated.
+   *
+   * @return seconds, 300 unless overridden; zero tolerates none
+   */
+  public int offlineReplayClockSkewSeconds() {
+    return offlineReplayClockSkewSeconds;
+  }
+
+  /**
    * Fires on every boot so a non-dev environment that inherits docker-compose's pricing.enforce=
    * false override (no seeded price catalogue) cannot silently trust client-supplied prices, tax,
    * and discounts without it showing up in the startup log.

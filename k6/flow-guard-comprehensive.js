@@ -4,10 +4,11 @@
 // proves the guard: a step works once what it needs exists, and is refused when attempted too
 // early, by the wrong person, or against someone else's tenant.
 //
-//   1 auth          register, log in, who-am-I
+//   1 auth          start a business (the owner's own sign-up), log in, who-am-I; a shopper's
+//                   sign-up beside it is still a customer
 //   2 onboarding    create the tenant, first store, OWNER grant, no reaching into other tenants
 //   3 locations     stores and zones
-//   4 staff         assign a storekeeper; they get staff powers, not management ones
+//   4 staff         provision and assign a storekeeper; they get staff powers, not management ones
 //   5 catalogue     brands, categories, products, variants, storefront reads
 //   6 stock         receive (idempotent), adjust, levels, batches, movements, thresholds
 //   7 status        onboarding checklist
@@ -27,6 +28,7 @@ import {
   onboardTenant,
   priceVariants,
   register,
+  registerBusiness,
   signInUntil,
   truthy,
   uniq,
@@ -44,19 +46,42 @@ export default function () {
   const ctx = {};
 
   group('1 auth', () => {
+    // The owner starts a business: its own sign-up, never a shopper's.
+    const START = '/api/iam-svc/auth/register/business';
     const email = `flow-owner-${run}@k6.storeql.test`;
-    expect(call('POST', '/api/iam-svc/auth/register', { body: { email, password: 'short' } }), 'register: weak password rejected', 400);
-    expect(call('POST', '/api/iam-svc/auth/register', { body: { email: 'not-an-email', password: PASSWORD } }), 'register: bad email rejected', 400);
-    const reg = call('POST', '/api/iam-svc/auth/register', { body: { email, password: PASSWORD } });
-    expect(reg, 'register', 201);
-    expect(call('POST', '/api/iam-svc/auth/register', { body: { email, password: PASSWORD } }), 'register: same email twice', 409);
+    expect(call('POST', START, { body: { email, password: 'short' } }), 'start a business: weak password rejected', 400);
+    expect(call('POST', START, { body: { email, password: 'fourteen chars' } }), 'start a business: the password policy holds', 400, 'PASSWORD_TOO_SHORT');
+    expect(call('POST', START, { body: { email: 'not-an-email', password: PASSWORD } }), 'start a business: bad email rejected', 400);
+    const reg = call('POST', START, { body: { email, password: PASSWORD } });
+    expect(reg, 'start a business', 201);
+    expect(call('POST', START, { body: { email, password: PASSWORD } }), 'start a business: same email twice', 409, 'USER_ALREADY_EXISTS');
+    // A shopper's account and a business account are separate identities (29 Sep 2026): the owner's
+    // address may shop too, as a login of its own — once — and a sign-in names which it means.
+    const alsoShopper = call('POST', '/api/iam-svc/auth/register', { body: { email, password: PASSWORD } });
+    expect(alsoShopper, 'register: the owner\'s email as a shopper too, a separate account', 201);
+    expect(call('POST', '/api/iam-svc/auth/register', { body: { email, password: PASSWORD } }), 'register: one shopper account per email', 409, 'USER_ALREADY_EXISTS');
     ctx.owner = { email, password: PASSWORD, token: data(reg).accessToken, refreshToken: data(reg).refreshToken };
     ctx.owner.userId = claims(ctx.owner.token).sub;
     expect(call('POST', '/api/iam-svc/auth/login', { body: { email, password: 'Wrong-Passw0rd!' } }), 'login: wrong password', 401);
-    expect(login(ctx.owner), 'login', 200);
+    const atWork = login(ctx.owner);
+    expect(atWork, 'login', 200);
+    truthy('login: running a business opens the business account, not the shopper one on its email', claims(data(atWork).accessToken).sub === ctx.owner.userId, claims(data(atWork).accessToken));
+    const atTheShop = claims(data(call('POST', '/api/iam-svc/auth/login', { body: { email, password: PASSWORD, accountType: 'CUSTOMER' } })).accessToken);
+    truthy('login: a storefront opens the shopper account', atTheShop.type === 'CUSTOMER' && atTheShop.sub === claims(data(alsoShopper).accessToken).sub, atTheShop);
     expect(call('GET', '/api/iam-svc/auth/me', { token: ctx.owner.token }), 'who am I', 200);
     expect(call('GET', '/api/iam-svc/auth/me'), 'who am I: no token', 401);
-    truthy('a new sign-up is a customer with no tenant', !claims(ctx.owner.token).tenant && (claims(ctx.owner.token).roles || []).includes('CUSTOMER'), claims(ctx.owner.token));
+    const owner = claims(ctx.owner.token);
+    truthy('a business sign-up is staff with no tenant and no role yet', owner.type === 'STAFF' && !owner.tenant && Array.isArray(owner.roles) && owner.roles.length === 0, owner);
+
+    // A shopper's sign-up is unchanged.
+    const shopperEmail = `flow-shopper-${run}@k6.storeql.test`;
+    expect(call('POST', '/api/iam-svc/auth/register', { body: { email: shopperEmail, password: 'short' } }), 'register: weak password rejected', 400);
+    expect(call('POST', '/api/iam-svc/auth/register', { body: { email: 'not-an-email', password: PASSWORD } }), 'register: bad email rejected', 400);
+    const shopper = call('POST', '/api/iam-svc/auth/register', { body: { email: shopperEmail, password: PASSWORD } });
+    expect(shopper, 'register', 201);
+    expect(call('POST', '/api/iam-svc/auth/register', { body: { email: shopperEmail, password: PASSWORD } }), 'register: same email twice', 409);
+    const shopping = claims(data(shopper).accessToken);
+    truthy('a shopper sign-up is a customer with no tenant', shopping.type === 'CUSTOMER' && !shopping.tenant && (shopping.roles || []).includes('CUSTOMER'), shopping);
   });
 
   group('2 onboarding', () => {
@@ -101,6 +126,21 @@ export default function () {
       403,
       'TENANT_ACCESS_DENIED'
     );
+    // Another business sign-up, still without a business of its own, is as much a stranger here.
+    const founder = registerBusiness('flow-other-founder');
+    expect(
+      call('POST', '/api/tenant-svc/onboarding/stores', { token: founder.token, headers: spoof, body: { name: 'Hijack', code: 'HIJACK2', timezone: 'Europe/London' } }),
+      "another business sign-up naming this tenant cannot add a store",
+      403,
+      'TENANT_ACCESS_DENIED'
+    );
+    expect(
+      call('GET', '/api/tenant-svc/onboarding/status', { token: founder.token, headers: spoof }),
+      "...nor read its onboarding status",
+      403,
+      'TENANT_ACCESS_DENIED'
+    );
+    expect(call('GET', '/api/tenant-svc/admin/tenant', { token: founder.token, headers: spoof }), '...nor read its profile', 403);
     const first = call('POST', '/api/tenant-svc/onboarding/stores', {
       token: t,
       headers: spoof,
@@ -172,7 +212,13 @@ export default function () {
 
   group('4 staff', () => {
     const t = ctx.owner.token;
-    ctx.keeper = register('flow-storekeeper');
+    // Staff are made in the business the one way there is: the owner provisions the address, and an
+    // assignment then binds that login (a StaffAssigned never takes on a shopper's sign-up by id).
+    const keeperEmail = `flow-storekeeper-${run}@k6.storeql.test`;
+    const made = call('POST', '/api/iam-svc/auth/admin/staff-users', { token: t, body: { email: keeperEmail, password: PASSWORD } });
+    expect(made, 'provision a storekeeper login in the business', 200);
+    ctx.keeper = { email: keeperEmail, password: PASSWORD, userId: (data(made) || {}).userId };
+    ctx.keeper.token = (data(login(ctx.keeper)) || {}).accessToken;
     expect(
       call('POST', '/api/tenant-svc/admin/staff', { token: t, body: { userId: ctx.keeper.userId, storeId: UNKNOWN, role: 'STOREKEEPER' } }),
       'assign staff to an unknown store',

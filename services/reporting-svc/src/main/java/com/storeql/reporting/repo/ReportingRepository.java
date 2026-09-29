@@ -22,6 +22,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -140,13 +141,28 @@ public class ReportingRepository extends BaseJdbcRepository {
    */
   private static final int REPORTING_SAFETY_CAP = 20_000;
 
-  /** Gap #47: cross-store on-hand. Optionally filtered by storeId or variantId. */
-  public List<InventoryProjection> queryOnHand(UUID tenantId, UUID storeId, UUID variantId) {
+  /**
+   * Binds a non-null store scope as a {@code uuid[]} array parameter, paired in the SQL with {@code
+   * store_id = ANY(?)}. Callers append that clause — and call this — only when {@code stores} is
+   * non-null; an unrestricted (whole-tenant) read must build a query with no store clause at all,
+   * never one bound with a null array (the Postgres driver cannot determine the parameter's type in
+   * that shape and errors before it ever finds no rows).
+   */
+  private static void bindStores(PreparedStatement ps, int index, Set<UUID> stores)
+      throws SQLException {
+    ps.setArray(index, ps.getConnection().createArrayOf("uuid", stores.toArray(new UUID[0])));
+  }
+
+  /**
+   * Gap #47: cross-store on-hand. Optionally filtered to a store scope (SJ-D74: {@code null} for
+   * every store in the tenant, else the caller's own stores added together) and/or variantId.
+   */
+  public List<InventoryProjection> queryOnHand(UUID tenantId, Set<UUID> stores, UUID variantId) {
     StringBuilder sb =
         new StringBuilder(
             "SELECT tenant_id, store_id, variant_id, on_hand, updated_at"
                 + " FROM inventory_projection WHERE tenant_id = ?");
-    if (storeId != null) sb.append(" AND store_id = ?");
+    if (stores != null) sb.append(" AND store_id = ANY(?)");
     if (variantId != null) sb.append(" AND variant_id = ?");
     sb.append(" ORDER BY store_id, variant_id LIMIT ?");
     return query(
@@ -154,7 +170,9 @@ public class ReportingRepository extends BaseJdbcRepository {
         ps -> {
           ps.setObject(1, tenantId);
           int i = 2;
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            bindStores(ps, i++, stores);
+          }
           if (variantId != null) ps.setObject(i++, variantId);
           ps.setInt(i, REPORTING_SAFETY_CAP);
         },
@@ -162,20 +180,25 @@ public class ReportingRepository extends BaseJdbcRepository {
         "query on-hand");
   }
 
-  /** Gap #48: open supply in transit, optionally filtered by toStoreId or variantId. */
-  public List<OpenSupplyLine> querySupplyLines(UUID tenantId, UUID toStoreId, UUID variantId) {
+  /**
+   * Gap #48: open supply in transit, optionally filtered to a store scope (destination store; see
+   * {@link #queryOnHand}) and/or variantId.
+   */
+  public List<OpenSupplyLine> querySupplyLines(UUID tenantId, Set<UUID> stores, UUID variantId) {
     StringBuilder sb =
         new StringBuilder(
             "SELECT id, tenant_id, from_store_id, to_store_id, variant_id, qty, event_id"
                 + " FROM open_supply_lines WHERE tenant_id = ?");
-    if (toStoreId != null) sb.append(" AND to_store_id = ?");
+    if (stores != null) sb.append(" AND to_store_id = ANY(?)");
     if (variantId != null) sb.append(" AND variant_id = ?");
     return query(
         sb.toString(),
         ps -> {
           ps.setObject(1, tenantId);
           int i = 2;
-          if (toStoreId != null) ps.setObject(i++, toStoreId);
+          if (stores != null) {
+            bindStores(ps, i++, stores);
+          }
           if (variantId != null) ps.setObject(i, variantId);
         },
         ReportingRepository::mapSupplyLine,
@@ -184,10 +207,11 @@ public class ReportingRepository extends BaseJdbcRepository {
 
   /**
    * Gap #49: movement stats aggregated by (store, variant, date-bucket). bucketDays controls the
-   * truncation unit: 1=day, 7=week, 30=month (approximate, uses date_trunc).
+   * truncation unit: 1=day, 7=week, 30=month (approximate, uses date_trunc). Store scope as in
+   * {@link #queryOnHand}.
    */
   public List<MovementStat> queryMovementStats(
-      UUID tenantId, UUID storeId, UUID variantId, int bucketDays) {
+      UUID tenantId, Set<UUID> stores, UUID variantId, int bucketDays) {
     String trunc = bucketDays <= 1 ? "day" : bucketDays <= 7 ? "week" : "month";
     StringBuilder sb =
         new StringBuilder(
@@ -198,7 +222,7 @@ public class ReportingRepository extends BaseJdbcRepository {
                 + "       COALESCE(SUM(CASE WHEN qty_change > 0 THEN qty_change ELSE 0 END),0) AS total_in,"
                 + "       COALESCE(SUM(CASE WHEN qty_change < 0 THEN ABS(qty_change) ELSE 0 END),0) AS total_out"
                 + " FROM movement_events WHERE tenant_id = ?");
-    if (storeId != null) sb.append(" AND store_id = ?");
+    if (stores != null) sb.append(" AND store_id = ANY(?)");
     if (variantId != null) sb.append(" AND variant_id = ?");
     sb.append(
         " GROUP BY store_id, variant_id, bucket ORDER BY bucket DESC, store_id, variant_id"
@@ -208,7 +232,9 @@ public class ReportingRepository extends BaseJdbcRepository {
         ps -> {
           ps.setObject(1, tenantId);
           int i = 2;
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            bindStores(ps, i++, stores);
+          }
           if (variantId != null) ps.setObject(i++, variantId);
           ps.setInt(i, REPORTING_SAFETY_CAP);
         },
@@ -419,9 +445,12 @@ public class ReportingRepository extends BaseJdbcRepository {
    * or its top-level ancestor when {@code top}. Lines whose variant is unknown to the projection,
    * or whose product has no category, group under a null category rather than vanish — takings the
    * report cannot place are still takings. The lines of a voided sale are left out.
+   *
+   * @param stores the store scope (SJ-D74): {@code null} for every store in the tenant, else the
+   *     caller's own stores added together
    */
   public List<SalesCategoryStat> salesByCategory(
-      UUID tenantId, Instant from, Instant to, UUID storeId, String channel, boolean top) {
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel, boolean top) {
     StringBuilder sb =
         new StringBuilder(
             "SELECT CASE WHEN ? THEN cp.category_path[array_length(cp.category_path, 1)]"
@@ -448,9 +477,9 @@ public class ReportingRepository extends BaseJdbcRepository {
       sb.append(" AND l.confirmed_at < ?");
       params.add(OffsetDateTime.ofInstant(to, ZoneOffset.UTC));
     }
-    if (storeId != null) {
-      sb.append(" AND l.store_id = ?");
-      params.add(storeId);
+    if (stores != null) {
+      sb.append(" AND l.store_id = ANY(?)");
+      params.add(stores.toArray(new UUID[0]));
     }
     if (channel != null) {
       sb.append(" AND l.channel = ?");
@@ -462,7 +491,12 @@ public class ReportingRepository extends BaseJdbcRepository {
         sb.toString(),
         ps -> {
           for (int i = 0; i < params.size(); i++) {
-            ps.setObject(i + 1, params.get(i));
+            Object p = params.get(i);
+            if (p instanceof UUID[] ids) {
+              ps.setArray(i + 1, ps.getConnection().createArrayOf("uuid", ids));
+            } else {
+              ps.setObject(i + 1, p);
+            }
           }
         },
         ReportingRepository::mapSalesCategory,
@@ -506,18 +540,18 @@ public class ReportingRepository extends BaseJdbcRepository {
 
   /** Sales totals grouped by currency over the window/filters; a voided sale is left out. */
   public List<SalesSummary> salesSummary(
-      UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel) {
     StringBuilder sb =
         new StringBuilder(
             "SELECT currency, COUNT(*) AS orders,"
                 + " COALESCE(SUM(gross_amount),0) AS gross,"
                 + " COALESCE(SUM(refunded_amount),0) AS refunded"
                 + " FROM sales_facts WHERE tenant_id = ? AND voided_at IS NULL");
-    appendSalesFilters(sb, from, to, storeId, channel);
+    appendSalesFilters(sb, from, to, stores, channel);
     sb.append(" GROUP BY currency ORDER BY currency");
     return query(
         sb.toString(),
-        ps -> bindSalesFilters(ps, tenantId, from, to, storeId, channel),
+        ps -> bindSalesFilters(ps, tenantId, from, to, stores, channel),
         ReportingRepository::mapSalesSummary,
         "sales summary");
   }
@@ -525,43 +559,51 @@ public class ReportingRepository extends BaseJdbcRepository {
   /**
    * Sales totals bucketed by day (and currency) over the window/filters, newest first; a voided
    * sale is left out.
+   *
+   * @param stores the store scope (SJ-D74): {@code null} for every store in the tenant, else the
+   *     caller's own stores added together
    */
   public List<SalesDayStat> salesByDay(
-      UUID tenantId, Instant from, Instant to, UUID storeId, String channel) {
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel) {
     StringBuilder sb =
         new StringBuilder(
             "SELECT date_trunc('day', confirmed_at) AS day, currency, COUNT(*) AS orders,"
                 + " COALESCE(SUM(gross_amount),0) AS gross,"
                 + " COALESCE(SUM(refunded_amount),0) AS refunded"
                 + " FROM sales_facts WHERE tenant_id = ? AND voided_at IS NULL");
-    appendSalesFilters(sb, from, to, storeId, channel);
+    appendSalesFilters(sb, from, to, stores, channel);
     sb.append(" GROUP BY day, currency ORDER BY day DESC, currency LIMIT ?");
     return query(
         sb.toString(),
         ps ->
             ps.setInt(
-                bindSalesFilters(ps, tenantId, from, to, storeId, channel), REPORTING_SAFETY_CAP),
+                bindSalesFilters(ps, tenantId, from, to, stores, channel), REPORTING_SAFETY_CAP),
         ReportingRepository::mapSalesDay,
         "sales by day");
   }
 
   private static void appendSalesFilters(
-      StringBuilder sb, Instant from, Instant to, UUID storeId, String channel) {
+      StringBuilder sb, Instant from, Instant to, Set<UUID> stores, String channel) {
     if (from != null) sb.append(" AND confirmed_at >= ?");
     if (to != null) sb.append(" AND confirmed_at < ?");
-    if (storeId != null) sb.append(" AND store_id = ?");
+    if (stores != null) sb.append(" AND store_id = ANY(?)");
     if (channel != null) sb.append(" AND channel = ?");
   }
 
   /** Binds the shared filters and returns the next free parameter index for the caller to use. */
   private static int bindSalesFilters(
-      PreparedStatement ps, UUID tenantId, Instant from, Instant to, UUID storeId, String channel)
+      PreparedStatement ps,
+      UUID tenantId,
+      Instant from,
+      Instant to,
+      Set<UUID> stores,
+      String channel)
       throws SQLException {
     ps.setObject(1, tenantId);
     int i = 2;
     if (from != null) ps.setObject(i++, OffsetDateTime.ofInstant(from, ZoneOffset.UTC));
     if (to != null) ps.setObject(i++, OffsetDateTime.ofInstant(to, ZoneOffset.UTC));
-    if (storeId != null) ps.setObject(i++, storeId);
+    if (stores != null) bindStores(ps, i++, stores);
     if (channel != null) ps.setObject(i++, channel);
     return i;
   }
@@ -674,41 +716,50 @@ public class ReportingRepository extends BaseJdbcRepository {
    * that is what the shop took; labour in another currency is summed apart and its minutes still
    * counted, so the hours are never lost even where the money cannot be added up. A voided sale is
    * not takings.
+   *
+   * @param stores the store scope (SJ-D74): {@code null} for every store in the business, else the
+   *     caller's own stores added together
    */
-  public List<LabourDayStat> labourByDay(UUID tenantId, Instant from, Instant to, UUID storeId) {
+  public List<LabourDayStat> labourByDay(
+      UUID tenantId, Instant from, Instant to, Set<UUID> stores) {
+    // The store filter is appended only when there is one to apply — an unconditional
+    // "store_id = ANY(?)" bound with a null array makes the Postgres driver fail to determine the
+    // parameter's type (it never reaches the point of finding no rows), so an unrestricted caller
+    // must get a query with no store clause at all, exactly as the single-store filters elsewhere
+    // in this class do.
+    String storeFilter = stores != null ? " AND store_id = ANY(?)" : "";
     String sql =
-        """
-        WITH sales AS (
-            SELECT date_trunc('day', confirmed_at)::date AS day, currency,
-                   COALESCE(SUM(gross_amount),0) AS gross,
-                   COALESCE(SUM(refunded_amount),0) AS refunded
-            FROM sales_facts
-            WHERE tenant_id = ? AND confirmed_at >= ? AND confirmed_at < ?
-              AND voided_at IS NULL
-              AND (?::uuid IS NULL OR store_id = ?)
-            GROUP BY 1, 2
-        ),
-        labour AS (
-            SELECT day, SUM(minutes)::bigint AS minutes,
-                   SUM(CASE WHEN cost IS NULL THEN minutes ELSE 0 END)::bigint AS uncosted,
-                   SUM(cost) AS cost,
-                   MAX(currency) AS currency
-            FROM labour_facts
-            WHERE tenant_id = ? AND day >= ?::date AND day < ?::date
-              AND (?::uuid IS NULL OR store_id = ?)
-            GROUP BY 1
-        )
-        SELECT COALESCE(s.day, l.day) AS day,
-               COALESCE(s.currency, l.currency) AS currency,
-               -- Scaled, not bare: a day with hours and no sales would otherwise answer 0 where a
-               -- trading day answers 0.00, and a column of mixed scales reads as broken.
-               COALESCE(s.gross, 0)::numeric(18,2) AS gross,
-               COALESCE(s.refunded, 0)::numeric(18,2) AS refunded,
-               COALESCE(l.minutes, 0) AS minutes,
-               COALESCE(l.uncosted, 0) AS uncosted,
-               l.cost AS cost
-        FROM sales s FULL OUTER JOIN labour l ON l.day = s.day
-        ORDER BY 1 DESC LIMIT ?""";
+        "WITH sales AS ("
+            + "    SELECT date_trunc('day', confirmed_at)::date AS day, currency,"
+            + "           COALESCE(SUM(gross_amount),0) AS gross,"
+            + "           COALESCE(SUM(refunded_amount),0) AS refunded"
+            + "    FROM sales_facts"
+            + "    WHERE tenant_id = ? AND confirmed_at >= ? AND confirmed_at < ?"
+            + "      AND voided_at IS NULL"
+            + storeFilter
+            + "    GROUP BY 1, 2"
+            + "),"
+            + "labour AS ("
+            + "    SELECT day, SUM(minutes)::bigint AS minutes,"
+            + "           SUM(CASE WHEN cost IS NULL THEN minutes ELSE 0 END)::bigint AS uncosted,"
+            + "           SUM(cost) AS cost,"
+            + "           MAX(currency) AS currency"
+            + "    FROM labour_facts"
+            + "    WHERE tenant_id = ? AND day >= ?::date AND day < ?::date"
+            + storeFilter
+            + "    GROUP BY 1"
+            + ")"
+            + "SELECT COALESCE(s.day, l.day) AS day,"
+            + "       COALESCE(s.currency, l.currency) AS currency,"
+            // Scaled, not bare: a day with hours and no sales would otherwise answer 0 where a
+            // trading day answers 0.00, and a column of mixed scales reads as broken.
+            + "       COALESCE(s.gross, 0)::numeric(18,2) AS gross,"
+            + "       COALESCE(s.refunded, 0)::numeric(18,2) AS refunded,"
+            + "       COALESCE(l.minutes, 0) AS minutes,"
+            + "       COALESCE(l.uncosted, 0) AS uncosted,"
+            + "       l.cost AS cost"
+            + " FROM sales s FULL OUTER JOIN labour l ON l.day = s.day"
+            + " ORDER BY 1 DESC LIMIT ?";
     return query(
         sql,
         ps -> {
@@ -716,13 +767,11 @@ public class ReportingRepository extends BaseJdbcRepository {
           ps.setObject(i++, tenantId);
           ps.setObject(i++, from.atOffset(ZoneOffset.UTC));
           ps.setObject(i++, to.atOffset(ZoneOffset.UTC));
-          ps.setObject(i++, storeId);
-          ps.setObject(i++, storeId);
+          if (stores != null) bindStores(ps, i++, stores);
           ps.setObject(i++, tenantId);
           ps.setObject(i++, from.atOffset(ZoneOffset.UTC).toLocalDate());
           ps.setObject(i++, to.atOffset(ZoneOffset.UTC).toLocalDate());
-          ps.setObject(i++, storeId);
-          ps.setObject(i++, storeId);
+          if (stores != null) bindStores(ps, i++, stores);
           ps.setInt(i, REPORTING_SAFETY_CAP);
         },
         ReportingRepository::mapLabourDay,

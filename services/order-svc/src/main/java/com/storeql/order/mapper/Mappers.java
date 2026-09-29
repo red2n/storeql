@@ -496,7 +496,9 @@ public final class Mappers {
         str(e.orderId()),
         e.amount(),
         e.reason(),
-        e.detail());
+        e.detail(),
+        str(e.variantId()),
+        str(e.replayedBy()));
   }
 
   /**

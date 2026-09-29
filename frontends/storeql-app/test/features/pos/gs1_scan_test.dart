@@ -43,6 +43,15 @@ void main() {
       );
     });
 
+    test('the recalled lot printed another way is still the recalled lot', () {
+      // Trimmed and case aside, as inventory-svc and order-svc compare it, so
+      // the till never sells a pack the server would refuse at the tender.
+      expect(
+        checkRecall('v-1', [lotRecall], batchNo: ' lot-7 '),
+        isA<RecallBlocked>(),
+      );
+    });
+
     test('another lot of the same line goes on selling', () {
       // The expensive half. Without the pack's lot every jar of this line needed
       // a cashier to read it, which is why this row is worth having.

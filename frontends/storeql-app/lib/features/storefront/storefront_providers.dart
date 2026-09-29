@@ -92,10 +92,15 @@ class StorefrontAuthNotifier extends StateNotifier<StorefrontAuthState> {
         if (phone != null && phone.isNotEmpty) 'phone': phone,
       }, email);
 
-  Future<void> login(String email, String password) => _auth(
-      '/${ApiConstants.iam}/auth/login',
-      {'email': email, 'password': password},
-      email);
+  Future<void> login(String email, String password) =>
+      _auth('/${ApiConstants.iam}/auth/login', signInBody(email, password), email);
+
+  /// What the storefront's sign-in sends. One address may hold a shopper's
+  /// account and a business account, separate identities (iam-svc, 29 Sep
+  /// 2026): `accountType: CUSTOMER` asks for the shopper's, where the admin
+  /// console and the till ask for the business's.
+  static Map<String, dynamic> signInBody(String email, String password) =>
+      {'email': email, 'password': password, 'accountType': 'CUSTOMER'};
 
   Future<void> _auth(String path, Map<String, dynamic> body, String email) async {
     // Use a clean Dio (no stale Authorization header) for the auth call.

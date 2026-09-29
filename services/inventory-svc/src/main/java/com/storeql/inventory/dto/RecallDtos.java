@@ -230,15 +230,32 @@ public final class RecallDtos {
 
   @Schema(
       name = "ActiveRecallItem",
-      description = "One scope line of an open recall, as the till checks an item against it.")
+      description =
+          "One scope line of an open recall, as the till checks an item against it — or, asked"
+              + " with ?endedSince=, of one ended since then.")
   public record ActiveRecallItemResponse(
       String recallId,
       String reference,
       String kind,
       String hazard,
       String customerNotice,
+      @Schema(
+              description =
+                  "When the recall was opened (ISO instant). order-svc judges a till sale replayed"
+                      + " from an offline queue by the recalls open when it was rung up.")
+          String openedAt,
       String variantId,
       String batchNo,
       String expiryFrom,
-      String expiryTo) {}
+      String expiryTo,
+      @Schema(
+              description =
+                  "When the recall was closed or cancelled (ISO instant). Only on a line asked"
+                      + " for with ?endedSince=; absent while the recall is open.")
+          String endedAt,
+      @Schema(
+              description =
+                  "CLOSED or CANCELLED (raised in error), with endedAt; absent while the recall"
+                      + " is open.")
+          String endedAs) {}
 }

@@ -7,6 +7,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -40,13 +41,13 @@ public class ValuationRepository extends BaseJdbcRepository {
 
   /**
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param grouping VARIANT for the per-line detail, STORE for the rollup
    * @param limit maximum rows, already clamped by the caller
    * @return rows ordered by value, largest holding first
    */
   public List<ValuationRow> value(
-      UUID tenantId, UUID storeId, ValuationGrouping grouping, int limit) {
+      UUID tenantId, Set<UUID> stores, ValuationGrouping grouping, int limit) {
     // "Can this row be valued?" -- an AVERAGE row needs a non-zero average_cost; a FIFO row needs a
     // cost_price on the batch. Written once here and reused in all three aggregates below so the
     // value and the unvalued quantity can never disagree about which rows counted.
@@ -123,7 +124,7 @@ public class ValuationRepository extends BaseJdbcRepository {
                 + " LEFT JOIN excise_duty_rates edr"
                 + "   ON edr.tenant_id = b.tenant_id AND edr.variant_id = b.variant_id"
                 + " WHERE b.tenant_id = ? AND b.remaining_qty > 0");
-    if (storeId != null) sql.append(" AND b.store_id = ?");
+    if (stores != null) sql.append(" AND b.store_id = ANY(?)");
     sql.append(" GROUP BY 1 ORDER BY value DESC, group_key ASC LIMIT ?");
 
     return query(
@@ -131,7 +132,9 @@ public class ValuationRepository extends BaseJdbcRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         ValuationRepository::mapRow,

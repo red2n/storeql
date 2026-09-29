@@ -40,7 +40,7 @@ public class GrossMarginService {
    */
   public GrossMarginReport report(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       StockTurnGrouping grouping,
@@ -51,10 +51,10 @@ public class GrossMarginService {
     }
     int windowDays = (int) Math.max(1, Duration.between(from, to).toDays());
     Map<String, StockTurnRow> held =
-        stockTurn.stockTurn(tenantId, storeId, from, to, grouping, REPLAY_LIMIT).stream()
+        stockTurn.stockTurn(tenantId, stores, from, to, grouping, REPLAY_LIMIT).stream()
             .collect(Collectors.toMap(StockTurnRow::groupKey, Function.identity(), (a, b) -> a));
-    var earned = revenue.earned(tenantId, storeId, from, to, grouping);
-    var unpriced = revenue.unpricedSaleQty(tenantId, storeId, from, to, grouping);
+    var earned = revenue.earned(tenantId, stores, from, to, grouping);
+    var unpriced = revenue.unpricedSaleQty(tenantId, stores, from, to, grouping);
 
     Set<String> keys = new LinkedHashSet<>(held.keySet());
     keys.addAll(earned.keySet());
@@ -90,7 +90,6 @@ public class GrossMarginService {
                     .thenComparing(GrossMarginRow::groupKey))
             .limit(limit)
             .toList();
-    return new GrossMarginReport(
-        rows, stockTurn.historyComplete(tenantId, storeId, to), windowDays);
+    return new GrossMarginReport(rows, stockTurn.historyComplete(tenantId, stores, to), windowDays);
   }
 }
