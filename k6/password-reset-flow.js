@@ -148,14 +148,17 @@ function registerAs(email, password) {
 }
 
 /**
- * The address signed up afresh and made staff at one of the business's stores. Its session is
- * renewed until the role arrives, never signed in again: the address may already hold another
- * business's login, which a business sign-in tries alone until this one is that business's too, and
- * a run of refused sign-ins would lock the address at the gateway.
+ * The address made staff at one of the business's stores. Staff are made by the business (29 Sep
+ * 2026): provisioning creates this business's own login for the address, with the password it is
+ * given — a login the address holds anywhere else is never taken on — and the role is then assigned
+ * to that login. Its session is renewed until the role arrives, never signed in again: the address
+ * holds another business's login too, and a run of refused sign-ins would lock it at the gateway.
  */
 function staffLogin(tenant, role, storeId, email, password) {
-  const user = registerAs(email, password);
-  must(call('POST', `${TS}/admin/staff`, { token: tenant.owner.token, body: { userId: user.userId, storeId, role } }), 201, `assign ${role}`);
+  const made = must(call('POST', `${AUTH}/admin/staff-users`, { token: tenant.owner.token, body: { email, password } }), 200, `provision ${email} at ${tenant.label}`);
+  must(call('POST', `${TS}/admin/staff`, { token: tenant.owner.token, body: { userId: made.userId, storeId, role } }), 201, `assign ${role}`);
+  const signed = must(call('POST', `${AUTH}/login`, { body: { email, password } }), 200, `sign in ${email} at ${tenant.label}`);
+  const user = { email, password, userId: made.userId, token: signed.accessToken, refreshToken: signed.refreshToken };
   const took = poll(90, () => {
     const renewed = data(call('POST', `${AUTH}/refresh`, { body: { refreshToken: user.refreshToken } }));
     if (!renewed.accessToken) return false;
