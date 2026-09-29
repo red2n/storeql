@@ -105,7 +105,7 @@ export default function ({ tenant, variantId, rival, cashier }) {
   let sold = null;
   poll(60, () => { sold = byLot(a.id); return sold.L3 && Number(sold.L3.remainingQty) === 1; });
   truthy('[+] the sale drew two of the three L3 left — every other lot had gone', sold && Number(sold.L3.remainingQty) === 1 && Number(sold.L2.remainingQty) === 0, sold);
-  expect(call('POST', `/api/order-svc/orders/${sale.id}/returns`, { token: owner, body: { reason: 'Changed their mind', items: [{ variantId, qty: 1 }] } }), '[+] one comes back', [200, 201]);
+  expect(call('POST', `/api/order-svc/orders/${sale.id}/returns`, { token: owner, idem: true, body: { reason: 'Changed their mind', items: [{ variantId, qty: 1, condition: 'SEALED' }] } }), '[+] one comes back', [200, 201]);
   let back = null;
   poll(60, () => { back = batches(a.id).find((x) => x.batchNo === 'L3' && x.id !== l3src); return !!back; });
   truthy('[+] under L3, the lot it was sold from, with its date and cost — not an anonymous RET- batch', !!back && Number(back.remainingQty) === 1 && back.expiryDate === later && Number(back.costPrice) === 2.75, batches(a.id));

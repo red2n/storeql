@@ -87,6 +87,20 @@ public final class Events {
    * taken, or the value given away, against the gift card liability, once per card transaction.
    */
   static OutboxRow giftCardLoaded(GiftCard gc, GiftCardTransaction tx, String paidBy) {
+    return giftCardLoaded(gc, tx, paidBy, null);
+  }
+
+  /**
+   * Value put on a card by a return's refund: paid by {@code RETURN}, which is no tender, and
+   * naming the return. purchase-svc counts it in its gift-card pool but posts nothing, because the
+   * refund is booked from payment-svc's {@code PaymentRefunded}.
+   */
+  static OutboxRow giftCardLoadedByReturn(GiftCard gc, GiftCardTransaction tx, UUID returnId) {
+    return giftCardLoaded(gc, tx, "RETURN", returnId);
+  }
+
+  private static OutboxRow giftCardLoaded(
+      GiftCard gc, GiftCardTransaction tx, String paidBy, UUID returnId) {
     JsonObjectBuilder b =
         Json.createObjectBuilder()
             .add("eventId", Ids.newId().toString())
@@ -99,6 +113,7 @@ public final class Events {
             .add("currency", gc.currency())
             .add("paidBy", paidBy);
     nullable(b, "storeId", gc.storeId() == null ? null : gc.storeId().toString());
+    if (returnId != null) b.add("returnId", returnId.toString());
     return new OutboxRow(
         "GiftCardLoaded", TOPIC_GIFT_CARD_LOADED, gc.tenantId(), gc.id(), b.build().toString());
   }
@@ -708,70 +723,105 @@ public final class Events {
       BigDecimal refundAmount,
       String refundMethod,
       String currency) {
+    return orderReturned(
+        tenantId,
+        orderId,
+        returnId,
+        storeId,
+        items,
+        refundAmount,
+        refundMethod,
+        currency,
+        null,
+        null,
+        false,
+        null);
+  }
+
+  /**
+   * A return the platform must act on: inventory-svc puts each line where its condition says,
+   * payment-svc refunds by the method chosen, customer-svc takes back the loyalty points.
+   *
+   * @param customerId the order's customer, or null for an anonymous sale
+   * @param giftCardId the card a GIFT_CARD refund was put on, else null
+   * @param recall whether the return settles a recall notice (its goods go to RECALLED)
+   * @param approvedBy the {@code sales.refund} holder who allowed a return outside the policy
+   */
+  static OutboxRow orderReturned(
+      UUID tenantId,
+      UUID orderId,
+      UUID returnId,
+      UUID storeId,
+      List<ReturnItem> items,
+      BigDecimal refundAmount,
+      String refundMethod,
+      String currency,
+      UUID customerId,
+      UUID giftCardId,
+      boolean recall,
+      UUID approvedBy) {
     // eventId is required by inventory-svc's OrderEventHandler for per-line dedupe — without it
     // every OrderReturned is dropped as malformed and stock is never restocked. refundAmount +
     // refundMethod let payment-svc reverse the captured payment for ORIGINAL-tender returns.
-    StringBuilder sb = new StringBuilder();
-    sb.append("{\"eventId\":\"")
-        .append(Ids.newId())
-        .append("\",\"eventType\":\"OrderReturned\",\"tenantId\":\"")
-        .append(tenantId)
-        .append("\",\"orderId\":\"")
-        .append(orderId)
-        .append("\",\"returnId\":\"")
-        .append(returnId)
-        .append("\",\"storeId\":\"")
-        .append(storeId)
-        .append("\",\"refundAmount\":")
-        .append(refundAmount != null ? refundAmount.toPlainString() : "0")
-        .append(",\"refundMethod\":\"")
-        .append(esc(refundMethod))
-        .append("\",\"currency\":\"")
-        .append(esc(currency))
-        .append("\",\"items\":[");
-    for (int i = 0; i < items.size(); i++) {
-      if (i > 0) sb.append(',');
-      sb.append("{\"variantId\":\"")
-          .append(items.get(i).variantId())
-          .append("\",\"qty\":")
-          .append(items.get(i).qty().toPlainString())
-          .append('}');
+    JsonArrayBuilder lines = Json.createArrayBuilder();
+    for (ReturnItem item : items) {
+      JsonObjectBuilder line =
+          Json.createObjectBuilder()
+              .add("variantId", item.variantId().toString())
+              .add("qty", item.qty());
+      // A line from before conditions existed has none; the consumer reads its absence as sellable.
+      if (item.condition() != null) line.add("condition", item.condition());
+      lines.add(line);
     }
-    sb.append("]}");
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "OrderReturned")
+            .add("tenantId", tenantId.toString())
+            .add("orderId", orderId.toString())
+            .add("returnId", returnId.toString())
+            .add("storeId", storeId.toString())
+            .add("refundAmount", refundAmount != null ? refundAmount : BigDecimal.ZERO)
+            .add("refundMethod", refundMethod)
+            .add("currency", currency)
+            .add("recall", recall)
+            .add("items", lines);
+    nullable(b, "customerId", customerId == null ? null : customerId.toString());
+    nullable(b, "giftCardId", giftCardId == null ? null : giftCardId.toString());
+    nullable(b, "approvedBy", approvedBy == null ? null : approvedBy.toString());
     return new OutboxRow(
-        "OrderReturned", "storeql.order.order-returned", tenantId, orderId, sb.toString());
+        "OrderReturned", "storeql.order.order-returned", tenantId, orderId, b.build().toString());
   }
 
   static OutboxRow orderVoided(
       UUID tenantId,
       UUID orderId,
       UUID storeId,
+      UUID customerId,
       List<com.storeql.order.domain.Domain.RestockLine> restock) {
     // SJ-D40 made a paid till sale deduct stock, so voiding one must put the stock back. items is
     // what to put back: each line net of anything already returned, or empty when the sale was
     // never handed over and nothing was deducted. eventId and storeId are what inventory-svc's
     // OrderEventHandler needs to restock and dedupe per line, exactly as for OrderReturned.
-    StringBuilder sb = new StringBuilder();
-    sb.append("{\"eventId\":\"")
-        .append(Ids.newId())
-        .append("\",\"eventType\":\"OrderVoided\",\"tenantId\":\"")
-        .append(tenantId)
-        .append("\",\"orderId\":\"")
-        .append(orderId)
-        .append("\",\"storeId\":\"")
-        .append(storeId)
-        .append("\",\"items\":[");
-    for (int i = 0; i < restock.size(); i++) {
-      if (i > 0) sb.append(',');
-      sb.append("{\"variantId\":\"")
-          .append(restock.get(i).variantId())
-          .append("\",\"qty\":")
-          .append(restock.get(i).qty().toPlainString())
-          .append('}');
+    // customerId lets customer-svc take back the points the sale earned.
+    JsonArrayBuilder lines = Json.createArrayBuilder();
+    for (var line : restock) {
+      lines.add(
+          Json.createObjectBuilder()
+              .add("variantId", line.variantId().toString())
+              .add("qty", line.qty()));
     }
-    sb.append("]}");
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "OrderVoided")
+            .add("tenantId", tenantId.toString())
+            .add("orderId", orderId.toString())
+            .add("storeId", storeId.toString())
+            .add("items", lines);
+    nullable(b, "customerId", customerId == null ? null : customerId.toString());
     return new OutboxRow(
-        "OrderVoided", "storeql.order.order-voided", tenantId, orderId, sb.toString());
+        "OrderVoided", "storeql.order.order-voided", tenantId, orderId, b.build().toString());
   }
 
   static OutboxRow layawayCreated(UUID tenantId, UUID layawayId) {

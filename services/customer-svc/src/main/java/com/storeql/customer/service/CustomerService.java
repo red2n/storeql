@@ -811,6 +811,7 @@ public class CustomerService {
         tenantId,
         customerId,
         orderId,
+        total,
         points,
         programmeOf(tenantId),
         awarded ->
@@ -824,6 +825,105 @@ public class CustomerService {
                 total,
                 taxAmount),
         CustomerService::tierChangedEvent);
+  }
+
+  static final String ORDER_RETURNED_CONSUMER = "customer-svc/order-returned";
+  static final String ORDER_VOIDED_CONSUMER = "customer-svc/order-voided";
+  static final String PAYMENT_REFUNDED_CONSUMER = "customer-svc/payment-refunded";
+  private static final String TOPIC_REVERSED = "storeql.customer.loyalty-reversed";
+
+  /**
+   * A return took part of a sale back: takes back that share of the points the sale earned, once
+   * per event. Nothing when the sale earned nothing here (a guest, or no customer of this
+   * business).
+   */
+  public void reverseLoyaltyForReturn(
+      UUID eventId, UUID tenantId, UUID orderId, BigDecimal refundAmount) {
+    if (refundAmount == null || refundAmount.signum() <= 0) {
+      return;
+    }
+    reverseLoyalty(
+        eventId, ORDER_RETURNED_CONSUMER, tenantId, orderId, refundAmount, "Return of order ");
+  }
+
+  /** A sale was voided: takes back every point it earned that is still held, once per event. */
+  public void reverseLoyaltyForVoid(UUID eventId, UUID tenantId, UUID orderId) {
+    reverseLoyalty(eventId, ORDER_VOIDED_CONSUMER, tenantId, orderId, null, "Void of order ");
+  }
+
+  private void reverseLoyalty(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal refundAmount,
+      String reasonPrefix) {
+    repo.reversePointsForOrderOnce(
+        eventId,
+        consumer,
+        tenantId,
+        orderId,
+        refundAmount,
+        pointsPerUnit(),
+        reasonPrefix + orderId,
+        programmeOf(tenantId),
+        (customerId, points) ->
+            loyaltyEvent(
+                "LoyaltyReversed",
+                TOPIC_REVERSED,
+                tenantId,
+                customerId,
+                points,
+                orderId,
+                null,
+                null));
+  }
+
+  /**
+   * A refund the shopper chose to take as store credit: credits the customer's account in the
+   * refund's currency once per event. The currency is the refund's own when the event names it,
+   * else the business's.
+   */
+  public void creditStoreCreditFromRefund(
+      UUID eventId,
+      UUID tenantId,
+      UUID customerId,
+      UUID orderId,
+      UUID refundId,
+      UUID returnId,
+      BigDecimal amount,
+      String currency) {
+    if (amount == null || amount.signum() <= 0) {
+      return;
+    }
+    String cur = storeCreditCurrency(tenantId, currency);
+    String payload =
+        Json.createObjectBuilder()
+            .add("customerId", customerId.toString())
+            .add("tenantId", tenantId.toString())
+            .add("amount", amount)
+            .add("currency", cur)
+            .build()
+            .toString();
+    var event =
+        new OutboxRow(
+            "StoreCreditIssued",
+            "storeql.customer.store-credit-issued",
+            tenantId,
+            customerId,
+            payload);
+    repo.issueStoreCreditFromRefundOnce(
+        eventId,
+        PAYMENT_REFUNDED_CONSUMER,
+        tenantId,
+        customerId,
+        amount,
+        cur,
+        orderId,
+        "Refund to store credit"
+            + (returnId == null ? "" : " · return " + returnId)
+            + (refundId == null ? "" : " · refund " + refundId),
+        event);
   }
 
   private static final String LOYALTY_EARNED = "LoyaltyEarned";

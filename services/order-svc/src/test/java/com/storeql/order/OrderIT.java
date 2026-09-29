@@ -87,12 +87,12 @@ class OrderIT {
   }
 
   private Response post(String path, String json, String tenant) {
-    return target
-        .path(path)
-        .request()
-        .header("X-Tenant-Id", tenant)
-        .header("X-Roles", "OWNER")
-        .post(Entity.entity(json, MediaType.APPLICATION_JSON));
+    var req = target.path(path).request().header("X-Tenant-Id", tenant).header("X-Roles", "OWNER");
+    // A return or a void is retryable, so it carries a key: a fresh one for each attempt here.
+    if (path.endsWith("/returns") || path.endsWith("/void")) {
+      req = req.header("Idempotency-Key", Ids.newId().toString());
+    }
+    return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
   /**
@@ -173,7 +173,7 @@ class OrderIT {
                 + "\"refundMethod\":\"ORIGINAL\","
                 + "\"items\":[{\"variantId\":\""
                 + V
-                + "\",\"qty\":1}]}",
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
             T);
     assertThat(r3.getStatus(), is(201));
     assertThat(r3.readEntity(String.class), containsString("COMPLETED"));
@@ -480,7 +480,9 @@ class OrderIT {
   @Test
   void onlyGoodsThatWereHandedOverCanBeReturned() {
     String oneBack =
-        "{\"reason\":\"changed mind\",\"items\":[{\"variantId\":\"" + V + "\",\"qty\":1}]}";
+        "{\"reason\":\"changed mind\",\"items\":[{\"variantId\":\""
+            + V
+            + "\",\"qty\":1,\"condition\":\"SEALED\"}]}";
 
     UUID unpaid = placeAt("POS", "INSTORE");
     Response pending = post("/orders/" + unpaid + "/returns", oneBack, T);
@@ -511,7 +513,7 @@ class OrderIT {
             "{\"reason\":\"one was bruised\",\"refundMethod\":\"ORIGINAL\","
                 + "\"items\":[{\"variantId\":\""
                 + V
-                + "\",\"qty\":1}]}",
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
             T);
     assertThat(ret.getStatus(), is(201));
     assertThat(
@@ -781,7 +783,9 @@ class OrderIT {
     Response tooMany =
         post(
             "/orders/" + orderId + "/returns",
-            "{\"reason\":\"too many\",\"items\":[{\"variantId\":\"" + V + "\",\"qty\":3}]}",
+            "{\"reason\":\"too many\",\"items\":[{\"variantId\":\""
+                + V
+                + "\",\"qty\":3,\"condition\":\"SEALED\"}]}",
             T);
     assertThat(tooMany.getStatus(), is(409));
     assertThat(tooMany.readEntity(String.class), containsString("RETURN_QTY_EXCEEDS_PURCHASED"));
@@ -790,7 +794,9 @@ class OrderIT {
     Response first =
         post(
             "/orders/" + orderId + "/returns",
-            "{\"reason\":\"first\",\"items\":[{\"variantId\":\"" + V + "\",\"qty\":1}]}",
+            "{\"reason\":\"first\",\"items\":[{\"variantId\":\""
+                + V
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
             T);
     assertThat(first.getStatus(), is(201));
 
@@ -798,7 +804,9 @@ class OrderIT {
     Response second =
         post(
             "/orders/" + orderId + "/returns",
-            "{\"reason\":\"second\",\"items\":[{\"variantId\":\"" + V + "\",\"qty\":2}]}",
+            "{\"reason\":\"second\",\"items\":[{\"variantId\":\""
+                + V
+                + "\",\"qty\":2,\"condition\":\"SEALED\"}]}",
             T);
     assertThat(second.getStatus(), is(409));
     assertThat(second.readEntity(String.class), containsString("RETURN_QTY_EXCEEDS_PURCHASED"));
@@ -1773,6 +1781,9 @@ class OrderIT {
             .header("X-User-Id", userId)
             .header("X-Roles", roles);
     if (idempotencyKey != null) req = req.header("Idempotency-Key", idempotencyKey);
+    else if (path.endsWith("/returns") || path.endsWith("/void")) {
+      req = req.header("Idempotency-Key", Ids.newId().toString());
+    }
     return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
@@ -2157,16 +2168,16 @@ class OrderIT {
     assertThat(cancel.readEntity(String.class), containsString("ORDER_PARTLY_FULFILLED"));
     // Three back when only two were handed over: a refund for goods the customer never had.
     String three =
-        "{\"reason\":\"faulty\",\"refundMethod\":\"CASH\",\"items\":[{\"variantId\":\""
+        "{\"reason\":\"faulty\",\"refundMethod\":\"ORIGINAL\",\"items\":[{\"variantId\":\""
             + V
-            + "\",\"qty\":3}]}";
+            + "\",\"qty\":3,\"condition\":\"SEALED\"}]}";
     Response tooMany = post("/orders/" + order + "/returns", three, T);
     assertThat(tooMany.getStatus(), is(409));
     assertThat(tooMany.readEntity(String.class), containsString("RETURN_QTY_EXCEEDS_PURCHASED"));
     String two =
-        "{\"reason\":\"faulty\",\"refundMethod\":\"CASH\",\"items\":[{\"variantId\":\""
+        "{\"reason\":\"faulty\",\"refundMethod\":\"ORIGINAL\",\"items\":[{\"variantId\":\""
             + V
-            + "\",\"qty\":2}]}";
+            + "\",\"qty\":2,\"condition\":\"SEALED\"}]}";
     assertThat(post("/orders/" + order + "/returns", two, T).getStatus(), is(201));
   }
 
@@ -2495,6 +2506,7 @@ class OrderIT {
             .header("X-User-Id", Ids.newId().toString())
             .header("X-Roles", "MANAGER")
             .header("X-Store-Ids", Ids.newId().toString())
+            .header("Idempotency-Key", Ids.newId().toString())
             .post(Entity.entity(why, MediaType.APPLICATION_JSON));
     assertThat(elsewhere.getStatus(), is(403));
     assertThat(statusOf(orderId), is("FULFILLED"));

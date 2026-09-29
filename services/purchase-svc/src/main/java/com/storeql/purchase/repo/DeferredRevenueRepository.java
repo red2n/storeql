@@ -170,7 +170,8 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
             ps.setString(6, load.paidBy());
             ps.setBigDecimal(7, load.amount());
             ps.setString(8, load.currency());
-            ps.setObject(9, posting.get(0).journalId());
+            // A load paid for by a return's refund posts nothing: the refund owes the card.
+            ps.setObject(9, posting.isEmpty() ? null : posting.get(0).journalId());
             if (ps.executeUpdate() == 0) return false;
           }
           GiftCardPool pool = lockGiftCardPool(c, load.tenantId());

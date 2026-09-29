@@ -48,6 +48,7 @@ import com.storeql.inventory.domain.Domain.TransferOrderLine;
 import com.storeql.inventory.domain.Domain.ValuationGrouping;
 import com.storeql.inventory.domain.Domain.ValuationRow;
 import com.storeql.inventory.domain.Domain.ZoneGlMapping;
+import com.storeql.inventory.domain.ReturnDisposition;
 import com.storeql.inventory.repo.AbcAnalysisRepository;
 import com.storeql.inventory.repo.CostingRepository;
 import com.storeql.inventory.repo.CycleCountRepository;
@@ -393,6 +394,31 @@ public class InventoryService {
       UUID variantId,
       BigDecimal qty,
       UUID orderId) {
+    return receiveReturnFromOrderOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        orderId,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /**
+   * As above, the goods put where the till's condition says (return controls): back on sale, held
+   * for a check, or off sale as damaged or recalled. Each arrival is a batch of its own carrying
+   * the sale's lot, cost and date, so an off-sale return is never merged into stock on sale.
+   */
+  public boolean receiveReturnFromOrderOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID orderId,
+      ReturnDisposition where) {
     return repo.receiveBackOnce(
         dedupeId,
         consumerName,
@@ -404,7 +430,8 @@ public class InventoryService {
         "RETURN",
         "RET-" + Ids.shortRef(orderId),
         InventoryService::stockReceivedEvent,
-        true);
+        true,
+        where);
   }
 
   /**

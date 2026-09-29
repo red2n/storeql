@@ -232,6 +232,8 @@ function post(path, body, token) {
   const headers = hdrs(token);
   // order-svc refuses an order without an Idempotency-Key (header, or the legacy body field).
   if (path === '/api/order-svc/orders' && !(body && body.idempotencyKey)) headers['Idempotency-Key'] = newKey('retail-order');
+  // ...and a return or a void of one (return controls): header only, no body fallback.
+  if (/^\/api\/order-svc\/orders\/[^/]+\/(returns|void)$/.test(path)) headers['Idempotency-Key'] = newKey('retail-return-or-void');
   return http.post(`${BASE}${path}`, JSON.stringify(body), { headers });
 }
 
@@ -2495,7 +2497,7 @@ export function orderPos(d) {
   const returnRes = post(`/api/order-svc/orders/${orderId}/returns`, {
     reason: 'customer changed mind',
     refundMethod: 'ORIGINAL',
-    items: [{ variantId, qty: 1 }],
+    items: [{ variantId, qty: 1, condition: 'SEALED' }],
   }, tenant.ownerToken);
   ok(returnRes, `${tag} create return 201`);
 

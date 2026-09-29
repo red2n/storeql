@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
+import '../../core/ids.dart';
 import '../../core/network/api_client.dart';
 
 // Withdrawals and recalls. Opening one takes every pack in scope off sale at
@@ -665,10 +666,15 @@ Future<RecallNotice> resolveRecallNotice(
 }
 
 /// The refund: a return of the recalled lines against the order, naming the
-/// notice, so the goods, the money and the notice are settled together.
+/// notice, so the goods, the money and the notice are settled together. A
+/// recall refund is never held by the business's return policy and asks no
+/// condition (the goods go to RECALLED whatever state they are in). Its
+/// Idempotency-Key is derived from the notice, so a retry after a lost answer
+/// replays the first refund rather than making a second.
 Future<void> refundRecallNotice(Dio dio, {required RecallNotice notice}) =>
     dio.post(
       '/${ApiConstants.order}/orders/${notice.orderId}/returns',
+      options: Options(headers: {'Idempotency-Key': derivedId(notice.id, 'recall-refund')}),
       data: {
         'reason': 'Product safety recall ${notice.reference}',
         'recallNoticeId': notice.id,

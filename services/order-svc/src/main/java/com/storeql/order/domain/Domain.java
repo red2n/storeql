@@ -2,6 +2,7 @@ package com.storeql.order.domain;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /** Domain records for order-svc. Money is BigDecimal; times are UTC Instant. */
@@ -789,13 +790,19 @@ public final class Domain {
       String status,
       Instant createdAt,
       Instant completedAt,
-      UUID createdBy) {
+      UUID createdBy,
+      UUID idempotencyKey,
+      UUID approvedBy,
+      List<String> outsidePolicy,
+      UUID giftCardId) {
     public static final String STATUS_PENDING = "PENDING";
     public static final String STATUS_COMPLETED = "COMPLETED";
     public static final String STATUS_REJECTED = "REJECTED";
     public static final String METHOD_ORIGINAL = "ORIGINAL";
     public static final String METHOD_STORE_CREDIT = "STORE_CREDIT";
     public static final String METHOD_GIFT_CARD = "GIFT_CARD";
+    public static final List<String> METHODS =
+        List.of(METHOD_ORIGINAL, METHOD_STORE_CREDIT, METHOD_GIFT_CARD);
   }
 
   public record ReturnItem(
@@ -805,7 +812,14 @@ public final class Domain {
       UUID variantId,
       BigDecimal qty,
       BigDecimal refundAmount,
-      String condition) {}
+      String condition) {
+    public static final String CONDITION_SEALED = "SEALED";
+    public static final String CONDITION_OPENED = "OPENED";
+    public static final String CONDITION_DAMAGED = "DAMAGED";
+    public static final String CONDITION_FAULTY = "FAULTY";
+    public static final List<String> CONDITIONS =
+        List.of(CONDITION_SEALED, CONDITION_OPENED, CONDITION_DAMAGED, CONDITION_FAULTY);
+  }
 
   // ── Post-void (Gap #14) ───────────────────────────────────────────────────
 
@@ -817,7 +831,8 @@ public final class Domain {
       UUID storeId,
       String reason,
       UUID voidedBy,
-      Instant voidedAt) {}
+      Instant voidedAt,
+      UUID idempotencyKey) {}
 
   // ── Layaway (Gap #14) ─────────────────────────────────────────────────────
 
@@ -1074,7 +1089,10 @@ public final class Domain {
       String reason,
       String detail,
       UUID variantId,
-      UUID replayedBy) {
+      UUID replayedBy,
+      UUID approvedBy,
+      List<String> outsidePolicy,
+      List<AuditReturnLine> lines) {
     public static final String TYPE_DISCOUNT = "DISCOUNT";
     public static final String TYPE_VOID = "VOID";
     public static final String TYPE_NO_SALE = "NO_SALE";
@@ -1093,6 +1111,9 @@ public final class Domain {
             TYPE_OFFLINE_SALE_OF_RECALLED_ITEM,
             TYPE_OFFLINE_SALE_ON_UNFIT_SCALE);
   }
+
+  /** One line of a return, as the audit trail shows it: what came back, how much, in what state. */
+  public record AuditReturnLine(UUID variantId, BigDecimal qty, String condition) {}
 
   /**
    * A till sale replayed from the offline queue within the grace, and recorded, although when it

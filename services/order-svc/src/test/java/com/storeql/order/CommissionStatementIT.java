@@ -322,7 +322,7 @@ class CommissionStatementIT {
                 "/orders/" + order + "/returns",
                 "{\"reason\":\"Changed their mind\",\"items\":[{\"variantId\":\""
                     + V_STD
-                    + "\",\"qty\":1}]}",
+                    + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
                 T);
     assertThat(refunded.readEntity(String.class), refunded.getStatus(), is(201));
     refunded(T, order, 303);

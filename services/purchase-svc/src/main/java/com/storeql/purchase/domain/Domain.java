@@ -1027,6 +1027,9 @@ public final class Domain {
 
     /** Points that died under the programme's expiry rule (13.x): a lapse, announced. */
     public static final String EXPIRED = "EXPIRED";
+
+    /** Points taken back because the sale that earned them was returned or voided. */
+    public static final String REVERSED = "REVERSED";
   }
 
   /** A gift card issued or reloaded, as order-svc announced it (17.11). */

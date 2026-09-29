@@ -80,6 +80,27 @@ final class Events {
       java.math.BigDecimal amount,
       java.util.List<com.storeql.payment.domain.Domain.RefundAllocation> tenders,
       String kind) {
+    return paymentRefunded(
+        tenantId, refundId, orderId, amount, tenders, kind, null, null, null, null);
+  }
+
+  /**
+   * A return's refund: also names the {@code refundMethod} the shopper chose (ORIGINAL,
+   * STORE_CREDIT, GIFT_CARD), the {@code returnId}, the {@code customerId} (null for a guest sale)
+   * and the sale's {@code currency}, so customer-svc can credit store credit from it once, in the
+   * currency the customer paid.
+   */
+  static OutboxRow paymentRefunded(
+      UUID tenantId,
+      UUID refundId,
+      UUID orderId,
+      java.math.BigDecimal amount,
+      java.util.List<com.storeql.payment.domain.Domain.RefundAllocation> tenders,
+      String kind,
+      String refundMethod,
+      UUID returnId,
+      UUID customerId,
+      String currency) {
     // Each tender's share, so the ledger credits the control account the money left from (17.7).
     StringBuilder shares = new StringBuilder();
     for (var t : tenders) {
@@ -103,7 +124,11 @@ final class Events {
             orderId,
             amount.toPlainString(),
             shares,
-            kind == null ? "" : ",\"kind\":\"" + clean(kind) + "\""));
+            (kind == null ? "" : ",\"kind\":\"" + clean(kind) + "\"")
+                + (refundMethod == null ? "" : ",\"refundMethod\":\"" + clean(refundMethod) + "\"")
+                + (returnId == null ? "" : ",\"returnId\":\"" + returnId + "\"")
+                + (customerId == null ? "" : ",\"customerId\":\"" + customerId + "\"")
+                + (currency == null ? "" : ",\"currency\":\"" + clean(currency) + "\"")));
   }
 
   /**

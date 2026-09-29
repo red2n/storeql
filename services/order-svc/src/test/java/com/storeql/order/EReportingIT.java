@@ -333,7 +333,7 @@ class EReportingIT {
                 "/orders/" + sale + "/returns",
                 "{\"reason\":\"CHANGED_MIND\",\"items\":[{\"variantId\":\""
                     + V_STD
-                    + "\",\"qty\":1,\"refundAmount\":12.00}]}",
+                    + "\",\"qty\":1,\"condition\":\"SEALED\",\"refundAmount\":12.00}]}",
                 T);
     assertThat(refunded.readEntity(String.class), refunded.getStatus(), is(201));
     backdate(T, sale, 8);

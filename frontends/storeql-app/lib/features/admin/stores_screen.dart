@@ -17,6 +17,7 @@ import '../../shared/widgets/page_header.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'fulfilment_windows_screen.dart';
 import 'providers/admin_providers.dart';
+import 'return_policy_card.dart';
 import 'store_instruments_dialog.dart';
 
 /// A store's status in words: *Open* while it trades, *Closed* when switched
@@ -70,6 +71,8 @@ class StoresScreen extends ConsumerWidget {
               ),
             ],
           ),
+          // The business's return policy sits with the business-wide settings, for management.
+          if (isManager) const ReturnPolicyCard(),
           Expanded(
             child: storesAsync.when(
               loading: () => const LoadingView(label: 'Loading stores…'),

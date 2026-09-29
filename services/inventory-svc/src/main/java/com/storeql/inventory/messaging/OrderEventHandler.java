@@ -2,6 +2,7 @@ package com.storeql.inventory.messaging;
 
 import com.storeql.ids.Ids;
 import com.storeql.inventory.domain.Domain.Reservation;
+import com.storeql.inventory.domain.ReturnDisposition;
 import com.storeql.inventory.service.InventoryService;
 import com.storeql.inventory.service.WaveService;
 import com.storeql.web.ApiException;
@@ -117,6 +118,9 @@ class OrderEventHandler {
     boolean complete = "FULFILLED".equals(orderStatus);
     boolean partial = "PARTIALLY_FULFILLED".equals(orderStatus);
 
+    // A return that settles a recall sends its goods to RECALLED whatever their condition.
+    boolean recall = obj.getBoolean("recall", false);
+
     for (int i = 0; i < items.size(); i++) {
       JsonObject line = items.getJsonObject(i);
       UUID variantId = Ids.parse(line.getString("variantId"));
@@ -161,7 +165,14 @@ class OrderEventHandler {
               dedupeId, CONSUMER_NAME, tenantId, storeId, variantId, qty, orderId);
         } else {
           service.receiveReturnFromOrderOnce(
-              dedupeId, CONSUMER_NAME, tenantId, storeId, variantId, qty, orderId);
+              dedupeId,
+              CONSUMER_NAME,
+              tenantId,
+              storeId,
+              variantId,
+              qty,
+              orderId,
+              ReturnDisposition.of(conditionOf(line), recall));
         }
       } catch (ApiException e) {
         if (e.status() >= 500) {
@@ -233,6 +244,16 @@ class OrderEventHandler {
             ? obj.getString("fulfilmentType", null)
             : null;
     return com.storeql.inventory.service.WaveService.waits(channel, fulfilment);
+  }
+
+  /** The condition the till recorded for a returned line; null on an event from before it did. */
+  private static String conditionOf(JsonObject line) {
+    if (!line.containsKey("condition") || line.isNull("condition")) return null;
+    try {
+      return line.getString("condition");
+    } catch (ClassCastException e) {
+      return null;
+    }
   }
 
   /** What the line still has outstanding after this handover, when the event says. */

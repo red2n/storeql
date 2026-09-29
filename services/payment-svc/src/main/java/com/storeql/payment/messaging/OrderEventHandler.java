@@ -14,8 +14,8 @@ import java.util.UUID;
 
 /**
  * Automatic refunds in response to order events. {@code OrderReturned} refunds the return amount
- * (only when the return went back to the ORIGINAL tender — STORE_CREDIT/GIFT_CARD refunds are
- * settled elsewhere); {@code OrderCancelled} refunds whatever is still captured (unpaid pay-later
+ * (to the ORIGINAL tenders, or recorded as a STORE_CREDIT / GIFT_CARD refund whose value goes to a
+ * liability); {@code OrderCancelled} refunds whatever is still captured (unpaid pay-later
  * cancellations are a no-op). Both are idempotent on the order event's {@code eventId} inside
  * {@link PaymentService#refundForOrderEvent}. Separated from {@link OrderEventConsumer} so Kafka
  * lifecycle and domain logic each change for one reason (SRP).
@@ -48,14 +48,31 @@ class OrderEventHandler {
     BigDecimal requestedAmount; // null => cancellation: refund all remaining captured
     String reason;
     String kind = null;
+    PaymentService.ReturnRefund returnRefund = null;
     try (var reader = Json.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventType = obj.getString("eventType", null);
       if ("OrderReturned".equals(eventType)) {
-        // Only ORIGINAL-tender returns reverse a payment.
-        if (!REFUND_METHOD_ORIGINAL.equals(obj.getString("refundMethod", REFUND_METHOD_ORIGINAL))) {
+        // ORIGINAL reverses the captured tenders; STORE_CREDIT / GIFT_CARD are recorded as a
+        // refund of that method (the value goes to a liability). Anything else is not ours.
+        String method = obj.getString("refundMethod", REFUND_METHOD_ORIGINAL);
+        if (!REFUND_METHOD_ORIGINAL.equals(method)
+            && !"STORE_CREDIT".equals(method)
+            && !"GIFT_CARD".equals(method)) {
           return;
         }
+        returnRefund =
+            new PaymentService.ReturnRefund(
+                method,
+                obj.containsKey("returnId") && !obj.isNull("returnId")
+                    ? Ids.parse(obj.getString("returnId"))
+                    : null,
+                obj.containsKey("customerId") && !obj.isNull("customerId")
+                    ? Ids.parse(obj.getString("customerId"))
+                    : null,
+                obj.containsKey("currency") && !obj.isNull("currency")
+                    ? obj.getString("currency")
+                    : null);
         requestedAmount = obj.getJsonNumber("refundAmount").bigDecimalValue();
         reason = "Return refund";
       } else if ("OrderCancelled".equals(eventType)) {
@@ -85,6 +102,11 @@ class OrderEventHandler {
       return;
     }
 
+    if (returnRefund != null) {
+      service.refundReturnForOrderEvent(
+          eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, returnRefund);
+      return;
+    }
     service.refundForOrderEvent(
         eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, kind);
   }

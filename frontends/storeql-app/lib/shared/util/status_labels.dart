@@ -133,3 +133,45 @@ String tillPhoneLabel(String? choice) => switch ((choice ?? '').toUpperCase()) {
       'OFF' => "Don't ask",
       _ => 'Optional',
     };
+
+/// The conditions a returned item can come back in (return-controls), in the
+/// order a person picks from. Nothing is preselected: the person looks.
+const returnConditions = ['SEALED', 'OPENED', 'DAMAGED', 'FAULTY'];
+
+/// A returned item's condition in words, with where it goes for the ones the
+/// shelf cares about — see [returnConditionHint].
+String returnConditionLabel(String? condition) =>
+    switch ((condition ?? '').toUpperCase()) {
+      'SEALED' => 'Sealed',
+      'OPENED' => 'Opened',
+      'DAMAGED' => 'Damaged',
+      'FAULTY' => 'Faulty',
+      _ => humanizeCode(condition),
+    };
+
+/// Where a returned item goes for its condition, in words.
+String returnConditionHint(String? condition) =>
+    switch ((condition ?? '').toUpperCase()) {
+      'SEALED' => 'back on sale',
+      'OPENED' => 'checked before resale',
+      'DAMAGED' || 'FAULTY' => 'off sale',
+      _ => '',
+    };
+
+/// Why a return needed a manager (order-svc's reason codes), in words.
+String returnReasonLabel(String? code) =>
+    switch ((code ?? '').toUpperCase()) {
+      'WINDOW' => "Past the business's return window",
+      'CEILING' => "Over the cashier's refund limit",
+      'FAULTY_PAST_WINDOW' => 'Faulty goods past the window',
+      _ => humanizeCode(code),
+    };
+
+/// How a return is paid back, in words.
+String refundMethodLabel(String? method) =>
+    switch ((method ?? '').toUpperCase()) {
+      'ORIGINAL' => 'Back to how they paid',
+      'STORE_CREDIT' => 'Store credit',
+      'GIFT_CARD' => 'Gift card',
+      _ => humanizeCode(method),
+    };

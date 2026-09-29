@@ -11,11 +11,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * OrderEventHandler drives the automatic-refund path. OrderReturned refunds only for
- * ORIGINAL-tender returns; OrderCancelled refunds whatever is still captured (null amount);
- * other/malformed events are skipped without throwing so the consumer loop acks them. payment-svc
- * has no mocking framework on the test classpath, so a capturing subclass stands in for {@link
- * PaymentService}.
+ * OrderEventHandler drives the automatic-refund path. OrderReturned refunds only for ORIGINAL,
+ * STORE_CREDIT and GIFT_CARD returns; OrderCancelled refunds whatever is still captured (null
+ * amount); other/malformed events are skipped without throwing so the consumer loop acks them.
+ * payment-svc has no mocking framework on the test classpath, so a capturing subclass stands in for
+ * {@link PaymentService}.
  */
 class OrderEventHandlerTest {
 
@@ -32,6 +32,20 @@ class OrderEventHandlerTest {
     BigDecimal amount;
     String reason;
     String kind;
+    ReturnRefund ret;
+
+    @Override
+    public void refundReturnForOrderEvent(
+        UUID eventId,
+        String consumer,
+        UUID tenantId,
+        UUID orderId,
+        BigDecimal requestedAmount,
+        String reason,
+        ReturnRefund ret) {
+      refundForOrderEvent(eventId, consumer, tenantId, orderId, requestedAmount, reason, null);
+      this.ret = ret;
+    }
 
     @Override
     public void refundForOrderEvent(
@@ -95,8 +109,20 @@ class OrderEventHandlerTest {
   }
 
   @Test
-  void storeCreditReturnDoesNotReversePayment() {
+  void storeCreditAndGiftCardReturnsAreRecordedUnderTheirOwnMethod() {
     handler.handle(returned("STORE_CREDIT", "25.00"));
+    assertEquals(1, service.calls);
+    assertEquals("STORE_CREDIT", service.ret.method());
+    assertEquals(new BigDecimal("25.00"), service.amount);
+
+    handler.handle(returned("GIFT_CARD", "5.00"));
+    assertEquals(2, service.calls);
+    assertEquals("GIFT_CARD", service.ret.method());
+  }
+
+  @Test
+  void anUnknownRefundMethodIsNotOurs() {
+    handler.handle(returned("CHEQUE", "25.00"));
 
     assertEquals(0, service.calls);
   }

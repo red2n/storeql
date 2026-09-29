@@ -388,7 +388,7 @@ class SalesInvoiceIT {
             "{\"reason\":\"one bag split\",\"refundMethod\":\"ORIGINAL\","
                 + "\"items\":[{\"variantId\":\""
                 + V_STD
-                + "\",\"qty\":1}]}",
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
             T_GB);
     JsonObject ret = data(returned);
     assertThat(ret.toString(), returned.getStatus(), is(201));
@@ -424,7 +424,9 @@ class SalesInvoiceIT {
     Response returned =
         post(
             "/orders/" + order + "/returns",
-            "{\"reason\":\"changed mind\",\"items\":[{\"variantId\":\"" + V_STD + "\",\"qty\":1}]}",
+            "{\"reason\":\"changed mind\",\"items\":[{\"variantId\":\""
+                + V_STD
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
             T_GB);
     String returnId = data(returned).getString("id");
     Response credit = post("/admin/returns/" + returnId + "/credit-note", "{}", T_GB);

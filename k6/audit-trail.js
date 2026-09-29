@@ -65,13 +65,13 @@ export default function ({ tenant, rival }) {
   truthy('[+] a discounted sale is placed by the owner', !!discounted.id, JSON.stringify(discounted));
   const voided = place(sale());
   pay(voided);
-  expect(call('POST', `/api/order-svc/orders/${voided.id}/void`, { token: t, body: { reason: 'rang up twice' } }), '[+] a paid sale is voided by the owner', 200);
+  expect(call('POST', `/api/order-svc/orders/${voided.id}/void`, { token: t, idem: true, body: { reason: 'rang up twice' } }), '[+] a paid sale is voided by the owner', 200);
   expect(call('POST', '/api/order-svc/pos/no-sale', { token: cashier.token, body: { storeId, reason: 'drawer check' } }), '[+] the cashier opens the drawer without a sale', 201);
   const cancelled = place(sale());
   expect(call('POST', `/api/order-svc/orders/${cancelled.id}/cancel`, { token: t, body: { reason: 'customer walked out' } }), '[+] a pending sale is cancelled by the owner', 200);
   const returned = place(sale());
   pay(returned);
-  expect(call('POST', `/api/order-svc/orders/${returned.id}/returns`, { token: t, body: { reason: 'chipped', items: [{ variantId, qty: 1 }] } }), '[+] one unit is taken back by the owner', 201);
+  expect(call('POST', `/api/order-svc/orders/${returned.id}/returns`, { token: t, idem: true, body: { reason: 'chipped', items: [{ variantId, qty: 1, condition: 'DAMAGED' }] } }), '[+] one unit is taken back by the owner', 201);
   expect(call('POST', '/api/inventory-svc/admin/inventory/adjust', { token: t, idem: true, body: { storeId, variantId, delta: -3, reason: 'damaged' } }), '[+] and three are written off', [200, 201]);
 
   // ── the trail ────────────────────────────────────────────────────────────────

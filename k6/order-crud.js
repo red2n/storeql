@@ -10,6 +10,7 @@ import {
   call,
   data,
   expect,
+  newKey,
   onboardTenant,
   poll,
   priceVariants,
@@ -72,7 +73,7 @@ export default function ({ tenant, rival, shopper, stranger }) {
 
   // ── pay, fulfil, return ─────────────────────────────────────────────────────
   expect(
-    call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, body: { reason: 'Too early', items: [{ variantId, qty: 1 }] } }),
+    call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, idem: true, body: { reason: 'Too early', items: [{ variantId, qty: 1, condition: 'SEALED' }] } }),
     '[-] return before the goods were handed over',
     409,
     'ORDER_CANNOT_RETURN'
@@ -83,14 +84,14 @@ export default function ({ tenant, rival, shopper, stranger }) {
   truthy('[+] paying for a till sale fulfils it', statusOf(order.id) === 'FULFILLED', statusOf(order.id));
   expect(call('POST', `/api/order-svc/orders/${order.id}/fulfil`, { token: t }), '[-] fulfil twice', 409, 'ORDER_NOT_FULFILLABLE');
   expect(call('POST', `/api/order-svc/orders/${order.id}/cancel`, { token: t, body: { reason: 'Too late' } }), '[-] cancel a fulfilled order', 409);
-  expect(call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, body: { items: [{ variantId, qty: 1 }] } }), '[-] return: reason required', 400);
+  expect(call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, idem: true, body: { items: [{ variantId, qty: 1, condition: 'SEALED' }] } }), '[-] return: reason required', 400);
   expect(
-    call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, body: { reason: 'Too many', items: [{ variantId, qty: 5 }] } }),
+    call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, idem: true, body: { reason: 'Too many', items: [{ variantId, qty: 5, condition: 'SEALED' }] } }),
     '[-] return more than was bought',
     [400, 409, 422]
   );
   expect(
-    call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, body: { reason: 'Chipped', refundMethod: 'CASH', items: [{ variantId, qty: 1, condition: 'DAMAGED' }] } }),
+    call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, idem: true, body: { reason: 'Chipped', refundMethod: 'ORIGINAL', items: [{ variantId, qty: 1, condition: 'DAMAGED' }] } }),
     '[+] return one mug',
     201
   );
@@ -128,7 +129,7 @@ export default function ({ tenant, rival, shopper, stranger }) {
   truthy('[+] the order is PARTIALLY_FULFILLED with one handed over', data(one).status === 'PARTIALLY_FULFILLED' && Number(data(one).items[0].fulfilledQty) === 1, data(one));
   expect(call('POST', `/api/order-svc/orders/${partial.id}/cancel`, { token: t, body: { reason: 'changed mind' } }), '[-] cancel once goods have gone out', 409, 'ORDER_PARTLY_FULFILLED');
   expect(
-    call('POST', `/api/order-svc/orders/${partial.id}/returns`, { token: t, body: { reason: 'Too many', refundMethod: 'CASH', items: [{ variantId, qty: 2 }] } }),
+    call('POST', `/api/order-svc/orders/${partial.id}/returns`, { token: t, idem: true, body: { reason: 'Too many', refundMethod: 'ORIGINAL', items: [{ variantId, qty: 2, condition: 'SEALED' }] } }),
     '[-] return two when only one was handed over',
     409,
     'RETURN_QTY_EXCEEDS_PURCHASED'
@@ -166,16 +167,16 @@ export default function ({ tenant, rival, shopper, stranger }) {
   expect(call('POST', `/api/order-svc/orders/${toCancel.id}/cancel`, { token: t, body: { reason: 'Customer walked out' } }), '[+] cancel a pending order', 200);
   expect(call('POST', `/api/order-svc/orders/${toCancel.id}/fulfil`, { token: t }), '[-] fulfil a cancelled order', 409, 'ORDER_NOT_FULFILLABLE');
   expect(
-    call('POST', `/api/order-svc/orders/${toCancel.id}/returns`, { token: t, body: { reason: 'Never had it', items: [{ variantId, qty: 1 }] } }),
+    call('POST', `/api/order-svc/orders/${toCancel.id}/returns`, { token: t, idem: true, body: { reason: 'Never had it', items: [{ variantId, qty: 1, condition: 'SEALED' }] } }),
     '[-] return a cancelled order',
     409,
     'ORDER_CANNOT_RETURN'
   );
   const toVoid = data(place(sale()));
-  expect(call('POST', `/api/order-svc/orders/${toVoid.id}/void`, { token: t, body: {} }), '[-] void: reason required', 400);
-  expect(call('POST', `/api/order-svc/orders/${toVoid.id}/void`, { token: t, body: { reason: 'Rang up twice' } }), '[+] void a POS order', 200);
+  expect(call('POST', `/api/order-svc/orders/${toVoid.id}/void`, { token: t, idem: true, body: {} }), '[-] void: reason required', 400);
+  expect(call('POST', `/api/order-svc/orders/${toVoid.id}/void`, { token: t, idem: true, body: { reason: 'Rang up twice' } }), '[+] void a POS order', 200);
   truthy('[+] ...VOIDED', statusOf(toVoid.id) === 'VOIDED', statusOf(toVoid.id));
-  expect(call('POST', `/api/order-svc/orders/${toVoid.id}/void`, { token: t, body: { reason: 'Again' } }), '[-] void twice', 409);
+  expect(call('POST', `/api/order-svc/orders/${toVoid.id}/void`, { token: t, idem: true, body: { reason: 'Again' } }), '[-] void twice', 409);
 
   // ── the back-office void (09.13) ────────────────────────────────────────────
   // A management action: the cashier who rang the sale is refused before it is touched, an
@@ -185,27 +186,27 @@ export default function ({ tenant, rival, shopper, stranger }) {
   expect(pay(standingSale), '[+] pay for a sale to void from the back office', [200, 201]);
   poll(30, () => statusOf(standingSale.id) === 'FULFILLED');
   truthy('[+] ...handed over at the till', statusOf(standingSale.id) === 'FULFILLED', statusOf(standingSale.id));
-  expect(call('POST', `/api/order-svc/orders/${standingSale.id}/void`, { token: cashierToken, body: { reason: 'Rang up twice' } }), '[-] a cashier cannot void a completed sale', 403);
+  expect(call('POST', `/api/order-svc/orders/${standingSale.id}/void`, { token: cashierToken, idem: true, body: { reason: 'Rang up twice' } }), '[-] a cashier cannot void a completed sale', 403);
   truthy('[+] ...and the sale still stands', statusOf(standingSale.id) === 'FULFILLED', statusOf(standingSale.id));
-  expect(call('POST', `/api/order-svc/orders/${standingSale.id}/void`, { token: t, body: { reason: 'Rang up twice' } }), '[+] the owner voids it from the back office', 200);
+  expect(call('POST', `/api/order-svc/orders/${standingSale.id}/void`, { token: t, idem: true, body: { reason: 'Rang up twice' } }), '[+] the owner voids it from the back office', 200);
   truthy('[+] ...VOIDED', statusOf(standingSale.id) === 'VOIDED', statusOf(standingSale.id));
   const webOrder = data(parkedOnline());
-  expect(call('POST', `/api/order-svc/orders/${webOrder.id}/void`, { token: t, body: { reason: 'Not a till sale' } }), '[-] an online order is cancelled or returned, never voided', 409, 'ORDER_VOID_ONLY_POS');
+  expect(call('POST', `/api/order-svc/orders/${webOrder.id}/void`, { token: t, idem: true, body: { reason: 'Not a till sale' } }), '[-] an online order is cancelled or returned, never voided', 409, 'ORDER_VOID_ONLY_POS');
   const exceptionRows = data(call('GET', `/api/order-svc/admin/reports/exceptions?storeId=${storeId}&groupBy=ACTOR`, { token: t }));
   const ownerRow = (exceptionRows.rows || []).find((r) => r.groupKey === tenant.owner.userId);
   truthy('[+] the voids are counted against who made them', !!ownerRow && Number(ownerRow.voids) >= 2, JSON.stringify(exceptionRows));
   expect(call('GET', `/api/order-svc/admin/reports/exceptions?storeId=${storeId}`, { token: cashierToken }), '[-] a cashier cannot read who is voiding', 403);
 
   // ── abuse: the void does not wear down, leak across tenants, or race ─────────
-  const voidAt = (id, token, reason) => ['POST', `${BASE}/api/order-svc/orders/${id}/void`, JSON.stringify({ reason }), { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, tags: { name: 'POST /api/order-svc/orders/{id}/void (batch)' } }];
+  const voidAt = (id, token, reason) => ['POST', `${BASE}/api/order-svc/orders/${id}/void`, JSON.stringify({ reason }), { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'Idempotency-Key': newKey('void') }, tags: { name: 'POST /api/order-svc/orders/{id}/void (batch)' } }];
   const abused = data(place(sale()));
   expect(pay(abused), '[+] a second paid sale for the abuse cases', [200, 201]);
   poll(30, () => statusOf(abused.id) === 'FULFILLED');
   const hammered = http.batch(Array.from({ length: 20 }, (_, i) => voidAt(abused.id, cashierToken, `attempt ${i}`)));
   truthy('[-] twenty cashier attempts at once: every one refused', hammered.every((r) => r.status === 403 || r.status === 429), hammered.map((r) => r.status).join(','));
   truthy('[+] ...and the sale still stands', statusOf(abused.id) === 'FULFILLED', statusOf(abused.id));
-  expect(call('POST', `/api/order-svc/orders/${abused.id}/void`, { token: rival.owner.token, body: { reason: 'Not mine' } }), '[-] another tenant cannot void it', 404);
-  expect(call('POST', `/api/order-svc/orders/${abused.id}/void`, { token: t, body: { reason: 'x'.repeat(501) } }), '[-] a reason longer than 500 characters', 400);
+  expect(call('POST', `/api/order-svc/orders/${abused.id}/void`, { token: rival.owner.token, idem: true, body: { reason: 'Not mine' } }), '[-] another tenant cannot void it', 404);
+  expect(call('POST', `/api/order-svc/orders/${abused.id}/void`, { token: t, idem: true, body: { reason: 'x'.repeat(501) } }), '[-] a reason longer than 500 characters', 400);
   truthy('[+] ...and it still stands', statusOf(abused.id) === 'FULFILLED', statusOf(abused.id));
   const raceVoids = http.batch(Array.from({ length: 6 }, () => voidAt(abused.id, t, 'race')));
   const raceWon = raceVoids.filter((r) => r.status === 200).length;

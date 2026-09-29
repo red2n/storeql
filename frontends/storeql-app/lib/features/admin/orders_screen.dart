@@ -22,6 +22,7 @@ import 'providers/orders_pagination.dart';
 import 'sales_invoices_dialog.dart';
 import '../../shared/util/short_ref.dart';
 import '../../shared/util/slot_label.dart';
+import '../../shared/util/status_labels.dart';
 import 'package:storeql_app/core/ids.dart';
 
 /// The body of a cancel. The reason is optional, and the server takes "no
@@ -283,7 +284,7 @@ class _AdminOrdersScreenState extends ConsumerState<AdminOrdersScreen> {
     if (action == 'return') {
       await showDialog<void>(
         context: context,
-        builder: (_) => _ReturnDialog(
+        builder: (_) => ReturnDialog(
           orderId: o.id,
           onDone: () {
             ref.read(ordersPaginationProvider(_filter).notifier).refresh();
@@ -405,29 +406,63 @@ class _AdminOrdersScreenState extends ConsumerState<AdminOrdersScreen> {
   }
 }
 
-/// Creates a return against an order (order-svc) and records the matching
-/// money refund (payment-svc) for CASH/CARD refunds.
-class _ReturnDialog extends ConsumerStatefulWidget {
-  final String orderId;
-  final VoidCallback onDone;
-  const _ReturnDialog({required this.orderId, required this.onDone});
-
-  @override
-  ConsumerState<_ReturnDialog> createState() => _ReturnDialogState();
+/// The reason codes a refused return carries, in the order the server named
+/// them: the top-level `details` of the problem, else the envelope's own.
+/// A code may arrive as `reason=CEILING`; only the code is kept.
+List<String> returnRefusalReasons(Object e) {
+  final raw = <String>[];
+  if (e is DioException) {
+    final data = e.response?.data;
+    if (data is Map && data['details'] is List) {
+      raw.addAll([for (final d in data['details'] as List) d.toString()]);
+    }
+  }
+  if (raw.isEmpty) raw.addAll(apiErrorOf(e)?.details ?? const []);
+  return [
+    for (final d in raw) d.contains('=') ? d.substring(d.indexOf('=') + 1) : d,
+  ];
 }
 
-class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
+/// Takes items back against an order (order-svc). Each returned line says what
+/// condition it is in (nothing is preselected: the person looks), and the
+/// refund goes where the person chooses: back to how they paid, to the
+/// customer's store credit, or to a gift card. The server refunds and restocks
+/// from the return itself; the dialog only records it, once — the same
+/// Idempotency-Key goes with a retry of the same submit.
+class ReturnDialog extends ConsumerStatefulWidget {
+  final String orderId;
+  final VoidCallback onDone;
+  const ReturnDialog({super.key, required this.orderId, required this.onDone});
+
+  @override
+  ConsumerState<ReturnDialog> createState() => _ReturnDialogState();
+}
+
+class _ReturnDialogState extends ConsumerState<ReturnDialog> {
   final _reasonCtrl = TextEditingController();
+  final _giftCodeCtrl = TextEditingController();
   final Map<String, int> _returnQty = {}; // variantId → qty to return
-  String _method = 'CARD';
+  final Map<String, String> _condition = {}; // variantId → SEALED|OPENED|DAMAGED|FAULTY
+  String _method = 'ORIGINAL';
+  bool _topUp = false;
   bool _submitting = false;
   String? _error;
 
-  static const _methods = ['CARD', 'CASH', 'STORE_CREDIT'];
+  /// Why the server said a manager must take the return, as codes.
+  List<String>? _needsManager;
+
+  /// The key of the attempt in hand, and what it was for: a retry of the same
+  /// submit reuses it, any change to what is sent gets a new one.
+  String? _key;
+  String? _keyFor;
+
+  /// The gift card a successful return made or topped up, shown once.
+  Map<String, dynamic>? _giftCard;
 
   @override
   void dispose() {
     _reasonCtrl.dispose();
+    _giftCodeCtrl.dispose();
     super.dispose();
   }
 
@@ -440,100 +475,152 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
   }
 
   Future<void> _submit(OrderDetail order) async {
-    final items = [
+    final chosen = [
       for (final entry in _returnQty.entries)
-        if (entry.value > 0)
-          {'variantId': entry.key, 'qty': entry.value, 'condition': 'GOOD'},
+        if (entry.value > 0) entry,
     ];
-    if (items.isEmpty) {
-      setState(() => _error = 'Select at least one item to return.');
+    if (chosen.isEmpty) {
+      setState(() {
+        _needsManager = null;
+        _error = 'Select at least one item to return.';
+      });
       return;
+    }
+    if (chosen.any((e) => _condition[e.key] == null)) {
+      setState(() {
+        _needsManager = null;
+        _error = 'Say what condition each returned item is in.';
+      });
+      return;
+    }
+    final giftCode = _giftCodeCtrl.text.trim();
+    final topUp = _method == 'GIFT_CARD' && _topUp;
+    if (topUp && giftCode.isEmpty) {
+      setState(() {
+        _needsManager = null;
+        _error = 'Enter the code of the gift card to top up.';
+      });
+      return;
+    }
+    final reason =
+        _reasonCtrl.text.trim().isEmpty ? 'Customer return' : _reasonCtrl.text.trim();
+    final items = [
+      for (final e in chosen)
+        {'variantId': e.key, 'qty': e.value, 'condition': _condition[e.key]},
+    ];
+    final body = <String, dynamic>{
+      'reason': reason,
+      'refundMethod': _method,
+      if (topUp) 'giftCardCode': giftCode,
+      'items': items,
+    };
+    // The same submit again (a retry after a network failure) is the same
+    // attempt; anything changed is a new one.
+    final signature = '${body['reason']}|$_method|${topUp ? giftCode : ''}|'
+        '${[for (final i in items) '${i['variantId']}:${i['qty']}:${i['condition']}'].join(',')}';
+    if (_key == null || _keyFor != signature) {
+      _key = newId();
+      _keyFor = signature;
     }
     setState(() {
       _submitting = true;
       _error = null;
+      _needsManager = null;
     });
-    final dio = ref.read(apiClientProvider).dio;
     try {
-      // 1. Record the return (computes the refund amount server-side).
-      final retResp = await dio.post(
-        '/${ApiConstants.order}/orders/${widget.orderId}/returns',
-        data: {
-          'reason': _reasonCtrl.text.trim().isEmpty
-              ? 'Customer return'
-              : _reasonCtrl.text.trim(),
-          'refundMethod': _method,
-          'items': items,
-        },
-      );
-      final ret = retResp.data['data'] as Map<String, dynamic>;
-      final refundAmount = (ret['refundAmount'] as num?)?.toDouble() ?? 0;
-
-      // 2. For a money refund, record it against the original payment tender.
-      String? refundNote;
-      if (_method != 'STORE_CREDIT' && refundAmount > 0) {
-        final paymentId = await _findPaymentId(dio);
-        if (paymentId != null) {
-          await dio.post(
-            '/${ApiConstants.payment}/payments/by-order/${widget.orderId}/refunds',
-            data: {
-              'paymentId': paymentId,
-              'amount': refundAmount,
-              'method': _method,
-              'reason': _reasonCtrl.text.trim().isEmpty
-                  ? 'Customer return'
-                  : _reasonCtrl.text.trim(),
-            },
+      final resp = await ref.read(apiClientProvider).dio.post(
+            '/${ApiConstants.order}/orders/${widget.orderId}/returns',
+            data: body,
+            options: Options(headers: {'Idempotency-Key': _key}),
           );
-        } else {
-          refundNote = ' (no captured payment found — refund not posted)';
-        }
-      }
-
+      final ret = (resp.data['data'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final refundAmount = (ret['refundAmount'] as num?)?.toDouble() ?? _previewRefund(order.items);
+      final card = (ret['giftCard'] as Map?)?.cast<String, dynamic>();
       if (!mounted) return;
       widget.onDone();
+      if (card != null) {
+        // The code is shown once, here; closing the dialog is the only way out.
+        setState(() {
+          _submitting = false;
+          _giftCard = card;
+        });
+        return;
+      }
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text(
                 'Return recorded · ${AppFormat.money(refundAmount, currencyCode: order.currency)} '
-                '${_method == 'STORE_CREDIT' ? 'as store credit' : 'refunded'}'
-                '${refundNote ?? ''}')),
+                '${_method == 'STORE_CREDIT' ? 'to store credit' : 'refunded'}')),
       );
     } catch (e) {
+      if (!mounted) return;
+      final code = apiErrorCode(e);
       setState(() {
         _submitting = false;
-        _error = _friendly(e);
+        if (code == 'ORDER_RETURN_NEEDS_MANAGER') {
+          _needsManager = returnRefusalReasons(e);
+        } else {
+          _error = _friendly(e, code);
+        }
       });
     }
   }
 
-  /// First captured tender id for the order, to refund against.
-  Future<String?> _findPaymentId(Dio dio) async {
-    try {
-      final resp = await dio
-          .get('/${ApiConstants.payment}/payments/by-order/${widget.orderId}');
-      final list = (resp.data['data'] as List?) ?? [];
-      for (final t in list) {
-        final m = t as Map<String, dynamic>;
-        final status = (m['status'] as String? ?? '').toUpperCase();
-        if (status == 'CAPTURED' || status == 'AUTHORIZED' || status.isEmpty) {
-          return m['id'] as String?;
-        }
-      }
-      return list.isNotEmpty ? (list.first['id'] as String?) : null;
-    } catch (_) {
-      return null;
+  String _friendly(Object e, String? code) {
+    switch (code) {
+      case 'ORDER_RETURN_CONDITION_REQUIRED':
+      case 'ORDER_RETURN_CONDITION_INVALID':
+        return 'Say what condition each returned item is in.';
+      case 'ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER':
+        return 'Store credit needs a sale that names a customer. Choose another way to pay it back.';
+      case 'GIFT_CARD_NOT_FOUND':
+        return 'No gift card has that code. Check it, or issue a new card.';
     }
-  }
-
-  String _friendly(Object e) {
-    if (e is DioException) {
-      final status = e.response?.statusCode;
-      if (status == 409) return 'Refund exceeds the captured payment.';
-      if (status == 404) return 'Order or item not found.';
+    if (e is DioException && e.response?.statusCode == 404) {
+      return 'Order or item not found.';
     }
     return friendlyError(e, fallback: 'Could not process return.');
+  }
+
+  Widget _panel(BuildContext context, {required List<Widget> children}) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(color: cs.errorContainer, borderRadius: AppRadius.chip),
+      child: DefaultTextStyle.merge(
+        style: TextStyle(color: cs.onErrorContainer),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
+      ),
+    );
+  }
+
+  Widget _giftCardResult(BuildContext context, OrderDetail order) {
+    final card = _giftCard!;
+    final balance = (card['balance'] as num?)?.toDouble() ?? 0;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('The return is recorded and the refund is on a gift card. '
+            'This is the only time the code is shown.'),
+        const SizedBox(height: AppSpacing.md),
+        Text('Gift card code', style: Theme.of(context).textTheme.labelLarge),
+        SelectableText(
+          '${card['code'] ?? ''}',
+          key: const Key('return-gift-card-code'),
+          style: Theme.of(context)
+              .textTheme
+              .titleLarge
+              ?.copyWith(fontFamily: 'monospace', fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        Text(
+          'Balance ${AppFormat.money(balance, currencyCode: order.currency)}',
+          key: const Key('return-gift-card-balance'),
+        ),
+      ],
+    );
   }
 
   @override
@@ -543,7 +630,7 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
     final returnsAsync = ref.watch(orderReturnsProvider(widget.orderId));
 
     return AlertDialog(
-      title: const Text('Return / Refund'),
+      title: Text(_giftCard == null ? 'Return / Refund' : 'Return recorded'),
       content: SizedBox(
         width: 460,
         child: detailAsync.when(
@@ -558,7 +645,11 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
             ),
           ),
           data: (order) {
+            if (_giftCard != null) {
+              return SingleChildScrollView(child: _giftCardResult(context, order));
+            }
             final preview = _previewRefund(order.items);
+            final hasCustomer = order.customerId != null;
             final labels = ref
                     .watch(variantLabelsProvider(
                         variantIdsKey(order.items.map((l) => l.variantId))))
@@ -569,16 +660,21 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (_needsManager != null) ...[
+                    _panel(context, children: [
+                      const Text('A manager must take this return',
+                          key: Key('return-needs-manager'),
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: AppSpacing.xs),
+                      for (final r in _needsManager!) Text('· ${returnReasonLabel(r)}'),
+                      const SizedBox(height: AppSpacing.xs),
+                      const Text('Ask a manager to sign in and record it, '
+                          'or hand them this screen in their own session.'),
+                    ]),
+                    const SizedBox(height: AppSpacing.md),
+                  ],
                   if (_error != null) ...[
-                    Container(
-                      padding: const EdgeInsets.all(AppSpacing.md),
-                      decoration: BoxDecoration(
-                        color: cs.errorContainer,
-                        borderRadius: AppRadius.chip,
-                      ),
-                      child: Text(_error!,
-                          style: TextStyle(color: cs.onErrorContainer)),
-                    ),
+                    _panel(context, children: [Text(_error!)]),
                     const SizedBox(height: AppSpacing.md),
                   ],
                   // Existing returns (if any).
@@ -597,7 +693,7 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                                 for (final r in returns)
                                   Text(
                                     '· ${AppFormat.money(r.refundAmount, currencyCode: order.currency)} '
-                                    'via ${humanizeCode(r.refundMethod)} (${humanizeCode(r.status)})',
+                                    'via ${refundMethodLabel(r.refundMethod)} (${humanizeCode(r.status)})',
                                     style: TextStyle(
                                         fontSize: 12, color: cs.outline),
                                   ),
@@ -617,8 +713,11 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                       sku: variantSku(line.variantId, labels),
                       currency: order.currency,
                       value: _returnQty[line.variantId] ?? 0,
+                      condition: _condition[line.variantId],
                       onChanged: (v) =>
                           setState(() => _returnQty[line.variantId] = v),
+                      onCondition: (c) =>
+                          setState(() => _condition[line.variantId] = c),
                     ),
                   const SizedBox(height: AppSpacing.md),
                   TextField(
@@ -629,15 +728,62 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
                     ),
                   ),
                   const SizedBox(height: AppSpacing.md),
-                  DropdownButtonFormField<String>(
-                    initialValue: _method,
-                    decoration: const InputDecoration(labelText: 'Refund method'),
-                    items: _methods
-                        .map((m) => DropdownMenuItem(
-                            value: m, child: Text(humanizeCode(m))))
-                        .toList(),
-                    onChanged: (v) => setState(() => _method = v!),
+                  Text('Pay the refund', style: Theme.of(context).textTheme.labelLarge),
+                  const SizedBox(height: AppSpacing.xs),
+                  Wrap(
+                    spacing: AppSpacing.sm,
+                    runSpacing: AppSpacing.xs,
+                    children: [
+                      for (final m in const ['ORIGINAL', 'STORE_CREDIT', 'GIFT_CARD'])
+                        ChoiceChip(
+                          key: Key('return-method-$m'),
+                          label: Text(refundMethodLabel(m)),
+                          selected: _method == m,
+                          // Store credit goes to a customer: a sale that names none has nobody to credit.
+                          onSelected: m == 'STORE_CREDIT' && !hasCustomer
+                              ? null
+                              : (_) => setState(() => _method = m),
+                        ),
+                    ],
                   ),
+                  if (!hasCustomer) ...[
+                    const SizedBox(height: AppSpacing.xs),
+                    Text(
+                      'Store credit needs a sale that names a customer.',
+                      key: const Key('return-store-credit-why'),
+                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                    ),
+                  ],
+                  if (_method == 'GIFT_CARD') ...[
+                    const SizedBox(height: AppSpacing.sm),
+                    Wrap(
+                      spacing: AppSpacing.sm,
+                      runSpacing: AppSpacing.xs,
+                      children: [
+                        ChoiceChip(
+                          key: const Key('return-gift-new'),
+                          label: const Text('New card'),
+                          selected: !_topUp,
+                          onSelected: (_) => setState(() => _topUp = false),
+                        ),
+                        ChoiceChip(
+                          key: const Key('return-gift-topup'),
+                          label: const Text('Top up a card'),
+                          selected: _topUp,
+                          onSelected: (_) => setState(() => _topUp = true),
+                        ),
+                      ],
+                    ),
+                    if (_topUp) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      TextField(
+                        key: const Key('return-gift-code'),
+                        controller: _giftCodeCtrl,
+                        textCapitalization: TextCapitalization.characters,
+                        decoration: const InputDecoration(labelText: 'Gift card code'),
+                      ),
+                    ],
+                  ],
                   const SizedBox(height: AppSpacing.lg),
                   Row(
                     children: [
@@ -657,27 +803,34 @@ class _ReturnDialogState extends ConsumerState<_ReturnDialog> {
           },
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: _submitting ? null : () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: _submitting
-              ? null
-              : () {
-                  final order = detailAsync.value;
-                  if (order != null) _submit(order);
-                },
-          child: _submitting
-              ?  SizedBox(
-                  height: 18,
-                  width: 18,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
-              : const Text('Process return'),
-        ),
-      ],
+      actions: _giftCard != null
+          ? [
+              FilledButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Done'),
+              ),
+            ]
+          : [
+              TextButton(
+                onPressed: _submitting ? null : () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: _submitting
+                    ? null
+                    : () {
+                        final order = detailAsync.value;
+                        if (order != null) _submit(order);
+                      },
+                child: _submitting
+                    ? SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
+                    : const Text('Process return'),
+              ),
+            ],
     );
   }
 }
@@ -688,49 +841,79 @@ class _ReturnLineRow extends StatelessWidget {
   final String sku;
   final String currency;
   final int value;
+  final String? condition;
   final ValueChanged<int> onChanged;
+  final ValueChanged<String> onCondition;
   const _ReturnLineRow({
     required this.line,
     required this.name,
     required this.sku,
     required this.currency,
     required this.value,
+    required this.condition,
     required this.onChanged,
+    required this.onCondition,
   });
 
   @override
   Widget build(BuildContext context) {
     final maxQty = line.qty.toInt();
+    final cs = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsetsDirectional.symmetric(vertical: AppSpacing.xs),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 13)),
+                    Text(
+                        '${sku.isNotEmpty ? '$sku · ' : ''}ordered $maxQty · ${AppFormat.money(line.unitPrice, currencyCode: currency)}',
+                        style: TextStyle(fontSize: 11, color: cs.outline)),
+                  ],
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.remove_circle_outline),
+                tooltip: 'Decrease quantity',
+                onPressed: value > 0 ? () => onChanged(value - 1) : null,
+              ),
+              Text('$value', style: const TextStyle(fontWeight: FontWeight.bold)),
+              IconButton(
+                icon: const Icon(Icons.add_circle_outline),
+                tooltip: 'Increase quantity',
+                onPressed: value < maxQty ? () => onChanged(value + 1) : null,
+              ),
+            ],
+          ),
+          // What state the goods are in decides where they go; nothing is preselected.
+          if (value > 0) ...[
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.xs,
               children: [
-                Text(name,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.w600, fontSize: 13)),
-                Text(
-                    '${sku.isNotEmpty ? '$sku · ' : ''}ordered $maxQty · ${AppFormat.money(line.unitPrice, currencyCode: currency)}',
-                    style: TextStyle(
-                        fontSize: 11,
-                        color: Theme.of(context).colorScheme.outline)),
+                for (final c in returnConditions)
+                  ChoiceChip(
+                    key: Key('return-condition-${line.variantId}-$c'),
+                    label: Text(returnConditionLabel(c)),
+                    selected: condition == c,
+                    onSelected: (_) => onCondition(c),
+                  ),
               ],
             ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.remove_circle_outline),
-            tooltip: 'Decrease quantity',
-            onPressed: value > 0 ? () => onChanged(value - 1) : null,
-          ),
-          Text('$value', style: const TextStyle(fontWeight: FontWeight.bold)),
-          IconButton(
-            icon: const Icon(Icons.add_circle_outline),
-            tooltip: 'Increase quantity',
-            onPressed: value < maxQty ? () => onChanged(value + 1) : null,
-          ),
+            if (condition != null)
+              Padding(
+                padding: const EdgeInsetsDirectional.only(top: AppSpacing.xs),
+                child: Text(returnConditionHint(condition),
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+              ),
+          ],
         ],
       ),
     );
@@ -1602,6 +1785,11 @@ class _VoidSaleDialogState extends ConsumerState<VoidSaleDialog> {
   bool _saving = false;
   String? _error;
 
+  /// The key of the attempt in hand: a retry of the same void (same reason)
+  /// reuses it, so the server answers with the first; a new reason is a new attempt.
+  String? _key;
+  String? _keyFor;
+
   @override
   void dispose() {
     _reasonCtrl.dispose();
@@ -1614,6 +1802,10 @@ class _VoidSaleDialogState extends ConsumerState<VoidSaleDialog> {
       setState(() => _error = 'A reason is required.');
       return;
     }
+    if (_key == null || _keyFor != reason) {
+      _key = newId();
+      _keyFor = reason;
+    }
     setState(() {
       _saving = true;
       _error = null;
@@ -1622,6 +1814,7 @@ class _VoidSaleDialogState extends ConsumerState<VoidSaleDialog> {
       await ref.read(apiClientProvider).dio.post(
             '/${ApiConstants.order}/orders/${widget.orderId}/void',
             data: {'reason': reason},
+            options: Options(headers: {'Idempotency-Key': _key}),
           );
       widget.onDone();
       if (!mounted) return;

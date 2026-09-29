@@ -11,6 +11,7 @@ import com.storeql.customer.domain.Domain.StoreCreditAccount;
 import com.storeql.customer.domain.Domain.StoreCreditLedgerEntry;
 import com.storeql.customer.domain.Domain.TierChange;
 import com.storeql.customer.domain.LoyaltyProgramme;
+import com.storeql.customer.domain.LoyaltyReversal;
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
@@ -1237,6 +1238,7 @@ public class CustomerRepository extends BaseOutboxRepository {
       UUID tenantId,
       UUID customerId,
       UUID orderId,
+      BigDecimal orderTotal,
       BigDecimal basePoints,
       LoyaltyProgramme programme,
       Function<BigDecimal, OutboxRow> eventFor,
@@ -1268,6 +1270,7 @@ public class CustomerRepository extends BaseOutboxRepository {
                   points,
                   LoyaltyLedgerEntry.TYPE_EARN,
                   orderId,
+                  orderTotal,
                   reason,
                   programme,
                   tierEvent);
@@ -1370,7 +1373,7 @@ public class CustomerRepository extends BaseOutboxRepository {
                     tierEvent);
           } else {
             Instant now = Instant.now();
-            BigDecimal taken = points.negate().min(account.pointsBalance());
+            BigDecimal taken = points.negate().min(account.pointsBalance()).max(BigDecimal.ZERO);
             LoyaltyLots.consume(
                 conn, tenantId, LoyaltyLots.openLots(conn, account, programme, now), taken);
             BigDecimal newBalance = account.pointsBalance().subtract(taken);
@@ -1417,6 +1420,20 @@ public class CustomerRepository extends BaseOutboxRepository {
       LoyaltyProgramme programme,
       Function<TierChange, OutboxRow> tierEvent)
       throws SQLException {
+    return credit(conn, account, points, type, orderId, null, reason, programme, tierEvent);
+  }
+
+  private LoyaltyAccount credit(
+      Connection conn,
+      LoyaltyAccount account,
+      BigDecimal points,
+      String type,
+      UUID orderId,
+      BigDecimal orderTotal,
+      String reason,
+      LoyaltyProgramme programme,
+      Function<TierChange, OutboxRow> tierEvent)
+      throws SQLException {
     Instant now = Instant.now();
     UUID tenantId = account.tenantId();
     UUID customerId = account.customerId();
@@ -1430,9 +1447,20 @@ public class CustomerRepository extends BaseOutboxRepository {
     insertLedgerEntry(
         conn,
         new LoyaltyLedgerEntry(
-            entryId, tenantId, customerId, type, points, newBalance, orderId, reason, now));
+            entryId, tenantId, customerId, type, points, newBalance, orderId, reason, now),
+        orderTotal);
+    // Points already taken back below zero are made good first: only the rest can be spent.
+    BigDecimal debt =
+        account.pointsBalance().signum() < 0 ? account.pointsBalance().negate() : BigDecimal.ZERO;
     LoyaltyLots.insertLot(
-        conn, tenantId, customerId, entryId, points, now, programme.expiryFor(now));
+        conn,
+        tenantId,
+        customerId,
+        entryId,
+        points,
+        points.subtract(debt.min(points)),
+        now,
+        programme.expiryFor(now));
     LoyaltyAccount provisional =
         new LoyaltyAccount(
             account.id(),
@@ -1546,6 +1574,171 @@ public class CustomerRepository extends BaseOutboxRepository {
           return updated;
         },
         "issue store credit");
+  }
+
+  /** What an order's earning and reversals stand at, for the one customer who earned it. */
+  private record OrderPoints(UUID customerId, BigDecimal earned, BigDecimal orderTotal) {}
+
+  /**
+   * Takes back the points an order earned, once per event (return controls). {@code refundAmount}
+   * is what a return refunded; null takes back everything still held (a void). The customer is the
+   * one the ledger says earned the order, whatever the event names, and the order is looked up
+   * under the event's business only, so another business's event finds nothing.
+   *
+   * <p>Lots are drawn oldest-dying first for what they still hold; the balance may fall below zero
+   * when the points were already spent, and redemption stays refused until it is earned back.
+   *
+   * @return the account after the reversal, or null when nothing was taken back
+   */
+  public LoyaltyAccount reversePointsForOrderOnce(
+      UUID eventId,
+      String consumerName,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal refundAmount,
+      BigDecimal pointsPerUnit,
+      String reason,
+      LoyaltyProgramme programme,
+      java.util.function.BiFunction<UUID, BigDecimal, OutboxRow> eventFor) {
+    return inTx(
+        conn -> {
+          if (!markProcessedIfNewTx(conn, eventId, consumerName)) {
+            return null; // already taken back for this event
+          }
+          OrderPoints earnedOn = orderEarning(conn, tenantId, orderId);
+          if (earnedOn == null) {
+            return null; // the order earned nothing here
+          }
+          UUID customerId = earnedOn.customerId();
+          LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          BigDecimal reversed = orderReversed(conn, tenantId, orderId);
+          BigDecimal points =
+              refundAmount == null
+                  ? LoyaltyReversal.remaining(earnedOn.earned(), reversed)
+                  : LoyaltyReversal.forReturn(
+                      earnedOn.earned(),
+                      reversed,
+                      earnedOn.orderTotal(),
+                      refundAmount,
+                      pointsPerUnit);
+          if (points.signum() <= 0) {
+            return null;
+          }
+          Instant now = Instant.now();
+          LoyaltyLots.consume(
+              conn, tenantId, LoyaltyLots.openLots(conn, account, programme, now), points);
+          BigDecimal newBalance = account.pointsBalance().subtract(points);
+          LoyaltyAccount updated =
+              updateLoyaltyAccount(
+                  conn,
+                  tenantId,
+                  customerId,
+                  newBalance,
+                  account.lifetimePoints(),
+                  account.tier(),
+                  account.qualifyingPoints(),
+                  account.tierSince());
+          insertLedgerEntry(
+              conn,
+              new LoyaltyLedgerEntry(
+                  Ids.newId(),
+                  tenantId,
+                  customerId,
+                  LoyaltyLedgerEntry.TYPE_REVERSE,
+                  points.negate(),
+                  newBalance,
+                  orderId,
+                  reason,
+                  now));
+          insertOutbox(conn, eventFor.apply(customerId, points));
+          return updated;
+        },
+        "reverse loyalty points for order");
+  }
+
+  /** The customer who earned on the order, what they earned in all, and what it was based on. */
+  private static OrderPoints orderEarning(Connection c, UUID tenantId, UUID orderId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT customer_id, SUM(points) AS earned, MAX(order_total) AS order_total"
+                + " FROM loyalty_ledger"
+                + " WHERE tenant_id = ? AND order_id = ? AND type = 'EARN' AND points > 0"
+                + " GROUP BY customer_id ORDER BY MIN(created_at) LIMIT 1")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next()
+            ? new OrderPoints(
+                rs.getObject("customer_id", UUID.class),
+                rs.getBigDecimal("earned"),
+                rs.getBigDecimal("order_total"))
+            : null;
+      }
+    }
+  }
+
+  /** Points already taken back for the order, as a positive number. */
+  private static BigDecimal orderReversed(Connection c, UUID tenantId, UUID orderId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT COALESCE(-SUM(points), 0) AS reversed FROM loyalty_ledger"
+                + " WHERE tenant_id = ? AND order_id = ? AND type = 'REVERSE'")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getBigDecimal("reversed") : BigDecimal.ZERO;
+      }
+    }
+  }
+
+  /**
+   * Credits store credit from a refund, once per event: the account in the refund's currency, a
+   * ledger entry naming the order, and the event. Nothing when the customer is not this business's.
+   *
+   * @return the account, or null when the event was already applied or the customer is unknown
+   */
+  public StoreCreditAccount issueStoreCreditFromRefundOnce(
+      UUID eventId,
+      String consumerName,
+      UUID tenantId,
+      UUID customerId,
+      BigDecimal amount,
+      String currency,
+      UUID orderId,
+      String reason,
+      OutboxRow event) {
+    return inTx(
+        conn -> {
+          if (!markProcessedIfNewTx(conn, eventId, consumerName)) {
+            return null;
+          }
+          if (!customerExists(conn, tenantId, customerId)) {
+            return null; // not this business's customer — nothing to credit, no loop
+          }
+          StoreCreditAccount account =
+              getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
+          BigDecimal newBalance = account.balance().add(amount);
+          StoreCreditAccount updated =
+              updateStoreCreditAccount(conn, tenantId, customerId, currency, newBalance);
+          insertStoreCreditEntry(
+              conn,
+              new StoreCreditLedgerEntry(
+                  Ids.newId(),
+                  tenantId,
+                  customerId,
+                  StoreCreditLedgerEntry.TYPE_ISSUE,
+                  amount,
+                  newBalance,
+                  currency,
+                  orderId,
+                  reason,
+                  Instant.now()));
+          insertOutbox(conn, event);
+          return updated;
+        },
+        "issue store credit from refund");
   }
 
   /**
@@ -1841,10 +2034,15 @@ public class CustomerRepository extends BaseOutboxRepository {
   }
 
   private void insertLedgerEntry(Connection c, LoyaltyLedgerEntry e) throws SQLException {
+    insertLedgerEntry(c, e, null);
+  }
+
+  private void insertLedgerEntry(Connection c, LoyaltyLedgerEntry e, BigDecimal orderTotal)
+      throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO loyalty_ledger (id, tenant_id, customer_id, type, points, balance_after,"
-                + " order_id, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)")) {
+                + " order_id, reason, created_at, order_total) VALUES (?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, e.id());
       ps.setObject(2, e.tenantId());
       ps.setObject(3, e.customerId());
@@ -1854,6 +2052,7 @@ public class CustomerRepository extends BaseOutboxRepository {
       ps.setObject(7, e.orderId());
       ps.setString(8, e.reason());
       ps.setObject(9, e.createdAt().atOffset(ZoneOffset.UTC));
+      ps.setBigDecimal(10, orderTotal);
       ps.executeUpdate();
     }
   }

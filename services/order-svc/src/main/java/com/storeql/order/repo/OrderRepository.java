@@ -2248,7 +2248,9 @@ public class OrderRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "INSERT INTO returns"
                       + " (id,tenant_id,order_id,store_id,reason,refund_amount,refund_method,"
-                      + "status,created_by) VALUES (?,?,?,?,?,?,?,?,?)")) {
+                      + "status,created_by,idempotency_key,approved_by,outside_policy,gift_card_id,"
+                      + "created_at,completed_at)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, ret.id());
             ps.setObject(2, ret.tenantId());
             ps.setObject(3, ret.orderId());
@@ -2258,7 +2260,36 @@ public class OrderRepository extends BaseOutboxRepository {
             ps.setString(7, ret.refundMethod());
             ps.setString(8, ret.status());
             ps.setObject(9, ret.createdBy());
+            // A UUID column is never bound null through setObject(i, null): each optional id
+            // takes its own branch with a typed null.
+            if (ret.idempotencyKey() != null) ps.setObject(10, ret.idempotencyKey());
+            else ps.setNull(10, java.sql.Types.OTHER);
+            if (ret.approvedBy() != null) ps.setObject(11, ret.approvedBy());
+            else ps.setNull(11, java.sql.Types.OTHER);
+            ps.setArray(
+                12,
+                c.createArrayOf(
+                    "text",
+                    (ret.outsidePolicy() == null ? List.<String>of() : ret.outsidePolicy())
+                        .toArray(String[]::new)));
+            if (ret.giftCardId() != null) ps.setObject(13, ret.giftCardId());
+            else ps.setNull(13, java.sql.Types.OTHER);
+            // The times the answer carries, so a replay reads back exactly what the first said.
+            ps.setObject(
+                14, java.time.OffsetDateTime.ofInstant(ret.createdAt(), java.time.ZoneOffset.UTC));
+            ps.setObject(
+                15,
+                ret.completedAt() == null
+                    ? null
+                    : java.time.OffsetDateTime.ofInstant(
+                        ret.completedAt(), java.time.ZoneOffset.UTC));
             ps.executeUpdate();
+          } catch (SQLException sqle) {
+            // Two attempts with one key racing: the later one lost. The caller reads the first.
+            if (UNIQUE_VIOLATION.equals(sqle.getSQLState()) && ret.idempotencyKey() != null)
+              throw new ApiException(
+                  409, "RETURN_DUPLICATE_KEY", "duplicate idempotency key", List.of(), sqle);
+            throw sqle;
           }
           for (ReturnItem item : items) {
             try (PreparedStatement ps =
@@ -2295,7 +2326,8 @@ public class OrderRepository extends BaseOutboxRepository {
   public List<Return> findReturns(UUID tenantId, UUID orderId) {
     return query(
         "SELECT id, tenant_id, order_id, store_id, reason, refund_amount, refund_method,"
-            + " status, created_at, completed_at, created_by"
+            + " status, created_at, completed_at, created_by, idempotency_key, approved_by,"
+            + " outside_policy, gift_card_id"
             + " FROM returns WHERE tenant_id=? AND order_id=? ORDER BY created_at",
         ps -> {
           ps.setObject(1, tenantId);
@@ -2303,6 +2335,113 @@ public class OrderRepository extends BaseOutboxRepository {
         },
         rs -> mapReturn(rs),
         "find returns");
+  }
+
+  /**
+   * The return a retried request already made: the first one written under this key.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param idempotencyKey the caller's key
+   * @return the return, or empty when the key has not been used
+   */
+  public Optional<Return> findReturnByKey(UUID tenantId, UUID idempotencyKey) {
+    return query(
+            "SELECT id, tenant_id, order_id, store_id, reason, refund_amount, refund_method,"
+                + " status, created_at, completed_at, created_by, idempotency_key, approved_by,"
+                + " outside_policy, gift_card_id"
+                + " FROM returns WHERE tenant_id=? AND idempotency_key=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, idempotencyKey);
+            },
+            rs -> mapReturn(rs),
+            "find return by idempotency key")
+        .stream()
+        .findFirst();
+  }
+
+  /**
+   * How much of each variant has already come back on an order, across every return.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param orderId the order
+   * @return the returned quantity per variant; a variant never returned is absent
+   */
+  public java.util.Map<UUID, BigDecimal> returnedQtyByVariant(UUID tenantId, UUID orderId) {
+    var out = new java.util.HashMap<UUID, BigDecimal>();
+    query(
+        "SELECT ri.variant_id, SUM(ri.qty) AS qty FROM return_items ri"
+            + " JOIN returns r ON r.tenant_id = ri.tenant_id AND r.id = ri.return_id"
+            + " WHERE r.tenant_id=? AND r.order_id=? GROUP BY ri.variant_id",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, orderId);
+        },
+        rs -> {
+          out.put(rs.getObject("variant_id", UUID.class), rs.getBigDecimal("qty"));
+          return Boolean.TRUE;
+        },
+        "returned quantities");
+    return out;
+  }
+
+  /**
+   * When the goods left the store: the first time the order was fulfilled or part-fulfilled, read
+   * from the append-only status history.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param orderId the order
+   * @return that moment, or empty when the order never was
+   */
+  public Optional<Instant> findFirstFulfilledAt(UUID tenantId, UUID orderId) {
+    return query(
+            "SELECT MIN(changed_at) AS at FROM order_status_history"
+                + " WHERE tenant_id=? AND order_id=?"
+                + " AND to_status IN ('FULFILLED','PARTIALLY_FULFILLED')",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, orderId);
+            },
+            rs -> toInstant(rs.getObject("at", OffsetDateTime.class)),
+            "find first fulfilled")
+        .stream()
+        .filter(java.util.Objects::nonNull)
+        .findFirst();
+  }
+
+  /**
+   * The orders a receipt number could name: this business's fiscal receipts with that printed
+   * number (case-insensitive), and, when given, the orders whose short reference — the last eight
+   * characters of the id, as the receipt prints it — is that.
+   *
+   * @param tenantId owning tenant; the first condition of both queries
+   * @param number the printed fiscal number, trimmed
+   * @param shortRef the short order reference, lower case, or null when the text cannot be one
+   * @return the distinct order ids
+   */
+  public List<UUID> findOrderIdsByReceipt(UUID tenantId, String number, String shortRef) {
+    List<UUID> ids = new ArrayList<>();
+    String sql =
+        "SELECT order_id AS id FROM fiscal_receipts WHERE tenant_id=? AND lower(full_number)=?"
+            + (shortRef == null
+                ? ""
+                : " UNION SELECT id FROM orders WHERE tenant_id=? AND right(id::text, 8)=?");
+    query(
+        sql,
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setString(2, number.toLowerCase(java.util.Locale.ROOT));
+          if (shortRef != null) {
+            ps.setObject(3, tenantId);
+            ps.setString(4, shortRef);
+          }
+        },
+        rs -> {
+          ids.add(rs.getObject("id", UUID.class));
+          return Boolean.TRUE;
+        },
+        "find orders by receipt");
+    return ids;
   }
 
   /**
@@ -2344,6 +2483,7 @@ public class OrderRepository extends BaseOutboxRepository {
       UUID storeId,
       String reason,
       UUID voidedBy,
+      UUID idempotencyKey,
       java.util.function.Function<List<com.storeql.order.domain.Domain.RestockLine>, OutboxRow>
           eventFor) {
     return inTx(
@@ -2380,17 +2520,32 @@ public class OrderRepository extends BaseOutboxRepository {
           PosVoidLog vl;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "INSERT INTO pos_void_log (id,tenant_id,order_id,store_id,reason,voided_by)"
-                      + " VALUES (?,?,?,?,?,?)")) {
+                  "INSERT INTO pos_void_log"
+                      + " (id,tenant_id,order_id,store_id,reason,voided_by,idempotency_key,voided_at)"
+                      + " VALUES (?,?,?,?,?,?,?,?)")) {
             UUID vid = Ids.newId();
+            // One clock for the row and the answer, at Postgres's precision, so a replay under the
+            // same key answers with exactly the time the first did.
+            Instant voidedAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             ps.setObject(1, vid);
             ps.setObject(2, tenantId);
             ps.setObject(3, orderId);
             ps.setObject(4, storeId);
             ps.setString(5, reason);
             ps.setObject(6, voidedBy);
+            if (idempotencyKey != null) ps.setObject(7, idempotencyKey);
+            else ps.setNull(7, java.sql.Types.OTHER);
+            ps.setObject(8, java.time.OffsetDateTime.ofInstant(voidedAt, java.time.ZoneOffset.UTC));
             ps.executeUpdate();
-            vl = new PosVoidLog(vid, tenantId, orderId, storeId, reason, voidedBy, Instant.now());
+            vl =
+                new PosVoidLog(
+                    vid, tenantId, orderId, storeId, reason, voidedBy, voidedAt, idempotencyKey);
+          } catch (SQLException sqle) {
+            // A racing retry with the same key lost; the caller reads the first void.
+            if (UNIQUE_VIOLATION.equals(sqle.getSQLState()) && idempotencyKey != null)
+              throw new ApiException(
+                  409, "VOID_DUPLICATE_KEY", "duplicate idempotency key", List.of(), sqle);
+            throw sqle;
           }
           // With the prior status in hand the history row says what was voided; it used to record
           // null here.
@@ -2400,6 +2555,36 @@ public class OrderRepository extends BaseOutboxRepository {
           return vl;
         },
         "void order");
+  }
+
+  /**
+   * The void a retried request already made: the first one written under this key.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param idempotencyKey the caller's key
+   * @return the void, or empty when the key has not been used
+   */
+  public Optional<PosVoidLog> findVoidByKey(UUID tenantId, UUID idempotencyKey) {
+    return query(
+            "SELECT id, tenant_id, order_id, store_id, reason, voided_by, voided_at,"
+                + " idempotency_key FROM pos_void_log WHERE tenant_id=? AND idempotency_key=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, idempotencyKey);
+            },
+            rs ->
+                new PosVoidLog(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("tenant_id", UUID.class),
+                    rs.getObject("order_id", UUID.class),
+                    rs.getObject("store_id", UUID.class),
+                    rs.getString("reason"),
+                    rs.getObject("voided_by", UUID.class),
+                    toInstant(rs.getObject("voided_at", OffsetDateTime.class)),
+                    rs.getObject("idempotency_key", UUID.class)),
+            "find void by idempotency key")
+        .stream()
+        .findFirst();
   }
 
   /**
@@ -2739,6 +2924,119 @@ public class OrderRepository extends BaseOutboxRepository {
             rs -> mapGiftCard(rs),
             "find gift card");
     return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
+  }
+
+  /**
+   * Looks a gift card up by its id.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param id the card's id
+   * @return the card, or empty when no such card exists in this tenant
+   */
+  public Optional<GiftCard> findGiftCardById(UUID tenantId, UUID id) {
+    return query(
+            "SELECT id, tenant_id, store_id, code, initial_balance, current_balance,"
+                + " status, currency, issued_at, updated_at, expires_at"
+                + " FROM gift_cards WHERE tenant_id=? AND id=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, id);
+            },
+            rs -> mapGiftCard(rs),
+            "find gift card by id")
+        .stream()
+        .findFirst();
+  }
+
+  /**
+   * Puts a return's refund on a gift card, on the return's own transaction: a new card is written
+   * with the refund as its opening balance, or the named card is topped up. Either way a ledger row
+   * names the order and the return, and a {@code GiftCardLoaded} is written with it (paid by
+   * RETURN, naming the return) so purchase-svc counts the value in its gift-card pool without
+   * posting it a second time: the refund itself is booked from payment-svc's announcement.
+   *
+   * @param c the return's connection
+   * @param fresh the new card to write, or null to top up {@code code}
+   * @param code the card to top up, when {@code fresh} is null
+   * @param tenantId owning tenant; the first condition of every query
+   * @param amount the refund
+   * @param orderId the order the return is against
+   * @param returnId the return
+   * @param loaded builds the {@code GiftCardLoaded} event from the card and its transaction
+   * @throws ApiException 404 {@code GIFT_CARD_NOT_FOUND}; 409 {@code GIFT_CARD_NOT_ACTIVE}
+   */
+  public void giftCardForReturnTx(
+      Connection c,
+      GiftCard fresh,
+      String code,
+      UUID tenantId,
+      BigDecimal amount,
+      UUID orderId,
+      UUID returnId,
+      java.util.function.BiFunction<GiftCard, GiftCardTransaction, OutboxRow> loaded)
+      throws SQLException {
+    if (fresh != null) {
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "INSERT INTO gift_cards"
+                  + " (id,tenant_id,store_id,code,initial_balance,current_balance,"
+                  + "  status,currency,expires_at)"
+                  + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+        ps.setObject(1, fresh.id());
+        ps.setObject(2, fresh.tenantId());
+        ps.setObject(3, fresh.storeId());
+        ps.setString(4, fresh.code());
+        ps.setBigDecimal(5, fresh.initialBalance());
+        ps.setBigDecimal(6, fresh.currentBalance());
+        ps.setString(7, fresh.status());
+        ps.setString(8, fresh.currency());
+        ps.setNull(9, java.sql.Types.TIMESTAMP_WITH_TIMEZONE);
+        ps.executeUpdate();
+      }
+      var issued =
+          new GiftCardTransaction(
+              Ids.newId(),
+              tenantId,
+              fresh.id(),
+              GiftCardTransaction.TX_ISSUE,
+              amount,
+              BigDecimal.ZERO,
+              amount,
+              orderId,
+              returnId.toString(),
+              Instant.now());
+      insertGiftCardTx(c, issued);
+      insertOutbox(c, loaded.apply(fresh, issued));
+      return;
+    }
+    GiftCard gc = findGiftCardByCodeInTx(c, tenantId, code);
+    if (gc == null) throw ApiException.notFound("GIFT_CARD_NOT_FOUND", "gift card not found");
+    if (!GiftCard.STATUS_ACTIVE.equals(gc.status()))
+      throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+    BigDecimal after = gc.currentBalance().add(amount);
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE gift_cards SET current_balance=?, updated_at=now()"
+                + " WHERE tenant_id=? AND id=?")) {
+      ps.setBigDecimal(1, after);
+      ps.setObject(2, tenantId);
+      ps.setObject(3, gc.id());
+      ps.executeUpdate();
+    }
+    var reloaded =
+        new GiftCardTransaction(
+            Ids.newId(),
+            tenantId,
+            gc.id(),
+            GiftCardTransaction.TX_RELOAD,
+            amount,
+            gc.currentBalance(),
+            after,
+            orderId,
+            returnId.toString(),
+            Instant.now());
+    insertGiftCardTx(c, reloaded);
+    insertOutbox(c, loaded.apply(gc, reloaded));
   }
 
   /**
@@ -3217,7 +3515,15 @@ public class OrderRepository extends BaseOutboxRepository {
         rs.getString("status"),
         toInstant(rs.getObject("created_at", OffsetDateTime.class)),
         toInstant(rs.getObject("completed_at", OffsetDateTime.class)),
-        rs.getObject("created_by", UUID.class));
+        rs.getObject("created_by", UUID.class),
+        rs.getObject("idempotency_key", UUID.class),
+        rs.getObject("approved_by", UUID.class),
+        textArray(rs.getArray("outside_policy")),
+        rs.getObject("gift_card_id", UUID.class));
+  }
+
+  private static List<String> textArray(java.sql.Array a) throws SQLException {
+    return a == null ? List.of() : List.of((String[]) a.getArray());
   }
 
   private ReturnItem mapReturnItem(ResultSet rs) throws SQLException {

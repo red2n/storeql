@@ -304,6 +304,41 @@ class DeferredRevenueIT {
 
   @Test
   @DisplayName(
+      "Points taken back with a returned sale put their deferral back into sales, once, and a card"
+          + " loaded by a refund is counted but posts nothing of its own")
+  void aReturnTakesPointsBackAndARefundLoadedCardPostsNothing() {
+    data(put(ESTIMATES, T, "OWNER"));
+    handler.loyalty(earnedOnSale("200", "120.00", "20.00"));
+    BigDecimal deferred = data(get(T, "OWNER")).getJsonNumber("deferredIncome").bigDecimalValue();
+    assertThat(deferred.signum(), is(1));
+
+    // The whole sale comes back: its 200 points are taken back, and their deferral with them.
+    String reversed = loyalty("LoyaltyReversed", "200");
+    handler.loyalty(reversed);
+    handler.loyalty(reversed);
+    JsonObject view = data(get(T, "OWNER"));
+    assertThat(
+        view.getJsonNumber("deferredIncome").bigDecimalValue(), comparesEqualTo(BigDecimal.ZERO));
+    assertThat(
+        view.getJsonNumber("pointsOutstanding").bigDecimalValue(),
+        comparesEqualTo(BigDecimal.ZERO));
+    // Sales got back exactly what earning took out of it; nothing became breakage.
+    assertThat(net("LOYALTY_DEFERRAL", "4010"), comparesEqualTo(BigDecimal.ZERO));
+    assertThat(lines("LOYALTY_RELEASE").size(), is(0));
+
+    // A refund taken on a gift card: the pool counts the load, the ledger does not post it twice.
+    String refundLoad = loaded("ISSUE", "RETURN", "15.00");
+    handler.giftCardLoaded(refundLoad);
+    handler.giftCardLoaded(refundLoad);
+    assertThat(lines("GIFT_CARD_LOAD").size(), is(0));
+    assertThat(
+        data(get(T, "OWNER")).getJsonNumber("giftCardsLoaded").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("15.00")));
+    assertThat(trialBalance().getBoolean("balanced"), is(true));
+  }
+
+  @Test
+  @DisplayName(
       "A gift card sold is a liability against the tender; spending it recognises breakage once")
   void giftCardsAreALiabilityWithBreakage() {
     String issue = loaded("ISSUE", "CARD", "100.00");

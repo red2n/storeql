@@ -17,6 +17,7 @@ import com.storeql.inventory.domain.Domain.TransferOrder;
 import com.storeql.inventory.domain.Domain.TransferOrderLine;
 import com.storeql.inventory.domain.Provenance;
 import com.storeql.inventory.domain.Provenance.Drawn;
+import com.storeql.inventory.domain.ReturnDisposition;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
@@ -1765,10 +1766,39 @@ public class InventoryRepository extends BaseOutboxRepository {
       UUID refId,
       Function<Batch, OutboxRow> eventFor)
       throws SQLException {
+    return receiveDrawn(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        drawn,
+        fallbackNo,
+        moveType,
+        refType,
+        refId,
+        eventFor,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /** As above, the arrivals placed as {@code where} says: off sale when the goods must not sell. */
+  private List<Batch> receiveDrawn(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      List<Drawn> drawn,
+      String fallbackNo,
+      String moveType,
+      String refType,
+      UUID refId,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where)
+      throws SQLException {
     List<Batch> arrived = new ArrayList<>();
     for (Drawn from : drawn) {
-      Batch child = Provenance.arrival(tenantId, storeId, variantId, from, fallbackNo);
+      Batch child = where.place(Provenance.arrival(tenantId, storeId, variantId, from, fallbackNo));
       insertBatch(c, child);
+      announceOffSale(c, child);
       insertMovement(
           c,
           tenantId,
@@ -1801,8 +1831,37 @@ public class InventoryRepository extends BaseOutboxRepository {
       UUID refId,
       Function<Batch, OutboxRow> eventFor)
       throws SQLException {
-    Batch batch = Provenance.anonymous(tenantId, storeId, variantId, qty, fallbackNo);
+    return receiveAnonymous(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        fallbackNo,
+        moveType,
+        refType,
+        refId,
+        eventFor,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /** As above, the arrival placed as {@code where} says. */
+  private Batch receiveAnonymous(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String fallbackNo,
+      String moveType,
+      String refType,
+      UUID refId,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where)
+      throws SQLException {
+    Batch batch = where.place(Provenance.anonymous(tenantId, storeId, variantId, qty, fallbackNo));
     insertBatch(c, batch);
+    announceOffSale(c, batch);
     insertMovement(
         c,
         tenantId,
@@ -1816,6 +1875,23 @@ public class InventoryRepository extends BaseOutboxRepository {
         MovementAttribution.system());
     if (eventFor != null) insertOutbox(c, eventFor.apply(batch));
     return batch;
+  }
+
+  /**
+   * Announces a batch that arrived off sale, the way every other status change is announced, so
+   * whoever watches material status sees returned stock held for a check or written off sale.
+   */
+  private void announceOffSale(Connection c, Batch b) throws SQLException {
+    if (b.materialStatus() == null || Batch.MATERIAL_AVAILABLE.equals(b.materialStatus())) return;
+    insertOutbox(
+        c,
+        new OutboxRow(
+            "MaterialStatusChanged",
+            "storeql.inventory.material-status-changed",
+            b.tenantId(),
+            b.id(),
+            com.storeql.inventory.service.Events.materialStatusChanged(
+                b.tenantId(), b.id(), b.materialStatus(), b.materialStatusReason())));
   }
 
   /**
@@ -1843,6 +1919,38 @@ public class InventoryRepository extends BaseOutboxRepository {
       String fallbackNo,
       Function<Batch, OutboxRow> eventFor,
       boolean reverseRevenue) {
+    return receiveBackOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        orderId,
+        refType,
+        fallbackNo,
+        eventFor,
+        reverseRevenue,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /**
+   * As above, the goods placed where {@code where} says — back on sale, or held off it with the
+   * same lot, cost and date. Every arrival is a batch of its own, never merged into one on sale.
+   */
+  public boolean receiveBackOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID orderId,
+      String refType,
+      String fallbackNo,
+      Function<Batch, OutboxRow> eventFor,
+      boolean reverseRevenue,
+      ReturnDisposition where) {
     return inTx(
         c -> {
           if (dedupeId != null && !markProcessedIfNewTx(c, dedupeId, consumerName)) {
@@ -1865,7 +1973,8 @@ public class InventoryRepository extends BaseOutboxRepository {
               MoveType.RECEIVE,
               refType,
               orderId,
-              eventFor);
+              eventFor,
+              where);
           BigDecimal rest = Provenance.unplaced(qty, back);
           if (rest.signum() > 0) {
             receiveAnonymous(
@@ -1878,7 +1987,8 @@ public class InventoryRepository extends BaseOutboxRepository {
                 MoveType.RECEIVE,
                 refType,
                 orderId,
-                eventFor);
+                eventFor,
+                where);
           }
           return true;
         },
@@ -1939,8 +2049,9 @@ public class InventoryRepository extends BaseOutboxRepository {
             "INSERT INTO inventory_batches"
                 + " (id, tenant_id, store_id, variant_id, batch_no, received_qty,"
                 + " remaining_qty, cost_price, expiry_date, created_at, status, material_status,"
-                + " grade, zone_id, idempotency_key, ownership, owner_supplier_id, duty_status)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + " grade, zone_id, idempotency_key, ownership, owner_supplier_id, duty_status,"
+                + " material_status_reason)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, b.id());
       ps.setObject(2, b.tenantId());
       ps.setObject(3, b.storeId());
@@ -1959,6 +2070,7 @@ public class InventoryRepository extends BaseOutboxRepository {
       ps.setString(16, b.ownership() == null ? Batch.OWNERSHIP_OWNED : b.ownership());
       ps.setObject(17, b.ownerSupplierId());
       ps.setString(18, b.dutyStatus() == null ? Batch.DUTY_PAID : b.dutyStatus());
+      ps.setString(19, b.materialStatusReason());
       ps.executeUpdate();
     }
     // Directed putaway: a batch that arrives with no zone is placed by the store's rule, or waits

@@ -93,6 +93,8 @@ public class OrderService {
   @Inject OrderRouter router;
   @Inject FulfilmentWindowService windows;
   @Inject SaleChecks saleChecks;
+  @Inject ReturnPolicyService returnPolicies;
+  @Inject com.storeql.service.FxRates fx;
 
   // ── Orders ────────────────────────────────────────────────────────────────
 
@@ -2556,20 +2558,50 @@ public class OrderService {
    * they were handed over. Returning a PENDING or CONFIRMED order would record a refund for goods,
    * and often money, that were never exchanged — cancel it instead.
    *
+   * <p>The business's return policy is checked before anything is written. A return outside it
+   * (past the window, over the cashier's ceiling) needs a caller holding {@code sales.refund}, who
+   * is then named on it; anyone else is refused with the reasons. A retry under the same {@code
+   * Idempotency-Key} answers with the first return and writes nothing.
+   *
    * @param tenantId owning tenant
    * @param orderId the order being returned against
-   * @param req the lines and quantities coming back, and the reason
+   * @param req the lines, their conditions and quantities, the reason and the refund method
+   * @param idempotencyKey the caller's key, already known to be present
    * @param ctx caller context, checked for access to the order's store
-   * @return the recorded return
+   * @return the recorded return, or the first one made under this key
    * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
-   *     ORDER_CANNOT_RETURN} (409) when it is not FULFILLED or PARTIALLY_REFUNDED
+   *     ORDER_CANNOT_RETURN} (409) when it is not FULFILLED or PARTIALLY_REFUNDED; {@code
+   *     ORDER_RETURN_NEEDS_MANAGER} (403) when the return is outside the policy and the caller
+   *     holds no {@code sales.refund}
    */
   public Return createReturn(
-      UUID tenantId, UUID orderId, CreateReturnRequest req, TenantContext ctx) {
+      UUID tenantId,
+      UUID orderId,
+      CreateReturnRequest req,
+      String idempotencyKey,
+      TenantContext ctx) {
     Order order =
         repo.findOrder(tenantId, orderId)
             .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
     ctx.requireStoreAccess(order.storeId());
+
+    // A retry answers with the first return, before anything is judged again: the policy and the
+    // order's status may have moved on, and the first answer is still the answer.
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findReturnByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedReturn(earlier.get(), orderId);
+
+    // What the request says is judged before what the order is: a bad request is the caller's to
+    // fix whatever state the order is in.
+    if (req.items() == null || req.items().isEmpty())
+      throw ApiException.badRequest("ORDER_RETURN_NO_ITEMS", "a return needs at least one item");
+    // A refund that settles a product-safety recall is the business's duty, not a favour its
+    // return policy grants: no window or limit stands in its way, and the goods go to RECALLED
+    // whatever state they are in, so a condition is not asked for (one that is sent is checked).
+    boolean settlesRecall = req.recallNoticeId() != null && !req.recallNoticeId().isBlank();
+    for (var ri : req.items()) {
+      if (!settlesRecall || !isBlank(ri.condition())) returnCondition(ri.condition());
+    }
 
     // Goods can only come back once they were handed over. An order still PENDING or CONFIRMED
     // never left the store — cancel it instead; returning it recorded a refund for goods, and
@@ -2581,13 +2613,26 @@ public class OrderService {
           "ORDER_CANNOT_RETURN",
           "only a fulfilled order can be returned; this one is " + order.status());
 
+    String method = returnMethod(req.refundMethod());
+    if (Return.METHOD_STORE_CREDIT.equals(method) && order.customerId() == null)
+      throw ApiException.conflict(
+          "ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER",
+          "store credit goes to the sale's customer, and this sale names none");
+    String giftCode = req.giftCardCode() == null ? "" : req.giftCardCode().trim();
+    if (!giftCode.isEmpty() && !Return.METHOD_GIFT_CARD.equals(method))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_GIFT_CARD_CODE_UNEXPECTED",
+          "giftCardCode is only for a refund to a gift card");
+
     List<OrderItem> orderItems = repo.findOrderItems(tenantId, orderId);
     UUID returnId = Ids.newId();
     BigDecimal totalRefund = BigDecimal.ZERO;
     List<ReturnItem> returnItems = new ArrayList<>();
-    String method = req.refundMethod() != null ? req.refundMethod() : Return.METHOD_ORIGINAL;
+    boolean everyLineFaulty = true;
 
     for (var ri : req.items()) {
+      String condition =
+          settlesRecall && isBlank(ri.condition()) ? null : returnCondition(ri.condition());
       UUID variantId = Parsing.uuid(ri.variantId(), "variantId");
       OrderItem matched =
           orderItems.stream()
@@ -2599,11 +2644,75 @@ public class OrderService {
                           "ITEM_NOT_IN_ORDER", "variant " + ri.variantId() + " not in order"));
       BigDecimal refundAmt = matched.unitPrice().multiply(ri.qty());
       totalRefund = totalRefund.add(refundAmt);
+      everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
       returnItems.add(
           new ReturnItem(
-              Ids.newId(), tenantId, returnId, variantId, ri.qty(), refundAmt, ri.condition()));
+              Ids.newId(), tenantId, returnId, variantId, ri.qty(), refundAmt, condition));
     }
 
+    // A refund to a gift card goes on a new card or a named one of this business. Read here, so a
+    // card that is not there or not usable is refused before the policy is judged or anything is
+    // written; the card itself is written on the return's own transaction below.
+    GiftCard freshCard = null;
+    String topUpCode = null;
+    UUID giftCardId = null;
+    if (Return.METHOD_GIFT_CARD.equals(method)) {
+      if (giftCode.isEmpty()) {
+        giftCardId = Ids.newId();
+        freshCard =
+            new GiftCard(
+                giftCardId,
+                tenantId,
+                order.storeId(),
+                generateGiftCardCode(),
+                totalRefund,
+                totalRefund,
+                GiftCard.STATUS_ACTIVE,
+                order.currency(),
+                Instant.now(),
+                null);
+      } else {
+        topUpCode = giftCode.toUpperCase(Locale.ROOT);
+        GiftCard card = getGiftCard(tenantId, topUpCode);
+        if (!GiftCard.STATUS_ACTIVE.equals(card.status()))
+          throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+        if (!card.currency().equalsIgnoreCase(order.currency()))
+          throw ApiException.conflict(
+              "GIFT_CARD_CURRENCY_MISMATCH",
+              "the card holds " + card.currency() + " and this sale is in " + order.currency());
+        giftCardId = card.id();
+      }
+    }
+
+    // The policy, before anything is written. Outside it the caller must hold sales.refund and is
+    // named as the approver; otherwise the refusal lists why, and no return, refund or restock
+    // exists afterwards.
+    List<String> outside =
+        settlesRecall
+            ? List.of()
+            : returnPolicies
+                .effective(tenantId)
+                .reasons(
+                    handedOverAt(order),
+                    Instant.now(),
+                    storeZone(tenantId, order.storeId()),
+                    inHomeCurrency(tenantId, totalRefund, order.currency()),
+                    everyLineFaulty);
+    UUID approvedBy = null;
+    if (!outside.isEmpty()) {
+      if (!ctx.hasPermission(com.storeql.web.Permissions.SALES_REFUND))
+        throw new ApiException(
+            403,
+            "ORDER_RETURN_NEEDS_MANAGER",
+            "this return is outside the business's return policy and needs a manager: "
+                + String.join(", ", outside),
+            outside);
+      approvedBy = ctx.userId();
+    }
+
+    // One clock for the row and the answer, at the precision Postgres keeps, so a replay under the
+    // same key answers with exactly the times the first did.
+    Instant returnedAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
     Return ret =
         new Return(
             returnId,
@@ -2614,10 +2723,14 @@ public class OrderService {
             totalRefund,
             method,
             Return.STATUS_COMPLETED,
-            Instant.now(),
-            Instant.now(),
+            returnedAt,
+            returnedAt,
             // The audit trail (20.11) names who took the goods back; a return never used to.
-            ctx.userId());
+            ctx.userId(),
+            key,
+            approvedBy,
+            outside,
+            giftCardId);
 
     // A refund that settles a recall notice (05.10) settles it in this transaction: the goods, the
     // money and the notice agree, or none of them is recorded.
@@ -2625,27 +2738,219 @@ public class OrderService {
         req.recallNoticeId() == null || req.recallNoticeId().isBlank()
             ? null
             : Parsing.uuid(req.recallNoticeId(), "recallNoticeId");
-    Return created =
-        repo.createReturn(
-            ret,
-            returnItems,
-            Events.orderReturned(
+    GiftCard cardToWrite = freshCard;
+    String codeToTopUp = topUpCode;
+    BigDecimal refund = totalRefund;
+    OrderRepository.ReturnStep step =
+        c -> {
+          if (Return.METHOD_GIFT_CARD.equals(method)) {
+            repo.giftCardForReturnTx(
+                c,
+                cardToWrite,
+                codeToTopUp,
                 tenantId,
+                refund,
                 orderId,
                 returnId,
-                order.storeId(),
-                returnItems,
-                totalRefund,
-                method,
-                order.currency()),
-            noticeId == null
-                ? null
-                : c ->
-                    RecallNoticeRepository.resolveByReturnTx(
-                        c, tenantId, noticeId, orderId, returnId, ctx.userId()));
+                (card, tx) -> Events.giftCardLoadedByReturn(card, tx, returnId));
+          }
+          if (noticeId != null) {
+            RecallNoticeRepository.resolveByReturnTx(
+                c, tenantId, noticeId, orderId, returnId, ctx.userId());
+          }
+        };
+    Return created;
+    try {
+      created =
+          repo.createReturn(
+              ret,
+              returnItems,
+              Events.orderReturned(
+                  tenantId,
+                  orderId,
+                  returnId,
+                  order.storeId(),
+                  returnItems,
+                  totalRefund,
+                  method,
+                  order.currency(),
+                  order.customerId(),
+                  Return.METHOD_GIFT_CARD.equals(method) ? giftCardId : null,
+                  noticeId != null,
+                  approvedBy),
+              step);
+    } catch (ApiException e) {
+      // Two attempts with one key raced and this one lost — on the key itself, or on the quantity
+      // the winner just took back. Either way the winner's return is the answer.
+      var first = repo.findReturnByKey(tenantId, key);
+      if (first.isPresent()) return replayedReturn(first.get(), orderId);
+      throw e;
+    }
     // A return against an invoiced sale is credited (18.9), in the background.
     salesInvoices.issueCreditNoteLater(tenantId, orderId, created.id(), ctx.userId());
     return created;
+  }
+
+  /** The first return made under a key, when the key is used again for the same order. */
+  private static Return replayedReturn(Return first, UUID orderId) {
+    if (!first.orderId().equals(orderId))
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for a different order");
+    return first;
+  }
+
+  private static String returnMethod(String requested) {
+    if (requested == null || requested.isBlank()) return Return.METHOD_ORIGINAL;
+    String m = requested.trim().toUpperCase(Locale.ROOT);
+    if (!Return.METHODS.contains(m))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_METHOD_INVALID",
+          "refundMethod must be ORIGINAL, STORE_CREDIT or GIFT_CARD");
+    return m;
+  }
+
+  private static String returnCondition(String requested) {
+    if (requested == null || requested.isBlank())
+      throw ApiException.badRequest(
+          "ORDER_RETURN_CONDITION_REQUIRED",
+          "each returned item needs its condition: SEALED, OPENED, DAMAGED or FAULTY");
+    String c = requested.trim().toUpperCase(Locale.ROOT);
+    if (!ReturnItem.CONDITIONS.contains(c))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_CONDITION_INVALID", "condition must be SEALED, OPENED, DAMAGED or FAULTY");
+    return c;
+  }
+
+  /**
+   * When the goods left the store: the recorded handover of an online order, else the moment the
+   * sale first became fulfilled (a till sale's completion).
+   */
+  private Instant handedOverAt(Order order) {
+    var handover = repo.findHandover(order.tenantId(), order.id());
+    if (handover.isPresent()) return handover.get().handedAt();
+    return repo.findFirstFulfilledAt(order.tenantId(), order.id()).orElse(order.createdAt());
+  }
+
+  /** The store's own zone; UTC only when tenant-svc cannot say (the window is then by UTC day). */
+  private ZoneId storeZone(UUID tenantId, UUID storeId) {
+    try {
+      ZoneId zone = profiles.stores(tenantId, storeId).zoneOf(storeId);
+      return zone != null ? zone : ZoneOffset.UTC;
+    } catch (ApiException e) {
+      return ZoneOffset.UTC;
+    }
+  }
+
+  /**
+   * An amount in the business's home currency, for the cashier's ceiling; null when the sale is in
+   * another currency and the business keeps no rate for it, which the policy reads as over the
+   * ceiling (it fails closed, as spend authority does).
+   */
+  private BigDecimal inHomeCurrency(UUID tenantId, BigDecimal amount, String currency) {
+    String home =
+        tenantStatusRepo
+            .findCurrency(tenantId)
+            .orElseGet(
+                () ->
+                    profiles
+                        .find(tenantId)
+                        .map(com.storeql.service.TenantProfiles.Profile::currency)
+                        .orElse(null));
+    if (home != null && home.equalsIgnoreCase(currency)) return amount;
+    return fx.toHome(tenantId, amount, currency)
+        .map(com.storeql.service.Fx.Converted::amount)
+        .orElse(null);
+  }
+
+  /**
+   * The gift card a return's refund went on, for the answer to the return itself.
+   *
+   * @param ret the return
+   * @return the card, or empty when the refund was not to a gift card
+   */
+  public java.util.Optional<GiftCard> giftCardOf(Return ret) {
+    return ret.giftCardId() == null
+        ? java.util.Optional.empty()
+        : repo.findGiftCardById(ret.tenantId(), ret.giftCardId());
+  }
+
+  /**
+   * A sale found by its receipt, with what can still come back on each line.
+   *
+   * @param order the sale
+   * @param receiptNumber its printed fiscal number, or null when none is issued yet
+   * @param lines what was sold, what came back and what can still
+   */
+  public record ReceiptMatch(Order order, String receiptNumber, List<ReturnableLine> lines) {}
+
+  /**
+   * One variant of a sale: sold, already returned, and still returnable.
+   *
+   * @param variantId the variant
+   * @param soldQty what was handed over
+   * @param returnedQty what has come back on any return
+   * @param unitPrice the price paid for one
+   */
+  public record ReturnableLine(
+      UUID variantId, BigDecimal soldQty, BigDecimal returnedQty, BigDecimal unitPrice) {
+    /** Sold less returned, never below zero. */
+    public BigDecimal returnableQty() {
+      return soldQty.subtract(returnedQty).max(BigDecimal.ZERO);
+    }
+  }
+
+  /**
+   * Finds a sale by the number printed on its receipt: the fiscal number (case-insensitive) or the
+   * short order reference, the last eight characters of the order id. Only sales at stores the
+   * caller may act at are found; a short reference is not unique, so two sales sharing one are
+   * refused rather than guessed between.
+   *
+   * @param tenantId owning tenant
+   * @param number the text typed or scanned
+   * @param ctx caller context, whose stores bound the search
+   * @return the sale with its returnable lines
+   * @throws ApiException {@code ORDER_RECEIPT_NOT_FOUND} (404) when nothing at the caller's stores
+   *     matches; {@code ORDER_RECEIPT_AMBIGUOUS} (409) when more than one sale does
+   */
+  public ReceiptMatch findByReceipt(UUID tenantId, String number, TenantContext ctx) {
+    String n = number == null ? "" : number.trim();
+    if (n.isEmpty()) throw ApiException.badRequest("VALIDATION_FAILED", "number: is required");
+    String bare = n.startsWith("#") ? n.substring(1).trim() : n;
+    String shortRef = bare.matches("(?i)[0-9a-f]{8}") ? bare.toLowerCase(Locale.ROOT) : null;
+    List<Order> found = new ArrayList<>();
+    for (UUID id : repo.findOrderIdsByReceipt(tenantId, n, shortRef)) {
+      repo.findOrder(tenantId, id)
+          .filter(o -> ctx.hasStoreAccess(o.storeId()))
+          .ifPresent(found::add);
+    }
+    if (found.isEmpty())
+      throw ApiException.notFound("ORDER_RECEIPT_NOT_FOUND", "no sale found for that receipt");
+    if (found.size() > 1)
+      throw ApiException.conflict(
+          "ORDER_RECEIPT_AMBIGUOUS",
+          "more than one sale matches that number; use the full receipt number");
+    Order order = found.get(0);
+    var returned = repo.returnedQtyByVariant(tenantId, order.id());
+    Map<UUID, ReturnableLine> byVariant = new LinkedHashMap<>();
+    for (OrderItem item : repo.findOrderItems(tenantId, order.id())) {
+      BigDecimal sold = item.fulfilledQty() == null ? BigDecimal.ZERO : item.fulfilledQty();
+      byVariant.merge(
+          item.variantId(),
+          new ReturnableLine(
+              item.variantId(),
+              sold,
+              returned.getOrDefault(item.variantId(), BigDecimal.ZERO),
+              item.unitPrice()),
+          (a, b) ->
+              new ReturnableLine(
+                  a.variantId(), a.soldQty().add(b.soldQty()), a.returnedQty(), a.unitPrice()));
+    }
+    String receipt =
+        receiptRepo
+            .findByOrder(tenantId, order.id())
+            .map(Domain.FiscalReceipt::fullNumber)
+            .orElse(null);
+    return new ReceiptMatch(order, receipt, List.copyOf(byVariant.values()));
   }
 
   /**
@@ -2691,32 +2996,57 @@ public class OrderService {
    * @param tenantId owning tenant
    * @param orderId the sale to void
    * @param req the reason, recorded on both the void log and the receipt
+   * @param idempotencyKey the caller's key; a retry answers with the first void
    * @param ctx caller context, checked for access to the sale's store
    * @return the recorded void log entry
    * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
    *     ORDER_VOID_ONLY_POS} (409) when the order is not a POS sale
    */
-  public PosVoidLog voidOrder(UUID tenantId, UUID orderId, VoidRequest req, TenantContext ctx) {
+  public PosVoidLog voidOrder(
+      UUID tenantId, UUID orderId, VoidRequest req, String idempotencyKey, TenantContext ctx) {
     Order order =
         repo.findOrder(tenantId, orderId)
             .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
     ctx.requireStoreAccess(order.storeId());
+    // A retry answers with the first void: the order is voided by now, and saying so again would
+    // turn a lost response into an error.
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findVoidByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedVoid(earlier.get(), orderId);
     if (!Order.CHANNEL_POS.equals(order.channel()))
       throw ApiException.conflict("ORDER_VOID_ONLY_POS", "void is only allowed on POS orders");
-    PosVoidLog log =
-        repo.voidOrder(
-            tenantId,
-            orderId,
-            order.storeId(),
-            req.reason(),
-            ctx.userId(),
-            restock -> Events.orderVoided(tenantId, orderId, order.storeId(), restock));
+    PosVoidLog log;
+    try {
+      log =
+          repo.voidOrder(
+              tenantId,
+              orderId,
+              order.storeId(),
+              req.reason(),
+              ctx.userId(),
+              key,
+              restock ->
+                  Events.orderVoided(
+                      tenantId, orderId, order.storeId(), order.customerId(), restock));
+    } catch (ApiException e) {
+      // A retry that raced the first: it lost on the key or found the order already voided.
+      var first = repo.findVoidByKey(tenantId, key);
+      if (first.isPresent()) return replayedVoid(first.get(), orderId);
+      throw e;
+    }
 
     // The receipt keeps its number and gains a reason. Removing it would close the hole in the
     // sequence, and closing the hole is the whole trick: ring the sale, take the cash, void the
     // receipt, and a till that balances hides a theft. Here the document stays, numbered.
     receiptRepo.markVoided(tenantId, orderId, req.reason());
     return log;
+  }
+
+  private static PosVoidLog replayedVoid(PosVoidLog first, UUID orderId) {
+    if (!first.orderId().equals(orderId))
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for a different order");
+    return first;
   }
 
   // ── Layaway ───────────────────────────────────────────────────────────────

@@ -1133,12 +1133,17 @@ class OrderDetail {
   final double total;
   final List<OrderLine> items;
 
+  /// The customer the sale names, or null for an anonymous till sale. Store
+  /// credit can only go to a named customer.
+  final String? customerId;
+
   const OrderDetail({
     required this.id,
     required this.status,
     required this.currency,
     required this.total,
     required this.items,
+    this.customerId,
   });
 
   factory OrderDetail.fromJson(Map<String, dynamic> j) => OrderDetail(
@@ -1149,6 +1154,9 @@ class OrderDetail {
         items: ((j['items'] as List?) ?? [])
             .map((e) => OrderLine.fromJson(e as Map<String, dynamic>))
             .toList(),
+        customerId: (j['customerId'] as String?)?.isEmpty == true
+            ? null
+            : j['customerId'] as String?,
       );
 }
 

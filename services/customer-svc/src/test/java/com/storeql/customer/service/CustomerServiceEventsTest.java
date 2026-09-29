@@ -117,6 +117,7 @@ class CustomerServiceEventsTest {
             eq(CUSTOMER),
             eq(order),
             eq(new BigDecimal("24.00")),
+            eq(new BigDecimal("24.00")),
             any(LoyaltyProgramme.class),
             captor.capture(),
             any());

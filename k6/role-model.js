@@ -93,7 +93,7 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   // ── every gated decision, refused by name and admitted by tier ───────────────
   expect(journal(lead.token), '[-] the shift lead cannot post a journal', 403, 'PERMISSION_DENIED');
   expect(journal(manager.token), '[+] a plain manager can', 201);
-  expect(call('POST', `/api/order-svc/orders/${lead.userId}/void`, { token: lead.token, body: { reason: 'x' } }), '[-] the shift lead cannot void a sale', 403, 'PERMISSION_DENIED');
+  expect(call('POST', `/api/order-svc/orders/${lead.userId}/void`, { token: lead.token, idem: true, body: { reason: 'x' } }), '[-] the shift lead cannot void a sale', 403, 'PERMISSION_DENIED');
   expect(call('POST', ROLES, { token: lead.token, body: { code: 'JUNIOR', name: 'Junior', baseTier: 'CASHIER', permissions: [] } }), '[+] but may define a role: staff.manage was kept', 201);
   expect(noSale(trainee.token), '[-] the trainee cannot open the drawer', 403, 'PERMISSION_DENIED');
   expect(noSale(cashier.token), '[+] a plain cashier can', 201);

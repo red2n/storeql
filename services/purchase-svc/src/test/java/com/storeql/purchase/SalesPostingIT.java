@@ -184,6 +184,54 @@ class SalesPostingIT {
     same(row(trialBalance(), "1299"), "4.00");
   }
 
+  @Test
+  @DisplayName(
+      "A return refunded to store credit or a gift card credits that liability, not the tender")
+  void aReturnToStoreCreditOrGiftCardCreditsItsLiability() {
+    String order = Ids.newId().toString();
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "120.00", "CARD"));
+    handler.orderConfirmed(confirmed(T, order, "120.00", "20.00"));
+
+    String credit =
+        refunded(
+                T,
+                order,
+                "30.00",
+                "{\"paymentId\":\""
+                    + Ids.newId()
+                    + "\",\"method\":\"STORE_CREDIT\",\"amount\":30.00}")
+            .replace(
+                "\"amount\":30.00}]",
+                "\"amount\":30.00}],\"refundMethod\":\"STORE_CREDIT\",\"returnId\":\""
+                    + Ids.newId()
+                    + "\",\"customerId\":\""
+                    + Ids.newId()
+                    + "\"");
+    handler.paymentRefunded(credit);
+    handler.paymentRefunded(credit);
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "4010"), "-75.00");
+    same(row(tb, "2200"), "-15.00");
+    same(row(tb, "2320"), "-30.00");
+    same(row(tb, "1250"), "120.00");
+    same(row(tb, "1105"), "0");
+
+    handler.paymentRefunded(
+        refunded(
+            T,
+            order,
+            "12.00",
+            "{\"paymentId\":\"" + Ids.newId() + "\",\"method\":\"GIFT_CARD\",\"amount\":12.00}"));
+    tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "2310"), "-12.00");
+    same(row(tb, "2320"), "-30.00");
+    same(row(tb, "4010"), "-65.00");
+    same(row(tb, "2200"), "-13.00");
+  }
+
   // ── the clearing report: what did not net ───────────────────────────────────
 
   @Test

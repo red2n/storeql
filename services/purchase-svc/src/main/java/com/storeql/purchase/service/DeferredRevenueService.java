@@ -118,6 +118,7 @@ public class DeferredRevenueService {
           DeferredRevenue.earned(src, settings, pool, e.points(), e.orderTotal(), e.orderTax());
       case LoyaltyEvent.REDEEMED -> DeferredRevenue.redeemed(src, settings, pool, e.points());
       case LoyaltyEvent.EXPIRED -> DeferredRevenue.expired(src, settings, pool, e.points());
+      case LoyaltyEvent.REVERSED -> DeferredRevenue.reversed(src, settings, pool, e.points().abs());
       default -> DeferredRevenue.adjusted(src, settings, pool, e.points());
     };
   }

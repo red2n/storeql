@@ -189,6 +189,9 @@ public final class Domain {
     public static final String TYPE_REDEEM = "REDEEM";
     public static final String TYPE_EXPIRE = "EXPIRE";
     public static final String TYPE_ADJUST = "ADJUST";
+
+    /** Points taken back because the sale that earned them was returned or voided. */
+    public static final String TYPE_REVERSE = "REVERSE";
   }
 
   public record StoreCreditAccount(

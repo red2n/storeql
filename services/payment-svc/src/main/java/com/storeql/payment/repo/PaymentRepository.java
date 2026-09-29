@@ -243,6 +243,28 @@ public class PaymentRepository extends BaseOutboxRepository {
       java.util.function.BiFunction<
               BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
           eventBuilder) {
+    refundOrderOnce(
+        eventId, consumer, tenantId, orderId, requestedAmount, reason, null, eventBuilder);
+  }
+
+  /**
+   * As above, recording every allocation under {@code methodOverride} when it is not null: a return
+   * refunded to STORE_CREDIT or a GIFT_CARD moves no money back to the card or the till, the value
+   * goes to a liability, so the refund row names that method (its {@code payment_id} is the
+   * captured tender the value is drawn against, which keeps the per-tender cap). No provider is
+   * called on this path in either case.
+   */
+  public void refundOrderOnce(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      String methodOverride,
+      java.util.function.BiFunction<
+              BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
+          eventBuilder) {
     inTx(
         c -> {
           if (!markProcessedIfNewTx(c, eventId, consumer)) {
@@ -269,10 +291,11 @@ public class PaymentRepository extends BaseOutboxRepository {
             BigDecimal residual = t.amount().subtract(sumRefundsTx(c, tenantId, t.id()));
             if (residual.signum() <= 0) continue;
             BigDecimal alloc = left.min(residual);
-            insertRefundTenderTx(c, tenantId, orderId, t.id(), alloc, t.method(), reason);
+            String method = methodOverride != null ? methodOverride : t.method();
+            insertRefundTenderTx(c, tenantId, orderId, t.id(), alloc, method, reason);
             shares.add(
                 new com.storeql.payment.domain.Domain.RefundAllocation(
-                    t.id(), t.method(), alloc, t.storeId()));
+                    t.id(), method, alloc, t.storeId()));
             left = left.subtract(alloc);
           }
           insertOutbox(c, eventBuilder.apply(toRefund, shares));

@@ -778,19 +778,34 @@ public class OrderResource {
    */
   @Operation(
       summary = "Void a POS order",
-      description = "Voids a POS-channel order after the fact and emits OrderVoided.")
+      description =
+          "Voids a POS-channel order after the fact and emits OrderVoided. Requires an"
+              + " Idempotency-Key: a retry answers with the first void and writes nothing.")
   @APIResponse(responseCode = "200", description = "Order voided")
+  @APIResponse(responseCode = "400", description = "Missing or malformed Idempotency-Key")
   @APIResponse(responseCode = "404", description = "Order not found")
   @APIResponse(responseCode = "409", description = "Void is only allowed on POS-channel orders")
   @POST
   @Path("/{id}/void")
-  public Response voidOrder(@PathParam("id") String id, VoidRequest req) {
+  public Response voidOrder(
+      @PathParam("id") String id,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      VoidRequest req) {
     // Management by path (the shared filter); by permission here (20.10): a shift lead who is a
     // manager in every other way can be a manager who cannot void a sale.
     ctx.requirePermission(com.storeql.web.Permissions.SALES_VOID);
     Validations.validate(req);
-    var vl = svc.voidOrder(ctx.tenantId(), Parsing.uuid(id, "id"), req, ctx);
+    var vl = svc.voidOrder(ctx.tenantId(), Parsing.uuid(id, "id"), req, requiredKey(key), ctx);
     return Response.ok(ApiResponse.ok(Mappers.toDto(vl))).build();
+  }
+
+  /** The caller's key, canonical; a write that must be retryable is refused without one. */
+  private static String requiredKey(String header) {
+    if (header == null || header.isBlank()) {
+      throw ApiException.badRequest(
+          "IDEMPOTENCY_KEY_REQUIRED", "the Idempotency-Key header is required");
+    }
+    return IdempotencyKeys.require(header.trim());
   }
 
   // ── Returns (Gap #14) ─────────────────────────────────────────────────────
@@ -810,20 +825,89 @@ public class OrderResource {
   @Operation(
       summary = "Create a return for an order",
       description =
-          "Refunds one or more line items of the order. Cannot be used on a voided or cancelled"
-              + " order.")
-  @APIResponse(responseCode = "201", description = "Return created")
+          "Refunds one or more line items of the order, each with its condition (SEALED, OPENED,"
+              + " DAMAGED, FAULTY). Checked against the business's return policy first: outside it"
+              + " (past the window, over the cashier's ceiling) needs sales.refund, and the caller"
+              + " is named as approver. Requires an Idempotency-Key: a retry answers with the"
+              + " first return and writes nothing. Cannot be used on a voided or cancelled order.")
+  @APIResponse(responseCode = "201", description = "Return created (or the first one, on a retry)")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED, ORDER_RETURN_CONDITION_REQUIRED,"
+              + " ORDER_RETURN_CONDITION_INVALID, ORDER_RETURN_METHOD_INVALID")
+  @APIResponse(
+      responseCode = "403",
+      description = "ORDER_RETURN_NEEDS_MANAGER, with the reasons in details")
   @APIResponse(
       responseCode = "404",
-      description = "Order not found, or a returned variant is not on the order")
-  @APIResponse(responseCode = "409", description = "Order is voided or cancelled")
+      description =
+          "Order not found, a returned variant is not on the order, or GIFT_CARD_NOT_FOUND")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Order is voided or cancelled, or ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER, or the card"
+              + " is not usable")
   @POST
   @Path("/{id}/returns")
-  public Response createReturn(@PathParam("id") String id, CreateReturnRequest req) {
+  public Response createReturn(
+      @PathParam("id") String id,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      CreateReturnRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
     Validations.validate(req);
-    var ret = svc.createReturn(ctx.tenantId(), Parsing.uuid(id, "id"), req, ctx);
+    var ret = svc.createReturn(ctx.tenantId(), Parsing.uuid(id, "id"), req, requiredKey(key), ctx);
     var retItems = svc.getReturnItems(ctx.tenantId(), ret.id());
-    return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(ret, retItems))).build();
+    var card = svc.giftCardOf(ret).orElse(null);
+    return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(ret, retItems, card))).build();
+  }
+
+  /**
+   * Finds a sale by the number on its receipt, for a return at the till.
+   *
+   * @param number the fiscal receipt number, or the short order reference the receipt prints
+   * @return the sale with its lines, and per line how much can still come back
+   */
+  @Operation(
+      summary = "Find a sale by its receipt",
+      description =
+          "Matches the business's fiscal receipt number (trimmed, case-insensitive) or the short"
+              + " order reference the receipt prints, at the stores the caller may act at. Answers"
+              + " the order with, per line, how much can still come back. Staff only.")
+  @APIResponse(responseCode = "200", description = "The sale and its returnable lines")
+  @APIResponse(
+      responseCode = "404",
+      description = "ORDER_RECEIPT_NOT_FOUND: nothing at the caller's stores matches")
+  @APIResponse(
+      responseCode = "409",
+      description = "ORDER_RECEIPT_AMBIGUOUS: more than one sale shares that short reference")
+  @GET
+  @Path("/by-receipt")
+  public Response byReceipt(@QueryParam("number") String number) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    var m = svc.findByReceipt(ctx.requireTenantId(), number, ctx);
+    var order = m.order();
+    var items = svc.getOrderItems(order.tenantId(), order.id());
+    var answer =
+        new com.storeql.order.dto.Dtos.ReceiptLookupResponse(
+            Mappers.toDto(
+                order,
+                items,
+                svc.depositsOf(order.tenantId(), order.id()),
+                svc.groupOf(order.tenantId(), order.id()).orElse(null),
+                svc.handoverOf(order.tenantId(), order.id()).orElse(null)),
+            m.receiptNumber(),
+            m.lines().stream()
+                .map(
+                    l ->
+                        new com.storeql.order.dto.Dtos.ReturnableLineResponse(
+                            l.variantId().toString(),
+                            l.soldQty(),
+                            l.returnedQty(),
+                            l.returnableQty(),
+                            l.unitPrice()))
+                .toList());
+    return Response.ok(ApiResponse.ok(answer)).build();
   }
 
   // ─────────────────────────────────────────────────────────────────── utils

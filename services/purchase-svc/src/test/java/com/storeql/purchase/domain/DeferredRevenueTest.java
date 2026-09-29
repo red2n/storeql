@@ -131,6 +131,50 @@ class DeferredRevenueTest {
   }
 
   @Test
+  @DisplayName("Points taken back with a returned sale put their deferral back into sales")
+  void pointsTakenBackWithAReturnPutTheirDeferralBackIntoSales() {
+    PointsPool pool = saleOf200Points(PointsPool.EMPTY).pool();
+
+    // Half the sale comes back: 100 of 200 points, 7.41 × 100 / 200 = 3.705 → 3.71 back to sales.
+    PointsOutcome half = DeferredRevenue.reversed(SRC, SETTINGS, pool, new BigDecimal("100"));
+    assertThat(net(half.posting(), Domain.CODE_SALES), comparesEqualTo(new BigDecimal("-3.71")));
+    assertThat(
+        net(half.posting(), Domain.CODE_DEFERRED_LOYALTY), comparesEqualTo(new BigDecimal("3.71")));
+    assertThat(half.posting().get(0).sourceType(), is(Domain.SOURCE_LOYALTY_DEFERRAL));
+    assertBalanced(half.posting());
+    assertPool(half.pool(), "100", "3.70", "0");
+
+    // The rest comes back: nothing left deferred, nothing outstanding, and no breakage invented.
+    PointsOutcome rest =
+        DeferredRevenue.reversed(SRC, SETTINGS, half.pool(), new BigDecimal("100"));
+    assertThat(net(rest.posting(), Domain.CODE_SALES), comparesEqualTo(new BigDecimal("-3.70")));
+    assertThat(net(rest.posting(), Domain.CODE_LOYALTY_BREAKAGE), comparesEqualTo(BigDecimal.ZERO));
+    assertPool(rest.pool(), "0", "0", "0");
+  }
+
+  @Test
+  @DisplayName("Points already spent release nothing when their sale comes back: they are a debt")
+  void pointsAlreadySpentReleaseNothingWhenTheirSaleComesBack() {
+    PointsPool pool = saleOf200Points(PointsPool.EMPTY).pool();
+    PointsPool spent = DeferredRevenue.redeemed(SRC, SETTINGS, pool, new BigDecimal("200")).pool();
+    PointsOutcome out = DeferredRevenue.reversed(SRC, SETTINGS, spent, new BigDecimal("200"));
+    assertThat(out.posting(), is(empty()));
+    assertThat(out.pool(), is(spent));
+  }
+
+  @Test
+  @DisplayName("A gift card loaded by a refund posts nothing: the refund already owes it")
+  void aGiftCardLoadedByARefundPostsNothing() {
+    assertThat(
+        DeferredRevenue.giftCardLoaded(
+            SRC, "ISSUE", DeferredRevenue.PAID_BY_RETURN, new BigDecimal("15.00")),
+        is(empty()));
+    assertThat(
+        DeferredRevenue.giftCardLoaded(SRC, "ISSUE", "CASH", new BigDecimal("15.00")),
+        is(not(empty())));
+  }
+
+  @Test
   @DisplayName("Points spent before their earning reached the ledger are settled when it arrives")
   void aRedemptionReadBeforeItsEarningIsMatchedLater() {
     PointsOutcome early =

@@ -36,6 +36,23 @@ final class LoyaltyLots {
       Instant earnedAt,
       Instant expiresAt)
       throws SQLException {
+    insertLot(c, tenantId, customerId, ledgerEntryId, points, points, earnedAt, expiresAt);
+  }
+
+  /**
+   * A lot with less left than it was earned with: points earned while the balance stood below zero
+   * first make good the debt, so only the rest can be spent.
+   */
+  static void insertLot(
+      Connection c,
+      UUID tenantId,
+      UUID customerId,
+      UUID ledgerEntryId,
+      BigDecimal points,
+      BigDecimal remaining,
+      Instant earnedAt,
+      Instant expiresAt)
+      throws SQLException {
     if (points.signum() <= 0) {
       return;
     }
@@ -48,7 +65,7 @@ final class LoyaltyLots {
       ps.setObject(3, customerId);
       ps.setObject(4, ledgerEntryId);
       ps.setBigDecimal(5, points);
-      ps.setBigDecimal(6, points);
+      ps.setBigDecimal(6, remaining);
       ps.setObject(7, odt(earnedAt));
       ps.setObject(8, odt(expiresAt));
       ps.executeUpdate();

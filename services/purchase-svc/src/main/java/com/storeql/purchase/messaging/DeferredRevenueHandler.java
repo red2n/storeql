@@ -25,8 +25,8 @@ public class DeferredRevenueHandler {
   @Inject DeferredRevenueService deferred;
 
   /**
-   * {@code LoyaltyEarned}, {@code LoyaltyRedeemed}, {@code LoyaltyAdjusted} or {@code
-   * LoyaltyExpired}.
+   * {@code LoyaltyEarned}, {@code LoyaltyRedeemed}, {@code LoyaltyAdjusted}, {@code LoyaltyExpired}
+   * or {@code LoyaltyReversed}.
    */
   public void loyalty(String json) {
     LoyaltyEvent event;
@@ -38,6 +38,7 @@ public class DeferredRevenueHandler {
             case "LoyaltyRedeemed" -> LoyaltyEvent.REDEEMED;
             case "LoyaltyAdjusted" -> LoyaltyEvent.ADJUSTED;
             case "LoyaltyExpired" -> LoyaltyEvent.EXPIRED;
+            case "LoyaltyReversed" -> LoyaltyEvent.REVERSED;
             default -> null;
           };
       if (kind == null) return;

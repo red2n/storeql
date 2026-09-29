@@ -42,6 +42,12 @@ public final class DeferredRevenue {
   /** A gift card given away rather than sold: a marketing cost, not a tender. */
   public static final String PAID_BY_PROMOTIONAL = "PROMOTIONAL";
 
+  /**
+   * A card loaded by a return's refund (return controls). The refund's own posting already credits
+   * the gift-card liability, so the load is counted in the pool but posts nothing of its own.
+   */
+  public static final String PAID_BY_RETURN = "RETURN";
+
   private static final BigDecimal HUNDRED = new BigDecimal("100");
   private static final int WORKING_SCALE = 10;
 
@@ -227,6 +233,43 @@ public final class DeferredRevenue {
         "Loyalty points lapsed, ");
   }
 
+  /**
+   * Points taken back because the sale that earned them was returned or voided (return controls):
+   * the deferral that went with them leaves deferred income and goes back to sales — the inverse of
+   * earning, valued at the pool's average as redemption values it. The refund reversed the whole
+   * sale out of sales, so without this sales would be short by what earning deferred. Points beyond
+   * those outstanding were already spent: the customer owes them, and they release nothing.
+   */
+  public static PointsOutcome reversed(Source src, Settings s, PointsPool pool, BigDecimal points) {
+    if (points == null || points.signum() <= 0) return new PointsOutcome(pool, List.of());
+    BigDecimal matched = points.min(pool.outstanding());
+    if (matched.signum() <= 0) return new PointsOutcome(pool, List.of());
+    BigDecimal back =
+        pool.deferred().signum() <= 0
+            ? BigDecimal.ZERO
+            : money(
+                    pool.deferred()
+                        .multiply(matched)
+                        .divide(pool.outstanding(), WORKING_SCALE, RoundingMode.HALF_UP))
+                .min(pool.deferred());
+    PointsPool next =
+        new PointsPool(
+            pool.outstanding().subtract(matched), pool.deferred().subtract(back), pool.unmatched());
+    if (back.signum() == 0) return new PointsOutcome(next, List.of());
+    return new PointsOutcome(
+        next,
+        LedgerPosting.of(
+                src.tenantId(),
+                src.date(),
+                "Loyalty points taken back with a returned sale " + Handle.of(src.ref()),
+                Domain.SOURCE_LOYALTY_DEFERRAL,
+                src.ref(),
+                src.storeId())
+            .debit(Domain.CODE_DEFERRED_LOYALTY, Domain.NAME_DEFERRED_LOYALTY, back)
+            .credit(Domain.CODE_SALES, Domain.NAME_SALES, back)
+            .build());
+  }
+
   /** Posts a release, and sweeps what is left to breakage when no points remain outstanding. */
   /**
    * Points that died under the programme's expiry rule (13.x): they leave the pool as a lapse, and
@@ -276,6 +319,7 @@ public final class DeferredRevenue {
       Source src, String kind, String paidBy, BigDecimal amount) {
     if (amount == null || amount.signum() <= 0) return List.of();
     String how = paidBy == null ? "" : paidBy.trim().toUpperCase(Locale.ROOT);
+    if (PAID_BY_RETURN.equals(how)) return List.of();
     boolean given = PAID_BY_PROMOTIONAL.equals(how);
     LedgerPosting p =
         LedgerPosting.of(

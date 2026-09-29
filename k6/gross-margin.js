@@ -79,7 +79,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   truthy('[+] by store, the sale rolls up to its store', ((data(report(owner, '&groupBy=STORE')) || {}).rows || []).some((r) => r.groupKey === store.id && cents(num(r.revenue)) === earned));
 
   // ── a return takes back its share of revenue and cost ────────────────────────
-  expect(call('POST', `/api/order-svc/orders/${sale.id}/returns`, { token: owner, body: { reason: 'Too big', items: [{ variantId, qty: 1 }] } }), '[+] one of the three is returned', [200, 201]);
+  expect(call('POST', `/api/order-svc/orders/${sale.id}/returns`, { token: owner, idem: true, body: { reason: 'Too big', items: [{ variantId, qty: 1, condition: 'SEALED' }] } }), '[+] one of the three is returned', [200, 201]);
   const afterReturn = cents(earned - cents(earned / 3));
   truthy('[+] the return takes back a third of the revenue', waitFor(afterReturn), { row, afterReturn });
   truthy('[+] ...and the cost of the unit that came back', cents(num(row.cogs)) === 12, row);
@@ -88,7 +88,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   const voided = paidSale(2);
   const voidedEarned = cents(num(voided.total) - num(voided.taxAmount));
   truthy('[+] a second sale adds its revenue', waitFor(cents(afterReturn + voidedEarned)), row);
-  expect(call('POST', `/api/order-svc/orders/${voided.id}/void`, { token: owner, body: { reason: 'rang up twice' } }), '[+] the second sale is voided', 200);
+  expect(call('POST', `/api/order-svc/orders/${voided.id}/void`, { token: owner, idem: true, body: { reason: 'rang up twice' } }), '[+] the second sale is voided', 200);
   truthy('[+] ...and its revenue leaves the report', waitFor(afterReturn), row);
   truthy('[+] ...with its cost', cents(num(row.cogs)) === 12, row);
 

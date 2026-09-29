@@ -526,13 +526,61 @@ class RecallNoticeIT {
     return id;
   }
 
+  /**
+   * A product-safety recall refund is the business's duty, never a favour its return policy grants:
+   * a cashier settles a notice for a sale long past the window, and no condition is asked, the
+   * goods going to RECALLED whatever state they are in. The same cashier's ordinary return of that
+   * sale is still held by the policy.
+   */
+  @Test
+  void aRecallRefundIsNeverHeldByTheReturnPolicy() {
+    UUID recall = Ids.newId();
+    String order = placeAtTill(Ids.newId(), "10.00");
+    String other = placeAtTill(Ids.newId(), "10.00");
+    handler.handle(saleAffected(recall, order, "RECALL", "REFUND"));
+    String notice = find(staffList(recall, null), "orderId", order).getString("id");
+    for (String old : new String[] {order, other}) {
+      com.storeql.test.Envelopes.exec(
+          PG,
+          "UPDATE \"order\".order_status_history SET changed_at = now() - interval '90 days'"
+              + " WHERE order_id = '"
+              + old
+              + "' AND to_status IN ('FULFILLED','PARTIALLY_FULFILLED')");
+    }
+    String cashier = Ids.newId().toString();
+    String noCondition =
+        "{\"reason\":\"Recalled\",\"recallNoticeId\":\""
+            + notice
+            + "\",\"items\":[{\"variantId\":\""
+            + V
+            + "\",\"qty\":1}]}";
+    JsonObject returned =
+        created(
+            request("POST", "/orders/" + order + "/returns", noCondition, T, "CASHIER", cashier));
+    assertThat(returned.getJsonArray("outsidePolicy").size(), is(0));
+    assertThat(find(staffList(recall, null), "orderId", order).getString("status"), is("RESOLVED"));
+
+    Response ordinary =
+        request(
+            "POST",
+            "/orders/" + other + "/returns",
+            "{\"reason\":\"Changed mind\",\"items\":[{\"variantId\":\""
+                + V
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
+            T,
+            "CASHIER",
+            cashier);
+    assertThat(ordinary.getStatus(), is(403));
+    assertThat(ordinary.readEntity(String.class), containsString("ORDER_RETURN_NEEDS_MANAGER"));
+  }
+
   private static String returnJson(String noticeId) {
     return "{\"reason\":\"Recalled\",\"recallNoticeId\":\""
         + noticeId
         + "\","
         + "\"items\":[{\"variantId\":\""
         + V
-        + "\",\"qty\":1}]}";
+        + "\",\"qty\":1,\"condition\":\"SEALED\"}]}";
   }
 
   /** The event inventory-svc publishes for one order a recall reached. */
@@ -595,7 +643,7 @@ class RecallNoticeIT {
     Invocation.Builder b = t.request().header("X-Tenant-Id", tenant);
     if (roles != null) b = b.header("X-Roles", roles);
     if (userId != null) b = b.header("X-User-Id", userId);
-    if ("POST".equals(method) && parts[0].equals("/orders")) {
+    if ("POST".equals(method) && (parts[0].equals("/orders") || parts[0].endsWith("/returns"))) {
       b = b.header("Idempotency-Key", Ids.newId().toString());
     }
     return json == null

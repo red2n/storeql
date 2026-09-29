@@ -58,6 +58,8 @@ class _Server implements HttpClientAdapter {
     } else if (o.path.endsWith('/zones') && o.method == 'GET') {
       body = '{"data":[{"id":"z-1","storeId":"store-1","name":"Dairy chiller","code":"CR1",'
           '"type":"COLD_ROOM","status":"ACTIVE"}],"meta":{}}';
+    } else if (o.path.endsWith('/admin/return-policy')) {
+      body = '{"data":{"windowDays":30,"noReceiptAllowed":false}}';
     } else if (o.path.endsWith('/admin/tenant')) {
       body = '{"data":{"id":"tenant-1","name":"Shop","status":"ACTIVE","currency":"USD","country":"US"}}';
     }

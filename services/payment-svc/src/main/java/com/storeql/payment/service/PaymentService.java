@@ -523,4 +523,56 @@ public class PaymentService {
         (amt, shares) ->
             Events.paymentRefunded(tenantId, refundBatchId, orderId, amt, shares, kind));
   }
+
+  /**
+   * What an {@code OrderReturned} says about where the money goes; {@code customerId} may be null,
+   * and {@code currency} is the sale's, so store credit is credited in it rather than guessed.
+   */
+  public record ReturnRefund(String method, UUID returnId, UUID customerId, String currency) {
+    public ReturnRefund(String method, UUID returnId, UUID customerId) {
+      this(method, returnId, customerId, null);
+    }
+
+    /** The value goes to a liability (store credit, gift card), not back to the card or cash. */
+    public boolean toLiability() {
+      return "STORE_CREDIT".equals(method) || "GIFT_CARD".equals(method);
+    }
+  }
+
+  /**
+   * Refund a return in whatever method the shopper chose. ORIGINAL reverses the captured tenders as
+   * before; STORE_CREDIT and GIFT_CARD record the refund under that method (no provider call, the
+   * value goes to a liability). All three are capped at what was captured less what was refunded,
+   * once per event, and announce {@code PaymentRefunded} with the method, return and customer.
+   */
+  public void refundReturnForOrderEvent(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      ReturnRefund ret) {
+    UUID refundBatchId = Ids.newId();
+    repo.refundOrderOnce(
+        eventId,
+        consumer,
+        tenantId,
+        orderId,
+        requestedAmount,
+        reason,
+        ret.toLiability() ? ret.method() : null,
+        (amt, shares) ->
+            Events.paymentRefunded(
+                tenantId,
+                refundBatchId,
+                orderId,
+                amt,
+                shares,
+                null,
+                ret.method(),
+                ret.returnId(),
+                ret.customerId(),
+                ret.currency()));
+  }
 }

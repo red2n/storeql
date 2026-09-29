@@ -465,20 +465,33 @@ public final class Dtos {
   public record ReturnItemRequest(
       @NotBlank String variantId,
       @NotNull @Positive BigDecimal qty,
-      @Schema(description = "Condition of the returned item, e.g. NEW, DAMAGED.")
+      @Schema(
+              description =
+                  "Required. SEALED goes back on sale; OPENED to inspection; DAMAGED and FAULTY"
+                      + " off sale. Missing is 400 ORDER_RETURN_CONDITION_REQUIRED, any other"
+                      + " value 400 ORDER_RETURN_CONDITION_INVALID.")
           String condition) {}
 
   @Schema(name = "CreateReturnRequest")
   public record CreateReturnRequest(
       @NotBlank String reason,
-      @Schema(description = "Defaults to refunding via the order's original payment method.")
+      @Schema(
+              description =
+                  "ORIGINAL (the default: back to how the sale was paid), STORE_CREDIT (the sale"
+                      + " must name a customer) or GIFT_CARD.")
           String refundMethod,
       @NotNull @Valid List<ReturnItemRequest> items,
       @Schema(
               description =
                   "The recall notice this refund settles (05.10): the notice is marked refunded"
                       + " in the same transaction. Must be a notice about this order.")
-          String recallNoticeId) {}
+          String recallNoticeId,
+      @Schema(
+              description =
+                  "GIFT_CARD only: the code of this business's card to top up. Absent, a new card"
+                      + " is issued for the refund.")
+          @Size(max = 64)
+          String giftCardCode) {}
 
   @Schema(name = "ReturnItemResponse")
   public record ReturnItemResponse(
@@ -499,7 +512,73 @@ public final class Dtos {
           String createdBy,
       String createdAt,
       String completedAt,
-      List<ReturnItemResponse> items) {}
+      List<ReturnItemResponse> items,
+      @Schema(
+              description =
+                  "The sales.refund holder who allowed a return outside the policy; null when it"
+                      + " was within it.")
+          String approvedBy,
+      @Schema(
+              description =
+                  "Why it needed a manager: WINDOW, CEILING or FAULTY_PAST_WINDOW; empty when it"
+                      + " was within the policy.")
+          List<String> outsidePolicy,
+      @Schema(
+              description =
+                  "GIFT_CARD only, on the response to the return itself: the card the refund went"
+                      + " on, with its code as the issue endpoint shows it.")
+          ReturnGiftCardResponse giftCard) {}
+
+  @Schema(name = "ReturnGiftCardResponse")
+  public record ReturnGiftCardResponse(String id, String code, BigDecimal balance) {}
+
+  @Schema(name = "ReturnableLineResponse")
+  public record ReturnableLineResponse(
+      String variantId,
+      @Schema(description = "What was handed over.") BigDecimal soldQty,
+      @Schema(description = "What has already come back.") BigDecimal returnedQty,
+      @Schema(description = "What can still come back: sold less returned.")
+          BigDecimal returnableQty,
+      @Schema(description = "The price paid for one, before any refund.") BigDecimal unitPrice) {}
+
+  @Schema(
+      name = "ReceiptLookupResponse",
+      description = "A sale found by its receipt, with how much of each line can still come back.")
+  public record ReceiptLookupResponse(
+      OrderResponse order,
+      @Schema(description = "The printed fiscal number, when one has been issued.")
+          String receiptNumber,
+      List<ReturnableLineResponse> lines) {}
+
+  @Schema(name = "ReturnPolicyRequest")
+  public record ReturnPolicyRequest(
+      @Schema(description = "Calendar days from handover in which a cashier may take a return.")
+          @NotNull
+          @Min(1)
+          @Max(3650)
+          Integer windowDays,
+      @Schema(
+              description =
+                  "The most a cashier may refund on one return, in the business's home currency;"
+                      + " absent for no ceiling.")
+          @PositiveOrZero
+          BigDecimal cashierCeiling,
+      @Schema(description = "Whether a return with no receipt may be taken at all.") @NotNull
+          Boolean noReceiptAllowed,
+      @Schema(description = "The most a no-receipt return may refund, home currency.")
+          @PositiveOrZero
+          BigDecimal noReceiptCeiling) {}
+
+  @Schema(name = "ReturnPolicyResponse")
+  public record ReturnPolicyResponse(
+      int windowDays,
+      BigDecimal cashierCeiling,
+      boolean noReceiptAllowed,
+      BigDecimal noReceiptCeiling,
+      @Schema(description = "The business's home currency, which the ceilings are in.")
+          String currency,
+      @Schema(description = "True while the business has set nothing and the default applies.")
+          boolean usingDefault) {}
 
   // ── Post-void (Gap #14) ───────────────────────────────────────────────────
 
@@ -1158,7 +1237,21 @@ public final class Dtos {
                   "Who sent an offline sale from the till's queue, which may be somebody other"
                       + " than who rang it up (actorId, null when that was not a member of staff"
                       + " the business holds at the store); null for the rest.")
-          String replayedBy) {}
+          String replayedBy,
+      @Schema(
+              description =
+                  "A return only: the sales.refund holder who allowed it outside the policy.")
+          String approvedBy,
+      @Schema(
+              description =
+                  "A return only: why it needed a manager (WINDOW, CEILING, FAULTY_PAST_WINDOW);"
+                      + " empty when within the policy.")
+          List<String> outsidePolicy,
+      @Schema(description = "A return only: the lines, quantities and conditions.")
+          List<AuditReturnLineResponse> lines) {}
+
+  @Schema(name = "AuditReturnLineResponse")
+  public record AuditReturnLineResponse(String variantId, BigDecimal qty, String condition) {}
 
   // ── Deposit return (09.16) ────────────────────────────
 

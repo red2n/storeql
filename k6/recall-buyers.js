@@ -215,18 +215,18 @@ export default function ({ gb, rival, store, variantId, spare, cashier, manager,
     expect(call('POST', `/api/order-svc/orders/recall-notices/${mine.id}/resolve`, { token: shopper.token, ...shop, body: { resolution: 'DECLINED' } }), '[-] nor settles one', 403);
     expect(call('POST', `/api/order-svc/orders/recall-notices/${mine.id}/resolve`, { token: cashier.token, body: { resolution: 'REFUNDED' } }), '[-] a refund is not settled by hand', 400, 'RECALL_REFUND_THROUGH_RETURN');
     expect(
-      call('POST', `/api/order-svc/orders/${guestOrder.id}/returns`, { token: cashier.token, body: { reason: 'Recall', recallNoticeId: mine.id, items: [{ variantId, qty: 1 }] } }),
+      call('POST', `/api/order-svc/orders/${guestOrder.id}/returns`, { token: cashier.token, idem: true, body: { reason: 'Recall', recallNoticeId: mine.id, items: [{ variantId, qty: 1 }] } }),
       "[-] a return cannot settle another order's notice",
       409,
       'RECALL_NOTICE_ORDER_MISMATCH'
     );
     truthy('[+] ...and recorded no return', (data(call('GET', `/api/order-svc/orders/${guestOrder.id}/returns`, { token: cashier.token })) || []).length === 0);
-    const refund = call('POST', `/api/order-svc/orders/${shopperOrder.id}/returns`, { token: cashier.token, body: { reason: 'Product safety recall', recallNoticeId: mine.id, items: [{ variantId, qty: 1 }] } });
+    const refund = call('POST', `/api/order-svc/orders/${shopperOrder.id}/returns`, { token: cashier.token, idem: true, body: { reason: 'Product safety recall', recallNoticeId: mine.id, items: [{ variantId, qty: 1 }] } });
     expect(refund, '[+] the cashier takes a jar back and refunds', 201);
     const settled = (data(call('GET', `/api/order-svc/orders/recall-notices?recallId=${recall.id}`, { token: cashier.token })) || []).find((n) => n.id === mine.id) || {};
     truthy('[+] the notice is settled by that return', settled.status === 'RESOLVED' && settled.resolution === 'REFUNDED' && settled.returnId === data(refund).id, settled);
     expect(
-      call('POST', `/api/order-svc/orders/${shopperOrder.id}/returns`, { token: cashier.token, body: { reason: 'Again', recallNoticeId: mine.id, items: [{ variantId, qty: 1 }] } }),
+      call('POST', `/api/order-svc/orders/${shopperOrder.id}/returns`, { token: cashier.token, idem: true, body: { reason: 'Again', recallNoticeId: mine.id, items: [{ variantId, qty: 1 }] } }),
       '[-] a settled notice is not settled twice',
       409,
       'RECALL_NOTICE_RESOLVED'

@@ -466,6 +466,20 @@ public final class Mappers {
    * @return its API representation, header and lines together
    */
   public static ReturnResponse toDto(Return r, List<ReturnItem> items) {
+    return toDto(r, items, null);
+  }
+
+  /**
+   * Converts a return, its lines and, for a GIFT_CARD refund, the card it went on.
+   *
+   * @param r the return header
+   * @param items the returned lines
+   * @param giftCard the card the refund went on, or null; shown only on the response to the return
+   *     itself, since it carries the card's code
+   * @return its API representation
+   */
+  public static ReturnResponse toDto(
+      Return r, List<ReturnItem> items, com.storeql.order.domain.Domain.GiftCard giftCard) {
     return new ReturnResponse(
         str(r.id()),
         str(r.orderId()),
@@ -477,7 +491,13 @@ public final class Mappers {
         str(r.createdBy()),
         ts(r.createdAt()),
         ts(r.completedAt()),
-        items.stream().map(Mappers::toDto).toList());
+        items.stream().map(Mappers::toDto).toList(),
+        str(r.approvedBy()),
+        r.outsidePolicy() == null ? List.of() : r.outsidePolicy(),
+        giftCard == null
+            ? null
+            : new Dtos.ReturnGiftCardResponse(
+                str(giftCard.id()), giftCard.code(), giftCard.currentBalance()));
   }
 
   /**
@@ -498,7 +518,17 @@ public final class Mappers {
         e.reason(),
         e.detail(),
         str(e.variantId()),
-        str(e.replayedBy()));
+        str(e.replayedBy()),
+        str(e.approvedBy()),
+        e.outsidePolicy() == null ? List.of() : e.outsidePolicy(),
+        e.lines() == null
+            ? List.of()
+            : e.lines().stream()
+                .map(
+                    l ->
+                        new Dtos.AuditReturnLineResponse(
+                            str(l.variantId()), l.qty(), l.condition()))
+                .toList());
   }
 
   /**
