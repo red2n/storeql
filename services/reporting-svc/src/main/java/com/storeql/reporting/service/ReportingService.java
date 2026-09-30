@@ -270,6 +270,22 @@ public class ReportingService {
   }
 
   /**
+   * Record a return made without a receipt as a refund on its day at its store, deduped on the
+   * event's id (and on the return).
+   */
+  public void applyNoReceiptRefund(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID returnId,
+      UUID storeId,
+      BigDecimal amount,
+      String currency) {
+    repo.recordNoReceiptRefundOnce(
+        eventId, consumer, tenantId, returnId, storeId, amount, currency);
+  }
+
+  /**
    * Void a sale: order-svc voided a till sale after the fact ({@code OrderVoided}). The sale's fact
    * is marked, never deleted, and left out of every sales report from then on. Deduped on the
    * event's id; the first void heard for an order stands, and one heard before its sale voids the

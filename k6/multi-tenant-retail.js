@@ -234,6 +234,8 @@ function post(path, body, token) {
   if (path === '/api/order-svc/orders' && !(body && body.idempotencyKey)) headers['Idempotency-Key'] = newKey('retail-order');
   // ...and a return or a void of one (return controls): header only, no body fallback.
   if (/^\/api\/order-svc\/orders\/[^/]+\/(returns|void)$/.test(path)) headers['Idempotency-Key'] = newKey('retail-return-or-void');
+  // ...and a gift-card redeem (the till's gift-card tender): header only.
+  if (/^\/api\/order-svc\/gift-cards\/[^/]+\/redeem$/.test(path)) headers['Idempotency-Key'] = newKey('retail-gift-redeem');
   return http.post(`${BASE}${path}`, JSON.stringify(body), { headers });
 }
 

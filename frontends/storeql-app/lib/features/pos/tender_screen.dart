@@ -13,6 +13,7 @@ import '../../core/offline/offline_sale.dart';
 import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/bottom_action_bar.dart';
+import '../../shared/util/status_labels.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
@@ -86,6 +87,8 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   /// treated as finished. Harmless before SJ-D6, because the server discarded the
   /// discount entirely; that fix is what made the till's figure matter.
   double get _discount {
+    // An exchange's new order is already priced by the server.
+    if (ref.read(posExchangeSettlementProvider) != null) return 0;
     final subtotal = ref.read(posCartProvider.notifier).total;
     return ref.read(posDiscountProvider).clamp(0, subtotal).toDouble();
   }
@@ -93,6 +96,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   /// Goods less the discount, plus the return-scheme deposits on the sale's
   /// containers (09.16): the deposit is due in full whatever the discount.
   double get _due =>
+      ref.read(posExchangeSettlementProvider)?.due ??
       ref.read(posCartProvider.notifier).total -
       _discount +
       ref.read(posCartProvider.notifier).deposits;
@@ -222,15 +226,21 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   }
 
   String get _currency {
+    final settlement = ref.read(posExchangeSettlementProvider);
+    if (settlement != null) return settlement.currency;
     final cart = ref.read(posCartProvider);
     return cart.isNotEmpty ? cart.first.currency : '';
   }
 
   Future<void> _complete() async {
     if (_processing) return;
-    final cart = ref.read(posCartProvider);
+    // An exchange's new order already exists: only its difference is paid here.
+    final settlement = ref.read(posExchangeSettlementProvider);
+    final List<PosLine> cart =
+        settlement?.lines ?? ref.read(posCartProvider);
     final storeId = ref.read(posStoreProvider);
-    final customer = ref.read(posCustomerProvider);
+    final customer =
+        settlement != null ? null : ref.read(posCustomerProvider);
     final walkInPhone = ref.read(posWalkInPhoneProvider);
     final tillPhone = ref.read(posTillPhoneProvider);
     final discount = _discount;
@@ -241,7 +251,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     }
     // Only a Required store blocks here (phone-at-the-till) — Optional and
     // Don't ask complete with the field blank, or absent altogether.
-    if (tillPhone == 'REQUIRED' && customer == null && walkInPhone.isEmpty) {
+    if (settlement == null &&
+        tillPhone == 'REQUIRED' &&
+        customer == null &&
+        walkInPhone.isEmpty) {
       setState(() =>
           _phoneError = "Enter the customer's number, or attach the customer");
       return;
@@ -268,6 +281,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
       rungUpBy: _signedInUserId(),
       storeId: storeId,
       currency: currency,
+      orderId: settlement?.orderId,
       total: _due,
       itemCount: cart.fold<int>(0, (s, l) => s + l.itemCount),
       orderRequest: {
@@ -303,8 +317,9 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
         ],
       },
       // STORE_CREDIT redemption is done server-side by payment-svc (it redeems the
-      // customer's balance as part of capturing the tender), so only GIFT_CARD
-      // carries a redemption step of its own here.
+      // customer's balance as part of capturing the tender). A GIFT_CARD tender is
+      // taken by redeeming the card, and payment-svc records the tender itself from
+      // the redemption: no GIFT_CARD payment is posted (it would be refused).
       tenders: [
         for (final t in _tenders)
           OfflineTender(
@@ -324,21 +339,41 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     );
 
     try {
-      // 1. Place the POS order (server is authoritative for the total).
-      final orderResp = await dio.post(
-        '/${ApiConstants.order}/orders',
-        data: sale.orderRequest,
-        options: Options(headers: {'Idempotency-Key': derivedId(idemBase, 'order')}),
-      );
-      final order = orderResp.data['data'] as Map<String, dynamic>;
-      final orderId = order['id'] as String? ?? '';
-      sale = sale.copyWith(orderId: orderId);
+      // 1. Place the POS order (server is authoritative for the total). An
+      // exchange's new order is already placed: it is settled as it stands.
+      final String orderId;
+      var order = <String, dynamic>{};
+      if (settlement != null) {
+        orderId = settlement.orderId;
+      } else {
+        final orderResp = await dio.post(
+          '/${ApiConstants.order}/orders',
+          data: sale.orderRequest,
+          options: Options(headers: {'Idempotency-Key': derivedId(idemBase, 'order')}),
+        );
+        order = orderResp.data['data'] as Map<String, dynamic>;
+        orderId = order['id'] as String? ?? '';
+        sale = sale.copyWith(orderId: orderId);
+      }
 
-      // 2. Record each tender against the order, then redeem any gift card it drew
-      // on. Progress is tracked on `sale` step by step, so if the network drops
-      // here only the steps that have not landed are queued.
+      // 2. Take each tender against the order. Progress is tracked on `sale`
+      // step by step, so if the network drops here only the steps that have not
+      // landed are queued. A gift card is charged FIRST, through its redeem: it
+      // is the tender, and a refused card stops the sale here, before any
+      // further tender is taken.
       for (var i = 0; i < sale.tenders.length; i++) {
         final t = sale.tenders[i];
+        final giftCode = t.giftCardCode;
+        if (giftCode != null) {
+          await dio.post(
+            '/${ApiConstants.order}/gift-cards/$giftCode/redeem',
+            data: {'amount': t.amount, 'orderId': orderId},
+            options: Options(
+                headers: {'Idempotency-Key': derivedId(idemBase, 'gift:$i')}),
+          );
+          sale = sale.markTender(i, tenderDone: true, redeemDone: true);
+          continue;
+        }
         // A card on a terminal is approved BEFORE it is recorded (07.16). The
         // key is derived from the sale and the tender's position, never freshly
         // generated: a second press with the same key finds the first attempt
@@ -374,14 +409,6 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           options: Options(headers: {'Idempotency-Key': derivedId(idemBase, 'pay:$i')}),
         );
         sale = sale.markTender(i, tenderDone: true);
-        final code = t.giftCardCode;
-        if (code != null) {
-          await dio.post(
-            '/${ApiConstants.order}/gift-cards/$code/redeem',
-            data: {'amount': t.amount, 'orderId': orderId},
-          );
-          sale = sale.markTender(i, redeemDone: true);
-        }
       }
 
       // 3. Journal the sale to the POS transaction journal. Its own try: by this
@@ -428,11 +455,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
 
       final change = _change;
       final email = customer?.email;
-      ref.read(posCartProvider.notifier).clear();
-      ref.read(posCustomerProvider.notifier).state = null;
-      ref.read(posDiscountProvider.notifier).state = 0;
-      ref.read(posDiscountReasonProvider.notifier).state = '';
-      ref.read(posWalkInPhoneProvider.notifier).state = '';
+      _clearAfterSale(settlement != null);
       _tenders.clear();
       if (!mounted) return;
       setState(() => _processing = false);
@@ -505,15 +528,35 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           setState(() => _phoneError = _phoneServerErrorMessage(code!, tillPhone));
           return;
         }
-        _snack(friendlyError(e, fallback: 'Sale failed.'), error: true);
+        // A gift card the server would not charge says why in words; the sale
+        // stays as it was, ready for another tender.
+        _snack(
+            returnRefusalLabel(code) ??
+                friendlyError(e, fallback: 'Sale failed.'),
+            error: true);
         return;
       }
       // The server could not be reached. The customer has paid and is standing
       // there, so the sale completes at the till and whatever it still owes the
       // server is held until the network is back.
       await ref.read(offlineQueueProvider.notifier).enqueue(sale);
-      await _finishOffline(sale, [...cart], discount, currency, customer);
+      await _finishOffline(sale, [...cart], discount, currency, customer,
+          exchange: settlement != null);
     }
+  }
+
+  /// Empties the till after a sale: the cart and everything attached to it, or
+  /// only the exchange being settled (its basket was never the cart).
+  void _clearAfterSale(bool exchange) {
+    if (exchange) {
+      ref.read(posExchangeSettlementProvider.notifier).state = null;
+      return;
+    }
+    ref.read(posCartProvider.notifier).clear();
+    ref.read(posCustomerProvider.notifier).state = null;
+    ref.read(posDiscountProvider.notifier).state = 0;
+    ref.read(posDiscountReasonProvider.notifier).state = '';
+    ref.read(posWalkInPhoneProvider.notifier).state = '';
   }
 
   /// Finish a sale the server was never told about: print the receipt, clear the
@@ -523,8 +566,9 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     List<PosLine> cartSnapshot,
     double discount,
     String currency,
-    Customer? customer,
-  ) async {
+    Customer? customer, {
+    bool exchange = false,
+  }) async {
     // The total here is the till's own (subtotal − discount) rather than the
     // server's, which is not knowable offline. It is the amount actually
     // tendered, which is what the customer's paper receipt has to show.
@@ -545,11 +589,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     // No session heartbeat here: it exists to tell the server the till is active,
     // which is exactly what cannot be done right now — and awaiting it would sit
     // on the connect timeout with the customer waiting for their receipt.
-    ref.read(posCartProvider.notifier).clear();
-    ref.read(posCustomerProvider.notifier).state = null;
-    ref.read(posDiscountProvider.notifier).state = 0;
-    ref.read(posDiscountReasonProvider.notifier).state = '';
-    ref.read(posWalkInPhoneProvider.notifier).state = '';
+    _clearAfterSale(exchange);
     _tenders.clear();
     if (!mounted) return;
     setState(() => _processing = false);
@@ -1135,9 +1175,11 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final cart = ref.watch(posCartProvider);
+    final settlement = ref.watch(posExchangeSettlementProvider);
+    final List<PosLine> cart =
+        settlement?.lines ?? ref.watch(posCartProvider);
     final showPrices = ref.watch(posShowPricesProvider);
-    final customer = ref.watch(posCustomerProvider);
+    final customer = settlement != null ? null : ref.watch(posCustomerProvider);
     final tillPhone = ref.watch(posTillPhoneProvider);
     final currency = _currency;
     // Recompute reactively (watch so discount/cart edits refresh the figures).
@@ -1167,9 +1209,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     // The figures, the payment buttons and the tenders added so far scroll as
     // one column, so large text or a long split never overflows the screen.
     final details = <Widget>[
-      Text('Tender', style: theme.textTheme.headlineMedium),
+      Text(settlement != null ? 'Exchange: collect the difference' : 'Tender',
+          style: theme.textTheme.headlineMedium),
       const SizedBox(height: 12),
-      _SummaryRow(label: 'Total due', value: money(due), bold: true),
+      _SummaryRow(label: settlement != null ? 'Difference due' : 'Total due', value: money(due), bold: true),
       _SummaryRow(label: 'Paid', value: money(_paid)),
       // An unpaid balance is the normal state while tendering, not a failure:
       // bold on-surface ink like the total, never the error colour.
@@ -1256,7 +1299,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     // The walk-in phone field (phone-at-the-till): the same field as the Sale
     // tab's, right above the action that completes the sale, whenever no
     // registered customer is attached and this store's till asks at all.
-    if (customer == null && tillPhone != 'OFF') {
+    if (settlement == null && customer == null && tillPhone != 'OFF') {
       details.addAll([
         const SizedBox(height: 16),
         TextField(
@@ -1300,10 +1343,24 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
         style: const TextStyle(fontSize: 17),
       ),
     );
-    final back = OutlinedButton(
-      onPressed: _processing ? null : () => context.go('/pos/cart'),
-      child: const Text('Back to Sale'),
-    );
+    final back = settlement != null
+        // The exchange itself is done; what is owed stays on its order. Leaving
+        // it drops the settlement so the next sale is not mistaken for it.
+        ? OutlinedButton(
+            key: const Key('tender-exchange-leave'),
+            onPressed: _processing
+                ? null
+                : () {
+                    ref.read(posExchangeSettlementProvider.notifier).state =
+                        null;
+                    context.go('/pos/cart');
+                  },
+            child: const Text('Leave it unpaid'),
+          )
+        : OutlinedButton(
+            onPressed: _processing ? null : () => context.go('/pos/cart'),
+            child: const Text('Back to Sale'),
+          );
     final gutter = context.pageGutter;
 
     return LayoutBuilder(

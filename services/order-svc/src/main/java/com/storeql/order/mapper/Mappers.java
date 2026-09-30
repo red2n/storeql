@@ -455,7 +455,13 @@ public final class Mappers {
    */
   public static ReturnItemResponse toDto(ReturnItem ri) {
     return new ReturnItemResponse(
-        str(ri.id()), str(ri.variantId()), ri.qty(), ri.refundAmount(), ri.condition());
+        str(ri.id()),
+        str(ri.variantId()),
+        ri.qty(),
+        ri.refundAmount(),
+        ri.condition(),
+        ri.unitPrice(),
+        ri.taxAmount());
   }
 
   /**
@@ -497,7 +503,10 @@ public final class Mappers {
         giftCard == null
             ? null
             : new Dtos.ReturnGiftCardResponse(
-                str(giftCard.id()), giftCard.code(), giftCard.currentBalance()));
+                str(giftCard.id()), giftCard.code(), giftCard.currentBalance()),
+        str(r.exchangeOrderId()),
+        r.noReceipt(),
+        str(r.customerId()));
   }
 
   /**
@@ -528,7 +537,9 @@ public final class Mappers {
                     l ->
                         new Dtos.AuditReturnLineResponse(
                             str(l.variantId()), l.qty(), l.condition()))
-                .toList());
+                .toList(),
+        e.outsidePolicy() != null
+            && e.outsidePolicy().contains(com.storeql.order.domain.Domain.Return.NO_RECEIPT));
   }
 
   /**

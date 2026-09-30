@@ -470,6 +470,28 @@ final posDiscountProvider = StateProvider<double>((ref) => 0);
 /// records it against the cashier who granted it, so the till must collect it up front.
 final posDiscountReasonProvider = StateProvider<String>((ref) => '');
 
+/// An exchange whose new order already exists (the server made it with the
+/// exchange) and only needs the difference paid. The tender screen settles it
+/// instead of placing an order from the cart: [due] is what the customer owes
+/// on [orderId], and [lines] are the new items, for the receipt. Cleared once
+/// the tenders have landed.
+class PosExchangeSettlement {
+  final String orderId;
+  final double due;
+  final String currency;
+  final List<PosLine> lines;
+
+  const PosExchangeSettlement({
+    required this.orderId,
+    required this.due,
+    required this.currency,
+    required this.lines,
+  });
+}
+
+final posExchangeSettlementProvider =
+    StateProvider<PosExchangeSettlement?>((ref) => null);
+
 /// A single tender (part-payment) staged against the sale before completion.
 /// POS supports splitting one sale across several tenders of different methods.
 class PosTender {

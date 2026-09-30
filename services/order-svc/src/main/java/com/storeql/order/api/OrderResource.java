@@ -863,6 +863,59 @@ public class OrderResource {
   }
 
   /**
+   * Takes goods back and sells others in one act, at the till.
+   *
+   * @param id the sale the goods came from
+   * @param req the reason, the goods coming back with their conditions, and the goods bought
+   * @return {@code 201} with the return, the new sale (PENDING until paid) and how they settle
+   */
+  @Operation(
+      summary = "Exchange goods from a sale",
+      description =
+          "Returns items from the sale and places a new till sale at the same store in one"
+              + " transaction. The return is judged like any return (policy, conditions,"
+              + " sales.refund outside it) and the new sale is priced as any till sale. The"
+              + " returned value pays the new basket directly: exchangeAmount is the lesser of"
+              + " the two, dueFromCustomer is collected with normal tenders on the new sale, and"
+              + " refundToCustomer goes back to how the customer paid. Requires an"
+              + " Idempotency-Key: a retry answers with the first exchange.")
+  @APIResponse(responseCode = "201", description = "Exchange recorded (or the first, on a retry)")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED, ORDER_RETURN_NO_ITEMS, ORDER_EXCHANGE_NO_NEW_ITEMS,"
+              + " ORDER_RETURN_CONDITION_REQUIRED, ORDER_RETURN_CONDITION_INVALID")
+  @APIResponse(responseCode = "403", description = "ORDER_RETURN_NEEDS_MANAGER")
+  @APIResponse(responseCode = "404", description = "The sale is not found in this business")
+  @APIResponse(responseCode = "409", description = "ORDER_CANNOT_RETURN or a refused sale")
+  @POST
+  @Path("/{id}/exchange")
+  public Response exchange(
+      @PathParam("id") String id,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      com.storeql.order.dto.Dtos.ExchangeRequest req) {
+    // The new sale is a till sale, so the roles are the till's own.
+    ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
+    Validations.validate(req);
+    var x = svc.exchange(ctx.tenantId(), Parsing.uuid(id, "id"), req, requiredKey(key), ctx);
+    var bought = x.order();
+    var answer = new java.util.LinkedHashMap<String, Object>();
+    // "return" is a Java keyword, so the answer is a map rather than a record.
+    answer.put("return", Mappers.toDto(x.ret(), x.items()));
+    answer.put(
+        "order",
+        Mappers.toDto(
+            bought,
+            svc.getOrderItems(bought.tenantId(), bought.id()),
+            svc.depositsOf(bought.tenantId(), bought.id()),
+            svc.groupOf(bought.tenantId(), bought.id()).orElse(null)));
+    answer.put("exchangeAmount", x.settlement().exchangeAmount());
+    answer.put("dueFromCustomer", x.settlement().dueFromCustomer());
+    answer.put("refundToCustomer", x.settlement().refundToCustomer());
+    return Response.status(201).entity(ApiResponse.ok(answer)).build();
+  }
+
+  /**
    * Finds a sale by the number on its receipt, for a return at the till.
    *
    * @param number the fiscal receipt number, or the short order reference the receipt prints

@@ -42,6 +42,8 @@ public final class SalesPosting {
       new Control(Domain.CODE_GIFT_CARD_LIABILITY, Domain.NAME_GIFT_CARD_LIABILITY);
   public static final Control STORE_CREDIT_LIABILITY =
       new Control(Domain.CODE_STORE_CREDIT_LIABILITY, Domain.NAME_STORE_CREDIT_LIABILITY);
+  public static final Control EXCHANGE_CLEARING =
+      new Control(Domain.CODE_EXCHANGE_CLEARING, Domain.NAME_EXCHANGE_CLEARING);
   public static final Control UNALLOCATED_RECEIPTS =
       new Control(Domain.CODE_UNALLOCATED_RECEIPTS, Domain.NAME_UNALLOCATED_RECEIPTS);
 
@@ -59,6 +61,7 @@ public final class SalesPosting {
       case "CARD", "UPI", "WALLET" -> CARD_CLEARING;
       case "GIFT_CARD", "VOUCHER" -> GIFT_CARD_LIABILITY;
       case "STORE_CREDIT" -> STORE_CREDIT_LIABILITY;
+      case "EXCHANGE" -> EXCHANGE_CLEARING;
       default -> UNALLOCATED_RECEIPTS;
     };
   }
@@ -142,6 +145,41 @@ public final class SalesPosting {
     }
     byControl.forEach((control, amount) -> p.credit(control.code(), control.name(), amount));
     return p.build();
+  }
+
+  /**
+   * A return with no receipt (order-svc announces it, there being no sale for payment-svc to
+   * refund): Dr sales net of VAT and Dr VAT output / Cr the store credit or gift card liability the
+   * refund was made to. A refund method that is neither is refused rather than guessed.
+   *
+   * @param returnId the return, the journal's source
+   */
+  public static List<NominalLedgerEntry> noReceiptReturn(
+      UUID tenantId,
+      UUID returnId,
+      UUID storeId,
+      String refundMethod,
+      BigDecimal amount,
+      BigDecimal tax,
+      LocalDate date) {
+    if (amount == null || amount.signum() <= 0) return List.of();
+    Control liability = controlFor(refundMethod);
+    if (liability != STORE_CREDIT_LIABILITY && liability != GIFT_CARD_LIABILITY) {
+      throw new IllegalArgumentException(
+          "a no-receipt return refunds to store credit or a gift card");
+    }
+    BigDecimal vat = tax == null ? BigDecimal.ZERO : tax.max(BigDecimal.ZERO).min(amount);
+    return LedgerPosting.of(
+            tenantId,
+            date,
+            "Return without receipt " + Handle.of(returnId),
+            Domain.SOURCE_NO_RECEIPT_RETURN,
+            returnId,
+            storeId)
+        .debit(Domain.CODE_SALES, Domain.NAME_SALES, amount.subtract(vat))
+        .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat)
+        .credit(liability.code(), liability.name(), amount)
+        .build();
   }
 
   /**

@@ -15,7 +15,11 @@ import '../network/api_error.dart';
 ///                      the original order for a duplicate key.
 ///   * `POST /payments` replays on `payment_tenders.idempotency_key` — the
 ///                      original tender is returned rather than charging again.
-///   * gift-card redeem replays on (card, order) — see V13, added for this.
+///   * gift-card redeem replays on its Idempotency-Key (derived from this
+///                      sale's id and the tender's position). The redeem IS
+///                      the gift-card tender: payment-svc records the GIFT_CARD
+///                      tender itself from the redemption, and refuses a
+///                      client-posted one (400 PAYMENT_GIFT_CARD_VIA_REDEEM).
 /// So a step whose response was lost (the ambiguous case, and the common one
 /// when a network drops) can simply be sent again.
 class OfflineSale {
@@ -180,14 +184,16 @@ enum OfflineSaleStatus {
   failed,
 }
 
-/// One tender (part-payment) owed to the server, plus any gift-card redemption
-/// that goes with it.
+/// One tender (part-payment) owed to the server. A gift-card tender is owed as
+/// a redemption only: the card is charged first, and payment-svc records the
+/// tender from that charge.
 class OfflineTender {
   /// Body for `POST /payment-svc/payments`, minus `orderId` which is filled in at
-  /// replay once the order exists.
+  /// replay once the order exists. Not sent for a gift-card tender.
   final Map<String, dynamic> body;
 
-  /// Set for a GIFT_CARD tender: the card to redeem after the tender is recorded.
+  /// Set for a GIFT_CARD tender: the card to redeem. Redeeming is the whole
+  /// tender; no payment is posted for it.
   final String? giftCardCode;
   final double amount;
 
@@ -202,7 +208,9 @@ class OfflineTender {
     this.redeemDone = false,
   });
 
-  bool get isComplete => tenderDone && (giftCardCode == null || redeemDone);
+  /// A gift-card tender is complete once the card is redeemed (the server
+  /// records the tender from that); any other once its payment is recorded.
+  bool get isComplete => giftCardCode != null ? redeemDone : tenderDone;
 
   OfflineTender copyWith({bool? tenderDone, bool? redeemDone}) => OfflineTender(
         body: body,
@@ -265,9 +273,20 @@ bool isOfflineError(Object error) {
 /// none — is judged as a sale made now and refused, worded for a manager. A 409 like any conflict, but no
 /// retry changes the answer, and retrying would hold up every sale queued
 /// behind it — so it is parked for a manager, with the server's words, instead.
+///
+/// A gift card the server will not charge is the same: a card that has expired,
+/// is not active, is in another currency, has too little left, or was already
+/// charged a different amount for this sale stays that way however often the
+/// till asks, so the sale is parked with the server's words for a manager to
+/// settle another way.
 const _permanentConflicts = {
   'ORDER_LINE_RECALLED',
   'ORDER_SCALE_NOT_CERTIFIED',
+  'GIFT_CARD_EXPIRED',
+  'GIFT_CARD_NOT_ACTIVE',
+  'GIFT_CARD_CURRENCY_MISMATCH',
+  'GIFT_CARD_INSUFFICIENT_BALANCE',
+  'GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER',
 };
 
 /// Whether a server *response* to a replay is permanent — retrying will not help,

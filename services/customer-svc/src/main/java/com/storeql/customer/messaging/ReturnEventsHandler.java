@@ -20,6 +20,9 @@ import java.util.UUID;
  *   <li>{@code OrderVoided}: takes back the rest of the points the sale earned.
  *   <li>{@code PaymentRefunded} with {@code refundMethod} STORE_CREDIT: credits the customer's
  *       store credit by the refunded amount.
+ *   <li>{@code NoReceiptReturnRecorded} with {@code refundMethod} STORE_CREDIT: the same credit for
+ *       a return with no sale (order-svc announces it itself). Nothing was earned, so no loyalty is
+ *       reversed.
  * </ul>
  *
  * Every write dedupes on the event's {@code eventId}, so a redelivery does nothing. Malformed
@@ -106,6 +109,38 @@ class ReturnEventsHandler {
     }
     service.creditStoreCreditFromRefund(
         eventId, tenantId, customerId, orderId, refundId, returnId, amount, currency);
+  }
+
+  void handleNoReceiptReturn(String json) {
+    UUID eventId;
+    UUID tenantId;
+    UUID customerId;
+    UUID returnId;
+    BigDecimal amount;
+    String currency;
+    try (var reader = Json.createReader(new StringReader(json))) {
+      JsonObject obj = reader.readObject();
+      if (!"STORE_CREDIT".equals(text(obj, "refundMethod"))) {
+        return; // a gift card is issued elsewhere; nothing to credit here
+      }
+      String customer = text(obj, "customerId");
+      if (customer == null) {
+        return; // no account to credit
+      }
+      eventId = Ids.parse(obj.getString("eventId"));
+      tenantId = Ids.parse(obj.getString("tenantId"));
+      customerId = Ids.parse(customer);
+      returnId = Ids.parse(obj.getString("returnId"));
+      amount = decimal(obj, "amount");
+      currency = text(obj, "currency");
+    } catch (RuntimeException e) {
+      LOG.log(
+          Level.WARNING, "Malformed NoReceiptReturnRecorded payload skipped: " + e.getMessage());
+      return;
+    }
+    // No order and no payment refund: the ledger entry names the return in its reason.
+    service.creditStoreCreditFromRefund(
+        eventId, tenantId, customerId, null, null, returnId, amount, currency);
   }
 
   private static String text(JsonObject obj, String key) {

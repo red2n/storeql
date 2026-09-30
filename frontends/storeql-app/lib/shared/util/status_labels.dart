@@ -164,6 +164,7 @@ String returnReasonLabel(String? code) =>
       'WINDOW' => "Past the business's return window",
       'CEILING' => "Over the cashier's refund limit",
       'FAULTY_PAST_WINDOW' => 'Faulty goods past the window',
+      'NO_RECEIPT' => 'No receipt to find the sale by',
       _ => humanizeCode(code),
     };
 
@@ -174,4 +175,44 @@ String refundMethodLabel(String? method) =>
       'STORE_CREDIT' => 'Store credit',
       'GIFT_CARD' => 'Gift card',
       _ => humanizeCode(method),
+    };
+
+/// What kind of return a record is (return-controls slice 2): an exchange
+/// settles against a new basket, a no-receipt return has no sale behind it.
+String returnKindLabel(String? kind) => switch ((kind ?? '').toUpperCase()) {
+      'EXCHANGE' => 'Exchange',
+      'NO_RECEIPT' => 'Return without a receipt',
+      'REFUND' || 'RETURN' => 'Return',
+      _ => humanizeCode(kind),
+    };
+
+/// A refusal of a return, an exchange or a gift-card charge at the till, in
+/// words the cashier can act on. Null for a code this does not know, so the
+/// caller shows the server's own message.
+String? returnRefusalLabel(String? code) =>
+    switch ((code ?? '').toUpperCase()) {
+      'ORDER_RETURN_CONDITION_REQUIRED' ||
+      'ORDER_RETURN_CONDITION_INVALID' =>
+        'Say what condition each returned item is in.',
+      'ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER' =>
+        'Store credit needs a customer. Choose one, or pay it back another way.',
+      'ORDER_RECEIPT_NOT_FOUND' =>
+        'No sale has that receipt number at this store. Check it and try again.',
+      'ORDER_RECEIPT_AMBIGUOUS' =>
+        'More than one sale matches that number. Type the full receipt number.',
+      'ORDER_NO_RECEIPT_RETURNS_OFF' =>
+        'This business does not take returns without a receipt.',
+      'ORDER_NO_RECEIPT_OVER_CEILING' =>
+        "That is over the most this business gives back without a receipt.",
+      'ORDER_NO_RECEIPT_METHOD_INVALID' =>
+        'Without a receipt the refund goes to store credit or a gift card only.',
+      'ORDER_RETURN_NEEDS_MANAGER' => 'A manager must take this one.',
+      'GIFT_CARD_NOT_FOUND' => 'No gift card has that code.',
+      'GIFT_CARD_INSUFFICIENT_BALANCE' =>
+        "The gift card doesn't have enough on it. Take a smaller amount from it, or another payment.",
+      'GIFT_CARD_EXPIRED' => 'That gift card has expired.',
+      'GIFT_CARD_CURRENCY_MISMATCH' =>
+        "That gift card is in a different currency and can't be used here.",
+      'GIFT_CARD_NOT_ACTIVE' => 'That gift card is not active.',
+      _ => null,
     };

@@ -480,6 +480,13 @@ final routerProvider = Provider<GoRouter>((ref) {
             ),
           ),
           GoRoute(
+            path: '/pos/returns',
+            builder: (_, _) => DeferredWidget(
+              libraryLoader: pos_lib.loadLibrary,
+              builder: (_) => pos_lib.PosReturnsScreen(),
+            ),
+          ),
+          GoRoute(
             path: '/pos/pending',
             builder: (_, _) => DeferredWidget(
               libraryLoader: pos_lib.loadLibrary,

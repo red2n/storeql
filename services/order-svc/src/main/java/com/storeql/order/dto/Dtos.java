@@ -495,7 +495,14 @@ public final class Dtos {
 
   @Schema(name = "ReturnItemResponse")
   public record ReturnItemResponse(
-      String id, String variantId, BigDecimal qty, BigDecimal refundAmount, String condition) {}
+      String id,
+      String variantId,
+      BigDecimal qty,
+      BigDecimal refundAmount,
+      String condition,
+      @Schema(description = "A no-receipt line only: one unit at today's price, VAT included.")
+          BigDecimal unitPrice,
+      @Schema(description = "A no-receipt line only: the VAT in the line.") BigDecimal taxAmount) {}
 
   @Schema(name = "ReturnResponse")
   public record ReturnResponse(
@@ -527,7 +534,52 @@ public final class Dtos {
               description =
                   "GIFT_CARD only, on the response to the return itself: the card the refund went"
                       + " on, with its code as the issue endpoint shows it.")
-          ReturnGiftCardResponse giftCard) {}
+          ReturnGiftCardResponse giftCard,
+      @Schema(
+              description =
+                  "A direct exchange only: the sale the returned goods pay towards; null"
+                      + " otherwise.")
+          String exchangeOrderId,
+      @Schema(description = "True for a return taken with no receipt, when orderId is null.")
+          boolean noReceipt,
+      @Schema(description = "The customer a no-receipt refund goes to; null when none is named.")
+          String customerId) {}
+
+  @Schema(name = "ExchangeRequest")
+  public record ExchangeRequest(
+      @NotBlank String reason,
+      @NotNull @Valid List<ReturnItemRequest> returnItems,
+      @NotNull @Valid List<ExchangeNewItemRequest> newItems,
+      @Schema(
+              description =
+                  "The customer the new sale is for; the returned sale's customer when absent.")
+          String customerId) {}
+
+  @Schema(name = "ExchangeNewItemRequest")
+  public record ExchangeNewItemRequest(
+      @NotBlank String variantId, @NotNull @Positive BigDecimal qty) {}
+
+  @Schema(name = "NoReceiptReturnRequest")
+  public record NoReceiptReturnRequest(
+      @NotBlank String storeId,
+      @NotBlank String reason,
+      @Schema(
+              description =
+                  "STORE_CREDIT or GIFT_CARD. Never ORIGINAL: there is no sale to pay back.")
+          @NotBlank
+          String refundMethod,
+      @Schema(description = "Required for STORE_CREDIT: the customer whose credit it goes to.")
+          String customerId,
+      @Schema(
+              description =
+                  "The phone or email the customer gives, kept for the record and never logged.")
+          @NotBlank
+          @Size(max = 200)
+          String customerContact,
+      @Schema(description = "GIFT_CARD only: a card of this business to top up; absent, a new one.")
+          @Size(max = 64)
+          String giftCardCode,
+      @NotNull @Valid List<ReturnItemRequest> items) {}
 
   @Schema(name = "ReturnGiftCardResponse")
   public record ReturnGiftCardResponse(String id, String code, BigDecimal balance) {}
@@ -708,8 +760,12 @@ public final class Dtos {
   @Schema(name = "RedeemGiftCardRequest")
   public record RedeemGiftCardRequest(
       @NotNull @Positive BigDecimal amount,
-      @Schema(description = "UUID of the order this redemption pays for, if any.") String orderId,
+      @Schema(description = "UUID of the order this redemption pays for.") @NotBlank String orderId,
       String reference) {}
+
+  @Schema(name = "RedeemGiftCardResponse")
+  public record RedeemGiftCardResponse(
+      String redemptionId, String giftCardId, BigDecimal amount, BigDecimal balance) {}
 
   @Schema(name = "GiftCardResponse")
   public record GiftCardResponse(
@@ -1248,7 +1304,9 @@ public final class Dtos {
                       + " empty when within the policy.")
           List<String> outsidePolicy,
       @Schema(description = "A return only: the lines, quantities and conditions.")
-          List<AuditReturnLineResponse> lines) {}
+          List<AuditReturnLineResponse> lines,
+      @Schema(description = "A return only: true when it was taken with no receipt.")
+          boolean noReceipt) {}
 
   @Schema(name = "AuditReturnLineResponse")
   public record AuditReturnLineResponse(String variantId, BigDecimal qty, String condition) {}

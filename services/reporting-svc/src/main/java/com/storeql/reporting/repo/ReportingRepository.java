@@ -538,12 +538,52 @@ public class ReportingRepository extends BaseJdbcRepository {
         "apply sales refund");
   }
 
+  /**
+   * Record a return made without a receipt as a refund on its day at its store, once per event
+   * ({@code NoReceiptReturnRecorded}). It is a {@code sales_facts} row keyed by the return, gross
+   * zero and the refund in {@code refunded_amount}, flagged so it is never counted as an order. The
+   * mark and the row commit in one transaction; the key also makes a second event for the same
+   * return a no-op.
+   *
+   * @return false when the event (or the return) was already recorded
+   */
+  public boolean recordNoReceiptRefundOnce(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID returnId,
+      UUID storeId,
+      BigDecimal amount,
+      String currency) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, eventId, consumer)) {
+            return false;
+          }
+          try (var ps =
+              c.prepareStatement(
+                  "INSERT INTO sales_facts"
+                      + " (tenant_id, order_id, store_id, gross_amount, refunded_amount,"
+                      + "  currency, no_receipt)"
+                      + " VALUES (?,?,?,0,?,?,true)"
+                      + " ON CONFLICT (tenant_id, order_id) DO NOTHING")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, returnId);
+            ps.setObject(3, storeId);
+            ps.setBigDecimal(4, amount);
+            ps.setString(5, currency);
+            return ps.executeUpdate() > 0;
+          }
+        },
+        "record no-receipt refund");
+  }
+
   /** Sales totals grouped by currency over the window/filters; a voided sale is left out. */
   public List<SalesSummary> salesSummary(
       UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel) {
     StringBuilder sb =
         new StringBuilder(
-            "SELECT currency, COUNT(*) AS orders,"
+            "SELECT currency, COUNT(*) FILTER (WHERE NOT no_receipt) AS orders,"
                 + " COALESCE(SUM(gross_amount),0) AS gross,"
                 + " COALESCE(SUM(refunded_amount),0) AS refunded"
                 + " FROM sales_facts WHERE tenant_id = ? AND voided_at IS NULL");
@@ -567,7 +607,8 @@ public class ReportingRepository extends BaseJdbcRepository {
       UUID tenantId, Instant from, Instant to, Set<UUID> stores, String channel) {
     StringBuilder sb =
         new StringBuilder(
-            "SELECT date_trunc('day', confirmed_at) AS day, currency, COUNT(*) AS orders,"
+            "SELECT date_trunc('day', confirmed_at) AS day, currency,"
+                + " COUNT(*) FILTER (WHERE NOT no_receipt) AS orders,"
                 + " COALESCE(SUM(gross_amount),0) AS gross,"
                 + " COALESCE(SUM(refunded_amount),0) AS refunded"
                 + " FROM sales_facts WHERE tenant_id = ? AND voided_at IS NULL");

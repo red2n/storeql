@@ -9,9 +9,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 /**
  * Kafka infrastructure for the automatic-refund path. Polls {@code storeql.order.order-returned},
  * {@code storeql.order.order-cancelled} and {@code storeql.order.container-deposit-refunded}
- * (09.16: the deposit paid back at the till leaves the drawer) and dispatches each record to {@link
- * OrderEventHandler}. Consumer lifecycle is inherited from {@link BaseKafkaConsumer}; all business
- * logic lives in the handler (SRP).
+ * (09.16: the deposit paid back at the till leaves the drawer) and {@code
+ * storeql.order.gift-card-redeemed} (the tender follows a card charged) and dispatches each record
+ * to {@link OrderEventHandler}. Consumer lifecycle is inherited from {@link BaseKafkaConsumer}; all
+ * business logic lives in the handler (SRP).
  */
 @ApplicationScoped
 class OrderEventConsumer extends BaseKafkaConsumer {
@@ -48,6 +49,12 @@ class OrderEventConsumer extends BaseKafkaConsumer {
       defaultValue = "storeql.order.order-line-substituted")
   String lineSubstitutedTopic;
 
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.gift-card-redeemed",
+      defaultValue = "storeql.order.gift-card-redeemed")
+  String giftCardRedeemedTopic;
+
   @Override
   protected List<String> topics() {
     return List.of(
@@ -55,7 +62,8 @@ class OrderEventConsumer extends BaseKafkaConsumer {
         cancelledTopic,
         containerRefundTopic,
         lineShortClosedTopic,
-        lineSubstitutedTopic);
+        lineSubstitutedTopic,
+        giftCardRedeemedTopic);
   }
 
   @Override

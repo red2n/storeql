@@ -7,6 +7,7 @@ import com.storeql.order.domain.Domain.GiftCard;
 import com.storeql.order.domain.Domain.GiftCardTransaction;
 import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderItem;
+import com.storeql.order.domain.Domain.Return;
 import com.storeql.order.domain.Domain.ReturnItem;
 import com.storeql.order.domain.RecallNotice.Line;
 import com.storeql.order.domain.RecallNotice.Notice;
@@ -28,6 +29,8 @@ public final class Events {
 
   static final String TOPIC_RECALL_NOTICE_ISSUED = "storeql.order.recall-notice-issued";
   static final String TOPIC_GIFT_CARD_LOADED = "storeql.order.gift-card-loaded";
+  static final String TOPIC_GIFT_CARD_REDEEMED = "storeql.order.gift-card-redeemed";
+  static final String TOPIC_NO_RECEIPT_RETURN_RECORDED = "storeql.order.no-receipt-return-recorded";
 
   private Events() {}
 
@@ -760,6 +763,48 @@ public final class Events {
       UUID giftCardId,
       boolean recall,
       UUID approvedBy) {
+    return orderReturned(
+        tenantId,
+        orderId,
+        returnId,
+        storeId,
+        items,
+        refundAmount,
+        refundMethod,
+        currency,
+        customerId,
+        giftCardId,
+        recall,
+        approvedBy,
+        null,
+        null);
+  }
+
+  /**
+   * As above, for a direct exchange: {@code refundMethod} is EXCHANGE, {@code exchangeOrderId} is
+   * the sale the returned goods pay towards and {@code exchangeAmount} the part of it they pay (the
+   * lesser of the return's value and that sale's total). payment-svc refunds that much of the old
+   * sale's tenders as EXCHANGE, captures it as an EXCHANGE tender on the new sale, and refunds any
+   * surplus of {@code refundAmount} over it to how the customer paid.
+   *
+   * @param exchangeOrderId the sale bought with the return, or null when this is no exchange
+   * @param exchangeAmount what the returned value pays of it, or null when this is no exchange
+   */
+  static OutboxRow orderReturned(
+      UUID tenantId,
+      UUID orderId,
+      UUID returnId,
+      UUID storeId,
+      List<ReturnItem> items,
+      BigDecimal refundAmount,
+      String refundMethod,
+      String currency,
+      UUID customerId,
+      UUID giftCardId,
+      boolean recall,
+      UUID approvedBy,
+      UUID exchangeOrderId,
+      BigDecimal exchangeAmount) {
     // eventId is required by inventory-svc's OrderEventHandler for per-line dedupe — without it
     // every OrderReturned is dropped as malformed and stock is never restocked. refundAmount +
     // refundMethod let payment-svc reverse the captured payment for ORIGINAL-tender returns.
@@ -789,8 +834,78 @@ public final class Events {
     nullable(b, "customerId", customerId == null ? null : customerId.toString());
     nullable(b, "giftCardId", giftCardId == null ? null : giftCardId.toString());
     nullable(b, "approvedBy", approvedBy == null ? null : approvedBy.toString());
+    if (exchangeOrderId != null) {
+      b.add("exchangeOrderId", exchangeOrderId.toString());
+      b.add("exchangeAmount", exchangeAmount);
+    }
     return new OutboxRow(
         "OrderReturned", "storeql.order.order-returned", tenantId, orderId, b.build().toString());
+  }
+
+  /**
+   * A gift card charged for an order: payment-svc records the GIFT_CARD tender from this, once per
+   * event, so a tender exists only for value the card actually gave up.
+   *
+   * @param order the order the card pays towards, which names the store and the currency
+   */
+  static OutboxRow giftCardRedeemed(GiftCard gc, GiftCardTransaction tx, Order order) {
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "GiftCardRedeemed")
+            .add("tenantId", gc.tenantId().toString())
+            .add("redemptionId", tx.id().toString())
+            .add("giftCardId", gc.id().toString())
+            .add("orderId", order.id().toString())
+            .add("storeId", order.storeId().toString())
+            .add("amount", tx.amount())
+            .add("currency", order.currency());
+    return new OutboxRow(
+        "GiftCardRedeemed", TOPIC_GIFT_CARD_REDEEMED, gc.tenantId(), gc.id(), b.build().toString());
+  }
+
+  /**
+   * A return taken with no receipt. There is no sale, so no {@code OrderReturned}: this is the
+   * announcement customer-svc (store credit), inventory-svc (restock by condition), purchase-svc
+   * (posting) and reporting act on. Amounts include VAT, at the price the store sells at today.
+   *
+   * @param customerId the customer whose store credit it goes to, or null
+   * @param giftCardId the card it was put on, or null
+   * @param items the lines with their unit price (VAT included), VAT and condition
+   */
+  static OutboxRow noReceiptReturnRecorded(
+      Return ret, String currency, BigDecimal taxAmount, List<ReturnItem> items, UUID giftCardId) {
+    JsonArrayBuilder lines = Json.createArrayBuilder();
+    for (ReturnItem item : items) {
+      lines.add(
+          Json.createObjectBuilder()
+              .add("variantId", item.variantId().toString())
+              .add("qty", item.qty())
+              .add("unitPrice", item.unitPrice())
+              .add("taxAmount", item.taxAmount())
+              .add("condition", item.condition()));
+    }
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "NoReceiptReturnRecorded")
+            .add("tenantId", ret.tenantId().toString())
+            .add("returnId", ret.id().toString())
+            .add("storeId", ret.storeId().toString())
+            .add("currency", currency)
+            .add("amount", ret.refundAmount())
+            .add("taxAmount", taxAmount)
+            .add("refundMethod", ret.refundMethod())
+            .add("approvedBy", ret.approvedBy().toString())
+            .add("items", lines);
+    nullable(b, "customerId", ret.customerId() == null ? null : ret.customerId().toString());
+    nullable(b, "giftCardId", giftCardId == null ? null : giftCardId.toString());
+    return new OutboxRow(
+        "NoReceiptReturnRecorded",
+        TOPIC_NO_RECEIPT_RETURN_RECORDED,
+        ret.tenantId(),
+        ret.id(),
+        b.build().toString());
   }
 
   static OutboxRow orderVoided(

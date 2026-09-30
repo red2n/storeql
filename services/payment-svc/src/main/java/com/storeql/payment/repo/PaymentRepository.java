@@ -176,7 +176,7 @@ public class PaymentRepository extends BaseOutboxRepository {
     return dbError(what, e);
   }
 
-  private PaymentTender findTenderByKeyTx(
+  private static PaymentTender findTenderByKeyTx(
       java.sql.Connection c, UUID tenantId, String idempotencyKey) throws SQLException {
     try (var ps =
         c.prepareStatement(
@@ -270,42 +270,130 @@ public class PaymentRepository extends BaseOutboxRepository {
           if (!markProcessedIfNewTx(c, eventId, consumer)) {
             return null; // this order event already produced its refund
           }
-          List<PaymentTender> captured = capturedTendersForUpdateTx(c, tenantId, orderId);
-          BigDecimal capturedTotal = BigDecimal.ZERO;
-          for (PaymentTender t : captured) {
-            capturedTotal = capturedTotal.add(t.amount());
-          }
-          BigDecimal remaining = capturedTotal.subtract(sumRefundsByOrderTx(c, tenantId, orderId));
-          if (remaining.signum() <= 0) {
-            return null; // unpaid (e.g. pay-later cancel) or already fully refunded — no-op
-          }
-          BigDecimal toRefund =
-              requestedAmount == null ? remaining : requestedAmount.min(remaining);
-          if (toRefund.signum() <= 0) {
-            return null;
-          }
-          BigDecimal left = toRefund;
-          List<com.storeql.payment.domain.Domain.RefundAllocation> shares = new ArrayList<>();
-          for (PaymentTender t : captured) {
-            if (left.signum() <= 0) break;
-            BigDecimal residual = t.amount().subtract(sumRefundsTx(c, tenantId, t.id()));
-            if (residual.signum() <= 0) continue;
-            BigDecimal alloc = left.min(residual);
-            String method = methodOverride != null ? methodOverride : t.method();
-            insertRefundTenderTx(c, tenantId, orderId, t.id(), alloc, method, reason);
-            shares.add(
-                new com.storeql.payment.domain.Domain.RefundAllocation(
-                    t.id(), method, alloc, t.storeId()));
-            left = left.subtract(alloc);
-          }
-          insertOutbox(c, eventBuilder.apply(toRefund, shares));
+          refundTx(c, tenantId, orderId, requestedAmount, reason, methodOverride, eventBuilder);
           return null;
         },
         "refund order from event");
   }
 
-  private List<PaymentTender> capturedTendersForUpdateTx(Connection c, UUID tenantId, UUID orderId)
+  /**
+   * The refund itself, on the caller's transaction: locks the order's captured tenders, caps the
+   * amount at what remains, spreads it by residual capacity, writes the refund rows and the outbox
+   * event. Returns what was actually refunded (zero when nothing was captured or all was refunded).
+   */
+  private BigDecimal refundTx(
+      Connection c,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      String methodOverride,
+      java.util.function.BiFunction<
+              BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
+          eventBuilder)
       throws SQLException {
+    List<PaymentTender> captured = capturedTendersForUpdateTx(c, tenantId, orderId);
+    BigDecimal capturedTotal = BigDecimal.ZERO;
+    for (PaymentTender t : captured) {
+      capturedTotal = capturedTotal.add(t.amount());
+    }
+    BigDecimal remaining = capturedTotal.subtract(sumRefundsByOrderTx(c, tenantId, orderId));
+    if (remaining.signum() <= 0) {
+      return BigDecimal.ZERO; // unpaid (e.g. pay-later cancel) or already fully refunded — no-op
+    }
+    BigDecimal toRefund = requestedAmount == null ? remaining : requestedAmount.min(remaining);
+    if (toRefund.signum() <= 0) {
+      return BigDecimal.ZERO;
+    }
+    BigDecimal left = toRefund;
+    List<com.storeql.payment.domain.Domain.RefundAllocation> shares = new ArrayList<>();
+    for (PaymentTender t : captured) {
+      if (left.signum() <= 0) break;
+      BigDecimal residual = t.amount().subtract(sumRefundsTx(c, tenantId, t.id()));
+      if (residual.signum() <= 0) continue;
+      BigDecimal alloc = left.min(residual);
+      String method = methodOverride != null ? methodOverride : t.method();
+      insertRefundTenderTx(c, tenantId, orderId, t.id(), alloc, method, reason);
+      shares.add(
+          new com.storeql.payment.domain.Domain.RefundAllocation(
+              t.id(), method, alloc, t.storeId()));
+      left = left.subtract(alloc);
+    }
+    insertOutbox(c, eventBuilder.apply(toRefund, shares));
+    return toRefund;
+  }
+
+  /**
+   * A gift card was charged by order-svc's redeem: record the GIFT_CARD tender for the order and
+   * announce it, once per redemption. The dedupe mark, the tender and its {@code PaymentCaptured}
+   * commit together; the tender's key is derived from the redemption, so a replay under another
+   * event id still finds it.
+   *
+   * @return true when a tender was recorded, false on a replay
+   */
+  public boolean captureGiftCardOnce(
+      UUID eventId, String consumer, PaymentTender tender, OutboxRow event) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, eventId, consumer)) return false;
+          if (findTenderByKeyTx(c, tender.tenantId(), tender.idempotencyKey()) != null) {
+            return false;
+          }
+          insertTenderTx(c, tender);
+          insertOutbox(c, event);
+          return true;
+        },
+        "capture gift card tender");
+  }
+
+  /** What one exchange moved: the EXCHANGE refund, the EXCHANGE tender, and the cash-back. */
+  public record ExchangeMoved(BigDecimal exchanged, BigDecimal refundedOriginal) {}
+
+  /**
+   * An exchange return, once per event and on one transaction: (1) refund up to {@code
+   * exchangeAmount} of the original order's captured tenders under method EXCHANGE (no provider
+   * call), (2) capture an EXCHANGE tender of what actually moved on the new order, (3) when {@code
+   * extraRefund} is positive, refund it on the original order to its original tenders. Any of the
+   * three is skipped when nothing could move. Returns null on a replay.
+   */
+  public ExchangeMoved exchangeOnce(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal exchangeAmount,
+      BigDecimal extraRefund,
+      String reason,
+      java.util.function.BiFunction<
+              BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
+          exchangeRefundEvent,
+      java.util.function.BiFunction<
+              BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
+          originalRefundEvent,
+      java.util.function.Function<BigDecimal, OutboxRow> exchangeCapturedEvent,
+      java.util.function.Function<BigDecimal, PaymentTender> exchangeTender) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, eventId, consumer)) return null;
+          BigDecimal exchanged =
+              refundTx(
+                  c, tenantId, orderId, exchangeAmount, reason, "EXCHANGE", exchangeRefundEvent);
+          if (exchanged.signum() > 0) {
+            insertTenderTx(c, exchangeTender.apply(exchanged));
+            insertOutbox(c, exchangeCapturedEvent.apply(exchanged));
+          }
+          BigDecimal original = BigDecimal.ZERO;
+          if (extraRefund != null && extraRefund.signum() > 0) {
+            original =
+                refundTx(c, tenantId, orderId, extraRefund, reason, null, originalRefundEvent);
+          }
+          return new ExchangeMoved(exchanged, original);
+        },
+        "exchange return from event");
+  }
+
+  private static List<PaymentTender> capturedTendersForUpdateTx(
+      Connection c, UUID tenantId, UUID orderId) throws SQLException {
     List<PaymentTender> out = new ArrayList<>();
     try (PreparedStatement ps =
         c.prepareStatement(
@@ -396,7 +484,7 @@ public class PaymentRepository extends BaseOutboxRepository {
               ps.setObject(1, tenantId);
               ps.setObject(2, tenderId);
             },
-            this::mapTender,
+            PaymentRepository::mapTender,
             "find tender");
     return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
   }
@@ -414,7 +502,7 @@ public class PaymentRepository extends BaseOutboxRepository {
               ps.setObject(1, tenantId);
               ps.setString(2, idempotencyKey);
             },
-            this::mapTender,
+            PaymentRepository::mapTender,
             "find tender by key");
     return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
   }
@@ -439,7 +527,7 @@ public class PaymentRepository extends BaseOutboxRepository {
           ps.setObject(1, tenantId);
           ps.setObject(2, orderId);
         },
-        this::mapTender,
+        PaymentRepository::mapTender,
         "list tenders by order");
   }
 
@@ -466,7 +554,7 @@ public class PaymentRepository extends BaseOutboxRepository {
 
   // ── mappers ───────────────────────────────────────────────────────────────
 
-  private PaymentTender mapTender(ResultSet rs) throws SQLException {
+  private static PaymentTender mapTender(ResultSet rs) throws SQLException {
     return new PaymentTender(
         rs.getObject("id", UUID.class),
         rs.getObject("tenant_id", UUID.class),

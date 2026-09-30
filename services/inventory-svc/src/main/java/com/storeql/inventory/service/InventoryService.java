@@ -435,6 +435,35 @@ public class InventoryService {
   }
 
   /**
+   * Restocks a line of a no-receipt return (return controls): there is no sale to trace, so the
+   * goods arrive as an anonymous batch of their own, placed by the till's condition, with a RECEIVE
+   * movement of reference type {@code NO_RECEIPT_RETURN} pointing at the return. Costless — no cost
+   * is known for goods nobody can trace, as with any anonymous return.
+   */
+  public boolean receiveNoReceiptReturnOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID returnId,
+      ReturnDisposition where) {
+    return repo.receiveNoReceiptOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        returnId,
+        "NO_RECEIPT_RETURN",
+        "RET-" + Ids.shortRef(returnId),
+        InventoryService::stockReceivedEvent,
+        where);
+  }
+
+  /**
    * Puts back the stock a voided till sale took, deduped on {@code dedupeId} (SJ-D40).
    *
    * <p>Recorded as a RECEIVE movement with reference type {@code VOID}: distinguishable from a

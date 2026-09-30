@@ -89,7 +89,7 @@ class OrderIT {
   private Response post(String path, String json, String tenant) {
     var req = target.path(path).request().header("X-Tenant-Id", tenant).header("X-Roles", "OWNER");
     // A return or a void is retryable, so it carries a key: a fresh one for each attempt here.
-    if (path.endsWith("/returns") || path.endsWith("/void")) {
+    if (path.endsWith("/returns") || path.endsWith("/void") || path.endsWith("/redeem")) {
       req = req.header("Idempotency-Key", Ids.newId().toString());
     }
     return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
@@ -926,9 +926,41 @@ class OrderIT {
     assertThat(r2.getStatus(), is(200));
     assertThat(r2.readEntity(String.class), containsString("70"));
 
-    // redeem
-    Response r3 = post("/gift-cards/" + code + "/redeem", "{\"amount\":30.00}", T);
+    // redeem: a charge is always against an order, and always under a key
+    String payFor =
+        extractId(
+            post(
+                    "/orders",
+                    "{\"storeId\":\""
+                        + S
+                        + "\",\"channel\":\"POS\","
+                        + "\"items\":[{\"variantId\":\""
+                        + V
+                        + "\",\"qty\":1,\"unitPrice\":30.00}]}",
+                    T,
+                    Ids.newId().toString())
+                .readEntity(String.class));
+    Response noOrder = post("/gift-cards/" + code + "/redeem", "{\"amount\":30.00}", T);
+    assertThat(noOrder.getStatus(), is(400));
+    Response r3 =
+        post(
+            "/gift-cards/" + code + "/redeem",
+            "{\"amount\":30.00,\"orderId\":\"" + payFor + "\"}",
+            T);
     assertThat(r3.getStatus(), is(200));
+    assertThat(r3.readEntity(String.class), containsString("\"balance\":40"));
+    Response noKey =
+        target
+            .path("/gift-cards/" + code + "/redeem")
+            .request()
+            .header("X-Tenant-Id", T)
+            .header("X-Roles", "OWNER")
+            .post(
+                Entity.entity(
+                    "{\"amount\":1.00,\"orderId\":\"" + payFor + "\"}",
+                    MediaType.APPLICATION_JSON));
+    assertThat(noKey.getStatus(), is(400));
+    assertThat(noKey.readEntity(String.class), containsString("IDEMPOTENCY_KEY_REQUIRED"));
 
     // tenant isolation — other tenant cannot see this card
     Response rIso = get("/gift-cards/" + code, "01a090ae-611e-701d-9d60-a9d7516ed03b");
@@ -965,12 +997,12 @@ class OrderIT {
     String redeem = "{\"amount\":30.00,\"orderId\":\"" + orderId + "\"}";
     Response first = post("/gift-cards/" + code + "/redeem", redeem, T);
     assertThat(first.getStatus(), is(200));
-    assertThat(first.readEntity(String.class), containsString("\"currentBalance\":20.0"));
+    assertThat(first.readEntity(String.class), containsString("\"balance\":20.0"));
 
-    // The replay must be a no-op, not a second deduction.
+    // The replay must be a no-op, not a second deduction, even under a fresh key.
     Response replay = post("/gift-cards/" + code + "/redeem", redeem, T);
     assertThat(replay.getStatus(), is(200));
-    assertThat(replay.readEntity(String.class), containsString("\"currentBalance\":20.0"));
+    assertThat(replay.readEntity(String.class), containsString("\"balance\":20.0"));
 
     assertThat(
         get("/gift-cards/" + code, T).readEntity(String.class),
@@ -996,7 +1028,7 @@ class OrderIT {
             "{\"amount\":5.00,\"orderId\":\"" + otherOrder + "\"}",
             T);
     assertThat(second.getStatus(), is(200));
-    assertThat(second.readEntity(String.class), containsString("\"currentBalance\":15.0"));
+    assertThat(second.readEntity(String.class), containsString("\"balance\":15.0"));
   }
 
   /**

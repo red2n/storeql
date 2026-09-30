@@ -103,6 +103,30 @@ public class SalesEventHandler {
   }
 
   /**
+   * {@code NoReceiptReturnRecorded}: a return with no sale behind it, refunded to store credit or a
+   * gift card. Its posting is the only credit to that liability (a card it loads is {@code paidBy:
+   * RETURN}, counted in the pool but never posted).
+   */
+  public void noReceiptReturn(String json) {
+    try {
+      JsonObject o = EventJson.parse(json);
+      if (!"NoReceiptReturnRecorded".equals(o.getString("eventType", ""))) return;
+      postings.postNoReceiptReturn(
+          Ids.parse(o.getString("eventId")),
+          Ids.parse(o.getString("tenantId")),
+          Ids.parse(o.getString("returnId")),
+          EventJson.optUuid(o, "storeId"),
+          o.getString("refundMethod", null),
+          o.getJsonNumber("amount").bigDecimalValue(),
+          o.containsKey("taxAmount") && !o.isNull("taxAmount")
+              ? o.getJsonNumber("taxAmount").bigDecimalValue()
+              : BigDecimal.ZERO);
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "NoReceiptReturnRecorded not posted, malformed: " + e.getMessage());
+    }
+  }
+
+  /**
    * {@code PaymentDisputeOpened} and {@code PaymentDisputeFundsWithdrawn} (11.9): the acquirer
    * taking a disputed card payment. A dispute opened with the money still in hand posts nothing
    * yet.

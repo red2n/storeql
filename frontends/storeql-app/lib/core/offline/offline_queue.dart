@@ -208,26 +208,31 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
         await _replace(current);
       }
 
-      // 2. Record each tender, then redeem any gift card it drew on. The redeem
-      //    is second so a card is never debited for a tender that did not land.
+      // 2. Take each tender. A gift card is charged through its redeem, on a
+      //    key derived from the sale and the tender's position, and the server
+      //    records the GIFT_CARD tender from that charge: no payment is posted
+      //    for it. Any other tender is a payment on its own key.
       for (var i = 0; i < current.tenders.length; i++) {
         final t = current.tenders[i];
-        if (!t.tenderDone) {
+        final code = t.giftCardCode;
+        if (code != null) {
+          if (!t.redeemDone) {
+            await dio.post(
+              '/${ApiConstants.order}/gift-cards/$code/redeem',
+              data: {'amount': t.amount, 'orderId': current.orderId},
+              options: Options(
+                  headers: {'Idempotency-Key': derivedId(current.id, 'gift:$i')}),
+            );
+            current = current.markTender(i, tenderDone: true, redeemDone: true);
+            await _replace(current);
+          }
+        } else if (!t.tenderDone) {
           await dio.post(
             '/${ApiConstants.payment}/payments',
             data: {...t.body, 'orderId': current.orderId},
             options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'pay:$i')}),
           );
           current = current.markTender(i, tenderDone: true);
-          await _replace(current);
-        }
-        final code = current.tenders[i].giftCardCode;
-        if (code != null && !current.tenders[i].redeemDone) {
-          await dio.post(
-            '/${ApiConstants.order}/gift-cards/$code/redeem',
-            data: {'amount': current.tenders[i].amount, 'orderId': current.orderId},
-          );
-          current = current.markTender(i, redeemDone: true);
           await _replace(current);
         }
       }

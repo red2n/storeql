@@ -140,11 +140,14 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
 
   const giftSale = placeSale(3);
   const spend = num(giftSale.total);
-  must(call('POST', `/api/order-svc/gift-cards/${card.code}/redeem`, { token: owner, body: { amount: spend, orderId: giftSale.id } }), 200, 'the card spent at the till');
+  // The till charges the card through its redeem; payment-svc records the GIFT_CARD tender itself from
+  // the redemption (a client-posted GIFT_CARD payment is refused: PAYMENT_GIFT_CARD_VIA_REDEEM).
   const tenderKey = newId();
-  const tender = must(pay(giftSale.id, spend.toFixed(2), 'GIFT_CARD', { reference: card.code }, tenderKey), [200, 201], 'a gift card tender');
-  const replay = pay(giftSale.id, spend.toFixed(2), 'GIFT_CARD', { reference: card.code }, tenderKey);
-  truthy('[-] the tender replayed on its key is the same payment', [200, 201].includes(replay.status) && data(replay).id === tender.id, { status: replay.status, first: tender.id, again: data(replay).id });
+  const redeem = () => call('POST', `/api/order-svc/gift-cards/${card.code}/redeem`, { token: owner, idem: tenderKey, body: { amount: spend, orderId: giftSale.id } });
+  const tender = must(redeem(), [200, 201], 'the card spent at the till');
+  const replay = redeem();
+  truthy('[-] the redeem replayed on its key is the same redemption', [200, 201].includes(replay.status) && data(replay).redemptionId === tender.redemptionId, { status: replay.status, first: tender.redemptionId, again: data(replay).redemptionId });
+  expect(pay(giftSale.id, spend.toFixed(2), 'GIFT_CARD', { reference: card.code }), '[-] a gift card tender cannot be posted as a payment', 400, 'PAYMENT_GIFT_CARD_VIA_REDEEM');
   const breakageDue = Math.min(round((spend * 0.1) / 0.9), 12, round(120 - spend));
   let breakage = [];
   poll(60, () => {

@@ -145,19 +145,19 @@ class OrderServiceDarkStoreTest {
 
   @Test
   void aDeliveryIsPlacedAtADarkStoreAsAtAnyShop() {
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
     var order = svc.placeOrder(request("ONLINE", "DELIVERY"), ctx, null);
     assertEquals(DARK, order.storeId());
     verify(repo, times(1))
-        .createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList());
+        .createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any());
   }
 
   @Test
   void storeTypesThatCannotBeReadRefuseNothing() {
     when(profiles.stores(TENANT, DARK))
         .thenThrow(new ApiException(503, "TENANT_STORES_UNAVAILABLE", "down", List.of()));
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
     var order = svc.placeOrder(request("ONLINE", "PICKUP"), ctx, null);
     assertEquals("PICKUP", order.fulfilmentType());

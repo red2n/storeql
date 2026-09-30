@@ -6,6 +6,8 @@
 /// lives behind the conditional export in `pos_receipt.dart`.
 library;
 
+import 'package:qr/qr.dart';
+
 import '../../core/format.dart';
 import 'pos_fiscal_receipt.dart';
 import 'pos_providers.dart';
@@ -88,6 +90,38 @@ class PosReceiptData {
   );
 
   String get shortId => shortRef(orderId).toUpperCase();
+
+  /// What the receipt's scannable code carries: the legal receipt number, else
+  /// the short order reference printed on it. The Returns screen finds the sale
+  /// from either. Null for a sale held offline, whose reference is the till's
+  /// own and means nothing to the server until it has synced.
+  String? get receiptCode {
+    final n = fiscalNumber;
+    if (n != null && n.isNotEmpty) return n;
+    return orderId.length > 8 ? shortId : null;
+  }
+
+  /// The receipt code as a QR code in SVG, black on white, drawn from the
+  /// encoder's modules with a quiet zone of four modules on every side.
+  static String qrSvg(String data, {int cell = 3}) {
+    final image = QrImage(QrCode(payload: QrPayload.fromString(data)));
+    final n = image.moduleCount;
+    const quiet = 4;
+    final side = (n + 2 * quiet) * cell;
+    final rects = StringBuffer();
+    for (var y = 0; y < n; y++) {
+      for (var x = 0; x < n; x++) {
+        if (image.isDark(y, x)) {
+          rects.write('<rect x="${(x + quiet) * cell}" y="${(y + quiet) * cell}" '
+              'width="$cell" height="$cell"/>');
+        }
+      }
+    }
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="$side" height="$side" '
+        'viewBox="0 0 $side $side" shape-rendering="crispEdges">'
+        '<rect width="$side" height="$side" fill="#fff"/>'
+        '<g fill="#000">$rects</g></svg>';
+  }
 
   /// Money as the shopper reads it, `£12.00`. (The thermal encoder keeps
   /// currency codes: a printer's code page cannot print every symbol.)
@@ -210,6 +244,17 @@ class PosReceiptData {
   </div>''';
     }
 
+    // A scannable code of the receipt number, so the Returns screen's scan
+    // finds this sale.
+    final code = receiptCode;
+    final codeBlock = code == null
+        ? ''
+        : '''
+  <div class="receipt-code center" data-receipt-code="${_esc(code)}">
+    ${qrSvg(code)}
+    <div class="fiscal-note">${_esc(code)}</div>
+  </div>''';
+
     return '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -299,6 +344,7 @@ class PosReceiptData {
     $changeRow
   </table>
   $fiscalBlock
+  $codeBlock
 
   <hr class="divider-solid">
 

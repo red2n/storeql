@@ -257,6 +257,19 @@ void main() {
       expect(redeemed.copyWith(posLogDone: true).isComplete, isTrue);
     });
 
+    test('a gift-card tender is complete once redeemed: the redeem is the tender', () {
+      const redeemedOnly = OfflineTender(
+          body: {'method': 'GIFT_CARD'},
+          amount: 5.0,
+          giftCardCode: 'GC-1',
+          redeemDone: true);
+      expect(redeemedOnly.isComplete, isTrue,
+          reason: 'payment-svc records the tender from the redemption');
+      const other = OfflineTender(body: {'method': 'CASH'}, amount: 5.0);
+      expect(other.isComplete, isFalse);
+      expect(other.copyWith(tenderDone: true).isComplete, isTrue);
+    });
+
     test('an older queued sale replays rather than being stuck unjournalled', () {
       // posLogDone defaults to false when absent, so a sale written by a build
       // that predates journalling replays the journal write instead of failing

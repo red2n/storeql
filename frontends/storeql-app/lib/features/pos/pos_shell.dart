@@ -42,9 +42,22 @@ List<AdaptiveNavDestination> _destinations(int pending) => [
         selectedIcon: Icons.cloud_off,
         badgeCount: pending,
       ),
+      // Sale returns and exchanges (return-controls). Not the deposit-container
+      // action in the app bar, which is called Container deposits.
+      const AdaptiveNavDestination(
+        label: 'Returns',
+        icon: Icons.assignment_return_outlined,
+        selectedIcon: Icons.assignment_return,
+      ),
     ];
 
-const _routes = ['/pos/cart', '/pos/tender', '/pos/cash', '/pos/pending'];
+const _routes = [
+  '/pos/cart',
+  '/pos/tender',
+  '/pos/cash',
+  '/pos/pending',
+  '/pos/returns',
+];
 
 class PosShell extends ConsumerStatefulWidget {
   final String currentLocation;
@@ -85,7 +98,9 @@ class _PosShellState extends ConsumerState<PosShell> {
 
   int get _selectedIndex => _pendingSelected
       ? 3
-      : widget.currentLocation.startsWith('/pos/cash')
+      : widget.currentLocation.startsWith('/pos/returns')
+          ? 4
+          : widget.currentLocation.startsWith('/pos/cash')
           ? 2
           : widget.currentLocation.startsWith('/pos/tender')
               ? 1
@@ -124,13 +139,13 @@ class _PosShellState extends ConsumerState<PosShell> {
       child: AdaptiveNavShell(
         title: 'POS Terminal',
         leadingIcon: Icons.point_of_sale,
-        // Four flat destinations — a bottom bar, per Material's compact-width guidance.
+        // Five flat destinations — a bottom bar, per Material's compact-width guidance.
         compactStyle: CompactNavStyle.bottomBar,
         destinations: _destinations(pending),
         selectedIndex: _selectedIndex,
         onDestinationSelected: (i) => context.go(_routes[i]),
         // Six commands: all on the bar from tablet width, but on a phone only
-        // Returns stays — the rest go into ⋮ so the title keeps its room.
+        // Container deposits stays — the rest go into ⋮ so the title keeps its room.
         actions: [
           AdaptiveActions(actions: [
             if (session != null &&
@@ -147,7 +162,7 @@ class _PosShellState extends ConsumerState<PosShell> {
             if (session != null)
               AdaptiveAction(
                 key: const Key('pos-container-return'),
-                label: 'Returns',
+                label: 'Container deposits',
                 icon: Icons.recycling,
                 showLabel: true,
                 keepOnCompact: true,

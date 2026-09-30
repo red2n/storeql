@@ -49,6 +49,7 @@ class SalesPostingTest {
     assertThat(SalesPosting.controlFor("GIFT_CARD"), is(SalesPosting.GIFT_CARD_LIABILITY));
     assertThat(SalesPosting.controlFor("VOUCHER"), is(SalesPosting.GIFT_CARD_LIABILITY));
     assertThat(SalesPosting.controlFor("STORE_CREDIT"), is(SalesPosting.STORE_CREDIT_LIABILITY));
+    assertThat(SalesPosting.controlFor("EXCHANGE"), is(SalesPosting.EXCHANGE_CLEARING));
     assertThat(SalesPosting.controlFor(null), is(SalesPosting.UNALLOCATED_RECEIPTS));
     assertThat(SalesPosting.controlFor("BARTER"), is(SalesPosting.UNALLOCATED_RECEIPTS));
   }
@@ -331,5 +332,48 @@ class SalesPostingTest {
         SalesPosting.cardSettlement(TENANT, ORDER, STORE, "WP-5", null, null, null, null, DAY)
             .isEmpty(),
         is(true));
+  }
+
+  @Test
+  @DisplayName("An exchange's refund and its new-sale tender net to zero on exchange clearing")
+  void anExchangeNetsToZeroOnExchangeClearing() {
+    UUID newOrder = Ids.parse("0198a000-0000-7000-8000-00000000000a");
+    List<NominalLedgerEntry> lines = new ArrayList<>();
+    lines.addAll(
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("EXCHANGE", d("30.00"))),
+            d("120.00"),
+            d("20.00"),
+            true,
+            DAY));
+    lines.addAll(SalesPosting.tender(TENANT, newOrder, STORE, "EXCHANGE", d("30.00"), DAY));
+    same(balance(lines, "1260"), "0");
+    same(balance(lines, "1250"), "0");
+    same(balance(lines, "2310"), "0");
+    same(balance(lines, "4010"), "25.00");
+  }
+
+  @Test
+  @DisplayName("A no-receipt return debits sales and VAT and credits the liability it refunded to")
+  void aNoReceiptReturnCreditsTheLiability() {
+    var credit =
+        SalesPosting.noReceiptReturn(
+            TENANT, ORDER, STORE, "STORE_CREDIT", d("12.00"), d("2.00"), DAY);
+    same(balance(credit, "4010"), "10.00");
+    same(balance(credit, "2200"), "2.00");
+    same(balance(credit, "2320"), "-12.00");
+    var card =
+        SalesPosting.noReceiptReturn(TENANT, ORDER, STORE, "GIFT_CARD", d("12.00"), null, DAY);
+    same(balance(card, "2310"), "-12.00");
+    same(balance(card, "4010"), "12.00");
+    assertThat(
+        SalesPosting.noReceiptReturn(TENANT, ORDER, STORE, "GIFT_CARD", d("0"), null, DAY).size(),
+        is(0));
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> SalesPosting.noReceiptReturn(TENANT, ORDER, STORE, "CASH", d("1.00"), null, DAY));
   }
 }

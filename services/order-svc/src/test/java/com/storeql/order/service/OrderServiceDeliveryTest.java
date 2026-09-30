@@ -146,7 +146,7 @@ class OrderServiceDeliveryTest {
 
   @Test
   void deliveryWithFullAddressIsPersisted() {
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
 
     Order order =
@@ -164,7 +164,7 @@ class OrderServiceDeliveryTest {
 
   @Test
   void pickupIgnoresAnySuppliedAddressFields() {
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
 
     // A pickup order should never persist delivery details even if the client sends some

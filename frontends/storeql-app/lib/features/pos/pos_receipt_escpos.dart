@@ -116,6 +116,16 @@ class EscPosReceipt {
 
     _fiscal(b, d);
 
+    // The receipt number as a scannable code, so the Returns screen finds the sale.
+    final code = d.receiptCode;
+    if (code != null) {
+      _divider(b, '-');
+      b.add([_esc, 0x61, 1]);
+      _qr(b, code);
+      _line(b, code);
+      b.add([_esc, 0x61, 0]);
+    }
+
     _divider(b, '=');
     b.add([_esc, 0x61, 1]);
     _line(b, 'Thank you for your purchase!');

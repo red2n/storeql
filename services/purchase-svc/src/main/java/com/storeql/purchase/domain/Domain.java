@@ -76,6 +76,10 @@ public final class Domain {
 
   public static final String SOURCE_SALE_TENDER = "SALE_TENDER";
   public static final String SOURCE_SALE_REFUND = "SALE_REFUND";
+
+  /** A return with no receipt, refunded to store credit or a gift card by order-svc's own event. */
+  public static final String SOURCE_NO_RECEIPT_RETURN = "NO_RECEIPT_RETURN";
+
   // Chargebacks (11.9): the acquirer taking a card payment back, and how the argument ended.
   public static final String SOURCE_CHARGEBACK = "CHARGEBACK";
   // A payout reconciled against the acquirer's settlement file (11.10): clearing to bank.
@@ -93,6 +97,11 @@ public final class Domain {
   public static final String NAME_CASH_IN_TILLS = "Cash in Tills";
   public static final String CODE_CARD_CLEARING = "1250";
   public static final String NAME_CARD_CLEARING = "Card and Wallet Clearing";
+
+  /** The returned value of an exchange, paying the new basket: refund credits it, tender debits. */
+  public static final String CODE_EXCHANGE_CLEARING = "1260";
+
+  public static final String NAME_EXCHANGE_CLEARING = "Exchange Clearing";
   public static final String CODE_UNALLOCATED_RECEIPTS = "1299";
   public static final String NAME_UNALLOCATED_RECEIPTS = "Unallocated Receipts";
   public static final String CODE_GIFT_CARD_LIABILITY = "2310";

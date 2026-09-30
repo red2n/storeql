@@ -369,6 +369,10 @@ class OrderEventHandler {
 
   /** Deterministic per-line dedupe id: stable across redeliveries of the same event. */
   static UUID lineDedupeId(UUID eventId, int lineIndex) {
-    return Ids.derived(eventId, CONSUMER_NAME + ":" + lineIndex);
+    return lineDedupeId(eventId, lineIndex, CONSUMER_NAME);
+  }
+
+  static UUID lineDedupeId(UUID eventId, int lineIndex, String consumerName) {
+    return Ids.derived(eventId, consumerName + ":" + lineIndex);
   }
 }

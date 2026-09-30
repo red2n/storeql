@@ -28,6 +28,7 @@ import com.storeql.order.domain.Domain.SpecialOrder;
 import com.storeql.order.domain.Domain.SpecialOrderItem;
 import com.storeql.order.domain.Handover;
 import com.storeql.order.domain.OrderSplit;
+import com.storeql.order.domain.ReturnValue;
 import com.storeql.order.domain.Routing;
 import com.storeql.order.domain.StopSale;
 import com.storeql.order.domain.SubstitutePrice;
@@ -35,8 +36,11 @@ import com.storeql.order.dto.Dtos.AddDepositRequest;
 import com.storeql.order.dto.Dtos.CreateLayawayRequest;
 import com.storeql.order.dto.Dtos.CreateReturnRequest;
 import com.storeql.order.dto.Dtos.CreateSpecialOrderRequest;
+import com.storeql.order.dto.Dtos.ExchangeRequest;
 import com.storeql.order.dto.Dtos.GenerateReceiptRequest;
 import com.storeql.order.dto.Dtos.IssueGiftCardRequest;
+import com.storeql.order.dto.Dtos.NoReceiptReturnRequest;
+import com.storeql.order.dto.Dtos.OrderItemRequest;
 import com.storeql.order.dto.Dtos.PlaceOrderRequest;
 import com.storeql.order.dto.Dtos.RecordAgeCheckRequest;
 import com.storeql.order.dto.Dtos.RedeemGiftCardRequest;
@@ -267,6 +271,21 @@ public class OrderService {
   }
 
   public Order placeOrder(PlaceOrderRequest req, TenantContext ctx, String idempotencyKey) {
+    return placeOrder(req, ctx, idempotencyKey, null);
+  }
+
+  /**
+   * As {@link #placeOrder(PlaceOrderRequest, TenantContext, String)}, with a step that commits with
+   * the order or not at all: the return a direct exchange writes beside the sale it pays for. Only
+   * a till sale is placed this way, so the split-checkout path never carries a step.
+   *
+   * @param afterPlaced the step, or null for none; not run when the placement is a replay
+   */
+  private Order placeOrder(
+      PlaceOrderRequest req,
+      TenantContext ctx,
+      String idempotencyKey,
+      OrderRepository.PlacedStep afterPlaced) {
     if (req.items() == null || req.items().isEmpty())
       throw ApiException.badRequest("ORDER_NO_ITEMS", "order must have at least one item");
 
@@ -692,7 +711,8 @@ public class OrderService {
               discountAudit,
               quoted == null ? List.of() : quoted.applied(),
               containerDeposits,
-              offlineFlags);
+              offlineFlags,
+              afterPlaced);
       // Spending the coupon is deliberately the last thing, and deliberately outside the order's
       // transaction. A basket is quoted on every change and must not burn a redemption by being
       // looked at; only a placed order spends one. If this call fails the order still stands — a
@@ -2606,12 +2626,7 @@ public class OrderService {
     // Goods can only come back once they were handed over. An order still PENDING or CONFIRMED
     // never left the store — cancel it instead; returning it recorded a refund for goods, and
     // often money, that were never exchanged. A fully REFUNDED order has nothing left to refund.
-    if (!Order.STATUS_FULFILLED.equals(order.status())
-        && !Order.STATUS_PARTIALLY_FULFILLED.equals(order.status())
-        && !Order.STATUS_PARTIALLY_REFUNDED.equals(order.status()))
-      throw ApiException.conflict(
-          "ORDER_CANNOT_RETURN",
-          "only a fulfilled order can be returned; this one is " + order.status());
+    requireReturnable(order);
 
     String method = returnMethod(req.refundMethod());
     if (Return.METHOD_STORE_CREDIT.equals(method) && order.customerId() == null)
@@ -2642,8 +2657,14 @@ public class OrderService {
                   () ->
                       ApiException.notFound(
                           "ITEM_NOT_IN_ORDER", "variant " + ri.variantId() + " not in order"));
+      // The line keeps its net figure, which the fiscal and commission reports read; the refund is
+      // what the customer paid for it, VAT included, as an exchange values it. A return once
+      // refunded the net alone, leaving a VAT-registered business's customer short by the VAT.
       BigDecimal refundAmt = matched.unitPrice().multiply(ri.qty());
-      totalRefund = totalRefund.add(refundAmt);
+      totalRefund =
+          totalRefund.add(
+              ReturnValue.grossOf(
+                  matched.unitPrice(), ri.qty(), matched.vatAmount(), matched.qty()));
       everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
       returnItems.add(
           new ReturnItem(
@@ -2698,17 +2719,7 @@ public class OrderService {
                     storeZone(tenantId, order.storeId()),
                     inHomeCurrency(tenantId, totalRefund, order.currency()),
                     everyLineFaulty);
-    UUID approvedBy = null;
-    if (!outside.isEmpty()) {
-      if (!ctx.hasPermission(com.storeql.web.Permissions.SALES_REFUND))
-        throw new ApiException(
-            403,
-            "ORDER_RETURN_NEEDS_MANAGER",
-            "this return is outside the business's return policy and needs a manager: "
-                + String.join(", ", outside),
-            outside);
-      approvedBy = ctx.userId();
-    }
+    UUID approvedBy = approverFor(outside, ctx);
 
     // One clock for the row and the answer, at the precision Postgres keeps, so a replay under the
     // same key answers with exactly the times the first did.
@@ -2791,11 +2802,497 @@ public class OrderService {
     return created;
   }
 
+  /**
+   * Goods can only come back once they were handed over.
+   *
+   * @throws ApiException 409 {@code ORDER_CANNOT_RETURN} unless the order is FULFILLED,
+   *     PARTIALLY_FULFILLED or PARTIALLY_REFUNDED
+   */
+  private static void requireReturnable(Order order) {
+    if (!Order.STATUS_FULFILLED.equals(order.status())
+        && !Order.STATUS_PARTIALLY_FULFILLED.equals(order.status())
+        && !Order.STATUS_PARTIALLY_REFUNDED.equals(order.status()))
+      throw ApiException.conflict(
+          "ORDER_CANNOT_RETURN",
+          "only a fulfilled order can be returned; this one is " + order.status());
+  }
+
+  /**
+   * Who may allow a return that falls outside the policy: a holder of {@code sales.refund}, who is
+   * then named on it. A return inside the policy needs nobody.
+   *
+   * @param outside why the return is outside the policy; empty when it is not
+   * @return the approver, or null when none was needed
+   * @throws ApiException 403 {@code ORDER_RETURN_NEEDS_MANAGER}, naming the reasons
+   */
+  private static UUID approverFor(List<String> outside, TenantContext ctx) {
+    if (outside.isEmpty()) return null;
+    if (!ctx.hasPermission(com.storeql.web.Permissions.SALES_REFUND))
+      throw new ApiException(
+          403,
+          "ORDER_RETURN_NEEDS_MANAGER",
+          "this return is outside the business's return policy and needs a manager: "
+              + String.join(", ", outside),
+          outside);
+    return ctx.userId();
+  }
+
   /** The first return made under a key, when the key is used again for the same order. */
   private static Return replayedReturn(Return first, UUID orderId) {
-    if (!first.orderId().equals(orderId))
+    if (!orderId.equals(first.orderId()))
       throw ApiException.conflict(
           "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for a different order");
+    return first;
+  }
+
+  // ── Direct exchange (intent/return-controls.md) ──────────────────────────
+
+  /**
+   * A direct exchange as it is answered.
+   *
+   * @param ret the return of the old goods, method EXCHANGE
+   * @param items its lines
+   * @param order the new sale, PENDING until paid
+   * @param settlement how the two settle: what the returned value pays, what is still due, what
+   *     goes back
+   */
+  public record ExchangeResult(
+      Return ret, List<ReturnItem> items, Order order, ReturnValue.Settlement settlement) {}
+
+  /**
+   * Takes goods back and sells others in one act: the return of the old goods and the new till sale
+   * are written on one transaction, so the customer is never left with one and not the other.
+   *
+   * <p>The return is judged exactly as {@link #createReturn} judges one (status, quantities,
+   * conditions, the business's policy, a manager when outside it), and the new sale is placed by
+   * the ordinary till path, priced by the same rules. What the returned goods are worth is measured
+   * the way the new sale is charged, VAT included, so a like-for-like swap moves no money.
+   * payment-svc settles it from {@code OrderReturned}; the till then collects only what is due on
+   * the new sale.
+   *
+   * @param tenantId owning tenant
+   * @param orderId the sale the goods came from
+   * @param req the reason, the goods coming back with their conditions, and the goods bought
+   * @param idempotencyKey the caller's key, already known to be present: a retry answers with the
+   *     first exchange and writes nothing
+   * @param ctx caller context, checked for access to the sale's store
+   * @return the exchange
+   * @throws ApiException as for a return, plus 400 {@code ORDER_EXCHANGE_NO_NEW_ITEMS}, 409 {@code
+   *     ORDER_EXCHANGE_CURRENCY_MISMATCH}, and whatever placing a till sale can refuse
+   */
+  public ExchangeResult exchange(
+      UUID tenantId, UUID orderId, ExchangeRequest req, String idempotencyKey, TenantContext ctx) {
+    Order order =
+        repo.findOrder(tenantId, orderId)
+            .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    ctx.requireStoreAccess(order.storeId());
+
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findReturnByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedExchange(earlier.get(), orderId);
+
+    if (req.returnItems() == null || req.returnItems().isEmpty())
+      throw ApiException.badRequest("ORDER_RETURN_NO_ITEMS", "an exchange needs an item to return");
+    if (req.newItems() == null || req.newItems().isEmpty())
+      throw ApiException.badRequest(
+          "ORDER_EXCHANGE_NO_NEW_ITEMS", "an exchange needs an item to buy; otherwise return it");
+    for (var ri : req.returnItems()) returnCondition(ri.condition());
+    requireReturnable(order);
+
+    List<OrderItem> orderItems = repo.findOrderItems(tenantId, orderId);
+    UUID returnId = Ids.newId();
+    BigDecimal value = BigDecimal.ZERO;
+    List<ReturnItem> returnItems = new ArrayList<>();
+    boolean everyLineFaulty = true;
+    for (var ri : req.returnItems()) {
+      String condition = returnCondition(ri.condition());
+      UUID variantId = Parsing.uuid(ri.variantId(), "variantId");
+      OrderItem matched =
+          orderItems.stream()
+              .filter(oi -> oi.variantId().equals(variantId))
+              .findFirst()
+              .orElseThrow(
+                  () ->
+                      ApiException.notFound(
+                          "ITEM_NOT_IN_ORDER", "variant " + ri.variantId() + " not in order"));
+      // The line is worth what the customer paid for it, VAT included, because that is what the
+      // new sale asks of them; the line itself keeps the net figure every report reads.
+      value =
+          value.add(
+              ReturnValue.grossOf(
+                  matched.unitPrice(), ri.qty(), matched.vatAmount(), matched.qty()));
+      everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
+      returnItems.add(
+          new ReturnItem(
+              Ids.newId(),
+              tenantId,
+              returnId,
+              variantId,
+              ri.qty(),
+              matched.unitPrice().multiply(ri.qty()).setScale(2, java.math.RoundingMode.HALF_UP),
+              condition));
+    }
+
+    List<String> outside =
+        returnPolicies
+            .effective(tenantId)
+            .reasons(
+                handedOverAt(order),
+                Instant.now(),
+                storeZone(tenantId, order.storeId()),
+                inHomeCurrency(tenantId, value, order.currency()),
+                everyLineFaulty);
+    UUID approvedBy = approverFor(outside, ctx);
+
+    UUID customerId = Parsing.optionalUuid(req.customerId(), "customerId");
+    if (customerId == null) customerId = order.customerId();
+    var newLines =
+        req.newItems().stream()
+            .map(
+                n ->
+                    new OrderItemRequest(
+                        n.variantId(), n.qty(), null, null, null, null, null, null))
+            .toList();
+    // A till sale at the same store as the old one, placed by the ordinary path so it is priced,
+    // checked and announced as any other; only the return rides on its transaction.
+    var placeReq =
+        new PlaceOrderRequest(
+            order.storeId().toString(),
+            customerId == null ? null : customerId.toString(),
+            Order.CHANNEL_POS,
+            Order.FULFILMENT_INSTORE,
+            newLines,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            order.contactPhone(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+
+    Instant at = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+    BigDecimal returnedValue = value;
+    java.util.concurrent.atomic.AtomicReference<Return> written =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    java.util.concurrent.atomic.AtomicReference<ReturnValue.Settlement> settled =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    OrderRepository.PlacedStep step =
+        (c, placed) -> {
+          if (!placed.currency().equalsIgnoreCase(order.currency()))
+            throw ApiException.conflict(
+                "ORDER_EXCHANGE_CURRENCY_MISMATCH",
+                "the sale was in "
+                    + order.currency()
+                    + " and the business now trades in "
+                    + placed.currency());
+          var settlement = ReturnValue.settle(returnedValue, placed.total());
+          Return ret =
+              new Return(
+                  returnId,
+                  tenantId,
+                  orderId,
+                  order.storeId(),
+                  req.reason(),
+                  returnedValue,
+                  Return.METHOD_EXCHANGE,
+                  Return.STATUS_COMPLETED,
+                  at,
+                  at,
+                  ctx.userId(),
+                  key,
+                  approvedBy,
+                  outside,
+                  null,
+                  placed.id(),
+                  false,
+                  null,
+                  null);
+          repo.createReturnTx(
+              c,
+              ret,
+              returnItems,
+              Events.orderReturned(
+                  tenantId,
+                  orderId,
+                  returnId,
+                  order.storeId(),
+                  returnItems,
+                  returnedValue,
+                  Return.METHOD_EXCHANGE,
+                  order.currency(),
+                  order.customerId(),
+                  null,
+                  false,
+                  approvedBy,
+                  placed.id(),
+                  settlement.exchangeAmount()),
+              null);
+          repo.linkExchangeTx(c, tenantId, placed.id(), returnId);
+          written.set(ret);
+          settled.set(settlement);
+        };
+
+    Order placed;
+    try {
+      placed = placeOrder(placeReq, ctx, Ids.derived(key, "exchange-order").toString(), step);
+    } catch (ApiException e) {
+      // Two attempts with one key raced and this one lost, on the key or on the quantity the
+      // winner just took back: the winner's exchange is the answer.
+      var first = repo.findReturnByKey(tenantId, key);
+      if (first.isPresent()) return replayedExchange(first.get(), orderId);
+      throw e;
+    }
+    if (written.get() == null) {
+      // The sale under the derived key already stood, so the step never ran: a retry.
+      return replayedExchange(
+          repo.findReturnByKey(tenantId, key)
+              .orElseThrow(
+                  () ->
+                      ApiException.conflict(
+                          "ORDER_EXCHANGE_INCOMPLETE",
+                          "the sale for this exchange stands without its return")),
+          orderId);
+    }
+    salesInvoices.issueCreditNoteLater(tenantId, orderId, returnId, ctx.userId());
+    return new ExchangeResult(written.get(), returnItems, placed, settled.get());
+  }
+
+  /** The exchange already made under a key, when the key is used again for the same sale. */
+  private ExchangeResult replayedExchange(Return first, UUID orderId) {
+    if (!orderId.equals(first.orderId()) || first.exchangeOrderId() == null)
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
+    Order bought = getOrder(first.tenantId(), first.exchangeOrderId());
+    return new ExchangeResult(
+        first,
+        repo.findReturnItems(first.tenantId(), first.id()),
+        bought,
+        ReturnValue.settle(first.refundAmount(), bought.total()));
+  }
+
+  // ── Return with no receipt (intent/return-controls.md) ────────────────────
+
+  /**
+   * Takes goods back with no receipt, for store credit or a gift card, at what the store sells them
+   * for today.
+   *
+   * <p>There is no sale to refund against, so nothing here reaches payment-svc: the return is
+   * announced by {@code NoReceiptReturnRecorded}, and customer-svc, inventory-svc and purchase-svc
+   * act on that. A manager only ({@code sales.refund}), only where the business allows it at all,
+   * never for cash, and never over the business's ceiling. Each line is priced by pricing-svc; a
+   * price that cannot be had refuses the return, since a guessed price is money given away.
+   *
+   * @param tenantId owning tenant
+   * @param req the store, the reason, the method, the customer and how to reach them, the goods
+   * @param idempotencyKey the caller's key, already known to be present: a retry answers with the
+   *     first return and writes nothing
+   * @param ctx caller context, checked for access to the store
+   * @return the recorded return
+   * @throws ApiException 400 {@code ORDER_NO_RECEIPT_METHOD_INVALID}, {@code
+   *     ORDER_RETURN_NO_ITEMS}, the condition codes; 403 {@code ORDER_RETURN_NEEDS_MANAGER}
+   *     (details {@code NO_RECEIPT}); 409 {@code ORDER_NO_RECEIPT_RETURNS_OFF}, {@code
+   *     ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER}, gift card conflicts; 422 {@code
+   *     ORDER_NO_RECEIPT_OVER_CEILING}, {@code ORDER_PRICE_UNRESOLVED}; 503 when pricing cannot be
+   *     reached
+   */
+  public Return noReceiptReturn(
+      UUID tenantId, NoReceiptReturnRequest req, String idempotencyKey, TenantContext ctx) {
+    UUID storeId = Parsing.uuid(req.storeId(), "storeId");
+    ctx.requireStoreAccess(storeId);
+
+    // A retry answers with the first return before anything is judged again: the policy may have
+    // moved on, and the first answer is still the answer.
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findReturnByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedNoReceipt(earlier.get(), storeId);
+
+    if (req.items() == null || req.items().isEmpty())
+      throw ApiException.badRequest("ORDER_RETURN_NO_ITEMS", "a return needs at least one item");
+    String method =
+        req.refundMethod() == null ? "" : req.refundMethod().trim().toUpperCase(Locale.ROOT);
+    if (!Return.METHOD_STORE_CREDIT.equals(method) && !Return.METHOD_GIFT_CARD.equals(method))
+      throw ApiException.badRequest(
+          "ORDER_NO_RECEIPT_METHOD_INVALID",
+          "a return with no receipt is refunded to store credit or a gift card, never to how the"
+              + " sale was paid");
+    List<String> conditions = new ArrayList<>();
+    for (var ri : req.items()) conditions.add(returnCondition(ri.condition()));
+
+    var policy = returnPolicies.effective(tenantId);
+    if (!policy.noReceiptAllowed())
+      throw ApiException.conflict(
+          "ORDER_NO_RECEIPT_RETURNS_OFF", "this business does not take returns with no receipt");
+    if (!ctx.hasPermission(com.storeql.web.Permissions.SALES_REFUND))
+      throw new ApiException(
+          403,
+          "ORDER_RETURN_NEEDS_MANAGER",
+          "a return with no receipt needs a manager",
+          List.of(Return.NO_RECEIPT));
+
+    UUID customerId = Parsing.optionalUuid(req.customerId(), "customerId");
+    if (Return.METHOD_STORE_CREDIT.equals(method) && customerId == null)
+      throw ApiException.conflict(
+          "ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER",
+          "store credit goes to a customer, and this return names none");
+    String giftCode = req.giftCardCode() == null ? "" : req.giftCardCode().trim();
+    if (!giftCode.isEmpty() && !Return.METHOD_GIFT_CARD.equals(method))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_GIFT_CARD_CODE_UNEXPECTED",
+          "giftCardCode is only for a refund to a gift card");
+    String contact = req.customerContact() == null ? "" : req.customerContact().trim();
+    if (contact.isEmpty())
+      throw ApiException.badRequest(
+          "ORDER_NO_RECEIPT_CONTACT_REQUIRED",
+          "a return with no receipt records how to reach the customer");
+
+    // The store's own money: the business's currency, and each line at what the till would charge
+    // for it right now. Unreadable is a refusal, never a guess.
+    String currency = resolveCurrency(tenantId, null);
+    UUID returnId = Ids.newId();
+    BigDecimal total = BigDecimal.ZERO;
+    BigDecimal tax = BigDecimal.ZERO;
+    List<ReturnItem> returnItems = new ArrayList<>();
+    for (int i = 0; i < req.items().size(); i++) {
+      var ri = req.items().get(i);
+      UUID variantId = Parsing.uuid(ri.variantId(), "variantId");
+      com.storeql.order.client.PricingClient.ResolvedLine price;
+      try {
+        price = pricing.resolveLine(tenantId, variantId, storeId, Order.CHANNEL_POS, ri.qty());
+      } catch (org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException e) {
+        throw new ApiException(
+            503,
+            "ORDER_PRICING_UNAVAILABLE",
+            "pricing-svc circuit open — too many recent failures",
+            List.of(),
+            e);
+      }
+      var line = ReturnValue.priceLine(price.unitPrice(), price.vatAmount(), ri.qty());
+      total = total.add(line.value());
+      tax = tax.add(line.taxAmount());
+      returnItems.add(
+          new ReturnItem(
+              Ids.newId(),
+              tenantId,
+              returnId,
+              variantId,
+              ri.qty(),
+              line.value(),
+              conditions.get(i),
+              line.unitPrice(),
+              line.taxAmount()));
+    }
+    if (policy.noReceiptCeiling() != null && total.compareTo(policy.noReceiptCeiling()) > 0)
+      throw ApiException.unprocessable(
+          "ORDER_NO_RECEIPT_OVER_CEILING",
+          "this return is over the most the business gives without a receipt");
+
+    GiftCard freshCard = null;
+    String topUpCode = null;
+    UUID giftCardId = null;
+    if (Return.METHOD_GIFT_CARD.equals(method)) {
+      if (giftCode.isEmpty()) {
+        giftCardId = Ids.newId();
+        freshCard =
+            new GiftCard(
+                giftCardId,
+                tenantId,
+                storeId,
+                generateGiftCardCode(),
+                total,
+                total,
+                GiftCard.STATUS_ACTIVE,
+                currency,
+                Instant.now(),
+                null);
+      } else {
+        topUpCode = giftCode.toUpperCase(Locale.ROOT);
+        GiftCard card = getGiftCard(tenantId, topUpCode);
+        if (!GiftCard.STATUS_ACTIVE.equals(card.status()))
+          throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+        if (!card.currency().equalsIgnoreCase(currency))
+          throw ApiException.conflict(
+              "GIFT_CARD_CURRENCY_MISMATCH",
+              "the card holds " + card.currency() + " and this return is in " + currency);
+        giftCardId = card.id();
+      }
+    }
+
+    Instant at = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+    Return ret =
+        new Return(
+            returnId,
+            tenantId,
+            null,
+            storeId,
+            req.reason(),
+            total,
+            method,
+            Return.STATUS_COMPLETED,
+            at,
+            at,
+            ctx.userId(),
+            key,
+            // The manager who took it is the approver: a return with no receipt is always outside
+            // the policy, and the audit trail says so.
+            ctx.userId(),
+            List.of(Return.NO_RECEIPT),
+            giftCardId,
+            null,
+            true,
+            customerId,
+            contact);
+    GiftCard cardToWrite = freshCard;
+    String codeToTopUp = topUpCode;
+    BigDecimal refund = total;
+    OrderRepository.ReturnStep step =
+        c -> {
+          if (Return.METHOD_GIFT_CARD.equals(method)) {
+            repo.giftCardForReturnTx(
+                c,
+                cardToWrite,
+                codeToTopUp,
+                tenantId,
+                refund,
+                null,
+                returnId,
+                (card, tx) -> Events.giftCardLoadedByReturn(card, tx, returnId));
+          }
+        };
+    try {
+      return repo.createReturn(
+          ret,
+          returnItems,
+          Events.noReceiptReturnRecorded(ret, currency, tax, returnItems, giftCardId),
+          step);
+    } catch (ApiException e) {
+      var first = repo.findReturnByKey(tenantId, key);
+      if (first.isPresent()) return replayedNoReceipt(first.get(), storeId);
+      throw e;
+    }
+  }
+
+  /** The no-receipt return already made under a key, when the key is used again at the store. */
+  private static Return replayedNoReceipt(Return first, UUID storeId) {
+    if (!first.noReceipt() || !storeId.equals(first.storeId()))
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
     return first;
   }
 
@@ -3321,21 +3818,46 @@ public class OrderService {
   }
 
   /**
-   * Spends against a gift card, optionally attributing it to an order.
+   * Charges a gift card for an order, once per {@code Idempotency-Key}.
    *
-   * <p>The balance check happens in the repository, inside the transaction that writes the
-   * transaction row, so two tills cannot together overspend one card.
+   * <p>The card is debited, the ledger row written and {@code GiftCardRedeemed} put in the outbox
+   * on one transaction; payment-svc records the GIFT_CARD tender from that event, so a payment
+   * exists only for value the card really gave up. The order must be this business's, at a store
+   * the caller may act at, and in the card's currency. The balance check happens in the repository
+   * with the card row locked, so two tills cannot together overspend one card.
    *
    * @param tenantId owning tenant
    * @param code the card's code
-   * @param req the amount, the order being paid towards, and a reference
-   * @return the card with its new balance
-   * @throws ApiException {@code GIFT_CARD_NOT_FOUND} (404) when no such card exists; a conflict
-   *     when the balance is insufficient or the card is not active
+   * @param req the amount and the order being paid towards
+   * @param idempotencyKey the caller's key, already known to be present
+   * @param ctx caller context, checked for access to the order's store
+   * @return the redemption, made now or the first one made under this key
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404), {@code GIFT_CARD_NOT_FOUND} (404); 409
+   *     {@code GIFT_CARD_NOT_ACTIVE}, {@code GIFT_CARD_EXPIRED}, {@code
+   *     GIFT_CARD_CURRENCY_MISMATCH}, {@code GIFT_CARD_INSUFFICIENT_BALANCE}
    */
-  public GiftCard redeemGiftCard(UUID tenantId, String code, RedeemGiftCardRequest req) {
-    UUID orderId = req.orderId() != null ? Parsing.uuid(req.orderId(), "orderId") : null;
-    return repo.redeemGiftCard(tenantId, code, req.amount(), orderId, req.reference());
+  public GiftCardTransaction redeemGiftCard(
+      UUID tenantId,
+      String code,
+      RedeemGiftCardRequest req,
+      String idempotencyKey,
+      TenantContext ctx) {
+    UUID orderId = Parsing.uuid(req.orderId(), "orderId");
+    Order order =
+        repo.findOrder(tenantId, orderId)
+            .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    ctx.requireStoreAccess(order.storeId());
+    return repo.redeemGiftCard(
+            tenantId,
+            code,
+            req.amount(),
+            orderId,
+            order.currency(),
+            req.reference(),
+            Ids.parse(idempotencyKey),
+            Instant.now(),
+            (card, tx) -> Events.giftCardRedeemed(card, tx, order))
+        .tx();
   }
 
   /**

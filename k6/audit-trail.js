@@ -83,7 +83,9 @@ export default function ({ tenant, rival }) {
   truthy('[+] the void names the owner and its reason', byType('VOID').actorId === owner && byType('VOID').orderId === voided.id && byType('VOID').reason === 'rang up twice', JSON.stringify(byType('VOID')));
   truthy('[+] the no-sale names the cashier and no order', byType('NO_SALE').actorId === cashier.userId && !byType('NO_SALE').orderId, JSON.stringify(byType('NO_SALE')));
   truthy('[+] the cancel names the owner and the status it came from', byType('CANCEL').actorId === owner && byType('CANCEL').detail === 'PENDING', JSON.stringify(byType('CANCEL')));
-  truthy('[+] the return names the owner, the refund and its method', byType('RETURN').actorId === owner && Number(byType('RETURN').amount) === 10 && byType('RETURN').detail === 'ORIGINAL', JSON.stringify(byType('RETURN')));
+  // A return gives back what the customer paid for the line: its price and its share of the sale's VAT.
+  const paidPerUnit = (Number(returned.total) || 0) / (returned.items || []).reduce((q, i) => q + Number(i.qty), 0);
+  truthy('[+] the return names the owner, the refund and its method', byType('RETURN').actorId === owner && Math.abs(Number(byType('RETURN').amount) - paidPerUnit) < 0.005 && byType('RETURN').detail === 'ORIGINAL', JSON.stringify(byType('RETURN')));
   const stamps = all.map((e) => e.occurredAt);
   truthy('[+] newest first', stamps.every((s, i) => i === 0 || s <= stamps[i - 1]), stamps.join(' '));
   const returns = data(call('GET', `/api/order-svc/orders/${returned.id}/returns`, { token: t }));

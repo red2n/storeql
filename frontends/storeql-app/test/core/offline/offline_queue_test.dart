@@ -314,7 +314,9 @@ void main() {
         reason: 'the key is positional, so the second tender keeps its own key');
   });
 
-  test('a gift card is redeemed after its tender, and only once', () async {
+  test('a gift card is charged through its redeem, which is the tender', () async {
+    // payment-svc records the GIFT_CARD tender itself from the redemption and
+    // refuses a client-posted one, so replay posts no payment for it.
     final h = _harness();
     final notifier = h.container.read(offlineQueueProvider.notifier);
     await notifier.enqueue(_sale(tenders: const [
@@ -325,10 +327,53 @@ void main() {
 
     expect(h.adapter.paths, [
       '/${ApiConstants.order}/orders',
-      '/${ApiConstants.payment}/payments',
       '/${ApiConstants.order}/gift-cards/GC-1/redeem',
       '/${ApiConstants.order}/pos/log/orders/order-1',
     ]);
+    final redeem = h.adapter.calls[1];
+    expect(redeem.idempotencyKey, derivedId(_saleId, 'gift:0'));
+    expect(redeem.data, {'amount': 5.0, 'orderId': 'order-1'});
+    expect(h.adapter.countOf('/payments'), 0);
+  });
+
+  test('a redeemed gift card is not charged again on a later replay', () async {
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(orderId: 'order-1', tenders: const [
+      OfflineTender(
+          body: {'method': 'GIFT_CARD'},
+          amount: 5.0,
+          giftCardCode: 'GC-1',
+          tenderDone: true,
+          redeemDone: true),
+      OfflineTender(body: {'method': 'CASH'}, amount: 2.0),
+    ]));
+    await notifier.sync();
+
+    expect(h.adapter.countOf('/redeem'), 0);
+    expect(h.adapter.countOf('/payments'), 1);
+    expect(h.adapter.calls.first.idempotencyKey, derivedId(_saleId, 'pay:1'));
+  });
+
+  test('a gift card the server will not charge parks the sale, in its words',
+      () async {
+    final h = _harness();
+    h.adapter
+      ..rejectWith['/redeem'] = 409
+      ..rejectCode = 'GIFT_CARD_EXPIRED'
+      ..rejectMessage = 'That gift card has expired.';
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(orderId: 'order-1', tenders: const [
+      OfflineTender(
+          body: {'method': 'GIFT_CARD'}, amount: 5.0, giftCardCode: 'GC-1'),
+    ]));
+    await notifier.sync();
+
+    final parked = h.container.read(offlineQueueProvider).single;
+    expect(parked.status, OfflineSaleStatus.failed,
+        reason: 'a 409 would otherwise loop forever and hold up the queue');
+    expect(parked.lastError, 'That gift card has expired.');
+    expect(h.adapter.countOf('/pos/log/orders/'), 0);
   });
 
   test('a sale that only owes its journal replays just that', () async {

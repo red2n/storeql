@@ -9,7 +9,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 /**
  * Kafka infrastructure for what a returned or voided sale does to a customer (return controls):
  * {@code storeql.order.order-returned} and {@code storeql.order.order-voided} take loyalty points
- * back, {@code storeql.payment.payment-refunded} credits store credit. Each record goes to {@link
+ * back, {@code storeql.payment.payment-refunded} and {@code
+ * storeql.order.no-receipt-return-recorded} credit store credit. Each record goes to {@link
  * ReturnEventsHandler}; the consumer lifecycle is inherited from {@link BaseKafkaConsumer}.
  */
 @ApplicationScoped
@@ -35,9 +36,15 @@ class ReturnEventsConsumer extends BaseKafkaConsumer {
       defaultValue = "storeql.payment.payment-refunded")
   String refundedTopic;
 
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.no-receipt-return-recorded",
+      defaultValue = "storeql.order.no-receipt-return-recorded")
+  String noReceiptTopic;
+
   @Override
   protected List<String> topics() {
-    return List.of(returnedTopic, voidedTopic, refundedTopic);
+    return List.of(returnedTopic, voidedTopic, refundedTopic, noReceiptTopic);
   }
 
   @Override
@@ -58,6 +65,8 @@ class ReturnEventsConsumer extends BaseKafkaConsumer {
       handler.handleVoided(value);
     } else if (topic.equals(refundedTopic)) {
       handler.handleRefunded(value);
+    } else if (topic.equals(noReceiptTopic)) {
+      handler.handleNoReceiptReturn(value);
     }
   }
 }

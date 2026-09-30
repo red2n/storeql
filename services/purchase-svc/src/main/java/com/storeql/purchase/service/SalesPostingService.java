@@ -32,6 +32,7 @@ public class SalesPostingService {
   static final String SALE_CONSUMER = "purchase-svc/sale-posting";
   static final String TENDER_CONSUMER = "purchase-svc/tender-posting";
   static final String REFUND_CONSUMER = "purchase-svc/refund-posting";
+  static final String NO_RECEIPT_CONSUMER = "purchase-svc/no-receipt-return-posting";
   static final String CHARGEBACK_CONSUMER = "purchase-svc/chargeback-posting";
   static final String SETTLEMENT_CONSUMER = "purchase-svc/card-settlement-posting";
 
@@ -88,6 +89,23 @@ public class SalesPostingService {
             sale.isPresent(),
             today());
     return repo.recordRefundOnce(eventId, REFUND_CONSUMER, posting);
+  }
+
+  /** Posts a return made without a receipt, once per event. */
+  public boolean postNoReceiptReturn(
+      UUID eventId,
+      UUID tenantId,
+      UUID returnId,
+      UUID storeId,
+      String refundMethod,
+      BigDecimal amount,
+      BigDecimal taxAmount) {
+    return repo.recordJournalOnce(
+        eventId,
+        NO_RECEIPT_CONSUMER,
+        SalesPosting.noReceiptReturn(
+            tenantId, returnId, storeId, refundMethod, amount, taxAmount, today()),
+        "post no-receipt return");
   }
 
   /**

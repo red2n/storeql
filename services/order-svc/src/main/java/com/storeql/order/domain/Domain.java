@@ -794,13 +794,69 @@ public final class Domain {
       UUID idempotencyKey,
       UUID approvedBy,
       List<String> outsidePolicy,
-      UUID giftCardId) {
+      UUID giftCardId,
+      /** The sale a direct exchange bought, when this return is one; null otherwise. */
+      UUID exchangeOrderId,
+      /** True for a return with no receipt: {@code orderId} is then null. */
+      boolean noReceipt,
+      /** The customer a no-receipt refund goes to (store credit); null when none is named. */
+      UUID customerId,
+      /** The phone or email a no-receipt customer gave; null for a return against a sale. */
+      String customerContact) {
+
+    /** A return against a sale that is no exchange and no no-receipt return. */
+    public Return(
+        UUID id,
+        UUID tenantId,
+        UUID orderId,
+        UUID storeId,
+        String reason,
+        BigDecimal refundAmount,
+        String refundMethod,
+        String status,
+        Instant createdAt,
+        Instant completedAt,
+        UUID createdBy,
+        UUID idempotencyKey,
+        UUID approvedBy,
+        List<String> outsidePolicy,
+        UUID giftCardId) {
+      this(
+          id,
+          tenantId,
+          orderId,
+          storeId,
+          reason,
+          refundAmount,
+          refundMethod,
+          status,
+          createdAt,
+          completedAt,
+          createdBy,
+          idempotencyKey,
+          approvedBy,
+          outsidePolicy,
+          giftCardId,
+          null,
+          false,
+          null,
+          null);
+    }
+
     public static final String STATUS_PENDING = "PENDING";
     public static final String STATUS_COMPLETED = "COMPLETED";
     public static final String STATUS_REJECTED = "REJECTED";
     public static final String METHOD_ORIGINAL = "ORIGINAL";
     public static final String METHOD_STORE_CREDIT = "STORE_CREDIT";
     public static final String METHOD_GIFT_CARD = "GIFT_CARD";
+
+    /** A direct exchange: the returned value pays the new basket. Not a choice a caller makes. */
+    public static final String METHOD_EXCHANGE = "EXCHANGE";
+
+    /** The reason a no-receipt return needs a manager, beside the policy's own reasons. */
+    public static final String NO_RECEIPT = "NO_RECEIPT";
+
+    /** What a caller may choose on a return against a sale. */
     public static final List<String> METHODS =
         List.of(METHOD_ORIGINAL, METHOD_STORE_CREDIT, METHOD_GIFT_CARD);
   }
@@ -812,7 +868,24 @@ public final class Domain {
       UUID variantId,
       BigDecimal qty,
       BigDecimal refundAmount,
-      String condition) {
+      String condition,
+      /** A no-receipt line's unit price, VAT included; null on a return against a sale. */
+      BigDecimal unitPrice,
+      /** The VAT in a no-receipt line; null on a return against a sale. */
+      BigDecimal taxAmount) {
+
+    /** A line of a return against a sale, whose price is the sale's. */
+    public ReturnItem(
+        UUID id,
+        UUID tenantId,
+        UUID returnId,
+        UUID variantId,
+        BigDecimal qty,
+        BigDecimal refundAmount,
+        String condition) {
+      this(id, tenantId, returnId, variantId, qty, refundAmount, condition, null, null);
+    }
+
     public static final String CONDITION_SEALED = "SEALED";
     public static final String CONDITION_OPENED = "OPENED";
     public static final String CONDITION_DAMAGED = "DAMAGED";

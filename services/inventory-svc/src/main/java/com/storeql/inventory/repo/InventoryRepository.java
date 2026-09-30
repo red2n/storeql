@@ -1995,6 +1995,47 @@ public class InventoryRepository extends BaseOutboxRepository {
         "receive back from order");
   }
 
+  /**
+   * Restocks a no-receipt return: goods with no sale to trace, so an anonymous batch of their own,
+   * placed as {@code where} says, with a RECEIVE movement referencing the return. Deduped on {@code
+   * dedupeId} inside the transaction, so a replay writes nothing.
+   *
+   * @return false when {@code dedupeId} was already processed
+   */
+  public boolean receiveNoReceiptOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID returnId,
+      String refType,
+      String fallbackNo,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, dedupeId, consumerName)) {
+            return false;
+          }
+          receiveAnonymous(
+              c,
+              tenantId,
+              storeId,
+              variantId,
+              qty,
+              fallbackNo,
+              MoveType.RECEIVE,
+              refType,
+              returnId,
+              eventFor,
+              where);
+          return true;
+        },
+        "receive no-receipt return");
+  }
+
   private Reservation loadReservationForUpdate(Connection c, UUID tenantId, UUID id)
       throws SQLException {
     try (PreparedStatement ps =

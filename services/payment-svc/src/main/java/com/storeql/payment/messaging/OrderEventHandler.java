@@ -41,10 +41,15 @@ class OrderEventHandler {
       handleContainerRefund(json);
       return;
     }
+    if (json.contains("\"GiftCardRedeemed\"")) {
+      handleGiftCardRedeemed(json);
+      return;
+    }
     String eventType;
     UUID eventId;
     UUID tenantId;
     UUID orderId;
+    PaymentService.ExchangeReturn exchange = null;
     BigDecimal requestedAmount; // null => cancellation: refund all remaining captured
     String reason;
     String kind = null;
@@ -58,8 +63,16 @@ class OrderEventHandler {
         String method = obj.getString("refundMethod", REFUND_METHOD_ORIGINAL);
         if (!REFUND_METHOD_ORIGINAL.equals(method)
             && !"STORE_CREDIT".equals(method)
-            && !"GIFT_CARD".equals(method)) {
+            && !"GIFT_CARD".equals(method)
+            && !"EXCHANGE".equals(method)) {
           return;
+        }
+        if ("EXCHANGE".equals(method)) {
+          exchange = exchangeOf(obj);
+          if (exchange == null) {
+            LOG.log(Level.WARNING, "Exchange return without an exchange order skipped");
+            return;
+          }
         }
         returnRefund =
             new PaymentService.ReturnRefund(
@@ -102,6 +115,10 @@ class OrderEventHandler {
       return;
     }
 
+    if (exchange != null) {
+      service.exchangeForOrderEvent(eventId, CONSUMER_NAME, tenantId, orderId, exchange);
+      return;
+    }
     if (returnRefund != null) {
       service.refundReturnForOrderEvent(
           eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, returnRefund);
@@ -109,6 +126,63 @@ class OrderEventHandler {
     }
     service.refundForOrderEvent(
         eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, kind);
+  }
+
+  private static PaymentService.ExchangeReturn exchangeOf(JsonObject obj) {
+    if (!obj.containsKey("exchangeOrderId") || obj.isNull("exchangeOrderId")) return null;
+    BigDecimal refund = obj.getJsonNumber("refundAmount").bigDecimalValue();
+    BigDecimal exchanged =
+        obj.containsKey("exchangeAmount") && !obj.isNull("exchangeAmount")
+            ? obj.getJsonNumber("exchangeAmount").bigDecimalValue()
+            : refund;
+    // Never more exchanged than returned, never negative.
+    exchanged = exchanged.min(refund).max(BigDecimal.ZERO);
+    return new PaymentService.ExchangeReturn(
+        Ids.parse(obj.getString("exchangeOrderId")),
+        obj.containsKey("storeId") && !obj.isNull("storeId")
+            ? Ids.parse(obj.getString("storeId"))
+            : null,
+        exchanged,
+        refund,
+        obj.containsKey("returnId") && !obj.isNull("returnId")
+            ? Ids.parse(obj.getString("returnId"))
+            : null,
+        obj.containsKey("customerId") && !obj.isNull("customerId")
+            ? Ids.parse(obj.getString("customerId"))
+            : null,
+        obj.containsKey("currency") && !obj.isNull("currency") ? obj.getString("currency") : null);
+  }
+
+  /**
+   * A gift card charged by order-svc's redeem: the tender follows (once per redemption), so an
+   * order is never counted paid by a card that was not charged.
+   */
+  void handleGiftCardRedeemed(String json) {
+    UUID eventId;
+    UUID tenantId;
+    UUID redemptionId;
+    UUID orderId;
+    UUID storeId;
+    BigDecimal amount;
+    try (var reader = Json.createReader(new StringReader(json))) {
+      JsonObject obj = reader.readObject();
+      if (!"GiftCardRedeemed".equals(obj.getString("eventType", null))) return;
+      eventId = Ids.parse(obj.getString("eventId"));
+      tenantId = Ids.parse(obj.getString("tenantId"));
+      redemptionId = Ids.parse(obj.getString("redemptionId"));
+      orderId = Ids.parse(obj.getString("orderId"));
+      storeId =
+          obj.containsKey("storeId") && !obj.isNull("storeId")
+              ? Ids.parse(obj.getString("storeId"))
+              : null;
+      amount = obj.getJsonNumber("amount").bigDecimalValue();
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "Malformed gift card event skipped: " + e.getMessage());
+      return;
+    }
+    if (amount.signum() <= 0) return;
+    service.recordGiftCardRedemption(
+        eventId, CONSUMER_NAME + "/gift-card", tenantId, redemptionId, orderId, storeId, amount);
   }
 
   /**

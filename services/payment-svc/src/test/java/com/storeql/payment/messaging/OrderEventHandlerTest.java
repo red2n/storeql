@@ -33,6 +33,31 @@ class OrderEventHandlerTest {
     String reason;
     String kind;
     ReturnRefund ret;
+    ExchangeReturn exchange;
+    UUID redemption;
+    UUID giftCardOrder;
+    BigDecimal giftCardAmount;
+
+    @Override
+    public void exchangeForOrderEvent(
+        UUID eventId, String consumer, UUID tenantId, UUID orderId, ExchangeReturn ex) {
+      this.exchange = ex;
+    }
+
+    @Override
+    public boolean recordGiftCardRedemption(
+        UUID eventId,
+        String consumer,
+        UUID tenantId,
+        UUID redemptionId,
+        UUID orderId,
+        UUID storeId,
+        BigDecimal amount) {
+      this.redemption = redemptionId;
+      this.giftCardOrder = orderId;
+      this.giftCardAmount = amount;
+      return true;
+    }
 
     @Override
     public void refundReturnForOrderEvent(
@@ -118,6 +143,68 @@ class OrderEventHandlerTest {
     handler.handle(returned("GIFT_CARD", "5.00"));
     assertEquals(2, service.calls);
     assertEquals("GIFT_CARD", service.ret.method());
+  }
+
+  @Test
+  void exchangeReturnGoesToTheExchangePathWithBothAmounts() {
+    UUID newOrder = Ids.newId();
+    handler.handle(
+        returned("EXCHANGE", "25.00")
+            .replace(
+                "\"currency\"",
+                "\"exchangeOrderId\":\"" + newOrder + "\",\"exchangeAmount\":20.00,\"currency\""));
+
+    assertEquals(0, service.calls, "an exchange is not a plain refund");
+    assertEquals(newOrder, service.exchange.exchangeOrderId());
+    assertEquals(new BigDecimal("20.00"), service.exchange.exchangeAmount());
+    assertEquals(new BigDecimal("25.00"), service.exchange.refundAmount());
+  }
+
+  @Test
+  void exchangeWithoutANewOrderIsSkipped() {
+    handler.handle(returned("EXCHANGE", "25.00"));
+
+    assertNull(service.exchange);
+    assertEquals(0, service.calls);
+  }
+
+  @Test
+  void giftCardRedeemedBecomesATender() {
+    UUID redemption = Ids.newId();
+    handler.handle(
+        "{\"eventId\":\""
+            + EVENT
+            + "\",\"eventType\":\"GiftCardRedeemed\",\"tenantId\":\""
+            + TENANT
+            + "\",\"redemptionId\":\""
+            + redemption
+            + "\",\"giftCardId\":\""
+            + Ids.newId()
+            + "\",\"orderId\":\""
+            + ORDER
+            + "\",\"storeId\":\""
+            + Ids.newId()
+            + "\",\"amount\":12.50,\"currency\":\"GBP\"}");
+
+    assertEquals(redemption, service.redemption);
+    assertEquals(ORDER, service.giftCardOrder);
+    assertEquals(new BigDecimal("12.50"), service.giftCardAmount);
+  }
+
+  @Test
+  void aNoReceiptReturnAnnouncementIsIgnored() {
+    handler.handle(
+        "{\"eventId\":\""
+            + EVENT
+            + "\",\"eventType\":\"NoReceiptReturnRecorded\",\"tenantId\":\""
+            + TENANT
+            + "\",\"orderId\":\""
+            + ORDER
+            + "\",\"refundAmount\":5.00}");
+
+    assertEquals(0, service.calls);
+    assertNull(service.exchange);
+    assertNull(service.redemption);
   }
 
   @Test

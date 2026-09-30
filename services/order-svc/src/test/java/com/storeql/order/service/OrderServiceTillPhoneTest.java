@@ -85,7 +85,9 @@ class OrderServiceTillPhoneTest {
     lenient().when(tenants.resolveFulfilment(any(), any())).thenReturn(Optional.empty());
     lenient().when(config.pricingEnforce()).thenReturn(false);
     lenient()
-        .when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList()))
+        .when(
+            repo.createOrder(
+                any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
   }
 

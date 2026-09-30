@@ -628,14 +628,23 @@ class ReturnsIT {
     assertThat(read.getString("currency"), is("USD"));
     JsonObject redeemed =
         data(
-            as("/gift-cards/" + code + "/redeem", T, "CASHIER", CASHIER, null)
-                .post(Entity.entity("{\"amount\":4.00}", MediaType.APPLICATION_JSON)),
+            post(
+                "/gift-cards/" + code + "/redeem",
+                "{\"amount\":4.00,\"orderId\":\"" + order + "\"}",
+                T,
+                "CASHIER",
+                CASHIER,
+                Ids.newId().toString()),
             200);
-    assertThat(
-        redeemed.getJsonNumber("currentBalance").bigDecimalValue(), is(new BigDecimal("6.00")));
+    assertThat(redeemed.getJsonNumber("balance").bigDecimalValue(), is(new BigDecimal("6.00")));
     Response tooMuch =
-        as("/gift-cards/" + code + "/redeem", T, "CASHIER", CASHIER, null)
-            .post(Entity.entity("{\"amount\":7.00}", MediaType.APPLICATION_JSON));
+        post(
+            "/gift-cards/" + code + "/redeem",
+            "{\"amount\":7.00,\"orderId\":\"" + sale(T, STORE, null) + "\"}",
+            T,
+            "CASHIER",
+            CASHIER,
+            Ids.newId().toString());
     assertThat(tooMuch.getStatus(), is(409));
 
     // A ledger row names the order and the return; the events carry it.
