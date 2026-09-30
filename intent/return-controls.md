@@ -7,7 +7,7 @@
 | **Roadmap** | new: the flow catalogue (artifact R391n2d2cV23sdKHKUnpGc), returns domain — ret-till-return, ret-no-receipt, ret-stock-disposition, rfd-storecredit-giftcard, exc-exchange |
 | **Services** | order-svc owns returns, the return policy, receipt lookup, gift cards and exchanges · inventory-svc puts returned stock where its condition says · payment-svc refunds and announces every refund, whatever the method · customer-svc credits store credit and takes back loyalty points · purchase-svc posts it · the app gives the till a returns screen |
 | **Builds on** | `returns`/`return_items` (`condition` column never used), `POST /orders/{id}/returns` (`createReturn`), `OrderReturned` (no condition, no customer), inventory-svc `receiveReturnFromOrderOnce` (always AVAILABLE), batch `material_status` (AVAILABLE/QUARANTINE/INSPECTION/DAMAGED/RECALLED), payment-svc `refundForOrderEvent` (ORIGINAL only), `PaymentRefunded` → purchase-svc `SalesEventHandler`, customer-svc `store_credit_ledger`/`loyalty_ledger`/`loyalty_point_lots` (both keyed by `order_id`), order-svc `gift_cards`/`gift_card_transactions`, `fiscal_receipts.full_number`, the audit trail, `pos_void_log`, the admin Orders *Return / Refund* dialog |
-| **Built in** | slice 1 (the controls) `0f6decf3` · slice 2 (the till's Returns screen, exchanges, no-receipt returns, the gift-card tender charged first) the commit after it on `fix/flow-catalogue-findings`, 2026-09-30 |
+| **Built in** | slice 1 (the controls) `0f6decf3` · slice 2 (the till's Returns screen, exchanges, no-receipt returns, the gift-card tender charged first) `94e74776`, 2026-09-30 |
 
 ## Problem
 
