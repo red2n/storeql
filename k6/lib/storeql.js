@@ -83,6 +83,18 @@ let counter = 0;
  * guard rightly refuses (400 CARD_DATA_NOT_ACCEPTED), failing whichever suite drew it. The millis
  * in base 36 begin with a letter, so no run of thirteen digits can form.
  */
+/**
+ * A valid EAN-13 in the in-store range (prefix 2): twelve digits and their GS1 check digit.
+ * product-svc refuses a barcode shaped like a GTIN whose check digit is wrong.
+ */
+export function gtin13() {
+  counter += 1;
+  const body = `2${String(Date.now()).slice(-8)}${String(counter % 100).padStart(2, '0')}${Math.floor(Math.random() * 10)}`;
+  let sum = 0;
+  for (let i = 0; i < 12; i += 1) sum += Number(body[i]) * (i % 2 === 0 ? 1 : 3);
+  return `${body}${(10 - (sum % 10)) % 10}`;
+}
+
 export function uniq() {
   counter += 1;
   return `${Date.now().toString(36)}${counter.toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
@@ -342,7 +354,8 @@ export function staffUser(tenant, role, storeIds) {
 }
 
 export function setTenantStatus(admin, tenantId, status) {
-  return call('PATCH', `/api/tenant-svc/platform/tenants/${tenantId}/status`, { token: admin.token, body: { status } });
+  // Switching a business off must say why; switching it back on needs no reason.
+  return call('PATCH', `/api/tenant-svc/platform/tenants/${tenantId}/status`, { token: admin.token, body: { status, ...(status === 'INACTIVE' ? { reason: 'k6 suspension' } : {}) } });
 }
 
 export function setStoreStatus(tenant, storeId, status) {
@@ -379,7 +392,8 @@ export function sellableVariant(tenant, name, extra = {}) {
   const variant = must(
     call('POST', `/api/product-svc/admin/products/${product.id}/variants`, {
       token: t,
-      body: { sku, barcode: `${run}`.slice(0, 13), unit: 'PCS' },
+      // An internal code, not a GTIN: product-svc checks the GS1 digit of any all-digit code of GTIN length.
+      body: { sku, barcode: `K${run}`.slice(0, 13), unit: 'PCS' },
     }),
     201,
     `create variant ${sku}`

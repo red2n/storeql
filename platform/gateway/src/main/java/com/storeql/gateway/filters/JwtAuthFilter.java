@@ -425,6 +425,11 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     if ("GET".equals(method) && isOrderSelfRead(path)) {
       return true;
     }
+    // The shopper cancelling one of their own orders before anything was paid: order-svc lets only
+    // the login the order belongs to do it, and only while it is an unpaid PENDING online order.
+    if ("POST".equals(method) && isOrderSelfCancel(path)) {
+      return true;
+    }
     // A split checkout (order orchestration): the shopper reading the parts of the delivery they
     // placed, with order-svc's object-level check behind it like an order read by id.
     if ("GET".equals(method) && isOrderGroupSelfRead(path)) {
@@ -661,6 +666,21 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     }
     String child = rest.substring(slash + 1);
     return "history".equals(child) || "returns".equals(child) || "fiscal-receipt".equals(child);
+  }
+
+  /**
+   * {@code POST api/order-svc/orders/{id}/cancel} with an id-shaped segment and nothing after it.
+   *
+   * @param path the normalized request path
+   * @return {@code true} for exactly that shape
+   */
+  private static boolean isOrderSelfCancel(String path) {
+    String prefix = "api/order-svc/orders/";
+    String suffix = "/cancel";
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) {
+      return false;
+    }
+    return looksLikeUuid(path.substring(prefix.length(), path.length() - suffix.length()));
   }
 
   private static boolean isPaymentIntentRead(String path) {

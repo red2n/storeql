@@ -76,6 +76,20 @@ public class AuditTrailRepository extends BaseJdbcRepository {
                   + " FROM order_status_history h"
                   + " JOIN orders o ON o.tenant_id = h.tenant_id AND o.id = h.order_id"
                   + " WHERE h.tenant_id=? AND h.to_status='CANCELLED'"),
+          // A catalogue-mode order given its price by a manager (SJ-D41): the history row of the
+          // AWAITING_PRICE to PENDING move names who priced it and when, the order the total it
+          // was priced at. Priced once, so one entry per order.
+          new Branch(
+              AuditEvent.TYPE_PRICED,
+              "SELECT h.id, h.tenant_id, 'PRICED' AS type, h.changed_at AS occurred_at,"
+                  + " h.changed_by AS actor_id, o.store_id, h.order_id, o.total AS amount,"
+                  + " h.reason, NULL::text AS detail, NULL::uuid AS variant_id,"
+                  + " NULL::uuid AS replayed_by,"
+                  + NO_APPROVAL
+                  + " FROM order_status_history h"
+                  + " JOIN orders o ON o.tenant_id = h.tenant_id AND o.id = h.order_id"
+                  + " WHERE h.tenant_id=? AND h.from_status='AWAITING_PRICE'"
+                  + " AND h.to_status='PENDING'"),
           new Branch(
               AuditEvent.TYPE_RETURN,
               "SELECT id, tenant_id, 'RETURN' AS type, created_at AS occurred_at,"

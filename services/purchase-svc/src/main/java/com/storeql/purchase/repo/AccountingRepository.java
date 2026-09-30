@@ -389,26 +389,92 @@ public class AccountingRepository extends BaseJdbcRepository {
         "accounting sync attempts");
   }
 
-  /** Queued to go now, whatever it was waiting for; a delivered one is left as it is. */
-  public boolean retry(UUID tenantId, UUID id, Instant now) {
+  /**
+   * Queued to go now, whatever it was waiting for; a delivered one is left as it is. An UNCERTAIN
+   * one queued this way is a person's word that it never landed, and is recorded as such.
+   */
+  public boolean retry(UUID tenantId, UUID id, Instant now, UUID by) {
     return inTx(
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "UPDATE accounting_syncs SET status = ?, next_attempt_at = ?, leased_until = NULL"
+                  "UPDATE accounting_syncs SET"
+                      + " resolution = CASE WHEN status = 'UNCERTAIN' THEN 'NOT_LANDED' ELSE resolution END,"
+                      + " resolved_by = CASE WHEN status = 'UNCERTAIN' THEN ? ELSE resolved_by END,"
+                      + " resolved_at = CASE WHEN status = 'UNCERTAIN' THEN ? ELSE resolved_at END,"
+                      + " status = ?, next_attempt_at = ?, leased_until = NULL"
                       + " WHERE tenant_id = ? AND id = ? AND status IN (?, ?, ?, ?)")) {
-            ps.setString(1, Accounting.PENDING);
+            ps.setObject(1, by);
             ps.setObject(2, at(now));
-            ps.setObject(3, tenantId);
-            ps.setObject(4, id);
-            ps.setString(5, Accounting.PENDING);
-            ps.setString(6, Accounting.FAILED);
-            ps.setString(7, Accounting.UNCERTAIN);
-            ps.setString(8, Accounting.SKIPPED);
+            ps.setString(3, Accounting.PENDING);
+            ps.setObject(4, at(now));
+            ps.setObject(5, tenantId);
+            ps.setObject(6, id);
+            ps.setString(7, Accounting.PENDING);
+            ps.setString(8, Accounting.FAILED);
+            ps.setString(9, Accounting.UNCERTAIN);
+            ps.setString(10, Accounting.SKIPPED);
             return ps.executeUpdate() == 1;
           }
         },
         "retry accounting sync");
+  }
+
+  /**
+   * Settles an UNCERTAIN push by a person's word, once: it landed (DELIVERED under the package's
+   * reference, so never pushed again) or it did not (PENDING, due now). False when the push is not
+   * UNCERTAIN (any more).
+   */
+  public boolean resolveUncertain(
+      UUID tenantId,
+      UUID id,
+      boolean landed,
+      String externalId,
+      UUID by,
+      String note,
+      Instant now) {
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE accounting_syncs SET status = ?, external_id = ?, delivered_at = ?,"
+                      + " next_attempt_at = ?, leased_until = NULL, resolution = ?, resolved_by = ?,"
+                      + " resolved_at = ?, resolution_note = ?"
+                      + " WHERE tenant_id = ? AND id = ? AND status = 'UNCERTAIN'")) {
+            ps.setString(1, landed ? Accounting.DELIVERED : Accounting.PENDING);
+            ps.setString(2, landed ? externalId : null);
+            ps.setObject(3, landed ? at(now) : null);
+            ps.setObject(4, at(now));
+            ps.setString(5, landed ? Accounting.LANDED : Accounting.NOT_LANDED);
+            ps.setObject(6, by);
+            ps.setObject(7, at(now));
+            ps.setString(8, note);
+            ps.setObject(9, tenantId);
+            ps.setObject(10, id);
+            return ps.executeUpdate() == 1;
+          }
+        },
+        "resolve uncertain accounting sync");
+  }
+
+  /** What a person decided about the push, if they did. */
+  public Optional<Accounting.Resolution> resolution(UUID tenantId, UUID syncId) {
+    return query(
+            "SELECT resolution, resolved_by, resolved_at, resolution_note FROM accounting_syncs"
+                + " WHERE tenant_id = ? AND id = ? AND resolution IS NOT NULL",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, syncId);
+            },
+            rs ->
+                new Accounting.Resolution(
+                    rs.getString("resolution"),
+                    rs.getObject("resolved_by", UUID.class),
+                    instant(rs, "resolved_at"),
+                    rs.getString("resolution_note")),
+            "accounting sync resolution")
+        .stream()
+        .findFirst();
   }
 
   public boolean skip(UUID tenantId, UUID id, String reason) {

@@ -485,11 +485,17 @@ class CustomerIT {
   // ── helpers ───────────────────────────────────────────────────────────────
 
   private Response post(String path, String json) {
+    // A manual award or adjustment needs the key of its attempt; every call here is a new attempt.
+    boolean needsKey =
+        path.endsWith("/loyalty/earn")
+            || path.endsWith("/loyalty/adjust")
+            || path.endsWith("/store-credit/issue");
     return target
         .path(path)
         .request(MediaType.APPLICATION_JSON)
         .header("X-Tenant-Id", TENANT)
         .header("X-Roles", "OWNER")
+        .header("Idempotency-Key", needsKey ? Ids.newId().toString() : null)
         .post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
@@ -571,6 +577,7 @@ class CustomerIT {
         target
             .path("/customers/" + ghost + "/store-credit/issue")
             .request()
+            .header("Idempotency-Key", Ids.newId().toString())
             .header("X-Tenant-Id", nobody)
             .header("X-Roles", "MANAGER")
             .post(jakarta.ws.rs.client.Entity.json("{\"amount\":5,\"reason\":\"x\"}"));

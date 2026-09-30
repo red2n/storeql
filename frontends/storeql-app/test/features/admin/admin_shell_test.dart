@@ -34,7 +34,7 @@ class _Server implements HttpClientAdapter {
   }
 }
 
-Future<void> _pump(WidgetTester tester, String role) async {
+Future<void> _pump(WidgetTester tester, String role, {List<String> storeIds = const []}) async {
   // Desktop width: the sectioned list sits beside the page, every entry drawn.
   tester.view.physicalSize = const Size(1400, 2400);
   tester.view.devicePixelRatio = 1;
@@ -45,7 +45,7 @@ Future<void> _pump(WidgetTester tester, String role) async {
     key: UniqueKey(),
     overrides: [
       apiClientProvider.overrideWithValue(FakeApiClient(dio)),
-      authNotifierProvider.overrideWith(() => RoleAuth(role)),
+      authNotifierProvider.overrideWith(() => RoleAuth(role, storeIds: storeIds)),
     ],
     child: MaterialApp(
       theme: AppTheme.light,
@@ -78,5 +78,29 @@ void main() {
     await _pump(tester, 'STOREKEEPER');
     expect(find.text('Data export'), findsNothing);
     expect(find.text('Inventory'), findsOneWidget);
+  });
+
+  testWidgets('Security events is listed to an owner and a head-office manager, not to a manager held to stores',
+      (tester) async {
+    await _pump(tester, 'OWNER');
+    expect(find.text('Security events'), findsOneWidget);
+    await _pump(tester, 'MANAGER');
+    expect(find.text('Security events'), findsOneWidget);
+    await _pump(tester, 'MANAGER', storeIds: ['s1']);
+    expect(find.text('Security events'), findsNothing);
+    // Security notices, a different page, is unaffected.
+    expect(find.text('Security notices'), findsOneWidget);
+    await _pump(tester, 'STOREKEEPER');
+    expect(find.text('Security events'), findsNothing);
+  });
+
+  testWidgets('Changes (stores and staff) is management\'s, a store-held manager included, not a storekeeper\'s',
+      (tester) async {
+    await _pump(tester, 'OWNER');
+    expect(find.text('Changes'), findsOneWidget);
+    await _pump(tester, 'MANAGER', storeIds: ['s1']);
+    expect(find.text('Changes'), findsOneWidget);
+    await _pump(tester, 'STOREKEEPER');
+    expect(find.text('Changes'), findsNothing);
   });
 }

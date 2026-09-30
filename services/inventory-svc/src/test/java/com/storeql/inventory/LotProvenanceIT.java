@@ -62,6 +62,13 @@ class LotProvenanceIT {
   private static final String T = "01a090ae-611e-7011-ae7d-1bd68c966ff6";
   private static final String USER = "01a090ae-611e-7033-93f1-01903ac69340";
 
+  /** Use-by dates that stay in the future, however long since this was written. */
+  private static final String D1 = java.time.LocalDate.now().plusDays(10).toString();
+
+  private static final String D2 = java.time.LocalDate.now().plusDays(60).toString();
+  private static final String D3 = java.time.LocalDate.now().plusDays(40).toString();
+  private static final String D4 = java.time.LocalDate.now().plusDays(20).toString();
+
   @Inject WebTarget target;
   @Inject InventoryService inventory;
 
@@ -79,8 +86,8 @@ class LotProvenanceIT {
     String a = uuid();
     String b = uuid();
     String variant = uuid();
-    String l1 = receive(a, variant, "10", "L1", "2026-10-01", "2.50");
-    String l2 = receive(a, variant, "5", "L2", "2026-12-01", "3.00");
+    String l1 = receive(a, variant, "10", "L1", D1, "2.50");
+    String l2 = receive(a, variant, "5", "L2", D2, "3.00");
 
     String order = createTransfer(a, b, variant, "DIRECT", "12");
     ok(post("/admin/inventory/transfers/" + order + "/ship", null));
@@ -90,12 +97,12 @@ class LotProvenanceIT {
     assertThat(arrived.keySet().toString(), arrived.size(), is(2));
     JsonObject bL1 = arrived.get("L1");
     assertThat(bL1.getJsonNumber("remainingQty").bigDecimalValue(), is(new BigDecimal("10.000")));
-    assertThat(bL1.getString("expiryDate"), is("2026-10-01"));
+    assertThat(bL1.getString("expiryDate"), is(D1));
     assertThat(
         bL1.getJsonNumber("costPrice").bigDecimalValue(), comparesEqualTo(new BigDecimal("2.50")));
     JsonObject bL2 = arrived.get("L2");
     assertThat(bL2.getJsonNumber("remainingQty").bigDecimalValue(), is(new BigDecimal("2.000")));
-    assertThat(bL2.getString("expiryDate"), is("2026-12-01"));
+    assertThat(bL2.getString("expiryDate"), is(D2));
     assertThat(
         bL2.getJsonNumber("costPrice").bigDecimalValue(), comparesEqualTo(new BigDecimal("3.00")));
 
@@ -138,8 +145,8 @@ class LotProvenanceIT {
     String a = uuid();
     String b = uuid();
     String variant = uuid();
-    receive(a, variant, "4", "L1", "2026-10-01", "2.50");
-    receive(a, variant, "4", "L2", "2026-11-01", "2.75");
+    receive(a, variant, "4", "L1", D1, "2.50");
+    receive(a, variant, "4", "L2", D3, "2.75");
 
     String order = createTransfer(a, b, variant, "INTRANSIT", "6");
     ok(post("/admin/inventory/transfers/" + order + "/ship", null));
@@ -151,7 +158,7 @@ class LotProvenanceIT {
     assertThat(
         arrived.get("L1").getJsonNumber("remainingQty").bigDecimalValue(),
         is(new BigDecimal("4.000")));
-    assertThat(arrived.get("L1").getString("expiryDate"), is("2026-10-01"));
+    assertThat(arrived.get("L1").getString("expiryDate"), is(D1));
     assertThat(
         arrived.get("L2").getJsonNumber("remainingQty").bigDecimalValue(),
         is(new BigDecimal("2.000")));
@@ -166,7 +173,7 @@ class LotProvenanceIT {
     String a = uuid();
     String b = uuid();
     String variant = uuid();
-    receive(a, variant, "3", null, "2026-10-15", null);
+    receive(a, variant, "3", null, D4, null);
 
     String order = createTransfer(a, b, variant, "DIRECT", "3");
     ok(post("/admin/inventory/transfers/" + order + "/ship", null));
@@ -174,7 +181,7 @@ class LotProvenanceIT {
     List<JsonObject> arrived = batches(b, variant);
     assertThat(arrived, hasSize(1));
     assertThat(arrived.get(0).getString("batchNo"), is("TO-" + Ids.shortRef(Ids.parse(order))));
-    assertThat(arrived.get(0).getString("expiryDate"), is("2026-10-15"));
+    assertThat(arrived.get(0).getString("expiryDate"), is(D4));
     assertThat(
         arrived.get(0).containsKey("costPrice") && !arrived.get(0).isNull("costPrice"), is(false));
     assertThat(expiringLots(b, 30), is(List.of("TO-" + Ids.shortRef(Ids.parse(order)))));
@@ -186,7 +193,7 @@ class LotProvenanceIT {
     String a = uuid();
     String b = uuid();
     String variant = uuid();
-    receive(a, variant, "2", "L1", "2026-10-01", "2.50");
+    receive(a, variant, "2", "L1", D1, "2.50");
 
     String order = createTransfer(a, b, variant, "DIRECT", "5");
     Response r = post("/admin/inventory/transfers/" + order + "/ship", null);
@@ -206,7 +213,7 @@ class LotProvenanceIT {
   void aMoveOrderCarriesTheLotItPicked() {
     String a = uuid();
     String variant = uuid();
-    String l1 = receive(a, variant, "6", "L1", "2026-10-01", "1.20");
+    String l1 = receive(a, variant, "6", "L1", D1, "1.20");
 
     String order = createMoveOrder(a, variant, "4");
     ok(post("/admin/inventory/move-orders/" + order + "/pick", null));
@@ -217,7 +224,7 @@ class LotProvenanceIT {
     JsonObject child =
         all.stream().filter(x -> !x.getString("id").equals(l1)).findFirst().orElseThrow();
     assertThat(child.getString("batchNo"), is("L1"));
-    assertThat(child.getString("expiryDate"), is("2026-10-01"));
+    assertThat(child.getString("expiryDate"), is(D1));
     assertThat(
         child.getJsonNumber("costPrice").bigDecimalValue(),
         comparesEqualTo(new BigDecimal("1.20")));
@@ -233,7 +240,7 @@ class LotProvenanceIT {
   void aReturnComesBackUnderTheLotItWasSoldFromAndNeverTwice() {
     String a = uuid();
     String variant = uuid();
-    String l1 = receive(a, variant, "10", "L1", "2026-10-01", "2.50");
+    String l1 = receive(a, variant, "10", "L1", D1, "2.50");
     UUID order = Ids.newId();
     inventory.deductSaleFromOrderOnce(
         Ids.newId(),
@@ -251,7 +258,7 @@ class LotProvenanceIT {
     JsonObject back =
         after.stream().filter(x -> !x.getString("id").equals(l1)).findFirst().orElseThrow();
     assertThat(back.getString("batchNo"), is("L1"));
-    assertThat(back.getString("expiryDate"), is("2026-10-01"));
+    assertThat(back.getString("expiryDate"), is(D1));
     assertThat(
         back.getJsonNumber("costPrice").bigDecimalValue(), comparesEqualTo(new BigDecimal("2.50")));
     assertThat(back.getJsonNumber("remainingQty").bigDecimalValue(), is(new BigDecimal("2.000")));

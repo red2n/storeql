@@ -150,6 +150,15 @@ class RetentionPurgeIT {
 
   /** A password-reset row, dated {@code age} ago — {@code tenant_id} is always null. */
   private static String passwordReset(String age) {
+    return passwordRow("PASSWORD_RESET", age);
+  }
+
+  /** A "your password was changed" row, dated {@code age} ago — {@code tenant_id} null too. */
+  private static String passwordChanged(String age) {
+    return passwordRow("PASSWORD_CHANGED", age);
+  }
+
+  private static String passwordRow(String type, String age) {
     String id = Ids.newId().toString();
     exec(
         PG,
@@ -158,7 +167,9 @@ class RetentionPurgeIT {
             + id
             + "', NULL, '"
             + Ids.newId()
-            + "', 'PASSWORD_RESET', 'EMAIL', 'a@example.com', 'Reset your password',"
+            + "', '"
+            + type
+            + "', 'EMAIL', 'a@example.com', 'Reset your password',"
             + "'Shopper account: [link removed]', 'SENT', now() - interval '"
             + age
             + "')");
@@ -177,5 +188,21 @@ class RetentionPurgeIT {
     assertThat(exists(recent), is("1"));
     // Idempotent: a second sweep the same moment finds nothing left due.
     assertThat(retentionService.purgePasswordResets(), is(0));
+  }
+
+  @Test
+  void passwordChangedRowsAreDeletedWithTheResetRowsAfterTheSamePeriod() {
+    String oldChanged = passwordChanged("31 days");
+    String recentChanged = passwordChanged("1 days");
+    String oldReset = passwordReset("31 days");
+
+    int purged = retentionService.purgePasswordResets();
+
+    // Counted by what this test made: other rows in the log are older only if another test made
+    // them.
+    assertThat(purged >= 2, is(true));
+    assertThat(exists(oldChanged), is("0"));
+    assertThat(exists(oldReset), is("0"));
+    assertThat(exists(recentChanged), is("1"));
   }
 }

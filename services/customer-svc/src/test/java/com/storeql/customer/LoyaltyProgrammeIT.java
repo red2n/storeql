@@ -133,10 +133,12 @@ class LoyaltyProgrammeIT {
 
   private JsonObject earn(String customerId, String points) {
     return data(
-        post(
-            "/customers/" + customerId + "/loyalty/earn",
-            "OWNER",
-            "{\"points\":" + points + ",\"reason\":\"test\"}"));
+        as("/customers/" + customerId + "/loyalty/earn", "OWNER")
+            .header("Idempotency-Key", Ids.newId().toString())
+            .post(
+                Entity.entity(
+                    "{\"points\":" + points + ",\"reason\":\"test\"}",
+                    MediaType.APPLICATION_JSON)));
   }
 
   private JsonObject loyalty(String customerId) {

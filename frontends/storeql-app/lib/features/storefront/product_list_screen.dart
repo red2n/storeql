@@ -86,6 +86,10 @@ class _ProductListScreenState extends ConsumerState<ProductListScreen> {
         // Store switcher (only shown when the tenant has more than one store)
         const SliverToBoxAdapter(child: _StoreSwitcher()),
 
+        // A shop that only delivers says so while the shopper browses, not
+        // first at checkout (dark-store picking).
+        const SliverToBoxAdapter(child: _DeliveryOnlyNotice()),
+
         // Offers hero carousel
         const SliverToBoxAdapter(child: _OffersCarousel()),
 
@@ -270,6 +274,39 @@ class _ShopSkeleton extends StatelessWidget {
         ),
       );
     });
+  }
+}
+
+/// A quiet line under the store switcher when the store being browsed offers
+/// no collection (a dark store): the shopper knows before the cart. Nothing
+/// while the config loads or where collection is offered.
+class _DeliveryOnlyNotice extends ConsumerWidget {
+  const _DeliveryOnlyNotice();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final offered =
+        ref.watch(storefrontConfigProvider).value?.pickupOffered ?? true;
+    if (offered) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          context.pageGutter, AppSpacing.sm, context.pageGutter, 0),
+      child: Row(
+        key: const Key('browse-delivery-only'),
+        children: [
+          Icon(Icons.local_shipping_outlined,
+              size: 18, color: cs.onSurfaceVariant),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text('This shop delivers only. Collection is not offered.',
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(color: cs.onSurfaceVariant)),
+          ),
+        ],
+      ),
+    );
   }
 }
 

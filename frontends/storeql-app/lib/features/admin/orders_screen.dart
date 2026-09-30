@@ -18,6 +18,8 @@ import '../../core/input_mode.dart';
 import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import 'providers/admin_providers.dart';
+import 'recall_providers.dart';
+import 'recall_return_choice.dart';
 import 'providers/orders_pagination.dart';
 import 'sales_invoices_dialog.dart';
 import '../../shared/util/short_ref.dart';
@@ -448,6 +450,14 @@ class _ReturnDialogState extends ConsumerState<ReturnDialog> {
   bool _submitting = false;
   String? _error;
 
+  /// The recall notice this return settles, or null for an ordinary return.
+  RecallNotice? _recall;
+
+  /// Whether the return's recall covers this line: its goods go to recalled
+  /// stock, so no condition is asked for it.
+  bool _isRecalled(String variantId) =>
+      _recall?.lines.any((l) => l.variantId == variantId) ?? false;
+
   /// Why the server said a manager must take the return, as codes.
   List<String>? _needsManager;
 
@@ -486,10 +496,17 @@ class _ReturnDialogState extends ConsumerState<ReturnDialog> {
       });
       return;
     }
-    if (chosen.any((e) => _condition[e.key] == null)) {
+    if (chosen.any((e) => _condition[e.key] == null && !_isRecalled(e.key))) {
       setState(() {
         _needsManager = null;
         _error = 'Say what condition each returned item is in.';
+      });
+      return;
+    }
+    if (_recall != null && !chosen.any((e) => _isRecalled(e.key))) {
+      setState(() {
+        _needsManager = null;
+        _error = 'Choose the recalled item to take back, or turn off "This is a recall return".';
       });
       return;
     }
@@ -506,17 +523,23 @@ class _ReturnDialogState extends ConsumerState<ReturnDialog> {
         _reasonCtrl.text.trim().isEmpty ? 'Customer return' : _reasonCtrl.text.trim();
     final items = [
       for (final e in chosen)
-        {'variantId': e.key, 'qty': e.value, 'condition': _condition[e.key]},
+        {
+          'variantId': e.key,
+          'qty': e.value,
+          // A recalled line has none: the server sends the goods to RECALLED.
+          if (!_isRecalled(e.key)) 'condition': _condition[e.key],
+        },
     ];
     final body = <String, dynamic>{
       'reason': reason,
       'refundMethod': _method,
+      if (_recall != null) 'recallNoticeId': _recall!.id,
       if (topUp) 'giftCardCode': giftCode,
       'items': items,
     };
     // The same submit again (a retry after a network failure) is the same
     // attempt; anything changed is a new one.
-    final signature = '${body['reason']}|$_method|${topUp ? giftCode : ''}|'
+    final signature = '${body['reason']}|$_method|${topUp ? giftCode : ''}|${_recall?.id ?? ''}|'
         '${[for (final i in items) '${i['variantId']}:${i['qty']}:${i['condition']}'].join(',')}';
     if (_key == null || _keyFor != signature) {
       _key = newId();
@@ -714,11 +737,20 @@ class _ReturnDialogState extends ConsumerState<ReturnDialog> {
                       currency: order.currency,
                       value: _returnQty[line.variantId] ?? 0,
                       condition: _condition[line.variantId],
+                      recalled: _isRecalled(line.variantId),
                       onChanged: (v) =>
                           setState(() => _returnQty[line.variantId] = v),
                       onCondition: (c) =>
                           setState(() => _condition[line.variantId] = c),
                     ),
+                  RecallReturnChoice(
+                    orderId: widget.orderId,
+                    selected: _recall,
+                    onChanged: (n) => setState(() {
+                      _recall = n;
+                      _error = null;
+                    }),
+                  ),
                   const SizedBox(height: AppSpacing.md),
                   TextField(
                     controller: _reasonCtrl,
@@ -842,6 +874,9 @@ class _ReturnLineRow extends StatelessWidget {
   final String currency;
   final int value;
   final String? condition;
+
+  /// Covered by the recall this return settles: no condition is asked.
+  final bool recalled;
   final ValueChanged<int> onChanged;
   final ValueChanged<String> onCondition;
   const _ReturnLineRow({
@@ -851,6 +886,7 @@ class _ReturnLineRow extends StatelessWidget {
     required this.currency,
     required this.value,
     required this.condition,
+    this.recalled = false,
     required this.onChanged,
     required this.onCondition,
   });
@@ -893,7 +929,11 @@ class _ReturnLineRow extends StatelessWidget {
             ],
           ),
           // What state the goods are in decides where they go; nothing is preselected.
-          if (value > 0) ...[
+          if (value > 0 && recalled)
+            Text('Recalled: goes to recalled stock, no condition needed.',
+                key: Key('return-recalled-${line.variantId}'),
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant))
+          else if (value > 0) ...[
             Wrap(
               spacing: AppSpacing.sm,
               runSpacing: AppSpacing.xs,

@@ -72,6 +72,13 @@ class RecallIT {
   private static final String MANAGER = "01a090ae-611e-7031-ace6-811d51dcecba";
   private static final String STAFF = "01a090ae-611e-7032-8c9c-1dc9a2769104";
 
+  /** A use-by date this many days ahead, so no fixture goes stale. */
+  private static String in(int days) {
+    return java.time.LocalDate.now().plusDays(days).toString();
+  }
+
+  private static final String SOON = in(30);
+
   @Inject WebTarget target;
   @Inject InventoryService inventoryService;
 
@@ -89,9 +96,9 @@ class RecallIT {
     String storeB = uuid();
     String storeC = uuid();
     String variant = uuid();
-    receive(storeA, variant, "10", "L1", "2026-10-01");
-    receive(storeB, variant, "5", "L2", "2026-10-01");
-    receive(storeC, variant, "4", null, "2026-10-01");
+    receive(storeA, variant, "10", "L1", SOON);
+    receive(storeB, variant, "5", "L2", SOON);
+    receive(storeC, variant, "4", null, SOON);
     String orderA = sell(storeA, variant, "3");
     String orderB = sell(storeB, variant, "2");
     String orderC = sell(storeC, variant, "1");
@@ -149,6 +156,27 @@ class RecallIT {
     JsonArray listed =
         okArray(send("GET", "/admin/inventory/recalls", null, T, "OWNER", MANAGER, null));
     assertThat(find(listed, "id", recall.getString("id")).getInt("ordersAffected"), is(2));
+  }
+
+  /**
+   * Catalogue RCL gap 1: a notice's source is not only a UK regulator. REGULATOR, MANUFACTURER,
+   * SUPPLIER and INTERNAL are accepted (with OTHER and the original FSA and FSS) and come back as
+   * given; a source nobody named is refused whole.
+   */
+  @Test
+  void aRecallNamesItsSourceInAnyCountry() {
+    for (String source :
+        new String[] {"REGULATOR", "MANUFACTURER", "SUPPLIER", "INTERNAL", "OTHER", "FSA", "FSS"}) {
+      String json =
+          openJson("SRC-" + source, "WITHDRAWAL", lotLine(uuid(), "L1"), null)
+              .replace("\"source\":\"FSA\"", "\"source\":\"" + source + "\"");
+      JsonObject made = created(send("POST", "/admin/recalls", json, T, "OWNER", MANAGER, null));
+      assertThat(source, made.getString("source"), is(source));
+    }
+    String unknown =
+        openJson("SRC-NONE", "WITHDRAWAL", lotLine(uuid(), "L1"), null)
+            .replace("\"source\":\"FSA\"", "\"source\":\"THE_MINISTRY\"");
+    refused(T, unknown, "VALIDATION_FAILED");
   }
 
   @Test
@@ -252,7 +280,7 @@ class RecallIT {
   void twentyOpensOfOneNoticeMakeOneRecallAndItsBuyersAreAnnouncedOnce() throws Exception {
     String store = uuid();
     String variant = uuid();
-    receive(store, variant, "10", "L9", "2026-10-01");
+    receive(store, variant, "10", "L9", SOON);
     String order = sell(store, variant, "2");
     ExecutorService pool = Executors.newFixedThreadPool(20);
     try {
@@ -317,10 +345,10 @@ class RecallIT {
     String storeA = uuid();
     String storeB = uuid();
     String variant = uuid();
-    String aL1 = receive(storeA, variant, "10", "L1", "2026-10-01");
-    String aL2 = receive(storeA, variant, "5", "L2", "2026-10-01");
+    String aL1 = receive(storeA, variant, "10", "L1", SOON);
+    String aL2 = receive(storeA, variant, "5", "L2", SOON);
     String bL1 = receive(storeB, variant, "3", "l1", null);
-    String bUnknown = receive(storeB, variant, "4", null, "2026-10-01");
+    String bUnknown = receive(storeB, variant, "4", null, SOON);
 
     JsonObject recall = created(open("FSA-PRIN-01", "RECALL", lotLine(variant, "L1")));
     Map<String, JsonObject> held = heldByBatch(recall);
@@ -408,7 +436,7 @@ class RecallIT {
   void stockArrivingUnderAnOpenRecallIsHeldAsItArrives() {
     String store = uuid();
     String variant = uuid();
-    receive(store, variant, "2", "L7", "2026-10-15");
+    receive(store, variant, "2", "L7", in(20));
     String recallId =
         created(
                 open(
@@ -416,7 +444,11 @@ class RecallIT {
                     "WITHDRAWAL",
                     "{\"variantId\":\""
                         + variant
-                        + "\",\"expiryFrom\":\"2026-10-01\",\"expiryTo\":\"2026-10-31\"}"))
+                        + "\",\"expiryFrom\":\""
+                        + in(10)
+                        + "\",\"expiryTo\":\""
+                        + in(40)
+                        + "\"}"))
             .getString("id");
 
     JsonObject late =
@@ -424,7 +456,7 @@ class RecallIT {
             send(
                 "POST",
                 "/admin/inventory/receive",
-                receiveJson(store, variant, "6", "L8", "2026-10-20"),
+                receiveJson(store, variant, "6", "L8", in(25)),
                 T,
                 "STOREKEEPER",
                 STAFF,
@@ -436,7 +468,7 @@ class RecallIT {
             send(
                 "POST",
                 "/admin/inventory/receive",
-                receiveJson(store, variant, "6", "L9", "2026-11-20"),
+                receiveJson(store, variant, "6", "L9", in(70)),
                 T,
                 "STOREKEEPER",
                 STAFF,

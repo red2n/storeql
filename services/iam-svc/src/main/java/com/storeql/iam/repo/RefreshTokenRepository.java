@@ -126,6 +126,27 @@ public class RefreshTokenRepository extends BaseJdbcRepository {
   }
 
   /**
+   * Revokes every still-valid refresh token of one user and says how many that was — the sessions
+   * ended by "sign out everywhere". Tokens already revoked or spent are not counted.
+   *
+   * @param userId the user whose renewable sessions end
+   * @return how many refresh tokens were live and are now revoked
+   */
+  public int revokeLiveForUser(UUID userId) {
+    return inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE refresh_tokens SET revoked = true"
+                      + " WHERE user_id = ? AND revoked = false")) {
+            ps.setObject(1, userId);
+            return ps.executeUpdate();
+          }
+        },
+        "revoke live user tokens");
+  }
+
+  /**
    * Revoke every refresh token belonging to a tenant's users — used when a tenant is deactivated so
    * existing sessions can't mint new access tokens (login + refresh are blocked separately too).
    */

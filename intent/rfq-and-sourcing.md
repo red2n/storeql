@@ -74,6 +74,8 @@ Database-per-service (rule 1): the store and the FX rates are read, never joined
 
 ## Decisions
 
+- **A late quote is kept and marked, never refused** (2026-09-30, from the flow catalogue's "no response deadline" finding). `closesOn` stays advisory, as Scope says: a quote recorded after that day, judged in the store's own day (and never early where the zone cannot be read), is accepted and carries `receivedLate: true` on the bid and in the comparison. It does not change the ranking. A refusal was built first and taken out again, because a late quote is still a quote the buyer may want.
+- **Awarding away from the lowest bid needs a reason** (2026-09-30, same source). The buyer still decides, and the platform still only marks the lowest and shows the grade; but a line given to a supplier who was not the lowest comparable bid must say why (`400 PURCHASE_RFQ_AWARD_REASON_REQUIRED`), and the reason is kept on the award. A bid that cannot be ranked (no rate at home, or partial) never counts as lower.
 - **The buyer records the quote.** No supplier writes to the platform; a portal is its own row. The quote is `PUT` and replaces the earlier one as a set, so a corrected quote never leaves a stale price on a line.
 - **Orders first, award last.** The award's transaction records the status and the award rows after the draft orders exist; a lost race leaves drafts a person can cancel, never an award pointing at orders that were never raised.
 - **Untranslatable is shown, not guessed.** A price with no rate at home appears in the comparison with no home figure, is never the lowest and keeps its bid out of the ranking; the platform fetches no rates and guesses none (the Exchange rates convention).

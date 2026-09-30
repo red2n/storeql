@@ -219,7 +219,11 @@ public final class Events {
             + loginPart
             + (groupId != null ? ",\"groupId\":\"" + groupId + "\"" : "")
             + slotFields(slotStartsAt, slotEndsAt, slotTimeZone)
-            + "}");
+            // Last, so nothing that reads the payload from its start moves: consumers that dedupe
+            // on an eventId (the webhook fan-out) skipped an OrderPlaced that carried none.
+            + ",\"eventId\":\""
+            + Ids.newId()
+            + "\"}");
   }
 
   /**
@@ -946,8 +950,9 @@ public final class Events {
         tenantId,
         layawayId,
         String.format(
-            "{\"eventType\":\"LayawayCreated\",\"tenantId\":\"%s\",\"layawayId\":\"%s\"}",
-            tenantId, layawayId));
+            "{\"eventType\":\"LayawayCreated\",\"tenantId\":\"%s\",\"layawayId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, layawayId, Ids.newId()));
   }
 
   static OutboxRow layawayCompleted(UUID tenantId, UUID layawayId) {
@@ -957,8 +962,9 @@ public final class Events {
         tenantId,
         layawayId,
         String.format(
-            "{\"eventType\":\"LayawayCompleted\",\"tenantId\":\"%s\",\"layawayId\":\"%s\"}",
-            tenantId, layawayId));
+            "{\"eventType\":\"LayawayCompleted\",\"tenantId\":\"%s\",\"layawayId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, layawayId, Ids.newId()));
   }
 
   static OutboxRow layawayCancelled(UUID tenantId, UUID layawayId) {
@@ -968,7 +974,8 @@ public final class Events {
         tenantId,
         layawayId,
         String.format(
-            "{\"eventType\":\"LayawayCancelled\",\"tenantId\":\"%s\",\"layawayId\":\"%s\"}",
-            tenantId, layawayId));
+            "{\"eventType\":\"LayawayCancelled\",\"tenantId\":\"%s\",\"layawayId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, layawayId, Ids.newId()));
   }
 }

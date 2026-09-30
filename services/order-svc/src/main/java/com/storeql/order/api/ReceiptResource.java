@@ -73,7 +73,8 @@ public class ReceiptResource {
    *
    * @param orderId the sale whose receipt records to read
    * @return the receipt records, empty when no copy was ever produced
-   * @throws com.storeql.web.ApiException {@code 404} when the order does not exist
+   * @throws com.storeql.web.ApiException {@code 404} when the order does not exist; {@code 403}
+   *     {@code STORE_ACCESS_DENIED} for staff not assigned to the sale's store
    */
   @Operation(
       summary = "List receipt records for an order",
@@ -83,7 +84,7 @@ public class ReceiptResource {
   @GET
   public Response list(@PathParam("orderId") UUID orderId) {
     var receipts =
-        svc.listReceipts(ctx.requireTenantId(), orderId).stream().map(Mappers::toDto).toList();
+        svc.listReceipts(ctx.requireTenantId(), orderId, ctx).stream().map(Mappers::toDto).toList();
     return Response.ok(ApiResponse.ok(receipts)).build();
   }
 }

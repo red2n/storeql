@@ -33,7 +33,10 @@ public final class RfqDtos {
               description =
                   "The day the goods are needed, as yyyy-MM-dd; becomes the orders' expected delivery.")
           String neededBy,
-      @Schema(description = "The day quotes are due, as yyyy-MM-dd; advisory.") String closesOn,
+      @Schema(
+              description =
+                  "The day quotes are due, as yyyy-MM-dd, in the store's own days; advisory: a quote recorded after it is kept and flagged receivedLate.")
+          String closesOn,
       @Size(max = 2000) String notes,
       @NotNull @Valid List<RfqLineRequest> lines,
       @Schema(description = "The suppliers asked to quote.") @NotNull List<String> supplierIds) {}
@@ -55,7 +58,15 @@ public final class RfqDtos {
       @NotNull @Valid List<RfqQuoteLineRequest> lines) {}
 
   @Schema(name = "RfqAwardLineRequest")
-  public record RfqAwardLineRequest(@NotBlank String variantId, @NotBlank String supplierId) {}
+  public record RfqAwardLineRequest(
+      @NotBlank String variantId,
+      @NotBlank String supplierId,
+      @Schema(
+              description =
+                  "Why this supplier and not the lowest comparable bid; required for a line"
+                      + " awarded away from it.")
+          @Size(max = 500)
+          String reason) {}
 
   @Schema(
       name = "RfqAwardRequest",
@@ -96,7 +107,9 @@ public final class RfqDtos {
               description =
                   "The supplier's scorecard grade over the last 90 days; null with nothing to judge.")
           String grade,
-      List<RfqPriceResponse> prices) {}
+      List<RfqPriceResponse> prices,
+      @Schema(description = "The quote was recorded after the request's due day; never refused.")
+          boolean receivedLate) {}
 
   @Schema(
       name = "RfqPriceComparisonResponse",
@@ -125,7 +138,9 @@ public final class RfqDtos {
       String currency,
       BigDecimal homeTotal,
       @Schema(description = "1 for the cheapest complete bid readable at home; null when unranked.")
-          Integer rank) {}
+          Integer rank,
+      @Schema(description = "The bid was recorded after the due day; does not change the rank.")
+          boolean receivedLate) {}
 
   @Schema(name = "RfqComparisonResponse")
   public record RfqComparisonResponse(
@@ -135,7 +150,13 @@ public final class RfqDtos {
 
   @Schema(name = "RfqAwardResponse")
   public record RfqAwardResponse(
-      UUID variantId, UUID supplierId, UUID poId, BigDecimal unitPrice, String currency) {}
+      UUID variantId,
+      UUID supplierId,
+      UUID poId,
+      BigDecimal unitPrice,
+      String currency,
+      @Schema(description = "Why the line went away from the lowest bid; null when it did not.")
+          String reason) {}
 
   @Schema(name = "RfqResponse", description = "The request in full.")
   public record RfqResponse(

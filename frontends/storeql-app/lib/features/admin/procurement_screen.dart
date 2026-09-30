@@ -1413,6 +1413,7 @@ class _PoDetailDialogState extends ConsumerState<_PoDetailDialog> {
     final stores = ref.watch(storesProvider).value ?? const <StoreInfo>[];
     final names = {for (final s in stores) s.id: s.name};
     final atWarehouse = po != null && stores.any((s) => s.id == po.storeId && s.type == 'WAREHOUSE');
+    final warnings = ref.watch(purchaseOrderWarningsProvider(poId)).value ?? const <String>[];
     final allocations = atWarehouse
         ? ref.watch(purchaseOrderAllocationsProvider(poId)).value ?? const <LineAllocation>[]
         : const <LineAllocation>[];
@@ -1461,6 +1462,27 @@ class _PoDetailDialogState extends ConsumerState<_PoDetailDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // A plain warning, never a block: the order can go on.
+              for (final w in warnings)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                  child: Container(
+                    key: Key('po-warning-$w'),
+                    padding: const EdgeInsets.all(AppSpacing.sm),
+                    decoration: BoxDecoration(
+                      color: context.status.warningContainer,
+                      borderRadius: AppRadius.badge,
+                    ),
+                    child: Row(children: [
+                      Icon(Icons.warning_amber_outlined, size: 18, color: context.status.onWarningContainer),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
+                        child: Text(purchaseWarningWords(w),
+                            style: TextStyle(color: context.status.onWarningContainer)),
+                      ),
+                    ]),
+                  ),
+                ),
               if (lines.isEmpty)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 16),
@@ -1666,12 +1688,12 @@ class _PoDetailDialogState extends ConsumerState<_PoDetailDialog> {
       // than assuming. Telling a buyer their order went to the supplier when it is actually
       // waiting for a manager is the one thing this screen must not do.
       final held = (resp.data['data'] as Map?)?['status'] == 'PENDING_APPROVAL';
+      final warned = purchaseWarningsOf(resp.data['data']).map(purchaseWarningWords).join(' ');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            held
-                ? 'Above your spend authority — sent for approval.'
-                : 'Purchase order submitted.',
+            '${held ? 'Above your spend authority — sent for approval.' : 'Purchase order submitted.'}'
+            '${warned.isEmpty ? '' : ' $warned'}',
           ),
         ),
       );

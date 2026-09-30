@@ -227,9 +227,12 @@ public class DropshipService {
    * arrives here. Posts the cost of goods the business never held against what the supplier will
    * invoice (Dr Purchases - Dropship, Cr Goods Received Not Invoiced).
    *
-   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND}; 409 {@code PURCHASE_PO_NOT_DELIVERABLE}
+   * @throws ApiException 403 for a role outside buying; 404 {@code PURCHASE_PO_NOT_FOUND}; 409
+   *     {@code PURCHASE_PO_NOT_DELIVERABLE}
    */
   public PurchaseOrder deliver(TenantContext ctx, UUID poId) {
+    // Confirming a delivery posts to the ledger, as a receipt does: warehouse and management work.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER");
     UUID tenantId = ctx.requireTenantId();
     PurchaseOrder po =
         purchases

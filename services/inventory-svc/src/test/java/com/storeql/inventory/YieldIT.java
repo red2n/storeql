@@ -88,6 +88,25 @@ class YieldIT {
     return "GET".equals(method) ? b.get() : b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
+  private Response callAs(
+      String method,
+      String path,
+      String json,
+      String tenant,
+      String roles,
+      String permissions,
+      String stores) {
+    var b =
+        com.storeql.test.WebTargets.at(target, path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", "01a091ae-611e-700b-bde4-50df0324c3e1")
+            .header("X-Roles", roles);
+    if (permissions != null) b = b.header("X-Permissions", permissions);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
+    return "GET".equals(method) ? b.get() : b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
   private Response post(String path, String json) {
     return call("POST", path, json, T, "OWNER");
   }
@@ -246,6 +265,93 @@ class YieldIT {
             call("POST", "/admin/inventory/yield/runs", run(id, 100, 34, 44, ""), T2, "OWNER"),
             404),
         is("INVENTORY_YIELD_TEMPLATE_NOT_FOUND"));
+  }
+
+  // ── who may break a primal down ────────────────────────────────────────────
+
+  /**
+   * Catalogue INV yield gap 1: templates are management's (create and end); a breakdown draws stock
+   * and makes new stock, so it needs stock.adjust at a store the caller keeps. Another business's
+   * staff, naming our store and template, find nothing and move nothing.
+   */
+  @Test
+  void aBreakdownNeedsStockAdjustAtAStoreTheCallerKeepsAndTemplatesAreManagements() {
+    String id = template();
+    receiveSide(100, null);
+    String path = "/admin/inventory/yield/runs";
+    String body = run(id, 100, 34, 44, "");
+    String elsewhere = "01a091ae-611e-703c-a378-a4972ea461e9";
+
+    // The till, a role narrowed off the permission and a keeper of another store are refused.
+    assertThat(
+        code(callAs("POST", path, body, T, "CASHIER", null, null), 403), is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", "-", null), 403),
+        is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", null, elsewhere), 403),
+        is("STORE_ACCESS_DENIED"));
+
+    // Templates: staff below management may neither create nor end one.
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          code(
+              callAs("POST", "/admin/inventory/yield/templates", TEMPLATE, T, role, null, null),
+              403),
+          is("FORBIDDEN"));
+      assertThat(
+          role,
+          code(
+              callAs(
+                  "POST",
+                  "/admin/inventory/yield/templates/" + id + "/end",
+                  "{}",
+                  T,
+                  role,
+                  null,
+                  null),
+              403),
+          is("FORBIDDEN"));
+    }
+
+    // Another business's staff, naming our store and template.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(
+          role,
+          code(callAs("POST", path, body, T2, role, null, STORE), 404),
+          is("INVENTORY_YIELD_TEMPLATE_NOT_FOUND"));
+    }
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          code(
+              callAs(
+                  "POST",
+                  "/admin/inventory/yield/templates/" + id + "/end",
+                  "{}",
+                  T2,
+                  role,
+                  null,
+                  null),
+              404),
+          is("INVENTORY_YIELD_TEMPLATE_NOT_FOUND"));
+    }
+    assertThat(
+        code(callAs("POST", path, body, T2, "CASHIER", null, STORE), 403), is("PERMISSION_DENIED"));
+
+    // Nothing moved: no run, the primal untouched, the template live.
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.yield_runs"), is("0"));
+    assertThat(level(SIDE, "onHand"), comparesEqualTo(new BigDecimal("100")));
+    assertThat(
+        Envelopes.okArray(get("/admin/inventory/yield/templates"))
+            .getJsonObject(0)
+            .getBoolean("active"),
+        is(true));
+
+    // The keeper of the store, holding stock.adjust by their tier, records it.
+    Envelopes.created(callAs("POST", path, body, T, "STOREKEEPER", null, STORE));
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.yield_runs"), is("1"));
   }
 
   // ── the breakdown: the primal consumed, the cuts made at cost, the loss known ─

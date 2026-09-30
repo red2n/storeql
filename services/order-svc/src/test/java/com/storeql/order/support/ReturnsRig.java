@@ -126,6 +126,12 @@ public final class ReturnsRig {
   // ── calls ─────────────────────────────────────────────────────────────────
 
   public Invocation.Builder as(String path, String tenant, String roles, String user) {
+    return as(path, tenant, roles, user, null);
+  }
+
+  /** As {@link #as(String, String, String, String)}, held to the stores named (comma-separated). */
+  public Invocation.Builder as(
+      String path, String tenant, String roles, String user, String stores) {
     // A query string is given as parameters: path() would escape the question mark.
     int q = path.indexOf('?');
     var t = target.path(q < 0 ? path : path.substring(0, q));
@@ -138,7 +144,19 @@ public final class ReturnsRig {
     var b = t.request(MediaType.APPLICATION_JSON).header("X-Tenant-Id", tenant);
     if (roles != null) b = b.header("X-Roles", roles);
     if (user != null) b = b.header("X-User-Id", user);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
     return b;
+  }
+
+  public Response postHeld(
+      String path, String json, String tenant, String roles, String user, String stores) {
+    return as(path, tenant, roles, user, stores)
+        .header("Idempotency-Key", Ids.newId().toString())
+        .post(Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  public Response getHeld(String path, String tenant, String roles, String user, String stores) {
+    return as(path, tenant, roles, user, stores).get();
   }
 
   public Response post(
@@ -196,6 +214,50 @@ public final class ReturnsRig {
         Ids.newId(),
         order.getJsonNumber("total").bigDecimalValue());
     return order.getString("id");
+  }
+
+  /**
+   * A till sale like {@link #sale}, with a staff discount taken off the whole basket (and, when
+   * {@code paid} is set, paid in full so it is FULFILLED).
+   *
+   * @return the order as answered
+   */
+  public JsonObject discountedSale(
+      String tenant,
+      String store,
+      String variant,
+      int qty,
+      String discount,
+      String cashier,
+      boolean paid) {
+    Response r =
+        post(
+            "/orders",
+            "{\"storeId\":\""
+                + store
+                + "\",\"channel\":\"POS\",\"fulfilmentType\":\"INSTORE\","
+                + "\"items\":[{\"variantId\":\""
+                + variant
+                + "\",\"qty\":"
+                + qty
+                + "}],\"discountAmount\":"
+                + discount
+                + ",\"discountReason\":\"damaged box\"}",
+            tenant,
+            "MANAGER",
+            cashier,
+            Ids.newId().toString());
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(201));
+    JsonObject order = parse(body).getJsonObject("data");
+    if (paid) {
+      orders.handlePaymentCaptured(
+          Ids.parse(tenant),
+          Ids.parse(order.getString("id")),
+          Ids.newId(),
+          order.getJsonNumber("total").bigDecimalValue());
+    }
+    return order;
   }
 
   // ── reads ─────────────────────────────────────────────────────────────────

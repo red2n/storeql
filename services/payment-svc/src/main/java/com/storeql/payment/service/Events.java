@@ -37,9 +37,17 @@ final class Events {
         tenantId,
         paymentId,
         String.format(
+            // The eventId is what a consumer that keeps no key of its own (the webhook fan-out)
+            // tells one capture from another by; it goes last so older readers are untouched.
             "{\"eventType\":\"PaymentCaptured\",\"tenantId\":\"%s\",\"paymentId\":\"%s\","
-                + "\"orderId\":\"%s\",\"amount\":%s%s%s}",
-            tenantId, paymentId, orderId, amount.toPlainString(), methodField, storeField));
+                + "\"orderId\":\"%s\",\"amount\":%s%s%s,\"eventId\":\"%s\"}",
+            tenantId,
+            paymentId,
+            orderId,
+            amount.toPlainString(),
+            methodField,
+            storeField,
+            com.storeql.ids.Ids.newId()));
   }
 
   static OutboxRow paymentFailed(UUID tenantId, UUID paymentId, UUID orderId) {
@@ -49,8 +57,9 @@ final class Events {
         tenantId,
         paymentId,
         String.format(
-            "{\"eventType\":\"PaymentFailed\",\"tenantId\":\"%s\",\"paymentId\":\"%s\",\"orderId\":\"%s\"}",
-            tenantId, paymentId, orderId));
+            "{\"eventType\":\"PaymentFailed\",\"tenantId\":\"%s\",\"paymentId\":\"%s\",\"orderId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, paymentId, orderId, com.storeql.ids.Ids.newId()));
   }
 
   /**

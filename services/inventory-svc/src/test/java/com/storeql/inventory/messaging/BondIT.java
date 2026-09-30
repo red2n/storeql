@@ -54,6 +54,7 @@ class BondIT {
   private static final String SHOP = "01a090ae-611e-703c-a378-a4972ea461e2";
   private static final String WHISKY = "01a090ae-611e-7037-a4b7-c854f0266ae1";
   private static final String UNRATED = "01a090ae-611e-7037-a4b7-c854f0266ae2";
+  private static final String OTHER_T = "01a090ae-611e-702c-a97b-d1b8025478e9";
   private static final String ORDER = "01a090ae-611e-705c-994c-5daee3fbd0e1";
 
   @Inject WebTarget target;
@@ -91,6 +92,26 @@ class BondIT {
       case "PUT" -> b.put(Entity.entity(json, MediaType.APPLICATION_JSON));
       default -> b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
     };
+  }
+
+  /** A call as staff of any business, with the permission claim and store scope the token bears. */
+  private Response callAs(
+      String method,
+      String path,
+      String json,
+      String tenant,
+      String roles,
+      String permissions,
+      String storeIds) {
+    var b =
+        com.storeql.test.WebTargets.at(target, path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", "01a090ae-611e-700b-bde4-50df0324c3e1")
+            .header("X-Roles", roles);
+    if (permissions != null) b = b.header("X-Permissions", permissions);
+    if (storeIds != null) b = b.header("X-Store-Ids", storeIds);
+    return "GET".equals(method) ? b.get() : b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
   private Response post(String path, String json) {
@@ -416,5 +437,66 @@ class BondIT {
     assertThat(batches.size(), is(1));
     assertThat(batches.getJsonObject(0).getString("dutyStatus"), is("DUTY_SUSPENDED"));
     assertThat(levelAt(BOND, WHISKY).getJsonNumber("available").bigDecimalValue().signum(), is(0));
+  }
+
+  // ── who may release ────────────────────────────────────────────────────────
+
+  /**
+   * Catalogue INV-BOND gap 1: a release crystallises a duty debt, so it is stock work
+   * (stock.adjust) at a store the caller keeps. A till, a role narrowed off the permission and a
+   * keeper of another store are refused, and another business's staff, naming our bonded store,
+   * move nothing.
+   */
+  @Test
+  void aReleaseNeedsStockAdjustAtAStoreTheCallerKeeps() {
+    bondTheWarehouse();
+    rateTheWhisky();
+    Envelopes.created(receive(BOND, WHISKY, 10, "DUTY_SUSPENDED"));
+    String path = "/admin/inventory/bond/releases";
+    String body =
+        "{\"storeId\":\""
+            + BOND
+            + "\",\"variantId\":\""
+            + WHISKY
+            + "\",\"qty\":4,\"reference\":\"gate\"}";
+
+    assertThat(
+        code(callAs("POST", path, body, T, "CASHIER", null, null), 403), is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", "-", null), 403),
+        is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "MANAGER", "-", null), 403), is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", null, SHOP), 403),
+        is("STORE_ACCESS_DENIED"));
+    // Another business, naming our bonded store: no approval of theirs, so nothing to release.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(
+          role,
+          code(callAs("POST", path, body, OTHER_T, role, null, BOND), 409),
+          is("INVENTORY_STORE_NOT_BONDED"));
+    }
+    assertThat(
+        code(callAs("POST", path, body, OTHER_T, "CASHIER", null, BOND), 403),
+        is("PERMISSION_DENIED"));
+
+    // Nothing moved for any of them.
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.bond_releases"), is("0"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.stock_movements WHERE type = 'BOND_RELEASE'"),
+        is("0"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.outbox WHERE event_type = 'DutyReleased'"),
+        is("0"));
+    assertThat(
+        levelAt(BOND, WHISKY).getJsonNumber("inBond").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("10")));
+
+    // The keeper of the bonded store, holding the permission by their tier, releases.
+    Envelopes.created(callAs("POST", path, body, T, "STOREKEEPER", null, BOND));
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.bond_releases"), is("1"));
   }
 }

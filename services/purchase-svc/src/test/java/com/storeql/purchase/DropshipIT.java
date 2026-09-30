@@ -73,7 +73,12 @@ class DropshipIT {
             .header("X-Tenant-Id", tenant)
             .header("X-User-Id", USER)
             .header("X-Roles", roles);
-    return "GET".equals(method) ? b.get() : b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+    return switch (method) {
+      case "GET" -> b.get();
+      case "DELETE" -> b.delete();
+      case "PUT" -> b.put(Entity.entity(json, MediaType.APPLICATION_JSON));
+      default -> b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+    };
   }
 
   private Response post(String path, String json) {
@@ -237,6 +242,17 @@ class DropshipIT {
         confirmed(Ids.newId().toString(), T, Ids.newId().toString(), line(STOCKED, 3, "9.00")));
     assertThat(dropshipOrders().size(), is(1));
 
+    // A dropship order's lines are what the customer bought: not changed or removed here.
+    String draftLine = lines.getJsonObject(0).getString("id");
+    String draftLinePath = "/purchase-orders/" + po.getString("id") + "/lines/" + draftLine;
+    assertThat(
+        code(call("PUT", draftLinePath, "{\"qty\":5,\"unitPrice\":4.00}", T, "OWNER"), 409),
+        is("PURCHASE_PO_LINES_FIXED"));
+    assertThat(
+        code(call("DELETE", draftLinePath, null, T, "OWNER"), 409), is("PURCHASE_PO_LINES_FIXED"));
+    assertThat(
+        Envelopes.okArray(get("/purchase-orders/" + po.getString("id") + "/lines")).size(), is(1));
+
     // Submitted to the supplier; never received into stock; delivered to the customer instead.
     String poId = po.getString("id");
     assertThat(
@@ -245,6 +261,20 @@ class DropshipIT {
     assertThat(
         code(post("/goods-receipts", PurchaseFixtures.receiptJson(poId, 2)), 409),
         is("PURCHASE_DROPSHIP_NOT_RECEIVED"));
+    // Confirming a delivery posts to the ledger: not the till's, and not another business's.
+    assertThat(
+        call("POST", "/purchase-orders/" + poId + "/dropship-delivered", "{}", T, "CASHIER")
+            .getStatus(),
+        is(403));
+    assertThat(
+        call("POST", "/purchase-orders/" + poId + "/dropship-delivered", "{}", T2, "OWNER")
+            .getStatus(),
+        is(404));
+    assertThat(
+        call("POST", "/purchase-orders/" + poId + "/dropship-delivered", "{}", T2, "STOREKEEPER")
+            .getStatus(),
+        is(404));
+    assertThat(Envelopes.ok(get("/purchase-orders/" + poId)).getString("status"), is("SUBMITTED"));
     JsonObject delivered =
         Envelopes.ok(post("/purchase-orders/" + poId + "/dropship-delivered", "{}"));
     assertThat(delivered.getString("status"), is("RECEIVED"));
@@ -281,6 +311,26 @@ class DropshipIT {
     JsonObject ended =
         Envelopes.ok(post("/admin/dropship/arrangements/" + made.getString("id") + "/end", "{}"));
     assertThat(ended.getBoolean("active"), is(false));
+    // Ending twice is refused by name; another business's staff find no such arrangement; a
+    // storekeeper is refused the management surface.
+    String arrangementPath = "/admin/dropship/arrangements/" + made.getString("id") + "/end";
+    assertThat(code(post(arrangementPath, "{}"), 409), is("PURCHASE_DROPSHIP_ARRANGEMENT_ENDED"));
+    assertThat(
+        code(call("POST", arrangementPath, "{}", T2, "OWNER"), 404),
+        is("PURCHASE_DROPSHIP_ARRANGEMENT_NOT_FOUND"));
+    assertThat(call("POST", arrangementPath, "{}", T, "STOREKEEPER").getStatus(), is(403));
+    assertThat(
+        call(
+                "POST",
+                "/admin/dropship/arrangements",
+                arrangement(STOCKED, supplierId, "1"),
+                T,
+                "STOREKEEPER")
+            .getStatus(),
+        is(403));
+    assertThat(
+        Envelopes.okArray(call("GET", "/admin/dropship/arrangements", null, T2, "MANAGER")).size(),
+        is(0));
     assertThat(
         Envelopes.scalar(
             PG,

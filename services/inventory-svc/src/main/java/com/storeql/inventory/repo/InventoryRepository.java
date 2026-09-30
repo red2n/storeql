@@ -15,6 +15,7 @@ import com.storeql.inventory.domain.Domain.PickingRuleZonePriority;
 import com.storeql.inventory.domain.Domain.Reservation;
 import com.storeql.inventory.domain.Domain.TransferOrder;
 import com.storeql.inventory.domain.Domain.TransferOrderLine;
+import com.storeql.inventory.domain.Expiry;
 import com.storeql.inventory.domain.Provenance;
 import com.storeql.inventory.domain.Provenance.Drawn;
 import com.storeql.inventory.domain.ReturnDisposition;
@@ -22,6 +23,7 @@ import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Connection;
@@ -48,6 +50,9 @@ import java.util.function.Function;
  */
 @ApplicationScoped
 public class InventoryRepository extends BaseOutboxRepository {
+
+  /** Each store's day, for the rule that stock past its date is never sold ({@link Expiry}). */
+  @Inject ExpiryDay expiryDay;
 
   // ---------------------------------------------------------------- receive
   /**
@@ -955,11 +960,18 @@ public class InventoryRepository extends BaseOutboxRepository {
    * reservations then {@code tenant_id} for batches. Callers append store/cursor filters + GROUP BY
    * / ORDER BY / LIMIT, or wrap it for aggregate counts.
    */
-  private static final String LEVELS_CORE =
+  private String levelsCore(UUID tenantId) {
+    Expiry x = expiryDay.of(tenantId);
+    return LEVELS_CORE_TEMPLATE.replace("{EXPIRED}", x.expiredSql("b"));
+  }
+
+  private static final String LEVELS_CORE_TEMPLATE =
       """
       SELECT b.store_id, b.variant_id,
              COALESCE(SUM(b.remaining_qty),0) AS on_hand,
              COALESCE(SUM(CASE WHEN b.duty_status = 'DUTY_SUSPENDED' THEN b.remaining_qty ELSE 0 END),0) AS in_bond,
+             COALESCE(SUM(CASE WHEN {EXPIRED} THEN b.remaining_qty ELSE 0 END),0) AS expired,
+             COALESCE(SUM(CASE WHEN {EXPIRED} AND b.duty_status = 'DUTY_PAID' THEN b.remaining_qty ELSE 0 END),0) AS expired_paid,
              COALESCE(MAX(res.reserved),0) AS reserved
       FROM inventory_batches b
       LEFT JOIN (
@@ -992,7 +1004,7 @@ public class InventoryRepository extends BaseOutboxRepository {
    */
   public List<Level> levelsForVariants(UUID tenantId, List<UUID> variantIds) {
     return query(
-        LEVELS_CORE
+        levelsCore(tenantId)
             + " AND b.variant_id = ANY(?) GROUP BY b.store_id, b.variant_id ORDER BY b.store_id,"
             + " b.variant_id LIMIT ?",
         ps -> {
@@ -1015,7 +1027,7 @@ public class InventoryRepository extends BaseOutboxRepository {
     boolean hasStore = storeId != null;
     boolean hasCursor = afterStoreId != null && afterVariantId != null;
     String sql =
-        LEVELS_CORE
+        levelsCore(tenantId)
             + (hasStore ? " AND b.store_id = ?" : "")
             + (hasCursor ? " AND (b.store_id, b.variant_id) > (?, ?)" : "")
             + " GROUP BY b.store_id, b.variant_id"
@@ -1049,8 +1061,9 @@ public class InventoryRepository extends BaseOutboxRepository {
     boolean hasStore = storeId != null;
     String sql =
         "SELECT COUNT(*) AS sku_count,"
-            + " COUNT(*) FILTER (WHERE lv.on_hand - lv.reserved <= ?) AS low_count FROM ("
-            + LEVELS_CORE
+            + " COUNT(*) FILTER (WHERE lv.on_hand - lv.expired_paid - lv.reserved <= ?) AS"
+            + " low_count FROM ("
+            + levelsCore(tenantId)
             + (hasStore ? " AND b.store_id = ?" : "")
             + " GROUP BY b.store_id, b.variant_id) lv";
     List<LevelSummary> rows =
@@ -1074,13 +1087,18 @@ public class InventoryRepository extends BaseOutboxRepository {
     BigDecimal onHand = rs.getBigDecimal("on_hand");
     BigDecimal reserved = rs.getBigDecimal("reserved");
     BigDecimal inBond = rs.getBigDecimal("in_bond");
+    BigDecimal expired = rs.getBigDecimal("expired");
+    // Stock past its date is on hand and reported apart, but never available. Expired stock still
+    // in bond is already left out of available with the rest of what is in bond.
+    BigDecimal expiredPaid = rs.getBigDecimal("expired_paid");
     return new Level(
         rs.getObject("store_id", UUID.class),
         rs.getObject("variant_id", UUID.class),
         onHand,
         reserved,
-        onHand.subtract(inBond).subtract(reserved),
-        inBond);
+        onHand.subtract(inBond).subtract(expiredPaid).subtract(reserved),
+        inBond,
+        expired);
   }
 
   // ---------------------------------------------------------------- batches (read)
@@ -1419,7 +1437,9 @@ public class InventoryRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "SELECT remaining_qty FROM inventory_batches"
                 + " WHERE tenant_id=? AND store_id=? AND variant_id=?"
-                + " AND material_status='AVAILABLE' AND duty_status='DUTY_PAID' FOR UPDATE")) {
+                + " AND material_status='AVAILABLE' AND duty_status='DUTY_PAID' AND "
+                + expiryDay.of(tenantId).sellableSql("")
+                + " FOR UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, storeId);
       ps.setObject(3, variantId);
@@ -1534,6 +1554,7 @@ public class InventoryRepository extends BaseOutboxRepository {
                 + " WHERE tenant_id=? AND store_id=? AND variant_id=? AND remaining_qty > 0"
                 + " AND material_status='AVAILABLE'"
                 + dutyFilter(moveType)
+                + expiryFilter(tenantId, moveType)
                 // The named batch first (a cross-dock line's own); with none named every row
                 // compares to null alike and the order is the rule's.
                 + " ORDER BY (id = CAST(? AS uuid)) DESC NULLS LAST, "
@@ -1599,6 +1620,16 @@ public class InventoryRepository extends BaseOutboxRepository {
    * draws it and nothing else does — a sale, a transfer or a return to vendor takes duty-paid stock
    * only (release first), while an adjustment may correct either, since losses in bond are real.
    */
+  /**
+   * Which batches a movement may draw, by date: stock past its date is drawn by nothing that sells,
+   * picks, moves or transforms it, only by a write-off (ADJUST) and a return to the vendor (RTV).
+   * The condition is {@link Expiry}'s, so the rule is written once.
+   */
+  private String expiryFilter(UUID tenantId, String moveType) {
+    if (MoveType.ADJUST.equals(moveType) || MoveType.RTV.equals(moveType)) return "";
+    return " AND " + expiryDay.of(tenantId).sellableSql("");
+  }
+
   private static String dutyFilter(String moveType) {
     if (MoveType.BOND_RELEASE.equals(moveType)) return " AND duty_status='DUTY_SUSPENDED'";
     if (MoveType.ADJUST.equals(moveType)) return "";
@@ -3149,7 +3180,8 @@ public class InventoryRepository extends BaseOutboxRepository {
             + "cost_price,expiry_date,created_at,status,material_status,material_status_reason,grade,zone_id,ownership,owner_supplier_id,duty_status"
             + " FROM inventory_batches"
             + " WHERE tenant_id=? AND store_id=? AND variant_id=? AND remaining_qty>0"
-            + " AND material_status='AVAILABLE'"
+            + " AND material_status='AVAILABLE' AND "
+            + expiryDay.of(tenantId).sellableSql("")
             + " ORDER BY "
             + orderBy,
         ps -> {
@@ -3282,7 +3314,8 @@ public class InventoryRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "SELECT COALESCE(SUM(remaining_qty),0) AS q FROM inventory_batches"
                 + " WHERE tenant_id=? AND store_id=? AND variant_id=?"
-                + " AND material_status='AVAILABLE'")) {
+                + " AND material_status='AVAILABLE' AND "
+                + expiryDay.of(tenantId).sellableSql(""))) {
       ps.setObject(1, tenantId);
       ps.setObject(2, storeId);
       ps.setObject(3, variantId);

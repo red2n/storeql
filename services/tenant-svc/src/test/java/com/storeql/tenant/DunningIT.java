@@ -542,7 +542,10 @@ class DunningIT {
     JsonObject invoice = onlyInvoice(shop);
     String id = invoice.getString("id");
 
-    Answer off = patch(PLATFORM + "/tenants/" + shop + "/status", "{\"status\":\"INACTIVE\"}");
+    Answer off =
+        patch(
+            PLATFORM + "/tenants/" + shop + "/status",
+            "{\"status\":\"INACTIVE\",\"reason\":\"Chargeback fraud, case 4471\"}");
     assertThat(off.text(), off.status(), is(200));
     assertThat(tenantStatus(shop), is("INACTIVE"));
     assertThat(

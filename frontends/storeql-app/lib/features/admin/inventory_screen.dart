@@ -1342,7 +1342,7 @@ void _showAdjustDialog(
 ) {
   showDialog(
     context: context,
-    builder: (_) => _AdjustStockDialog(level: level, onDone: onChanged),
+    builder: (_) => AdjustStockDialog(level: level, onDone: onChanged),
   );
 }
 
@@ -1436,7 +1436,24 @@ class _WideTable extends StatelessWidget {
                     ),
                   ),
                   DataCell(Text(_storeNameOf(l.storeId, storeNames))),
-                  DataCell(Text(l.onHand.toStringAsFixed(0))),
+                  DataCell(
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(l.onHand.toStringAsFixed(0)),
+                        if (l.expiredLabel != null)
+                          Text(
+                            l.expiredLabel!,
+                            key: const Key('level-expired'),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: context.status.warning,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                   DataCell(Text(l.reserved.toStringAsFixed(0))),
                   DataCell(
                     Text(
@@ -1597,6 +1614,17 @@ class _NarrowList extends StatelessWidget {
                       ],
                     ),
                   ),
+                  // Its own line, so the figures keep a phone's width.
+                  if (l.expiredLabel != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: AppSpacing.xs),
+                      child: Text(
+                        '${l.expiredLabel!} (past last day of sale)',
+                        key: const Key('level-expired'),
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: context.status.warning),
+                      ),
+                    ),
                 ],
               ),
               trailing: PopupMenuButton<String>(
@@ -1899,24 +1927,72 @@ class _SummaryChip extends StatelessWidget {
 
 // ── Adjust stock ─────────────────────────────────────────────────────────────
 
-/// A fresh key per attempt at an adjustment: a UUIDv7, which every service requires.
-String _newIdempotencyKey() => newId();
+/// One of the business's transaction reason codes, as inventory-svc lists them
+/// (`GET /admin/inventory/reason-codes`).
+class StockReasonCode {
+  final String code;
+  final String description;
+  final bool active;
+  const StockReasonCode(
+      {required this.code, required this.description, required this.active});
 
-class _AdjustStockDialog extends ConsumerStatefulWidget {
-  final InventoryLevel level;
-  final VoidCallback onDone;
-  const _AdjustStockDialog({required this.level, required this.onDone});
+  factory StockReasonCode.fromJson(Map<String, dynamic> j) => StockReasonCode(
+        code: j['code'] as String? ?? '',
+        description: j['description'] as String? ?? '',
+        active: j['active'] as bool? ?? true,
+      );
 
-  @override
-  ConsumerState<_AdjustStockDialog> createState() => _AdjustStockDialogState();
+  /// What the person reads: the description the business wrote, else the code
+  /// in words.
+  String get label => description.trim().isNotEmpty
+      ? description.trim()
+      : humanizeCode(code);
 }
 
-class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
+/// The business's active reason codes for a stock adjustment. An unreadable
+/// list is an empty one: the dialog then takes only the free-text note, as it
+/// did before the catalogue was offered.
+final stockReasonCodesProvider =
+    FutureProvider.autoDispose<List<StockReasonCode>>((ref) async {
+  try {
+    final resp = await ref
+        .watch(apiClientProvider)
+        .dio
+        .get('/${ApiConstants.inventory}/admin/inventory/reason-codes');
+    final data = (resp.data['data'] as List?) ?? const [];
+    return [
+      for (final e in data)
+        StockReasonCode.fromJson(e as Map<String, dynamic>),
+    ].where((c) => c.active && c.code.isNotEmpty).toList();
+  } catch (_) {
+    return const [];
+  }
+});
+
+class AdjustStockDialog extends ConsumerStatefulWidget {
+  final InventoryLevel level;
+  final VoidCallback onDone;
+  const AdjustStockDialog({super.key, required this.level, required this.onDone});
+
+  @override
+  ConsumerState<AdjustStockDialog> createState() => AdjustStockDialogState();
+}
+
+class AdjustStockDialogState extends ConsumerState<AdjustStockDialog> {
   final _formKey = GlobalKey<FormState>();
   final _deltaCtrl = TextEditingController();
   final _reasonCtrl = TextEditingController();
+
+  /// The reason code picked from the business's catalogue; null for none.
+  String? _reasonCode;
   bool _loading = false;
   String? _error;
+
+  /// The Idempotency-Key of the adjustment being sent, and what it was made
+  /// for: a retry of the same adjustment sends the same key (so a lost answer
+  /// cannot move the stock twice), a changed one a new key.
+  String? _key;
+  String? _keyFor;
 
   @override
   void dispose() {
@@ -1931,6 +2007,13 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
       _loading = true;
       _error = null;
     });
+    final delta = double.parse(_deltaCtrl.text.trim());
+    final note = _reasonCtrl.text.trim();
+    final signature = '$delta|${_reasonCode ?? ''}|$note';
+    if (_key == null || _keyFor != signature) {
+      _key = newId();
+      _keyFor = signature;
+    }
     try {
       await ref
           .read(apiClientProvider)
@@ -1940,13 +2023,12 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
             data: {
               'storeId': widget.level.storeId,
               'variantId': widget.level.variantId,
-              'delta': double.parse(_deltaCtrl.text.trim()),
-              if (_reasonCtrl.text.trim().isNotEmpty)
-                'reason': _reasonCtrl.text.trim(),
+              'delta': delta,
+              // The code groups the shrinkage report; the note stays free text.
+              if (_reasonCode != null) 'reasonCode': _reasonCode,
+              if (note.isNotEmpty) 'reason': note,
             },
-            options: Options(
-              headers: {'Idempotency-Key': _newIdempotencyKey()},
-            ),
+            options: Options(headers: {'Idempotency-Key': _key}),
           );
       if (!mounted) return;
       widget.onDone();
@@ -1991,7 +2073,8 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
                 const SizedBox(height: 12),
               ],
               Text(
-                'Available: ${l.available.toStringAsFixed(0)}  ·  On-hand: ${l.onHand.toStringAsFixed(0)}',
+                'Available: ${l.available.toStringAsFixed(0)}  ·  On-hand: ${l.onHand.toStringAsFixed(0)}'
+                '${l.expiredLabel == null ? '' : '  ·  ${l.expiredLabel}'}',
                 style: TextStyle(color: cs.outline, fontSize: 13),
               ),
               const SizedBox(height: 12),
@@ -2014,11 +2097,42 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
                 },
               ),
               const SizedBox(height: 12),
+              // The business's own reason codes, when it has any: shrinkage
+              // is reported by code, so a code beats wording made up per person.
+              ...(() {
+                final codes =
+                    ref.watch(stockReasonCodesProvider).value ?? const [];
+                if (codes.isEmpty) return const <Widget>[];
+                return <Widget>[
+                  DropdownButtonFormField<String?>(
+                    key: const Key('adjust-reason-code'),
+                    initialValue: _reasonCode,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason code',
+                      prefixIcon: Icon(Icons.rule_outlined),
+                    ),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                          value: null, child: Text('No code')),
+                      for (final c in codes)
+                        DropdownMenuItem<String?>(
+                            value: c.code,
+                            child: Text(c.label,
+                                overflow: TextOverflow.ellipsis)),
+                    ],
+                    onChanged: _loading
+                        ? null
+                        : (v) => setState(() => _reasonCode = v),
+                  ),
+                  const SizedBox(height: 12),
+                ];
+              })(),
               TextFormField(
                 controller: _reasonCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Reason',
-                  hintText: 'e.g. shrinkage, damage, found stock',
+                  labelText: 'Note',
+                  hintText: 'e.g. dropped in the aisle, found on a shelf',
                   prefixIcon: Icon(Icons.notes_outlined),
                 ),
               ),

@@ -150,7 +150,9 @@ public class RfqResource {
   @APIResponse(
       responseCode = "400",
       description =
-          "PURCHASE_RFQ_AWARDS_REQUIRED, PURCHASE_RFQ_AWARD_DUPLICATE, PURCHASE_RFQ_LINE_UNKNOWN")
+          "PURCHASE_RFQ_AWARDS_REQUIRED, PURCHASE_RFQ_AWARD_DUPLICATE, PURCHASE_RFQ_LINE_UNKNOWN,"
+              + " PURCHASE_RFQ_AWARD_REASON_REQUIRED (a line awarded away from the lowest"
+              + " comparable bid carries a reason)")
   @APIResponse(
       responseCode = "409",
       description = "PURCHASE_RFQ_NOT_ISSUED, PURCHASE_RFQ_NOT_QUOTED")

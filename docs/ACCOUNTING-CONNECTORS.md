@@ -70,7 +70,11 @@ Every journal's push is a **sync** (`GET /accounting/syncs`, newest first), with
   tokens). Fix the cause and `POST /accounting/syncs/{id}/retry`.
 - `UNCERTAIN` — the push may have reached a package that offers no idempotency key (Sage) and no
   answer came back. A second try could book the journal twice, so the clock leaves it: a person
-  checks the package and either retries or skips.
+  checks the package and says which it was with `POST /accounting/syncs/{id}/resolve`
+  `{outcome, externalId?, note?}` (management with `finance.journal`): `LANDED` makes it
+  `DELIVERED` under the package's own reference and it is never pushed again; `NOT_LANDED` puts it
+  back to `PENDING` to be pushed. Who settled it, when and the note are kept on the row. A plain
+  retry of an `UNCERTAIN` push is recorded as `NOT_LANDED`; skipping stays available.
 - `SKIPPED` — left out with a reason (`POST /accounting/syncs/{id}/skip`): entered by hand, or not
   wanted there. A delivered journal is never pushed again (`409 ACCOUNTING_SYNC_DELIVERED`).
 

@@ -228,7 +228,33 @@ public class AccountingResource {
   @Path("/syncs/{id}/retry")
   public ApiResponse<AccountingDtos.SyncResponse> retry(@PathParam("id") UUID id) {
     finance();
-    return ApiResponse.ok(AccountingMappers.toSync(service.retry(ctx.requireTenantId(), id)));
+    return ApiResponse.ok(
+        AccountingMappers.toSync(service.retry(ctx.requireTenantId(), id, ctx.userId())));
+  }
+
+  @Operation(
+      summary = "Say whether an uncertain push landed",
+      description =
+          "Management with finance.journal. For a push whose outcome was unknown: outcome LANDED"
+              + " with the package's own reference records it delivered and it is never pushed"
+              + " again; NOT_LANDED queues it to be tried again. Once, and kept on the row with who"
+              + " decided and when.")
+  @APIResponse(
+      responseCode = "400",
+      description = "ACCOUNTING_OUTCOME_INVALID, ACCOUNTING_EXTERNAL_ID_REQUIRED")
+  @APIResponse(responseCode = "404", description = "ACCOUNTING_SYNC_NOT_FOUND")
+  @APIResponse(responseCode = "409", description = "ACCOUNTING_SYNC_NOT_UNCERTAIN")
+  @POST
+  @Path("/syncs/{id}/resolve")
+  public ApiResponse<AccountingDtos.SyncResponse> resolve(
+      @PathParam("id") UUID id, AccountingDtos.ResolveRequest req) {
+    finance();
+    AccountingDtos.ResolveRequest r =
+        req == null ? new AccountingDtos.ResolveRequest(null, null, null) : req;
+    return ApiResponse.ok(
+        AccountingMappers.toSync(
+            service.resolve(
+                ctx.requireTenantId(), id, ctx.userId(), r.outcome(), r.externalId(), r.note())));
   }
 
   @Operation(

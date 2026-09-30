@@ -52,6 +52,10 @@ class CustomerServiceEventsTest {
   @Mock com.storeql.service.TenantProfiles profiles;
   private CustomerService service;
 
+  private static String key() {
+    return Ids.newId().toString();
+  }
+
   @BeforeEach
   void setUp() {
     service = new CustomerService();
@@ -144,10 +148,13 @@ class CustomerServiceEventsTest {
             anyString(),
             any(LoyaltyProgramme.class),
             captor.capture(),
+            any(),
             any()))
         .thenReturn(null);
-    service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "one"));
-    service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "two"));
+    service.adjustPoints(
+        TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "one"), Ids.newId(), key());
+    service.adjustPoints(
+        TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "two"), Ids.newId(), key());
 
     List<String> ids =
         captor.getAllValues().stream()
@@ -169,6 +176,7 @@ class CustomerServiceEventsTest {
             anyString(),
             any(LoyaltyProgramme.class),
             captor.capture(),
+            any(),
             any()))
         .thenReturn(
             new LoyaltyAccount(
@@ -183,7 +191,8 @@ class CustomerServiceEventsTest {
                 BigDecimal.TEN,
                 Instant.now()));
 
-    service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.TEN, "manual"));
+    service.adjustPoints(
+        TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.TEN, "manual"), Ids.newId(), key());
 
     OutboxRow event = captor.getValue();
     assertNotNull(event);
@@ -196,7 +205,7 @@ class CustomerServiceEventsTest {
   void issueStoreCreditPublishesStoreCreditIssuedEvent() {
     ArgumentCaptor<OutboxRow> captor = ArgumentCaptor.forClass(OutboxRow.class);
     when(repo.issueStoreCredit(
-            eq(TENANT), eq(CUSTOMER), any(), anyString(), any(), any(), captor.capture()))
+            eq(TENANT), eq(CUSTOMER), any(), anyString(), any(), any(), captor.capture(), any()))
         .thenReturn(
             new StoreCreditAccount(
                 Ids.newId(),
@@ -208,7 +217,11 @@ class CustomerServiceEventsTest {
                 Instant.now()));
 
     service.issueStoreCredit(
-        TENANT, CUSTOMER, new IssueStoreCreditRequest(BigDecimal.TEN, "GBP", null, "refund"));
+        TENANT,
+        CUSTOMER,
+        new IssueStoreCreditRequest(BigDecimal.TEN, "GBP", null, "refund"),
+        Ids.newId(),
+        Ids.newId().toString());
 
     OutboxRow event = captor.getValue();
     assertNotNull(event);

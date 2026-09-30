@@ -401,6 +401,46 @@ public class UserRepository extends BaseOutboxRepository {
           }
           UUID roleId = roleIdByName(c, roleName);
           String perms = permissions == null ? null : String.join(",", permissions);
+          if (storeId == null) {
+            // Business-wide: NULLs never collide in (user_id, role_id, store_id), so "one row per
+            // tier" is kept by hand — a second grant rewrites the code and permissions.
+            OffsetDateTime at =
+                permissionsAt == null ? null : permissionsAt.atOffset(ZoneOffset.UTC);
+            int updated;
+            try (PreparedStatement ps =
+                c.prepareStatement(
+                    "UPDATE user_roles SET role_code = ?, permissions = ?, permissions_at = ?"
+                        + " WHERE user_id = ? AND role_id = ? AND store_id IS NULL")) {
+              ps.setString(1, roleCode);
+              ps.setString(2, perms);
+              ps.setObject(3, at);
+              ps.setObject(4, userId);
+              ps.setObject(5, roleId);
+              updated = ps.executeUpdate();
+            }
+            if (updated == 0) {
+              try (PreparedStatement ps =
+                  c.prepareStatement(
+                      "INSERT INTO user_roles (id, user_id, role_id, store_id, role_code,"
+                          + " permissions, permissions_at) VALUES (?, ?, ?, NULL, ?, ?, ?)")) {
+                ps.setObject(1, Ids.newId());
+                ps.setObject(2, userId);
+                ps.setObject(3, roleId);
+                ps.setString(4, roleCode);
+                ps.setString(5, perms);
+                ps.setObject(6, at);
+                ps.executeUpdate();
+              }
+            }
+            auditTx(
+                c,
+                tenantId,
+                userId,
+                "STAFF_BOUND",
+                (roleCode == null ? roleName : roleCode + " (" + roleName + ")")
+                    + " @ business-wide");
+            return true;
+          }
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO user_roles (id, user_id, role_id, store_id, role_code, permissions,"
@@ -509,10 +549,11 @@ public class UserRepository extends BaseOutboxRepository {
           int removed;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "DELETE FROM user_roles WHERE user_id = ? AND role_id = ? AND store_id = ?")) {
+                  "DELETE FROM user_roles WHERE user_id = ? AND role_id = ?"
+                      + (storeId == null ? " AND store_id IS NULL" : " AND store_id = ?"))) {
             ps.setObject(1, userId);
             ps.setObject(2, roleId);
-            ps.setObject(3, storeId);
+            if (storeId != null) ps.setObject(3, storeId);
             removed = ps.executeUpdate();
           }
           // The last staff role gone: who the login goes back to being depends on how it came to
@@ -765,6 +806,30 @@ public class UserRepository extends BaseOutboxRepository {
     } catch (SQLException e) {
       throw dbError("update password", e);
     }
+  }
+
+  /**
+   * Sets a new password hash and writes the {@code PasswordChanged} outbox row in ONE transaction
+   * (golden rule #6): the notice is announced if and only if the password changed.
+   *
+   * @param userId the login whose password changes
+   * @param newHash the already-hashed new password; never plaintext
+   * @param outbox the {@code PasswordChanged} row, or {@code null} when nothing is announced
+   */
+  public void updatePassword(UUID userId, String newHash, OutboxRow outbox) {
+    inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE users SET password_hash = ?, updated_at = now() WHERE id = ?")) {
+            ps.setString(1, newHash);
+            ps.setObject(2, userId);
+            ps.executeUpdate();
+          }
+          insertOutbox(c, outbox);
+          return null;
+        },
+        "update password and announce");
   }
 
   private static User map(ResultSet rs) throws SQLException {

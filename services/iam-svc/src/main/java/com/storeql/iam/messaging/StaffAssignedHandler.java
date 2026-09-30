@@ -44,8 +44,16 @@ public class StaffAssignedHandler {
       eventId = Ids.parse(obj.getString("eventId"));
       tenantId = Ids.parse(obj.getString("tenantId"));
       userId = Ids.parse(obj.getString("userId"));
-      storeId = Ids.parse(obj.getString("storeId"));
+      // A business-wide assignment (head office, MANAGER tier) names no store and says so with
+      // "businessWide":true; the row then has a null store, which a token reads as "held to no
+      // store". A store assignment is exactly as it was: storeId, no marker.
+      boolean businessWide = obj.getBoolean("businessWide", false);
+      storeId = businessWide ? null : Ids.parse(obj.getString("storeId"));
       role = obj.getString("role");
+      if (businessWide && !"MANAGER".equals(role)) {
+        LOG.log(Level.WARNING, "Business-wide StaffAssigned for a non-MANAGER tier skipped");
+        return;
+      }
       // A custom role (20.10): the tier is in "role" as ever; the code and the permissions it
       // held at assignment ride beside it. Absent for a plain tier assignment.
       roleCode = obj.getString("roleCode", null);
@@ -71,7 +79,7 @@ public class StaffAssignedHandler {
       LOG.log(
           Level.INFO,
           "StaffAssigned handled (bound, or refused and audited): user {0} as {1}{2} of tenant {3}"
-              + " store {4}",
+              + " store {4} (null: business-wide)",
           userId,
           role,
           roleCode == null ? "" : " (" + roleCode + ")",

@@ -1066,7 +1066,8 @@ public class PricingRepository extends BaseOutboxRepository {
    * SJ-D15's lesson applied before the defect rather than after it — the question is not whether
    * this code is correct but what a replay of it does.
    *
-   * @return true if this call recorded the redemption, false if it had already been recorded
+   * @return true if this call recorded the redemption; false if it had already been recorded or the
+   *     promotion is not this tenant's
    */
   public boolean recordRedemption(
       UUID tenantId,
@@ -1075,27 +1076,29 @@ public class PricingRepository extends BaseOutboxRepository {
       UUID customerId,
       java.math.BigDecimal amount,
       String currency) {
-    try {
-      exec(
-          "INSERT INTO promotion_redemptions"
-              + " (id, tenant_id, promotion_id, order_id, customer_id, amount, currency)"
-              + " VALUES (?,?,?,?,?,?,?)"
-              + " ON CONFLICT (tenant_id, promotion_id, order_id) DO NOTHING",
-          ps -> {
+    // Selected from the tenant's own promotion, so an id that is unknown or belongs to another
+    // business records nothing (the foreign key alone would take any promotion's id). Nothing is
+    // swallowed: a database fault reaches the caller as a fault, not as "already recorded".
+    return inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "INSERT INTO promotion_redemptions"
+                      + " (id, tenant_id, promotion_id, order_id, customer_id, amount, currency)"
+                      + " SELECT ?::uuid, p.tenant_id, p.id, ?::uuid, ?::uuid, ?::numeric, ?"
+                      + " FROM promotions p WHERE p.tenant_id = ? AND p.id = ?"
+                      + " ON CONFLICT (tenant_id, promotion_id, order_id) DO NOTHING")) {
             ps.setObject(1, Ids.newId());
-            ps.setObject(2, tenantId);
-            ps.setObject(3, promotionId);
-            ps.setObject(4, orderId);
-            ps.setObject(5, customerId);
-            ps.setBigDecimal(6, amount);
-            ps.setString(7, currency);
-          },
-          "record promotion redemption");
-      return true;
-    } catch (RuntimeException e) {
-      // ON CONFLICT already makes this a no-op; the catch is for the race that beats it.
-      return false;
-    }
+            ps.setObject(2, orderId);
+            ps.setObject(3, customerId);
+            ps.setBigDecimal(4, amount);
+            ps.setString(5, currency);
+            ps.setObject(6, tenantId);
+            ps.setObject(7, promotionId);
+            return ps.executeUpdate() > 0;
+          }
+        },
+        "record promotion redemption");
   }
 
   /**

@@ -67,6 +67,7 @@ public class TenantBillingResource {
   @Path("/details")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> details(
       @Valid BillingDtos.BuyerRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         BillingMappers.toDto(
@@ -111,6 +112,7 @@ public class TenantBillingResource {
   @Path("/plan")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> changePlan(
       @Valid BillingDtos.PlanChangeRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         BillingMappers.toDto(
@@ -126,6 +128,7 @@ public class TenantBillingResource {
   @Path("/cancel")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> cancel(
       @Valid BillingDtos.CancelRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         BillingMappers.toDto(
@@ -137,6 +140,7 @@ public class TenantBillingResource {
   @POST
   @Path("/resume")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> resume() {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         BillingMappers.toDto(subscriptions.keepGoing(ctx.requireTenantId(), ctx.requireUserId())));
@@ -146,6 +150,7 @@ public class TenantBillingResource {
   @POST
   @Path("/plan/cancel-pending")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> dropPending() {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         BillingMappers.toDto(

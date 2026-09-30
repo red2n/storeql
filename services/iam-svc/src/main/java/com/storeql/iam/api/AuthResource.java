@@ -1,5 +1,6 @@
 package com.storeql.iam.api;
 
+import com.storeql.iam.dto.Dtos;
 import com.storeql.iam.dto.Dtos.BusinessRegisterRequest;
 import com.storeql.iam.dto.Dtos.ChangePasswordRequest;
 import com.storeql.iam.dto.Dtos.LoginRequest;
@@ -276,6 +277,25 @@ public class AuthResource {
   }
 
   /**
+   * Signs the caller out everywhere: every refresh token of their own login is revoked.
+   *
+   * @return how many sessions were ended
+   */
+  @Operation(
+      summary = "Sign out everywhere",
+      description =
+          "Ends every renewable session of the signed-in login, this one included; access tokens"
+              + " already issued live out their few minutes. Only ever the caller's own login.")
+  @APIResponse(responseCode = "200", description = "How many sessions were ended")
+  @APIResponse(responseCode = "401", description = "Not signed in")
+  @POST
+  @Path("/sessions/revoke-all")
+  public ApiResponse<Dtos.SessionsRevokedResponse> revokeAllSessions() {
+    return ApiResponse.ok(
+        new Dtos.SessionsRevokedResponse(auth.revokeAllSessions(ctx.requireUserId())));
+  }
+
+  /**
    * Changes the calling user's own password.
    *
    * <p>Re-verifies the current password so a session left open on a shared device cannot change it.
@@ -294,7 +314,8 @@ public class AuthResource {
   @Path("/change-password")
   public ApiResponse<String> changePassword(ChangePasswordRequest req) {
     Validations.validate(req);
-    auth.changePassword(ctx.requireUserId(), req.currentPassword(), req.newPassword());
+    auth.changePassword(
+        ctx.requireUserId(), req.currentPassword(), req.newPassword(), req.language());
     return ApiResponse.ok("password_changed");
   }
 

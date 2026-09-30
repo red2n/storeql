@@ -228,6 +228,17 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     });
   }
 
+  /// Ends every session of this login (`POST /auth/sessions/revoke-all`), then
+  /// signs this device out too. Throws, and stays signed in, when the server
+  /// refuses: a device left signed in on a failed call would be a false comfort.
+  Future<void> signOutEverywhere() async {
+    await ref
+        .read(apiClientProvider)
+        .dio
+        .post('/${ApiConstants.iam}/auth/sessions/revoke-all');
+    await logout();
+  }
+
   Future<void> logout() async {
     final refresh = await _storage.read(key: StorageKeys.refreshToken);
     if (refresh != null) {

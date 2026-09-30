@@ -132,7 +132,8 @@ public final class Mappers {
         l.onHand(),
         l.reserved(),
         l.available(),
-        l.inBond());
+        l.inBond(),
+        l.expired());
   }
 
   /**

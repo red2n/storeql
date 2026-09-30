@@ -286,6 +286,24 @@ class AdminAuthorizationFilterTest {
    * payment-svc verifies the order against order-svc rather than trusting the caller.
    */
   @Test
+  void aShopperCanCancelAnOrderByItsIdAndNothingElseUnderItOpens() throws Exception {
+    String id = "01a09509-72ec-72e9-9f08-94a93df26a36";
+    // The owner check is order-svc's: only the shopper the order belongs to gets past it.
+    assertNotAborted(invoke("POST", "/orders/" + id + "/cancel"));
+    assertAborted(invoke("POST", "/orders/" + id + "/void"), 403);
+    assertAborted(invoke("POST", "/orders/" + id + "/returns"), 403);
+    assertAborted(invoke("POST", "/orders/" + id + "/cancel/again"), 403);
+    assertAborted(invoke("POST", "/orders/mine/cancel"), 403);
+    assertAborted(invoke("POST", "/orders/export/cancel"), 403);
+  }
+
+  @Test
+  void signingOutEverywhereIsTheCallersOwn() throws Exception {
+    assertNotAborted(invoke("POST", "/auth/sessions/revoke-all"));
+    assertAborted(invoke("POST", "/auth/sessions/revoke-all/other"), 403);
+  }
+
+  @Test
   void aShopperCanOpenAndPollTheirOwnPaymentIntent() throws Exception {
     assertNotAborted(invoke("POST", "/payments/intents"));
     assertNotAborted(invoke("GET", "/payments/intents/abc"));

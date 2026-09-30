@@ -99,6 +99,7 @@ class CrossDockIT {
     return switch (method) {
       case "GET" -> b.get();
       case "PUT" -> b.put(Entity.entity(json, MediaType.APPLICATION_JSON));
+      case "DELETE" -> b.delete();
       default -> b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
     };
   }
@@ -285,5 +286,82 @@ class CrossDockIT {
                 + plain[0]
                 + "'"),
         is("0"));
+  }
+
+  // ── a draft's line is changed or removed only with its allocations in step ─
+
+  private BigDecimal totalNet(String po) {
+    return data(call("GET", "/purchase-orders/" + po, null, T, "OWNER"), 200)
+        .getJsonNumber("totalNet")
+        .bigDecimalValue();
+  }
+
+  @Test
+  void aLineOfferedToShopsIsNotOrderedBelowItsAllocationsNorRemovedWhileAllocated() {
+    String[] o = order(DC, null);
+    String line = "/purchase-orders/" + o[0] + "/lines/" + o[1];
+    list(
+        call("PUT", line + "/allocations", allocations(LEEDS, "25", YORK, "10"), T, "STOREKEEPER"),
+        200);
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
+
+    // Below the 35 already allocated: refused, and the line is as it was.
+    assertThat(
+        code(call("PUT", line, "{\"qty\":30,\"unitPrice\":2.00}", T, "OWNER"), 409),
+        is("PURCHASE_LINE_BELOW_ALLOCATIONS"));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
+    // Down to exactly what is allocated is fine, and the price can move with it.
+    JsonObject amended =
+        data(call("PUT", line, "{\"qty\":35,\"unitPrice\":3.00}", T, "MANAGER"), 200);
+    assertThat(
+        amended.getJsonNumber("qty").bigDecimalValue().compareTo(new BigDecimal("35")), is(0));
+    assertThat(
+        amended.getJsonNumber("unitPrice").bigDecimalValue().compareTo(new BigDecimal("3.00")),
+        is(0));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("105.00")), is(0));
+    // The allocations are untouched.
+    assertThat(
+        list(call("GET", "/purchase-orders/" + o[0] + "/allocations", null, T, "OWNER"), 200)
+            .size(),
+        is(2));
+
+    // Removing an allocated line is refused; cleared first, it goes, and the order totals nothing.
+    assertThat(
+        code(call("DELETE", line, null, T, "OWNER"), 409), is("PURCHASE_LINE_HAS_ALLOCATIONS"));
+    list(call("PUT", line + "/allocations", allocations(), T, "OWNER"), 200);
+    assertThat(call("DELETE", line, null, T, "OWNER").getStatus(), is(204));
+    assertThat(totalNet(o[0]).compareTo(BigDecimal.ZERO), is(0));
+    assertThat(
+        list(call("GET", "/purchase-orders/" + o[0] + "/lines", null, T, "OWNER"), 200).size(),
+        is(0));
+  }
+
+  @Test
+  void anotherBusinessesStaffOfEveryRoleCannotChangeOrRemoveOurLinesAndASubmittedOrderRefuses() {
+    String[] o = order(DC, null);
+    String line = "/purchase-orders/" + o[0] + "/lines/" + o[1];
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          code(call("PUT", line, "{\"qty\":1,\"unitPrice\":1.00}", T2, role), 404),
+          is("PURCHASE_PO_NOT_FOUND"));
+      assertThat(
+          role, code(call("DELETE", line, null, T2, role), 404), is("PURCHASE_PO_NOT_FOUND"));
+    }
+    assertThat(
+        call("PUT", line, "{\"qty\":1,\"unitPrice\":1.00}", T, "CUSTOMER").getStatus(), is(403));
+    assertThat(call("DELETE", line, null, T, "CUSTOMER").getStatus(), is(403));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
+    assertThat(
+        list(call("GET", "/purchase-orders/" + o[0] + "/lines", null, T, "OWNER"), 200).size(),
+        is(1));
+
+    // Once submitted the order is the supplier's: nothing changes on it.
+    data(post("/purchase-orders/" + o[0] + "/submit", ""), 200);
+    assertThat(
+        code(call("PUT", line, "{\"qty\":1,\"unitPrice\":1.00}", T, "OWNER"), 400),
+        is("PURCHASE_PO_NOT_DRAFT"));
+    assertThat(code(call("DELETE", line, null, T, "OWNER"), 400), is("PURCHASE_PO_NOT_DRAFT"));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
   }
 }

@@ -217,7 +217,7 @@ public class RfqRepository extends BaseJdbcRepository {
         "load rfq prices");
     return query(
         "SELECT b.id, b.tenant_id, b.rfq_id, b.supplier_id, s.name AS supplier_name, b.status,"
-            + " b.currency, b.lead_time_days, b.valid_until, b.notes, b.quoted_at"
+            + " b.currency, b.lead_time_days, b.valid_until, b.notes, b.quoted_at, b.received_late"
             + " FROM rfq_suppliers b JOIN suppliers s ON s.tenant_id = b.tenant_id AND s.id ="
             + " b.supplier_id WHERE b.tenant_id = ? AND b.rfq_id = ? ORDER BY s.name, b.id",
         ps -> {
@@ -241,7 +241,8 @@ public class RfqRepository extends BaseJdbcRepository {
               rs.getObject("valid_until", LocalDate.class),
               rs.getString("notes"),
               quoted == null ? null : quoted.toInstant(),
-              Map.copyOf(prices.getOrDefault(id, Map.of())));
+              Map.copyOf(prices.getOrDefault(id, Map.of())),
+              rs.getBoolean("received_late"));
         },
         "list rfq bids");
   }
@@ -249,7 +250,7 @@ public class RfqRepository extends BaseJdbcRepository {
   public List<Award> awards(UUID tenantId, UUID rfqId) {
     return query(
         "SELECT id, tenant_id, rfq_id, rfq_line_id, supplier_id, po_id, unit_price, currency,"
-            + " awarded_at FROM rfq_awards WHERE tenant_id = ? AND rfq_id = ? ORDER BY awarded_at, id",
+            + " awarded_at, reason FROM rfq_awards WHERE tenant_id = ? AND rfq_id = ? ORDER BY awarded_at, id",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, rfqId);
@@ -264,7 +265,8 @@ public class RfqRepository extends BaseJdbcRepository {
                 rs.getObject("po_id", UUID.class),
                 rs.getBigDecimal("unit_price"),
                 rs.getString("currency"),
-                rs.getObject("awarded_at", OffsetDateTime.class).toInstant()),
+                rs.getObject("awarded_at", OffsetDateTime.class).toInstant(),
+                rs.getString("reason")),
         "list rfq awards");
   }
 
@@ -351,6 +353,7 @@ public class RfqRepository extends BaseJdbcRepository {
       Integer leadTimeDays,
       LocalDate validUntil,
       String notes,
+      boolean receivedLate,
       Map<UUID, BigDecimal> pricesByLine) {
     return inTx(
         c -> {
@@ -359,15 +362,16 @@ public class RfqRepository extends BaseJdbcRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE rfq_suppliers SET status = 'QUOTED', currency = ?, lead_time_days = ?,"
-                      + " valid_until = ?, notes = ?, quoted_at = now() WHERE tenant_id = ? AND id"
-                      + " = ?")) {
+                      + " valid_until = ?, notes = ?, quoted_at = now(), received_late = ?"
+                      + " WHERE tenant_id = ? AND id = ?")) {
             ps.setString(1, currency);
             if (leadTimeDays == null) ps.setNull(2, java.sql.Types.INTEGER);
             else ps.setInt(2, leadTimeDays);
             ps.setObject(3, validUntil);
             ps.setString(4, notes);
-            ps.setObject(5, tenantId);
-            ps.setObject(6, bidId);
+            ps.setBoolean(5, receivedLate);
+            ps.setObject(6, tenantId);
+            ps.setObject(7, bidId);
             ps.executeUpdate();
           }
           deletePricesTx(c, tenantId, bidId);
@@ -458,7 +462,7 @@ public class RfqRepository extends BaseJdbcRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO rfq_awards (id, tenant_id, rfq_id, rfq_line_id, supplier_id, po_id,"
-                      + " unit_price, currency, awarded_at) VALUES (?,?,?,?,?,?,?,?,?)")) {
+                      + " unit_price, currency, awarded_at, reason) VALUES (?,?,?,?,?,?,?,?,?,?)")) {
             for (Award a : awards) {
               ps.setObject(1, a.id());
               ps.setObject(2, a.tenantId());
@@ -469,6 +473,7 @@ public class RfqRepository extends BaseJdbcRepository {
               ps.setBigDecimal(7, a.unitPrice());
               ps.setString(8, a.currency());
               ps.setObject(9, a.awardedAt().atOffset(ZoneOffset.UTC));
+              ps.setString(10, a.reason());
               ps.addBatch();
             }
             ps.executeBatch();

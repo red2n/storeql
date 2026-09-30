@@ -284,7 +284,7 @@ export default function () {
     expect(call('POST', `/api/product-svc/admin/products/${UNKNOWN}/variants`, { token: t, body: { sku: `X-${sku}` } }), 'variant of an unknown product', 404);
     const variant = call('POST', `/api/product-svc/admin/products/${ctx.productId}/variants`, {
       token: t,
-      body: { sku, barcode: `${run}`.slice(-13), attributes: JSON.stringify({ pack: '250g' }), unit: 'PCS' },
+      body: { sku, barcode: `K${`${run}`.slice(-12)}`, attributes: JSON.stringify({ pack: '250g' }), unit: 'PCS' },
     });
     expect(variant, 'create variant', 201);
     ctx.variantId = data(variant).id;
@@ -305,7 +305,7 @@ export default function () {
 
   group('6 stock', () => {
     const t = ctx.owner.token;
-    const receipt = { storeId: ctx.storeId, variantId: ctx.variantId, qty: 500, batchNo: `B-${run}`.slice(0, 32), costPrice: '250.00', expiryDate: '2027-12-31' };
+    const receipt = { storeId: ctx.storeId, variantId: ctx.variantId, qty: 500, batchNo: `B-${run}`.slice(0, 32), costPrice: '250.00', expiryDate: new Date(Date.now() + 365 * 86400000).toISOString().slice(0, 10) };
     expect(call('POST', '/api/inventory-svc/admin/inventory/receive', { token: t, idem: true, body: { ...receipt, qty: 0 } }), 'receive: qty must be positive', 400);
     const key = newId();
     const received = call('POST', '/api/inventory-svc/admin/inventory/receive', { token: t, idem: key, body: receipt });

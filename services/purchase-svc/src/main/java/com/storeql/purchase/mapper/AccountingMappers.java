@@ -49,7 +49,7 @@ public final class AccountingMappers {
   }
 
   public static AccountingDtos.SyncResponse toSync(Accounting.Sync s) {
-    return toSync(s, null, null);
+    return toSync(s, null, null, null);
   }
 
   public static AccountingDtos.SyncResponse toSync(AccountingService.Detail d) {
@@ -66,13 +66,21 @@ public final class AccountingMappers {
                         a.error(),
                         a.snippet(),
                         a.durationMs()))
-            .toList());
+            .toList(),
+        d.resolution() == null
+            ? null
+            : new AccountingDtos.ResolutionResponse(
+                d.resolution().outcome(),
+                d.resolution().by() == null ? null : d.resolution().by().toString(),
+                d.resolution().at(),
+                d.resolution().note()));
   }
 
   private static AccountingDtos.SyncResponse toSync(
       Accounting.Sync s,
       List<com.storeql.purchase.dto.Dtos.NominalLedgerEntryResponse> lines,
-      List<AccountingDtos.AttemptResponse> attempts) {
+      List<AccountingDtos.AttemptResponse> attempts,
+      AccountingDtos.ResolutionResponse resolution) {
     return new AccountingDtos.SyncResponse(
         s.id().toString(),
         s.journalId().toString(),
@@ -88,6 +96,7 @@ public final class AccountingMappers {
         s.sourceType(),
         s.total(),
         lines,
-        attempts);
+        attempts,
+        resolution);
   }
 }

@@ -43,7 +43,7 @@ public class AuditTrailResource {
    *
    * @param store one store, or every store the caller may see
    * @param actor one member of staff, by user id
-   * @param type DISCOUNT, VOID, NO_SALE, CANCEL, RETURN, OFFLINE_SALE_OF_RECALLED_ITEM or
+   * @param type DISCOUNT, VOID, NO_SALE, CANCEL, RETURN, PRICED, OFFLINE_SALE_OF_RECALLED_ITEM or
    *     OFFLINE_SALE_ON_UNFIT_SCALE; every log when omitted
    * @param from inclusive start as an ISO-8601 instant
    * @param to exclusive end as an ISO-8601 instant

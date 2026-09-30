@@ -254,6 +254,14 @@ public final class Dtos {
       @Schema(description = "UK VAT code, e.g. T1. Defaults to T1.") String vatCode) {}
 
   @Schema(
+      name = "AmendPurchaseOrderLineRequest",
+      description = "A draft order's line as it should now read.")
+  public record AmendPurchaseOrderLineRequest(
+      @NotNull @DecimalMin("0.001") BigDecimal qty,
+      @NotNull @DecimalMin("0.01") BigDecimal unitPrice,
+      @Schema(description = "VAT code; the line's own when omitted.") String vatCode) {}
+
+  @Schema(
       name = "CancelPurchaseOrderRequest",
       description = "Cancel a purchase order that has not yet been received against.")
   public record CancelPurchaseOrderRequest(
@@ -325,7 +333,14 @@ public final class Dtos {
       @Schema(description = "For a DROPSHIP order, the customer the supplier ships to.")
           String shipTo,
       @Schema(description = "DUTY_PAID, or DUTY_SUSPENDED when the goods arrive into bond.")
-          String dutyStatus) {}
+          String dutyStatus,
+      @Schema(
+              description =
+                  "Things worth knowing before acting on the order, never a refusal: SUPPLIER_GRADE_D"
+                      + " when it is open and the supplier's scorecard over the last 90 days is"
+                      + " D. Filled on a single read and on submit, for owner, manager and"
+                      + " storekeeper; empty elsewhere.")
+          List<String> warnings) {}
 
   @Schema(
       name = "PurchaseOrderLineProgressResponse",

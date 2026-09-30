@@ -19,6 +19,7 @@ import 'fulfilment_windows_screen.dart';
 import 'providers/admin_providers.dart';
 import 'return_policy_card.dart';
 import 'store_instruments_dialog.dart';
+import 'widgets/business_wide_note.dart';
 
 /// A store's status in words: *Open* while it trades, *Closed* when switched
 /// off; a status this screen does not know yet reads as words too.
@@ -27,6 +28,9 @@ String _storeStatusLabel(String status) => switch (status.toUpperCase()) {
       'INACTIVE' => 'Closed',
       _ => humanizeCode(status),
     };
+
+/// [_storeStatusLabel] for the change log and other screens.
+String storeStatusLabel(String status) => _storeStatusLabel(status);
 
 /// What a store's ⋮ menu offers on a narrow list.
 enum _StoreAction { edit, zones, instruments, delivery, slots, toggle }
@@ -50,14 +54,19 @@ class StoresScreen extends ConsumerWidget {
     final storesAsync = ref.watch(storesProvider);
     final auth = ref.watch(authNotifierProvider).value;
     final isManager = auth is AuthAuthenticated && auth.isManager;
+    // Opening a store changes the business, not a store: a manager held to
+    // stores is refused it (BUSINESS_WIDE_ONLY), so the control is not offered.
+    final canAddStore = !heldToStores(auth);
     final gutter = context.pageGutter;
 
     return Scaffold(
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showAddStoreDialog(context, ref),
-        icon: const Icon(Icons.add_business),
-        label: const Text('Add Store'),
-      ),
+      floatingActionButton: canAddStore
+          ? FloatingActionButton.extended(
+              onPressed: () => _showAddStoreDialog(context, ref),
+              icon: const Icon(Icons.add_business),
+              label: const Text('Add Store'),
+            )
+          : null,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -71,6 +80,13 @@ class StoresScreen extends ConsumerWidget {
               ),
             ],
           ),
+          if (!canAddStore)
+            Padding(
+              padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, AppSpacing.sm),
+              child: const Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: BusinessWideNote(key: Key('stores-business-wide-note'))),
+            ),
           // The business's return policy sits with the business-wide settings, for management.
           if (isManager) const ReturnPolicyCard(),
           Expanded(
@@ -87,11 +103,13 @@ class StoresScreen extends ConsumerWidget {
                     title: 'No stores yet',
                     message:
                         'Add a store or warehouse to start managing inventory.',
-                    action: OutlinedButton.icon(
-                      onPressed: () => _showAddStoreDialog(context, ref),
-                      icon: const Icon(Icons.add_business),
-                      label: const Text('Add Store'),
-                    ),
+                    action: canAddStore
+                        ? OutlinedButton.icon(
+                            onPressed: () => _showAddStoreDialog(context, ref),
+                            icon: const Icon(Icons.add_business),
+                            label: const Text('Add Store'),
+                          )
+                        : null,
                   );
                 }
                 return LayoutBuilder(builder: (context, constraints) {

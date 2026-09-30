@@ -16,6 +16,9 @@ import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
 import 'providers/staff_names.dart';
 import 'role_dialog.dart';
+import 'widgets/business_wide_note.dart';
+import '../../core/auth/auth_state.dart';
+import '../../core/auth/auth_notifier.dart';
 import '../../shared/util/short_ref.dart';
 import '../../core/theme.dart';
 
@@ -72,6 +75,9 @@ class _PeopleTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final staffAsync = ref.watch(staffProvider);
+    final auth = ref.watch(authNotifierProvider).value;
+    // Only an owner gives or takes away a head-office assignment.
+    final isOwner = auth is AuthAuthenticated && auth.roles.contains(UserRoles.owner);
     final gutter = context.pageGutter;
 
     return Column(
@@ -163,8 +169,12 @@ class _PeopleTab extends ConsumerWidget {
                     return _StaffCard(
                       member: m,
                       name: staffDisplayName(m.userId, logins),
-                      store: storeNames[m.storeId] ??
-                          'Store ${shortRef(m.storeId)}',
+                      // A head-office manager belongs to no store.
+                      store: m.businessWide
+                          ? 'Whole business'
+                          : storeNames[m.storeId] ??
+                              'Store ${shortRef(m.storeId ?? '')}',
+                      canRemove: !m.businessWide || isOwner,
                       role: _roleName(m.role, roleNames),
                       tier: _roleName(m.baseTier, roleNames),
                       compact: compact,
@@ -199,7 +209,9 @@ class _PeopleTab extends ConsumerWidget {
       builder: (ctx) => AlertDialog(
         title: const Text('Remove staff assignment?'),
         content: Text(
-            'Remove $role access for $who at $store. They lose access to it immediately.'),
+            m.businessWide
+                ? 'Remove $role access for $who across the whole business. They lose access to it immediately.'
+                : 'Remove $role access for $who at $store. They lose access to it immediately.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -219,7 +231,9 @@ class _PeopleTab extends ConsumerWidget {
     try {
       await ref.read(apiClientProvider).dio.delete(
         '/${ApiConstants.tenant}/admin/staff/${m.userId}',
-        queryParameters: {'store': m.storeId},
+        queryParameters: m.businessWide
+            ? {'businessWide': true}
+            : {'store': m.storeId},
       );
       ref.invalidate(staffProvider);
     } catch (e) {
@@ -244,6 +258,7 @@ class _StaffCard extends StatelessWidget {
     required this.member,
     required this.name,
     required this.store,
+    this.canRemove = true,
     required this.role,
     required this.tier,
     required this.compact,
@@ -254,6 +269,10 @@ class _StaffCard extends StatelessWidget {
   final StaffMember member;
   final String name;
   final String store;
+
+  /// Whether the viewer may remove this assignment: a head-office one only an
+  /// owner removes.
+  final bool canRemove;
   final String role;
   final String tier;
   final bool compact;
@@ -283,7 +302,12 @@ class _StaffCard extends StatelessWidget {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.store_outlined, size: 16, color: cs.onSurfaceVariant),
+                  Icon(
+                      member.businessWide
+                          ? Icons.domain_outlined
+                          : Icons.store_outlined,
+                      size: 16,
+                      color: cs.onSurfaceVariant),
                   const SizedBox(width: AppSpacing.xs),
                   Flexible(child: Text(store)),
                 ],
@@ -309,6 +333,7 @@ class _StaffCard extends StatelessWidget {
                       ],
                     ),
                   ),
+                  if (canRemove)
                   PopupMenuItem(
                     value: 'remove',
                     child: Row(
@@ -329,11 +354,12 @@ class _StaffCard extends StatelessWidget {
                     tooltip: 'Reset second step (lost phone)',
                     onPressed: () => onResetSecondStep(name),
                   ),
-                  IconButton(
-                    icon: Icon(Icons.delete_outline, color: cs.error),
-                    tooltip: 'Remove',
-                    onPressed: () => onRemove(name, store, role),
-                  ),
+                  if (canRemove)
+                    IconButton(
+                      icon: Icon(Icons.delete_outline, color: cs.error),
+                      tooltip: 'Remove',
+                      onPressed: () => onRemove(name, store, role),
+                    ),
                 ],
               ),
       ),
@@ -367,6 +393,21 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
   String _role = 'CASHIER';
   String? _storeId;
   bool _loading = false;
+
+  /// The store choice's value for a head-office assignment: no store, the whole business.
+  static const _wholeBusiness = '__whole_business__';
+  bool get _isWhole => _storeId == _wholeBusiness;
+
+  /// Whether the chosen role stands on the MANAGER tier: the built-in manager,
+  /// or a role of the business's own whose base tier is MANAGER.
+  bool _managerTier(List<TenantRole>? roles) {
+    if (_role == 'MANAGER') return true;
+    for (final r in roles ?? const <TenantRole>[]) {
+      if (r.code == _role) return r.baseTier == 'MANAGER';
+    }
+    return false;
+  }
+
   String? _error;
 
   /// The dropdown: the built-in tiers first, then the tenant's own roles, each
@@ -400,7 +441,7 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_storeId == null) {
-      setState(() => _error = 'Select a store.');
+      setState(() => _error = 'Select a store or the whole business.');
       return;
     }
     setState(() {
@@ -426,7 +467,9 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
       // 2. Assign that user a role at the chosen store.
       await dio.post(
         '/${ApiConstants.tenant}/admin/staff',
-        data: {'userId': userId, 'storeId': _storeId, 'role': _role},
+        data: _isWhole
+            ? {'userId': userId, 'role': _role, 'businessWide': true}
+            : {'userId': userId, 'storeId': _storeId, 'role': _role},
       );
       if (!mounted) return;
       widget.onAssigned();
@@ -477,6 +520,14 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
 
   String _friendly(Object e) {
     final status = e is DioException ? e.response?.statusCode : null;
+    // The head-office refusals say what is wrong; they are never "check the email".
+    final code = apiErrorCode(e) ?? '';
+    if (code.startsWith('STAFF_') || code == 'BUSINESS_WIDE_ONLY') {
+      return friendlyError(e, fallback: 'Could not assign staff.');
+    }
+    // A refusal that names its reason (only an owner makes an owner, a role
+    // beyond the caller's own) says so, whatever its status.
+    if (status == 403) return friendlyError(e, fallback: 'You cannot assign that.');
     // Only the assignment can conflict: adding an address another business
     // also uses makes this business a login of its own (iam-svc, 29 Sep 2026).
     if (status == 409) {
@@ -491,6 +542,12 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
     final cs = Theme.of(context).colorScheme;
     final storesAsync = ref.watch(storesProvider);
     final rolesAsync = ref.watch(rolesProvider);
+    // A head-office assignment: offered to an owner only, and only for the
+    // manager tier (the server refuses anything else).
+    final auth = ref.watch(authNotifierProvider).value;
+    final offerWhole = auth is AuthAuthenticated &&
+        auth.roles.contains(UserRoles.owner) &&
+        _managerTier(rolesAsync.value);
     return AlertDialog(
       title: const Text('Assign Staff'),
       content: SizedBox(
@@ -562,19 +619,26 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
                     friendlyError(e, fallback: 'Could not load stores.'),
                     style: TextStyle(color: cs.error)),
                 data: (stores) => DropdownButtonFormField<String>(
-                  initialValue: _storeId,
+                  key: ValueKey('assign-store-$offerWhole'),
+                  initialValue: offerWhole || _storeId != _wholeBusiness ? _storeId : null,
                   isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Store *',
-                    prefixIcon: Icon(Icons.store_outlined),
+                  decoration: InputDecoration(
+                    labelText: offerWhole ? 'Store or whole business *' : 'Store *',
+                    prefixIcon: const Icon(Icons.store_outlined),
                   ),
-                  items: stores
-                      .map((s) => DropdownMenuItem(
-                            value: s.id,
-                            child: Text('${s.name} (${s.code})',
-                                overflow: TextOverflow.ellipsis),
-                          ))
-                      .toList(),
+                  items: [
+                    if (offerWhole)
+                      const DropdownMenuItem(
+                        value: _wholeBusiness,
+                        child: Text('Whole business (head office)',
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                    ...stores.map((s) => DropdownMenuItem(
+                          value: s.id,
+                          child: Text('${s.name} (${s.code})',
+                              overflow: TextOverflow.ellipsis),
+                        )),
+                  ],
                   onChanged: (v) => setState(() => _storeId = v),
                   validator: (v) => v == null ? 'Required' : null,
                 ),
@@ -589,7 +653,11 @@ class _AssignStaffDialogState extends ConsumerState<_AssignStaffDialog> {
                   prefixIcon: Icon(Icons.shield_outlined),
                 ),
                 items: _roleItems(rolesAsync),
-                onChanged: (v) => setState(() => _role = v!),
+                onChanged: (v) => setState(() {
+                  _role = v!;
+                  // Head office is for the manager tier only.
+                  if (_isWhole && !_managerTier(rolesAsync.value)) _storeId = null;
+                }),
               ),
             ],
           ),
@@ -725,6 +793,9 @@ class _RolesTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
     final rolesAsync = ref.watch(rolesProvider);
+    // Defining a role changes the whole business: refused to a manager held to
+    // stores (BUSINESS_WIDE_ONLY), so it is not offered to one.
+    final canDefine = !heldToStores(ref.watch(authNotifierProvider).value);
     final gutter = context.pageGutter;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -742,13 +813,14 @@ class _RolesTab extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: 12),
-              FilledButton.icon(
-                key: const Key('define-role'),
-                onPressed: () => showDialog<bool>(
-                    context: context, builder: (_) => const RoleDialog()),
-                icon: const Icon(Icons.add_moderator_outlined),
-                label: const Text('Define role'),
-              ),
+              if (canDefine)
+                FilledButton.icon(
+                  key: const Key('define-role'),
+                  onPressed: () => showDialog<bool>(
+                      context: context, builder: (_) => const RoleDialog()),
+                  icon: const Icon(Icons.add_moderator_outlined),
+                  label: const Text('Define role'),
+                ),
               const SizedBox(width: 8),
               IconButton(
                 icon: const Icon(Icons.refresh),
@@ -758,6 +830,11 @@ class _RolesTab extends ConsumerWidget {
             ],
           ),
         ),
+        if (!canDefine)
+          Padding(
+            padding: EdgeInsetsDirectional.fromSTEB(gutter, AppSpacing.sm, gutter, 0),
+            child: const BusinessWideNote(key: Key('roles-business-wide-note')),
+          ),
         const SizedBox(height: 8),
         Expanded(
           child: rolesAsync.when(
@@ -801,7 +878,7 @@ class _RolesTab extends ConsumerWidget {
                               : 'Built in · ${r.permissions.join(', ')}',
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
-                    trailing: r.custom
+                    trailing: r.custom && canDefine
                         ? Row(mainAxisSize: MainAxisSize.min, children: [
                             IconButton(
                               key: Key('edit-role-${r.code}'),

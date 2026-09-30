@@ -354,11 +354,16 @@ public class OrderResource {
   /**
    * Cancels a PENDING or CONFIRMED order, releasing its stock holds via {@code OrderCancelled}.
    *
+   * <p>Staff cancel any order at their stores (and need the void permission once money was taken).
+   * A shopper may cancel only their own online order that is still PENDING with nothing paid; their
+   * own order that is paid, picked or a part of a split checkout is {@code 409}, and another
+   * shopper's or business's order is {@code 404}.
+   *
    * <p>A cancel with no body at all is allowed; a body that <em>is</em> sent must carry a reason
    * rather than silently passing an empty one through.
    *
    * @param id the order to cancel
-   * @param req the reason, or {@code null} to cancel without one
+   * @param raw the JSON body {@code {"reason": "..."}}, or nothing to cancel without a reason
    * @return the cancelled order with its lines
    * @throws com.storeql.web.ApiException {@code 404} when the order does not exist; {@code 409}
    *     when it is neither PENDING nor CONFIRMED
@@ -369,15 +374,27 @@ public class OrderResource {
           "Cancels a PENDING or CONFIRMED order and releases any stock holds via OrderCancelled."
               + " An optional reason may be given; if a body is sent it must include one.")
   @APIResponse(responseCode = "200", description = "Order cancelled")
-  @APIResponse(responseCode = "404", description = "Order not found")
+  @APIResponse(responseCode = "404", description = "Order not found (or not the shopper's own)")
   @APIResponse(
       responseCode = "409",
-      description = "Order is not PENDING or CONFIRMED, so it cannot be cancelled")
+      description =
+          "Order is not PENDING or CONFIRMED, so it cannot be cancelled; for a shopper: ORDER_CANNOT_CANCEL"
+              + " (not an unpaid PENDING online order of their own) or ORDER_CANCEL_PAID_NEEDS_STAFF")
   @POST
   @Path("/{id}/cancel")
-  public Response cancel(@PathParam("id") String id, VoidRequest req) {
-    // A cancel with no body at all is allowed (no reason given); a body that IS sent must satisfy
-    // VoidRequest's @NotBlank reason rather than silently passing an empty one through.
+  public Response cancel(@PathParam("id") String id, String raw) {
+    // A cancel with no body at all is allowed (no reason given), as a till, a script or the
+    // shopper's app sends nothing; a body that IS sent must satisfy VoidRequest's @NotBlank reason
+    // rather than silently passing an empty one through. Read as text so an absent body is legal.
+    VoidRequest req = null;
+    if (raw != null && !raw.isBlank()) {
+      try {
+        req = FULFIL_JSON.fromJson(raw, VoidRequest.class);
+      } catch (jakarta.json.bind.JsonbException e) {
+        throw new ApiException(
+            400, "VALIDATION_FAILED", "cancel body is not valid JSON", java.util.List.of(), e);
+      }
+    }
     if (req != null) {
       Validations.validate(req);
     }

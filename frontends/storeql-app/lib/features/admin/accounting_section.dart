@@ -12,6 +12,7 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'accounting_api.dart';
 import 'providers/admin_providers.dart' show tenantInfoProvider;
+import 'providers/staff_names.dart';
 
 // ---------------------------------------------------------------------------
 // Accounting (17.9), on the Integrations screen: the package the business keeps
@@ -365,6 +366,7 @@ class _SyncTile extends ConsumerWidget {
       margin: const EdgeInsetsDirectional.only(bottom: AppSpacing.sm),
       child: ListTile(
         title: Text(s.description ?? s.journalId),
+        onTap: () => showDialog<void>(context: context, builder: (_) => _SyncDetailDialog(id: s.id, currency: currency)),
         // The state as a badge under the details; the two actions at the end
         // where there is room, one menu on a phone, so the journal's name
         // keeps the width.
@@ -382,15 +384,40 @@ class _SyncTile extends ConsumerWidget {
                 ? PopupMenuButton<String>(
                     key: Key('sync-actions-${s.id}'),
                     tooltip: 'Try again or leave out',
-                    onSelected: (a) => a == 'retry' ? _retry(context, ref) : _skip(context, ref),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'retry', child: Text('Try again now')),
-                      PopupMenuItem(value: 'skip', child: Text('Leave it out of the package')),
+                    onSelected: (a) => switch (a) {
+                      'retry' => _retry(context, ref),
+                      'landed' => _landed(context, ref),
+                      'notLanded' => _notLanded(context, ref),
+                      _ => _skip(context, ref),
+                    },
+                    itemBuilder: (_) => [
+                      // An uncertain push may have landed: a person says which,
+                      // rather than trying it again blind.
+                      if (s.status == 'UNCERTAIN') ...const [
+                        PopupMenuItem(value: 'landed', child: Text('It reached the package')),
+                        PopupMenuItem(value: 'notLanded', child: Text('It did not')),
+                      ] else
+                        const PopupMenuItem(value: 'retry', child: Text('Try again now')),
+                      const PopupMenuItem(value: 'skip', child: Text('Leave it out of the package')),
                     ],
                   )
                 : Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (s.status == 'UNCERTAIN') ...[
+                        IconButton(
+                          key: Key('sync-landed-${s.id}'),
+                          tooltip: 'It reached the package',
+                          icon: const Icon(Icons.check_circle_outline),
+                          onPressed: () => _landed(context, ref),
+                        ),
+                        IconButton(
+                          key: Key('sync-not-landed-${s.id}'),
+                          tooltip: 'It did not',
+                          icon: const Icon(Icons.replay),
+                          onPressed: () => _notLanded(context, ref),
+                        ),
+                      ] else
                       IconButton(
                         key: Key('sync-retry-${s.id}'),
                         tooltip: 'Try again now',
@@ -430,6 +457,51 @@ class _SyncTile extends ConsumerWidget {
     }
   }
 
+  /// "It reached the package": asks for the package's own reference, and a
+  /// note if wanted, then records it.
+  Future<void> _landed(BuildContext context, WidgetRef ref) async {
+    final said = await showDialog<({String reference, String note})>(
+        context: context, builder: (_) => const _LandedDialog());
+    if (said == null || !context.mounted) return;
+    await _resolve(context, ref, landed: true, reference: said.reference, note: said.note);
+  }
+
+  /// "It did not": confirmed, then queued to go again.
+  Future<void> _notLanded(BuildContext context, WidgetRef ref) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('It never reached the package?'),
+        content: const Text('The journal is queued to be pushed again. Only say so when you have looked in the package and it is not there.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            key: const Key('sync-not-landed-confirm'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Queue it again'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    await _resolve(context, ref, landed: false);
+  }
+
+  Future<void> _resolve(BuildContext context, WidgetRef ref,
+      {required bool landed, String? reference, String? note}) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(accountingApiProvider).resolve(s.id, landed: landed, externalId: reference, note: note);
+      ref.invalidate(accountingSyncsProvider);
+      ref.invalidate(accountingConnectionProvider);
+      ref.invalidate(accountingSyncDetailProvider(s.id));
+      messenger.showSnackBar(SnackBar(
+          content: Text(landed ? 'Recorded as delivered to the package' : 'Queued to go on the next push')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(friendlyError(e, fallback: 'That could not be recorded.'))));
+    }
+  }
+
   Future<void> _skip(BuildContext context, WidgetRef ref) async {
     final reason = await showDialog<String>(context: context, builder: (_) => const _SkipReasonDialog());
     if (reason == null || reason.isEmpty || !context.mounted) return;
@@ -442,6 +514,123 @@ class _SyncTile extends ConsumerWidget {
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text(friendlyError(e, fallback: 'It could not be left out.'))));
     }
+  }
+}
+
+/// The package's own reference for a journal that did land, and a note.
+class _LandedDialog extends StatefulWidget {
+  const _LandedDialog();
+
+  @override
+  State<_LandedDialog> createState() => _LandedDialogState();
+}
+
+class _LandedDialogState extends State<_LandedDialog> {
+  final _reference = TextEditingController();
+  final _note = TextEditingController();
+  bool _missing = false;
+
+  @override
+  void dispose() {
+    _reference.dispose();
+    _note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('It reached the package?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            key: const Key('sync-landed-reference'),
+            controller: _reference,
+            decoration: InputDecoration(
+              labelText: "The package's reference (required)",
+              hintText: 'The id the package gave the journal',
+              errorText: _missing ? "Give the package's reference for it." : null,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          TextField(
+            key: const Key('sync-landed-note'),
+            controller: _note,
+            decoration: const InputDecoration(labelText: 'Note'),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        FilledButton(
+          key: const Key('sync-landed-confirm'),
+          onPressed: () {
+            final ref = _reference.text.trim();
+            if (ref.isEmpty) {
+              setState(() => _missing = true);
+              return;
+            }
+            Navigator.pop(context, (reference: ref, note: _note.text.trim()));
+          },
+          child: const Text('It reached it'),
+        ),
+      ],
+    );
+  }
+}
+
+/// One push in full; when a person settled it, who and when, in words.
+class _SyncDetailDialog extends ConsumerWidget {
+  final String id;
+  final String? currency;
+  const _SyncDetailDialog({required this.id, required this.currency});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final detail = ref.watch(accountingSyncDetailProvider(id));
+    final r = detail.value?.resolution;
+    final by = r?.resolvedBy;
+    final names = by == null
+        ? const <String, String>{}
+        : ref.watch(staffLoginsProvider(staffIdsKey([by]))).value ?? const <String, String>{};
+    return AlertDialog(
+      title: Text(detail.value?.description ?? 'Push'),
+      content: SizedBox(
+        width: 420,
+        child: detail.when(
+          loading: () => const SizedBox(height: 80, child: LoadingView(label: 'Loading…')),
+          error: (e, _) => Text(friendlyError(e, fallback: 'Could not load the push.')),
+          data: (d) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text([
+                _SyncTile._statusLabel(d.status),
+                '${d.attempts} ${d.attempts == 1 ? 'try' : 'tries'}',
+                if (d.externalId != null) 'in the package as ${_ref(d.externalId!)}',
+              ].join(' · ')),
+              if (d.lastError != null && !d.delivered) ...[
+                const SizedBox(height: AppSpacing.xs),
+                Text(d.lastError!),
+              ],
+              if (d.resolution != null) ...[
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  '${d.resolution!.landed ? 'Settled as reached the package' : 'Settled as never reached the package'}'
+                  ' by ${by == null ? 'someone' : names[by] ?? shortRef(by)}'
+                  '${d.resolution!.resolvedAt == null ? '' : ' on ${AppFormat.dateTime(d.resolution!.resolvedAt)}'}',
+                  key: const Key('sync-resolution'),
+                ),
+                if (d.resolution!.note != null && d.resolution!.note!.isNotEmpty)
+                  Text(d.resolution!.note!, key: const Key('sync-resolution-note')),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+    );
   }
 }
 

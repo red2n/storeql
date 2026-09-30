@@ -4,11 +4,15 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -74,7 +78,8 @@ public final class Rfq {
       LocalDate validUntil,
       String notes,
       Instant quotedAt,
-      Map<UUID, BigDecimal> prices) {}
+      Map<UUID, BigDecimal> prices,
+      boolean receivedLate) {}
 
   /** A line given to a supplier at the price they quoted, on the order it raised. */
   public record Award(
@@ -86,7 +91,8 @@ public final class Rfq {
       UUID poId,
       BigDecimal unitPrice,
       String currency,
-      Instant awardedAt) {}
+      Instant awardedAt,
+      String reason) {}
 
   /** Translates an amount in a currency into the business's own; empty when no rate is kept. */
   @FunctionalInterface
@@ -228,5 +234,57 @@ public final class Rfq {
               at < 0 ? null : at + 1));
     }
     return new Comparison(homeCurrency, compared, ranked);
+  }
+
+  /**
+   * The lines awarded to a supplier other than the lowest comparable bid for them, which is what
+   * needs a reason. A price is comparable only when its bid is ranked (priced every line and can be
+   * read at home) and the price itself has a home figure; a partial or untranslatable bid is never
+   * the reference "lower" bid. A tie with the lowest is not away from it. Where nothing is
+   * comparable there is no ranking to depart from. A chosen price with no home figure cannot be
+   * shown to be the lowest, so it counts as away when something comparable exists.
+   *
+   * @param comparison the comparison of the request
+   * @param supplierByLine the supplier each awarded line goes to, by line id
+   * @return the awarded line ids that go away from the lowest, in the request's line order
+   */
+  public static List<UUID> awardedAwayFromLowest(
+      Comparison comparison, Map<UUID, UUID> supplierByLine) {
+    Set<UUID> ranked = new HashSet<>();
+    for (BidSummary b : comparison.bids()) {
+      if (b.rank() != null) ranked.add(b.supplierId());
+    }
+    List<UUID> away = new ArrayList<>();
+    for (LineComparison lc : comparison.lines()) {
+      UUID chosen = supplierByLine.get(lc.lineId());
+      if (chosen == null) continue;
+      Optional<BigDecimal> lowest =
+          lc.prices().stream()
+              .filter(p -> ranked.contains(p.supplierId()) && p.homeUnitPrice() != null)
+              .map(Price::homeUnitPrice)
+              .min(Comparator.naturalOrder());
+      if (lowest.isEmpty()) continue;
+      BigDecimal mine = null;
+      for (Price p : lc.prices()) {
+        if (p.supplierId().equals(chosen)) mine = p.homeUnitPrice();
+      }
+      if (mine == null || mine.compareTo(lowest.get()) > 0) away.add(lc.lineId());
+    }
+    return away;
+  }
+
+  /**
+   * Whether quoting has closed: the day quotes are due has gone by. The due day itself is still
+   * open. The day is read in the store's own zone; where that is not known, in the earliest zone on
+   * Earth (UTC-12), so a request is never closed before its day has ended anywhere.
+   *
+   * @param closesOn the day quotes are due, or null for no deadline
+   * @param now the moment asked
+   * @param storeZone the store's zone, or null when unknown
+   */
+  public static boolean quotingClosed(LocalDate closesOn, Instant now, ZoneId storeZone) {
+    if (closesOn == null) return false;
+    ZoneId zone = storeZone != null ? storeZone : ZoneOffset.ofHours(-12);
+    return LocalDate.ofInstant(now, zone).isAfter(closesOn);
   }
 }

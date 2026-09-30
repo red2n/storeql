@@ -216,7 +216,7 @@ public class BroadcastRepository extends BaseOutboxRepository {
     for (Object[] row :
         query(
             "SELECT user_id, store_id, role, base_tier FROM staff_assignments WHERE tenant_id = ?"
-                + " AND (CAST(? AS uuid) IS NULL OR store_id = CAST(? AS uuid)) ORDER BY store_id, user_id",
+                + " AND store_id IS NOT NULL AND (CAST(? AS uuid) IS NULL OR store_id = CAST(? AS uuid)) ORDER BY store_id, user_id",
             ps -> {
               ps.setObject(1, tenantId);
               ps.setObject(2, storeId);

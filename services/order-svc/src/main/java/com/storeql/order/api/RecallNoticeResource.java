@@ -104,19 +104,28 @@ public class RecallNoticeResource {
   }
 
   /**
-   * A recall's notices, newest first, cursor-paginated. Staff only.
+   * A recall's notices, or one order's, newest first, cursor-paginated. Staff only.
    *
-   * @param recallId the recall (query parameter, required)
+   * @param recallId the recall (query parameter); required unless {@code orderId} is given
+   * @param orderId the order (query parameter): its notices, so a return dialog can offer to settle
+   *     one; only notices at stores the caller keeps are returned
    * @param status restrict to one status (query parameter)
    */
   @Operation(
-      summary = "List a recall's notices to buyers",
-      description = "Every order the recall reached and how far each buyer has got. Staff only.")
+      summary = "List recall notices, by recall or by order",
+      description =
+          "Every order a recall reached and how far each buyer has got (recallId), or the notices"
+              + " issued against one order (orderId), across recalls; either or both. Asked by"
+              + " order, only notices at the caller's stores are returned: another business's"
+              + " order, or one at a store the caller is not held to, gives an empty list. Staff"
+              + " only.")
   @APIResponse(responseCode = "200", description = "The notices")
+  @APIResponse(responseCode = "400", description = "Neither recallId nor orderId was given")
   @APIResponse(responseCode = "403", description = "Not a member of staff")
   @GET
   public ApiResponse<List<NoticeResponse>> list(
       @QueryParam("recallId") String recallId,
+      @QueryParam("orderId") String orderId,
       @QueryParam("status") String status,
       @QueryParam("after") String after,
       @QueryParam("limit") Integer limit) {
@@ -124,7 +133,9 @@ public class RecallNoticeResource {
     var page =
         service.list(
             ctx.requireTenantId(),
-            Parsing.uuid(recallId, "recallId"),
+            recallId == null || recallId.isBlank() ? null : Parsing.uuid(recallId, "recallId"),
+            orderId == null || orderId.isBlank() ? null : Parsing.uuid(orderId, "orderId"),
+            ctx.storeIds(),
             parseStatus(status),
             after,
             limit);

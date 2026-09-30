@@ -94,7 +94,11 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   expect(journal(lead.token), '[-] the shift lead cannot post a journal', 403, 'PERMISSION_DENIED');
   expect(journal(manager.token), '[+] a plain manager can', 201);
   expect(call('POST', `/api/order-svc/orders/${lead.userId}/void`, { token: lead.token, idem: true, body: { reason: 'x' } }), '[-] the shift lead cannot void a sale', 403, 'PERMISSION_DENIED');
-  expect(call('POST', ROLES, { token: lead.token, body: { code: 'JUNIOR', name: 'Junior', baseTier: 'CASHIER', permissions: [] } }), '[+] but may define a role: staff.manage was kept', 201);
+  // staff.manage was kept, so the refusal is not the permission's: roles belong to the whole business, and a lead held to one store changes only that store.
+  expect(call('POST', ROLES, { token: lead.token, body: { code: 'JUNIOR', name: 'Junior', baseTier: 'CASHIER', permissions: [] } }), '[-] a lead held to one store cannot define a role for the whole business', 403, 'BUSINESS_WIDE_ONLY');
+  expect(define({ code: 'JUNIOR', name: 'Junior', baseTier: 'CASHIER', permissions: [] }), '[+] the owner defines it instead', 201);
+  const reassign = call('POST', STAFF, { token: lead.token, body: { userId: trainee.userId, storeId: store.id, role: 'TRAINEE' } });
+  truthy('[+] ...but manages staff at their own store: staff.manage was kept', [200, 201, 409].includes(reassign.status) && !String(reassign.body).includes('PERMISSION_DENIED'), reassign.body);
   expect(noSale(trainee.token), '[-] the trainee cannot open the drawer', 403, 'PERMISSION_DENIED');
   expect(noSale(cashier.token), '[+] a plain cashier can', 201);
   expect(noSale(trainee.token, { 'X-Permissions': 'till.no_sale' }), '[-] a forged permission header is stripped at the gateway', 403, 'PERMISSION_DENIED');

@@ -181,6 +181,24 @@ class AccountingAttempt {
       );
 }
 
+/// A person's word on a push that was UNCERTAIN: it landed, or it did not.
+class AccountingResolution {
+  final String outcome;
+  final String? resolvedBy;
+  final String? resolvedAt;
+  final String? note;
+  const AccountingResolution({required this.outcome, this.resolvedBy, this.resolvedAt, this.note});
+
+  factory AccountingResolution.fromJson(Map<String, dynamic> j) => AccountingResolution(
+        outcome: j['outcome'] as String? ?? '',
+        resolvedBy: j['resolvedBy'] as String?,
+        resolvedAt: j['resolvedAt'] as String?,
+        note: j['note'] as String?,
+      );
+
+  bool get landed => outcome == 'LANDED';
+}
+
 class AccountingSync {
   final String id;
   final String journalId;
@@ -196,6 +214,9 @@ class AccountingSync {
   final String? sourceType;
   final String? total;
   final List<AccountingAttempt> attemptLog;
+
+  /// Who settled an uncertain push and how; on the detail only, else null.
+  final AccountingResolution? resolution;
   const AccountingSync({
     required this.id,
     required this.journalId,
@@ -211,6 +232,7 @@ class AccountingSync {
     required this.sourceType,
     required this.total,
     required this.attemptLog,
+    this.resolution,
   });
 
   factory AccountingSync.fromJson(Map<String, dynamic> j) => AccountingSync(
@@ -230,6 +252,9 @@ class AccountingSync {
         attemptLog: [
           for (final a in j['attemptLog'] as List<dynamic>? ?? const []) AccountingAttempt.fromJson(a as Map<String, dynamic>),
         ],
+        resolution: j['resolution'] is Map<String, dynamic>
+            ? AccountingResolution.fromJson(j['resolution'] as Map<String, dynamic>)
+            : null,
       );
 
   bool get delivered => status == 'DELIVERED';
@@ -333,11 +358,27 @@ class AccountingApi {
     return AccountingSync.fromJson(resp.data['data'] as Map<String, dynamic>);
   }
 
+  /// Settles an UNCERTAIN push: [landed] says it reached the package (with the
+  /// package's own [externalId]), otherwise it is queued to go again.
+  Future<AccountingSync> resolve(String id, {required bool landed, String? externalId, String? note}) async {
+    final resp = await _dio.post('$_base/syncs/$id/resolve', data: {
+      'outcome': landed ? 'LANDED' : 'NOT_LANDED',
+      if (landed && externalId != null && externalId.isNotEmpty) 'externalId': externalId,
+      if (note != null && note.isNotEmpty) 'note': note,
+    });
+    return AccountingSync.fromJson(resp.data['data'] as Map<String, dynamic>);
+  }
+
   Future<AccountingSync> skip(String id, String reason) async {
     final resp = await _dio.post('$_base/syncs/$id/skip', data: {'reason': reason});
     return AccountingSync.fromJson(resp.data['data'] as Map<String, dynamic>);
   }
 }
+
+/// One push in full, with who settled it when somebody did.
+final accountingSyncDetailProvider = FutureProvider.autoDispose.family<AccountingSync, String>(
+  (ref, id) => ref.watch(accountingApiProvider).sync(id),
+);
 
 final accountingApiProvider =
     Provider<AccountingApi>((ref) => AccountingApi(ref.watch(apiClientProvider).dio));

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
+import '../../core/ids.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
@@ -572,6 +573,13 @@ class _CustomerDetailDialog extends ConsumerWidget {
     final loyaltyAsync = ref.watch(customerLoyaltyProvider(customer.id));
     final creditAsync = ref.watch(customerStoreCreditProvider(customer.id));
     final ledgerAsync = ref.watch(customerLoyaltyLedgerProvider(customer.id));
+    // Adding points and issuing credit by hand are management's (customer-svc
+    // answers 403 below that); the till's own redeem stays open to every role.
+    final auth = ref.watch(authNotifierProvider).value;
+    final management = auth is AuthAuthenticated &&
+        (auth.roles.contains('OWNER') ||
+            auth.roles.contains('MANAGER') ||
+            auth.roles.contains('PLATFORM_ADMIN'));
 
     return AlertDialog(
       title: Row(
@@ -660,17 +668,21 @@ class _CustomerDetailDialog extends ConsumerWidget {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
+                  if (management)
                   OutlinedButton.icon(
+                    key: const Key('customer-earn-points'),
                     onPressed: () => _points(context, ref, 'earn'),
                     icon: const Icon(Icons.add, size: 18),
-                    label: const Text('Earn points'),
+                    label: const Text('Add points'),
                   ),
                   OutlinedButton.icon(
                     onPressed: () => _points(context, ref, 'redeem'),
                     icon: const Icon(Icons.remove, size: 18),
                     label: const Text('Redeem points'),
                   ),
+                  if (management)
                   OutlinedButton.icon(
+                    key: const Key('customer-issue-credit'),
                     onPressed: () => _storeCredit(context, ref, 'issue'),
                     icon: const Icon(Icons.add_card, size: 18),
                     label: const Text('Issue credit'),
@@ -889,13 +901,21 @@ class _CustomerDetailDialog extends ConsumerWidget {
 
   Future<void> _points(BuildContext context, WidgetRef ref, String action) async {
     final res = await _amountReason(context,
-        action == 'earn' ? 'Earn points' : 'Redeem points', 'Points');
+        action == 'earn' ? 'Add points' : 'Redeem points', 'Points',
+        reasonRequired: action == 'earn');
     if (res == null) return;
+    // Adding points is retried safely: the same request keeps its key, a
+    // changed one gets a new one, and a success lets it go.
+    final memo = '${customer.id}|$action|${res.amount}|${res.reason}';
     try {
       await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.customer}/customers/${customer.id}/loyalty/$action',
         data: {'points': res.amount, 'reason': res.reason},
+        options: action == 'earn'
+            ? Options(headers: {'Idempotency-Key': _keyFor(memo)})
+            : null,
       );
+      _sentKeys.remove(memo);
       _refresh(ref);
       if (!context.mounted) return;
       _toast(context, 'Points updated.');
@@ -909,13 +929,21 @@ class _CustomerDetailDialog extends ConsumerWidget {
   Future<void> _storeCredit(
       BuildContext context, WidgetRef ref, String action) async {
     final res = await _amountReason(context,
-        action == 'issue' ? 'Issue store credit' : 'Redeem store credit', 'Amount');
+        action == 'issue' ? 'Issue store credit' : 'Redeem store credit', 'Amount',
+        reasonRequired: action == 'issue');
     if (res == null) return;
+    // Issuing credit is retried safely, like adding points: same request,
+    // same key; a changed one, a new key; a success lets it go.
+    final memo = '${customer.id}|credit-$action|${res.amount}|${res.reason}';
     try {
       await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.customer}/customers/${customer.id}/store-credit/$action',
         data: {'amount': res.amount, 'reason': res.reason},
+        options: action == 'issue'
+            ? Options(headers: {'Idempotency-Key': _keyFor(memo)})
+            : null,
       );
+      _sentKeys.remove(memo);
       _refresh(ref);
       if (!context.mounted) return;
       _toast(context, 'Store credit updated.');
@@ -980,43 +1008,70 @@ class _AmountReason {
   const _AmountReason(this.amount, this.reason);
 }
 
+/// The Idempotency-Key of each manual grant not yet known to have landed: a
+/// retry of the same request reuses it, a changed request has a different
+/// memo and so a new key.
+final Map<String, String> _sentKeys = {};
+String _keyFor(String memo) => _sentKeys.putIfAbsent(memo, newId);
+
+/// Asks for an amount and a reason. When [reasonRequired] (adding points,
+/// issuing credit: the server refuses a blank one), the form says so and does
+/// not send without it.
 Future<_AmountReason?> _amountReason(
-    BuildContext context, String title, String amountLabel) {
+    BuildContext context, String title, String amountLabel,
+    {bool reasonRequired = false}) {
   final amountCtrl = TextEditingController();
   final reasonCtrl = TextEditingController();
   return showDialog<_AmountReason>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: amountCtrl,
-            autofocus: true,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: InputDecoration(labelText: amountLabel),
+    builder: (ctx) {
+      String? reasonError;
+      return StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                key: const Key('grant-amount'),
+                controller: amountCtrl,
+                autofocus: true,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(labelText: amountLabel),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('grant-reason'),
+                controller: reasonCtrl,
+                decoration: InputDecoration(
+                  labelText: reasonRequired ? 'Reason (required)' : 'Reason',
+                  errorText: reasonError,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: reasonCtrl,
-            decoration: const InputDecoration(labelText: 'Reason'),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-        FilledButton(
-          onPressed: () {
-            final amt = double.tryParse(amountCtrl.text.trim());
-            if (amt == null || amt <= 0) return;
-            Navigator.pop(ctx, _AmountReason(amt, reasonCtrl.text.trim()));
-          },
-          child: const Text('Apply'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            FilledButton(
+              key: const Key('grant-apply'),
+              onPressed: () {
+                final amt = double.tryParse(amountCtrl.text.trim());
+                if (amt == null || amt <= 0) return;
+                if (reasonRequired && reasonCtrl.text.trim().isEmpty) {
+                  setState(() => reasonError = 'Say why. It is kept with your name.');
+                  return;
+                }
+                Navigator.pop(ctx, _AmountReason(amt, reasonCtrl.text.trim()));
+              },
+              child: const Text('Apply'),
+            ),
+          ],
         ),
-      ],
-    ),
+      );
+    },
   );
 }
 

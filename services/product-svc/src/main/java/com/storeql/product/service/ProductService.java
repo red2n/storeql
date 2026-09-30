@@ -900,6 +900,7 @@ public class ProductService {
    * @return the created variant
    */
   public Variant createVariant(UUID tenantId, UUID productId, CreateVariantRequest req) {
+    VariantBarcodes.requireValid(req.barcode());
     UUID id = Ids.newId();
     Instant now = Instant.now();
     var variant =
@@ -962,6 +963,7 @@ public class ProductService {
   public Variant updateVariant(
       UUID tenantId, UUID productId, UUID variantId, UpdateVariantRequest req) {
     getVariant(tenantId, variantId);
+    VariantBarcodes.requireValid(req.barcode());
     return repo.updateVariant(
         tenantId,
         variantId,
@@ -1927,6 +1929,7 @@ public class ProductService {
           for (var v : p.variants()) {
             try {
               com.storeql.web.Validations.validate(v);
+              VariantBarcodes.requireValid(v.barcode());
               // REPLACE: drop any existing variant with this SKU first, so the sheet wins.
               if (replace) repo.deleteVariantBySku(tenantId, v.sku().trim());
               UUID variantId = Ids.newId();

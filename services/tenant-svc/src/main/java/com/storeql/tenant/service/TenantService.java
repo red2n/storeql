@@ -2,6 +2,7 @@ package com.storeql.tenant.service;
 
 import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
+import com.storeql.tenant.domain.Audit;
 import com.storeql.tenant.domain.Domain;
 import com.storeql.tenant.domain.Domain.DeliveryArea;
 import com.storeql.tenant.domain.Domain.StaffAssignment;
@@ -12,6 +13,7 @@ import com.storeql.tenant.domain.Domain.TenantInventoryConfig;
 import com.storeql.tenant.domain.Domain.TenantRole;
 import com.storeql.tenant.domain.Domain.TenantWithStore;
 import com.storeql.tenant.domain.Domain.Zone;
+import com.storeql.tenant.domain.RoleGrants;
 import com.storeql.tenant.dto.Dtos.AssignStaffRequest;
 import com.storeql.tenant.dto.Dtos.CreateDeliveryAreaRequest;
 import com.storeql.tenant.dto.Dtos.CreateStoreRequest;
@@ -208,7 +210,7 @@ public class TenantService {
       UUID tenantId, UUID callerUserId, CreateStoreRequest req) {
     requireOwner(getTenant(tenantId), callerUserId);
     boolean isDefault = !repo.hasDefaultStore(tenantId);
-    return createStoreInternal(tenantId, req, isDefault);
+    return createStoreInternal(tenantId, req, isDefault, callerUserId);
   }
 
   /**
@@ -222,7 +224,16 @@ public class TenantService {
    * @return the new store with its DEFAULT zone
    */
   public StoreWithZone addStore(UUID tenantId, CreateStoreRequest req) {
-    return createStoreInternal(tenantId, req, false);
+    return createStoreInternal(tenantId, req, false, null);
+  }
+
+  /**
+   * Adds a store, keeping who added it in the admin change log.
+   *
+   * @param actorId the login adding it
+   */
+  public StoreWithZone addStore(UUID tenantId, CreateStoreRequest req, UUID actorId) {
+    return createStoreInternal(tenantId, req, false, actorId);
   }
 
   private static final java.util.Set<String> ZONES = java.time.ZoneId.getAvailableZoneIds();
@@ -268,7 +279,7 @@ public class TenantService {
   }
 
   private StoreWithZone createStoreInternal(
-      UUID tenantId, CreateStoreRequest req, boolean isDefault) {
+      UUID tenantId, CreateStoreRequest req, boolean isDefault, UUID actorId) {
     // A shop or a warehouse, nothing else: depot / DC replenishment reads the type to know which
     // stores may serve shops.
     String type = storeType(req.type());
@@ -342,7 +353,10 @@ public class TenantService {
             Events.storeStatusChanged(tenantId, storeId, store.status(), store.type()));
 
     return repo.createStoreWithDefaultZone(
-        store, defaultZone, List.of(storeEvent, zoneEvent, statusEvent));
+        store,
+        defaultZone,
+        List.of(storeEvent, zoneEvent, statusEvent),
+        Audit.Entry.of(tenantId, Audit.STORE_CREATED, actorId, storeId, null, null, null, type));
   }
 
   /** Add a zone to a store. Publishes ZoneCreated. */
@@ -381,12 +395,37 @@ public class TenantService {
     ctx.requirePermission(Permissions.STAFF_MANAGE);
     UUID tenantId = ctx.requireTenantId();
     UUID userId = parseUuid(req.userId(), "userId");
-    UUID storeId = parseUuid(req.storeId(), "storeId");
+    boolean wide = Boolean.TRUE.equals(req.businessWide());
+    UUID storeId;
+    if (wide) {
+      if (req.storeId() != null && !req.storeId().isBlank()) {
+        throw ApiException.badRequest(
+            "STAFF_STORE_AND_BUSINESS_WIDE",
+            "a business-wide assignment names no store: leave storeId out");
+      }
+      // Head office is the owner's to give: nobody else decides who runs the business as a whole.
+      if (!ctx.hasRole("OWNER")) {
+        throw ApiException.forbidden(
+            "STAFF_BUSINESS_WIDE_OWNER_ONLY",
+            "Only an owner of the business grants a business-wide assignment");
+      }
+      storeId = null;
+    } else {
+      if (req.storeId() == null || req.storeId().isBlank()) {
+        throw ApiException.badRequest(
+            "STAFF_STORE_REQUIRED", "storeId is required unless businessWide is true");
+      }
+      storeId = parseUuid(req.storeId(), "storeId");
+    }
     // What the business is sold decides how many people may work for it (21.8).
     plans.requireRoomForAnotherStaffMember(tenantId, userId);
-    repo.findStore(tenantId, storeId)
-        .orElseThrow(
-            () -> ApiException.notFound("STORE_NOT_FOUND", "No such store in this tenant"));
+    if (storeId != null) {
+      repo.findStore(tenantId, storeId)
+          .orElseThrow(
+              () -> ApiException.notFound("STORE_NOT_FOUND", "No such store in this tenant"));
+      // A caller held to stores assigns people at those stores only.
+      ctx.requireStoreAccess(storeId);
+    }
     String role = req.role().trim().toUpperCase(Locale.ROOT);
     String baseTier;
     String roleCode = null;
@@ -410,6 +449,20 @@ public class TenantService {
       permissions = custom.permissions();
       roleUpdatedAt = custom.updatedAt();
     }
+    if (wide && !"MANAGER".equals(baseTier)) {
+      throw ApiException.badRequest(
+          "STAFF_BUSINESS_WIDE_TIER",
+          "a business-wide assignment is for the MANAGER tier only (the built-in MANAGER or a"
+              + " custom role standing on it), not "
+              + baseTier);
+    }
+    // Nobody hands out the owner tier, or more than they hold themselves.
+    RoleGrants.requireMayAssign(
+        ctx.hasRole("OWNER"),
+        Permissions.unrestricted(ctx.roles()),
+        ctx.permissions(),
+        baseTier,
+        permissions != null ? permissions : Permissions.defaultsFor(baseTier));
     var assignment =
         new StaffAssignment(Ids.newId(), tenantId, userId, storeId, role, baseTier, Instant.now());
     var event =
@@ -420,7 +473,18 @@ public class TenantService {
             userId,
             Events.staffAssigned(
                 tenantId, userId, storeId, baseTier, roleCode, permissions, roleUpdatedAt));
-    repo.createStaffWithOutbox(assignment, event);
+    repo.createStaffWithOutbox(
+        assignment,
+        event,
+        Audit.Entry.of(
+            tenantId,
+            Audit.STAFF_ASSIGNED,
+            ctx.userId(),
+            storeId,
+            userId,
+            role,
+            null,
+            wide ? role + Audit.BUSINESS_WIDE : role));
   }
 
   // ── custom roles (20.10) ──────────────────────────────────────────────────
@@ -477,6 +541,12 @@ public class TenantService {
     }
     String tier = req.baseTier().trim().toUpperCase(Locale.ROOT);
     Set<String> permissions = checkedPermissions(tier, req.permissions());
+    RoleGrants.requireMayDefine(
+        ctx.hasRole("OWNER"),
+        Permissions.unrestricted(ctx.roles()),
+        ctx.permissions(),
+        permissions,
+        Set.of());
     Instant now = Instant.now();
     TenantRole role =
         new TenantRole(
@@ -489,7 +559,7 @@ public class TenantService {
             blankToNull(req.description()),
             now,
             now);
-    repo.createRole(role, roleDefinedEvent(role));
+    repo.createRole(role, roleDefinedEvent(role), ctx.userId());
     return role;
   }
 
@@ -506,6 +576,12 @@ public class TenantService {
     ctx.requirePermission(Permissions.STAFF_MANAGE);
     TenantRole existing = getRole(ctx.requireTenantId(), code);
     Set<String> permissions = checkedPermissions(existing.baseTier(), req.permissions());
+    RoleGrants.requireMayDefine(
+        ctx.hasRole("OWNER"),
+        Permissions.unrestricted(ctx.roles()),
+        ctx.permissions(),
+        permissions,
+        existing.permissions());
     TenantRole role =
         new TenantRole(
             existing.id(),
@@ -517,7 +593,7 @@ public class TenantService {
             blankToNull(req.description()),
             existing.createdAt(),
             Instant.now());
-    if (!repo.updateRole(role, roleDefinedEvent(role))) {
+    if (!repo.updateRole(role, roleDefinedEvent(role), ctx.userId())) {
       throw ApiException.notFound("ROLE_NOT_FOUND", "No such role: " + code);
     }
     return role;
@@ -543,7 +619,8 @@ public class TenantService {
    */
   public void deleteRole(TenantContext ctx, String code) {
     ctx.requirePermission(Permissions.STAFF_MANAGE);
-    if (!repo.deleteRole(ctx.requireTenantId(), code.trim().toUpperCase(Locale.ROOT))) {
+    if (!repo.deleteRole(
+        ctx.requireTenantId(), code.trim().toUpperCase(Locale.ROOT), ctx.userId())) {
       throw ApiException.notFound("ROLE_NOT_FOUND", "No such role: " + code);
     }
   }
@@ -744,11 +821,27 @@ public class TenantService {
    * @throws ApiException {@code TENANT_NOT_FOUND} (404) when no such tenant exists; {@code
    *     INVALID_STATUS} (400) when the status is neither ACTIVE nor INACTIVE
    */
-  public Tenant patchTenantStatus(UUID tenantId, PatchStatusRequest req, UUID actorId) {
+  public Tenant patchTenantStatus(
+      UUID tenantId, com.storeql.tenant.dto.Dtos.TenantStatusRequest req, UUID actorId) {
     getTenant(tenantId);
     String status = req.status().toUpperCase(Locale.ROOT);
     if (!Tenant.STATUS_ACTIVE.equals(status) && !Tenant.STATUS_INACTIVE.equals(status)) {
       throw ApiException.badRequest("INVALID_STATUS", "status must be ACTIVE or INACTIVE");
+    }
+    // A suspension a business can appeal has to be explainable: the words are the administrator's
+    // own, and there is no suspending without them.
+    String note = blankToNull(req.reason());
+    if (Tenant.STATUS_INACTIVE.equals(status) && note == null) {
+      throw ApiException.badRequest(
+          "TENANT_STATUS_REASON_REQUIRED", "a reason is required to suspend a business");
+    }
+    if (Tenant.STATUS_ACTIVE.equals(status) && note != null) {
+      LOG.log(
+          System.Logger.Level.INFO,
+          "tenant {0} reactivated by {1}: {2}",
+          tenantId,
+          actorId,
+          note.replaceAll("[\\r\\n]+", " "));
     }
     // Switched off by a person, so it is recorded as such — and a payment will not lift it. Dunning
     // writes NON_PAYMENT for its own suspensions, which is the only reason money ever undoes.
@@ -756,8 +849,9 @@ public class TenantService {
         tenantId,
         status,
         com.storeql.tenant.domain.Dunning.ADMINISTRATOR,
+        note,
         actorId,
-        tenantStatusEvent(tenantId, status));
+        List.of(tenantStatusEvent(tenantId, status)));
   }
 
   /**
@@ -901,6 +995,15 @@ public class TenantService {
    *     none of the three
    */
   public Store updateStore(UUID tenantId, UUID storeId, UpdateStoreRequest req) {
+    return updateStore(tenantId, storeId, req, null);
+  }
+
+  /**
+   * The same, keeping who changed the till-phone setting when it moves.
+   *
+   * @param actorId the login making the change
+   */
+  public Store updateStore(UUID tenantId, UUID storeId, UpdateStoreRequest req, UUID actorId) {
     Store existing = getStore(tenantId, storeId);
     return repo.updateStore(
         tenantId,
@@ -922,7 +1025,8 @@ public class TenantService {
         // keep current value when the client omits the flag
         req.showPrices() == null ? existing.showPrices() : req.showPrices(),
         normalizePaymentMethods(req.enabledPaymentMethods(), existing.enabledPaymentMethods()),
-        normalizeTillPhone(req.tillPhone(), existing.tillPhone()));
+        normalizeTillPhone(req.tillPhone(), existing.tillPhone()),
+        actorId);
   }
 
   /**
@@ -982,6 +1086,15 @@ public class TenantService {
    *     {@code INVALID_STATUS} (400) when the status is not a known one
    */
   public Store patchStoreStatus(UUID tenantId, UUID storeId, PatchStatusRequest req) {
+    return patchStoreStatus(tenantId, storeId, req, null);
+  }
+
+  /**
+   * The same, keeping who changed it and from what in the admin change log.
+   *
+   * @param actorId the login making the change
+   */
+  public Store patchStoreStatus(UUID tenantId, UUID storeId, PatchStatusRequest req, UUID actorId) {
     Store existing = getStore(tenantId, storeId);
     String status = req.status().toUpperCase(Locale.ROOT);
     if (!Store.STATUSES.contains(status)) {
@@ -995,7 +1108,7 @@ public class TenantService {
             tenantId,
             storeId,
             Events.storeStatusChanged(tenantId, storeId, status, existing.type()));
-    return repo.updateStoreStatusWithOutbox(tenantId, storeId, status, event);
+    return repo.updateStoreStatusWithOutbox(tenantId, storeId, status, event, actorId);
   }
 
   /**
@@ -1069,11 +1182,27 @@ public class TenantService {
    *
    * @param tenantId owning tenant
    * @param userId the staff member to unassign
-   * @param storeId the store to unassign them from
+   * @param storeId the store to unassign them from, or null for their business-wide assignment (an
+   *     owner only, 403 {@code STAFF_BUSINESS_WIDE_OWNER_ONLY})
    */
   public void removeStaff(TenantContext ctx, UUID userId, UUID storeId) {
     ctx.requirePermission(Permissions.STAFF_MANAGE);
     UUID tenantId = ctx.requireTenantId();
+    if (storeId == null) {
+      // The business-wide assignment: an owner's to take away, as it was theirs to give.
+      if (!ctx.hasRole("OWNER")) {
+        throw ApiException.forbidden(
+            "STAFF_BUSINESS_WIDE_OWNER_ONLY",
+            "Only an owner of the business removes a business-wide assignment");
+      }
+    } else {
+      repo.findStore(tenantId, storeId)
+          .orElseThrow(
+              () -> ApiException.notFound("STORE_NOT_FOUND", "No such store in this tenant"));
+      // Only the assignment at that store goes, so a caller held to stores may remove people there
+      // and never touches the same person's assignment at a store outside their set.
+      ctx.requireStoreAccess(storeId);
+    }
     // SJ-D51: the removal used to stop at this table, and the role stayed on the login for good.
     repo.removeStaffWithOutbox(
         tenantId,
@@ -1085,7 +1214,8 @@ public class TenantService {
                 "storeql.tenant.staff-removed",
                 tenantId,
                 userId,
-                Events.staffRemoved(tenantId, userId, storeId, tier)));
+                Events.staffRemoved(tenantId, userId, storeId, tier)),
+        ctx.userId());
   }
 
   // ── Gap #53: Inventory org parameters ────────────────────────────────────
@@ -1186,23 +1316,14 @@ public class TenantService {
             () ->
                 new ApiException(
                     404, "STORE_NOT_FOUND", "No such store in this tenant", List.of()));
-    String pincode = req.pincode().trim();
+    String pincode = com.storeql.tenant.domain.Pincodes.normalise(req.pincode());
     if (pincode.isEmpty()) {
       throw ApiException.badRequest("DELIVERY_PINCODE_REQUIRED", "pincode is required");
     }
     int priority = req.priority() != null ? req.priority() : 100;
     var area = new DeliveryArea(Ids.newId(), tenantId, storeId, pincode, priority, Instant.now());
-    try {
-      return Mappers.toDto(repo.insertDeliveryArea(area));
-    } catch (RuntimeException e) {
-      // Unique (tenant, store, pincode) — surface a clean 409.
-      throw new ApiException(
-          409,
-          "DELIVERY_AREA_EXISTS",
-          "This store already covers pincode " + pincode,
-          List.of(),
-          e);
-    }
+    // The unique pair answers 409 by itself; anything else a database says stays what it is.
+    return Mappers.toDto(repo.insertDeliveryArea(area));
   }
 
   /**
@@ -1255,7 +1376,8 @@ public class TenantService {
     if (pincode == null || pincode.isBlank()) {
       throw ApiException.badRequest("FULFILMENT_PINCODE_REQUIRED", "pincode is required");
     }
-    Optional<DeliveryArea> hit = repo.resolveDeliveryArea(tenantId, pincode);
+    Optional<DeliveryArea> hit =
+        repo.resolveDeliveryArea(tenantId, com.storeql.tenant.domain.Pincodes.normalise(pincode));
     if (hit.isPresent()) {
       Store store =
           repo.findStore(tenantId, hit.get().storeId())
@@ -1274,7 +1396,7 @@ public class TenantService {
       throw new ApiException(
           404,
           "FULFILMENT_AREA_NOT_COVERED",
-          "No store delivers to pincode " + pincode.trim(),
+          "No store delivers to pincode " + com.storeql.tenant.domain.Pincodes.normalise(pincode),
           List.of());
     }
     // No areas configured → default/first store.
@@ -1289,7 +1411,11 @@ public class TenantService {
                     new ApiException(
                         404, "STORE_NOT_FOUND", "Tenant has no stores to fulfil from", List.of()));
     return new FulfilmentResolveResponse(
-        store.id().toString(), store.name(), store.code(), pincode.trim(), 0);
+        store.id().toString(),
+        store.name(),
+        store.code(),
+        com.storeql.tenant.domain.Pincodes.normalise(pincode),
+        0);
   }
 
   private static UUID parseUuid(String s, String field) {

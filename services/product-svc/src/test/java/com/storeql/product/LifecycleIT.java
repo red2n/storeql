@@ -95,7 +95,8 @@ class LifecycleIT {
   }
 
   private String barcode() {
-    return String.format("5%012d", Math.abs(System.nanoTime()) % 1_000_000_000_000L);
+    String body = String.format("5%011d", Math.abs(System.nanoTime()) % 100_000_000_000L);
+    return body + com.storeql.gs1.Gtin.checkDigit(body);
   }
 
   private static String outboxTypes() throws Exception {

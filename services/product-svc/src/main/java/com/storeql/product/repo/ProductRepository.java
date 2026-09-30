@@ -912,6 +912,9 @@ public class ProductRepository extends BaseOutboxRepository {
    * @param unit the unit of measure the variant is sold in
    * @return the variant as stored
    */
+  // The named duplicate keeps the driver's own failure as its cause, which is the trace that
+  // matters.
+  @SuppressWarnings("PMD.PreserveStackTrace")
   public Variant updateVariant(
       UUID tenantId,
       UUID variantId,
@@ -923,24 +926,35 @@ public class ProductRepository extends BaseOutboxRepository {
     Instant now = Instant.now();
     // RETURNING, not a second SELECT: a re-read could hand this caller a concurrent writer's row,
     // and could not tell "updated" from "matched nothing because the variant is delisted".
-    return query(
-            "UPDATE product_variants SET sku=?, barcode=?, manufacturer_pn=?, attributes=?, unit=?,"
-                + " updated_at=? WHERE tenant_id=? AND id=? AND status='ACTIVE'"
-                + " RETURNING id, tenant_id, product_id, sku, barcode, manufacturer_pn, attributes,"
-                + " unit, status, created_at, updated_at",
-            ps -> {
-              ps.setString(1, sku);
-              ps.setString(2, barcode);
-              ps.setString(3, manufacturerPn);
-              ps.setString(4, attributes);
-              ps.setString(5, unit);
-              ps.setObject(6, now.atOffset(ZoneOffset.UTC));
-              ps.setObject(7, tenantId);
-              ps.setObject(8, variantId);
-            },
-            ProductRepository::mapVariant,
-            "update variant")
-        .stream()
+    List<Variant> updated;
+    try {
+      updated =
+          query(
+              "UPDATE product_variants SET sku=?, barcode=?, manufacturer_pn=?, attributes=?, unit=?,"
+                  + " updated_at=? WHERE tenant_id=? AND id=? AND status='ACTIVE'"
+                  + " RETURNING id, tenant_id, product_id, sku, barcode, manufacturer_pn, attributes,"
+                  + " unit, status, created_at, updated_at",
+              ps -> {
+                ps.setString(1, sku);
+                ps.setString(2, barcode);
+                ps.setString(3, manufacturerPn);
+                ps.setString(4, attributes);
+                ps.setString(5, unit);
+                ps.setObject(6, now.atOffset(ZoneOffset.UTC));
+                ps.setObject(7, tenantId);
+                ps.setObject(8, variantId);
+              },
+              ProductRepository::mapVariant,
+              "update variant");
+    } catch (ApiException e) {
+      // query() wraps the driver's failure as a 500; a SKU or barcode already held is the
+      // caller's conflict, named as such.
+      if (e.getCause() instanceof SQLException sql && UNIQUE_VIOLATION.equals(sql.getSQLState())) {
+        throw duplicate(sql);
+      }
+      throw e;
+    }
+    return updated.stream()
         .findFirst()
         .orElseThrow(
             () ->
@@ -974,10 +988,44 @@ public class ProductRepository extends BaseOutboxRepository {
 
   @Override
   protected RuntimeException handleTxSqlException(String what, SQLException e) {
-    if (UNIQUE_VIOLATION.equals(e.getSQLState()))
-      return new ApiException(
-          409, "DUPLICATE", "A record with that unique value already exists", List.of(), e);
+    if (UNIQUE_VIOLATION.equals(e.getSQLState())) return duplicate(e);
     return dbError(what, e);
+  }
+
+  /**
+   * The refusal for a unique-constraint violation: a variant's SKU or barcode has its own stable
+   * code so a form can point at the field; any other unique value stays the generic {@code
+   * DUPLICATE}.
+   *
+   * @param e the violation
+   * @return the 409 to throw
+   */
+  static ApiException duplicate(SQLException e) {
+    String code = duplicateCode(e.getMessage());
+    return switch (code) {
+      case "PRODUCT_SKU_DUPLICATE" ->
+          new ApiException(
+              409, code, "Another variant in this business already has that SKU", List.of(), e);
+      case "PRODUCT_BARCODE_DUPLICATE" ->
+          new ApiException(
+              409, code, "Another variant in this business already has that barcode", List.of(), e);
+      default ->
+          new ApiException(
+              409, "DUPLICATE", "A record with that unique value already exists", List.of(), e);
+    };
+  }
+
+  /**
+   * Names the constraint a Postgres unique-violation message points at.
+   *
+   * @param message the driver's message, which quotes the constraint or index name
+   * @return {@code PRODUCT_SKU_DUPLICATE}, {@code PRODUCT_BARCODE_DUPLICATE} or {@code DUPLICATE}
+   */
+  static String duplicateCode(String message) {
+    if (message == null) return "DUPLICATE";
+    if (message.contains("uq_variants_tenant_barcode")) return "PRODUCT_BARCODE_DUPLICATE";
+    if (message.contains("product_variants_tenant_id_sku_key")) return "PRODUCT_SKU_DUPLICATE";
+    return "DUPLICATE";
   }
 
   // ─────────────────────────────────────────────────────── inserts / mappers

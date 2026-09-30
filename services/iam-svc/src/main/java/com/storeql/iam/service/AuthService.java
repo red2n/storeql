@@ -5,6 +5,7 @@ import com.storeql.iam.auth.Passwords;
 import com.storeql.iam.auth.Tokens;
 import com.storeql.iam.client.MqttSessionRevoker;
 import com.storeql.iam.config.ServiceConfig;
+import com.storeql.iam.domain.PasswordReset;
 import com.storeql.iam.domain.TokenIdentity;
 import com.storeql.iam.domain.User;
 import com.storeql.iam.dto.Dtos.ProvisionStaffResponse;
@@ -14,6 +15,7 @@ import com.storeql.iam.repo.SsoRepository;
 import com.storeql.iam.repo.UserRepository;
 import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
+import com.storeql.service.TenantProfiles;
 import com.storeql.service.TenantStatusRepository;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -45,6 +47,7 @@ public class AuthService {
   @Inject TenantStatusRepository tenantStatus;
   @Inject MfaService mfa;
   @Inject SsoRepository sso;
+  @Inject TenantProfiles tenantProfiles;
 
   /** RFC 8176's name for a password. */
   public static final String AMR_PASSWORD = "pwd";
@@ -476,7 +479,8 @@ public class AuthService {
   }
 
   /** Change password for an authenticated user (requires current password). */
-  public void changePassword(UUID userId, String currentPassword, String newPassword) {
+  public void changePassword(
+      UUID userId, String currentPassword, String newPassword, String rawLanguage) {
     User user =
         users
             .findById(userId)
@@ -485,11 +489,45 @@ public class AuthService {
       throw ApiException.unauthorized("INVALID_CREDENTIALS", "Current password is incorrect");
     }
     policy.check(newPassword, user.email());
-    users.updatePassword(userId, passwords.hash(newPassword));
+    // The "your password was changed" notice is written with the change itself, never for the
+    // platform administrator (whose credentials the operator's bootstrap owns).
+    boolean staff = user.tenantId() != null || !User.TYPE_CUSTOMER.equals(user.type());
+    OutboxRow changed =
+        PasswordChangedEvent.announces(
+                user.email(), users.rolesOf(userId).contains("PLATFORM_ADMIN"))
+            ? PasswordChangedEvent.row(
+                userId,
+                user.email(),
+                staff,
+                user.tenantId() != null
+                    ? tenantProfiles.businessName(user.tenantId()).orElse(null)
+                    : null,
+                PasswordChangedEvent.VIA_CHANGE,
+                PasswordReset.language(rawLanguage),
+                Instant.now())
+            : null;
+    users.updatePassword(userId, passwords.hash(newPassword), changed);
     // Revoke every outstanding refresh token: a password change must invalidate sessions that
     // may have been established with the old (possibly compromised) credentials.
     refreshTokens.revokeAllForUser(userId);
     users.audit(user.tenantId(), userId, "PASSWORD_CHANGED", user.email());
+  }
+
+  /**
+   * "Sign out everywhere": ends every renewable session of the caller's own login, the one they are
+   * using included. Access tokens already issued live out their few minutes. Audited as {@code
+   * SESSIONS_REVOKED_ALL}.
+   *
+   * @return how many sessions (refresh tokens still valid) were ended
+   */
+  public int revokeAllSessions(UUID userId) {
+    User user =
+        users
+            .findById(userId)
+            .orElseThrow(() -> ApiException.unauthorized("USER_NOT_FOUND", "User not found"));
+    int ended = refreshTokens.revokeLiveForUser(userId);
+    users.audit(user.tenantId(), userId, "SESSIONS_REVOKED_ALL", null);
+    return ended;
   }
 
   /**

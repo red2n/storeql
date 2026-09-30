@@ -1,8 +1,10 @@
 package com.storeql.inventory.repo;
 
 import com.storeql.inventory.domain.Domain.LowStockRow;
+import com.storeql.inventory.domain.Expiry;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
@@ -33,16 +35,25 @@ import java.util.UUID;
 @ApplicationScoped
 public class LowStockRepository extends BaseJdbcRepository {
 
+  @Inject ExpiryDay expiryDay;
+
   /**
    * Availability, defined exactly as {@code InventoryRepository.LEVELS_CORE} defines it — on hand
    * minus held reservations, counting only AVAILABLE material. Reserved stock is spoken for, so
    * treating it as on hand would under-report shortages; and a report that disagreed with the
    * levels list about how much stock there is would be worse than no report.
    */
-  private static final String AVAILABLE =
+  private static String available(Expiry expiry) {
+    // Stock past its date is on hand but never available (Expiry), so it is no cover for a
+    // shortage.
+    return AVAILABLE_HEAD.replace("{SELLABLE}", expiry.sellableSql("b"));
+  }
+
+  private static final String AVAILABLE_HEAD =
       """
       SELECT b.store_id, b.variant_id,
-             COALESCE(SUM(b.remaining_qty),0) - COALESCE(MAX(res.reserved),0) AS available
+             COALESCE(SUM(b.remaining_qty) FILTER (WHERE {SELLABLE}),0)
+               - COALESCE(MAX(res.reserved),0) AS available
       FROM inventory_batches b
       LEFT JOIN (
           SELECT store_id, variant_id, SUM(qty) AS reserved
@@ -81,7 +92,7 @@ public class LowStockRepository extends BaseJdbcRepository {
     // against a configured level.
     String sql =
         "WITH avail AS ("
-            + AVAILABLE
+            + available(expiryDay.of(tenantId))
             + "), signals AS ("
             + SIGNALS
             + "), binding AS ("

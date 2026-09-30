@@ -42,12 +42,12 @@ public class TenderMixRepository extends BaseJdbcRepository {
    * currency. If per-tenant multi-currency ever arrives, this is one of the places that has to
    * learn about it.
    *
-   * <p>{@code refund_tenders.store_id} is only ever populated by hand — every insert path this
-   * service has never writes it — so a refund's store is read as {@code COALESCE(r.store_id,
+   * <p>{@code refund_tenders.store_id} is written by every refund path and back-filled for older
+   * rows (V12), so a refund's store is its own. It is still read as {@code COALESCE(r.store_id,
    * t.store_id)} through a left join back to the payment tender it refunds, exactly as the
-   * settlement matcher already resolves it ({@code SettlementRepository.REFUND_TARGET}). A refund
-   * whose payment has since been deleted (never happens today) is store-less and so is counted only
-   * when every store is being read.
+   * settlement matcher resolves it ({@code SettlementRepository.REFUND_TARGET}), so a row that
+   * somehow has none falls back to its payment's store. A refund with neither is store-less and so
+   * is counted only when every store is being read.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
    * @param stores restrict to these stores, or {@code null} for every store in the tenant (a caller
@@ -96,8 +96,7 @@ public class TenderMixRepository extends BaseJdbcRepository {
             + window
             + "   UNION ALL"
             // refund_tenders has no status column: a row here is a refund that happened. Its own
-            // store_id is filled in only when a caller set it by hand, so the payment it refunds
-            // is the fallback (see the javadoc above).
+            // store_id is the store; the payment it refunds is the fallback (see the javadoc).
             + "   SELECT r.method, 0, 0, r.amount, 1, 0"
             + "     FROM refund_tenders r"
             + "     LEFT JOIN payment_tenders t"

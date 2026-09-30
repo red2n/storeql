@@ -1,19 +1,24 @@
 package com.storeql.purchase.api;
 
+import com.storeql.purchase.domain.Domain.PurchaseOrder;
 import com.storeql.purchase.dto.Dtos.AddPurchaseOrderLineRequest;
+import com.storeql.purchase.dto.Dtos.AmendPurchaseOrderLineRequest;
 import com.storeql.purchase.dto.Dtos.CancelPurchaseOrderRequest;
 import com.storeql.purchase.dto.Dtos.CreatePurchaseOrderRequest;
 import com.storeql.purchase.dto.Dtos.DecidePurchaseOrderRequest;
 import com.storeql.purchase.mapper.Mappers;
 import com.storeql.purchase.service.PurchaseService;
+import com.storeql.purchase.service.SupplierPerformanceService;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -42,6 +47,7 @@ public class PurchaseOrderResource {
 
   @Inject PurchaseService svc;
   @Inject com.storeql.purchase.service.DropshipService dropship;
+  @Inject SupplierPerformanceService performance;
   @Inject TenantContext ctx;
 
   /**
@@ -97,7 +103,9 @@ public class PurchaseOrderResource {
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") UUID id) {
-    return Response.ok(ApiResponse.ok(Mappers.toDto(svc.getPurchaseOrder(ctx, id)))).build();
+    PurchaseOrder po = svc.getPurchaseOrder(ctx, id);
+    return Response.ok(ApiResponse.ok(Mappers.toDto(po, performance.orderWarnings(ctx, po))))
+        .build();
   }
 
   /**
@@ -130,7 +138,9 @@ public class PurchaseOrderResource {
   @POST
   @Path("/{id}/submit")
   public Response submit(@PathParam("id") UUID id) {
-    return Response.ok(ApiResponse.ok(Mappers.toDto(svc.submitPurchaseOrder(ctx, id)))).build();
+    PurchaseOrder po = svc.submitPurchaseOrder(ctx, id);
+    return Response.ok(ApiResponse.ok(Mappers.toDto(po, performance.orderWarnings(ctx, po))))
+        .build();
   }
 
   @Operation(
@@ -391,6 +401,60 @@ public class PurchaseOrderResource {
     return Response.status(201)
         .entity(ApiResponse.ok(Mappers.toDto(svc.addPurchaseOrderLine(ctx, id, req))))
         .build();
+  }
+
+  /**
+   * Changes a draft order's line.
+   *
+   * @param id the purchase order
+   * @param lineId the line to change
+   * @param req the quantity, price and optionally VAT code as they should now read
+   * @return the line as it now stands
+   */
+  @Operation(
+      summary = "Change a line on a draft purchase order",
+      description =
+          "Quantity, price and optionally VAT code, while the order is DRAFT; the order's totals"
+              + " are restated. Not below what is already allocated to shops.")
+  @APIResponse(responseCode = "200", description = "Line as it now stands")
+  @APIResponse(responseCode = "400", description = "PURCHASE_PO_NOT_DRAFT")
+  @APIResponse(responseCode = "404", description = "PURCHASE_PO_NOT_FOUND, PURCHASE_LINE_NOT_FOUND")
+  @APIResponse(
+      responseCode = "409",
+      description = "PURCHASE_LINE_BELOW_ALLOCATIONS, PURCHASE_PO_LINES_FIXED (a dropship order)")
+  @PUT
+  @Path("/{id}/lines/{lineId}")
+  public Response amendLine(
+      @PathParam("id") UUID id,
+      @PathParam("lineId") UUID lineId,
+      AmendPurchaseOrderLineRequest req) {
+    Validations.validate(req);
+    return Response.ok(
+            ApiResponse.ok(Mappers.toDto(svc.amendPurchaseOrderLine(ctx, id, lineId, req))))
+        .build();
+  }
+
+  /**
+   * Removes a line from a draft order.
+   *
+   * @param id the purchase order
+   * @param lineId the line to remove
+   * @return 204
+   */
+  @Operation(
+      summary = "Remove a line from a draft purchase order",
+      description = "While the order is DRAFT and no shop has part of the line allocated.")
+  @APIResponse(responseCode = "204", description = "Removed")
+  @APIResponse(responseCode = "400", description = "PURCHASE_PO_NOT_DRAFT")
+  @APIResponse(responseCode = "404", description = "PURCHASE_PO_NOT_FOUND, PURCHASE_LINE_NOT_FOUND")
+  @APIResponse(
+      responseCode = "409",
+      description = "PURCHASE_LINE_HAS_ALLOCATIONS, PURCHASE_PO_LINES_FIXED (a dropship order)")
+  @DELETE
+  @Path("/{id}/lines/{lineId}")
+  public Response removeLine(@PathParam("id") UUID id, @PathParam("lineId") UUID lineId) {
+    svc.removePurchaseOrderLine(ctx, id, lineId);
+    return Response.noContent().build();
   }
 
   /**

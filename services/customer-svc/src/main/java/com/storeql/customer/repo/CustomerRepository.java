@@ -12,6 +12,7 @@ import com.storeql.customer.domain.Domain.StoreCreditLedgerEntry;
 import com.storeql.customer.domain.Domain.TierChange;
 import com.storeql.customer.domain.LoyaltyProgramme;
 import com.storeql.customer.domain.LoyaltyReversal;
+import com.storeql.customer.domain.ManualGrant;
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
@@ -1208,10 +1209,15 @@ public class CustomerRepository extends BaseOutboxRepository {
       String reason,
       LoyaltyProgramme programme,
       OutboxRow event,
-      Function<TierChange, OutboxRow> tierEvent) {
+      Function<TierChange, OutboxRow> tierEvent,
+      ManualGrant grant) {
     return inTx(
         conn -> {
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // a retry under the same key: the first answer, nothing written
+            return getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          }
           LoyaltyAccount updated =
               credit(
                   conn,
@@ -1301,10 +1307,15 @@ public class CustomerRepository extends BaseOutboxRepository {
       UUID orderId,
       String reason,
       LoyaltyProgramme programme,
-      OutboxRow event) {
+      OutboxRow event,
+      ManualGrant grant) {
     return inTx(
         conn -> {
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // the same order or key already took these points: nothing more
+            return getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          }
           if (account.pointsBalance().compareTo(points) < 0) {
             throw new ApiException(
                 422,
@@ -1355,10 +1366,15 @@ public class CustomerRepository extends BaseOutboxRepository {
       String reason,
       LoyaltyProgramme programme,
       OutboxRow event,
-      Function<TierChange, OutboxRow> tierEvent) {
+      Function<TierChange, OutboxRow> tierEvent,
+      ManualGrant grant) {
     return inTx(
         conn -> {
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // a retry under the same key: the first answer, nothing written
+            return getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          }
           LoyaltyAccount updated;
           if (points.signum() > 0) {
             updated =
@@ -1549,11 +1565,16 @@ public class CustomerRepository extends BaseOutboxRepository {
       String currency,
       UUID orderId,
       String reason,
-      OutboxRow event) {
+      OutboxRow event,
+      ManualGrant grant) {
     return inTx(
         conn -> {
           StoreCreditAccount account =
               getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // a retry under the same key: the first answer, nothing written
+            return getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
+          }
           BigDecimal newBalance = account.balance().add(amount);
           StoreCreditAccount updated =
               updateStoreCreditAccount(conn, tenantId, customerId, currency, newBalance);
@@ -2031,6 +2052,71 @@ public class CustomerRepository extends BaseOutboxRepository {
         return mapLoyaltyAccount(rs);
       }
     }
+  }
+
+  /**
+   * Writes the manual grant's record on the caller's transaction: who, why, and the key that makes
+   * a retry the same request. A grant with no key is always new.
+   *
+   * @return true when this is a new grant to carry out; false when the same key already carried it
+   *     out (a retry, nothing more to write)
+   * @throws ApiException 409 {@code IDEMPOTENCY_KEY_REUSED} when the key was used for a different
+   *     request
+   */
+  private static boolean recordGrant(Connection c, UUID tenantId, ManualGrant g)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO manual_grants (id, tenant_id, customer_id, kind, amount, currency, reason,"
+                + " actor_id, idempotency_key, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+                + " ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+                + " DO NOTHING")) {
+      ps.setObject(1, Ids.newId());
+      ps.setObject(2, tenantId);
+      ps.setObject(3, g.customerId());
+      ps.setString(4, g.kind());
+      ps.setBigDecimal(5, g.amount());
+      ps.setString(6, g.currency());
+      ps.setString(7, g.reason());
+      if (g.actorId() == null) {
+        ps.setNull(8, java.sql.Types.OTHER);
+      } else {
+        ps.setObject(8, g.actorId());
+      }
+      ps.setString(9, g.idempotencyKey());
+      ps.setObject(10, Instant.now().atOffset(ZoneOffset.UTC));
+      if (ps.executeUpdate() == 1) {
+        return true;
+      }
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT kind, customer_id, amount, currency FROM manual_grants"
+                + " WHERE tenant_id = ? AND idempotency_key = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setString(2, g.idempotencyKey());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          ManualGrant first =
+              new ManualGrant(
+                  rs.getString(1),
+                  rs.getObject(2, UUID.class),
+                  rs.getBigDecimal(3),
+                  rs.getString(4),
+                  null,
+                  null,
+                  g.idempotencyKey());
+          if (!first.sameRequestAs(g)) {
+            throw new ApiException(
+                409,
+                "IDEMPOTENCY_KEY_REUSED",
+                "This Idempotency-Key was already used for a different request",
+                java.util.List.of());
+          }
+        }
+      }
+    }
+    return false;
   }
 
   private void insertLedgerEntry(Connection c, LoyaltyLedgerEntry e) throws SQLException {

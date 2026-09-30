@@ -198,7 +198,9 @@ class CrossDockIT {
         + variant
         + "\",\"qty\":"
         + qty
-        + ",\"batchNo\":\"SUP-1\",\"costPrice\":2.00,\"expiryDate\":\"2026-11-01\"}";
+        + ",\"batchNo\":\"SUP-1\",\"costPrice\":2.00,\"expiryDate\":\""
+        + java.time.LocalDate.now().plusDays(60)
+        + "\"}";
   }
 
   private JsonArray transfersTo(String store, String tenant) {

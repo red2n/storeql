@@ -240,6 +240,148 @@ class ReturnDispositionIT {
         is("1"));
   }
 
+  // ── what a return leaves behind, and who may touch it (RET-26, RET-27, RET-31) ─────────
+
+  private Response asTenant(String method, String path, String json, String tenant, String role) {
+    var b =
+        com.storeql.test.WebTargets.at(target, path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", Ids.newId().toString())
+            .header("X-Roles", role);
+    return switch (method) {
+      case "GET" -> b.get();
+      case "PUT" -> b.put(Entity.entity(json, MediaType.APPLICATION_JSON));
+      default -> b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+    };
+  }
+
+  /** The batch of the given remaining quantity among a variant's batches, as the API lists them. */
+  private JsonObject batchOf(Sale s, int remaining) {
+    var rows =
+        Envelopes.okArray(
+            asTenant(
+                "GET",
+                "/admin/inventory/batches?store=" + s.store + "&variant=" + s.variant,
+                null,
+                T,
+                "OWNER"));
+    for (JsonObject row : rows.getValuesAs(JsonObject.class)) {
+      if (row.getJsonNumber("remainingQty").bigDecimalValue().compareTo(new BigDecimal(remaining))
+          == 0) {
+        return row;
+      }
+    }
+    throw new AssertionError("no batch with " + remaining + " remaining in " + rows);
+  }
+
+  /**
+   * RET-26: a returned unit is restocked AVAILABLE at the store that took it back, as a batch of
+   * its own carrying the sale's lot, use-by date and cost.
+   */
+  @Test
+  @DisplayName("A return is restocked available at the store, under the sale's lot, date and cost")
+  void aReturnIsRestockedAvailableUnderTheSalesLotDateAndCost() {
+    Sale s = sold();
+    orders.handle(returned(Ids.newId().toString(), T, s, "SEALED", false));
+    JsonObject back = batchOf(s, 2);
+    assertThat(back.getString("materialStatus"), is("AVAILABLE"));
+    assertThat(back.getString("storeId"), is(s.store));
+    assertThat(back.getString("batchNo"), is("L1"));
+    assertThat(back.getString("expiryDate"), is("2027-06-01"));
+    assertThat(
+        back.getJsonNumber("costPrice").bigDecimalValue(), comparesEqualTo(new BigDecimal("2.50")));
+    // It is a batch of its own: the original lot still holds the seven that were never sold.
+    assertThat(batchOf(s, 7).getString("id").equals(back.getString("id")), is(false));
+    assertThat(available(s), comparesEqualTo(new BigDecimal("9")));
+  }
+
+  /**
+   * RET-27: a return whose sale cannot be traced still adds the stock, as an anonymous batch with
+   * no lot, use-by date or cost, and one RETURN-referenced movement.
+   */
+  @Test
+  @DisplayName("A return with no traceable sale is an anonymous, costless restock")
+  void aReturnWithNoTraceableSaleIsAnAnonymousCostlessRestock() {
+    Sale s = new Sale(Ids.newId().toString(), Ids.newId().toString(), Ids.newId().toString());
+    orders.handle(returned(Ids.newId().toString(), T, s, "SEALED", false));
+    JsonObject back = batchOf(s, 2);
+    assertThat(back.getString("batchNo"), is("RET-" + Ids.shortRef(Ids.parse(s.order))));
+    assertThat(back.getString("materialStatus"), is("AVAILABLE"));
+    assertThat(back.containsKey("expiryDate") && !back.isNull("expiryDate"), is(false));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT cost_price IS NULL FROM inventory.inventory_batches WHERE id = '"
+                + back.getString("id")
+                + "'"),
+        is("true"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM inventory.stock_movements WHERE ref_type = 'RETURN' AND"
+                + " variant_id = '"
+                + s.variant
+                + "'"),
+        is("1"));
+    assertThat(onHand(s), comparesEqualTo(new BigDecimal("2")));
+    assertThat(available(s), comparesEqualTo(new BigDecimal("2")));
+  }
+
+  /**
+   * RET-31: another business's staff, of every role, can neither flip the material status of the
+   * batch a return made nor write stock off against our store, even naming its ids; nothing of ours
+   * moves.
+   */
+  @Test
+  @DisplayName("Another business's staff cannot flip a returned batch's status or write it off")
+  void anotherBusinessCannotFlipOrWriteOffAReturnedBatch() {
+    Sale s = sold();
+    orders.handle(returned(Ids.newId().toString(), T, s, "SEALED", false));
+    String batchId = batchOf(s, 2).getString("id");
+    String status = "{\"materialStatus\":\"QUARANTINE\",\"reason\":\"not ours\"}";
+    String writeOff =
+        "{\"storeId\":\""
+            + s.store
+            + "\",\"variantId\":\""
+            + s.variant
+            + "\",\"delta\":-1,\"reason\":\"Damaged\"}";
+    int movements =
+        Integer.parseInt(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.stock_movements"));
+
+    for (String role :
+        new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          asTenant(
+                  "PUT",
+                  "/admin/inventory/batches/" + batchId + "/material-status",
+                  status,
+                  OTHER_T,
+                  role)
+              .getStatus(),
+          is(404));
+      assertThat(
+          role,
+          asTenant("GET", "/admin/inventory/batches/" + batchId, null, OTHER_T, role).getStatus(),
+          is(404));
+      int adjusted =
+          asTenant("POST", "/admin/inventory/adjust", writeOff, OTHER_T, role).getStatus();
+      // The till is refused the write-off outright; the others find nothing of theirs to write off.
+      assertThat(role, adjusted, is("CASHIER".equals(role) ? 403 : 422));
+    }
+
+    assertThat(returnedStatus(s), is("AVAILABLE"));
+    assertThat(onHand(s), comparesEqualTo(new BigDecimal("9")));
+    assertThat(
+        Envelopes.scalar(PG, "SELECT count(*) FROM inventory.stock_movements"),
+        is(String.valueOf(movements)));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.outbox WHERE event_type = 'MaterialStatusChanged'"),
+        is("0"));
+  }
+
   @Test
   @DisplayName("The same return event twice restocks once")
   void theSameEventTwiceRestocksOnce() {

@@ -1,7 +1,9 @@
 package com.storeql.cart.service;
 
+import com.storeql.cart.domain.CartAccess;
 import com.storeql.cart.domain.Domain.Cart;
 import com.storeql.cart.domain.Domain.CartItem;
+import com.storeql.cart.domain.Domain.StaffAction;
 import com.storeql.cart.dto.Dtos.AddItemRequest;
 import com.storeql.cart.dto.Dtos.CartItemResponse;
 import com.storeql.cart.dto.Dtos.CartResponse;
@@ -149,7 +151,10 @@ public class CartService {
             req.qty(),
             req.unitPrice(),
             Instant.now());
-    return toItemResponse(repo.upsertItem(item));
+    StaffAction trace =
+        assistedAction(
+            cart, ctx, req.sessionId(), StaffAction.ADD_ITEM, null, item.variantId(), req.qty());
+    return toItemResponse(trace == null ? repo.upsertItem(item) : repo.upsertItem(item, trace));
   }
 
   /**
@@ -178,7 +183,14 @@ public class CartService {
     if (!item.cartId().equals(cartId))
       throw ApiException.notFound("CART_ITEM_NOT_FOUND", "item not found in this cart");
 
-    repo.updateItemQty(tenantId, cartId, itemId, req.qty());
+    StaffAction trace =
+        assistedAction(
+            cart, ctx, req.sessionId(), StaffAction.SET_QTY, itemId, item.variantId(), req.qty());
+    if (trace == null) {
+      repo.updateItemQty(tenantId, cartId, itemId, req.qty());
+    } else {
+      repo.updateItemQty(tenantId, cartId, itemId, req.qty(), trace);
+    }
     return toItemResponse(repo.findItemById(tenantId, itemId).orElseThrow());
   }
 
@@ -202,10 +214,18 @@ public class CartService {
             .orElseThrow(() -> ApiException.notFound("CART_NOT_FOUND", "cart not found"));
     requireOwnership(cart, ctx, sessionId);
 
-    repo.findItemById(tenantId, itemId)
-        .filter(i -> i.cartId().equals(cartId))
-        .orElseThrow(() -> ApiException.notFound("CART_ITEM_NOT_FOUND", "item not found"));
-    repo.deleteItem(tenantId, cartId, itemId);
+    CartItem item =
+        repo.findItemById(tenantId, itemId)
+            .filter(i -> i.cartId().equals(cartId))
+            .orElseThrow(() -> ApiException.notFound("CART_ITEM_NOT_FOUND", "item not found"));
+    StaffAction trace =
+        assistedAction(
+            cart, ctx, sessionId, StaffAction.REMOVE_ITEM, itemId, item.variantId(), item.qty());
+    if (trace == null) {
+      repo.deleteItem(tenantId, cartId, itemId);
+    } else {
+      repo.deleteItem(tenantId, cartId, itemId, trace);
+    }
   }
 
   // ── Merge guest cart ──────────────────────────────────────────────────────
@@ -318,21 +338,33 @@ public class CartService {
    * was created with (the cartId is returned to any caller who can view it, the sessionId is not).
    */
   private void requireOwnership(Cart cart, TenantContext ctx, String suppliedSessionId) {
-    if (isStaff(ctx)) return;
-    if (cart.customerId() != null) {
-      if (!cart.customerId().equals(ctx.userId()))
-        throw ApiException.notFound("CART_NOT_FOUND", "cart not found");
-      return;
-    }
-    if (cart.sessionId() == null || !cart.sessionId().equals(suppliedSessionId))
+    if (CartAccess.isStaff(staffRoles(ctx))) return;
+    if (!CartAccess.owns(cart, ctx.userId(), suppliedSessionId))
       throw ApiException.notFound("CART_NOT_FOUND", "cart not found");
   }
 
-  private boolean isStaff(TenantContext ctx) {
-    return ctx.hasRole("CASHIER")
-        || ctx.hasRole("STOREKEEPER")
-        || ctx.hasRole("MANAGER")
-        || ctx.hasRole("OWNER");
+  /**
+   * The trace of a change staff make to a cart that is not theirs (assisted shopping): who, in what
+   * role, and what. Null for a shopper on their own cart, or staff on a cart they hold as its
+   * owner.
+   */
+  private static java.util.Set<String> staffRoles(TenantContext ctx) {
+    return CartAccess.STAFF_ROLES.stream()
+        .filter(ctx::hasRole)
+        .collect(java.util.stream.Collectors.toSet());
+  }
+
+  private StaffAction assistedAction(
+      Cart cart,
+      TenantContext ctx,
+      String suppliedSession,
+      String action,
+      UUID itemId,
+      UUID variantId,
+      java.math.BigDecimal qty) {
+    if (!CartAccess.isAssisted(cart, staffRoles(ctx), ctx.userId(), suppliedSession)) return null;
+    return new StaffAction(
+        action, ctx.userId(), CartAccess.staffRole(staffRoles(ctx)), itemId, variantId, qty);
   }
 
   private UUID parseUuid(String val, String field) {

@@ -150,6 +150,22 @@ class StorefrontAuthNotifier extends StateNotifier<StorefrontAuthState> {
     state = const StorefrontAuthState();
   }
 
+  /// Ends every session of the shopper's login on every device
+  /// (`POST /auth/sessions/revoke-all`), then signs this device out. A refusal
+  /// throws and leaves them signed in.
+  Future<void> signOutEverywhere() async {
+    final token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      throw Exception('Not signed in.');
+    }
+    final dio = Dio(BaseOptions(
+      baseUrl: ApiConstants.baseUrl,
+      headers: {'Authorization': 'Bearer $token'},
+    ));
+    await dio.post('/${ApiConstants.iam}/auth/sessions/revoke-all');
+    await logout();
+  }
+
   /// SJ-D43: the account holder deletes their own login. The password is asked
   /// for again server-side (a session left open on this device must not be
   /// enough on its own), so a wrong password surfaces as the 401 iam-svc

@@ -442,4 +442,156 @@ class PriceZonesIT {
             .getStatus(),
         is(403));
   }
+
+  // ── a proposal that has outlived its rival price ───────────────────────────
+
+  /** Ages the rival observation behind every open proposal, as days going by would. */
+  private static void ageProposals(int days) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute("UPDATE pricing.repricing_proposals SET observed_on = CURRENT_DATE - " + days);
+    }
+  }
+
+  private static int priceChanged() throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT count(*) FROM pricing.outbox WHERE event_type = 'PriceChanged'")) {
+      rs.next();
+      return rs.getInt(1);
+    }
+  }
+
+  private String proposalFor(String list, int maxAgeDays) {
+    Envelopes.created(
+        post(
+            "/admin/competitor-prices",
+            "{\"variantId\":\""
+                + V
+                + "\",\"competitor\":\"Rival A\",\"price\":8.50,\"observedOn\":\""
+                + LocalDate.now()
+                + "\"}"));
+    JsonObject rule =
+        Envelopes.created(
+            post(
+                "/admin/repricing/rules",
+                "{\"name\":\"Match\",\"priceListId\":\""
+                    + list
+                    + "\",\"strategy\":\"MATCH_LOWEST\",\"value\":0,\"floorPercent\":50,"
+                    + "\"rounding\":\"NONE\",\"maxAgeDays\":"
+                    + maxAgeDays
+                    + "}"));
+    JsonObject run =
+        Envelopes.ok(post("/admin/repricing/rules/" + rule.getString("id") + "/run", "{}"));
+    assertThat(run.getInt("proposed"), is(1));
+    return run.getJsonArray("proposals").getJsonObject(0).getString("id");
+  }
+
+  @Test
+  void aProposalWhoseRivalPriceHasAgedOutIsNotAppliedButCanBeDismissed() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+
+    ageProposals(15);
+    int changesBefore = priceChanged();
+    assertThat(
+        code(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"), 409),
+        is("PRICING_PROPOSAL_STALE"));
+    assertThat("nothing was written", resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
+    assertThat(
+        "the proposal is still open, undecided",
+        Envelopes.okArray(get("/admin/repricing/proposals?status=PROPOSED")).size(),
+        is(1));
+    assertThat(Envelopes.okArray(get("/admin/repricing/proposals?status=APPLIED")).size(), is(0));
+    assertThat("and no PriceChanged went out for it", priceChanged(), is(changesBefore));
+
+    assertThat(
+        Envelopes.ok(post("/admin/repricing/proposals/" + proposal + "/dismiss", "{}"))
+            .getString("status"),
+        is("DISMISSED"));
+  }
+
+  @Test
+  void aProposalExactlyAtTheRulesReachStillApplies() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+    ageProposals(14);
+    assertThat(
+        Envelopes.ok(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"))
+            .getString("status"),
+        is("APPLIED"));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("8.50")));
+  }
+
+  @Test
+  void aStaleProposalRunAgainAgainstAFreshSightingIsAppliedOnce() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+    ageProposals(30);
+    assertThat(
+        code(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"), 409),
+        is("PRICING_PROPOSAL_STALE"));
+    // Another rival seen today, cheaper: running the rule refreshes the open proposal's
+    // observation.
+    Envelopes.created(
+        post(
+            "/admin/competitor-prices",
+            "{\"variantId\":\""
+                + V
+                + "\",\"competitor\":\"Rival B\",\"price\":8.40,\"observedOn\":\""
+                + LocalDate.now()
+                + "\"}"));
+    String rule = Envelopes.okArray(get("/admin/repricing/rules")).getJsonObject(0).getString("id");
+    Envelopes.ok(post("/admin/repricing/rules/" + rule + "/run", "{}"));
+    assertThat(
+        Envelopes.ok(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"))
+            .getString("status"),
+        is("APPLIED"));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("8.40")));
+  }
+
+  @Test
+  void anotherBusinessAndLowerRolesCannotApplyOrDismissOurProposal() {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      for (String action : new String[] {"apply", "dismiss"}) {
+        assertThat(
+            code(
+                call(
+                    "POST",
+                    "/admin/repricing/proposals/" + proposal + "/" + action,
+                    "{}",
+                    RIVAL_TENANT,
+                    role),
+                404),
+            is("REPRICING_PROPOSAL_NOT_FOUND"));
+      }
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      for (String action : new String[] {"apply", "dismiss"}) {
+        assertThat(
+            call("POST", "/admin/repricing/proposals/" + proposal + "/" + action, "{}", T, role)
+                .getStatus(),
+            is(403));
+        assertThat(
+            call(
+                    "POST",
+                    "/admin/repricing/proposals/" + proposal + "/" + action,
+                    "{}",
+                    RIVAL_TENANT,
+                    role)
+                .getStatus(),
+            is(403));
+      }
+    }
+    assertThat(Envelopes.okArray(get("/admin/repricing/proposals?status=PROPOSED")).size(), is(1));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
+  }
 }

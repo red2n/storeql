@@ -728,12 +728,16 @@ class ParkedSale {
   final List<PosLine> lines;
   final String? parkedAt;
 
+  /// The login that held it (a user id; name it through the staff lookup).
+  final String? parkedBy;
+
   const ParkedSale({
     required this.id,
     this.customerName,
     required this.subtotal,
     required this.lines,
     this.parkedAt,
+    this.parkedBy,
   });
 
   factory ParkedSale.fromJson(Map<String, dynamic> j) => ParkedSale(
@@ -741,6 +745,7 @@ class ParkedSale {
     customerName: j['customerName'] as String?,
     subtotal: (j['subtotal'] as num?)?.toDouble() ?? 0,
     parkedAt: j['parkedAt'] as String?,
+    parkedBy: j['parkedBy'] as String?,
     lines: ((j['items'] as List?) ?? []).map((e) {
       final m = e as Map<String, dynamic>;
       final vid = m['variantId'] as String? ?? '';

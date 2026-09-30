@@ -50,7 +50,7 @@ export function setup() {
   const variantId = sellableVariant(gb, 'Crunchy peanut butter').variantId;
   priceVariants(gb, [variantId], '3.50');
   // One lot at the store; every sale below draws from it.
-  must(receiveLot(gb, store.id, variantId, 30, 'L-2291', '2026-12-31'), [200, 201], 'receive lot');
+  must(receiveLot(gb, store.id, variantId, 30, 'L-2291', new Date(Date.now() + 365 * 86400000).toISOString().slice(0, 10)), [200, 201], 'receive lot');
   const cashier = staffUser(gb, 'CASHIER', [store.id]);
   const manager = staffUser(gb, 'MANAGER', [store.id]);
   const shopper = register('recall-shopper');

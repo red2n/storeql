@@ -1,5 +1,6 @@
 package com.storeql.purchase.service;
 
+import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.Supplier;
 import com.storeql.purchase.domain.SupplierScorecard;
 import com.storeql.purchase.domain.SupplierScorecard.Card;
@@ -82,6 +83,27 @@ public class SupplierPerformanceService {
         repo.fillStats(tenantId, supplierId, p.from(), p.to()),
         repo.returnStats(tenantId, supplierId, p.from(), p.to()),
         repo.invoiceStats(tenantId, supplierId, p.from(), p.to()));
+  }
+
+  /**
+   * What the reader of an order is told about its supplier's record (last 90 days): {@code
+   * SUPPLIER_GRADE_D} on an open order whose supplier is graded D. Shown to management and buying
+   * roles, who may read the scorecard's substance; a till role sees none. Never fails the read a
+   * warning decorates.
+   */
+  public List<String> orderWarnings(TenantContext ctx, Domain.PurchaseOrder po) {
+    if (!(ctx.hasRole("PLATFORM_ADMIN")
+        || ctx.hasRole("OWNER")
+        || ctx.hasRole("MANAGER")
+        || ctx.hasRole("STOREKEEPER"))) {
+      return List.of();
+    }
+    try {
+      return SupplierScorecard.orderWarnings(
+          po.status(), scorecard(ctx, po.supplierId(), null, null).grade());
+    } catch (RuntimeException e) {
+      return List.of();
+    }
   }
 
   /** Every supplier's scorecard, the best first; those with nothing to judge last, unscored. */

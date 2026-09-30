@@ -94,6 +94,7 @@ public class CommissionResource {
   @POST
   @Path("/schemes")
   public Response create(CommissionDtos.SchemeRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
     Scheme scheme =
@@ -119,6 +120,7 @@ public class CommissionResource {
   @POST
   @Path("/schemes/{id}/corrections")
   public Response correct(@PathParam("id") UUID id, CommissionDtos.SchemeRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
     Scheme scheme =
@@ -145,6 +147,7 @@ public class CommissionResource {
   @DELETE
   @Path("/schemes/{id}")
   public ApiResponse<CommissionDtos.SchemeResponse> withdraw(@PathParam("id") UUID id) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(CommissionMappers.toDto(svc.withdraw(ctx.requireTenantId(), id)));
   }
@@ -177,6 +180,7 @@ public class CommissionResource {
   @PUT
   @Path("/staff/{userId}")
   public Response assign(@PathParam("userId") UUID userId, CommissionDtos.AssignmentRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
     var assignment =

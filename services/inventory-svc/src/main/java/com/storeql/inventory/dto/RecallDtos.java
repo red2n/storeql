@@ -22,7 +22,7 @@ public final class RecallDtos {
       description =
           "A withdrawal or recall notice. Every batch in scope is taken off sale as it is opened.")
   public record OpenRecallRequest(
-      @Schema(description = "The notice's reference — the supplier's, or the FSA's. Unique.")
+      @Schema(description = "The notice's reference — the supplier's, or the regulator's. Unique.")
           @NotBlank
           @Size(max = 80)
           String reference,
@@ -49,11 +49,25 @@ public final class RecallDtos {
           String reason,
       @Schema(description = "The point-of-sale notice. Required for a RECALL.") @Size(max = 2000)
           String customerNotice,
-      @Schema(enumeration = {"SUPPLIER", "FSA", "FSS", "INTERNAL", "OTHER"})
+      @Schema(
+              description =
+                  "Who raised the notice. REGULATOR is whichever authority the business answers to;"
+                      + " FSA and FSS remain valid for the UK regulators.",
+              enumeration = {
+                "REGULATOR",
+                "MANUFACTURER",
+                "SUPPLIER",
+                "INTERNAL",
+                "FSA",
+                "FSS",
+                "OTHER"
+              })
           @NotBlank
-          @Pattern(regexp = "SUPPLIER|FSA|FSS|INTERNAL|OTHER", message = "source is not recognised")
+          @Pattern(
+              regexp = "REGULATOR|MANUFACTURER|SUPPLIER|INTERNAL|FSA|FSS|OTHER",
+              message = "source is not recognised")
           String source,
-      @Schema(description = "The source's own reference, e.g. an FSA alert number.")
+      @Schema(description = "The source's own reference, e.g. a regulator's alert number.")
           @Size(max = 120)
           String sourceReference,
       @Schema(description = "What is affected. At most 100 lines.") @NotEmpty @Valid

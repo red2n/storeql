@@ -89,6 +89,8 @@ public class RoleResource {
   @APIResponse(responseCode = "409", description = "The tenant already has a role by that code")
   @POST
   public Response define(DefineRoleRequest req) {
+    ctx.requirePermission(com.storeql.web.Permissions.STAFF_MANAGE);
+    BusinessWide.require(ctx);
     Validations.validate(req);
     Domain.TenantRole role = service.defineRole(ctx, req);
     return Response.status(Response.Status.CREATED)
@@ -116,6 +118,8 @@ public class RoleResource {
   @PUT
   @Path("/{code}")
   public ApiResponse<RoleResponse> update(@PathParam("code") String code, UpdateRoleRequest req) {
+    ctx.requirePermission(com.storeql.web.Permissions.STAFF_MANAGE);
+    BusinessWide.require(ctx);
     Validations.validate(req);
     return ApiResponse.ok(Mappers.toRole(service.updateRole(ctx, code, req)));
   }
@@ -129,6 +133,8 @@ public class RoleResource {
   @DELETE
   @Path("/{code}")
   public Response delete(@PathParam("code") String code) {
+    ctx.requirePermission(com.storeql.web.Permissions.STAFF_MANAGE);
+    BusinessWide.require(ctx);
     service.deleteRole(ctx, code);
     return Response.noContent().build();
   }

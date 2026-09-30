@@ -15,6 +15,8 @@ import '../../shared/util/status_labels.dart';
 import '../../shared/widgets/barcode_scanner_sheet.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
+import '../admin/recall_providers.dart';
+import '../admin/recall_return_choice.dart';
 import 'pos_providers.dart';
 
 // ---------------------------------------------------------------------------
@@ -135,6 +137,11 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
   // What comes back.
   final Map<String, double> _qty = {};
   final Map<String, String> _condition = {};
+
+  /// The recall notice a refund settles, or null for an ordinary return.
+  RecallNotice? _recall;
+  bool _isRecalled(String variantId) =>
+      _recall?.lines.any((l) => l.variantId == variantId) ?? false;
   final Map<String, PosLine> _noReceiptLines = {}; // no-receipt items, by variant
   final _reasonCtrl = TextEditingController();
 
@@ -190,6 +197,7 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       _sale = null;
       _qty.clear();
       _condition.clear();
+      _recall = null;
       _noReceiptLines.clear();
       _reasonCtrl.clear();
       _method = 'ORIGINAL';
@@ -218,6 +226,7 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       _looking = true;
       _lookupError = null;
       _sale = null;
+      _recall = null;
       _qty.clear();
       _condition.clear();
       _error = null;
@@ -354,10 +363,20 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       });
       return null;
     }
-    if (chosen.any((e) => _condition[e.key] == null)) {
+    // A recalled line has no condition: the server sends the goods to RECALLED.
+    final recall = _exchange ? null : _recall;
+    bool recalled(String v) => recall != null && _isRecalled(v);
+    if (chosen.any((e) => _condition[e.key] == null && !recalled(e.key))) {
       setState(() {
         _needsManager = null;
         _error = 'Say what condition each returned item is in.';
+      });
+      return null;
+    }
+    if (recall != null && !chosen.any((e) => recalled(e.key))) {
+      setState(() {
+        _needsManager = null;
+        _error = 'Choose the recalled item to take back, or turn off "This is a recall return".';
       });
       return null;
     }
@@ -366,7 +385,7 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
         {
           'variantId': e.key,
           'qty': _qtyValue(e.value),
-          'condition': _condition[e.key],
+          if (!recalled(e.key)) 'condition': _condition[e.key],
         },
     ];
   }
@@ -409,10 +428,11 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       'reason': _reason,
       'refundMethod': _method,
       if (topUp) 'giftCardCode': giftCode,
+      if (_recall != null) 'recallNoticeId': _recall!.id,
       'items': items,
     };
     final key = _keyForAttempt(
-        'refund|${sale.orderId}|$_reason|$_method|${topUp ? giftCode : ''}|${_itemsSignature(items)}');
+        'refund|${sale.orderId}|${_recall?.id ?? ''}|$_reason|$_method|${topUp ? giftCode : ''}|${_itemsSignature(items)}');
     await _send(
       path: '/${ApiConstants.order}/orders/${sale.orderId}/returns',
       body: body,
@@ -833,6 +853,7 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
               max: l.returnableQty.floor(),
               value: (_qty[l.variantId] ?? 0).toInt(),
               condition: _condition[l.variantId],
+              recalled: !_exchange && _isRecalled(l.variantId),
               onChanged: (v) => setState(() => _qty[l.variantId] = v.toDouble()),
               onCondition: (c) => setState(() => _condition[l.variantId] = c),
             ),
@@ -1101,8 +1122,19 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
               const SizedBox(height: AppSpacing.md),
               if (_exchange)
                 _newBasket(context, sale.currency)
-              else
+              else ...[
                 _methodChips(context, canOriginal: true, canCredit: hasCustomer),
+                // A recall's refund is the business's duty, not a favour of the
+                // return policy: offered only where the order has an open notice.
+                RecallReturnChoice(
+                  orderId: sale.orderId,
+                  selected: _recall,
+                  onChanged: (n) => setState(() {
+                    _recall = n;
+                    _error = null;
+                  }),
+                ),
+              ],
               if (!_exchange && _previewRefund(sale) > 0) ...[
                 const SizedBox(height: AppSpacing.md),
                 Row(
@@ -1185,6 +1217,9 @@ class _ReturnLineTile extends StatelessWidget {
   final int max;
   final int value;
   final String? condition;
+
+  /// Covered by the recall this refund settles: no condition is asked.
+  final bool recalled;
   final ValueChanged<int> onChanged;
   final ValueChanged<String> onCondition;
 
@@ -1195,6 +1230,7 @@ class _ReturnLineTile extends StatelessWidget {
     required this.max,
     required this.value,
     required this.condition,
+    this.recalled = false,
     required this.onChanged,
     required this.onCondition,
   });
@@ -1238,7 +1274,11 @@ class _ReturnLineTile extends StatelessWidget {
               ),
             ],
           ),
-          if (value > 0) ...[
+          if (value > 0 && recalled)
+            Text('Recalled: goes to recalled stock, no condition needed.',
+                key: Key('returns-recalled-$variantId'),
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
+          else if (value > 0) ...[
             Wrap(
               spacing: AppSpacing.sm,
               runSpacing: AppSpacing.xs,

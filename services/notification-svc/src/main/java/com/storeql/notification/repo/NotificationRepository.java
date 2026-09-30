@@ -203,19 +203,19 @@ public class NotificationRepository extends BaseJdbcRepository {
   }
 
   /**
-   * Deletes password-reset rows older than the cutoff: a platform rule, not any business's
-   * retention schedule — the row belongs to no tenant, so no tenant's own period ever reaches it,
-   * and there is no hold to check (nobody's account can keep this one back). Called by {@link
-   * com.storeql.notification.service.RetentionPurgeService} on its own daily sweep, once, never per
-   * tenant.
+   * Deletes password-reset and password-changed rows older than the cutoff: a platform rule, not
+   * any business's retention schedule — the row belongs to no tenant, so no tenant's own period
+   * ever reaches it, and there is no hold to check (nobody's account can keep this one back).
+   * Called by {@link com.storeql.notification.service.RetentionPurgeService} on its own daily
+   * sweep, once, never per tenant.
    */
   public int purgePasswordResetsBefore(Instant cutoff) {
     return inTx(
         c -> {
           try (var ps =
               c.prepareStatement(
-                  "DELETE FROM notification_log WHERE type = 'PASSWORD_RESET' AND tenant_id IS"
-                      + " NULL AND created_at < ?")) {
+                  "DELETE FROM notification_log WHERE type IN ('PASSWORD_RESET',"
+                      + " 'PASSWORD_CHANGED') AND tenant_id IS NULL AND created_at < ?")) {
             ps.setObject(1, cutoff.atOffset(ZoneOffset.UTC));
             return ps.executeUpdate();
           }

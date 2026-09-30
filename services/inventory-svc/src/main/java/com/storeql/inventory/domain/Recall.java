@@ -52,8 +52,14 @@ public final class Recall {
     OTHER
   }
 
+  /**
+   * Who raised the notice. {@code REGULATOR} is whichever authority the business answers to, in any
+   * country; {@code FSA} and {@code FSS} stay valid for the UK regulators that were named first.
+   */
   public enum Source {
     SUPPLIER,
+    MANUFACTURER,
+    REGULATOR,
     FSA,
     FSS,
     INTERNAL,

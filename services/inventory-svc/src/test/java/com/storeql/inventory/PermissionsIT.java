@@ -121,4 +121,61 @@ class PermissionsIT {
     gate().assertGated("POST", complete, "", "stock.adjust");
     gate().assertTierRefused("POST", complete, "", "CASHIER");
   }
+
+  /**
+   * RET-30 / INV-17: writing stock off, returned stock included, is stock.adjust. A cashier holds
+   * nothing of the warehouse by default and is refused on the tier alone.
+   */
+  @Test
+  @DisplayName("A cashier cannot write stock off, and it is refused by permission, not just hidden")
+  void aCashierCannotWriteStockOff() {
+    String body =
+        "{\"storeId\":\""
+            + ID
+            + "\",\"variantId\":\""
+            + ID
+            + "\",\"delta\":-1,\"reason\":\"DAMAGED\"}";
+    gate().assertTierRefused("POST", "/admin/inventory/adjust", body, "CASHIER");
+  }
+
+  /** A release from bond crystallises a duty debt: stock work (stock.adjust), never the till's. */
+  @Test
+  @DisplayName("Releasing bonded stock needs stock.adjust; a cashier cannot")
+  void bondReleaseIsGated() {
+    String body = "{\"storeId\":\"" + ID + "\",\"variantId\":\"" + ID + "\",\"qty\":1}";
+    String path = "/admin/inventory/bond/releases";
+    gate().assertGated("POST", path, body, "stock.adjust");
+    gate().assertTierNarrows("POST", path, body, "STOREKEEPER");
+    gate().assertTierRefused("POST", path, body, "CASHIER");
+  }
+
+  /** A breakdown draws the primal and makes new stock: stock.adjust. */
+  @Test
+  @DisplayName("Recording a yield breakdown needs stock.adjust; a cashier cannot")
+  void yieldRunsAreGated() {
+    String body =
+        "{\"storeId\":\"" + ID + "\",\"templateId\":\"" + ID + "\",\"inputQty\":1,\"outputs\":[]}";
+    String path = "/admin/inventory/yield/runs";
+    gate().assertGated("POST", path, body, "stock.adjust");
+    gate().assertTierNarrows("POST", path, body, "STOREKEEPER");
+    gate().assertTierRefused("POST", path, body, "CASHIER");
+  }
+
+  /**
+   * Depot replenishment: proposing transfers to a warehouse's shops and releasing a proposed one
+   * are stock.transfer, so a till cannot start or release a movement of stock between sites.
+   */
+  @Test
+  @DisplayName("Proposing and releasing depot transfers need stock.transfer; a cashier cannot")
+  void depotTransfersAreGated() {
+    String propose = "/admin/inventory/network/proposals";
+    String body = "{\"warehouseId\":\"" + ID + "\"}";
+    gate().assertGated("POST", propose, body, "stock.transfer");
+    gate().assertTierNarrows("POST", propose, body, "STOREKEEPER");
+    gate().assertTierRefused("POST", propose, body, "CASHIER");
+    String release = "/admin/inventory/transfers/" + ID + "/release";
+    gate().assertGated("POST", release, "", "stock.transfer");
+    gate().assertTierNarrows("POST", release, "", "STOREKEEPER");
+    gate().assertTierRefused("POST", release, "", "CASHIER");
+  }
 }

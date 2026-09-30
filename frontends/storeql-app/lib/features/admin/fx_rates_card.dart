@@ -1,3 +1,4 @@
+import 'widgets/business_wide_note.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -57,7 +58,11 @@ final fxRatesProvider = FutureProvider.autoDispose<FxRateSheet>((ref) async {
 /// currency, each rate in force with its day and reason, and — for management —
 /// **Set a rate**. A rate is the business's own; the platform fetches none.
 class FxRatesCard extends ConsumerWidget {
-  const FxRatesCard({super.key, required this.management});
+  const FxRatesCard({super.key, required this.management, this.heldToStores = false});
+
+  /// A manager held to stores reads the rates and sets none (the rates are the
+  /// whole business's: BUSINESS_WIDE_ONLY); the card says who does.
+  final bool heldToStores;
 
   /// Whether the viewer may set a rate (OWNER, MANAGER, PLATFORM_ADMIN).
   final bool management;
@@ -129,6 +134,10 @@ class FxRatesCard extends ConsumerWidget {
                       ),
                   ],
                 ),
+                if (heldToStores) ...[
+                  const SizedBox(height: AppSpacing.xs),
+                  const BusinessWideNote(key: Key('fx-business-wide-note')),
+                ],
                 const SizedBox(height: AppSpacing.xs),
                 Text(
                   s.rates.isEmpty

@@ -40,18 +40,21 @@ const auditTypeLabels = <String, String>{
   'CANCEL': 'Cancel',
   'RETURN': 'Return',
   'STOCK_ADJUSTMENT': 'Stock adjustment',
+  // A price set on an order that was waiting for one (catalogue mode).
+  'PRICED': 'Price set on an order',
   'OFFLINE_SALE_OF_RECALLED_ITEM': 'Offline sale of a recalled item',
   'OFFLINE_SALE_ON_UNFIT_SCALE': 'Offline sale on an unfit scale',
 };
 
 /// The Action filter's words for a kind that does not simply take an "s".
 const _auditTypePlurals = <String, String>{
+  'PRICED': 'Prices set on orders',
   'OFFLINE_SALE_OF_RECALLED_ITEM': 'Offline sales of recalled items',
   'OFFLINE_SALE_ON_UNFIT_SCALE': 'Offline sales on unfit scales',
 };
 
 /// Whether an event is an offline sale flagged for a manager.
-bool _isOfflineSale(String type) => _auditTypePlurals.containsKey(type);
+bool _isOfflineSale(String type) => type.startsWith('OFFLINE_SALE_');
 
 /// The standing order-svc keeps for a scale the register cannot show was fit
 /// for trade when the sale was rung up.
@@ -637,6 +640,7 @@ class _AuditRow extends StatelessWidget {
       'NO_SALE' => (Icons.point_of_sale_outlined, cs.secondary),
       'CANCEL' => (Icons.cancel_outlined, cs.error),
       'RETURN' => (Icons.assignment_return_outlined, cs.primary),
+      'PRICED' => (Icons.price_check_outlined, cs.primary),
       'OFFLINE_SALE_OF_RECALLED_ITEM' => (Icons.report_outlined, cs.error),
       'OFFLINE_SALE_ON_UNFIT_SCALE' => (Icons.scale_outlined, cs.error),
       _ => (Icons.inventory_outlined, cs.secondary),
@@ -655,6 +659,8 @@ class _AuditRow extends StatelessWidget {
       'CANCEL' => detail == null
           ? label
           : '$label · the order was ${_midSentence(orderStatusLabel(detail))}',
+      // The order's total once it was priced.
+      'PRICED' => [label, if (money.isNotEmpty) money].join(' · '),
       'RETURN' => [
           label,
           [

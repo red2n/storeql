@@ -85,6 +85,7 @@ public class StatutoryResource {
   @Path("/{code}/filings")
   public ApiResponse<StatutoryDtos.ObligationResponse> file(
       @PathParam("code") String code, @Valid StatutoryDtos.FileRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         StatutoryMappers.toDto(

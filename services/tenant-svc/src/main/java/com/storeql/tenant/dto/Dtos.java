@@ -113,6 +113,18 @@ public final class Dtos {
   public record PatchStatusRequest(
       @Schema(description = "New status, e.g. ACTIVE or INACTIVE.") @NotBlank String status) {}
 
+  @Schema(
+      name = "TenantStatusRequest",
+      description = "Suspend or reactivate a business, with the administrator's reason.")
+  public record TenantStatusRequest(
+      @Schema(description = "ACTIVE or INACTIVE.") @NotBlank String status,
+      @Schema(
+              description =
+                  "Why, in the administrator's words. Required to suspend (INACTIVE); kept with who"
+                      + " and when and shown when the business is read. Optional for ACTIVE.")
+          @Size(max = 500)
+          String reason) {}
+
   @Schema(name = "CreateZoneRequest", description = "Create a zone (aisle/rack/etc.) in a store.")
   public record CreateZoneRequest(
       @NotBlank String name,
@@ -122,11 +134,24 @@ public final class Dtos {
   @Schema(name = "UpdateZoneRequest")
   public record UpdateZoneRequest(@NotBlank String name, @NotBlank String code, String type) {}
 
-  @Schema(name = "AssignStaffRequest", description = "Assign a staff user a role at a store.")
+  @Schema(
+      name = "AssignStaffRequest",
+      description =
+          "Assign a staff user a role at a store, or (businessWide) across the whole business.")
   public record AssignStaffRequest(
       @Schema(description = "UUID of the user to assign (must already exist in iam-svc).") @NotBlank
           String userId,
-      @Schema(description = "UUID of the store the role applies to.") @NotBlank String storeId,
+      @Schema(
+              description =
+                  "UUID of the store the role applies to. Required unless businessWide is true,"
+                      + " and then it must be absent.")
+          String storeId,
+      @Schema(
+              description =
+                  "true: a business-wide assignment, held to no store (head office). MANAGER tier"
+                      + " only (the built-in MANAGER or a custom role standing on it); only an"
+                      + " owner grants it. Absent means false.")
+          Boolean businessWide,
       @Schema(
               description =
                   "A built-in role (OWNER, MANAGER, STOREKEEPER, CASHIER) or the code of one of"
@@ -202,7 +227,16 @@ public final class Dtos {
                       + " real — no message leaves it, no money moves, nothing is billed.")
           String mode,
       @Schema(description = "For a SANDBOX, the live business it stands in for; null otherwise.")
-          String sandboxOf) {}
+          String sandboxOf,
+      @Schema(
+              description =
+                  "What the administrator said when switching it off; null while it is trading, and"
+                      + " for a suspension dunning made.")
+          String deactivatedNote,
+      @Schema(description = "The login that switched it off; null while it is trading.")
+          String deactivatedBy,
+      @Schema(description = "When it was switched off; null while it is trading.")
+          String deactivatedAt) {}
 
   @Schema(name = "StoreResponse")
   public record StoreResponse(
@@ -287,7 +321,9 @@ public final class Dtos {
       String storeId,
       @Schema(description = "The role as assigned: a tier or a custom role code.") String role,
       @Schema(description = "The tier the assignment stands on.") String baseTier,
-      String assignedAt) {}
+      String assignedAt,
+      @Schema(description = "True for a business-wide assignment (storeId is then null).")
+          boolean businessWide) {}
 
   @Schema(name = "OnboardingStatus", description = "Setup-checklist state for the tenant.")
   public record OnboardingStatus(

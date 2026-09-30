@@ -63,6 +63,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -2377,7 +2378,9 @@ public class OrderService {
    * @param orderId the order to cancel
    * @param reason free-text reason recorded on the status transition
    * @param userId the staff member cancelling it
-   * @param ctx the caller, held to the order's store like the void and the return beside it
+   * @param ctx the caller: staff are held to the order's store like the void and the return beside
+   *     it; a shopper may cancel only their own unpaid, PENDING online order ({@link
+   *     #cancelOwnOrder})
    * @return the cancelled order
    * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
    *     STORE_ACCESS_DENIED} (403) for staff held to other stores; {@code PERMISSION_DENIED} (403)
@@ -2389,6 +2392,7 @@ public class OrderService {
     // PENDING covers pay-later online orders awaiting confirmation; both states must be
     // cancellable so their stock holds get released (inventory-svc reacts to OrderCancelled).
     Order order = getOrder(tenantId, orderId);
+    if (!isStaff(ctx)) return cancelOwnOrder(order, reason, ctx);
     ctx.requireStoreAccess(order.storeId());
     // Once a tender was captured, payment-svc refunds it on OrderCancelled: that is a void, and
     // asks what a void asks. An order nobody paid for is still any staff's at its store to cancel.
@@ -2413,6 +2417,41 @@ public class OrderService {
         reason,
         userId,
         Events.orderCancelled(tenantId, orderId, reason, order.channel(), order.fulfilmentType()));
+  }
+
+  /**
+   * A shopper cancelling their own order, and only that: an online order they placed, still
+   * PENDING, with nothing paid towards it. Anything else, once money has moved or the shop has
+   * begun to fill it, is the shop's to cancel or refund, so the shopper is told to ask. An order
+   * that is not theirs is a 404, the same as reading it, so no one can probe for ids.
+   *
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404) unless the order was placed with the
+   *     caller's own login; {@code ORDER_CANNOT_CANCEL} (409) unless it is PENDING and not one part
+   *     of a split checkout; {@code ORDER_CANCEL_PAID_NEEDS_STAFF} (409) when any part of it is
+   *     paid
+   */
+  private Order cancelOwnOrder(Order order, String reason, TenantContext ctx) {
+    requireReadAccess(order, ctx);
+    if (!Order.CHANNEL_ONLINE.equals(order.channel())
+        || !Order.STATUS_PENDING.equals(order.status())
+        || repo.groupIdOf(order.tenantId(), order.id()).isPresent())
+      throw ApiException.conflict(
+          "ORDER_CANNOT_CANCEL",
+          "only an online order still waiting for payment can be cancelled by its shopper; ask the"
+              + " shop about this one");
+    if (repo.paidAmount(order.tenantId(), order.id()).signum() > 0)
+      throw ApiException.conflict(
+          "ORDER_CANCEL_PAID_NEEDS_STAFF",
+          "some of this order is paid, so the shop has to cancel it and refund what was taken");
+    return repo.transitionOrderStatus(
+        order.tenantId(),
+        order.id(),
+        Order.STATUS_PENDING,
+        Order.STATUS_CANCELLED,
+        reason,
+        ctx.userId(),
+        Events.orderCancelled(
+            order.tenantId(), order.id(), reason, order.channel(), order.fulfilmentType()));
   }
 
   /**
@@ -2640,6 +2679,7 @@ public class OrderService {
           "giftCardCode is only for a refund to a gift card");
 
     List<OrderItem> orderItems = repo.findOrderItems(tenantId, orderId);
+    ReturnWorths worths = new ReturnWorths(repo.returnedQtyByVariant(tenantId, orderId));
     UUID returnId = Ids.newId();
     BigDecimal totalRefund = BigDecimal.ZERO;
     List<ReturnItem> returnItems = new ArrayList<>();
@@ -2657,18 +2697,15 @@ public class OrderService {
                   () ->
                       ApiException.notFound(
                           "ITEM_NOT_IN_ORDER", "variant " + ri.variantId() + " not in order"));
-      // The line keeps its net figure, which the fiscal and commission reports read; the refund is
-      // what the customer paid for it, VAT included, as an exchange values it. A return once
-      // refunded the net alone, leaving a VAT-registered business's customer short by the VAT.
-      BigDecimal refundAmt = matched.unitPrice().multiply(ri.qty());
-      totalRefund =
-          totalRefund.add(
-              ReturnValue.grossOf(
-                  matched.unitPrice(), ri.qty(), matched.vatAmount(), matched.qty()));
+      // The refund is what the customer paid for the quantity: its net price and VAT less its
+      // share of the order's discounts; the line keeps the net figure the fiscal and commission
+      // reports read, likewise less that share.
+      var worth = worthOfReturn(order, orderItems, worths, matched, ri.qty());
+      totalRefund = totalRefund.add(worth.value());
       everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
       returnItems.add(
           new ReturnItem(
-              Ids.newId(), tenantId, returnId, variantId, ri.qty(), refundAmt, condition));
+              Ids.newId(), tenantId, returnId, variantId, ri.qty(), worth.net(), condition));
     }
 
     // A refund to a gift card goes on a new card or a named one of this business. Read here, so a
@@ -2803,6 +2840,56 @@ public class OrderService {
   }
 
   /**
+   * What has come back from each variant of a sale so far, kept while a request is worked through
+   * so two lines of one request for one variant are valued one after the other.
+   */
+  private static final class ReturnWorths {
+    private final Map<UUID, BigDecimal> returned;
+
+    ReturnWorths(Map<UUID, BigDecimal> alreadyReturned) {
+      this.returned = new HashMap<>(alreadyReturned);
+    }
+
+    BigDecimal take(UUID variantId, BigDecimal qty) {
+      BigDecimal before = returned.getOrDefault(variantId, BigDecimal.ZERO);
+      returned.put(variantId, before.add(qty));
+      return before;
+    }
+  }
+
+  /**
+   * What returning {@code qty} of a sold line is worth: what the customer paid for it, the order's
+   * discounts (the staff discount and the promotion engine's whole-basket reduction) taken off in
+   * proportion to the line's net value, in the currency's minor units, so the parts a line comes
+   * back in never add up to more than the line was paid for ({@link ReturnValue#worth}).
+   */
+  private ReturnValue.Worth worthOfReturn(
+      Order order, List<OrderItem> lines, ReturnWorths worths, OrderItem matched, BigDecimal qty) {
+    int scale = java.util.Currency.getInstance(order.currency()).getDefaultFractionDigits();
+    // A stable order, because the units a discount cannot divide evenly go to a line by its place.
+    List<OrderItem> stable = new ArrayList<>(lines);
+    stable.sort(java.util.Comparator.comparing(OrderItem::id));
+    BigDecimal discount =
+        (order.discountAmount() == null ? BigDecimal.ZERO : order.discountAmount())
+            .add(order.promotionDiscount() == null ? BigDecimal.ZERO : order.promotionDiscount());
+    List<BigDecimal> shares =
+        ReturnValue.discountShares(
+            discount,
+            stable.stream()
+                .map(l -> l.lineTotal() == null ? BigDecimal.ZERO : l.lineTotal())
+                .toList(),
+            scale);
+    BigDecimal share = shares.get(stable.indexOf(matched));
+    BigDecimal lineNet =
+        matched.lineTotal() != null
+            ? matched.lineTotal()
+            : matched.unitPrice().multiply(matched.qty());
+    BigDecimal before = worths.take(matched.variantId(), qty);
+    return ReturnValue.worth(
+        lineNet, matched.vatAmount(), matched.qty(), share, before, qty, scale);
+  }
+
+  /**
    * Goods can only come back once they were handed over.
    *
    * @throws ApiException 409 {@code ORDER_CANNOT_RETURN} unless the order is FULFILLED,
@@ -2900,6 +2987,7 @@ public class OrderService {
     requireReturnable(order);
 
     List<OrderItem> orderItems = repo.findOrderItems(tenantId, orderId);
+    ReturnWorths worths = new ReturnWorths(repo.returnedQtyByVariant(tenantId, orderId));
     UUID returnId = Ids.newId();
     BigDecimal value = BigDecimal.ZERO;
     List<ReturnItem> returnItems = new ArrayList<>();
@@ -2915,22 +3003,15 @@ public class OrderService {
                   () ->
                       ApiException.notFound(
                           "ITEM_NOT_IN_ORDER", "variant " + ri.variantId() + " not in order"));
-      // The line is worth what the customer paid for it, VAT included, because that is what the
-      // new sale asks of them; the line itself keeps the net figure every report reads.
-      value =
-          value.add(
-              ReturnValue.grossOf(
-                  matched.unitPrice(), ri.qty(), matched.vatAmount(), matched.qty()));
+      // The line is worth what the customer paid for it, VAT included and the order's discounts
+      // taken off, because that is what the new sale asks of them; the line itself keeps the net
+      // figure every report reads.
+      var worth = worthOfReturn(order, orderItems, worths, matched, ri.qty());
+      value = value.add(worth.value());
       everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
       returnItems.add(
           new ReturnItem(
-              Ids.newId(),
-              tenantId,
-              returnId,
-              variantId,
-              ri.qty(),
-              matched.unitPrice().multiply(ri.qty()).setScale(2, java.math.RoundingMode.HALF_UP),
-              condition));
+              Ids.newId(), tenantId, returnId, variantId, ri.qty(), worth.net(), condition));
     }
 
     List<String> outside =
@@ -3783,12 +3864,18 @@ public class OrderService {
    * @param tenantId owning tenant
    * @param code the card's code
    * @param req the amount to add and a reference for the transaction log
+   * @param ctx the caller, held to the stores they keep
    * @return the card with its new balance
-   * @throws ApiException {@code GIFT_CARD_NOT_FOUND} (404) when no such card exists; a conflict
+   * @throws ApiException {@code GIFT_CARD_NOT_FOUND} (404) when no such card exists; {@code
+   *     STORE_ACCESS_DENIED} (403) when the caller keeps stores and none is the card's; a conflict
    *     when the card is not active
    */
-  public GiftCard reloadGiftCard(UUID tenantId, String code, ReloadGiftCardRequest req) {
+  public GiftCard reloadGiftCard(
+      UUID tenantId, String code, ReloadGiftCardRequest req, TenantContext ctx) {
     String paidBy = giftCardPaidBy(req.paidBy());
+    // Adding value is issuing it again: a caller held to stores reloads only a card issued at one
+    // of them, and one held to none (the whole business) reloads any.
+    ctx.requireStoreAccess(getGiftCard(tenantId, code).storeId());
     return repo.reloadGiftCard(
         tenantId,
         code,
@@ -4766,6 +4853,8 @@ public class OrderService {
     Order order =
         repo.findOrder(tenantId, orderId)
             .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    // A copy of a sale is made by staff at the sale's store, not by staff of another branch.
+    if (ctx != null) ctx.requireStoreAccess(order.storeId());
     if (OrderReceipt.TYPE_EMAIL.equals(req.receiptType())
         && (req.emailedTo() == null || req.emailedTo().isBlank()))
       throw ApiException.badRequest(
@@ -4870,12 +4959,16 @@ public class OrderService {
    *
    * @param tenantId owning tenant
    * @param orderId the sale whose receipt events to read
+   * @param ctx the caller, held to the stores they keep
    * @return the receipt events, empty when none were produced
-   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists in this tenant
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists in this tenant;
+   *     {@code STORE_ACCESS_DENIED} (403) for staff not assigned to the sale's store
    */
-  public List<OrderReceipt> listReceipts(UUID tenantId, UUID orderId) {
-    repo.findOrder(tenantId, orderId)
-        .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+  public List<OrderReceipt> listReceipts(UUID tenantId, UUID orderId, TenantContext ctx) {
+    Order order =
+        repo.findOrder(tenantId, orderId)
+            .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    ctx.requireStoreAccess(order.storeId());
     return repo.findOrderReceipts(tenantId, orderId);
   }
 

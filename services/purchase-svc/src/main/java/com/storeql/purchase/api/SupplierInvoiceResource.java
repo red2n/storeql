@@ -83,8 +83,11 @@ public class SupplierInvoiceResource {
       description =
           "This supplier's invoice number has already been captured, or the accounting period"
               + " covering the invoice date is closed (PURCHASE_PERIOD_CLOSED)")
+  @APIResponse(responseCode = "403", description = "Not owner, manager or storekeeper")
   @POST
   public Response capture(CaptureSupplierInvoiceRequest req) {
+    // Capturing posts to the ledger: back-office work, not the till's.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER");
     Validations.validate(req);
     var invoice = svc.captureSupplierInvoice(ctx, req);
     return Response.status(201)

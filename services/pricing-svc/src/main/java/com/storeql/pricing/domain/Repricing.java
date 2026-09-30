@@ -131,4 +131,18 @@ public final class Repricing {
     }
     return latest.values().stream().min(Comparator.comparing(Observation::price));
   }
+
+  /**
+   * Whether the rival observation a proposal rests on has aged past the rule's {@code maxAgeDays}
+   * by {@code today}: the same reach {@link #lowestFresh} gives it, so a proposal stops being one
+   * that could be made at the moment it can no longer be applied.
+   *
+   * @param observedOn the day the rival's price was seen
+   * @param today the day it is being applied
+   * @param maxAgeDays how old an observation may be and still count
+   * @return {@code true} when the observation is older than the rule allows
+   */
+  public static boolean isStale(LocalDate observedOn, LocalDate today, int maxAgeDays) {
+    return observedOn.isBefore(today.minusDays(maxAgeDays));
+  }
 }

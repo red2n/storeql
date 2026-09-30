@@ -71,8 +71,13 @@ public class SupplierResource {
 
   @Operation(
       summary = "Create a supplier",
-      description = "Creates a supplier master record for the caller's tenant.")
+      description =
+          "Creates a supplier master record for the caller's tenant. Owner, manager or storekeeper;"
+              + " bank details also need finance.payments.")
   @APIResponse(responseCode = "201", description = "Supplier created")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not a buying role, or bank details without finance.payments")
   @POST
   public Response create(CreateSupplierRequest req) {
     Validations.validate(req);

@@ -6,6 +6,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -163,6 +164,27 @@ public final class SupplierScorecard {
     if (score.compareTo(new BigDecimal("75")) >= 0) return "B";
     if (score.compareTo(new BigDecimal("60")) >= 0) return "C";
     return "D";
+  }
+
+  /** The warning an open order carries when its supplier is graded D. */
+  public static final String SUPPLIER_GRADE_D = "SUPPLIER_GRADE_D";
+
+  /**
+   * What an order's reader is told about the supplier's record: {@link #SUPPLIER_GRADE_D} while the
+   * order is still open (not yet fully received, cancelled or closed) and the supplier's current
+   * grade is D. A warning, never a refusal: the buyer decides.
+   *
+   * @param orderStatus the order's status
+   * @param grade the supplier's grade, or null when there is nothing to judge
+   * @return the warnings, possibly none
+   */
+  public static List<String> orderWarnings(String orderStatus, String grade) {
+    boolean open =
+        Domain.PO_DRAFT.equals(orderStatus)
+            || Domain.PO_PENDING_APPROVAL.equals(orderStatus)
+            || Domain.PO_SUBMITTED.equals(orderStatus)
+            || Domain.PO_PARTIALLY_RECEIVED.equals(orderStatus);
+    return open && "D".equals(grade) ? List.of(SUPPLIER_GRADE_D) : List.of();
   }
 
   private static LocalDate date(Instant at) {

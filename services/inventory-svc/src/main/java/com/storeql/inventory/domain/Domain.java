@@ -147,7 +147,23 @@ public final class Domain {
       BigDecimal reserved,
       BigDecimal available,
       /** How much of onHand sits in bond with its duty suspended: on hand, never available. */
-      BigDecimal inBond) {}
+      BigDecimal inBond,
+      /**
+       * How much of onHand is past its date ({@link Expiry}): on hand and valued, never available.
+       */
+      BigDecimal expired) {
+
+    /** A level with nothing past its date. */
+    public Level(
+        UUID storeId,
+        UUID variantId,
+        BigDecimal onHand,
+        BigDecimal reserved,
+        BigDecimal available,
+        BigDecimal inBond) {
+      this(storeId, variantId, onHand, reserved, available, inBond, BigDecimal.ZERO);
+    }
+  }
 
   /**
    * Aggregate counts over levels: total distinct SKUs and how many are at/below the low threshold.

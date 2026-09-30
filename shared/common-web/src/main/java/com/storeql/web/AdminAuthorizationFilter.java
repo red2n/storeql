@@ -97,7 +97,10 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
           // whatever the address, and spending one — the 256-bit token in the body is the whole
           // capability, and it resets exactly the one login it was minted for.
           "/auth/password/forgot",
-          "/auth/password/reset");
+          "/auth/password/reset",
+          // Signing out everywhere: every session of the caller's own login, which comes from the
+          // verified token and nothing else, so a shopper may do it as much as staff.
+          "/auth/sessions/revoke-all");
 
   @Inject TenantContext ctx;
 
@@ -449,6 +452,18 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
     return !token.isEmpty() && token.indexOf('/') < 0;
   }
 
+  /**
+   * {@code POST /orders/{id}/cancel} with an id-shaped segment and nothing after it.
+   *
+   * @param path the service-local request path
+   * @return {@code true} for exactly that shape
+   */
+  private static boolean isOwnOrderCancel(String path) {
+    if (!path.startsWith("/orders/") || !path.endsWith("/cancel")) return false;
+    String id = path.substring("/orders/".length(), path.length() - "/cancel".length());
+    return looksLikeUuid(id);
+  }
+
   private static boolean isOpenMutation(String path) {
     return IDENTITY_PATHS.contains(path)
         // Second factors (20.12): answering one at sign-in (no token yet — the mfaToken in the
@@ -516,6 +531,11 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         // or by an authenticated customer. POS channel orders require a staff role — enforced
         // inside OrderResource.place() after payload deserialisation.
         || "/orders".equals(path)
+        // A shopper cancelling their own order before anything was paid. Not unguarded: order-svc
+        // lets only the shopper the order belongs to cancel it, only while it is an unpaid PENDING
+        // online order, and answers 404 to anyone else. Matched by shape, so nothing else under
+        // /orders/{id}/ is opened by it.
+        || isOwnOrderCancel(path)
         // Shopping cart self-service: a guest (sessionId) or authenticated CUSTOMER manages their
         // own cart with no staff role. Object-level authorization (only the owning
         // customer/session,

@@ -1171,6 +1171,7 @@ public final class Domain {
     public static final String TYPE_NO_SALE = "NO_SALE";
     public static final String TYPE_CANCEL = "CANCEL";
     public static final String TYPE_RETURN = "RETURN";
+    public static final String TYPE_PRICED = "PRICED";
     public static final String TYPE_OFFLINE_SALE_OF_RECALLED_ITEM =
         OfflineSaleFlag.KIND_RECALLED_ITEM;
     public static final String TYPE_OFFLINE_SALE_ON_UNFIT_SCALE = OfflineSaleFlag.KIND_UNFIT_SCALE;
@@ -1181,6 +1182,7 @@ public final class Domain {
             TYPE_NO_SALE,
             TYPE_CANCEL,
             TYPE_RETURN,
+            TYPE_PRICED,
             TYPE_OFFLINE_SALE_OF_RECALLED_ITEM,
             TYPE_OFFLINE_SALE_ON_UNFIT_SCALE);
   }

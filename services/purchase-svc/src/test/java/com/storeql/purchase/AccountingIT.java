@@ -435,6 +435,152 @@ class AccountingIT {
         "ACCOUNTING_SYNC_NOT_FOUND");
   }
 
+  // ── an uncertain push is settled by a person, on the record ─────────────────
+
+  private String syncIdOf(String journalId, String status) {
+    return com.storeql.test.Envelopes.find(
+            object(
+                    call("GET", ACCOUNTING + "/syncs?status=" + status, null, T, "OWNER", OWNER),
+                    200)
+                .getJsonArray("items"),
+            "journalId",
+            journalId)
+        .getString("id");
+  }
+
+  private JsonObject syncOf(String id) {
+    return object(call("GET", ACCOUNTING + "/syncs/" + id, null, T, "OWNER", OWNER), 200);
+  }
+
+  @Test
+  @DisplayName(
+      "A person says whether an uncertain push landed: delivered under the package's own reference"
+          + " and never pushed again, or queued to try again; once, and kept on the row")
+  void anUncertainPushIsSettledByAPersonOnTheRecord() throws Exception {
+    object(call("PUT", CONNECTION, simulated(null, "9999"), T, "OWNER", OWNER), 200);
+    String landed = postJournal(LocalDate.now().toString(), "Maybe landed", "9999", "1200");
+    String missing = postJournal(LocalDate.now().toString(), "Maybe not", "9999", "1200");
+    String retried = postJournal(LocalDate.now().toString(), "Retried outright", "9999", "1200");
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    String landedId = syncIdOf(landed, "PENDING");
+    String missingId = syncIdOf(missing, "PENDING");
+    String retriedId = syncIdOf(retried, "PENDING");
+    // No answer came back from a package with no idempotency key: the state the clock never leaves.
+    for (String id : new String[] {landedId, missingId, retriedId}) {
+      com.storeql.test.Envelopes.exec(
+          PG, "UPDATE purchase.accounting_syncs SET status = 'UNCERTAIN' WHERE id = '" + id + "'");
+    }
+    String resolve = ACCOUNTING + "/syncs/" + landedId + "/resolve";
+    String landedBody =
+        "{\"outcome\":\"LANDED\",\"externalId\":\"SIM-4711\",\"note\":\"found in the package\"}";
+
+    // Refused by role and by tenant, and nothing moves.
+    assertThat(call("POST", resolve, landedBody, T, "CASHIER", CASHIER).getStatus(), is(403));
+    assertThat(call("POST", resolve, landedBody, T, "STOREKEEPER", CASHIER).getStatus(), is(403));
+    assertError(
+        call("POST", resolve, landedBody, T2, "OWNER", OWNER), 404, "ACCOUNTING_SYNC_NOT_FOUND");
+    assertError(
+        call("POST", resolve, landedBody, T2, "MANAGER", MANAGER),
+        404,
+        "ACCOUNTING_SYNC_NOT_FOUND");
+    assertError(
+        call("POST", resolve, "{\"outcome\":\"MAYBE\"}", T, "MANAGER", MANAGER),
+        400,
+        "ACCOUNTING_OUTCOME_INVALID");
+    assertError(
+        call("POST", resolve, "{\"outcome\":\"LANDED\"}", T, "MANAGER", MANAGER),
+        400,
+        "ACCOUNTING_EXTERNAL_ID_REQUIRED");
+    assertError(
+        call(
+            "POST",
+            resolve,
+            "{\"outcome\":\"LANDED\",\"externalId\":\"  \"}",
+            T,
+            "MANAGER",
+            MANAGER),
+        400,
+        "ACCOUNTING_EXTERNAL_ID_REQUIRED");
+    assertThat(syncOf(landedId).getString("status"), is("UNCERTAIN"));
+
+    // It did land: delivered under the package's reference, who and when on the row.
+    JsonObject done = object(call("POST", resolve, landedBody, T, "MANAGER", MANAGER), 200);
+    assertThat(done.getString("status"), is("DELIVERED"));
+    assertThat(done.getString("externalId"), is("SIM-4711"));
+    assertThat(done.containsKey("deliveredAt"), is(true));
+    JsonObject decision = done.getJsonObject("resolution");
+    assertThat(decision.getString("outcome"), is("LANDED"));
+    assertThat(decision.getString("resolvedBy"), is(MANAGER));
+    assertThat(decision.getString("note"), is("found in the package"));
+    assertThat(decision.containsKey("resolvedAt"), is(true));
+    // Never pushed again: a pass finds nothing to send for it, and its attempts stay as they were.
+    JsonObject pass = object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    assertThat(pass.getInt("delivered"), is(0));
+    JsonObject after = syncOf(landedId);
+    assertThat(after.getString("status"), is("DELIVERED"));
+    assertThat(after.getInt("attempts"), is(1));
+    // Decided once, either way.
+    assertError(
+        call("POST", resolve, landedBody, T, "OWNER", OWNER), 409, "ACCOUNTING_SYNC_NOT_UNCERTAIN");
+    assertError(
+        call("POST", resolve, "{\"outcome\":\"NOT_LANDED\"}", T, "OWNER", OWNER),
+        409,
+        "ACCOUNTING_SYNC_NOT_UNCERTAIN");
+    // A pending one is not uncertain.
+    String pending = postJournal(LocalDate.now().toString(), "Still pending", "9999", "1200");
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    assertError(
+        call(
+            "POST",
+            ACCOUNTING + "/syncs/" + syncIdOf(pending, "PENDING") + "/resolve",
+            "{\"outcome\":\"NOT_LANDED\"}",
+            T,
+            "OWNER",
+            OWNER),
+        409,
+        "ACCOUNTING_SYNC_NOT_UNCERTAIN");
+
+    // It never landed: queued to go now, the decision kept, and when the cause is mended it lands.
+    JsonObject notLanded =
+        object(
+            call(
+                "POST",
+                ACCOUNTING + "/syncs/" + missingId + "/resolve",
+                "{\"outcome\":\"NOT_LANDED\",\"note\":\"checked the package\"}",
+                T,
+                "OWNER",
+                OWNER),
+            200);
+    assertThat(notLanded.getString("status"), is("PENDING"));
+    assertThat(notLanded.getJsonObject("resolution").getString("outcome"), is("NOT_LANDED"));
+    assertThat(notLanded.getJsonObject("resolution").getString("resolvedBy"), is(OWNER));
+    array(
+        call(
+            "PUT",
+            CONNECTION + "/mappings",
+            "{\"mappings\":[{\"nominalCode\":\"9999\",\"externalAccount\":\"SIM-1100\"}]}",
+            T,
+            "OWNER",
+            OWNER),
+        200);
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    JsonObject nowLanded = syncOf(missingId);
+    assertThat(nowLanded.getString("status"), is("DELIVERED"));
+    assertThat(nowLanded.getJsonObject("resolution").getString("outcome"), is("NOT_LANDED"));
+
+    // Trying an uncertain one again by hand is the same word, and is recorded as such.
+    JsonObject retry =
+        object(
+            call(
+                "POST", ACCOUNTING + "/syncs/" + retriedId + "/retry", null, T, "MANAGER", MANAGER),
+            200);
+    JsonObject retryDecision = retry.getJsonObject("resolution");
+    assertThat(retryDecision.getString("outcome"), is("NOT_LANDED"));
+    assertThat(retryDecision.getString("resolvedBy"), is(MANAGER));
+    // A push nobody was unsure about carries no decision.
+    assertThat(syncOf(syncIdOf(pending, "PENDING")).containsKey("resolution"), is(false));
+  }
+
   // ── switched off, switched on, removed ──────────────────────────────────────
 
   @Test

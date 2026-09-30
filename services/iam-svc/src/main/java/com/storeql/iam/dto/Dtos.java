@@ -158,7 +158,12 @@ public final class Dtos {
   public record ResetPasswordRequest(
       @Schema(description = "The token from the reset link.") @NotBlank String token,
       @Schema(description = "The new password, checked against the published policy.") @NotBlank
-          String newPassword) {}
+          String newPassword,
+      @Schema(
+              description =
+                  "ISO 639 language code, [a-z]{2,3}, for the 'password changed' notice. Anything"
+                      + " else, or none, reads as English.")
+          String language) {}
 
   /** What {@code POST /auth/password/reset} answers on success. */
   @Schema(name = "ResetPasswordResponse")
@@ -251,12 +256,21 @@ public final class Dtos {
           String password) {}
 
   /** Change password (authenticated user only). */
+  @Schema(name = "SessionsRevokedResponse")
+  public record SessionsRevokedResponse(
+      @Schema(description = "How many signed-in sessions of this login were ended.") int revoked) {}
+
   @Schema(name = "ChangePasswordRequest")
   public record ChangePasswordRequest(
       @Schema(description = "The user's current password, re-verified before the change.") @NotBlank
           String currentPassword,
       @Schema(description = "The new password to set.") @NotBlank @Size(min = 8, max = 128)
-          String newPassword) {}
+          String newPassword,
+      @Schema(
+              description =
+                  "ISO 639 language code, [a-z]{2,3}, for the 'password changed' notice. Anything"
+                      + " else, or none, reads as English.")
+          String language) {}
 
   /** Current principal (GET /auth/me). */
   @Schema(name = "MeResponse", description = "The authenticated caller's identity and roles.")

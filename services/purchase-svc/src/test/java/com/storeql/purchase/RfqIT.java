@@ -454,4 +454,402 @@ class RfqIT {
     // The next request takes the next number.
     assertThat(raise(s1).getString("reference"), is("RFQ-000002"));
   }
+
+  // ── finding: an award away from the lowest bid carries a reason ────────────
+
+  private String awardBody(String... variantSupplierReason) {
+    StringBuilder b = new StringBuilder("{\"awards\":[");
+    for (int i = 0; i < variantSupplierReason.length; i += 3) {
+      if (i > 0) b.append(',');
+      b.append("{\"variantId\":\"")
+          .append(variantSupplierReason[i])
+          .append("\",\"supplierId\":\"")
+          .append(variantSupplierReason[i + 1])
+          .append('"');
+      if (variantSupplierReason[i + 2] != null) {
+        b.append(",\"reason\":\"").append(variantSupplierReason[i + 2]).append('"');
+      }
+      b.append('}');
+    }
+    return b.append("]}").toString();
+  }
+
+  /** Two complete bids (the euro one lowest on A at home, the pound one on B), issued. */
+  private String issuedWithTwoBids(String s1, String s2) {
+    String id = raise(s1, s2).getString("id");
+    Envelopes.ok(post("/rfqs/" + id + "/issue", "{}"));
+    Envelopes.ok(
+        call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "10.00", "4.00"), T, "OWNER"));
+    Envelopes.ok(
+        call("PUT", "/rfqs/" + id + "/quotes/" + s2, quote("EUR", "11.00", "5.00"), T, "OWNER"));
+    return id;
+  }
+
+  private int purchaseOrderCount() {
+    return Envelopes.okArray(get("/purchase-orders")).size();
+  }
+
+  @Test
+  void anAwardAwayFromTheLowestBidNeedsAReasonThatIsKeptOnTheAward() {
+    String s1 = supplier("Highland Meats", "GBP");
+    String s2 = supplier("Boucherie Nord", "EUR");
+    String id = issuedWithTwoBids(s1, s2);
+
+    // A goes to the pound bid though the euro bid (9.35 at home) is lower: no reason, no award.
+    assertThat(
+        code(
+            post("/rfqs/" + id + "/award", awardBody(VARIANT_A, s1, null, VARIANT_B, s1, null)),
+            400),
+        is("PURCHASE_RFQ_AWARD_REASON_REQUIRED"));
+    // A blank reason is no reason.
+    assertThat(
+        code(
+            post("/rfqs/" + id + "/award", awardBody(VARIANT_A, s1, "   ", VARIANT_B, s1, null)),
+            400),
+        is("PURCHASE_RFQ_AWARD_REASON_REQUIRED"));
+    // Nothing moved: the request is still ISSUED and no order was raised.
+    assertThat(Envelopes.ok(get("/rfqs/" + id)).getString("status"), is("ISSUED"));
+    assertThat(purchaseOrderCount(), is(0));
+
+    // With the reason on the line that needs it, it goes through; B was the lowest and needs none.
+    JsonObject awarded =
+        Envelopes.ok(
+            post(
+                "/rfqs/" + id + "/award",
+                awardBody(
+                    VARIANT_A,
+                    s1,
+                    "delivers Monday, the euro bid ships Friday",
+                    VARIANT_B,
+                    s1,
+                    null)));
+    assertThat(awarded.getString("status"), is("AWARDED"));
+    assertThat(
+        find(awarded.getJsonArray("awards"), "variantId", VARIANT_A).getString("reason"),
+        is("delivers Monday, the euro bid ships Friday"));
+    JsonObject b = find(awarded.getJsonArray("awards"), "variantId", VARIANT_B);
+    assertThat(!b.containsKey("reason") || b.isNull("reason"), is(true));
+    // The reason is on the record when the request is read again.
+    assertThat(
+        find(Envelopes.ok(get("/rfqs/" + id)).getJsonArray("awards"), "variantId", VARIANT_A)
+            .getString("reason"),
+        is("delivers Monday, the euro bid ships Friday"));
+    assertThat(purchaseOrderCount(), is(1));
+  }
+
+  @Test
+  void aBidThatCannotBeRankedNeverCountsAsLowerWhenAwarding() {
+    String s1 = supplier("Highland Meats", "GBP");
+    String s2 = supplier("Boucherie Nord", "EUR");
+    String partial = supplier("Cheap But Partial", "GBP");
+    String id = raise(s1, s2, partial).getString("id");
+    Envelopes.ok(post("/rfqs/" + id + "/issue", "{}"));
+    Envelopes.ok(
+        call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "10.00", "4.00"), T, "OWNER"));
+    Envelopes.ok(
+        call("PUT", "/rfqs/" + id + "/quotes/" + s2, quote("EUR", "11.00", "5.00"), T, "OWNER"));
+    // One line only, and cheaper: shown, never ranked.
+    JsonObject after =
+        Envelopes.ok(
+            call(
+                "PUT",
+                "/rfqs/" + id + "/quotes/" + partial,
+                quote("GBP", "1.00", null),
+                T,
+                "OWNER"));
+    assertThat(
+        find(after.getJsonObject("comparison").getJsonArray("bids"), "supplierId", partial)
+            .containsKey("rank"),
+        is(false));
+    // Awarding each line to the lowest comparable bid needs no reason though the partial is lower.
+    JsonObject awarded =
+        Envelopes.ok(
+            post("/rfqs/" + id + "/award", awardBody(VARIANT_A, s2, null, VARIANT_B, s1, null)));
+    assertThat(awarded.getString("status"), is("AWARDED"));
+  }
+
+  // ── quotes after the due day are kept and flagged, never refused ───────────
+
+  private static boolean late(JsonObject rfq, String supplierId) {
+    JsonObject bid = find(rfq.getJsonArray("bids"), "supplierId", supplierId);
+    JsonObject summary =
+        find(rfq.getJsonObject("comparison").getJsonArray("bids"), "supplierId", supplierId);
+    assertThat(summary.getBoolean("receivedLate"), is(bid.getBoolean("receivedLate")));
+    return bid.getBoolean("receivedLate");
+  }
+
+  private void setDueDay(String id, LocalDate day) {
+    Envelopes.exec(
+        PG, "UPDATE purchase.rfqs SET closes_on = DATE '" + day + "' WHERE id = '" + id + "'");
+  }
+
+  @Test
+  void aQuoteAfterTheDueDayIsAcceptedAndFlaggedLateAndTheRankingIsUnchanged() {
+    String s1 = supplier("Highland Meats", "GBP");
+    String s2 = supplier("Boucherie Nord", "EUR");
+    String id = raise(s1, s2).getString("id");
+    Envelopes.ok(post("/rfqs/" + id + "/issue", "{}"));
+
+    // Due today anywhere on Earth: not late.
+    setDueDay(id, LocalDate.now(java.time.ZoneOffset.ofHours(14)));
+    JsonObject onTime =
+        Envelopes.ok(
+            call(
+                "PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "10.00", "4.00"), T, "OWNER"));
+    assertThat(late(onTime, s1), is(false));
+
+    // The day has gone by everywhere: the quote is accepted, kept, and flagged.
+    setDueDay(id, LocalDate.now(java.time.ZoneOffset.ofHours(-12)).minusDays(1));
+    JsonObject lateQuote =
+        Envelopes.ok(
+            call(
+                "PUT", "/rfqs/" + id + "/quotes/" + s2, quote("EUR", "11.00", "5.00"), T, "OWNER"));
+    assertThat(late(lateQuote, s2), is(true));
+    assertThat(late(lateQuote, s1), is(false));
+    // Ranking is as without the flag: the euro bid (114.75 at home) still beats 120.00.
+    JsonArray bids = lateQuote.getJsonObject("comparison").getJsonArray("bids");
+    assertThat(find(bids, "supplierId", s2).getInt("rank"), is(1));
+    assertThat(find(bids, "supplierId", s1).getInt("rank"), is(2));
+
+    // Replacing re-evaluates at the time of replacing: the first, on-time quote replaced now is
+    // late.
+    assertThat(
+        late(
+            Envelopes.ok(
+                call(
+                    "PUT",
+                    "/rfqs/" + id + "/quotes/" + s1,
+                    quote("GBP", "9.00", "4.00"),
+                    T,
+                    "OWNER")),
+            s1),
+        is(true));
+    // Moving the due day out and replacing clears it.
+    setDueDay(id, LocalDate.now(java.time.ZoneOffset.ofHours(14)));
+    assertThat(
+        late(
+            Envelopes.ok(
+                call(
+                    "PUT",
+                    "/rfqs/" + id + "/quotes/" + s1,
+                    quote("GBP", "9.00", "4.00"),
+                    T,
+                    "OWNER")),
+            s1),
+        is(false));
+    // The flag is on the read, and the buyer can award what came in.
+    assertThat(late(Envelopes.ok(get("/rfqs/" + id)), s2), is(true));
+    assertThat(
+        Envelopes.ok(
+                post("/rfqs/" + id + "/award", awardBody(VARIANT_A, s1, null, VARIANT_B, s1, null)))
+            .getString("status"),
+        is("AWARDED"));
+  }
+
+  @Test
+  void aRequestWithNoDueDayTakesQuotesAtAnyTime() {
+    String s1 = supplier("Highland Meats", "GBP");
+    JsonObject rfq =
+        Envelopes.created(
+            post(
+                "/rfqs",
+                "{\"title\":\"Open ended\",\"storeId\":\""
+                    + STORE
+                    + "\",\"lines\":[{\"variantId\":\""
+                    + VARIANT_A
+                    + "\",\"qty\":1}],\"supplierIds\":[\""
+                    + s1
+                    + "\"]}"));
+    String id = rfq.getString("id");
+    Envelopes.ok(post("/rfqs/" + id + "/issue", "{}"));
+    JsonObject quoted =
+        Envelopes.ok(
+            call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "10.00", null), T, "OWNER"));
+    assertThat(late(quoted, s1), is(false));
+  }
+
+  // ── the new writes are tenant-bound and role-bound ─────────────────────────
+
+  @Test
+  void anotherBusinessesStaffOfEveryRoleMoveNothingOnOurRequest() {
+    String s1 = supplier("Highland Meats", "GBP");
+    String s2 = supplier("Boucherie Nord", "EUR");
+    String id = issuedWithTwoBids(s1, s2);
+    JsonObject before = Envelopes.ok(get("/rfqs/" + id));
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(
+          role,
+          code(
+              call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "1.00", "1.00"), T2, role),
+              404),
+          is("PURCHASE_RFQ_NOT_FOUND"));
+      assertThat(
+          role,
+          code(
+              call(
+                  "POST",
+                  "/rfqs/" + id + "/award",
+                  awardBody(VARIANT_A, s1, "because", VARIANT_B, s1, null),
+                  T2,
+                  role),
+              404),
+          is("PURCHASE_RFQ_NOT_FOUND"));
+      assertThat(
+          role,
+          call("POST", "/rfqs/" + id + "/cancel", "{\"reason\":\"x\"}", T2, role).getStatus(),
+          is(404));
+      assertThat(role, call("GET", "/rfqs/" + id, null, T2, role).getStatus(), is(404));
+    }
+    // The till and the shopper are refused by role, in either business.
+    for (String role : new String[] {"CASHIER", "CUSTOMER"}) {
+      for (String tenant : new String[] {T, T2}) {
+        assertThat(
+            call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "1.00", "1.00"), tenant, role)
+                .getStatus(),
+            is(403));
+        assertThat(
+            call(
+                    "POST",
+                    "/rfqs/" + id + "/award",
+                    awardBody(VARIANT_A, s1, "because", VARIANT_B, s1, null),
+                    tenant,
+                    role)
+                .getStatus(),
+            is(403));
+      }
+    }
+    assertThat(Envelopes.ok(get("/rfqs/" + id)), is(before));
+    assertThat(purchaseOrderCount(), is(0));
+  }
+
+  // ── catalogue cases: refusals by name ──────────────────────────────────────
+
+  @Test
+  void refusalsByNameOnRaisingQuotingAndAwarding() {
+    String s1 = supplier("Highland Meats", "GBP");
+    String s2 = supplier("Quiet Farm", "GBP");
+    String stranger = supplier("Stranger", "GBP");
+    // PO-74: a request with no line or no supplier is refused, for the warehouse role too.
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/rfqs",
+                "{\"title\":\"x\",\"storeId\":\""
+                    + STORE
+                    + "\",\"lines\":[],\"supplierIds\":[\""
+                    + s1
+                    + "\"]}",
+                T,
+                "STOREKEEPER"),
+            400),
+        is("PURCHASE_RFQ_LINES_REQUIRED"));
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/rfqs",
+                "{\"title\":\"x\",\"storeId\":\""
+                    + STORE
+                    + "\",\"lines\":[{\"variantId\":\""
+                    + VARIANT_A
+                    + "\",\"qty\":1}],\"supplierIds\":[]}",
+                T,
+                "STOREKEEPER"),
+            400),
+        is("PURCHASE_RFQ_SUPPLIERS_REQUIRED"));
+    // PO-75: a line asked twice, a supplier asked twice.
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/rfqs",
+                "{\"title\":\"x\",\"storeId\":\""
+                    + STORE
+                    + "\",\"lines\":[{\"variantId\":\""
+                    + VARIANT_A
+                    + "\",\"qty\":1},{\"variantId\":\""
+                    + VARIANT_A
+                    + "\",\"qty\":2}],\"supplierIds\":[\""
+                    + s1
+                    + "\"]}",
+                T,
+                "STOREKEEPER"),
+            400),
+        is("PURCHASE_RFQ_LINE_DUPLICATE"));
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/rfqs",
+                "{\"title\":\"x\",\"storeId\":\""
+                    + STORE
+                    + "\",\"lines\":[{\"variantId\":\""
+                    + VARIANT_A
+                    + "\",\"qty\":1}],\"supplierIds\":[\""
+                    + s1
+                    + "\",\""
+                    + s1
+                    + "\"]}",
+                T,
+                "STOREKEEPER"),
+            400),
+        is("PURCHASE_RFQ_SUPPLIER_DUPLICATE"));
+    assertThat(Envelopes.okArray(get("/rfqs")).size(), is(0));
+
+    String id = raise(s1, s2).getString("id");
+    // PO-70: a request still in DRAFT cannot be awarded.
+    assertThat(
+        code(post("/rfqs/" + id + "/award", awardBody(VARIANT_A, s1, null)), 409),
+        is("PURCHASE_RFQ_NOT_ISSUED"));
+    Envelopes.ok(post("/rfqs/" + id + "/issue", "{}"));
+    // PO-71: a supplier nobody asked cannot quote.
+    assertThat(
+        code(
+            call(
+                "PUT",
+                "/rfqs/" + id + "/quotes/" + stranger,
+                quote("GBP", "1.00", null),
+                T,
+                "MANAGER"),
+            400),
+        is("PURCHASE_RFQ_SUPPLIER_NOT_INVITED"));
+    // PO-76: a quote replaces the earlier one entirely; a line left out is a line not priced.
+    Envelopes.ok(
+        call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "10.00", "4.00"), T, "MANAGER"));
+    JsonObject requoted =
+        Envelopes.ok(
+            call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "9.00", null), T, "MANAGER"));
+    JsonArray prices = find(requoted.getJsonArray("bids"), "supplierId", s1).getJsonArray("prices");
+    assertThat(prices.size(), is(1));
+    assertThat(prices.getJsonObject(0).getString("variantId"), is(VARIANT_A));
+    assertThat(num(prices.getJsonObject(0), "unitPrice"), comparesEqualTo(new BigDecimal("9.00")));
+    // PO-68: a line goes only to a supplier who priced it (s1 left B unpriced; s2 quoted nothing).
+    assertThat(
+        code(post("/rfqs/" + id + "/award", awardBody(VARIANT_B, s1, null)), 409),
+        is("PURCHASE_RFQ_NOT_QUOTED"));
+    assertThat(
+        code(post("/rfqs/" + id + "/award", awardBody(VARIANT_A, s2, null)), 409),
+        is("PURCHASE_RFQ_NOT_QUOTED"));
+    // PO-69: the same line twice in one award.
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/rfqs/" + id + "/award",
+                awardBody(VARIANT_A, s1, null, VARIANT_A, s1, null),
+                T,
+                "MANAGER"),
+            400),
+        is("PURCHASE_RFQ_AWARD_DUPLICATE"));
+    assertThat(Envelopes.ok(get("/rfqs/" + id)).getString("status"), is("ISSUED"));
+    assertThat(purchaseOrderCount(), is(0));
+    // PO-78: another business's request is not there for them, whoever they are.
+    assertThat(call("GET", "/rfqs/" + id, null, T2, "OWNER").getStatus(), is(404));
+    assertThat(call("POST", "/rfqs/" + id + "/issue", "{}", T2, "OWNER").getStatus(), is(404));
+    assertThat(
+        call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "1", null), T2, "MANAGER")
+            .getStatus(),
+        is(404));
+  }
 }

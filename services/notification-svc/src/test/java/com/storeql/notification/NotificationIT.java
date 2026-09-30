@@ -111,6 +111,38 @@ class NotificationIT {
     }
   }
 
+  /**
+   * The "your password was changed" row belongs to no business either, so no tenant-scoped read of
+   * the log — any role, either business — finds it, even by the address it went to.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName(
+      "Another business's staff of every role — and this one's — never read the changed row")
+  void thePasswordChangedRowIsInvisibleToEveryRoleOfEveryBusiness() {
+    UUID event = Ids.newId();
+    notifications.recordNotification(
+        null,
+        Ids.newId(),
+        event,
+        "PASSWORD_CHANGED",
+        "EMAIL",
+        "changed-pw@example.com",
+        "Your password was changed",
+        "The password for your login at this email address was changed.",
+        "SENT",
+        "en",
+        null);
+    assertThat(notifications.alreadyNotified(event, "PASSWORD_CHANGED"), is(true));
+
+    for (String tenant : new String[] {T, OTHER}) {
+      for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+        String body = getAs("/admin/notifications", tenant, role).readEntity(String.class);
+        assertThat(tenant + "/" + role, body.contains("changed-pw@example.com"), is(false));
+        assertThat(tenant + "/" + role, body.contains("PASSWORD_CHANGED"), is(false));
+      }
+    }
+  }
+
   /** N1: a delivered notification is recorded, and a redelivered event is a no-op. */
   @Test
   void notifyOnceRecordsAndIsIdempotent() {

@@ -220,6 +220,12 @@ public final class Accounting {
       String snippet,
       int durationMs) {}
 
+  /** What a person decided about a push whose outcome was unknown. */
+  public record Resolution(String outcome, UUID by, Instant at, String note) {}
+
+  public static final String LANDED = "LANDED";
+  public static final String NOT_LANDED = "NOT_LANDED";
+
   public record Counts(int pending, int delivered, int failed, int uncertain, int skipped) {}
 
   /** What one pass did. */

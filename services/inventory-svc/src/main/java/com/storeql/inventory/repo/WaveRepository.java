@@ -49,6 +49,7 @@ public class WaveRepository extends BaseOutboxRepository {
   static final String AWAIT_CONSUMER = "inventory-svc/awaiting-orders";
 
   @Inject InventoryRepository inventory;
+  @Inject ExpiryDay expiryDay;
 
   // ── The projection: confirmed online orders waiting at their store ─────────
 
@@ -290,7 +291,9 @@ public class WaveRepository extends BaseOutboxRepository {
     return query(
         "SELECT id, batch_no, remaining_qty, zone_id FROM inventory_batches WHERE tenant_id = ?"
             + " AND store_id = ? AND variant_id = ? AND remaining_qty > 0 AND material_status ="
-            + " 'AVAILABLE' AND duty_status = 'DUTY_PAID' ORDER BY "
+            + " 'AVAILABLE' AND duty_status = 'DUTY_PAID' AND "
+            + expiryDay.of(tenantId).sellableSql("")
+            + " ORDER BY "
             + orderBy,
         ps -> {
           ps.setObject(1, tenantId);
@@ -764,7 +767,9 @@ public class WaveRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "SELECT ownership, owner_supplier_id, cost_price FROM inventory_batches WHERE tenant_id"
                 + " = ? AND id = ? AND store_id = ? AND material_status = 'AVAILABLE' AND duty_status"
-                + " = 'DUTY_PAID' FOR UPDATE")) {
+                + " = 'DUTY_PAID' AND "
+                + expiryDay.of(tenantId).sellableSql("")
+                + " FOR UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, line.batchId());
       ps.setObject(3, storeId);

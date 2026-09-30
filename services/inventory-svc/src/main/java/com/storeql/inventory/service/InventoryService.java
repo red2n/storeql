@@ -3347,6 +3347,13 @@ public class InventoryService {
 
   // ── Tier-1 Gap #28: Order modifiers ──────────────────────────────────────
 
+  /** The plan with this id in this tenant. @throws ApiException 404 {@code ROP_PLAN_NOT_FOUND} */
+  public ReorderPointPlan getRopPlanById(UUID tenantId, UUID id) {
+    return ropRepo
+        .findRopPlanById(tenantId, id)
+        .orElseThrow(() -> ApiException.notFound("ROP_PLAN_NOT_FOUND", "No such ROP plan"));
+  }
+
   /**
    * Updates a rop order modifiers.
    *

@@ -51,6 +51,8 @@ public class GiftCardResource {
   @APIResponse(responseCode = "201", description = "Gift card issued")
   @POST
   public Response issue(IssueGiftCardRequest req) {
+    // Stored value is money the business owes: staff only, whatever the path filter above says.
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
     Validations.validate(req);
     var gc = svc.issueGiftCard(req, ctx);
     return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(gc))).build();
@@ -79,8 +81,9 @@ public class GiftCardResource {
    * @param code the card's code
    * @param req the amount to add and a reference for the transaction log
    * @return the card with its new balance
-   * @throws com.storeql.web.ApiException {@code 404} when no such card exists; a conflict when the
-   *     card is not active
+   * @throws com.storeql.web.ApiException {@code 404} when no such card exists; {@code 403} for a
+   *     caller who is not staff, or who is held to stores and keeps none where the card was issued;
+   *     a conflict when the card is not active
    */
   @Operation(
       summary = "Reload a gift card",
@@ -90,8 +93,9 @@ public class GiftCardResource {
   @POST
   @Path("/{code}/reload")
   public Response reload(@PathParam("code") String code, ReloadGiftCardRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
     Validations.validate(req);
-    var gc = svc.reloadGiftCard(ctx.tenantId(), code, req);
+    var gc = svc.reloadGiftCard(ctx.requireTenantId(), code, req, ctx);
     return Response.ok(ApiResponse.ok(Mappers.toDto(gc))).build();
   }
 

@@ -690,6 +690,146 @@ public class PurchaseRepository extends BaseOutboxRepository {
   }
 
   /**
+   * Changes a draft order's line (quantity, price, optionally the VAT code) and restates the
+   * order's totals, atomically. The order is locked first, so a submit racing an amendment cannot
+   * both win: the amendment sees the order no longer DRAFT and is refused.
+   *
+   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND}, {@code PURCHASE_LINE_NOT_FOUND}; 400
+   *     {@code PURCHASE_PO_NOT_DRAFT}; 409 {@code PURCHASE_LINE_BELOW_ALLOCATIONS} when the new
+   *     quantity is less than what is already allocated to shops
+   */
+  public PurchaseOrderLine amendPurchaseOrderLine(
+      UUID tenantId,
+      UUID poId,
+      UUID lineId,
+      BigDecimal qty,
+      BigDecimal unitPrice,
+      String vatCode,
+      String currency,
+      java.util.Map<String, BigDecimal> vatRates) {
+    return inTx(
+        c -> {
+          requireDraftTx(c, tenantId, poId);
+          BigDecimal allocated = allocatedTx(c, tenantId, lineId);
+          if (allocated.compareTo(qty) > 0) {
+            throw ApiException.conflict(
+                "PURCHASE_LINE_BELOW_ALLOCATIONS",
+                "the line has "
+                    + allocated.stripTrailingZeros().toPlainString()
+                    + " allocated to shops; reduce its allocations before ordering less");
+          }
+          int rows;
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE purchase_order_lines SET qty=?, unit_price=?,"
+                      + " vat_code=COALESCE(?, vat_code) WHERE tenant_id=? AND po_id=? AND id=?")) {
+            ps.setBigDecimal(1, qty);
+            ps.setBigDecimal(2, unitPrice);
+            ps.setString(3, vatCode);
+            ps.setObject(4, tenantId);
+            ps.setObject(5, poId);
+            ps.setObject(6, lineId);
+            rows = ps.executeUpdate();
+          }
+          if (rows == 0) throw lineNotFound(poId, lineId);
+          restateTotals(c, tenantId, poId, currency, vatRates);
+          try (var ps =
+              c.prepareStatement(
+                  "SELECT id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,created_at,"
+                      + "proposal_reason FROM purchase_order_lines"
+                      + " WHERE tenant_id=? AND po_id=? AND id=?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, poId);
+            ps.setObject(3, lineId);
+            try (var rs = ps.executeQuery()) {
+              if (!rs.next()) throw lineNotFound(poId, lineId);
+              return new PurchaseOrderLine(
+                  rs.getObject("id", UUID.class),
+                  rs.getObject("tenant_id", UUID.class),
+                  rs.getObject("po_id", UUID.class),
+                  rs.getObject("variant_id", UUID.class),
+                  rs.getBigDecimal("qty"),
+                  rs.getBigDecimal("unit_price"),
+                  rs.getString("vat_code"),
+                  rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                  rs.getString("proposal_reason"));
+            }
+          }
+        },
+        "amend po line");
+  }
+
+  /**
+   * Removes a line from a draft order and restates its totals, atomically.
+   *
+   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND}, {@code PURCHASE_LINE_NOT_FOUND}; 400
+   *     {@code PURCHASE_PO_NOT_DRAFT}; 409 {@code PURCHASE_LINE_HAS_ALLOCATIONS} while shops have
+   *     part of the line allocated
+   */
+  public void removePurchaseOrderLine(
+      UUID tenantId,
+      UUID poId,
+      UUID lineId,
+      String currency,
+      java.util.Map<String, BigDecimal> vatRates) {
+    inTx(
+        c -> {
+          requireDraftTx(c, tenantId, poId);
+          if (allocatedTx(c, tenantId, lineId).signum() > 0) {
+            throw ApiException.conflict(
+                "PURCHASE_LINE_HAS_ALLOCATIONS",
+                "the line is allocated to shops; clear its allocations before removing it");
+          }
+          int rows;
+          try (var ps =
+              c.prepareStatement(
+                  "DELETE FROM purchase_order_lines WHERE tenant_id=? AND po_id=? AND id=?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, poId);
+            ps.setObject(3, lineId);
+            rows = ps.executeUpdate();
+          }
+          if (rows == 0) throw lineNotFound(poId, lineId);
+          restateTotals(c, tenantId, poId, currency, vatRates);
+          return null;
+        },
+        "remove po line");
+  }
+
+  private static ApiException lineNotFound(UUID poId, UUID lineId) {
+    return ApiException.notFound(
+        "PURCHASE_LINE_NOT_FOUND", "no line " + lineId + " on order " + poId);
+  }
+
+  /** Locks the order and refuses unless it is a DRAFT. */
+  private static void requireDraftTx(Connection c, UUID tenantId, UUID poId) throws SQLException {
+    String status = lockPurchaseOrderStatusTx(c, tenantId, poId);
+    if (status == null) {
+      throw ApiException.notFound("PURCHASE_PO_NOT_FOUND", "Purchase order not found: " + poId);
+    }
+    if (!Domain.PO_DRAFT.equals(status)) {
+      throw ApiException.badRequest(
+          "PURCHASE_PO_NOT_DRAFT",
+          "Lines can only be changed on DRAFT purchase orders; this one is " + status);
+    }
+  }
+
+  /** What is allocated to shops from a line, on the caller's transaction. */
+  private static BigDecimal allocatedTx(Connection c, UUID tenantId, UUID lineId)
+      throws SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "SELECT COALESCE(SUM(qty), 0) AS qty FROM purchase_order_line_allocations"
+                + " WHERE tenant_id=? AND po_line_id=?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, lineId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getBigDecimal("qty") : BigDecimal.ZERO;
+      }
+    }
+  }
+
+  /**
    * Reads every line of the order and writes the three totals back onto it. Runs on the caller's
    * connection so it joins their transaction.
    *

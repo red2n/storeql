@@ -58,7 +58,10 @@ public final class Mappers {
         t.einvoiceId(),
         t.deactivatedReason(),
         t.mode() == null ? Tenant.MODE_LIVE : t.mode(),
-        t.sandboxOf() == null ? null : t.sandboxOf().toString());
+        t.sandboxOf() == null ? null : t.sandboxOf().toString(),
+        t.deactivatedNote(),
+        t.deactivatedBy() == null ? null : t.deactivatedBy().toString(),
+        t.deactivatedAt() == null ? null : ts(t.deactivatedAt()));
   }
 
   /**
@@ -135,10 +138,11 @@ public final class Mappers {
     return new StaffResponse(
         s.id().toString(),
         s.userId().toString(),
-        s.storeId().toString(),
+        s.storeId() == null ? null : s.storeId().toString(),
         s.role(),
         s.baseTier(),
-        ts(s.createdAt()));
+        ts(s.createdAt()),
+        s.storeId() == null);
   }
 
   /**

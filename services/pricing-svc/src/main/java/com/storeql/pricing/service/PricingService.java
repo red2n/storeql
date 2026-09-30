@@ -1320,6 +1320,14 @@ public class PricingService {
           "PRICING_INVALID_PROMOTION_TYPE",
           "type must be one of " + PROMOTION_TYPES + " — got: " + type);
 
+    // A limit is a count of uses: 1 or more, or absent for none. Zero or less would either never
+    // apply or read as exhausted on its first quote, and is a slip, not a setting.
+    if ((req.maxRedemptions() != null && req.maxRedemptions() < 1)
+        || (req.maxPerCustomer() != null && req.maxPerCustomer() < 1))
+      throw ApiException.badRequest(
+          "PRICING_INVALID_LIMIT",
+          "maxRedemptions and maxPerCustomer must be 1 or more, or left out for no limit");
+
     boolean bogo = Promotion.TYPE_BOGO.equals(type);
     if (bogo) {
       if (req.buyQty() == null || req.getQty() == null || req.getDiscountPct() == null)

@@ -57,7 +57,7 @@ export default function ({ tenant, store, variantId, storekeeper, cashier }) {
   const customer = must(call('POST', `${CUST}/customers`, { token: owner, body: { email: `loyal-${uniq()}@k6.storeql.test`, firstName: 'Loyal', lastName: 'Shopper' } }), 201, 'customer');
   const fresh = loyalty(customer.id);
   truthy('[+] a new customer is BRONZE with nothing, SILVER ten points away, and points that will live twelve months', fresh.tier === 'BRONZE' && num(fresh.pointsBalance) === 0 && fresh.nextTier && fresh.nextTier.name === 'SILVER' && num(fresh.nextTier.pointsToGo) === 10 && fresh.expiryMonths === 12, fresh);
-  const earned = must(call('POST', `${CUST}/customers/${customer.id}/loyalty/earn`, { token: owner, body: { points: 12, reason: 'welcome' } }), 200, 'twelve points');
+  const earned = must(call('POST', `${CUST}/customers/${customer.id}/loyalty/earn`, { token: owner, idem: true, body: { points: 12, reason: 'welcome' } }), 200, 'twelve points');
   truthy('[+] twelve points reach SILVER', earned.tier === 'SILVER', earned);
   const silver = loyalty(customer.id);
   truthy('[+] ...the account says so: SILVER since now, twelve qualifying, ×1.5, GOLD thirty-eight away, nothing expiring soon', silver.tier === 'SILVER' && !!silver.tierSince && num(silver.qualifyingPoints) === 12 && num(silver.multiplier) === 1.5 && silver.nextTier.name === 'GOLD' && num(silver.nextTier.pointsToGo) === 38 && !silver.expiringSoon, silver);

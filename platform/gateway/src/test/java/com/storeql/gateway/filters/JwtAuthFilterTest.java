@@ -463,6 +463,24 @@ class JwtAuthFilterTest {
   }
 
   @Test
+  void customerTokenCancelsItsOwnOrderAndNothingElseUnderAnOrder() throws IOException {
+    // The shopper's own cancel gets the storefront tenant; order-svc decides whose order it is and
+    // whether it may still be cancelled. Every other write under an order stays staff work.
+    String id = "01a09509-72ec-72e9-9f08-94a93df26a36";
+    org.junit.jupiter.api.Assertions.assertEquals(
+        "tenant-abc", tenantDerivedFor("POST", "api/order-svc/orders/" + id + "/cancel", true));
+    for (String path :
+        new String[] {
+          "api/order-svc/orders/" + id + "/void",
+          "api/order-svc/orders/" + id + "/returns",
+          "api/order-svc/orders/" + id + "/cancel/again",
+          "api/order-svc/orders/mine/cancel",
+        }) {
+      org.junit.jupiter.api.Assertions.assertNull(tenantDerivedFor("POST", path, false), path);
+    }
+  }
+
+  @Test
   void customerTokenReachesItsOwnRecallNoticesAndNothingElseUnderThem() throws IOException {
     // 05.10: the shopper's notices and their choice of remedy get the storefront tenant; a recall's
     // list, its progress and settling a notice do not — those are staff work through the normal

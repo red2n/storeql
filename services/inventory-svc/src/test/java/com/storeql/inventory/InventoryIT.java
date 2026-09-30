@@ -92,7 +92,7 @@ class InventoryIT {
                     + S
                     + "\",\"variantId\":\""
                     + V_FIFO
-                    + "\",\"qty\":10,\"batchNo\":\"A\",\"expiryDate\":\"2026-01-01\"}",
+                    + "\",\"qty\":10,\"batchNo\":\"A\",\"expiryDate\":\"2098-01-01\"}",
                 T)
             .getStatus(),
         is(201));
@@ -103,7 +103,7 @@ class InventoryIT {
                     + S
                     + "\",\"variantId\":\""
                     + V_FIFO
-                    + "\",\"qty\":5,\"batchNo\":\"B\",\"expiryDate\":\"2027-01-01\"}",
+                    + "\",\"qty\":5,\"batchNo\":\"B\",\"expiryDate\":\"2099-01-01\"}",
                 T)
             .getStatus(),
         is(201));
@@ -338,7 +338,9 @@ class InventoryIT {
             + S
             + "\",\"variantId\":\""
             + V
-            + "\",\"qty\":3,\"batchNo\":\"EXP-NEAR\",\"expiryDate\":\"2026-01-15\"}",
+            + "\",\"qty\":3,\"batchNo\":\"EXP-NEAR\",\"expiryDate\":\""
+            + java.time.LocalDate.now().plusDays(5)
+            + "\"}",
         T);
 
     String resp =

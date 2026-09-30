@@ -66,46 +66,48 @@ public class ParkedSaleRepository extends BaseOutboxRepository {
           for (var item : items) {
             insertParkedItem(c, tenantId, saleId, item);
           }
-          return buildResponse(tenantId, saleId, c);
+          return buildResponse(tenantId, saleId, c, true);
         },
         "park sale");
   }
 
   /**
-   * Reads one parked sale with its lines.
+   * Reads one open parked sale with its lines.
    *
    * @param tenantId owning tenant; the first condition of the query
    * @param saleId the parked sale to read
    * @return the parked sale
-   * @throws com.storeql.web.ApiException a 404 when no such parked sale exists in this tenant
+   * @throws com.storeql.web.ApiException a 404 when no such open parked sale exists in this tenant
    */
   public ParkedSaleResponse findById(UUID tenantId, UUID saleId) {
-    return inTx(c -> buildResponse(tenantId, saleId, c), "find parked sale");
+    return inTx(c -> buildResponse(tenantId, saleId, c, true), "find parked sale");
   }
 
   /**
    * The still-open parked sales, newest first.
    *
-   * <p>Cancelled and resumed sales are excluded: this backs the till's "pick one back up" list.
+   * <p>Resumed and discarded sales are excluded: this backs the till's "pick one back up" list.
    *
    * @param tenantId owning tenant; the first condition of the query
-   * @param storeId restrict to one store, or {@code null} for the whole tenant
+   * @param storeIds the stores to read, or {@code null} for the whole tenant
    * @return the open parked sales with their lines
    */
-  public List<ParkedSaleResponse> listOpen(UUID tenantId, UUID storeId) {
+  public List<ParkedSaleResponse> listOpen(UUID tenantId, java.util.Set<UUID> storeIds) {
     return inTx(
         c -> {
           String sql =
-              storeId == null
-                  ? "SELECT id FROM parked_sales WHERE tenant_id=? AND resumed_at IS NULL ORDER BY parked_at DESC"
-                  : "SELECT id FROM parked_sales WHERE tenant_id=? AND store_id=? AND resumed_at IS NULL ORDER BY parked_at DESC";
+              "SELECT id FROM parked_sales WHERE tenant_id=?"
+                  + (storeIds == null ? "" : " AND store_id = ANY (?)")
+                  + " AND resumed_at IS NULL AND discarded_at IS NULL ORDER BY parked_at DESC";
           try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setObject(1, tenantId);
-            if (storeId != null) ps.setObject(2, storeId);
+            if (storeIds != null) {
+              ps.setArray(2, c.createArrayOf("uuid", storeIds.toArray()));
+            }
             List<ParkedSaleResponse> results = new ArrayList<>();
             try (ResultSet rs = ps.executeQuery()) {
               while (rs.next()) {
-                results.add(buildResponse(tenantId, rs.getObject("id", UUID.class), c));
+                results.add(buildResponse(tenantId, rs.getObject("id", UUID.class), c, true));
               }
             }
             return results;
@@ -115,19 +117,58 @@ public class ParkedSaleRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Marks a parked sale cancelled so it leaves the open list.
+   * Picks a parked sale back up: it leaves the open list and records who did it and when. Only an
+   * open sale can be picked up, and only once.
    *
    * @param tenantId owning tenant; the first condition of the query
-   * @param saleId the parked sale to cancel
+   * @param saleId the parked sale
+   * @param userId who is resuming it
+   * @return the sale as resumed
+   * @throws ApiException 404 {@code PARKED_SALE_NOT_FOUND} when there is no such sale (or it was
+   *     discarded); 409 {@code PARKED_SALE_NOT_OPEN} when it was resumed already
    */
-  public void cancel(UUID tenantId, UUID saleId) {
-    exec(
-        "DELETE FROM parked_sales WHERE tenant_id=? AND id=? AND resumed_at IS NULL",
-        ps -> {
-          ps.setObject(1, tenantId);
-          ps.setObject(2, saleId);
+  public ParkedSaleResponse resume(UUID tenantId, UUID saleId, UUID userId) {
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE parked_sales SET resumed_at = ?, resumed_by = ?"
+                      + " WHERE tenant_id=? AND id=? AND resumed_at IS NULL"
+                      + " AND discarded_at IS NULL")) {
+            ps.setObject(1, Instant.now().atOffset(ZoneOffset.UTC));
+            ps.setObject(2, userId);
+            ps.setObject(3, tenantId);
+            ps.setObject(4, saleId);
+            if (ps.executeUpdate() == 0) {
+              // Absent is a 404 (thrown by the read); present but finished is a lost race.
+              buildResponse(tenantId, saleId, c, false);
+              throw ApiException.conflict(
+                  "PARKED_SALE_NOT_OPEN", "this parked sale was already resumed or discarded");
+            }
+          }
+          return buildResponse(tenantId, saleId, c, false);
         },
-        "cancel parked sale");
+        "resume parked sale");
+  }
+
+  /**
+   * Throws a parked sale away: it leaves the open list and records who did it and when. A sale that
+   * is already finished with is left as it is.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param saleId the parked sale to discard
+   * @param userId who is discarding it
+   */
+  public void discard(UUID tenantId, UUID saleId, UUID userId) {
+    exec(
+        "UPDATE parked_sales SET discarded_at = now(), discarded_by = ?"
+            + " WHERE tenant_id=? AND id=? AND resumed_at IS NULL AND discarded_at IS NULL",
+        ps -> {
+          ps.setObject(1, userId);
+          ps.setObject(2, tenantId);
+          ps.setObject(3, saleId);
+        },
+        "discard parked sale");
   }
 
   /**
@@ -228,13 +269,15 @@ public class ParkedSaleRepository extends BaseOutboxRepository {
     }
   }
 
-  private ParkedSaleResponse buildResponse(UUID tenantId, UUID saleId, Connection c)
-      throws SQLException {
+  private ParkedSaleResponse buildResponse(
+      UUID tenantId, UUID saleId, Connection c, boolean openOnly) throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT id, tenant_id, store_id, cashier_id, customer_id, customer_name,"
-                + " subtotal, discount_amount, notes, parked_at, expires_at, resumed_at, order_id"
-                + " FROM parked_sales WHERE tenant_id=? AND id=?")) {
+                + " subtotal, discount_amount, notes, parked_at, expires_at, resumed_at,"
+                + " resumed_by, order_id"
+                + " FROM parked_sales WHERE tenant_id=? AND id=? AND discarded_at IS NULL"
+                + (openOnly ? " AND resumed_at IS NULL" : ""))) {
       ps.setObject(1, tenantId);
       ps.setObject(2, saleId);
       try (ResultSet rs = ps.executeQuery()) {
@@ -242,9 +285,12 @@ public class ParkedSaleRepository extends BaseOutboxRepository {
           throw ApiException.notFound("PARKED_SALE_NOT_FOUND", "Parked sale not found");
         UUID storeId = rs.getObject("store_id", UUID.class);
         UUID custId = rs.getObject("customer_id", UUID.class);
+        UUID cashierId = rs.getObject("cashier_id", UUID.class);
+        UUID resumedBy = rs.getObject("resumed_by", UUID.class);
         String parkedAt = rs.getObject("parked_at", OffsetDateTime.class).toInstant().toString();
         OffsetDateTime expiresOdt = rs.getObject("expires_at", OffsetDateTime.class);
         String expiresAt = expiresOdt == null ? null : expiresOdt.toInstant().toString();
+        OffsetDateTime resumedOdt = rs.getObject("resumed_at", OffsetDateTime.class);
         List<ParkedSaleItemResponse> items = fetchItems(c, tenantId, saleId);
         return new ParkedSaleResponse(
             saleId.toString(),
@@ -256,7 +302,10 @@ public class ParkedSaleRepository extends BaseOutboxRepository {
             items,
             rs.getString("notes"),
             parkedAt,
-            expiresAt);
+            expiresAt,
+            cashierId == null ? null : cashierId.toString(),
+            resumedOdt == null ? null : resumedOdt.toInstant().toString(),
+            resumedBy == null ? null : resumedBy.toString());
       }
     }
   }

@@ -16,6 +16,7 @@ import 'providers/admin_providers.dart';
 import 'recall_providers.dart';
 import 'widgets/variant_picker.dart';
 import '../../shared/util/short_ref.dart';
+import '../../shared/util/status_labels.dart' show recallSourceChoices, recallSourceLabel;
 import '../../core/theme.dart';
 
 final _isoDate = RegExp(r'^\d{4}-\d{2}-\d{2}$');
@@ -193,15 +194,6 @@ class _StatusFilter extends StatelessWidget {
     );
   }
 }
-
-/// Where a recall came from, in words: the same on the form and the detail.
-const recallSourceLabels = {
-  'SUPPLIER': 'Supplier',
-  'FSA': 'Food Standards Agency',
-  'FSS': 'Food Standards Scotland',
-  'INTERNAL': 'Our own',
-  'OTHER': 'Other',
-};
 
 Future<void> _showDetail(BuildContext context, String recallId) =>
     showDialog<void>(
@@ -413,7 +405,7 @@ class _RecallDetailDialog extends ConsumerWidget {
           child: ListView(
             children: [
               Text(
-                '${hazardLabel(r.hazard)} · from ${recallSourceLabels[r.source] ?? humanizeCode(r.source)}'
+                '${hazardLabel(r.hazard)} · from ${recallSourceLabel(r.source)}'
                 '${r.sourceReference == null ? '' : ' ${r.sourceReference}'}'
                 '${r.openedAt == null ? '' : ' · opened ${AppFormat.dateOf(r.openedAt!)}'}',
               ),
@@ -1153,7 +1145,6 @@ class _OpenRecallDialogState extends ConsumerState<_OpenRecallDialog> {
     'QUALITY',
     'OTHER',
   ];
-  static const _sources = recallSourceLabels;
 
   @override
   void dispose() {
@@ -1323,8 +1314,9 @@ class _OpenRecallDialogState extends ConsumerState<_OpenRecallDialog> {
                       isExpanded: true,
                       decoration: const InputDecoration(labelText: 'From'),
                       items: [
-                        for (final e in _sources.entries)
-                          DropdownMenuItem(value: e.key, child: Text(e.value)),
+                        for (final code in recallSourceChoices)
+                          DropdownMenuItem(
+                              value: code, child: Text(recallSourceLabel(code))),
                       ],
                       onChanged: (v) => setState(() => _source = v ?? _source),
                     ),

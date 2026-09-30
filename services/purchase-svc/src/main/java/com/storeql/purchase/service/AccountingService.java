@@ -482,18 +482,61 @@ public class AccountingService {
     return new Page(page, page.get(size - 1).id().toString());
   }
 
-  public record Detail(Sync sync, List<NominalLedgerEntry> lines, List<Attempt> attempts) {}
+  public record Detail(
+      Sync sync,
+      List<NominalLedgerEntry> lines,
+      List<Attempt> attempts,
+      Accounting.Resolution resolution) {}
 
   public Detail sync(UUID tenantId, UUID id) {
     Sync s = repo.sync(tenantId, id).orElseThrow(AccountingService::syncNotFound);
-    return new Detail(s, ledger.findJournal(tenantId, s.journalId()), repo.attempts(tenantId, id));
+    return new Detail(
+        s,
+        ledger.findJournal(tenantId, s.journalId()),
+        repo.attempts(tenantId, id),
+        repo.resolution(tenantId, id).orElse(null));
   }
 
-  public Detail retry(UUID tenantId, UUID id) {
+  public Detail retry(UUID tenantId, UUID id, UUID by) {
     repo.sync(tenantId, id).orElseThrow(AccountingService::syncNotFound);
-    if (!repo.retry(tenantId, id, Instant.now())) {
+    if (!repo.retry(tenantId, id, Instant.now(), by)) {
       throw ApiException.conflict(
           "ACCOUNTING_SYNC_DELIVERED", "This journal is already in the package");
+    }
+    return sync(tenantId, id);
+  }
+
+  /**
+   * A person's word on a push whose outcome was unknown: it landed (delivered under the package's
+   * own reference, never pushed again) or it never did (queued to try again). Once; audited on the
+   * row.
+   *
+   * @throws ApiException 400 {@code ACCOUNTING_OUTCOME_INVALID}, {@code
+   *     ACCOUNTING_EXTERNAL_ID_REQUIRED}; 404 {@code ACCOUNTING_SYNC_NOT_FOUND}; 409 {@code
+   *     ACCOUNTING_SYNC_NOT_UNCERTAIN}
+   */
+  public Detail resolve(
+      UUID tenantId, UUID id, UUID by, String outcome, String externalId, String note) {
+    String o = outcome == null ? "" : outcome.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!Accounting.LANDED.equals(o) && !Accounting.NOT_LANDED.equals(o)) {
+      throw ApiException.badRequest(
+          "ACCOUNTING_OUTCOME_INVALID", "outcome is LANDED or NOT_LANDED");
+    }
+    boolean landed = Accounting.LANDED.equals(o);
+    String reference = blankToNull(externalId == null ? null : externalId.trim());
+    if (landed && (reference == null || reference.length() > DESCRIPTION_MAX)) {
+      throw ApiException.badRequest(
+          "ACCOUNTING_EXTERNAL_ID_REQUIRED",
+          "give the package's own reference for the journal it holds");
+    }
+    String why = blankToNull(note == null ? null : note.trim());
+    if (why != null && why.length() > DESCRIPTION_MAX) {
+      throw ApiException.badRequest("ACCOUNTING_NOTE_TOO_LONG", "the note is too long");
+    }
+    repo.sync(tenantId, id).orElseThrow(AccountingService::syncNotFound);
+    if (!repo.resolveUncertain(tenantId, id, landed, reference, by, why, Instant.now())) {
+      throw ApiException.conflict(
+          "ACCOUNTING_SYNC_NOT_UNCERTAIN", "Only a push whose outcome is uncertain is resolved");
     }
     return sync(tenantId, id);
   }

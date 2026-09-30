@@ -340,6 +340,29 @@ class VendorReturnIT {
   }
 
   @Test
+  @DisplayName("A return offsets the invoice; it does not reopen or move the order")
+  void aReturnLeavesTheOrdersOwnStatusAlone() {
+    String po = receivedOrder("10", "10");
+    assertThat(
+        data(call("GET", "/purchase-orders/" + po, null, T, "OWNER")).getString("status"),
+        is("RECEIVED"));
+    assertThat(
+        call("POST", "/vendor-returns", rtv(po, "DAMAGED", "4"), T, "OWNER").getStatus(), is(201));
+    assertThat(
+        data(call("GET", "/purchase-orders/" + po, null, T, "OWNER")).getString("status"),
+        is("RECEIVED"));
+    // A partly received order stays as it was too, and its return needs no answer from
+    // inventory-svc (none is running here): the order's own ceiling decides.
+    String part = receivedOrder("10", "6");
+    assertThat(
+        call("POST", "/vendor-returns", rtv(part, "DAMAGED", "2"), T, "STOREKEEPER").getStatus(),
+        is(201));
+    assertThat(
+        data(call("GET", "/purchase-orders/" + part, null, T, "OWNER")).getString("status"),
+        is("PARTIALLY_RECEIVED"));
+  }
+
+  @Test
   @DisplayName("The supplier's credit note closes the return, once, and only management records it")
   void theCreditNoteClosesTheReturnOnce() {
     String po = receivedOrder("10", "10");

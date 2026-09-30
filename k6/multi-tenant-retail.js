@@ -236,6 +236,9 @@ function post(path, body, token) {
   if (/^\/api\/order-svc\/orders\/[^/]+\/(returns|void)$/.test(path)) headers['Idempotency-Key'] = newKey('retail-return-or-void');
   // ...and a gift-card redeem (the till's gift-card tender): header only.
   if (/^\/api\/order-svc\/gift-cards\/[^/]+\/redeem$/.test(path)) headers['Idempotency-Key'] = newKey('retail-gift-redeem');
+  // ...and points handed out or changed by hand (management only, and retry-safe).
+  if (/^\/api\/customer-svc\/customers\/[^/]+\/loyalty\/(earn|adjust)$/.test(path)) headers['Idempotency-Key'] = newKey('retail-loyalty');
+  if (/^\/api\/customer-svc\/customers\/[^/]+\/store-credit\/issue$/.test(path)) headers['Idempotency-Key'] = newKey('retail-store-credit');
   return http.post(`${BASE}${path}`, JSON.stringify(body), { headers });
 }
 
@@ -301,7 +304,7 @@ function apiReceiveStock(token, storeId, variantId, qty, costPrice, batchPrefix)
     storeId, variantId, qty,
     batchNo:    `${batchPrefix}-${slug()}`,
     costPrice:  String(costPrice),
-    expiryDate: '2028-12-31',
+    expiryDate: new Date(Date.now() + 365 * 86400000).toISOString().slice(0, 10),
   }, token);
 }
 

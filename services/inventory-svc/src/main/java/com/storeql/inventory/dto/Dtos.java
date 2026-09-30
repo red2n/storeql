@@ -103,10 +103,19 @@ public final class Dtos {
       @Schema(description = "UUID of the product variant.") String variantId,
       @Schema(description = "Total physical quantity in stock.") BigDecimal onHand,
       @Schema(description = "Quantity currently held by open reservations.") BigDecimal reserved,
-      @Schema(description = "onHand minus what is in bond minus reserved; the sellable quantity.")
+      @Schema(
+              description =
+                  "onHand minus what is in bond, minus what is past its date, minus reserved; the sellable"
+                      + " quantity.")
           BigDecimal available,
       @Schema(description = "How much of onHand sits in bond with its duty suspended.")
-          BigDecimal inBond) {}
+          BigDecimal inBond,
+      @Schema(
+              description =
+                  "How much of onHand is past its expiry date (the date is the last day it may be"
+                      + " sold, read in the store's own time zone): on hand and valued, never"
+                      + " available, never held or drawn by a sale.")
+          BigDecimal expired) {}
 
   @Schema(name = "LevelSummaryResponse", description = "Aggregate stock-level KPI counts.")
   public record LevelSummaryResponse(

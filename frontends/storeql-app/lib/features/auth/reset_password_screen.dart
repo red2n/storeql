@@ -50,12 +50,18 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
       _busy = true;
       _error = null;
     });
+    // The "your password was changed" email goes out in this language.
+    final language = Localizations.localeOf(context).languageCode;
     try {
       await ref
           .read(publicAuthDioProvider)
           .post(
             '/${ApiConstants.iam}/auth/password/reset',
-            data: {'token': widget.token, 'newPassword': _newCtrl.text},
+            data: {
+              'token': widget.token,
+              'newPassword': _newCtrl.text,
+              'language': language,
+            },
           );
       if (mounted) setState(() => _done = true);
     } catch (e) {

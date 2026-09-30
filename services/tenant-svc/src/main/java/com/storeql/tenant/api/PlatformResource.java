@@ -1,8 +1,8 @@
 package com.storeql.tenant.api;
 
 import com.storeql.tenant.dto.Dtos.CurrencyRepublishResponse;
-import com.storeql.tenant.dto.Dtos.PatchStatusRequest;
 import com.storeql.tenant.dto.Dtos.TenantResponse;
+import com.storeql.tenant.dto.Dtos.TenantStatusRequest;
 import com.storeql.tenant.dto.PlanDtos;
 import com.storeql.tenant.mapper.Mappers;
 import com.storeql.tenant.mapper.PlanMappers;
@@ -132,23 +132,28 @@ public class PlatformResource {
    *
    * @param tenantId the tenant whose status to change; taken from the path, as this is a
    *     cross-tenant platform operation
-   * @param req the new status, {@code ACTIVE} or {@code INACTIVE}
+   * @param req the new status, {@code ACTIVE} or {@code INACTIVE}, and the reason, required to
+   *     suspend
    * @return the tenant with its new status
-   * @throws com.storeql.web.ApiException {@code 400} when the status is neither; {@code 403} when
-   *     the caller is not a {@code PLATFORM_ADMIN}; {@code 404} when the tenant does not exist
+   * @throws com.storeql.web.ApiException {@code 400} when the status is neither, or {@code
+   *     TENANT_STATUS_REASON_REQUIRED} when a suspension gives no reason; {@code 403} when the
+   *     caller is not a {@code PLATFORM_ADMIN}; {@code 404} when the tenant does not exist
    */
   @Operation(
       summary = "Suspend or reactivate a tenant",
       description =
           "Sets a tenant's status to ACTIVE or INACTIVE and publishes TenantStatusChanged so other"
-              + " services (e.g. iam-svc locking out staff) can react. Requires PLATFORM_ADMIN.")
-  @APIResponse(responseCode = "400", description = "status must be ACTIVE or INACTIVE")
+              + " services (e.g. iam-svc locking out staff) can react. Suspending needs a reason,"
+              + " kept with who and when. Requires PLATFORM_ADMIN.")
+  @APIResponse(
+      responseCode = "400",
+      description = "status must be ACTIVE or INACTIVE; TENANT_STATUS_REASON_REQUIRED")
   @APIResponse(responseCode = "403", description = "Caller is not a PLATFORM_ADMIN")
   @APIResponse(responseCode = "404", description = "Tenant not found")
   @PATCH
   @Path("/tenants/{tenantId}/status")
   public ApiResponse<TenantResponse> patchTenantStatus(
-      @PathParam("tenantId") UUID tenantId, PatchStatusRequest req) {
+      @PathParam("tenantId") UUID tenantId, TenantStatusRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
     Validations.validate(req);
     return ApiResponse.ok(Mappers.toTenant(service.patchTenantStatus(tenantId, req, ctx.userId())));

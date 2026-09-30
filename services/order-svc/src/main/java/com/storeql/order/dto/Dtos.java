@@ -948,7 +948,11 @@ public final class Dtos {
       String notes,
       String parkedAt,
       @Schema(description = "When this parked sale is auto-discarded if not resumed.")
-          String expiresAt) {}
+          String expiresAt,
+      @Schema(description = "The cashier who parked it.") String parkedBy,
+      @Schema(description = "When it was picked back up; null while it is open.") String resumedAt,
+      @Schema(description = "Who picked it back up, which may not be who parked it.")
+          String resumedBy) {}
 
   // ── No-sale / open-drawer log ─────────────────────────────────────────────
 
@@ -1263,7 +1267,8 @@ public final class Dtos {
       String id,
       @Schema(
               description =
-                  "DISCOUNT, VOID, NO_SALE, CANCEL, RETURN, OFFLINE_SALE_OF_RECALLED_ITEM (a till"
+                  "DISCOUNT, VOID, NO_SALE, CANCEL, RETURN, PRICED (a catalogue-mode order given its"
+                      + " price by a manager), OFFLINE_SALE_OF_RECALLED_ITEM (a till"
                       + " sale replayed from the offline queue, recorded although a recall"
                       + " covered the line when it was rung up) or OFFLINE_SALE_ON_UNFIT_SCALE"
                       + " (the same, for a line weighed on a scale not fit for trade then).")

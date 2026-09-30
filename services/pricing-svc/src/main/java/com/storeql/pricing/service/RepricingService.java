@@ -333,6 +333,27 @@ public class RepricingService {
           "REPRICING_PROPOSAL_DECIDED",
           "proposal " + id + " was already " + p.status().toLowerCase(Locale.ROOT));
     }
+    // The rival's price was seen some days ago and the rule only trusts a price that fresh; a
+    // proposal that has outlived it is not applied, whatever the rival charges now. Dismissing
+    // it, or running the rule again against what is seen today, are still open.
+    RepricingRule rule =
+        repo.findRule(ctx.tenantId(), p.ruleId())
+            .orElseThrow(
+                () ->
+                    ApiException.conflict(
+                        "REPRICING_RULE_NOT_FOUND", "the proposal's rule no longer exists"));
+    if (Repricing.isStale(
+        p.observedOn(), LocalDate.now(ZoneOffset.UTC), rule.rule().maxAgeDays())) {
+      throw ApiException.conflict(
+          "PRICING_PROPOSAL_STALE",
+          "the rival price behind proposal "
+              + id
+              + " was seen on "
+              + p.observedOn()
+              + ", more than "
+              + rule.rule().maxAgeDays()
+              + " days ago; run the rule again or dismiss the proposal");
+    }
     PriceListItem item =
         new PriceListItem(
             Ids.newId(),

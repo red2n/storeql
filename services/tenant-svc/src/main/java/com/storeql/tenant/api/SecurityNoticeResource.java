@@ -65,6 +65,7 @@ public class SecurityNoticeResource {
   @Path("/{id}/reports")
   @Consumes(MediaType.APPLICATION_JSON)
   public Response report(@PathParam("id") UUID id, @Valid RecordDutyRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
     NoticeDuties duties = service.report(tenantId, id, req, ctx.requireUserId());
@@ -83,6 +84,7 @@ public class SecurityNoticeResource {
   @POST
   @Path("/{id}/acknowledge")
   public ApiResponse<SecurityNoticeResponse> acknowledge(@PathParam("id") UUID id) {
+    BusinessWide.require(ctx);
     return ApiResponse.ok(
         Mappers.toSecurityNotice(
             service.acknowledge(ctx.requireTenantId(), id, ctx.requireUserId()),

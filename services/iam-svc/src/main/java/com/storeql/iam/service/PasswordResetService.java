@@ -168,7 +168,7 @@ public class PasswordResetService {
    * @throws ApiException {@code 400 PASSWORD_RESET_TOKEN_INVALID} for an unknown, used, expired or
    *     replaced token, or a login no longer eligible; the policy's own code for a refused password
    */
-  public void reset(String rawToken, String newPassword) {
+  public void reset(String rawToken, String newPassword, String rawLanguage) {
     String tokenHash = CapabilityTokens.hash(rawToken);
     TokenOwner owner = resetRepo.find(tokenHash).orElseThrow(PasswordResetService::invalidToken);
     User user = users.findById(owner.userId()).orElseThrow(PasswordResetService::invalidToken);
@@ -179,7 +179,23 @@ public class PasswordResetService {
     // exactly as it was, so the person can try again with a better one.
     policy.check(newPassword, user.email());
     String hash = passwords.hash(newPassword);
-    resetRepo.reset(tokenHash, hash).orElseThrow(PasswordResetService::invalidToken);
+    // The notice ("your password was changed") is written on the reset's own transaction; a
+    // reset link is never issued to the platform administrator, so there is no exclusion to make.
+    boolean staff = user.tenantId() != null || !User.TYPE_CUSTOMER.equals(user.type());
+    String businessName =
+        user.tenantId() != null ? tenantProfiles.businessName(user.tenantId()).orElse(null) : null;
+    OutboxRow changed =
+        PasswordChangedEvent.announces(user.email(), false)
+            ? PasswordChangedEvent.row(
+                user.id(),
+                user.email(),
+                staff,
+                businessName,
+                PasswordChangedEvent.VIA_RESET,
+                PasswordReset.language(rawLanguage),
+                Instant.now())
+            : null;
+    resetRepo.reset(tokenHash, hash, changed).orElseThrow(PasswordResetService::invalidToken);
   }
 
   /** Re-checked at reset time, not only when the link was minted: minutes may have passed. */

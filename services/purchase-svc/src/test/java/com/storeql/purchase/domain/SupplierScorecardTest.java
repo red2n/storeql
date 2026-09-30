@@ -77,4 +77,23 @@ class SupplierScorecardTest {
         SupplierScorecard.pct(new BigDecimal("1"), new BigDecimal("3")),
         comparesEqualTo(new BigDecimal("33.3")));
   }
+
+  @Test
+  void anOpenOrderOfAGradeDSupplierCarriesAWarningAndNothingElseDoes() {
+    java.util.List<String> warned = java.util.List.of(SupplierScorecard.SUPPLIER_GRADE_D);
+    for (String open :
+        new String[] {
+          Domain.PO_DRAFT,
+          Domain.PO_PENDING_APPROVAL,
+          Domain.PO_SUBMITTED,
+          Domain.PO_PARTIALLY_RECEIVED
+        }) {
+      assertThat(SupplierScorecard.orderWarnings(open, "D"), is(warned));
+      assertThat(SupplierScorecard.orderWarnings(open, "C"), is(java.util.List.of()));
+      assertThat(SupplierScorecard.orderWarnings(open, null), is(java.util.List.of()));
+    }
+    for (String ended : new String[] {Domain.PO_RECEIVED, Domain.PO_CLOSED, Domain.PO_CANCELLED}) {
+      assertThat(SupplierScorecard.orderWarnings(ended, "D"), is(java.util.List.of()));
+    }
+  }
 }

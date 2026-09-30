@@ -1,3 +1,4 @@
+import 'widgets/business_wide_note.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
@@ -252,7 +253,7 @@ class _PriceListsTab extends ConsumerWidget {
     final header = <Widget>[
         // The business's exchange rates (03.x): what a price is shown in, what a foreign order is
         // measured in.
-        FxRatesCard(management: management),
+        FxRatesCard(management: management && !heldToStores(auth), heldToStores: heldToStores(auth)),
         _addBar(
           context,
           'New price list',

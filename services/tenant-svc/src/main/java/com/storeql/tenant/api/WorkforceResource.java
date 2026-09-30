@@ -223,6 +223,7 @@ public class WorkforceResource {
   @POST
   @Path("/pay-rates")
   public Response addRate(WorkforceDtos.AddPayRateRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
     java.math.BigDecimal rate;

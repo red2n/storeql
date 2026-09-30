@@ -625,4 +625,147 @@ class WebhookIT {
         call("POST", "/admin/webhooks/endpoints/" + Ids.newId() + "/ping", own, null).status(),
         is(404));
   }
+
+  /**
+   * Flow catalogue, mkt-notification-delivery gap 1: order-svc's OrderPlaced, payment-svc's
+   * PaymentCaptured and pricing-svc's PriceChanged carry no {@code eventId}, and the fan-out used
+   * to drop all three with a warning — subscribers never heard of them. The first two are queued
+   * under an id derived from the order or payment; the third has nothing to derive one from.
+   */
+  @Test
+  void anEventWithNoEventIdIsQueuedFromItsKeyOnceAndOneWithNoKeyIsNotQueued() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook", "OrderPlaced", "PaymentCaptured", "PriceChanged");
+    assertThat(made.status(), is(201));
+    String endpoint = made.data().getString("id");
+
+    UUID order = Ids.newId();
+    UUID payment = Ids.newId();
+    String placed =
+        "{\"eventType\":\"OrderPlaced\",\"tenantId\":\""
+            + tenant
+            + "\",\"orderId\":\""
+            + order
+            + "\",\"channel\":\"ONLINE\"}";
+    String captured =
+        "{\"eventType\":\"PaymentCaptured\",\"tenantId\":\""
+            + tenant
+            + "\",\"paymentId\":\""
+            + payment
+            + "\",\"orderId\":\""
+            + order
+            + "\",\"amount\":9.99}";
+    String priced =
+        "{\"eventType\":\"PriceChanged\",\"tenantId\":\""
+            + tenant
+            + "\",\"priceListId\":\""
+            + Ids.newId()
+            + "\"}";
+
+    assertThat(fanout.accept(placed), is(1));
+    assertThat("redelivered by Kafka: still one", fanout.accept(placed), is(0));
+    assertThat(fanout.accept(captured), is(1));
+    assertThat(fanout.accept(captured), is(0));
+    assertThat("no eventId and no key to derive one from", fanout.accept(priced), is(0));
+
+    JsonArray queued = deliveries(own, "?endpointId=" + endpoint);
+    assertThat(queued.toString(), queued, hasSize(2));
+    java.util.Set<String> ids = new java.util.HashSet<>();
+    java.util.Set<String> types = new java.util.HashSet<>();
+    for (JsonObject d : queued.getValuesAs(JsonObject.class)) {
+      ids.add(d.getString("eventId"));
+      types.add(d.getString("eventType"));
+    }
+    assertThat(types, is(java.util.Set.of("OrderPlaced", "PaymentCaptured")));
+    assertThat(
+        ids,
+        is(
+            java.util.Set.of(
+                Ids.derived(order, "webhook:OrderPlaced").toString(),
+                Ids.derived(payment, "webhook:PaymentCaptured").toString())));
+
+    // Another business's endpoint never receives this business's order, id-less or not.
+    Caller other = owner(Ids.newId());
+    String otherEndpoint = register(other, BASE + "/hook", "OrderPlaced").data().getString("id");
+    assertThat(fanout.accept(placed.replace(tenant.toString(), other.tenant().toString())), is(1));
+    assertThat(deliveries(own, "?endpointId=" + endpoint), hasSize(2));
+    assertThat(deliveries(other, "?endpointId=" + endpoint), hasSize(0));
+    assertThat(deliveries(other, "?endpointId=" + otherEndpoint), hasSize(1));
+
+    // Nothing this test queued may be left for another test's tick to send: removing an endpoint
+    // removes its deliveries with it.
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + endpoint, own, null).status(), is(200));
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + otherEndpoint, other, null).status(),
+        is(200));
+  }
+
+  /**
+   * Flow catalogue MKT-43 and MKT-44: deleting an endpoint removes its delivery log, and another
+   * business — an owner, a manager, even naming our ids — can read, ping, rotate, change, redeliver
+   * or delete nothing of ours.
+   */
+  @Test
+  void deletingAnEndpointRemovesItsDeliveriesAndAnotherBusinessCanTouchNoneOfIt() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook", "OrderPlaced");
+    String endpoint = made.data().getString("id");
+    fanout.accept(orderPlaced(tenant, Ids.newId()));
+    JsonArray queued = deliveries(own, "?endpointId=" + endpoint);
+    assertThat(queued, hasSize(1));
+    String deliveryId = queued.getJsonObject(0).getString("id");
+
+    for (Caller stranger : new Caller[] {owner(Ids.newId()), new Caller(Ids.newId(), "MANAGER")}) {
+      String who = stranger.roles();
+      assertThat(
+          who,
+          call("GET", "/admin/webhooks/endpoints/" + endpoint, stranger, null).status(),
+          is(404));
+      assertThat(
+          who,
+          call("POST", "/admin/webhooks/endpoints/" + endpoint + "/ping", stranger, null).status(),
+          is(404));
+      assertThat(
+          who,
+          call("GET", "/admin/webhooks/deliveries/" + deliveryId, stranger, null).status(),
+          is(404));
+      assertThat(
+          who,
+          call("POST", "/admin/webhooks/deliveries/" + deliveryId + "/redeliver", stranger, null)
+              .status(),
+          is(404));
+      assertThat(deliveries(stranger, "?endpointId=" + endpoint), hasSize(0));
+    }
+    Caller rival = owner(Ids.newId());
+    assertThat(
+        call("POST", "/admin/webhooks/endpoints/" + endpoint + "/secret", rival, null).status(),
+        is(404));
+    assertThat(
+        call("PUT", "/admin/webhooks/endpoints/" + endpoint, rival, "{\"enabled\":false}").status(),
+        is(404));
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + endpoint, rival, null).status(), is(404));
+
+    // Nothing of ours moved: still enabled, still there, delivery still queued.
+    Answer ours = call("GET", "/admin/webhooks/endpoints/" + endpoint, own, null);
+    assertThat(ours.data().getBoolean("enabled"), is(true));
+    assertThat(deliveries(own, "?endpointId=" + endpoint), hasSize(1));
+
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + endpoint, own, null).status(), is(200));
+    assertThat(
+        call("GET", "/admin/webhooks/deliveries/" + deliveryId, own, null).status(), is(404));
+    assertThat(deliveries(own, null), hasSize(0));
+  }
+
+  @Test
+  void aTypeNobodyCanSubscribeToIsIgnoredWhateverItCarries() {
+    UUID tenant = Ids.newId();
+    assertThat(
+        fanout.accept("{\"eventType\":\"PaymentFailed\",\"tenantId\":\"" + tenant + "\"}"), is(0));
+    assertThat(fanout.accept("{\"eventType\":\"SomethingNew\"}"), is(0));
+  }
 }

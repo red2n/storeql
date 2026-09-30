@@ -216,3 +216,27 @@ String? returnRefusalLabel(String? code) =>
       'GIFT_CARD_NOT_ACTIVE' => 'That gift card is not active.',
       _ => null,
     };
+
+/// Where a product recall or withdrawal came from, in the order a person picks
+/// from: no country's regulator is named, `REGULATOR` is whichever one applies.
+const recallSourceChoices = [
+  'REGULATOR',
+  'MANUFACTURER',
+  'SUPPLIER',
+  'INTERNAL',
+  'OTHER',
+];
+
+/// A recall's source in words. `FSA` and `FSS` are no longer offered but stay
+/// readable on the recalls already opened under them.
+String recallSourceLabel(String? source) =>
+    switch ((source ?? '').toUpperCase()) {
+      'REGULATOR' => 'A regulator',
+      'MANUFACTURER' => 'The manufacturer',
+      'SUPPLIER' => 'The supplier',
+      'INTERNAL' => 'Our own check',
+      'OTHER' => 'Other',
+      'FSA' => 'Food Standards Agency',
+      'FSS' => 'Food Standards Scotland',
+      _ => humanizeCode(source),
+    };

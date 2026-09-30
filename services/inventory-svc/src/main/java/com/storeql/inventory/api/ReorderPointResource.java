@@ -38,6 +38,8 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 @Tag(name = "Reorder Point & EOQ")
 public class ReorderPointResource {
 
+  private static final String[] MANAGEMENT = {"PLATFORM_ADMIN", "OWNER", "MANAGER"};
+
   @Inject InventoryService service;
   @Inject TenantContext ctx;
 
@@ -53,15 +55,21 @@ public class ReorderPointResource {
       summary = "Upsert a reorder-point/EOQ plan",
       description =
           "Sets the lead time, ordering cost, holding cost %, and unit cost inputs used"
-              + " to compute the variant's ROP and economic order quantity.")
+              + " to compute the variant's ROP and economic order quantity. Management only;"
+              + " reading a plan stays open to staff.")
   @APIResponse(responseCode = "200", description = "Upsert a reorder-point/EOQ plan")
+  @APIResponse(responseCode = "403", description = "Not management")
   @PUT
   @Path("/rop-plans")
   public ApiResponse<RopPlanResponse> upsertRopPlan(UpsertRopPlanRequest req) {
+    // Ordering cost, holding cost and unit cost are the business's money figures: management sets
+    // them, staff read the plans they produce.
+    ctx.requireAnyRole(MANAGEMENT);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(req.storeId(), "storeId");
     UUID variantId = uuid(req.variantId(), "variantId");
+    ctx.requireStoreAccess(storeId);
     return ApiResponse.ok(
         Mappers.toRopPlan(
             service.upsertRopPlan(
@@ -86,6 +94,7 @@ public class ReorderPointResource {
   public ApiResponse<List<RopPlanResponse>> listRopPlans(@QueryParam("store") String store) {
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(store, "store");
+    ctx.requireStoreAccess(storeId);
     return ApiResponse.ok(
         service.listRopPlans(tenantId, storeId).stream().map(Mappers::toRopPlan).toList());
   }
@@ -106,6 +115,7 @@ public class ReorderPointResource {
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(store, "store");
     UUID variantId = uuid(variant, "variant");
+    ctx.requireStoreAccess(storeId);
     return ApiResponse.ok(Mappers.toRopPlan(service.getRopPlan(tenantId, storeId, variantId)));
   }
 
@@ -125,6 +135,7 @@ public class ReorderPointResource {
   public ApiResponse<ComputeRopResult> computeRopPlans(@QueryParam("store") String store) {
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(store, "store");
+    ctx.requireStoreAccess(storeId);
     int count = service.computeRopPlans(tenantId, storeId);
     return ApiResponse.ok(new ComputeRopResult(count));
   }
@@ -143,12 +154,17 @@ public class ReorderPointResource {
       description =
           "Sets min/max order quantity and lot-size multiplier applied to the computed"
               + " EOQ (Gap #28).")
+  @APIResponse(responseCode = "403", description = "Not management, or STORE_ACCESS_DENIED")
   @APIResponse(responseCode = "404", description = "ROP plan not found")
   @PUT
   @Path("/rop-plans/{id}/order-modifiers")
   public ApiResponse<RopPlanResponse> updateRopModifiers(
       @PathParam("id") UUID id, UpdateOrderModifiersRequest req) {
+    // The order modifiers shape what gets ordered: management's, at a store the caller keeps. A
+    // plan of another business is not found, whatever role asks.
+    ctx.requireAnyRole(MANAGEMENT);
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getRopPlanById(tenantId, id).storeId());
     return ApiResponse.ok(
         Mappers.toRopPlan(
             service.updateRopOrderModifiers(

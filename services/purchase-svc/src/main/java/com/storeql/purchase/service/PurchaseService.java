@@ -20,6 +20,7 @@ import com.storeql.purchase.domain.SpendAuthority;
 import com.storeql.purchase.domain.ThreeWayMatch;
 import com.storeql.purchase.domain.Totals;
 import com.storeql.purchase.dto.Dtos.AddPurchaseOrderLineRequest;
+import com.storeql.purchase.dto.Dtos.AmendPurchaseOrderLineRequest;
 import com.storeql.purchase.dto.Dtos.CancelPurchaseOrderRequest;
 import com.storeql.purchase.dto.Dtos.CaptureSupplierInvoiceRequest;
 import com.storeql.purchase.dto.Dtos.CreateGoodsReceiptRequest;
@@ -91,6 +92,10 @@ public class PurchaseService {
 
   // ── Suppliers ─────────────────────────────────────────────────────────────────
 
+  private static final String[] SUPPLIER_WRITERS = {
+    "PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER"
+  };
+
   /**
    * Registers a supplier.
    *
@@ -100,6 +105,8 @@ public class PurchaseService {
    * order raised against that supplier is a JPY commitment.
    */
   public Supplier createSupplier(CreateSupplierRequest req, TenantContext ctx) {
+    // Vendor master data is a fraud vector: buying is warehouse and management work, not the till.
+    ctx.requireAnyRole(SUPPLIER_WRITERS);
     UUID tenantId = ctx.requireTenantId();
     String currency =
         req.currency() != null
@@ -437,6 +444,64 @@ public class PurchaseService {
             null);
     return repo.addPurchaseOrderLine(
         line, po.currency(), pricing.findVatRates(ctx.requireTenantId()));
+  }
+
+  /**
+   * Changes a draft order's line and restates its totals. Refused unless the order is DRAFT, for a
+   * dropship order (its lines are what the customer bought), and below what is already allocated to
+   * shops. An order that was rejected is back in DRAFT and can be corrected the same way; the
+   * approval trail keeps every decision as it was made.
+   *
+   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND}, {@code PURCHASE_LINE_NOT_FOUND}; 400
+   *     {@code PURCHASE_PO_NOT_DRAFT}; 409 {@code PURCHASE_PO_LINES_FIXED}, {@code
+   *     PURCHASE_LINE_BELOW_ALLOCATIONS}
+   */
+  public PurchaseOrderLine amendPurchaseOrderLine(
+      TenantContext ctx, UUID poId, UUID lineId, AmendPurchaseOrderLineRequest req) {
+    PurchaseOrder po = requireLinesChangeable(ctx, poId);
+    return repo.amendPurchaseOrderLine(
+        ctx.requireTenantId(),
+        poId,
+        lineId,
+        req.qty(),
+        req.unitPrice(),
+        req.vatCode() == null || req.vatCode().isBlank()
+            ? null
+            : req.vatCode().trim().toUpperCase(java.util.Locale.ROOT),
+        po.currency(),
+        pricing.findVatRates(ctx.requireTenantId()));
+  }
+
+  /**
+   * Removes a line from a draft order and restates its totals; refused while shops have part of it
+   * allocated.
+   *
+   * @throws ApiException as {@link #amendPurchaseOrderLine}, and 409 {@code
+   *     PURCHASE_LINE_HAS_ALLOCATIONS}
+   */
+  public void removePurchaseOrderLine(TenantContext ctx, UUID poId, UUID lineId) {
+    PurchaseOrder po = requireLinesChangeable(ctx, poId);
+    repo.removePurchaseOrderLine(
+        ctx.requireTenantId(),
+        poId,
+        lineId,
+        po.currency(),
+        pricing.findVatRates(ctx.requireTenantId()));
+  }
+
+  private PurchaseOrder requireLinesChangeable(TenantContext ctx, UUID poId) {
+    PurchaseOrder po = getPurchaseOrder(ctx, poId);
+    if (!Domain.PO_DRAFT.equals(po.status())) {
+      throw ApiException.badRequest(
+          "PURCHASE_PO_NOT_DRAFT",
+          "Lines can only be changed on DRAFT purchase orders; this one is " + po.status());
+    }
+    if (po.dropship()) {
+      throw ApiException.conflict(
+          "PURCHASE_PO_LINES_FIXED",
+          "a dropship order's lines are what the customer bought and cannot be changed here");
+    }
+    return po;
   }
 
   /**

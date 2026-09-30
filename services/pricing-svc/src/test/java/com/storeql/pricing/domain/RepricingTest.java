@@ -134,4 +134,24 @@ class RepricingTest {
     assertEquals(money("9.10"), lowest.orElseThrow().price());
     assertTrue(Repricing.lowestFresh(seen, TODAY, 0).isEmpty());
   }
+
+  @Test
+  void anObservationOlderThanTheRulesReachIsStaleTheDayItAgesOut() {
+    assertTrue(!Repricing.isStale(TODAY, TODAY, 14));
+    assertTrue(!Repricing.isStale(TODAY.minusDays(14), TODAY, 14), "exactly maxAgeDays old counts");
+    assertTrue(Repricing.isStale(TODAY.minusDays(15), TODAY, 14));
+    assertTrue(Repricing.isStale(TODAY.minusDays(1), TODAY, 0));
+    assertTrue(!Repricing.isStale(TODAY, TODAY, 0));
+  }
+
+  @Test
+  void staleMeansTheSameAsNotFreshToTheRunThatMadeTheProposal() {
+    for (int age = 0; age < 40; age++) {
+      LocalDate seen = TODAY.minusDays(age);
+      boolean fresh =
+          Repricing.lowestFresh(List.of(new Observation("R", money("1.00"), seen)), TODAY, 14)
+              .isPresent();
+      assertEquals(!fresh, Repricing.isStale(seen, TODAY, 14), "age " + age);
+    }
+  }
 }

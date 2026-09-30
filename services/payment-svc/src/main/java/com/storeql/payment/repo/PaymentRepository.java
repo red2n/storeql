@@ -121,6 +121,15 @@ public class PaymentRepository extends BaseOutboxRepository {
             throw com.storeql.web.ApiException.notFound(
                 "PAYMENT_NOT_FOUND", "payment tender not found");
           }
+          // A same-key request that was waiting on the lock while the first committed: the
+          // pre-check above could not see it, so look again now the payment is ours. It replays the
+          // first refund instead of colliding on the unique key.
+          if (r.idempotencyKey() != null) {
+            RefundTender existing = findRefundByKeyTx(c, r.tenantId(), r.idempotencyKey());
+            if (existing != null) {
+              return existing;
+            }
+          }
           if (!payment.orderId().equals(r.orderId())) {
             throw com.storeql.web.ApiException.conflict(
                 "PAYMENT_ORDER_MISMATCH", "payment does not belong to this order");
@@ -137,8 +146,8 @@ public class PaymentRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "INSERT INTO refund_tenders"
                       + " (id, tenant_id, order_id, payment_id, amount, method,"
-                      + "  reference, idempotency_key, reason, created_at)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?)")) {
+                      + "  reference, idempotency_key, reason, created_at, store_id)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, r.id());
             ps.setObject(2, r.tenantId());
             ps.setObject(3, r.orderId());
@@ -150,6 +159,9 @@ public class PaymentRepository extends BaseOutboxRepository {
             ps.setString(9, r.reason());
             // pgjdbc cannot infer a SQL type for a raw java.time.Instant.
             ps.setObject(10, r.createdAt().atOffset(java.time.ZoneOffset.UTC));
+            // The store the payment was taken at: a refund is that store's, as its Z report and
+            // tender mix read it. Null only for a payment recorded with no store.
+            ps.setObject(11, payment.storeId());
             ps.executeUpdate();
           }
           insertOutbox(c, event);
@@ -270,7 +282,8 @@ public class PaymentRepository extends BaseOutboxRepository {
           if (!markProcessedIfNewTx(c, eventId, consumer)) {
             return null; // this order event already produced its refund
           }
-          refundTx(c, tenantId, orderId, requestedAmount, reason, methodOverride, eventBuilder);
+          refundTx(
+              c, tenantId, orderId, requestedAmount, reason, methodOverride, null, eventBuilder);
           return null;
         },
         "refund order from event");
@@ -280,6 +293,9 @@ public class PaymentRepository extends BaseOutboxRepository {
    * The refund itself, on the caller's transaction: locks the order's captured tenders, caps the
    * amount at what remains, spreads it by residual capacity, writes the refund rows and the outbox
    * event. Returns what was actually refunded (zero when nothing was captured or all was refunded).
+   *
+   * <p>Each refund row carries the store it belongs to: {@code storeOverride} when the caller names
+   * one (an exchange is the store's where it was made), else the store of the payment refunded.
    */
   private BigDecimal refundTx(
       Connection c,
@@ -288,6 +304,7 @@ public class PaymentRepository extends BaseOutboxRepository {
       BigDecimal requestedAmount,
       String reason,
       String methodOverride,
+      UUID storeOverride,
       java.util.function.BiFunction<
               BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
           eventBuilder)
@@ -313,7 +330,15 @@ public class PaymentRepository extends BaseOutboxRepository {
       if (residual.signum() <= 0) continue;
       BigDecimal alloc = left.min(residual);
       String method = methodOverride != null ? methodOverride : t.method();
-      insertRefundTenderTx(c, tenantId, orderId, t.id(), alloc, method, reason);
+      insertRefundTenderTx(
+          c,
+          tenantId,
+          orderId,
+          t.id(),
+          alloc,
+          method,
+          reason,
+          storeOverride != null ? storeOverride : t.storeId());
       shares.add(
           new com.storeql.payment.domain.Domain.RefundAllocation(
               t.id(), method, alloc, t.storeId()));
@@ -364,6 +389,7 @@ public class PaymentRepository extends BaseOutboxRepository {
       BigDecimal exchangeAmount,
       BigDecimal extraRefund,
       String reason,
+      UUID exchangeStoreId,
       java.util.function.BiFunction<
               BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
           exchangeRefundEvent,
@@ -377,7 +403,14 @@ public class PaymentRepository extends BaseOutboxRepository {
           if (!markProcessedIfNewTx(c, eventId, consumer)) return null;
           BigDecimal exchanged =
               refundTx(
-                  c, tenantId, orderId, exchangeAmount, reason, "EXCHANGE", exchangeRefundEvent);
+                  c,
+                  tenantId,
+                  orderId,
+                  exchangeAmount,
+                  reason,
+                  "EXCHANGE",
+                  exchangeStoreId,
+                  exchangeRefundEvent);
           if (exchanged.signum() > 0) {
             insertTenderTx(c, exchangeTender.apply(exchanged));
             insertOutbox(c, exchangeCapturedEvent.apply(exchanged));
@@ -385,7 +418,15 @@ public class PaymentRepository extends BaseOutboxRepository {
           BigDecimal original = BigDecimal.ZERO;
           if (extraRefund != null && extraRefund.signum() > 0) {
             original =
-                refundTx(c, tenantId, orderId, extraRefund, reason, null, originalRefundEvent);
+                refundTx(
+                    c,
+                    tenantId,
+                    orderId,
+                    extraRefund,
+                    reason,
+                    null,
+                    exchangeStoreId,
+                    originalRefundEvent);
           }
           return new ExchangeMoved(exchanged, original);
         },
@@ -434,13 +475,15 @@ public class PaymentRepository extends BaseOutboxRepository {
       UUID paymentId,
       BigDecimal amount,
       String method,
-      String reason)
+      String reason,
+      UUID storeId)
       throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO refund_tenders"
-                + " (id, tenant_id, order_id, payment_id, amount, method, reason, created_at)"
-                + " VALUES (?,?,?,?,?,?,?, now())")) {
+                + " (id, tenant_id, order_id, payment_id, amount, method, reason, created_at,"
+                + " store_id)"
+                + " VALUES (?,?,?,?,?,?,?, now(), ?)")) {
       ps.setObject(1, Ids.newId());
       ps.setObject(2, tenantId);
       ps.setObject(3, orderId);
@@ -448,6 +491,7 @@ public class PaymentRepository extends BaseOutboxRepository {
       ps.setBigDecimal(5, amount);
       ps.setString(6, method);
       ps.setString(7, reason);
+      ps.setObject(8, storeId);
       ps.executeUpdate();
     }
   }

@@ -85,6 +85,9 @@ class RfqBid {
   final String? validUntil;
   final String? grade;
   final Map<String, double> prices;
+
+  /// Recorded after the request's due day; kept and shown, never refused.
+  final bool receivedLate;
   const RfqBid({
     required this.supplierId,
     required this.supplierName,
@@ -94,6 +97,7 @@ class RfqBid {
     this.validUntil,
     this.grade,
     required this.prices,
+    this.receivedLate = false,
   });
 
   factory RfqBid.fromJson(Map<String, dynamic> j) => RfqBid(
@@ -104,6 +108,7 @@ class RfqBid {
         leadTimeDays: (j['leadTimeDays'] as num?)?.toInt(),
         validUntil: j['validUntil'] as String?,
         grade: j['grade'] as String?,
+        receivedLate: j['receivedLate'] as bool? ?? false,
         prices: {
           for (final p in (j['prices'] as List?) ?? const [])
             (p as Map<String, dynamic>)['variantId'] as String: (p['unitPrice'] as num).toDouble(),
@@ -167,6 +172,7 @@ class RfqBidSummary {
   final String? currency;
   final double? homeTotal;
   final int? rank;
+  final bool receivedLate;
   const RfqBidSummary({
     required this.supplierId,
     this.supplierName,
@@ -176,6 +182,7 @@ class RfqBidSummary {
     this.currency,
     this.homeTotal,
     this.rank,
+    this.receivedLate = false,
   });
 
   factory RfqBidSummary.fromJson(Map<String, dynamic> j) => RfqBidSummary(
@@ -187,6 +194,7 @@ class RfqBidSummary {
         currency: j['currency'] as String?,
         homeTotal: (j['homeTotal'] as num?)?.toDouble(),
         rank: (j['rank'] as num?)?.toInt(),
+        receivedLate: j['receivedLate'] as bool? ?? false,
       );
 }
 
@@ -196,12 +204,16 @@ class RfqAward {
   final String poId;
   final double unitPrice;
   final String currency;
+
+  /// Why the line went away from the lowest bid; null when it did not.
+  final String? reason;
   const RfqAward({
     required this.variantId,
     required this.supplierId,
     required this.poId,
     required this.unitPrice,
     required this.currency,
+    this.reason,
   });
 
   factory RfqAward.fromJson(Map<String, dynamic> j) => RfqAward(
@@ -210,6 +222,7 @@ class RfqAward {
         poId: j['poId'] as String? ?? '',
         unitPrice: (j['unitPrice'] as num?)?.toDouble() ?? 0,
         currency: j['currency'] as String? ?? '',
+        reason: j['reason'] as String?,
       );
 }
 
@@ -411,6 +424,15 @@ class _StatusChip extends StatelessWidget {
     };
     return StatusBadge(words, key: Key('rfq-status-$status'), tone: tone);
   }
+}
+
+/// A quiet note on a bid recorded after the due day. It changes no ranking.
+class _LateBadge extends StatelessWidget {
+  const _LateBadge({super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      const StatusBadge('Received after the due date', tone: StatusTone.warning);
 }
 
 class _LineRow {
@@ -712,10 +734,18 @@ class RfqDetailDialog extends ConsumerWidget {
                               final home = s.homeTotal == null
                                   ? (s.complete ? 'no rate' : 'partial quote')
                                   : AppFormat.money(s.homeTotal!, currencyCode: d.homeCurrency);
-                              return Text(
-                                '$home${s.rank == null ? '' : ' · #${s.rank}'}',
-                                key: Key('rfq-total-${b.supplierId}'),
-                                style: TextStyle(fontWeight: s.rank == 1 ? FontWeight.w700 : FontWeight.w600),
+                              return Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '$home${s.rank == null ? '' : ' · #${s.rank}'}',
+                                    key: Key('rfq-total-${b.supplierId}'),
+                                    style: TextStyle(fontWeight: s.rank == 1 ? FontWeight.w700 : FontWeight.w600),
+                                  ),
+                                  if (b.receivedLate || s.receivedLate)
+                                    _LateBadge(key: Key('rfq-late-cmp-${b.supplierId}')),
+                                ],
                               );
                             })),
                         ]),
@@ -731,14 +761,17 @@ class RfqDetailDialog extends ConsumerWidget {
                       contentPadding: EdgeInsets.zero,
                       leading: GradeChip(b.grade),
                       title: Text(b.supplierName),
-                      subtitle: Text(
+                      subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                       Text(
                         switch (b.status) {
                           'QUOTED' =>
                             'Quoted in ${b.currency ?? '?'}${b.leadTimeDays == null ? '' : ' · ${b.leadTimeDays} days'}${b.validUntil == null ? '' : ' · valid until ${AppFormat.date(b.validUntil)}'}',
                           'DECLINED' => 'Declined to quote',
                           _ => 'Invited, nothing back yet',
                         },
-                      ),
+                       ),
+                       if (b.receivedLate) _LateBadge(key: Key('rfq-late-${b.supplierId}')),
+                      ]),
                       trailing: mayBuy && d.status == 'ISSUED'
                           ? Row(mainAxisSize: MainAxisSize.min, children: [
                               TextButton(
@@ -769,7 +802,11 @@ class RfqDetailDialog extends ConsumerWidget {
                           '${variantDisplayName(a.variantId, labels)} → ${d.bids.where((b) => b.supplierId == a.supplierId).map((b) => b.supplierName).firstOrNull ?? shortRef(a.supplierId)}'
                           ' at ${AppFormat.money(a.unitPrice, currencyCode: a.currency)}',
                         ),
-                        subtitle: Text('Draft order ${shortRef(a.poId)}'),
+                        subtitle: Text(
+                          'Draft order ${shortRef(a.poId)}'
+                          '${a.reason == null || a.reason!.isEmpty ? '' : '\nNot the lowest bid: ${a.reason}'}',
+                          key: Key('rfq-award-reason-${a.variantId}'),
+                        ),
                       ),
                   ],
                 ],
@@ -1014,6 +1051,7 @@ class AwardDialog extends ConsumerStatefulWidget {
 
 class _AwardDialogState extends ConsumerState<AwardDialog> {
   final Map<String, String?> _choice = {};
+  final Map<String, TextEditingController> _reasons = {};
   bool _busy = false;
   String? _refusal;
 
@@ -1025,10 +1063,42 @@ class _AwardDialogState extends ConsumerState<AwardDialog> {
     }
   }
 
+  @override
+  void dispose() {
+    for (final c in _reasons.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  /// A line goes away from the lowest bid when the comparison marks a lowest
+  /// and the chosen supplier's price is not it. A bid the comparison cannot
+  /// rank is never marked lowest, so choosing one is away; when nothing is
+  /// marked there is no ranking to depart from. The server has the last word.
+  bool _away(RfqLineComparison lc) {
+    final chosen = _choice[lc.variantId];
+    if (chosen == null) return false;
+    if (!lc.prices.any((p) => p.lowest)) return false;
+    return lc.of(chosen)?.lowest != true;
+  }
+
+  TextEditingController _reasonFor(String variantId) =>
+      _reasons.putIfAbsent(variantId, TextEditingController.new);
+
+  bool get _reasonsGiven => widget.rfq.comparison
+      .where(_away)
+      .every((lc) => _reasonFor(lc.variantId).text.trim().isNotEmpty);
+
   Future<void> _save() async {
     final awards = [
       for (final e in _choice.entries)
-        if (e.value != null) {'variantId': e.key, 'supplierId': e.value},
+        if (e.value != null)
+          {
+            'variantId': e.key,
+            'supplierId': e.value,
+            if (widget.rfq.comparison.any((lc) => lc.variantId == e.key && _away(lc)))
+              'reason': _reasonFor(e.key).text.trim(),
+          },
     ];
     if (awards.isEmpty) {
       setState(() => _refusal = 'Give at least one line to a supplier.');
@@ -1079,10 +1149,10 @@ class _AwardDialogState extends ConsumerState<AwardDialog> {
             children: [
               Text(
                 'Each line goes to one supplier at the price they quoted; the lowest at home is picked'
-                ' for you. A line left unassigned is not awarded.',
+                ' for you. A line left unassigned is not awarded. A line given to any other supplier needs a reason.',
                 style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
               ),
-              for (final lc in d.comparison)
+              for (final lc in d.comparison) ...[
                 Padding(
                   padding: const EdgeInsets.only(top: 12),
                   child: DropdownButtonFormField<String?>(
@@ -1106,6 +1176,21 @@ class _AwardDialogState extends ConsumerState<AwardDialog> {
                     onChanged: (v) => setState(() => _choice[lc.variantId] = v),
                   ),
                 ),
+              if (_away(lc))
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: TextField(
+                    key: Key('award-reason-${lc.variantId}'),
+                    controller: _reasonFor(lc.variantId),
+                    onChanged: (_) => setState(() {}),
+                    maxLength: 500,
+                    decoration: const InputDecoration(
+                      labelText: 'Why not the lowest bid? (required)',
+                      helperText: 'Kept with the award',
+                    ),
+                  ),
+                ),
+              ],
               if (_refusal != null) ...[
                 const SizedBox(height: 12),
                 Text(_refusal!, key: const Key('award-refusal'), style: TextStyle(color: cs.error)),
@@ -1116,7 +1201,7 @@ class _AwardDialogState extends ConsumerState<AwardDialog> {
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('award-save'), onPressed: _busy ? null : _save, child: const Text('Award')),
+        FilledButton(key: const Key('award-save'), onPressed: _busy || !_reasonsGiven ? null : _save, child: const Text('Award')),
       ],
     );
   }

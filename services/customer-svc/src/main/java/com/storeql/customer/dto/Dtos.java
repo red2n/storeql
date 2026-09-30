@@ -66,7 +66,10 @@ public final class Dtos {
       @Schema(description = "Points to award; must be positive.") @NotNull @Positive
           BigDecimal points,
       @Schema(description = "UUID of the order this award relates to, if any.") String orderId,
-      String reason) {}
+      @Schema(description = "Why the points are being awarded; kept with who did it.")
+          @NotBlank
+          @Size(max = 500)
+          String reason) {}
 
   @Schema(name = "RedeemPointsRequest", description = "Redeem loyalty points.")
   public record RedeemPointsRequest(
@@ -81,7 +84,10 @@ public final class Dtos {
   public record AdjustPointsRequest(
       @Schema(description = "Signed adjustment amount; may be negative.") @NotNull
           BigDecimal points,
-      String reason) {}
+      @Schema(description = "Why the balance is being corrected; kept with who did it.")
+          @NotBlank
+          @Size(max = 500)
+          String reason) {}
 
   @Schema(name = "IssueStoreCreditRequest", description = "Issue store credit to a customer.")
   public record IssueStoreCreditRequest(
@@ -89,7 +95,10 @@ public final class Dtos {
           BigDecimal amount,
       @Schema(description = "ISO currency code; the tenant's own when omitted.") String currency,
       @Schema(description = "UUID of the order this issuance relates to, if any.") String orderId,
-      String reason) {}
+      @Schema(description = "Why the credit is being issued; kept with who did it.")
+          @NotBlank
+          @Size(max = 500)
+          String reason) {}
 
   @Schema(name = "RedeemStoreCreditRequest", description = "Redeem a customer's store credit.")
   public record RedeemStoreCreditRequest(

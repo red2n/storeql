@@ -88,6 +88,9 @@ class _Server implements HttpClientAdapter {
             '{"id":"e-9","type":"OFFLINE_SALE_ON_UNFIT_SCALE","occurredAt":"${_at(3)}","actorId":"u-2","storeId":"s1","orderId":"o-9","variantId":"v-1","detail":"OUT_OF_SERVICE",'
             '"reason":"Sold while the till was offline: item 1 was weighed on Deli 3 when it could not be used for trade here (it is out of service)."}'
             '],"meta":{}}';
+      } else if (o.queryParameters['type'] == 'PRICED') {
+        body = '{"data":[{"id":"e-12","type":"PRICED","occurredAt":"${_at(1)}","actorId":"u-1",'
+            '"storeId":"s1","orderId":"o-12","amount":18.5,"reason":"priced: total 18.50"}],"meta":{}}';
       } else if (o.queryParameters['type'] == 'VOID') {
         body = '{"data":[{"id":"e-1","type":"VOID","occurredAt":"${_at(1)}","actorId":"u-1",'
             '"storeId":"s1","orderId":"o-1","reason":"rang up twice"}],"meta":{}}';
@@ -381,6 +384,23 @@ void main() {
     expect(server.requests.where((r) => r.path.endsWith('/admin/inventory/movements')), hasLength(1));
     expect(find.text('Offline sale of a recalled item · Oat milk 1L'), findsOneWidget);
     expect(find.text(_adjustment), findsNothing);
+  });
+
+  testWidgets('the Action filter offers a price set on an order that was waiting for one, in words, and asks the server',
+      (tester) async {
+    final server = await _pump(tester);
+    await tester.tap(find.byKey(const Key('audit-type')));
+    await tester.pumpAndSettle();
+    expect(find.text('Prices set on orders').last, findsOneWidget);
+    await tester.tap(find.text('Prices set on orders').last);
+    await tester.pumpAndSettle();
+    expect(_trailRequests(server).last.queryParameters['type'], 'PRICED');
+    // Who priced it, the order's total, and the server's own words; never the code.
+    expect(find.text('Price set on an order · £18.50'), findsOneWidget);
+    expect(find.textContaining('by ana@shop.test · order o-12 · priced: total 18.50'), findsOneWidget);
+    expect(find.textContaining('PRICED'), findsNothing);
+    // It is a till event, not an offline sale flagged for a manager.
+    expect(find.textContaining('rung up by'), findsNothing);
   });
 
   testWidgets('on a phone the filters fold behind one button and the trail starts on the first screen',

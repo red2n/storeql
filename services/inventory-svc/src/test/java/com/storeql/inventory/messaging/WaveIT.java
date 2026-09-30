@@ -60,6 +60,11 @@ class WaveIT {
   private static final String ZONE_B = "01a092ae-611e-7041-a4b7-c854f0266aa2";
   private static final String USER = "01a092ae-611e-700b-bde4-50df0324c3e1";
 
+  /** A use-by date this many days ahead, so no fixture goes stale. */
+  private static String in(int days) {
+    return java.time.LocalDate.now().plusDays(days).toString();
+  }
+
   @Inject WebTarget target;
   @Inject OrderEventHandler orders;
 
@@ -485,8 +490,8 @@ class WaveIT {
   @Test
   void aWaveIsOneWalkThroughTheZonesDirectedByTheRule() {
     // Older apples in zone B, newer apples in zone A; pears in zone A. FEFO by default.
-    JsonObject oldApples = receive(APPLES, 5, ZONE_B, "A-OLD", "2026-10-01");
-    JsonObject newApples = receive(APPLES, 10, ZONE_A, "A-NEW", "2026-11-01");
+    JsonObject oldApples = receive(APPLES, 5, ZONE_B, "A-OLD", in(10));
+    JsonObject newApples = receive(APPLES, 10, ZONE_A, "A-NEW", in(40));
     JsonObject pears = receive(PEARS, 8, ZONE_A, "P-1", null);
     String[] ids = twoOrdersWaiting();
 
@@ -558,8 +563,8 @@ class WaveIT {
 
   @Test
   void completingAWaveDeductsWhatWasPickedConsumesTheHoldsAndTellsOrderSvcOnce() {
-    JsonObject oldApples = receive(APPLES, 5, ZONE_B, "A-OLD", "2026-10-01");
-    receive(APPLES, 10, ZONE_A, "A-NEW", "2026-11-01");
+    JsonObject oldApples = receive(APPLES, 5, ZONE_B, "A-OLD", in(10));
+    receive(APPLES, 10, ZONE_A, "A-NEW", in(40));
     receive(PEARS, 8, ZONE_A, "P-1", null);
     String[] ids = twoOrdersWaiting();
     JsonObject wave =
@@ -785,8 +790,8 @@ class WaveIT {
     // all 4 over at once, before order-svc has applied the wave — the fulfilment names 4, the wave
     // drew 3: only the last apple leaves now, the revenue is recorded once for the line, and the
     // hold on that apple is consumed, not released.
-    JsonObject oldApples = receive(APPLES, 5, ZONE_B, "A-OLD", "2026-10-01");
-    receive(APPLES, 10, ZONE_A, "A-NEW", "2026-11-01");
+    JsonObject oldApples = receive(APPLES, 5, ZONE_B, "A-OLD", in(10));
+    receive(APPLES, 10, ZONE_A, "A-NEW", in(40));
     receive(PEARS, 8, ZONE_A, "P-1", null);
     String[] ids = twoOrdersWaiting();
     JsonObject wave =
@@ -927,14 +932,14 @@ class WaveIT {
     // person hands three of order 2's apples over by hand — FEFO draws them from that batch, so
     // the wave's own batches are untouched. Across both of its lines the wave then draws only the
     // one apple order 2 still waits for: the clamp is per order and product, not per line.
-    receive(APPLES, 5, ZONE_B, "A-OLD", "2026-10-01");
-    receive(APPLES, 10, ZONE_A, "A-NEW", "2026-11-01");
+    receive(APPLES, 5, ZONE_B, "A-OLD", in(10));
+    receive(APPLES, 10, ZONE_A, "A-NEW", in(40));
     receive(PEARS, 8, ZONE_A, "P-1", null);
     String[] ids = twoOrdersWaiting();
     JsonObject wave =
         Envelopes.created(post("/admin/inventory/waves", "{\"storeId\":\"" + STORE + "\"}"));
     String waveId = wave.getString("id");
-    receive(APPLES, 3, ZONE_A, "A-EARLY", "2026-09-30");
+    receive(APPLES, 3, ZONE_A, "A-EARLY", in(5));
     orders.handle(
         fulfilled(
             Ids.newId().toString(), ids[1], item(APPLES, 3, "7.50", 1), "PARTIALLY_FULFILLED"));

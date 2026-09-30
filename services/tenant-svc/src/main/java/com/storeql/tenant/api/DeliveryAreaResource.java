@@ -72,6 +72,8 @@ public class DeliveryAreaResource {
   @POST
   public Response create(@PathParam("storeId") UUID storeId, CreateDeliveryAreaRequest req) {
     Validations.validate(req);
+    service.getStore(ctx.requireTenantId(), storeId);
+    ctx.requireStoreAccess(storeId);
     var area = service.addDeliveryArea(ctx.requireTenantId(), storeId, req);
     return Response.status(Response.Status.CREATED).entity(ApiResponse.ok(area)).build();
   }
@@ -95,6 +97,8 @@ public class DeliveryAreaResource {
   @DELETE
   @Path("/{areaId}")
   public Response delete(@PathParam("storeId") UUID storeId, @PathParam("areaId") UUID areaId) {
+    service.getStore(ctx.requireTenantId(), storeId);
+    ctx.requireStoreAccess(storeId);
     service.deleteDeliveryArea(ctx.requireTenantId(), storeId, areaId);
     return Response.noContent().build();
   }

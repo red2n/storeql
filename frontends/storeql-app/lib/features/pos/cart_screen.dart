@@ -14,6 +14,7 @@ import '../../shared/widgets/barcode_scanner_sheet.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
+import '../admin/providers/staff_names.dart';
 import 'pos_age_check.dart';
 import 'pos_providers.dart';
 import 'pos_recall_check.dart';
@@ -437,12 +438,50 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
     }
   }
 
+  /// Throws a held sale away. Discarding is not resuming: the server records
+  /// who threw it away, and the sale never reaches this till's basket.
+  Future<void> _discardHeld(BuildContext dialogContext, WidgetRef ref, ParkedSale s) async {
+    final ok = await showDialog<bool>(
+      context: dialogContext,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Discard held sale?'),
+        content: const Text('It is thrown away and cannot be resumed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep it')),
+          FilledButton(
+            key: const Key('held-discard-confirm'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref
+          .read(apiClientProvider)
+          .dio
+          .delete('/${ApiConstants.order}/pos/parked-sales/${s.id}');
+    } catch (e) {
+      _snack(friendlyError(e, fallback: 'Could not discard the held sale.'), error: true);
+    }
+    if (mounted) ref.invalidate(parkedSalesProvider);
+  }
+
   Future<void> _resume() async {
     final selected = await showDialog<ParkedSale>(
       context: context,
       builder: (ctx) => Consumer(
         builder: (ctx, ref, _) {
           final async = ref.watch(parkedSalesProvider);
+          // Who held each sale, by name; the end of the id while it is unknown
+          // (a login the lookup is not open to, or not yet answered).
+          final holders = ref
+                  .watch(staffLoginsProvider(staffIdsKey([
+                    for (final s in async.value ?? const <ParkedSale>[]) ?s.parkedBy,
+                  ])))
+                  .value ??
+              const <String, String>{};
           return AlertDialog(
             title: const Text('Resume held sale'),
             content: SizedBox(
@@ -462,11 +501,19 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
                         children: [
                           for (final s in sales)
                             ListTile(
+                              key: Key('held-${s.id}'),
                               title: Text(s.customerName ?? 'Held sale'),
                               // A held sale carries no currency: the amount alone.
                               subtitle: Text(
                                 '${s.lines.length} item${s.lines.length == 1 ? '' : 's'}'
-                                ' · ${AppFormat.money(s.subtotal)}',
+                                ' · ${AppFormat.money(s.subtotal)}'
+                                '${s.parkedBy == null ? '' : ' · held by ${staffDisplayName(s.parkedBy!, holders)}'}',
+                              ),
+                              trailing: IconButton(
+                                key: Key('held-discard-${s.id}'),
+                                tooltip: 'Discard',
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: () => _discardHeld(ctx, ref, s),
                               ),
                               onTap: () => Navigator.pop(ctx, s),
                             ),
@@ -512,15 +559,24 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
       if (discard != true) return;
     }
 
-    ref.read(posCartProvider.notifier).loadLines(selected.lines);
+    // The server takes the sale off the open list and records who picked it up;
+    // it refuses one already resumed or discarded (another till was first), and
+    // then nothing is loaded here.
     try {
-      await ref
+      final resp = await ref
           .read(apiClientProvider)
           .dio
-          .delete('/${ApiConstants.order}/pos/parked-sales/${selected.id}');
-      ref.invalidate(parkedSalesProvider);
-    } catch (_) {
-      // Resumed locally even if the delete failed; it will expire server-side.
+          .post('/${ApiConstants.order}/pos/parked-sales/${selected.id}/resume');
+      if (!mounted) return;
+      final data = resp.data is Map ? (resp.data as Map)['data'] : null;
+      final basket = data is Map<String, dynamic> && (data['items'] is List)
+          ? ParkedSale.fromJson(data).lines
+          : selected.lines;
+      ref.read(posCartProvider.notifier).loadLines(basket.isEmpty ? selected.lines : basket);
+    } catch (e) {
+      _snack(friendlyError(e, fallback: 'Could not resume the held sale.'), error: true);
+    } finally {
+      if (mounted) ref.invalidate(parkedSalesProvider);
     }
   }
 

@@ -1,3 +1,4 @@
+import 'widgets/business_wide_note.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_notifier.dart';
@@ -36,7 +37,11 @@ class RetentionScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authNotifierProvider).value;
-    final isManager = auth is AuthAuthenticated && auth.isManager;
+    // Retention is the whole business's: a manager held to stores reads it and
+    // changes nothing (BUSINESS_WIDE_ONLY).
+    final isManager =
+        auth is AuthAuthenticated && auth.isManager && !auth.heldToStores;
+    final heldOnly = auth is AuthAuthenticated && auth.isManager && auth.heldToStores;
     final sheet = ref.watch(retentionSheetProvider);
     final runs = ref.watch(retentionRunsProvider);
     final text = Theme.of(context).textTheme;
@@ -69,6 +74,11 @@ class RetentionScreen extends ConsumerWidget {
           // The list is inset by the page gutter already.
           padding: EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
         ),
+        if (heldOnly)
+          const Padding(
+            padding: EdgeInsetsDirectional.only(bottom: AppSpacing.md),
+            child: BusinessWideNote(key: Key('retention-business-wide-note')),
+          ),
         if (sheet.hasError)
           ErrorView(
             message: friendlyError(

@@ -61,7 +61,7 @@ public class ParkedSaleResource {
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID cashierId = ctx.userId();
-    var sale = svc.park(tenantId, cashierId, req);
+    var sale = svc.park(tenantId, cashierId, req, ctx);
     return Response.status(201)
         .entity(ApiResponse.ok(sale, ApiResponse.Meta.of(ctx.requestId())))
         .build();
@@ -70,7 +70,7 @@ public class ParkedSaleResource {
   /**
    * The tenant's active parked sales, for a cashier picking one back up.
    *
-   * @param storeId restrict to one store, or {@code null} for the whole tenant
+   * @param storeId restrict to one store, or {@code null} for every store the caller keeps
    * @return the parked sales
    * @throws com.storeql.web.ApiException {@code 403} when the caller holds no POS-eligible role
    */
@@ -85,7 +85,7 @@ public class ParkedSaleResource {
     ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
     UUID tenantId = ctx.requireTenantId();
     UUID sid = storeId == null ? null : Parsing.uuid(storeId, "storeId");
-    var sales = svc.list(tenantId, sid);
+    var sales = svc.list(tenantId, sid, ctx);
     return ApiResponse.ok(sales, ApiResponse.Meta.of(ctx.requestId()));
   }
 
@@ -106,7 +106,36 @@ public class ParkedSaleResource {
   public ApiResponse<ParkedSaleResponse> getParked(@PathParam("id") UUID id) {
     ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
     UUID tenantId = ctx.requireTenantId();
-    return ApiResponse.ok(svc.get(tenantId, id), ApiResponse.Meta.of(ctx.requestId()));
+    return ApiResponse.ok(svc.get(tenantId, id, ctx), ApiResponse.Meta.of(ctx.requestId()));
+  }
+
+  /**
+   * Picks a parked sale back up, recording who did it.
+   *
+   * <p>The sale leaves the open list; the till then rings its basket up as an ordinary sale. The
+   * cashier who resumes it need not be the one who parked it, and the record says which is which.
+   *
+   * @param id the parked sale to resume
+   * @return the parked sale with its basket, who parked it and who resumed it
+   * @throws com.storeql.web.ApiException {@code 403} when the caller holds no POS-eligible role or
+   *     keeps none of the sale's stores; {@code 404} when no such open parked sale exists in the
+   *     tenant; {@code 409 PARKED_SALE_NOT_OPEN} when another till resumed it first
+   */
+  @Operation(
+      summary = "Resume a parked sale",
+      description =
+          "Takes a parked sale off the open list and records who picked it up and when. The"
+              + " basket is returned so the till can ring it up.")
+  @APIResponse(responseCode = "200", description = "Parked sale resumed")
+  @APIResponse(responseCode = "403", description = "Not a POS-eligible role, or another store")
+  @APIResponse(responseCode = "404", description = "Parked sale not found")
+  @APIResponse(responseCode = "409", description = "PARKED_SALE_NOT_OPEN: resumed already")
+  @POST
+  @Path("/parked-sales/{id}/resume")
+  public ApiResponse<ParkedSaleResponse> resume(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
+    UUID tenantId = ctx.requireTenantId();
+    return ApiResponse.ok(svc.resume(tenantId, id, ctx), ApiResponse.Meta.of(ctx.requestId()));
   }
 
   /**
@@ -114,7 +143,7 @@ public class ParkedSaleResource {
    *
    * <p>Nothing was sold and no stock was committed, so there is nothing to reverse.
    *
-   * @param id the parked sale to discard
+   * @param id the parked sale to discard; the row is kept, with who discarded it and when
    * @return {@code 204} with no body
    * @throws com.storeql.web.ApiException {@code 403} when the caller holds no POS-eligible role;
    *     {@code 404} when no such parked sale exists in the tenant
@@ -130,7 +159,7 @@ public class ParkedSaleResource {
   public Response cancel(@PathParam("id") UUID id) {
     ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
     UUID tenantId = ctx.requireTenantId();
-    svc.cancel(tenantId, id);
+    svc.cancel(tenantId, id, ctx);
     return Response.noContent().build();
   }
 

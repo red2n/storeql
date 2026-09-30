@@ -35,6 +35,7 @@ import java.lang.System.Logger.Level;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -211,6 +212,7 @@ public class RfqService {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
     Header h = requireIssued(tenantId, id);
+    boolean late = quotedLate(tenantId, h);
     if (req.lines().isEmpty()) {
       throw ApiException.badRequest("PURCHASE_RFQ_QUOTE_EMPTY", "a quote prices at least one line");
     }
@@ -243,6 +245,7 @@ public class RfqService {
         req.leadTimeDays(),
         date(req.validUntil(), "validUntil"),
         blankToNull(req.notes()),
+        late,
         prices)) {
       throw notInvited(supplierId);
     }
@@ -270,7 +273,8 @@ public class RfqService {
    *
    * @throws ApiException 409 {@code PURCHASE_RFQ_NOT_ISSUED}, {@code PURCHASE_RFQ_NOT_QUOTED}; 400
    *     {@code PURCHASE_RFQ_AWARDS_REQUIRED}, {@code PURCHASE_RFQ_AWARD_DUPLICATE}, {@code
-   *     PURCHASE_RFQ_LINE_UNKNOWN}
+   *     PURCHASE_RFQ_LINE_UNKNOWN}, {@code PURCHASE_RFQ_AWARD_REASON_REQUIRED} for a line awarded
+   *     away from the lowest comparable bid with no reason given
    */
   public Detail award(TenantContext ctx, UUID id, RfqAwardRequest req) {
     ctx.requireAnyRole(BUYING);
@@ -288,6 +292,8 @@ public class RfqService {
     // Which lines go to whom, each once and only to a supplier who priced it.
     Map<UUID, List<Line>> linesBySupplier = new LinkedHashMap<>();
     Set<UUID> given = new HashSet<>();
+    Map<UUID, UUID> supplierByLine = new HashMap<>();
+    Map<UUID, String> reasonByLine = new HashMap<>();
     for (RfqAwardLineRequest a : req.awards()) {
       UUID variantId = Parsing.uuid(a.variantId(), "awards.variantId");
       UUID supplierId = Parsing.uuid(a.supplierId(), "awards.supplierId");
@@ -312,7 +318,11 @@ public class RfqService {
                 + "; a line goes only to a supplier who quoted it");
       }
       linesBySupplier.computeIfAbsent(supplierId, k -> new ArrayList<>()).add(line);
+      supplierByLine.put(line.id(), supplierId);
+      String reason = blankToNull(a.reason());
+      if (reason != null) reasonByLine.put(line.id(), reason);
     }
+    requireReasonsAwayFromLowest(ctx, id, h, lineByVariant, supplierByLine, reasonByLine);
 
     Instant now = Instant.now();
     Map<String, BigDecimal> vatRates = pricing.findVatRates(tenantId);
@@ -366,7 +376,16 @@ public class RfqService {
             vatRates);
         awards.add(
             new Award(
-                Ids.newId(), tenantId, id, line.id(), e.getKey(), po.id(), price, currency, now));
+                Ids.newId(),
+                tenantId,
+                id,
+                line.id(),
+                e.getKey(),
+                po.id(),
+                price,
+                currency,
+                now,
+                reasonByLine.get(line.id())));
       }
     }
     if (!repo.award(tenantId, id, ctx.userId(), awards)) {
@@ -415,6 +434,49 @@ public class RfqService {
           "request " + h.reference() + " is " + h.status() + "; quotes and awards need it ISSUED");
     }
     return h;
+  }
+
+  /** A line awarded away from the lowest comparable bid needs the buyer's reason. */
+  private void requireReasonsAwayFromLowest(
+      TenantContext ctx,
+      UUID id,
+      Header h,
+      Map<UUID, Line> lineByVariant,
+      Map<UUID, UUID> supplierByLine,
+      Map<UUID, String> reasonByLine) {
+    List<UUID> away = Rfq.awardedAwayFromLowest(detail(ctx, id).comparison(), supplierByLine);
+    List<String> missing = new ArrayList<>();
+    for (UUID lineId : away) {
+      if (reasonByLine.containsKey(lineId)) continue;
+      for (Line l : lineByVariant.values()) {
+        if (l.id().equals(lineId)) missing.add(l.variantId().toString());
+      }
+    }
+    if (!missing.isEmpty()) {
+      throw ApiException.badRequest(
+          "PURCHASE_RFQ_AWARD_REASON_REQUIRED",
+          "request "
+              + h.reference()
+              + " awards variant(s) "
+              + String.join(", ", missing)
+              + " away from the lowest comparable bid; say why in the reason of each");
+    }
+  }
+
+  /**
+   * Whether a quote recorded now is after the day quotes were due, in the store's own day (the
+   * never-early fallback when its zone is unknown). The due day is advisory: a late quote is kept
+   * and flagged, never refused.
+   */
+  private boolean quotedLate(UUID tenantId, Header h) {
+    if (h.closesOn() == null) return false;
+    ZoneId zone;
+    try {
+      zone = tenants.stores(tenantId, h.storeId()).zoneOf(h.storeId());
+    } catch (ApiException e) {
+      zone = null;
+    }
+    return Rfq.quotingClosed(h.closesOn(), Instant.now(), zone);
   }
 
   private Bid requireInvited(UUID tenantId, UUID id, UUID supplierId) {

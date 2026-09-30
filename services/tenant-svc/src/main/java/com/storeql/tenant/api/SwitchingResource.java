@@ -65,6 +65,7 @@ public class SwitchingResource {
   @APIResponse(responseCode = "409", description = "SWITCHING_NOTICE_ALREADY_GIVEN")
   @POST
   public Response give(GiveNoticeRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     UUID tenantId = owner();
     return Response.status(201)
@@ -91,6 +92,7 @@ public class SwitchingResource {
   @POST
   @Path("/extend")
   public ApiResponse<StatusResponse> extend(ExtendRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     UUID tenantId = owner();
     return ApiResponse.ok(
@@ -105,6 +107,7 @@ public class SwitchingResource {
   @POST
   @Path("/cancel")
   public ApiResponse<StatusResponse> cancel(CancelRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     UUID tenantId = owner();
     return ApiResponse.ok(

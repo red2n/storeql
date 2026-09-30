@@ -657,6 +657,7 @@ public class PaymentService {
             ex.exchangeAmount(),
             extra,
             "Exchange",
+            ex.storeId(),
             (amt, shares) ->
                 Events.paymentRefunded(
                     tenantId,

@@ -442,6 +442,122 @@ class RecallNoticeIT {
         is(404));
   }
 
+  // ── notices of one order (the return dialog) ────────────────────────────────
+
+  /** The staff read of an order's notices, held to the stores named (or to none). */
+  private Response noticesOfOrder(
+      String query, String tenant, String roles, String userId, String stores) {
+    String[] parts = ("/orders/recall-notices?" + query).split("\\?", 2);
+    WebTarget t = target.path(parts[0]);
+    for (String pair : parts[1].split("&")) {
+      String[] kv = pair.split("=", 2);
+      t = t.queryParam(kv[0], kv[1]);
+    }
+    Invocation.Builder b = t.request().header("X-Tenant-Id", tenant).header("X-Roles", roles);
+    if (userId != null) b = b.header("X-User-Id", userId);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
+    return b.get();
+  }
+
+  @Test
+  void anOrdersNoticesAreListedAcrossRecallsForTheReturnDialogAndOnlyToStaffAtItsStore() {
+    UUID recallA = Ids.newId();
+    UUID recallB = Ids.newId();
+    String order = placeAtTill(Ids.newId(), "10.00");
+    String other = placeAtTill(Ids.newId(), "10.00");
+    handler.handle(saleAffected(recallA, order, "RECALL", "REFUND"));
+    handler.handle(saleAffected(recallB, order, "RECALL", "REFUND", "REPLACEMENT"));
+    handler.handle(saleAffected(recallA, other, "RECALL", "REFUND"));
+    String noticeA = find(staffList(recallA, null), "orderId", order).getString("id");
+
+    // Across recalls: both notices of the order, and none of the other order's.
+    JsonArray both = okArray(noticesOfOrder("orderId=" + order, T, "MANAGER", OWNER, null));
+    assertThat(both.size(), is(2));
+    for (int i = 0; i < both.size(); i++) {
+      assertThat(both.getJsonObject(i).getString("orderId"), is(order));
+      assertThat(both.getJsonObject(i).getString("status"), is("ISSUED"));
+    }
+    // With a recall as well: the one notice; with a status: only those that stand open.
+    assertThat(
+        okArray(
+                noticesOfOrder(
+                    "orderId=" + order + "&recallId=" + recallB, T, "CASHIER", OWNER, null))
+            .size(),
+        is(1));
+    assertThat(
+        okArray(noticesOfOrder("orderId=" + order + "&status=RESOLVED", T, "OWNER", OWNER, null))
+            .size(),
+        is(0));
+    // Settled by a refund through a return, it leaves the open ones but is still on the order.
+    created(staff("POST", "/orders/" + order + "/returns", returnJson(noticeA)));
+    assertThat(
+        okArray(noticesOfOrder("orderId=" + order + "&status=ISSUED", T, "OWNER", OWNER, null))
+            .size(),
+        is(1));
+    assertThat(
+        okArray(noticesOfOrder("orderId=" + order + "&status=RESOLVED", T, "OWNER", OWNER, null))
+            .size(),
+        is(1));
+    // An order nobody was told about has none.
+    assertThat(
+        okArray(noticesOfOrder("orderId=" + Ids.newId(), T, "OWNER", OWNER, null)).size(), is(0));
+    // One of the two must be named, and a shopper is not staff.
+    assertThat(noticesOfOrder("status=ISSUED", T, "OWNER", OWNER, null).getStatus(), is(400));
+    assertThat(
+        noticesOfOrder("orderId=" + order, T, "CUSTOMER", Ids.newId().toString(), null).getStatus(),
+        is(403));
+  }
+
+  @Test
+  void anOrdersNoticesAreEmptyForAnotherBusinessAndForStaffHeldToAnotherStore() {
+    UUID recall = Ids.newId();
+    String order = placeAtTill(Ids.newId(), "10.00");
+    handler.handle(saleAffected(recall, order, "RECALL", "REFUND"));
+
+    // Another business's staff of every role, naming this order: nothing, and no sign it exists.
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      Response r = noticesOfOrder("orderId=" + order, RIVAL, role, OWNER, S);
+      assertThat(role, r.getStatus(), is(200));
+      assertThat(role, okArray(r).size(), is(0));
+    }
+    // Staff of this business held to another store see none; held to this store, they see it.
+    String elsewhere = "01a090ae-611e-7060-8510-0000000000ff";
+    for (String role : new String[] {"MANAGER", "STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          okArray(noticesOfOrder("orderId=" + order, T, role, OWNER, elsewhere)).size(),
+          is(0));
+      assertThat(
+          role, okArray(noticesOfOrder("orderId=" + order, T, role, OWNER, S)).size(), is(1));
+    }
+  }
+
+  @Test
+  void anotherBusinessCannotSettleThisBusinessNoticeThroughAReturn() {
+    UUID recall = Ids.newId();
+    String order = placeAtTill(Ids.newId(), "10.00");
+    handler.handle(saleAffected(recall, order, "RECALL", "REFUND"));
+    String notice = find(staffList(recall, null), "orderId", order).getString("id");
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      Response r =
+          request("POST", "/orders/" + order + "/returns", returnJson(notice), RIVAL, role, OWNER);
+      assertThat(role, r.getStatus(), is(404));
+      assertThat(role, r.readEntity(String.class), containsString("ORDER_NOT_FOUND"));
+    }
+    assertThat(
+        request(
+                "POST",
+                "/orders/" + order + "/returns",
+                returnJson(notice),
+                RIVAL,
+                "CUSTOMER",
+                OWNER)
+            .getStatus(),
+        is(403));
+    assertThat(find(staffList(recall, null), "orderId", order).getString("status"), is("ISSUED"));
+    assertThat(okArray(staff("GET", "/orders/" + order + "/returns", null)).size(), is(0));
+  }
+
   // ── SJ-D59 ──────────────────────────────────────────────────────────────────
 
   @Test

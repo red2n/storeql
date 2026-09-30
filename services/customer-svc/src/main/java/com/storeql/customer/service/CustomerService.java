@@ -12,6 +12,7 @@ import com.storeql.customer.domain.Domain.MarketingPreference;
 import com.storeql.customer.domain.Domain.StoreCreditAccount;
 import com.storeql.customer.domain.Domain.TierChange;
 import com.storeql.customer.domain.LoyaltyProgramme;
+import com.storeql.customer.domain.ManualGrant;
 import com.storeql.customer.dto.Dtos.AddAddressRequest;
 import com.storeql.customer.dto.Dtos.AddressResponse;
 import com.storeql.customer.dto.Dtos.AdjustPointsRequest;
@@ -777,7 +778,14 @@ public class CustomerService {
     return programmes.programme(tenantId);
   }
 
-  public LoyaltyAccount earnPoints(UUID tenantId, UUID customerId, EarnPointsRequest req) {
+  /**
+   * Awards points by hand, once per Idempotency-Key.
+   *
+   * @param actorId the signed-in user, kept with the award
+   * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
+   */
+  public LoyaltyAccount earnPoints(
+      UUID tenantId, UUID customerId, EarnPointsRequest req, UUID actorId, String idempotencyKey) {
     get(tenantId, customerId);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     var event =
@@ -791,7 +799,15 @@ public class CustomerService {
         req.reason(),
         programmeOf(tenantId),
         event,
-        CustomerService::tierChangedEvent);
+        CustomerService::tierChangedEvent,
+        new ManualGrant(
+            ManualGrant.KIND_LOYALTY_EARN,
+            customerId,
+            req.points(),
+            null,
+            req.reason(),
+            actorId,
+            idempotencyKey));
   }
 
   public void accrueLoyaltyFromOrder(
@@ -1006,7 +1022,21 @@ public class CustomerService {
     }
   }
 
-  public LoyaltyAccount redeemPoints(UUID tenantId, UUID customerId, RedeemPointsRequest req) {
+  /**
+   * Spends points, once per order: with an {@code orderId} the redemption is keyed by (customer,
+   * order), so a retried tender takes nothing more and the same order with other points is refused
+   * ({@code 409 IDEMPOTENCY_KEY_REUSED}). Without one, an optional Idempotency-Key gives the same
+   * replay rule; with neither, every call spends.
+   *
+   * @param actorId the signed-in user, kept with the redemption
+   * @param idempotencyKey the request's key in canonical form, or null
+   */
+  public LoyaltyAccount redeemPoints(
+      UUID tenantId,
+      UUID customerId,
+      RedeemPointsRequest req,
+      UUID actorId,
+      String idempotencyKey) {
     get(tenantId, customerId);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     var event =
@@ -1019,11 +1049,40 @@ public class CustomerService {
             orderId,
             null,
             null);
+    String key =
+        orderId != null
+            ? Ids.derived(orderId, "loyalty-redeem/" + customerId).toString()
+            : idempotencyKey;
     return repo.redeemPoints(
-        tenantId, customerId, req.points(), orderId, req.reason(), programmeOf(tenantId), event);
+        tenantId,
+        customerId,
+        req.points(),
+        orderId,
+        req.reason(),
+        programmeOf(tenantId),
+        event,
+        new ManualGrant(
+            ManualGrant.KIND_LOYALTY_REDEEM,
+            customerId,
+            req.points(),
+            null,
+            req.reason(),
+            actorId,
+            key));
   }
 
-  public LoyaltyAccount adjustPoints(UUID tenantId, UUID customerId, AdjustPointsRequest req) {
+  /**
+   * A manual correction, once per Idempotency-Key.
+   *
+   * @param actorId the signed-in manager, kept with the correction
+   * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
+   */
+  public LoyaltyAccount adjustPoints(
+      UUID tenantId,
+      UUID customerId,
+      AdjustPointsRequest req,
+      UUID actorId,
+      String idempotencyKey) {
     get(tenantId, customerId);
     var event =
         loyaltyEvent(
@@ -1042,7 +1101,15 @@ public class CustomerService {
         req.reason(),
         programmeOf(tenantId),
         event,
-        CustomerService::tierChangedEvent);
+        CustomerService::tierChangedEvent,
+        new ManualGrant(
+            ManualGrant.KIND_LOYALTY_ADJUST,
+            customerId,
+            req.points(),
+            null,
+            req.reason(),
+            actorId,
+            idempotencyKey));
   }
 
   public List<LoyaltyLedgerEntry> getLedger(UUID tenantId, UUID customerId, int limit) {
@@ -1135,6 +1202,8 @@ public class CustomerService {
    *
    * @param tenantId owning tenant
    * @param customerId the customer to credit
+   * @param actorId the signed-in manager, kept with the issue
+   * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
    * @param req the amount, optional currency (the tenant's own when omitted), originating order and
    *     reason
    * @return the account with its new balance
@@ -1142,7 +1211,11 @@ public class CustomerService {
    *     tenant
    */
   public StoreCreditAccount issueStoreCredit(
-      UUID tenantId, UUID customerId, IssueStoreCreditRequest req) {
+      UUID tenantId,
+      UUID customerId,
+      IssueStoreCreditRequest req,
+      UUID actorId,
+      String idempotencyKey) {
     get(tenantId, customerId);
     String cur = storeCreditCurrency(tenantId, req.currency());
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
@@ -1162,7 +1235,21 @@ public class CustomerService {
             customerId,
             payload);
     return repo.issueStoreCredit(
-        tenantId, customerId, req.amount(), cur, orderId, req.reason(), event);
+        tenantId,
+        customerId,
+        req.amount(),
+        cur,
+        orderId,
+        req.reason(),
+        event,
+        new ManualGrant(
+            ManualGrant.KIND_STORE_CREDIT_ISSUE,
+            customerId,
+            req.amount(),
+            cur,
+            req.reason(),
+            actorId,
+            idempotencyKey));
   }
 
   /**

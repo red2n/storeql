@@ -537,6 +537,22 @@ final recallNoticesProvider = FutureProvider.autoDispose
       ];
     });
 
+/// The recall notices still open against one order, for the return dialogs
+/// ("This is a recall return"). Only notices at the caller's stores come back;
+/// another business's order, or a store not theirs, is an empty list.
+final orderRecallNoticesProvider = FutureProvider.autoDispose
+    .family<List<RecallNotice>, String>((ref, orderId) async {
+      final resp = await ref.read(apiClientProvider).dio.get(
+        _noticesBase,
+        queryParameters: {'orderId': orderId, 'status': 'ISSUED', 'limit': 100},
+      );
+      final data = (resp.data['data'] as List?) ?? const [];
+      return [
+        for (final e in data)
+          if (e is Map) RecallNotice.fromJson(e.cast<String, dynamic>()),
+      ];
+    });
+
 final recallBuyersProgressProvider = FutureProvider.autoDispose
     .family<RecallBuyersProgress, String>((ref, recallId) async {
       final resp = await ref

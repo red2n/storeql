@@ -132,7 +132,8 @@ class PurchaseAuthorizationIT {
   // ── helpers ─────────────────────────────────────────────────────────────────
 
   private String draftOrder(String role) {
-    Response sup = post("/suppliers", "{\"name\":\"auth-" + Ids.newId() + "\"}", role);
+    // Adding a supplier is warehouse and management work; the role under test raises the order.
+    Response sup = post("/suppliers", "{\"name\":\"auth-" + Ids.newId() + "\"}", "OWNER");
     assertThat(sup.getStatus(), is(201));
     String supId = id(sup.readEntity(String.class));
     Response po =

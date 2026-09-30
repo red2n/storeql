@@ -38,7 +38,8 @@ public class StaffRemovedHandler {
       eventId = Ids.parse(obj.getString("eventId"));
       tenantId = Ids.parse(obj.getString("tenantId"));
       userId = Ids.parse(obj.getString("userId"));
-      storeId = Ids.parse(obj.getString("storeId"));
+      // "businessWide":true and no storeId: the business-wide assignment (null store row) goes.
+      storeId = obj.getBoolean("businessWide", false) ? null : Ids.parse(obj.getString("storeId"));
       role = obj.getString("role");
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "Malformed StaffRemoved payload skipped: " + e.getMessage());

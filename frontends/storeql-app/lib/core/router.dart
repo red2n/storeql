@@ -372,6 +372,20 @@ final routerProvider = Provider<GoRouter>((ref) {
             ),
           ),
           GoRoute(
+            path: '/admin/security-events',
+            builder: (_, _) => DeferredWidget(
+              libraryLoader: admin_lib.loadLibrary,
+              builder: (_) => admin_lib.SecurityEventsScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/admin/changes',
+            builder: (_, _) => DeferredWidget(
+              libraryLoader: admin_lib.loadLibrary,
+              builder: (_) => admin_lib.BusinessChangesScreen(),
+            ),
+          ),
+          GoRoute(
             path: '/admin/stores',
             builder: (_, _) => DeferredWidget(
               libraryLoader: admin_lib.loadLibrary,

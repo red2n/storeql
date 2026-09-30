@@ -114,7 +114,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   truthy('[+] points spent release their share of the expected spend', net(release, '4020') === -released, { released, release });
   expect(call('POST', `/api/customer-svc/customers/${customer.id}/loyalty/redeem`, { token: owner, body: { points: points * 10, reason: 'more than held' } }), '[-] spending more points than are held is refused', [409, 422]);
   const rest = round(points - half);
-  must(call('POST', `/api/customer-svc/customers/${customer.id}/loyalty/adjust`, { token: owner, body: { points: -rest, reason: 'k6 lapse' } }), 200, 'the rest lapse');
+  must(call('POST', `/api/customer-svc/customers/${customer.id}/loyalty/adjust`, { token: owner, idem: true, body: { points: -rest, reason: 'k6 lapse' } }), 200, 'the rest lapse');
   poll(60, () => {
     release = of(ledger(), 'LOYALTY_RELEASE');
     return release.some((l) => l.nominalCode === '4030');

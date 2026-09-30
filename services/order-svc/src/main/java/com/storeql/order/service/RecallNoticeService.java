@@ -54,14 +54,41 @@ public class RecallNoticeService {
   }
 
   /**
-   * Cursor-paginated notices of one recall, newest first.
+   * Cursor-paginated notices, newest first, of one recall or of one order (or both).
    *
+   * <p>Asked by order, the answer is what the caller may see of it: only notices at stores the
+   * caller keeps, so another business's order, or one at a store the caller is not held to, gives
+   * an empty list and nothing that says the order exists.
+   *
+   * @param recallId the recall, or {@code null} to read across recalls (then {@code orderId} is
+   *     required)
+   * @param orderId the order whose open notices are wanted, or {@code null}
+   * @param storeScope the stores the caller is held to, or {@code null} when held to none; applied
+   *     when asked by order
    * @param status restrict to one status, or {@code null} for all
    */
   public Cursor.Page<Detail> list(
-      UUID tenantId, UUID recallId, Status status, String after, Integer limit) {
+      UUID tenantId,
+      UUID recallId,
+      UUID orderId,
+      java.util.Set<UUID> storeScope,
+      Status status,
+      String after,
+      Integer limit) {
+    if (recallId == null && orderId == null) {
+      throw ApiException.badRequest(
+          "VALIDATION_FAILED", "recallId or orderId: one of them is required");
+    }
     int lim = Cursor.clampLimit(limit);
-    var rows = repo.list(tenantId, recallId, status, Cursor.decodeCreatedAtId(after), lim + 1);
+    var rows =
+        repo.list(
+            tenantId,
+            recallId,
+            orderId,
+            orderId == null || storeScope == null || storeScope.isEmpty() ? null : storeScope,
+            status,
+            Cursor.decodeCreatedAtId(after),
+            lim + 1);
     return Cursor.page(rows, lim, d -> d.notice().issuedAt() + "|" + d.notice().id());
   }
 

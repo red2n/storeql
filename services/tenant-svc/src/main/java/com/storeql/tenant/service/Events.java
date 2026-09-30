@@ -148,19 +148,23 @@ final class Events {
                 + ",\"roleUpdatedAt\":\""
                 + roleUpdatedAt
                 + "\"";
+    // A business-wide assignment (no store) names none and says so: "businessWide":true, absent
+    // otherwise, so an event of a store assignment is byte-for-byte what it was.
+    String where = storeId == null ? "\"businessWide\":true" : "\"storeId\":\"" + storeId + "\"";
     return """
                 {"eventId":"%s","eventType":"StaffAssigned","tenantId":"%s","aggregateId":"%s","occurredAt":"%s",\
-                "userId":"%s","storeId":"%s","role":"%s"%s}"""
+                "userId":"%s",%s,"role":"%s"%s}"""
         .formatted(
-            Ids.newId(), tenantId, userId, Instant.now(), userId, storeId, esc(baseTier), custom);
+            Ids.newId(), tenantId, userId, Instant.now(), userId, where, esc(baseTier), custom);
   }
 
   /** A staff role taken away at a store (SJ-D51): iam-svc unbinds it. */
   static String staffRemoved(UUID tenantId, UUID userId, UUID storeId, String baseTier) {
+    String where = storeId == null ? "\"businessWide\":true" : "\"storeId\":\"" + storeId + "\"";
     return """
                 {"eventId":"%s","eventType":"StaffRemoved","tenantId":"%s","aggregateId":"%s","occurredAt":"%s",\
-                "userId":"%s","storeId":"%s","role":"%s"}"""
-        .formatted(Ids.newId(), tenantId, userId, Instant.now(), userId, storeId, esc(baseTier));
+                "userId":"%s",%s,"role":"%s"}"""
+        .formatted(Ids.newId(), tenantId, userId, Instant.now(), userId, where, esc(baseTier));
   }
 
   /** A custom role defined or redefined (20.10): iam-svc applies it to the role's holders. */

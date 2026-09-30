@@ -52,14 +52,20 @@ public class CostingResource {
    */
   @Operation(
       summary = "Set the costing method for a variant at a store",
-      description = "method must be FIFO or AVERAGE.")
+      description =
+          "method must be FIFO or AVERAGE. Management only, at a store the caller keeps; reading"
+              + " stays open to staff.")
   @APIResponse(responseCode = "400", description = "method is not FIFO or AVERAGE")
+  @APIResponse(responseCode = "403", description = "Not management, or STORE_ACCESS_DENIED")
   @PUT
   @Path("/costing-methods")
   public ApiResponse<CostingMethodResponse> upsertCostingMethod(UpsertCostingMethodRequest req) {
+    // The standard cost values the stock: management's, at a store the caller keeps.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(req.storeId(), "storeId");
+    ctx.requireStoreAccess(storeId);
     UUID variantId = uuid(req.variantId(), "variantId");
     return ApiResponse.ok(
         Mappers.toCostingMethod(
