@@ -3,50 +3,97 @@ package com.storeql.inventory.repo;
 import com.storeql.ids.Ids;
 import com.storeql.inventory.domain.Domain.SerialMovement;
 import com.storeql.inventory.domain.Domain.SerialNumber;
+import com.storeql.inventory.domain.SerialNumbers;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
+import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /** Serial number persistence. Extracted from InventoryRepository (self-contained section). */
 @ApplicationScoped
 public class SerialRepository extends BaseOutboxRepository {
 
-  /** Bulk-insert serial numbers + initial genealogy movement + outbox, atomically. */
-  public List<SerialNumber> registerSerials(List<SerialNumber> serials, OutboxRow event) {
+  /**
+   * Bulk-inserts serial numbers, their first genealogy movement and the outbox row, atomically.
+   * Each insert is {@code ON CONFLICT DO NOTHING RETURNING id}; a missing row is a clash and is
+   * never dropped. A supplied number that clashes refuses the whole call (409
+   * SERIAL_ALREADY_REGISTERED naming every clash, nothing written); a generated one is made again
+   * up to {@link SerialNumbers#MAX_GENERATION_ATTEMPTS} times, then 409
+   * SERIAL_GENERATION_EXHAUSTED.
+   *
+   * @param serials the serials to store, in the order the caller wants them back
+   * @param fresh makes another number when a generated one clashes; {@code null} when the numbers
+   *     were supplied
+   * @param event the outbox row, written with the rest
+   * @return exactly the rows stored
+   */
+  public List<SerialNumber> registerSerials(
+      List<SerialNumber> serials, Supplier<String> fresh, OutboxRow event) {
     return inTx(
         c -> {
-          try (var ps =
-              c.prepareStatement(
-                  "INSERT INTO serial_numbers"
-                      + " (id, tenant_id, store_id, variant_id, batch_id, serial_no, status, received_at)"
-                      + " VALUES (?,?,?,?,?,?,?,?)"
-                      + " ON CONFLICT (tenant_id, serial_no) DO NOTHING")) {
-            for (SerialNumber s : serials) {
-              ps.setObject(1, s.id());
-              ps.setObject(2, s.tenantId());
-              ps.setObject(3, s.storeId());
-              ps.setObject(4, s.variantId());
-              ps.setObject(5, s.batchId());
-              ps.setString(6, s.serialNo());
-              ps.setString(7, s.status());
-              ps.setObject(8, s.receivedAt().atOffset(ZoneOffset.UTC));
-              ps.addBatch();
+          SerialNumber[] stored = serials.toArray(new SerialNumber[0]);
+          // Insert in number order so two overlapping calls take their locks in the same order.
+          Integer[] order = new Integer[stored.length];
+          for (int i = 0; i < order.length; i++) order[i] = i;
+          if (fresh == null) {
+            Arrays.sort(order, Comparator.comparing(i -> stored[i].serialNo()));
+          }
+          List<String> clashes = new ArrayList<>();
+          for (int idx : order) {
+            int attempts = 0;
+            while (!insertOne(c, stored[idx])) {
+              if (fresh == null) {
+                clashes.add(stored[idx].serialNo());
+                break;
+              }
+              if (++attempts >= SerialNumbers.MAX_GENERATION_ATTEMPTS) {
+                throw new ApiException(
+                    409,
+                    "SERIAL_GENERATION_EXHAUSTED",
+                    "could not generate a free serial number; nothing was registered",
+                    List.of(),
+                    null);
+              }
+              SerialNumber s = stored[idx];
+              stored[idx] =
+                  new SerialNumber(
+                      s.id(),
+                      s.tenantId(),
+                      s.storeId(),
+                      s.variantId(),
+                      s.batchId(),
+                      fresh.get(),
+                      s.status(),
+                      s.receivedAt(),
+                      s.soldAt());
             }
-            ps.executeBatch();
+          }
+          if (!clashes.isEmpty()) {
+            throw new ApiException(
+                409,
+                "SERIAL_ALREADY_REGISTERED",
+                "serial numbers already registered in this business; nothing was registered",
+                clashes,
+                null);
           }
           try (var ps =
               c.prepareStatement(
                   "INSERT INTO serial_movements"
                       + " (id, tenant_id, serial_id, from_status, to_status, ref_type)"
                       + " VALUES (?,?,?,NULL,?,?)")) {
-            for (SerialNumber s : serials) {
+            for (SerialNumber s : stored) {
               ps.setObject(1, Ids.newId());
               ps.setObject(2, s.tenantId());
               ps.setObject(3, s.id());
@@ -57,9 +104,31 @@ public class SerialRepository extends BaseOutboxRepository {
             ps.executeBatch();
           }
           insertOutbox(c, event);
-          return serials;
+          return List.of(stored);
         },
         "register serials");
+  }
+
+  /** Inserts one serial; false when its number is already taken in the business. */
+  private static boolean insertOne(Connection c, SerialNumber s) throws SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO serial_numbers"
+                + " (id, tenant_id, store_id, variant_id, batch_id, serial_no, status, received_at)"
+                + " VALUES (?,?,?,?,?,?,?,?)"
+                + " ON CONFLICT (tenant_id, serial_no) DO NOTHING RETURNING id")) {
+      ps.setObject(1, s.id());
+      ps.setObject(2, s.tenantId());
+      ps.setObject(3, s.storeId());
+      ps.setObject(4, s.variantId());
+      ps.setObject(5, s.batchId());
+      ps.setString(6, s.serialNo());
+      ps.setString(7, s.status());
+      ps.setObject(8, s.receivedAt().atOffset(ZoneOffset.UTC));
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
   }
 
   /**

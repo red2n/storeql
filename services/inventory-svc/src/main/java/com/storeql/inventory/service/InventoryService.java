@@ -49,6 +49,7 @@ import com.storeql.inventory.domain.Domain.ValuationGrouping;
 import com.storeql.inventory.domain.Domain.ValuationRow;
 import com.storeql.inventory.domain.Domain.ZoneGlMapping;
 import com.storeql.inventory.domain.ReturnDisposition;
+import com.storeql.inventory.domain.SerialNumbers;
 import com.storeql.inventory.repo.AbcAnalysisRepository;
 import com.storeql.inventory.repo.CostingRepository;
 import com.storeql.inventory.repo.CycleCountRepository;
@@ -1411,8 +1412,11 @@ public class InventoryService {
    * @param autoQty how many to generate when {@code serials} is absent
    * @param prefix the prefix for generated numbers
    * @return the registered serial numbers
-   * @throws ApiException a 400 when more than 200 serials are supplied at once, or when neither a
-   *     list nor a quantity is given
+   * @throws ApiException a 400 when more than 200 serials are supplied at once, when neither a list
+   *     nor a quantity is given, or when a supplied number is blank; a 404 when the batch is not
+   *     this business's; a 409 SERIAL_ALREADY_REGISTERED (details name each number) when a supplied
+   *     number is repeated or already registered, nothing being written; a 409
+   *     SERIAL_GENERATION_EXHAUSTED when a generated number kept clashing
    */
   public List<SerialNumber> registerSerials(
       UUID tenantId,
@@ -1423,22 +1427,50 @@ public class InventoryService {
       Integer autoQty,
       String prefix) {
     List<String> serialNos;
+    boolean supplied = false;
+    String pfx = "SN";
     if (serials != null && !serials.isEmpty()) {
       if (serials.size() > 200)
         throw new ApiException(
             400, "TOO_MANY_SERIALS", "max 200 serials per call", List.of(), null);
-      serialNos = serials;
+      try {
+        serialNos = SerialNumbers.normalise(serials);
+      } catch (IllegalArgumentException e) {
+        throw new ApiException(
+            400, "SERIAL_NO_BLANK", "a serial number cannot be blank", List.of(), e);
+      }
+      List<String> repeats = SerialNumbers.repeated(serialNos);
+      if (!repeats.isEmpty()) {
+        throw new ApiException(
+            409,
+            "SERIAL_ALREADY_REGISTERED",
+            "the same serial number is given more than once; nothing was registered",
+            repeats,
+            null);
+      }
+      supplied = true;
     } else if (autoQty != null && autoQty > 0) {
       if (autoQty > 200)
         throw new ApiException(400, "TOO_MANY_SERIALS", "autoQty max 200", List.of(), null);
-      String pfx = prefix == null || prefix.isBlank() ? "SN" : prefix;
+      pfx = prefix == null || prefix.isBlank() ? "SN" : prefix.trim();
       serialNos = new ArrayList<>();
       for (int i = 0; i < autoQty; i++) {
-        serialNos.add(generateSerialNo(pfx, i));
+        serialNos.add(SerialNumbers.generate(pfx));
       }
     } else {
       throw new ApiException(
           400, "SERIALS_REQUIRED", "provide serials list or autoQty > 0", List.of(), null);
+    }
+    Batch batch =
+        repo.getBatch(tenantId, batchId)
+            .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "No such batch"));
+    if (!batch.storeId().equals(storeId) || !batch.variantId().equals(variantId)) {
+      throw new ApiException(
+          400,
+          "SERIAL_BATCH_MISMATCH",
+          "the batch is not that variant's stock at that store",
+          List.of(),
+          null);
     }
     Instant now = Instant.now();
     var domainSerials =
@@ -1463,7 +1495,9 @@ public class InventoryService {
             tenantId,
             batchId,
             Events.serialsRegistered(tenantId, batchId, domainSerials.size()));
-    return serialRepo.registerSerials(domainSerials, event);
+    final String generatedPrefix = pfx;
+    return serialRepo.registerSerials(
+        domainSerials, supplied ? null : () -> SerialNumbers.generate(generatedPrefix), event);
   }
 
   /**
@@ -1555,14 +1589,6 @@ public class InventoryService {
    */
   public List<SerialMovement> listSerialHistory(UUID tenantId, UUID serialId) {
     return serialRepo.listSerialHistory(tenantId, serialId);
-  }
-
-  private static String generateSerialNo(String prefix, int index) {
-    String rand =
-        Long.toHexString(System.nanoTime() ^ ((long) index * 0x9E3779B97F4A7C15L))
-            .toUpperCase(Locale.ROOT)
-            .substring(0, 8);
-    return prefix + "-" + rand;
   }
 
   // ---- demand history (Gap #7) ----

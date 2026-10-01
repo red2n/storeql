@@ -266,7 +266,7 @@ Nineteen resource classes covering the full stock/warehouse operations surface, 
 - `GET /admin/inventory/lots/{batchId}/actions` — audit history of split/merge actions on a batch.
 - `GET /admin/inventory/batches/expiring` — batches expiring within N days (default 30) for a store. Since SJ-D71 this includes stock that arrived by transfer, move or return, which used to arrive with no date.
 - `PUT /admin/inventory/batches/{id}/grade` — set a batch's quality grade.
-- `POST /admin/inventory/serials/register` — register serial numbers against a received batch (explicit list or auto-generated with a prefix).
+- `POST /admin/inventory/serials/register` — register serial numbers against a received batch (explicit list or auto-generated with a prefix). Generated numbers are the prefix plus 16 random upper-case hex characters of a fresh id (a clash is generated again, up to five times, then `409 SERIAL_GENERATION_EXHAUSTED`). A supplied number is trimmed and matched exactly (case counts, as in `lookup`); one already registered in the business, or repeated within the request, refuses the whole call with `409 SERIAL_ALREADY_REGISTERED` (`details` names each number) and writes nothing; two requests racing for one number have one winner. The batch must be the business's (`404 BATCH_NOT_FOUND`) and match the store and variant named (`400 SERIAL_BATCH_MISMATCH`). The answer, the first movement of each serial and the `SerialsRegistered` count describe exactly the rows stored.
 - `GET /admin/inventory/serials` — list serial numbers (by store/variant/status).
 - `GET /admin/inventory/serials/lookup?serial_no=` — find a serial by number.
 - `GET /admin/inventory/serials/{id}` — get a serial's detail.

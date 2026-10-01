@@ -1678,13 +1678,17 @@ export function serialControl(d) {
     // 5. Get the serial by ID
     const getRes = get(
       `/api/inventory-svc/admin/inventory/serials/${firstSerial.id}`, tenant.ownerToken);
-    ok(getRes, `${tag} SC get serial by id`);
+    if (!ok(getRes, `${tag} SC get serial by id`)) {
+      console.warn(`serial by id refused: ${getRes.status} ${String(getRes.body).slice(0, 240)}`);
+    }
 
     // 6. Change status to LOST
     const lostRes = put(
       `/api/inventory-svc/admin/inventory/serials/${firstSerial.id}/status`,
       { status: 'LOST' }, tenant.ownerToken);
-    ok(lostRes, `${tag} SC mark LOST`);
+    if (!ok(lostRes, `${tag} SC mark LOST`)) {
+      console.warn(`serial LOST refused: ${lostRes.status} ${String(lostRes.body).slice(0, 240)}`);
+    }
     check(lostRes, {
       [`${tag} SC serial status=LOST`]: r => {
         try { return JSON.parse(r.body).data.status === 'LOST'; } catch (_) { return false; }
@@ -2224,7 +2228,9 @@ export function costingControl(d) {
   // ── Open accounting period (unique per scenario-wide iteration: the scenario's 2
   //    concurrent VUs reach the same __ITER together, so __ITER alone collides) ──
   const periodSeq = exec.scenario.iterationInTest;
-  const periodDate = new Date(Date.now() - periodSeq * 86400000).toISOString().slice(0, 10);
+  // A period in the past: closing the one that covers today would (rightly) refuse every receipt,
+  // invoice and posting the rest of this run makes at that store today (PURCHASE_PERIOD_CLOSED).
+  const periodDate = new Date(Date.UTC(2015, 0, 1) + periodSeq * 86400000).toISOString().slice(0, 10);
   const periodRes = post('/api/inventory-svc/admin/inventory/accounting-periods',
     { storeId, periodName: `P-${periodSeq}-${tenant.label}`, periodDate }, tenant.ownerToken);
   check(periodRes, {
@@ -3093,9 +3099,9 @@ export function negativeTests(d) {
   neg(post('/api/inventory-svc/admin/inventory/accounting-periods',
     { periodName: 'NEG-PERIOD', periodDate: '2025-01-01' }, tenant.ownerToken), 'open period missing storeId', 400);
 
-  // Close a non-existent period → 409 (service returns conflict for not-found-or-already-closed)
+  // Close a non-existent period → 404 PERIOD_NOT_FOUND (the period is read before anything else)
   neg(post(`/api/inventory-svc/admin/inventory/accounting-periods/${fakeId}/close`,
-    {}, tenant.ownerToken), 'close nonexistent period', 409);
+    {}, tenant.ownerToken), 'close nonexistent period', 404);
 
   // Open two periods for the same store+date → 409
   const dupDate = '2020-06-01';
@@ -3510,7 +3516,9 @@ export function intercompanyFlow(d) {
         lines: [{ variantId: t.variantIds[0], qtyReceived: 50 }],
       }, ownerToken);
       intercompanyLatency.add(grnRes.timings.duration);
-      check(grnRes, { 'goods receipt 201': res => res.status === 201 });
+      if (!check(grnRes, { 'goods receipt 201': res => res.status === 201 })) {
+        console.warn(`goods receipt refused: ${grnRes.status} ${String(grnRes.body).slice(0, 240)}`);
+      }
 
       // PO should now be RECEIVED
       r = get(`/api/purchase-svc/purchase-orders/${poId}`, ownerToken);
@@ -3554,8 +3562,9 @@ export function intercompanyFlow(d) {
     check(r, { 'net amount correct': res => body(res)?.netAmount === 500.00 });
   }
 
-  // Nominal ledger check — should have 1100 Debtors entry
-  r = get('/api/purchase-svc/nominal-ledger', ownerToken);
+  // Nominal ledger check — should have 1100 Debtors entry (filtered by code: the unfiltered list is
+  // paged, and the receipts this run posts push the debtors line past the first page)
+  r = get('/api/purchase-svc/nominal-ledger?code=1100', ownerToken);
   check(r, { 'nominal ledger 200': res => res.status === 200 });
   check(r, { 'has debtors entry': res => {
     const entries = body(res);

@@ -22,7 +22,12 @@ function check(res, sets) {
 
 export function setup() {
   const tenant = onboardTenant('inventory', { stores: 2 });
-  return { tenant, variantId: sellableVariant(tenant, 'Stocked beans').variantId, shopper: register('inventory-shopper') };
+  return {
+    tenant,
+    variantId: sellableVariant(tenant, 'Stocked beans').variantId,
+    shopper: register('inventory-shopper'),
+    rival: onboardTenant('inventory-rival'),
+  };
 }
 
 export default function (d) {
@@ -1264,4 +1269,30 @@ export default function (d) {
     ),
     { '[-] create picking rule no token 401': (r) => r.status === 401 }
   );
+
+  // ── Serial numbers: a registration stores exactly what it answers ─────────
+  const serialBatch = (() => {
+    try {
+      const rows = JSON.parse(http.get(`${baseUrl}/api/inventory-svc/admin/inventory/batches?store=${storeId}&variant=${variantId}&limit=1`, { headers: hdrs }).body).data || [];
+      return rows[0] ? rows[0].id : null;
+    } catch (_) { return null; }
+  })();
+  const serialsUrl = `${baseUrl}/api/inventory-svc/admin/inventory/serials`;
+  const registerSerials = (b, headers = hdrs) => http.post(`${serialsUrl}/register`, JSON.stringify({ batchId: serialBatch, storeId, variantId, ...b }), { headers });
+  const generated = registerSerials({ autoQty: 3, prefix: 'K6' });
+  check(generated, { '[+] three generated serial numbers are registered': (r) => r.status === 201 && (JSON.parse(r.body).data || []).length === 3 });
+  const generatedIds = (() => { try { return (JSON.parse(generated.body).data || []).map((x) => x.id); } catch (_) { return []; } })();
+  check(generated, {
+    '[+] ...and every one answered is stored, readable by its id': () => generatedIds.length === 3 && generatedIds.every((id) => http.get(`${serialsUrl}/${id}`, { headers: hdrs }).status === 200),
+  });
+  const own = `K6-OWN-${Date.now().toString(36).toUpperCase()}`;
+  check(registerSerials({ serials: [own] }), { '[+] a serial number of our own is registered': (r) => r.status === 201 });
+  check(registerSerials({ serials: [own] }), {
+    '[-] the same number again is refused whole, never dropped': (r) => r.status === 409 && String(r.body).includes('SERIAL_ALREADY_REGISTERED') && String(r.body).includes(own),
+  });
+  check(registerSerials({ serials: [`${own}-B`, `${own}-B`] }), { '[-] a number repeated within one request is refused': (r) => r.status === 409 && String(r.body).includes('SERIAL_ALREADY_REGISTERED') });
+  check(http.get(`${serialsUrl}/lookup?serial_no=${own}-B`, { headers: hdrs }), { '[-] ...and nothing of the refused request was stored': (r) => r.status === 404 });
+  const rivalHdrs = { ...JSON_CT, Authorization: `Bearer ${d.rival.owner.token}` };
+  check(registerSerials({ serials: [`${own}-R`] }, rivalHdrs), { "[-] another business cannot register serials against our batch": (r) => r.status === 403 || r.status === 404 });
+  check(http.get(`${serialsUrl}/lookup?serial_no=${own}-R`, { headers: hdrs }), { '[-] ...and nothing was stored for it': (r) => r.status === 404 });
 }
