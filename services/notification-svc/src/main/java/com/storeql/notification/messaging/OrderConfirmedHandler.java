@@ -2,12 +2,12 @@ package com.storeql.notification.messaging;
 
 import com.storeql.ids.Ids;
 import com.storeql.notification.client.CustomerClient;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.service.Messages;
 import com.storeql.notification.service.Notifier;
 import com.storeql.notification.template.Values;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
@@ -46,7 +46,7 @@ class OrderConfirmedHandler {
     Instant slotStartsAt;
     Instant slotEndsAt;
     String slotTimeZone;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       if (!obj.containsKey("customerId") || obj.isNull("customerId")) {
         return; // guest checkout — no account to email

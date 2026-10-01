@@ -1,6 +1,7 @@
 package com.storeql.gateway.filters;
 
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.gateway.ControlPlane;
 import com.storeql.web.HttpHeaders;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.WebClient;
@@ -17,8 +18,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * What a business's API key may do (22.7), as iam-svc says, remembered here for ten seconds.
@@ -47,7 +46,7 @@ public class ApiKeyIntrospector {
   private static final String PATH = "/platform/api-keys/introspect";
 
   @Inject ServiceRegistry registry;
-  @Inject WebClient webClient;
+  @Inject @ControlPlane WebClient webClient;
 
   /** iam-svc's answer. */
   public sealed interface Verdict permits Active, Refused, Unavailable {}
@@ -67,33 +66,15 @@ public class ApiKeyIntrospector {
   /** iam-svc could not be asked, or did not answer in a way this gateway can read. */
   public record Unavailable() implements Verdict {}
 
-  private record Cached(Verdict verdict, long expiresAt) {}
-
-  private final Map<String, Cached> cache = new ConcurrentHashMap<>();
+  /**
+   * Never serves a verdict past its ten seconds, even while it is refreshed: a revocation must land
+   * on time. A burst of requests with one key does share one lookup.
+   */
+  private final LookupCache<Verdict> cache =
+      new LookupCache<>(MAX_ENTRIES, TTL_MILLIS, false, this::now);
 
   public Verdict introspect(String key) {
-    String k = cacheKey(key);
-    long now = now();
-    Cached c = cache.get(k);
-    if (c != null && c.expiresAt() > now) {
-      return c.verdict();
-    }
-    Verdict verdict = lookup(key);
-    if (verdict instanceof Unavailable) {
-      return verdict;
-    }
-    if (cache.size() >= MAX_ENTRIES && !cache.containsKey(k)) {
-      cache.values().removeIf(v -> v.expiresAt() <= now);
-      if (cache.size() >= MAX_ENTRIES) {
-        var it = cache.keySet().iterator();
-        if (it.hasNext()) {
-          it.next();
-          it.remove();
-        }
-      }
-    }
-    cache.put(k, new Cached(verdict, now + TTL_MILLIS));
-    return verdict;
+    return cache.get(cacheKey(key), k -> lookup(key), v -> !(v instanceof Unavailable));
   }
 
   /** iam-svc's answer for a key, asked now. */
@@ -132,6 +113,8 @@ public class ApiKeyIntrospector {
   /** The key's SHA-256 in hex: what the memory is keyed by, so a heap dump holds no key. */
   static String cacheKey(String key) {
     try {
+      // A digest per call: MessageDigest is not thread-safe, and the provider lookup is cached
+      // by the JDK, so this costs little on the request path.
       MessageDigest md = MessageDigest.getInstance("SHA-256");
       return HexFormat.of().formatHex(md.digest(key.getBytes(StandardCharsets.UTF_8)));
     } catch (NoSuchAlgorithmException e) {

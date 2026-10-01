@@ -122,6 +122,13 @@ public class JwtAuthFilter implements ContainerRequestFilter {
 
   @Inject SigningKeySet signingKeys;
 
+  private static final java.util.regex.Pattern VERSION_PREFIX =
+      java.util.regex.Pattern.compile("^api/v\\d+/");
+  private static final java.util.regex.Pattern ONBOARDING_ROUTE =
+      java.util.regex.Pattern.compile("api/[a-z0-9-]+/onboarding(/.*)?");
+  private static final java.util.regex.Pattern PLATFORM_ROUTE =
+      java.util.regex.Pattern.compile("api/[a-z0-9-]+/platform(/.*)?");
+
   /** A verifier per signing key, built once the key is known. */
   private final java.util.Map<String, JWTVerifier> verifiers =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -154,8 +161,8 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     String kid = decoded.getKeyId();
     var key =
         signingKeys.key(kid).orElseThrow(() -> new JWTVerificationException("unknown signing key"));
-    return verifiers
-        .computeIfAbsent(
+    JWTVerifier verifier =
+        verifiers.computeIfAbsent(
             kid + ":" + key.getModulus().hashCode(),
             k ->
                 JWT.require(Algorithm.RSA256(key, null))
@@ -177,8 +184,15 @@ public class JwtAuthFilter implements ContainerRequestFilter {
                     // never be allowed to help.
                     .acceptIssuedAt(CLOCK_SKEW_SECONDS)
                     .acceptNotBefore(CLOCK_SKEW_SECONDS)
-                    .build())
-        .verify(token);
+                    .build());
+    // Once a rotation has retired a key, its verifier goes too: the cache holds the current set.
+    if (verifiers.size() > signingKeys.kids().size()) {
+      var current = new java.util.HashSet<String>();
+      signingKeys.snapshot().forEach((id, k) -> current.add(id + ":" + k.getModulus().hashCode()));
+      verifiers.keySet().retainAll(current);
+    }
+    // The token is already decoded: verify that, rather than parsing the compact form again.
+    return verifier.verify(decoded);
   }
 
   @Override
@@ -737,7 +751,7 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     while (p.endsWith("/")) p = p.substring(0, p.length() - 1);
     // Collapse an optional API version segment so /api/v1/... matches the same public/storefront/
     // onboarding whitelists as the unversioned /api/... alias (golden rule #2 stays exact-match).
-    p = p.replaceFirst("^api/v\\d+/", "api/");
+    p = VERSION_PREFIX.matcher(p).replaceFirst("api/");
     return p;
   }
 
@@ -790,8 +804,8 @@ public class JwtAuthFilter implements ContainerRequestFilter {
   /** The routes a key never reaches, whatever tier it holds: see {@link #authenticateApiKey}. */
   static boolean isNoRouteForAKey(String target) {
     return target.startsWith("api/iam-svc/")
-        || target.matches("api/[a-z0-9-]+/onboarding(/.*)?")
-        || target.matches("api/[a-z0-9-]+/platform(/.*)?");
+        || ONBOARDING_ROUTE.matcher(target).matches()
+        || PLATFORM_ROUTE.matcher(target).matches();
   }
 
   private static Response keyRouteForbidden() {

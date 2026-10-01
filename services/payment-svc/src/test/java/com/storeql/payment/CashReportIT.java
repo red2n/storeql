@@ -20,7 +20,13 @@ import java.math.BigDecimal;
 import java.sql.DriverManager;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -382,5 +388,74 @@ class CashReportIT {
     // Their own store reads.
     UUID tillA = open(heldToA, storeA, "3.00");
     assertThat(xReport(heldToA, tillA).status(), is(200));
+  }
+
+  @Test
+  @DisplayName("A movement that is neither in nor out is 400 INVALID_DIRECTION and is not kept")
+  void aMovementThatIsNeitherInNorOutIsRefused() {
+    UUID tenant = Ids.newId();
+    UUID store = Ids.newId();
+    Caller manager = new Caller(tenant, Ids.newId(), "MANAGER");
+    UUID till = open(manager, store, "10.00");
+
+    for (String direction : new String[] {"SIDEWAYS", "pay_in", "Pay_Out"}) {
+      Answer a = movement(manager, store, till, direction, "5.00");
+      assertThat(direction + " " + a.body(), a.status(), is(400));
+      assertThat(direction, a.code(), is("INVALID_DIRECTION"));
+    }
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM payment.cash_movements WHERE tenant_id = '"
+                + tenant
+                + "' AND till_session_id = '"
+                + till
+                + "'"),
+        is("0"));
+    eq("drawer", xReport(manager, till).data(), "expectedCashInTill", "10");
+    // A proper direction is taken, so the refusal was the direction's.
+    assertThat(movement(manager, store, till, "PAY_IN", "5.00").status(), is(201));
+  }
+
+  @Test
+  @DisplayName("Closes arriving together close the till once and announce it once")
+  void twoClosesAtOnceCloseTheTillOnce() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID store = Ids.newId();
+    Caller owner = Caller.owner(tenant);
+    UUID till = open(owner, store, "80.00");
+    int n = 4;
+    ExecutorService pool = Executors.newFixedThreadPool(n);
+    CountDownLatch ready = new CountDownLatch(n);
+    CountDownLatch go = new CountDownLatch(1);
+    List<Future<Answer>> futures = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      futures.add(
+          pool.submit(
+              () -> {
+                ready.countDown();
+                go.await();
+                return ItCalls.post(
+                    target, TILLS + "/" + till + "/close", owner, "{\"countedCash\":95.00}");
+              }));
+    }
+    ready.await();
+    go.countDown();
+    int ok = 0;
+    for (Future<Answer> f : futures) {
+      Answer a = f.get();
+      if (a.status() == 200) {
+        ok++;
+      } else if (a.status() == 409) {
+        assertThat(a.body().toString(), a.code(), is("TILL_ALREADY_CLOSED"));
+      } else {
+        assertThat(a.body().toString(), a.status(), is(400));
+        assertThat(a.code(), is("TILL_CLOSED"));
+      }
+    }
+    pool.shutdown();
+
+    assertThat(ok, is(1));
+    assertThat(outbox(tenant, till), is("1"));
   }
 }

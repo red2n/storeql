@@ -680,4 +680,199 @@ class BillingIT {
         is(new BigDecimal(myInvoice.get("outstanding").toString())));
     assertThat(after.getString("tenantId"), is(mine));
   }
+
+  // ── refusals the billing surface makes by name ─────────────────────────────
+
+  /**
+   * A plan on sale priced only in {@code currency} at {@code amount}, with a trial of {@code
+   * trialDays}.
+   */
+  private String planIn(String code, String currency, String amount, int trialDays) {
+    Answer written =
+        platform(
+            "POST",
+            PLANS,
+            "{\"code\":\""
+                + code
+                + "\",\"name\":\""
+                + code
+                + " plan\",\"billingInterval\":\"MONTH\",\"trialDays\":"
+                + trialDays
+                + ",\"isPublic\":true,\"sortOrder\":1}");
+    assertThat(written.text(), written.status(), is(201));
+    String id = written.data().getString("id");
+    assertThat(
+        platform(
+                "POST",
+                PLANS + "/" + id + "/prices",
+                "{\"currency\":\"" + currency + "\",\"amount\":" + amount + "}")
+            .status(),
+        is(200));
+    assertThat(platform("POST", PLANS + "/" + id + "/activate", null).status(), is(200));
+    return id;
+  }
+
+  private static String tail() {
+    return Ids.newId().toString().substring(28).toUpperCase(java.util.Locale.ROOT);
+  }
+
+  private String planOf(String tenantId) {
+    return owner("GET", MINE, null, tenantId)
+        .data()
+        .getJsonObject("subscription")
+        .getString("planCode");
+  }
+
+  @Test
+  @DisplayName("A business with no subscription is not found, and nothing is recorded for it")
+  void aBusinessWithNoSubscriptionIsNotFound() {
+    Answer check =
+        platform(
+            "POST",
+            BILLING + "/tenants/" + Ids.newId() + "/vat-check",
+            "{\"vatNumber\":\"DE123456789\",\"source\":\"MANUAL\"}");
+    assertThat(check.text(), check.status(), is(404));
+    assertThat(check.code(), is("SUBSCRIPTION_NOT_FOUND"));
+    // A business's own view of it is the same refusal, rather than an empty page.
+    Answer own = owner("GET", MINE, null, Ids.newId().toString());
+    assertThat(own.text(), own.status(), is(404));
+    assertThat(own.code(), is("SUBSCRIPTION_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName("A VAT check names where it came from and what it checked, or it is refused")
+  void aCheckFromNowhereIsRefused() {
+    sellerIs("IE", "0.2300");
+    String plan = sellablePlan("IT-SRC-" + tail(), "10.00");
+    assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
+    String shop = onboard("Checks nothing");
+    assertThat(
+        owner("PUT", MINE + "/details", "{\"country\":\"DE\",\"vatNumber\":\"DE111111111\"}", shop)
+            .status(),
+        is(200));
+
+    Answer guessed =
+        platform(
+            "POST",
+            BILLING + "/tenants/" + shop + "/vat-check",
+            "{\"vatNumber\":\"DE111111111\",\"source\":\"GUESSED\"}");
+    assertThat(guessed.status(), is(400));
+    assertThat(guessed.code(), is("VAT_CHECK_SOURCE_UNKNOWN"));
+
+    // An ideographic space passes a trim()-based not-blank check and is caught by the service.
+    Answer blank =
+        platform(
+            "POST",
+            BILLING + "/tenants/" + shop + "/vat-check",
+            "{\"vatNumber\":\"\\u3000\",\"source\":\"MANUAL\"}");
+    assertThat(blank.status(), is(400));
+    assertThat(blank.code(), is("VAT_NUMBER_REQUIRED"));
+
+    JsonObject buyer =
+        owner("GET", MINE, null, shop).data().getJsonObject("subscription").getJsonObject("buyer");
+    assertThat("the buyer stays unchecked", buyer.getBoolean("vatChecked"), is(false));
+
+    // The platform records checks; a business does not, and another business's id is no help.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer own =
+          call(
+              "POST",
+              BILLING + "/tenants/" + shop + "/vat-check",
+              "{\"vatNumber\":\"DE111111111\",\"source\":\"MANUAL\"}",
+              shop,
+              role);
+      assertThat(role, own.status(), is(403));
+    }
+    assertThat(
+        owner("GET", MINE, null, shop)
+            .data()
+            .getJsonObject("subscription")
+            .getJsonObject("buyer")
+            .getBoolean("vatChecked"),
+        is(false));
+  }
+
+  @Test
+  @DisplayName("A plan change is NOW or at PERIOD_END, and anything else changes nothing")
+  void aPlanChangeIsNowOrAtPeriodEnd() {
+    sellerIs("IE", "0.2300");
+    String tag = tail();
+    String small = sellablePlan("IT-WHEN-S-" + tag, "10.00");
+    String big = sellablePlan("IT-WHEN-B-" + tag, "20.00");
+    assertThat(platform("POST", PLANS + "/" + small + "/default", null).status(), is(200));
+    String shop = onboard("Changes when");
+    String before = planOf(shop);
+    int invoices = invoicesOf(shop).size();
+
+    Answer tomorrow =
+        owner("POST", MINE + "/plan", "{\"planId\":\"" + big + "\",\"when\":\"TOMORROW\"}", shop);
+    assertThat(tomorrow.status(), is(400));
+    assertThat(tomorrow.code(), is("PLAN_CHANGE_WHEN_UNKNOWN"));
+    assertThat("the subscription is unchanged", planOf(shop), is(before));
+    assertThat("and nothing was invoiced", invoicesOf(shop).size(), is(invoices));
+  }
+
+  @Test
+  @DisplayName("Money arrives by transfer or card; any other method is refused and settles nothing")
+  void moneyArrivesByTransferOrCard() {
+    sellerIs("IE", "0.2300");
+    String plan = sellablePlan("IT-METH-" + tail(), "10.00");
+    assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
+    String shop = onboard("Pays by cheque");
+    JsonObject invoice = invoicesOf(shop).get(0);
+    String id = invoice.getString("id");
+
+    Answer cheque =
+        platform(
+            "POST",
+            BILLING + "/invoices/" + id + "/payments",
+            "{\"amount\":1.00,\"method\":\"CHEQUE\",\"providerRef\":\"CHQ-1\"}");
+    assertThat(cheque.status(), is(400));
+    assertThat(cheque.code(), is("PAYMENT_METHOD_UNKNOWN"));
+
+    JsonObject after = invoicesOf(shop).get(0);
+    assertThat("the invoice is as it was", after.getString("status"), is("OPEN"));
+    assertThat(
+        new BigDecimal(after.get("outstanding").toString())
+            .compareTo(new BigDecimal(invoice.get("outstanding").toString())),
+        is(0));
+  }
+
+  @Test
+  @DisplayName("An upgrade to a plan with no price in the business's currency is refused")
+  void anUpgradeToAPlanWithNoPriceInTheBusinessCurrencyIsRefused() {
+    sellerIs("IE", "0.2300");
+    String tag = tail();
+    String small = sellablePlan("IT-CUR-S-" + tag, "10.00");
+    String dollars = planIn("IT-CUR-D-" + tag, "USD", "25.00", 0);
+    assertThat(platform("POST", PLANS + "/" + small + "/default", null).status(), is(200));
+    String shop = onboard("Euro business");
+    String before = planOf(shop);
+    int invoices = invoicesOf(shop).size();
+
+    Answer up =
+        owner("POST", MINE + "/plan", "{\"planId\":\"" + dollars + "\",\"when\":\"NOW\"}", shop);
+    assertThat(up.status(), is(409));
+    assertThat(up.code(), is("PLAN_PRICE_MISSING"));
+    assertThat(planOf(shop), is(before));
+    assertThat("no invoice was issued", invoicesOf(shop).size(), is(invoices));
+  }
+
+  @Test
+  @DisplayName("A change with nothing to bill is refused, and no adjustment is issued")
+  void aChangeWithNothingToBillIsRefused() {
+    sellerIs("IE", "0.2300");
+    String tag = tail();
+    String free = planIn("IT-FREE-A-" + tag, "EUR", "0.00", 14);
+    String alsoFree = planIn("IT-FREE-B-" + tag, "EUR", "0.00", 14);
+    assertThat(platform("POST", PLANS + "/" + free + "/default", null).status(), is(200));
+    String shop = onboard("Free to free");
+    int invoices = invoicesOf(shop).size();
+
+    Answer change =
+        owner("POST", MINE + "/plan", "{\"planId\":\"" + alsoFree + "\",\"when\":\"NOW\"}", shop);
+    assertThat(change.text(), change.status(), is(409));
+    assertThat(change.code(), is("BILLING_PERIOD_ENDING"));
+    assertThat("no adjustment was issued", invoicesOf(shop).size(), is(invoices));
+  }
 }

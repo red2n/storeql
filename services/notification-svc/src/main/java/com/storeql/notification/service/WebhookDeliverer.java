@@ -6,6 +6,7 @@ import com.storeql.notification.domain.Webhooks.Attempt;
 import com.storeql.notification.domain.Webhooks.Delivery;
 import com.storeql.notification.domain.Webhooks.Due;
 import com.storeql.notification.domain.Webhooks.Endpoint;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.repo.WebhookRepository;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
@@ -15,7 +16,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.Initialized;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import java.io.StringReader;
@@ -24,9 +24,15 @@ import java.lang.System.Logger.Level;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
@@ -45,7 +51,6 @@ public class WebhookDeliverer {
   private static final Logger LOG = System.getLogger(WebhookDeliverer.class.getName());
   private static final String USER_AGENT = "StoreQL-Webhooks/1";
   private static final int SNIPPET_MAX = 8192;
-  private static final Duration LEASE = Duration.ofMinutes(2);
 
   @Inject WebhookRepository repo;
   @Inject WebhookSecrets secrets;
@@ -78,8 +83,30 @@ public class WebhookDeliverer {
   @ConfigProperty(name = "storeql.webhooks.keep-days", defaultValue = "30")
   int keepDays;
 
+  @Inject
+  @ConfigProperty(name = "storeql.webhooks.lease-seconds", defaultValue = "120")
+  long leaseSeconds;
+
+  @Inject
+  @ConfigProperty(name = "storeql.webhooks.concurrency", defaultValue = "8")
+  int concurrency;
+
+  @Inject
+  @ConfigProperty(name = "storeql.webhooks.prune-interval-seconds", defaultValue = "3600")
+  long pruneIntervalSeconds;
+
+  @Inject
+  @ConfigProperty(name = "storeql.webhooks.prune-batch", defaultValue = "1000")
+  int pruneBatch;
+
+  @Inject
+  @ConfigProperty(name = "storeql.webhooks.prune-max-batches-per-run", defaultValue = "50")
+  int pruneMaxBatches;
+
   private WebClient http;
   private ScheduledExecutorService scheduler;
+  private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+  private volatile Instant lastPrune = Instant.EPOCH;
 
   void onStart(@Observes @Initialized(ApplicationScoped.class) Object event) {
     http =
@@ -105,6 +132,7 @@ public class WebhookDeliverer {
   @PreDestroy
   void stop() {
     if (scheduler != null) scheduler.shutdownNow();
+    workers.shutdownNow();
   }
 
   private void tickQuietly() {
@@ -130,10 +158,74 @@ public class WebhookDeliverer {
               .build();
     }
     Instant now = Instant.now();
-    List<Due> due = repo.claimDue(batch, now, LEASE);
-    for (Due d : due) attempt(d);
-    repo.prune(now.minus(Duration.ofDays(keepDays)));
+    Duration lease = Duration.ofSeconds(leaseSeconds);
+    List<Due> due = repo.claimDue(batch, now, lease);
+    deliverAll(due, now.plus(lease.dividedBy(2)));
+    pruneIfDue(now);
     return due.size();
+  }
+
+  /**
+   * The claimed deliveries are sent concurrently, but one endpoint's deliveries go one after the
+   * other (so its events keep their order), at most {@code concurrency} endpoints at once, so one
+   * slow receiver delays only itself. An endpoint whose turn would begin after half the lease has
+   * gone is left alone: its deliveries keep the lease and come due again when it ends, rather than
+   * being sent a second time by whoever claims them next.
+   */
+  private void deliverAll(List<Due> due, Instant stopStarting) {
+    if (due.isEmpty()) return;
+    Map<UUID, List<Due>> byEndpoint = new LinkedHashMap<>();
+    for (Due d : due) {
+      byEndpoint.computeIfAbsent(d.endpoint().id(), k -> new java.util.ArrayList<>()).add(d);
+    }
+    Semaphore slots = new Semaphore(Math.max(1, concurrency));
+    List<Future<?>> running = new java.util.ArrayList<>();
+    for (List<Due> group : byEndpoint.values()) {
+      running.add(
+          workers.submit(
+              () -> {
+                try {
+                  slots.acquire();
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                  return;
+                }
+                try {
+                  for (Due d : group) {
+                    if (Instant.now().isAfter(stopStarting)) return;
+                    try {
+                      attempt(d);
+                    } catch (RuntimeException e) {
+                      LOG.log(Level.WARNING, "Webhook attempt failed: " + e.getMessage(), e);
+                    }
+                  }
+                } finally {
+                  slots.release();
+                }
+              }));
+    }
+    for (Future<?> f : running) {
+      try {
+        f.get();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return;
+      } catch (java.util.concurrent.ExecutionException e) {
+        LOG.log(Level.WARNING, "Webhook delivery worker failed: " + e.getMessage(), e);
+      }
+    }
+  }
+
+  /**
+   * Settled deliveries past the keep period go in bounded batches, once an interval, not a tick.
+   */
+  private void pruneIfDue(Instant now) {
+    if (Duration.between(lastPrune, now).getSeconds() < pruneIntervalSeconds) return;
+    lastPrune = now;
+    Instant before = now.minus(Duration.ofDays(keepDays));
+    for (int i = 0; i < pruneMaxBatches; i++) {
+      if (repo.prune(before, pruneBatch) < pruneBatch) break;
+    }
   }
 
   private void attempt(Due due) {
@@ -237,7 +329,7 @@ public class WebhookDeliverer {
   /** What the receiver reads: who, what, when, which try — and the event whole under data. */
   static String envelope(Delivery d, int attempt, Instant at) {
     JsonObjectBuilder b =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("id", d.id().toString())
             .add("type", d.eventType())
             .add("eventId", d.eventId().toString())
@@ -245,7 +337,7 @@ public class WebhookDeliverer {
             .add("attempt", attempt)
             .add("sentAt", at.toString());
     JsonObject data = null;
-    try (var reader = Json.createReader(new StringReader(d.payload()))) {
+    try (var reader = Jsons.reader(new StringReader(d.payload()))) {
       data = reader.readObject();
     } catch (RuntimeException ignored) {
       // A payload that is not an object travels as text.
@@ -260,12 +352,12 @@ public class WebhookDeliverer {
     return b.build().toString();
   }
 
-  private static String snippet(HttpClientResponse resp) {
-    try {
-      String text = resp.as(String.class);
-      if (text == null) return null;
-      return text.length() > SNIPPET_MAX ? text.substring(0, SNIPPET_MAX) : text;
-    } catch (RuntimeException e) {
+  /** At most SNIPPET_MAX bytes of the answer are read: the receiver chooses how long it is. */
+  static String snippet(HttpClientResponse resp) {
+    try (java.io.InputStream in = resp.entity().inputStream()) {
+      byte[] bytes = in.readNBytes(SNIPPET_MAX);
+      return new String(bytes, StandardCharsets.UTF_8);
+    } catch (java.io.IOException | RuntimeException e) {
       return null;
     }
   }

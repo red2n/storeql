@@ -3,6 +3,7 @@ package com.storeql.payment.client;
 import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.payment.config.Jsons;
 import com.storeql.payment.config.ServiceConfig;
 import com.storeql.web.ApiException;
 import com.storeql.web.HttpHeaders;
@@ -12,7 +13,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
@@ -65,13 +65,14 @@ public class CustomerClient {
   @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
   public void redeemStoreCredit(
       UUID tenantId, UUID customerId, BigDecimal amount, String currency, UUID orderId) {
-    ServiceInstance instance =
-        registry
-            .resolve(CUSTOMER_SERVICE)
+    String base =
+        com.storeql.service.ServiceReader.configuredUrl(CUSTOMER_SERVICE)
+            .or(() -> registry.resolve(CUSTOMER_SERVICE).map(ServiceInstance::baseUri))
             .orElseThrow(() -> unavailable("no healthy customer-svc instance in discovery", null));
 
     String payload =
-        Json.createObjectBuilder()
+        Jsons.PROVIDER
+            .createObjectBuilder()
             .add("amount", amount)
             .add("currency", currency)
             .add("orderId", orderId.toString())
@@ -81,7 +82,7 @@ public class CustomerClient {
 
     try (HttpClientResponse res =
         webClient
-            .post(instance.baseUri() + "/customers/" + customerId + "/store-credit/redeem")
+            .post(base + "/customers/" + customerId + "/store-credit/redeem")
             .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
             .header(HeaderNames.create(HttpHeaders.ROLES), INTERNAL_ROLE)
             .header(HeaderNames.CONTENT_TYPE, "application/json")

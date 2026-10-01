@@ -22,6 +22,8 @@ import java.util.Map;
  * KOR whose lines are the differences: negative.
  */
 public final class Fa3 {
+  private static final java.util.regex.Pattern SPACE_DASH =
+      java.util.regex.Pattern.compile("[\\s-]");
 
   public static final String NAMESPACE = "http://crd.gov.pl/wzor/2025/06/25/13775/";
   public static final String SYSTEM_CODE = "FA (3)";
@@ -58,7 +60,7 @@ public final class Fa3 {
   /** The Polish tax number in a VAT identifier, or null when the party is not Polish. */
   public static String nipOf(String vatId) {
     if (vatId == null) return null;
-    String v = vatId.replaceAll("[\\s-]", "").toUpperCase(Locale.ROOT);
+    String v = SPACE_DASH.matcher(vatId).replaceAll("").toUpperCase(Locale.ROOT);
     if (!v.startsWith("PL")) return null;
     String digits = v.substring(2);
     return digits.matches("\\d{10}") ? digits : null;

@@ -331,6 +331,44 @@ class ExchangeIT {
   }
 
   @Test
+  @DisplayName("A sale placed under the exchange's derived key is refused, and no return is made")
+  void aSaleSquattingTheExchangeKeyIsRefused() {
+    String order = rig().sale(T, STORE, V_A, 2, null, MANAGER);
+    java.util.UUID key = Ids.newId();
+    // The derived key is a plain hash, so anybody can place a till sale under it first.
+    Response squat =
+        rig()
+            .post(
+                "/orders",
+                "{\"storeId\":\""
+                    + STORE
+                    + "\",\"channel\":\"POS\",\"fulfilmentType\":\"INSTORE\",\"items\":["
+                    + newLine(V_B, 1)
+                    + "]}",
+                T,
+                "MANAGER",
+                MANAGER,
+                Ids.derived(key, "exchange-order").toString());
+    data(squat, 201);
+    long returns = returnsOf(T);
+
+    Response r =
+        exchange(
+            order,
+            exchangeBody(lineOf(V_A, 1, "SEALED"), newLine(V_B, 1), ""),
+            T,
+            "CASHIER",
+            CASHIER,
+            key.toString());
+    String text = r.readEntity(String.class);
+    assertThat(text, r.getStatus(), is(409));
+    assertThat(text, containsString("ORDER_EXCHANGE_INCOMPLETE"));
+    assertThat(returnsOf(T), is(returns));
+    assertThat(rig().count("returns", "order_id='" + order + "'"), is(0L));
+    assertThat(rig().events(order, "OrderReturned"), is(0L));
+  }
+
+  @Test
   @DisplayName("A refusal after the return is worked out leaves no new sale behind")
   void aRefusalLeavesNothing() {
     String order = rig().sale(T, STORE, V_A, 2, null, MANAGER);
@@ -388,6 +426,19 @@ class ExchangeIT {
     assertThat(nothingBought.getStatus(), is(400));
     assertThat(
         nothingBought.readEntity(String.class), containsString("ORDER_EXCHANGE_NO_NEW_ITEMS"));
+    // Nothing coming back.
+    Response nothingReturned =
+        exchange(
+            order,
+            "{\"reason\":\"r\",\"returnItems\":[],\"newItems\":[" + newLine(V_B, 1) + "]}",
+            T,
+            "CASHIER",
+            CASHIER,
+            Ids.newId().toString());
+    assertThat(nothingReturned.getStatus(), is(400));
+    assertThat(nothingReturned.readEntity(String.class), containsString("ORDER_RETURN_NO_ITEMS"));
+    assertThat(ordersOf(T), is(orders));
+    assertThat(returnsOf(T), is(returns));
     // Somebody who cannot ring a sale up cannot exchange.
     assertThat(
         exchange(order, good, T, "STOREKEEPER", KEEPER, Ids.newId().toString()).getStatus(),

@@ -64,6 +64,9 @@ public class ReturnPolicyResource {
               + " holding sales.refund.")
   @APIResponse(responseCode = "200", description = "The policy now in force")
   @APIResponse(responseCode = "400", description = "Window outside 1..3650 or a negative ceiling")
+  @APIResponse(
+      responseCode = "403",
+      description = "BUSINESS_WIDE_ONLY: a manager held to stores cannot set the whole business's")
   @PUT
   public ApiResponse<ReturnPolicyResponse> put(ReturnPolicyRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER", "PLATFORM_ADMIN");

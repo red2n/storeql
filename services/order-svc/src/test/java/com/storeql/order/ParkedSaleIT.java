@@ -131,6 +131,42 @@ class ParkedSaleIT {
   }
 
   @Test
+  @DisplayName("The open list gives each parked sale its own lines, read together")
+  void theListCarriesEachSalesOwnLines() {
+    String one = parked(STORE, ALICE).getString("id");
+    String two =
+        data(
+                rig()
+                    .post(
+                        "/pos/parked-sales",
+                        "{\"storeId\":\""
+                            + STORE
+                            + "\",\"customerName\":\"Two\",\"items\":["
+                            + "{\"variantId\":\""
+                            + V_A
+                            + "\",\"qty\":1,\"unitPrice\":5.00},"
+                            + "{\"variantId\":\""
+                            + V_A
+                            + "\",\"qty\":3,\"unitPrice\":2.00}]}",
+                        T,
+                        "CASHIER",
+                        ALICE,
+                        null),
+                201)
+            .getString("id");
+    JsonArray list = listOf("?storeId=" + STORE, T, "CASHIER", BOB, null);
+    for (var v : list) {
+      JsonObject sale = v.asJsonObject();
+      if (sale.getString("id").equals(one)) {
+        assertThat(sale.getJsonArray("items").size(), is(1));
+      } else if (sale.getString("id").equals(two)) {
+        assertThat(sale.getJsonArray("items").size(), is(2));
+      }
+    }
+    assertThat(hasId(list, one) && hasId(list, two), is(true));
+  }
+
+  @Test
   @DisplayName("A basket with no lines cannot be parked, and a storekeeper or shopper cannot park")
   void badInputAndWrongRoles() {
     Response empty =

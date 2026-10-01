@@ -308,9 +308,7 @@ public final class BillingMappers {
             .toList(),
         result.skipped().stream()
             .map(
-                k ->
-                    new BillingDtos.SkippedResponse(
-                        k.tenantId().toString(), "DUNNING_SKIPPED", k.reason()))
+                k -> new BillingDtos.SkippedResponse(k.tenantId().toString(), k.code(), k.reason()))
             .toList());
   }
 }

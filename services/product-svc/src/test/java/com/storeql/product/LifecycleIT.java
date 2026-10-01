@@ -119,18 +119,21 @@ class LifecycleIT {
       "A new line is hidden and refused with its launch day until launched, then listed and scanned")
   void aNewLineWaitsForItsLaunch() {
     String code = barcode();
+    String launchDay = java.time.LocalDate.now(java.time.ZoneOffset.UTC).plusDays(400).toString();
     String created =
         body(
             post(
                 "/admin/products",
                 "{\"name\":\"Spring cola "
                     + Ids.newId()
-                    + "\",\"status\":\"new_line\",\"launchOn\":\"2026-10-01\"}",
+                    + "\",\"status\":\"new_line\",\"launchOn\":\""
+                    + launchDay
+                    + "\"}",
                 T,
                 "OWNER"),
             201);
     assertThat(created, containsString("\"status\":\"NEW_LINE\""));
-    assertThat(created, containsString("\"launchOn\":\"2026-10-01\""));
+    assertThat(created, containsString("\"launchOn\":\"" + launchDay + "\""));
     String pid = id(created);
     body(
         post(
@@ -146,7 +149,7 @@ class LifecycleIT {
         not(containsString(pid)));
     String refused = body(get("/catalog/variants/by-barcode/" + code, T, "CASHIER"), 409);
     assertThat(refused, containsString("PRODUCT_NOT_ON_SALE_YET"));
-    assertThat(refused, containsString("2026-10-01"));
+    assertThat(refused, containsString(launchDay));
     assertThat(
         body(move(pid, "discontinue", T, "OWNER"), 409),
         containsString("PRODUCT_LIFECYCLE_INVALID"));

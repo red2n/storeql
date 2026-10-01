@@ -161,16 +161,11 @@ public class BroadcastService {
   public List<Seen> current(UUID tenantId, UUID storeId, UUID userId) {
     List<String> roles = requireRoles(tenantId, userId, storeId);
     Instant now = Instant.now();
-    List<UUID> mine = repo.acknowledgedBy(tenantId, userId);
-    Map<UUID, Instant> acked = new LinkedHashMap<>();
+    Map<UUID, Instant> mine = repo.ackTimesBy(tenantId, userId);
     List<Seen> out = new ArrayList<>();
     for (Broadcast b : repo.publishedFor(tenantId, storeId)) {
       if (!b.currentAt(now) || !b.addressedTo(storeId, roles)) continue;
-      Instant at =
-          mine.contains(b.id())
-              ? acked.computeIfAbsent(b.id(), k -> repo.acks(tenantId, k).get(userId))
-              : null;
-      out.add(new Seen(b, at));
+      out.add(new Seen(b, mine.get(b.id())));
     }
     return List.copyOf(out);
   }

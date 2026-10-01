@@ -437,6 +437,27 @@ class NoReceiptReturnIT {
             MANAGER,
             Ids.newId().toString());
     assertThat(noContact.getStatus(), is(400));
+    // Bean validation refuses a blank contact before the service's own check can be reached.
+    String noContactText = noContact.readEntity(String.class);
+    assertThat(noContactText, containsString("VALIDATION_FAILED"));
+    assertThat(noContactText, containsString("customerContact"));
+    // Nothing to take back.
+    Response noItems =
+        noReceipt(
+            "{\"storeId\":\""
+                + STORE
+                + "\",\"reason\":\"no receipt\",\"refundMethod\":\"STORE_CREDIT\","
+                + "\"customerContact\":\""
+                + CONTACT
+                + "\",\"items\":[]"
+                + creditExtra()
+                + "}",
+            T_ON,
+            "MANAGER",
+            MANAGER,
+            Ids.newId().toString());
+    assertThat(noItems.getStatus(), is(400));
+    assertThat(noItems.readEntity(String.class), containsString("ORDER_RETURN_NO_ITEMS"));
     // A shopper is no member of staff.
     assertThat(
         noReceipt(
@@ -458,6 +479,25 @@ class NoReceiptReturnIT {
                     body("STORE_CREDIT", 1, "SEALED", creditExtra()), MediaType.APPLICATION_JSON));
     assertThat(elsewhere.getStatus(), is(403));
     assertThat(returnsOf(T_ON), is(returns));
+  }
+
+  @Test
+  @DisplayName("A card code goes only with a refund to a gift card, and nothing is written")
+  void aCardCodeOnlyGoesWithAGiftCardRefund() {
+    long returns = returnsOf(T_ON);
+    long cards = cardsOf(T_ON);
+    Response r =
+        noReceipt(
+            body("STORE_CREDIT", 1, "SEALED", creditExtra() + ",\"giftCardCode\":\"ABCD\""),
+            T_ON,
+            "MANAGER",
+            MANAGER,
+            Ids.newId().toString());
+    String text = r.readEntity(String.class);
+    assertThat(text, r.getStatus(), is(400));
+    assertThat(text, containsString("ORDER_RETURN_GIFT_CARD_CODE_UNEXPECTED"));
+    assertThat(returnsOf(T_ON), is(returns));
+    assertThat(cardsOf(T_ON), is(cards));
   }
 
   // ── pricing, a retry, another business ────────────────────────────────────

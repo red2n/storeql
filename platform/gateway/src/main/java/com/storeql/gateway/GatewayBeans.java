@@ -6,6 +6,7 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * CDI producers for gateway-scoped infrastructure beans. Centralises object construction so {@link
@@ -16,6 +17,14 @@ import jakarta.inject.Inject;
 class GatewayBeans {
 
   @Inject GatewayConfig config;
+
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.control-plane.connect-timeout-ms", defaultValue = "1000")
+  long controlConnectTimeoutMs;
+
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.control-plane.read-timeout-ms", defaultValue = "2000")
+  long controlReadTimeoutMs;
 
   @Produces
   @ApplicationScoped
@@ -35,6 +44,22 @@ class GatewayBeans {
     return WebClient.builder()
         .connectTimeout(java.time.Duration.ofSeconds(config.upstreamConnectTimeoutSeconds()))
         .readTimeout(java.time.Duration.ofSeconds(config.upstreamReadTimeoutSeconds()))
+        .followRedirects(false)
+        .build();
+  }
+
+  /**
+   * The client for lookups made while a request waits (key set, tenant status, plan allowances, API
+   * key check): a slow tenant-svc or iam-svc must cost a request a second or two, never the proxy
+   * client's minutes.
+   */
+  @Produces
+  @ApplicationScoped
+  @ControlPlane
+  WebClient controlPlaneWebClient() {
+    return WebClient.builder()
+        .connectTimeout(java.time.Duration.ofMillis(controlConnectTimeoutMs))
+        .readTimeout(java.time.Duration.ofMillis(controlReadTimeoutMs))
         .followRedirects(false)
         .build();
   }

@@ -99,8 +99,9 @@ public class TenantDataRepository extends BaseOutboxRepository {
   /**
    * What this service holds for a tenant (art.25(2)(e), art.26).
    *
-   * @param checksum per table, the md5 of its rows in key order without {@code tenant_id}, so an
-   *     import into another tenant reads back the same figure
+   * @param checksum per table, the md5 of the per-row md5s (each row without {@code tenant_id}) in
+   *     key order, built incrementally so a big table is never one giant string, so an import into
+   *     another tenant reads back the same figure
    */
   public record Manifest(
       String schema,
@@ -121,6 +122,8 @@ public class TenantDataRepository extends BaseOutboxRepository {
   @Inject Instance<TenantDataSpec> specs;
 
   private volatile TenantDataCatalog catalog;
+  private final java.util.concurrent.locks.ReentrantLock catalogLock =
+      new java.util.concurrent.locks.ReentrantLock();
 
   /**
    * The catalog, read from the schema once.
@@ -131,7 +134,8 @@ public class TenantDataRepository extends BaseOutboxRepository {
   public TenantDataCatalog catalog() {
     TenantDataCatalog c = catalog;
     if (c == null) {
-      synchronized (this) {
+      catalogLock.lock();
+      try {
         if (catalog == null) {
           if (specs.isUnsatisfied()) {
             throw new ApiException(
@@ -143,6 +147,8 @@ public class TenantDataRepository extends BaseOutboxRepository {
           catalog = load(specs.get());
         }
         c = catalog;
+      } finally {
+        catalogLock.unlock();
       }
     }
     return c;
@@ -409,7 +415,7 @@ public class TenantDataRepository extends BaseOutboxRepository {
   }
 
   private static String statsSql(Table t) {
-    return "SELECT count(*) AS n, md5(coalesce(string_agg((to_jsonb(r) - 'tenant_id')::text, E'\\n'"
+    return "SELECT count(*) AS n, md5(coalesce(string_agg(md5((to_jsonb(r) - 'tenant_id')::text), ''"
         + " ORDER BY "
         + keys(t, "r.")
         + "), '')) AS checksum FROM (SELECT "

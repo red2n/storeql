@@ -357,4 +357,34 @@ class ProductSafetyIT {
     assertThat(
         "online " + online + " with " + missing + " missing", online && missing > 0, is(false));
   }
+
+  // ── refusals the negative-coverage audit found untested (1 Oct 2026) ─────────
+
+  @Test
+  @DisplayName("The shopper's safety sheet needs a shop, and shows nothing of another business's")
+  void theShoppersSheetIsRefusedWithNoShopOrForAnotherBusinesssProduct() {
+    String candle = created(DE, "Candle", true, EU_MAKER);
+    String path = "/catalog/products/" + candle + "/safety-information";
+
+    // No storefront named: refused, not guessed.
+    Response noShop = target.path(path).request().get();
+    assertThat(noShop.getStatus(), is(400));
+    assertThat(noShop.readEntity(String.class), containsString("NO_STOREFRONT"));
+
+    // Our product named from another business's storefront: not found, and nothing of ours shown.
+    Response other = as(path, GB, null).get();
+    assertThat(other.getStatus(), is(404));
+    String shown = other.readEntity(String.class);
+    assertThat(shown, containsString("PRODUCT_NOT_FOUND"));
+    assertThat(shown, not(containsString("Atelier Lumière SAS")));
+
+    // An id nobody holds.
+    Response unknown =
+        as("/catalog/products/" + Ids.newId() + "/safety-information", DE, null).get();
+    assertThat(unknown.getStatus(), is(404));
+    assertThat(unknown.readEntity(String.class), containsString("PRODUCT_NOT_FOUND"));
+
+    // Our own storefront still reads it, so the refusals above are about who asks.
+    assertThat(as(path, DE, null).get().getStatus(), is(200));
+  }
 }

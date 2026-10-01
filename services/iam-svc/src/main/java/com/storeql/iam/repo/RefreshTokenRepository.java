@@ -255,4 +255,29 @@ public class RefreshTokenRepository extends BaseJdbcRepository {
         ps -> ps.setObject(1, tenantId),
         "revoke tenant tokens");
   }
+
+  /**
+   * Deletes refresh tokens that expired more than {@code retentionDays} ago, revoked or not, at
+   * most {@code batchSize} of them. A token is kept at least until it expires (so reuse of a
+   * rotated token is still recognised) and then for the retention; an operational table, no
+   * business history.
+   *
+   * @param retentionDays days to keep a token after it expired
+   * @param batchSize the most rows deleted by this call
+   * @return how many rows were deleted
+   */
+  public int purgeExpired(int retentionDays, int batchSize) {
+    return inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "DELETE FROM refresh_tokens WHERE id IN (SELECT id FROM refresh_tokens"
+                      + " WHERE expires_at < now() - make_interval(days => ?) LIMIT ?)")) {
+            ps.setInt(1, retentionDays);
+            ps.setInt(2, batchSize);
+            return ps.executeUpdate();
+          }
+        },
+        "purge expired refresh tokens");
+  }
 }

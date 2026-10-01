@@ -87,6 +87,47 @@ class ReportingIT {
     assertThat(body.contains("\"data\""), is(true));
   }
 
+  private Response movementStats(String tenant, String... params) {
+    WebTarget t = target.path("/admin/reports/inventory/movement-stats");
+    for (int i = 0; i < params.length; i += 2) t = t.queryParam(params[i], params[i + 1]);
+    return t.request().header("X-Tenant-Id", tenant).header("X-Roles", "OWNER").get();
+  }
+
+  /** Movement stats read a bounded window: recent by default, never the whole history. */
+  @Test
+  void movementStatsAreBoundedToAWindow() {
+    UUID tenant = Ids.newId();
+    UUID variant = Ids.newId();
+    reporting.applyStockDeltaOnce(
+        Ids.newId(), "test", tenant, Ids.newId(), variant, new BigDecimal("5"), "StockReceived");
+    String t = tenant.toString();
+
+    // Default window (the last 90 days) holds the movement just made.
+    assertThat(movementStats(t).readEntity(String.class), containsString(variant.toString()));
+
+    // A window wholly in the past holds none of it.
+    Response past = movementStats(t, "from", "2000-01-01", "to", "2000-01-31");
+    assertThat(past.getStatus(), is(200));
+    assertThat(past.readEntity(String.class).contains(variant.toString()), is(false));
+
+    // Another business's window never shows it.
+    assertThat(
+        movementStats(OTHER).readEntity(String.class).contains(variant.toString()), is(false));
+  }
+
+  @Test
+  void movementStatsRefuseABackwardsOrOverlongPeriod() {
+    Response backwards = movementStats(T, "from", "2026-02-01", "to", "2026-01-01");
+    assertThat(backwards.getStatus(), is(400));
+    assertThat(backwards.readEntity(String.class), containsString("REPORT_PERIOD_INVALID"));
+
+    Response tooLong = movementStats(T, "from", "2000-01-01", "to", "2010-01-01");
+    assertThat(tooLong.getStatus(), is(400));
+    assertThat(tooLong.readEntity(String.class), containsString("REPORT_PERIOD_TOO_LONG"));
+
+    assertThat(movementStats(T, "from", "01/02/2026").getStatus(), is(400));
+  }
+
   /** Tenant isolation: different tenants see independent data. */
   @Test
   void tenantIsolation() {

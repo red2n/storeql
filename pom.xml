@@ -250,6 +250,15 @@
                     <configuration>
                         <!-- Helidon/CDI play nicer with classloader isolation off for tests -->
                         <useModulePath>false</useModulePath>
+                        <systemPropertyVariables>
+                            <!-- Integration tests stub peer services that answer 500 on purpose
+                                 (a tenant they do not know, a peer that is down). The shared
+                                 ServiceReader breaker opens after a few such failures for the
+                                 whole peer, which would make later tests in the same run depend
+                                 on test order. The breaker is proved by its own unit test
+                                 (ReadBreakerAndCacheTest), so it is kept closed for tests here. -->
+                            <storeql.clients.breaker.failures>1000000</storeql.clients.breaker.failures>
+                        </systemPropertyVariables>
                         <includes>
                             <include>**/*Test.java</include>
                             <include>**/*Tests.java</include>

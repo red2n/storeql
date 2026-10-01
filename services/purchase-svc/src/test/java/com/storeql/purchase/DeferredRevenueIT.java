@@ -48,6 +48,8 @@ class DeferredRevenueIT {
   private static final PostgresSupport PG = PostgresSupport.start().wire("purchase");
 
   static {
+    // Two events to a transaction, so a backlog of more than two is posted across several.
+    System.setProperty("storeql.deferred-revenue.backlog-chunk", "2");
     TenantSvcStub.start()
         .with(PurchaseFixtures.T, "GBP", "GB")
         .with(PurchaseFixtures.T2, "GBP", "GB");
@@ -189,6 +191,20 @@ class DeferredRevenueIT {
         comparesEqualTo(new BigDecimal("7.41")));
     assertThat(net("LOYALTY_DEFERRAL", "4010"), comparesEqualTo(new BigDecimal("7.41")));
     assertThat(net("LOYALTY_DEFERRAL", "2330"), comparesEqualTo(new BigDecimal("-7.41")));
+    assertThat(trialBalance().getBoolean("balanced"), is(true));
+  }
+
+  @Test
+  @DisplayName("A backlog bigger than a chunk is posted in full, across several transactions")
+  void aBacklogLargerThanAChunkIsPostedInFull() {
+    for (int i = 0; i < 5; i++) handler.loyalty(earnedOnSale("200", "120.00", "20.00"));
+    assertThat(data(get(T, "OWNER")).getJsonNumber("eventsAwaitingEstimates").longValue(), is(5L));
+
+    JsonObject after = data(put(ESTIMATES, T, "OWNER"));
+    assertThat(after.getJsonNumber("eventsAwaitingEstimates").longValue(), is(0L));
+    assertThat(net("LOYALTY_DEFERRAL", "4010").signum(), is(1));
+    assertThat(
+        net("LOYALTY_DEFERRAL", "2330"), comparesEqualTo(net("LOYALTY_DEFERRAL", "4010").negate()));
     assertThat(trialBalance().getBoolean("balanced"), is(true));
   }
 

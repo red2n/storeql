@@ -19,6 +19,11 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -210,7 +215,9 @@ class AssortmentIT {
   @DisplayName("A change is intent until it is applied, and then it is the live range")
   void intentThenState() {
     String p = product(T_SWEEP, null);
-    recordChange(T_SWEEP, p, STORE_A, false, "LIST", "2026-10-01");
+    // Relative to today, so the test never expires: the change is due 400 days from now.
+    LocalDate due = LocalDate.now().plusDays(400);
+    recordChange(T_SWEEP, p, STORE_A, false, "LIST", due.toString());
 
     // Nothing has moved: the line is still unrestricted, which is what no rows means.
     assertThat(liveRange(p, T_SWEEP), not(containsString(STORE_A)));
@@ -218,12 +225,12 @@ class AssortmentIT {
     // Not due yet, either: the day is what decides, not the recording.
     assertThat(sweep(T_SWEEP, null), containsString("\"applied\":0"));
 
-    assertThat(sweep(T_SWEEP, "2026-10-01"), containsString("\"applied\":1"));
+    assertThat(sweep(T_SWEEP, due.toString()), containsString("\"applied\":1"));
     assertThat(liveRange(p, T_SWEEP), containsString(STORE_A));
 
     // Applied once and only once: the second sweep finds nothing, which is what stops a de-list
     // somebody did by hand from being undone by a change that keeps re-applying itself.
-    assertThat(sweep(T_SWEEP, "2026-12-31"), containsString("\"applied\":0"));
+    assertThat(sweep(T_SWEEP, due.plusDays(90).toString()), containsString("\"applied\":0"));
   }
 
   @Test
@@ -594,5 +601,306 @@ class AssortmentIT {
     int again = sweeper.sweepQuietly();
     assertThat(liveRange(p, T_TICK), containsString(STORE_A));
     assertEquals(0, again, "nothing was left due for this business");
+  }
+
+  // ── refusals the negative-coverage audit found untested (1 Oct 2026) ─────────
+
+  private Response send(String method, String path, String json, String tenant, String roles) {
+    var b =
+        target
+            .path(path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", USER)
+            .header("X-Roles", roles);
+    return json == null
+        ? b.method(method)
+        : b.method(method, Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  private static void assertRefused(Response r, int status, String code) {
+    assertThat(body(r, status), containsString(code));
+  }
+
+  /** Rows this test can see for itself: a count over the product schema, read behind the app. */
+  private static int count(String sql, String... params) {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps = c.prepareStatement(sql)) {
+      for (int i = 0; i < params.length; i++) {
+        ps.setString(i + 1, params[i]);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    } catch (SQLException e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  /** Puts a cluster into the state no endpoint reaches: retired. */
+  private static void retire(String clusterId) {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "UPDATE product.store_clusters SET status = 'RETIRED' WHERE id = ?::uuid")) {
+      ps.setString(1, clusterId);
+      ps.executeUpdate();
+    } catch (SQLException e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  private static final String LINES_OF_REVIEW =
+      "SELECT count(*) FROM product.range_review_lines WHERE review_id = ?::uuid";
+  private static final String REVIEW_STATUS =
+      "SELECT count(*) FROM product.range_reviews WHERE id = ?::uuid AND status = ?";
+
+  private String category(String tenant) {
+    return id(post("/admin/categories", "{\"name\":\"Cat " + Ids.newId() + "\"}", tenant));
+  }
+
+  /** A review of a fresh category with one line (a variant of its own product). */
+  private String[] reviewWithALine(String tenant) {
+    String categoryId = category(tenant);
+    String v = variant(tenant, product(tenant, categoryId));
+    String review = openReview(tenant, categoryId);
+    addLine(tenant, review, v, false, 5);
+    return new String[] {review, v};
+  }
+
+  @Test
+  @DisplayName("Stores are added only to our own, live cluster, and only as real store ids")
+  void storesAreAddedOnlyToOurOwnLiveCluster() {
+    String c = cluster(T);
+    String path = "/admin/assortment/clusters/" + c + "/stores";
+    String members =
+        "SELECT count(*) FROM product.store_cluster_members WHERE cluster_id = ?::uuid";
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(
+          send("POST", path, "{\"storeIds\":[\"" + STORE_A + "\"]}", RIVAL, role),
+          404,
+          "CLUSTER_NOT_FOUND");
+      assertRefused(
+          send("GET", "/admin/assortment/clusters/" + c, null, RIVAL, role),
+          404,
+          "CLUSTER_NOT_FOUND");
+    }
+    assertRefused(
+        post(
+            "/admin/assortment/clusters/" + Ids.newId() + "/stores",
+            "{\"storeIds\":[\"" + STORE_A + "\"]}",
+            T),
+        404,
+        "CLUSTER_NOT_FOUND");
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertRefused(
+          send("POST", path, "{\"storeIds\":[\"" + STORE_A + "\"]}", T, role), 403, "FORBIDDEN");
+    }
+    // An empty list is said before the service is asked; a blank or odd id is named.
+    assertRefused(post(path, "{\"storeIds\":[]}", T), 400, "VALIDATION_FAILED");
+    assertRefused(post(path, "{\"storeIds\":[\"\"]}", T), 400, "ASSORTMENT_ID_REQUIRED");
+    assertRefused(post(path, "{\"storeIds\":[\"store-1\"]}", T), 400, "ASSORTMENT_ID_INVALID");
+    assertThat("the cluster still has no stores", count(members, c), is(0));
+
+    retire(c);
+    assertRefused(post(path, "{\"storeIds\":[\"" + STORE_A + "\"]}", T), 409, "CLUSTER_RETIRED");
+    assertThat("a retired cluster took none", count(members, c), is(0));
+  }
+
+  @Test
+  @DisplayName("A change aimed at another business's cluster, or dated badly, records nothing")
+  void aBadChangeRecordsNothing() {
+    String p = product(T, null);
+    String theirs = product(RIVAL, null);
+    String c = cluster(T, STORE_A);
+    String recorded = "SELECT count(*) FROM product.assortment_changes WHERE product_id = ?::uuid";
+
+    assertRefused(
+        send(
+            "POST",
+            "/admin/assortment/changes",
+            "{\"productId\":\""
+                + theirs
+                + "\",\"clusterId\":\""
+                + c
+                + "\",\"action\":\"LIST\",\"reason\":\"why\"}",
+            RIVAL,
+            "OWNER"),
+        404,
+        "CLUSTER_NOT_FOUND");
+    assertThat(count(recorded, theirs), is(0));
+
+    assertRefused(
+        post(
+            "/admin/assortment/changes",
+            "{\"productId\":\""
+                + p
+                + "\",\"storeId\":\""
+                + STORE_A
+                + "\",\"action\":\"LIST\",\"effectiveFrom\":\"01/10/2026\",\"reason\":\"why\"}",
+            T),
+        400,
+        "ASSORTMENT_DATE_INVALID");
+    assertThat(count(recorded, p), is(0));
+    assertRefused(
+        get("/admin/assortment/changes/due", "asOf", "yesterday", T),
+        400,
+        "ASSORTMENT_DATE_INVALID");
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertRefused(
+          send(
+              "POST",
+              "/admin/assortment/changes",
+              "{\"productId\":\""
+                  + p
+                  + "\",\"storeId\":\""
+                  + STORE_A
+                  + "\",\"action\":\"LIST\",\"reason\":\"why\"}",
+              T,
+              role),
+          403,
+          "FORBIDDEN");
+    }
+    assertThat(count(recorded, p), is(0));
+  }
+
+  @Test
+  @DisplayName("A line's history needs the line, and the line has to be an id")
+  void aLinesHistoryNeedsTheLineAsAnId() {
+    assertRefused(get("/admin/assortment/changes", null, null, T), 400, "ASSORTMENT_ID_REQUIRED");
+    assertRefused(
+        get("/admin/assortment/changes", "product", "not-an-id", T), 400, "ASSORTMENT_ID_INVALID");
+    // Another business's line is an empty history, not ours.
+    String p = product(T, null);
+    String listed = body(get("/admin/assortment/changes", "product", p, RIVAL), 200);
+    assertThat(listed, containsString("\"data\":[]"));
+  }
+
+  @Test
+  @DisplayName("A review is abandoned or closed once; another business's or a cashier's cannot")
+  void aReviewEndsOnce() {
+    String[] made = reviewWithALine(T);
+    String review = made[0];
+    String path = "/admin/assortment/reviews/" + review;
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(send("POST", path + "/abandon", "{}", RIVAL, role), 404, "REVIEW_NOT_FOUND");
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertRefused(send("POST", path + "/abandon", "{}", T, role), 403, "FORBIDDEN");
+    }
+    assertRefused(
+        post("/admin/assortment/reviews/" + Ids.newId() + "/abandon", "{}", T),
+        404,
+        "REVIEW_NOT_FOUND");
+    assertThat("still open", count(REVIEW_STATUS, review, "OPEN"), is(1));
+
+    body(post(path + "/abandon", "{}", T), 200);
+    assertRefused(post(path + "/abandon", "{}", T), 409, "REVIEW_NOT_OPEN");
+    assertRefused(
+        post(path + "/close", "{\"storeId\":\"" + STORE_A + "\"}", T), 409, "REVIEW_NOT_OPEN");
+    assertRefused(
+        post(path + "/decisions", "{\"variantId\":\"" + made[1] + "\",\"decision\":\"KEEP\"}", T),
+        409,
+        "REVIEW_NOT_OPEN");
+    assertThat("still abandoned", count(REVIEW_STATUS, review, "ABANDONED"), is(1));
+
+    // A closed review cannot be abandoned afterwards.
+    String[] decided = reviewWithALine(T);
+    decide(T, decided[0], decided[1], "KEEP", null);
+    body(
+        post(
+            "/admin/assortment/reviews/" + decided[0] + "/close",
+            "{\"storeId\":\"" + STORE_A + "\"}",
+            T),
+        200);
+    assertRefused(
+        post("/admin/assortment/reviews/" + decided[0] + "/abandon", "{}", T),
+        409,
+        "REVIEW_NOT_OPEN");
+    assertThat(count(REVIEW_STATUS, decided[0], "DECIDED"), is(1));
+  }
+
+  @Test
+  @DisplayName("An unknown decision, or a line not under review, leaves the line undecided")
+  void aLineIsDecidedOnlyWithAKnownDecisionAndOnlyIfItIsUnderReview() {
+    String[] made = reviewWithALine(T);
+    String review = made[0];
+    String undecided = LINES_OF_REVIEW + " AND decision IS NULL";
+    String path = "/admin/assortment/reviews/" + review + "/decisions";
+
+    assertRefused(
+        post(path, "{\"variantId\":\"" + made[1] + "\",\"decision\":\"MAYBE\"}", T),
+        400,
+        "REVIEW_DECISION_UNKNOWN");
+    String notAdded = variant(T, product(T, null));
+    assertRefused(
+        post(path, "{\"variantId\":\"" + notAdded + "\",\"decision\":\"KEEP\"}", T),
+        404,
+        "REVIEW_LINE_NOT_FOUND");
+    assertRefused(
+        post(path, "{\"variantId\":\"" + Ids.newId() + "\",\"decision\":\"KEEP\"}", T),
+        404,
+        "REVIEW_LINE_NOT_FOUND");
+    assertThat("the line stays undecided", count(undecided, review), is(1));
+    assertThat("and no line was added by asking", count(LINES_OF_REVIEW, review), is(1));
+  }
+
+  @Test
+  @DisplayName("A review with no lines decides nothing, and stays open")
+  void aReviewWithNoLinesDecidesNothing() {
+    String review = openReview(T, category(T));
+    assertRefused(
+        post(
+            "/admin/assortment/reviews/" + review + "/close",
+            "{\"storeId\":\"" + STORE_A + "\"}",
+            T),
+        409,
+        "REVIEW_EMPTY");
+    assertThat("still open", count(REVIEW_STATUS, review, "OPEN"), is(1));
+    assertThat(
+        "and produced no change",
+        count("SELECT count(*) FROM product.assortment_changes WHERE review_id = ?::uuid", review),
+        is(0));
+  }
+
+  @Test
+  @DisplayName("Negative sales or revenue are refused and the review gets no line")
+  void negativeFiguresAreRefused() {
+    String categoryId = category(T);
+    String v = variant(T, product(T, categoryId));
+    String review = openReview(T, categoryId);
+    String path = "/admin/assortment/reviews/" + review + "/lines";
+
+    assertRefused(
+        post(
+            path,
+            "{\"lines\":[{\"variantId\":\"" + v + "\",\"unitsSold\":-5,\"ownBrand\":false}]}",
+            T),
+        400,
+        "REVIEW_LINE_FIGURES");
+    assertRefused(
+        post(
+            path,
+            "{\"lines\":[{\"variantId\":\""
+                + v
+                + "\",\"revenue\":-1.00,\"currency\":\"GBP\",\"ownBrand\":false}]}",
+            T),
+        400,
+        "REVIEW_LINE_FIGURES");
+    assertThat(count(LINES_OF_REVIEW, review), is(0));
+    // Another business's review takes no line either.
+    assertRefused(
+        send(
+            "POST",
+            path,
+            "{\"lines\":[{\"variantId\":\"" + v + "\",\"unitsSold\":1,\"ownBrand\":false}]}",
+            RIVAL,
+            "OWNER"),
+        404,
+        "REVIEW_NOT_FOUND");
+    assertThat(count(LINES_OF_REVIEW, review), is(0));
   }
 }

@@ -1,10 +1,10 @@
 package com.storeql.purchase.client.accounting;
 
+import com.storeql.purchase.config.Jsons;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientRequest;
 import io.helidon.webclient.api.HttpClientResponse;
 import io.helidon.webclient.api.WebClient;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -28,7 +28,8 @@ final class PackageHttp {
 
     /** The body as an object, or an outage: a package that answers no JSON is not answering. */
     JsonObject json() {
-      try (JsonReader reader = Json.createReader(new StringReader(body == null ? "" : body))) {
+      try (JsonReader reader =
+          Jsons.PROVIDER.createReader(new StringReader(body == null ? "" : body))) {
         return reader.readObject();
       } catch (RuntimeException e) {
         throw new AccountingPackage.Unreachable(

@@ -30,6 +30,22 @@ final class SafeXml {
   /** A parsed document, and how many empty leaf elements it had. */
   record Parsed(XmlElement root, int emptyLeaves) {}
 
+  /**
+   * Configured once. The factory is only used to create readers (every reader is its own object),
+   * and every property is set here at class load and never changed afterwards.
+   */
+  private static final XMLInputFactory FACTORY = newFactory();
+
+  private static XMLInputFactory newFactory() {
+    XMLInputFactory factory = XMLInputFactory.newFactory();
+    factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+    factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+    factory.setProperty(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES, false);
+    factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
+    factory.setProperty(XMLInputFactory.IS_COALESCING, true);
+    return factory;
+  }
+
   private SafeXml() {}
 
   static Parsed parse(byte[] xml) {
@@ -40,14 +56,8 @@ final class SafeXml {
       throw new EInvoiceFormatException(
           "TOO_LARGE", "the document is larger than " + MAX_BYTES / (1024 * 1024) + " MB");
     }
-    XMLInputFactory factory = XMLInputFactory.newFactory();
-    factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
-    factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
-    factory.setProperty(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES, false);
-    factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
-    factory.setProperty(XMLInputFactory.IS_COALESCING, true);
     try {
-      XMLStreamReader r = factory.createXMLStreamReader(new ByteArrayInputStream(xml));
+      XMLStreamReader r = FACTORY.createXMLStreamReader(new ByteArrayInputStream(xml));
       try {
         return read(r);
       } finally {

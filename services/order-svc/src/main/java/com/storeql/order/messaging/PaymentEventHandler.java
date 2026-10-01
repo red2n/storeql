@@ -1,12 +1,13 @@
 package com.storeql.order.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.order.service.OrderService;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
+import jakarta.json.JsonReader;
 import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -37,7 +38,10 @@ class PaymentEventHandler {
     String method;
     String kind;
     try {
-      JsonObject obj = Json.createReader(new StringReader(payload)).readObject();
+      JsonObject obj;
+      try (JsonReader reader = Json.createReader(new StringReader(payload))) {
+        obj = reader.readObject();
+      }
       eventType = stringOrNull(obj, "eventType");
       String orderIdStr = stringOrNull(obj, "orderId");
       String tenantIdStr = stringOrNull(obj, "tenantId");

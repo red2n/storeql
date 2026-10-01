@@ -292,6 +292,41 @@ class MfaIT {
   }
 
   @Test
+  @DisplayName("Recovery codes need a factor, and an app never started cannot be confirmed")
+  void recoveryCodesAndConfirmationNeedAFactor() {
+    String email = "mfa-nofactor@example.com";
+    UUID me = register(email);
+    Caller self = new Caller(me, "CUSTOMER", null, null);
+
+    Answer notStarted = call("POST", "/auth/mfa/totp/confirm", self, "{\"code\":\"123456\"}");
+    assertThat(notStarted.body().toString(), notStarted.status(), is(400));
+    assertThat(notStarted.code(), is("MFA_TOTP_NOT_STARTED"));
+
+    Answer noFactor =
+        call("POST", "/auth/mfa/recovery-codes", self, "{\"password\":\"" + PASSWORD + "\"}");
+    assertThat(noFactor.body().toString(), noFactor.status(), is(400));
+    assertThat(noFactor.code(), is("MFA_NOT_ENROLLED"));
+    assertThat(noFactor.body().containsKey("data"), is(false));
+
+    Answer status = call("GET", "/auth/mfa", self, null);
+    assertThat("no factor was made", status.data().getBoolean("totp"), is(false));
+    assertThat("no codes were stored", status.data().getInt("recoveryCodesLeft"), is(0));
+    assertThat(
+        "sign-in still answers with tokens",
+        login(email).data().containsKey("accessToken"),
+        is(true));
+
+    // The same once the app is set up and taken away again.
+    enrolTotp(self);
+    Answer removed =
+        call("POST", "/auth/mfa/totp/remove", self, "{\"password\":\"" + PASSWORD + "\"}");
+    assertThat(removed.body().toString(), removed.status(), is(200));
+    Answer again = call("POST", "/auth/mfa/totp/confirm", self, "{\"code\":\"123456\"}");
+    assertThat(again.status(), is(400));
+    assertThat(again.code(), is("MFA_TOTP_NOT_STARTED"));
+  }
+
+  @Test
   @DisplayName(
       "One login's waiting sign-in is no use with another login's code, and rubbish is refused")
   void aWaitingSignInBelongsToItsLogin() {
@@ -495,13 +530,12 @@ class MfaIT {
     assertThat(
         call("DELETE", "/auth/admin/staff-users/" + ownerId + "/mfa", owner, null).code(),
         is("MFA_RESET_SELF"));
-    assertThat(
-        "another business's staff are not there to be found",
-        call("DELETE", "/auth/admin/staff-users/" + strangerId + "/mfa", owner, null).status(),
-        is(404));
-    assertThat(
-        call("DELETE", "/auth/admin/staff-users/" + Ids.newId() + "/mfa", owner, null).status(),
-        is(404));
+    Answer notOurs = call("DELETE", "/auth/admin/staff-users/" + strangerId + "/mfa", owner, null);
+    assertThat("another business's staff are not there to be found", notOurs.status(), is(404));
+    assertThat(notOurs.code(), is("USER_NOT_FOUND"));
+    Answer nobody = call("DELETE", "/auth/admin/staff-users/" + Ids.newId() + "/mfa", owner, null);
+    assertThat(nobody.status(), is(404));
+    assertThat(nobody.code(), is("USER_NOT_FOUND"));
     assertThat(
         call("DELETE", "/auth/admin/staff-users/not-a-uuid/mfa", owner, null).status(), is(400));
     assertThat(login("mfa-reset-stranger@example.com").data().getBoolean("mfaRequired"), is(true));
@@ -664,14 +698,14 @@ class MfaIT {
                 "{\"password\":\"nope nope nope nope\"}")
             .status(),
         is(401));
-    assertThat(
+    Answer noSuchPasskey =
         call(
-                "POST",
-                "/auth/mfa/passkeys/" + Ids.newId() + "/remove",
-                self,
-                "{\"password\":\"" + PASSWORD + "\"}")
-            .status(),
-        is(404));
+            "POST",
+            "/auth/mfa/passkeys/" + Ids.newId() + "/remove",
+            self,
+            "{\"password\":\"" + PASSWORD + "\"}");
+    assertThat(noSuchPasskey.status(), is(404));
+    assertThat(noSuchPasskey.code(), is("MFA_PASSKEY_NOT_FOUND"));
     assertThat(
         call(
                 "POST",
@@ -709,6 +743,20 @@ class MfaIT {
                 + secret
                 + "\"}");
     assertThat(born.body().toString(), born.status(), is(201));
+    Answer twice =
+        call(
+            "POST",
+            "/bootstrap/admin",
+            Caller.NOBODY,
+            "{\"email\":\"root-two@example.com\",\"password\":\""
+                + PASSWORD
+                + "\",\"totpSecret\":\""
+                + Totp.base32(Totp.newSecret())
+                + "\"}");
+    assertThat(twice.status(), is(409));
+    assertThat(twice.code(), is("BOOTSTRAP_ALREADY_DONE"));
+    assertThat(
+        "the second administrator was never made", login("root-two@example.com").status(), is(401));
 
     Answer owed =
         call("POST", "/auth/platform-login", Caller.NOBODY, credentials("root@example.com"));

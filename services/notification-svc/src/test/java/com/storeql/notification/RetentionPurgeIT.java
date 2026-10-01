@@ -56,6 +56,8 @@ class RetentionPurgeIT {
             .withRetention(UNSET, Map.of("CUSTOMER_RECORDS", 365), List.of())
             .withRetention(YEAR, Map.of("NOTIFICATION_LOG", 365), List.of());
     System.setProperty("storeql.retention-sweeper.enabled", "false");
+    // A small page, so the purge below has to cross several batches.
+    System.setProperty("storeql.retention.batch", "2");
   }
 
   @Inject WebTarget target;
@@ -90,6 +92,19 @@ class RetentionPurgeIT {
     assertThat(payload, containsString("\"rowsAffected\":2"));
     assertThat(payload, containsString("\"heldSkipped\":1"));
     assertThat(ok(sweep(AT_ONCE, "OWNER")).getInt("rowsAffected"), is(0));
+  }
+
+  @Test
+  void aBacklogLargerThanOneBatchIsPurgedInPagesAndCountedOnce() {
+    List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < 7; i++) {
+      ids.add(message(AT_ONCE, null, "0 days"));
+    }
+    JsonObject run = ok(sweep(AT_ONCE, "OWNER"));
+    assertThat(run.getInt("rowsAffected"), is(7));
+    for (String id : ids) {
+      assertThat(exists(id), is("0"));
+    }
   }
 
   @Test

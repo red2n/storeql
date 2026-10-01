@@ -187,6 +187,34 @@ class ProcurementControlsIT {
     assertThat(Envelopes.okArray(get("/supplier-invoices")).size(), is(0));
   }
 
+  @Test
+  @DisplayName("An order with no lines has nothing to receive against")
+  void anOrderWithNoLinesHasNothingToReceive() {
+    String po = draftOrder(supplier("Empty Ltd"));
+    assertThat(post("/purchase-orders/" + po + "/submit", "{}").getStatus(), is(200));
+    Response r =
+        post(
+            "/goods-receipts",
+            "{\"poId\":\""
+                + po
+                + "\",\"storeId\":\""
+                + STORE
+                + "\",\"lines\":[{\"variantId\":\""
+                + VARIANT
+                + "\",\"qtyReceived\":1}]}");
+    assertThat(code(r, 422), is("PURCHASE_PO_HAS_NO_LINES"));
+    assertThat(
+        "no receipt was kept",
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM purchase.goods_receipts WHERE po_id = '" + po + "'"),
+        is("0"));
+    assertThat(
+        "no GoodsReceived event was written",
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM purchase.outbox WHERE event_type = 'GoodsReceived'"),
+        is("0"));
+  }
+
   // ── a draft order's lines can be changed and removed ───────────────────────
 
   @Test

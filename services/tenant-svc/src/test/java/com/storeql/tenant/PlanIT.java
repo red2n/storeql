@@ -7,6 +7,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
+import com.storeql.test.Concurrency;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -19,6 +20,7 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -288,6 +290,11 @@ class PlanIT {
     Answer none = owner("GET", MINE, null, later);
     assertThat("a business on no plan carries no plan", absent(none.data(), "plan"), is(true));
     assertThat(none.data().getString("note"), is("This business is on no plan"));
+    // And it was never subscribed to anything, so its billing page says so rather than inventing
+    // one.
+    Answer noSubscription = owner("GET", "/admin/tenant/billing", null, later);
+    assertThat(noSubscription.status(), is(404));
+    assertThat(noSubscription.code(), is("SUBSCRIPTION_NOT_FOUND"));
     assertThat("no plan is no limit", addStore(later, "FREE").status(), is(201));
   }
 
@@ -500,5 +507,116 @@ class PlanIT {
     assertThat("each names who refuses when it is exceeded", body, containsString("tenant-svc"));
     assertThat(body, containsString("gateway"));
     assertThat(call("GET", PLANS + "/entitlement-keys", null, null, "OWNER").status(), is(403));
+  }
+
+  // ── refusals: a plan on sale is not sold again, the clock is not the caller's ──
+
+  /** A plan, priced in sterling and left in draft. */
+  private String pricedDraft(String code) {
+    Answer written = platform("POST", PLANS, planBody(code, "MONTH"));
+    assertThat(written.body().toString(), written.status(), is(201));
+    String id = written.data().getString("id");
+    assertThat(
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"GBP\",\"amount\":19.00}")
+            .status(),
+        is(200));
+    return id;
+  }
+
+  private String uniqueCode(String prefix) {
+    return prefix + "-" + Ids.newId().toString().substring(28).toUpperCase(java.util.Locale.ROOT);
+  }
+
+  @Test
+  @DisplayName("A plan already on sale is not sold again, and stays as it was")
+  void sellingAPlanAlreadyOnSaleIsRefused() {
+    String id = pricedDraft(uniqueCode("TWICE"));
+    assertThat(platform("POST", PLANS + "/" + id + "/activate").status(), is(200));
+
+    Answer again = platform("POST", PLANS + "/" + id + "/activate");
+    assertThat(again.status(), is(409));
+    assertThat(again.code(), is("PLAN_ALREADY_SOLD"));
+    assertThat(
+        "it is still on sale",
+        platform("GET", PLANS + "/" + id).data().getString("status"),
+        is("ACTIVE"));
+
+    // Nobody but the platform administrator sells a plan, and an owner's attempt moves nothing.
+    String shop = onboard("Sells nothing");
+    Answer owners = call("POST", PLANS + "/" + id + "/activate", null, shop, "OWNER");
+    assertThat(owners.status(), is(403));
+  }
+
+  @Test
+  @DisplayName("Twenty activations and twenty retirements at once each change a plan once")
+  void twentyActivationsAtOnceSellAPlanOnce() throws Exception {
+    String id = pricedDraft(uniqueCode("RACE"));
+    List<Answer> activations =
+        Concurrency.inParallel(20, () -> platform("POST", PLANS + "/" + id + "/activate"));
+    assertThat(
+        "exactly one activation wins",
+        activations.stream().filter(a -> a.status() == 200).count(),
+        is(1L));
+    for (Answer a : activations) {
+      if (a.status() != 200) {
+        assertThat(a.body().toString(), a.status(), is(409));
+        assertThat(
+            a.code(),
+            org.hamcrest.Matchers.either(is("PLAN_ALREADY_SOLD")).or(is("PLAN_CHANGED_MEANWHILE")));
+      }
+    }
+    assertThat(platform("GET", PLANS + "/" + id).data().getString("status"), is("ACTIVE"));
+
+    List<Answer> retirements =
+        Concurrency.inParallel(20, () -> platform("POST", PLANS + "/" + id + "/retire"));
+    assertThat(
+        "exactly one retirement wins",
+        retirements.stream().filter(a -> a.status() == 200).count(),
+        is(1L));
+    for (Answer a : retirements) {
+      if (a.status() != 200) {
+        assertThat(a.body().toString(), a.status(), is(409));
+        assertThat(
+            a.code(),
+            org.hamcrest.Matchers.either(is("PLAN_NOT_SOLD")).or(is("PLAN_CHANGED_MEANWHILE")));
+      }
+    }
+    assertThat(platform("GET", PLANS + "/" + id).data().getString("status"), is("RETIRED"));
+  }
+
+  @Test
+  @DisplayName("Naming the day of a billing run is refused where the test clock is off")
+  void namingTheDayOfARunIsRefusedWhereTheTestClockIsOff() {
+    for (String path : new String[] {"/platform/billing/run", "/platform/billing/dunning/run"}) {
+      Answer run = namedDay("POST", path, "2026-11-01", "PLATFORM_ADMIN");
+      assertThat(path, run.status(), is(403));
+      assertThat(path, run.code(), is("BILLING_TEST_CLOCK_DISABLED"));
+    }
+    Answer overdue =
+        namedDay("GET", "/platform/billing/dunning/overdue", "2026-11-01", "PLATFORM_ADMIN");
+    assertThat(overdue.status(), is(403));
+    assertThat(overdue.code(), is("BILLING_TEST_CLOCK_DISABLED"));
+    // The role is judged first: nobody else gets as far as the clock.
+    Answer owner = namedDay("POST", "/platform/billing/run", "2026-11-01", "OWNER");
+    assertThat(owner.status(), is(403));
+    assertThat(owner.code(), not(is("BILLING_TEST_CLOCK_DISABLED")));
+  }
+
+  private Answer namedDay(String method, String path, String asOf, String roles) {
+    Invocation.Builder b =
+        target
+            .path(path)
+            .queryParam("asOf", asOf)
+            .request(MediaType.APPLICATION_JSON)
+            .header("X-User-Id", Ids.newId())
+            .header("X-Roles", roles);
+    Response r =
+        "GET".equals(method) ? b.get() : b.post(Entity.entity("{}", MediaType.APPLICATION_JSON));
+    String text = r.readEntity(String.class);
+    return new Answer(
+        r.getStatus(),
+        text == null || text.isBlank()
+            ? JsonObject.EMPTY_JSON_OBJECT
+            : Json.createReader(new StringReader(text)).readObject());
   }
 }

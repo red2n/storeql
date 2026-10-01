@@ -337,4 +337,15 @@ class DeliveryAreaIT {
     assertThat(resolve(ours, "560001").data().getString("storeId"), is(ours.store()));
     assertThat(pincodes(ours.owner(), ours.store()), is(List.of("560001")));
   }
+
+  @Test
+  @DisplayName("A code of only Unicode space is no code, and no area is created")
+  void aPincodeOfOnlyUnicodeSpaceIsRefused() {
+    Biz b = AdminRig.biz(target, "Delivery Unicode Space", "IN", "INR");
+    // An ideographic space passes a trim()-based not-blank check; normalising strips it to nothing.
+    Answer a = call(target, "POST", areas(b.store()), "{\"pincode\":\"\\u3000\"}", b.owner());
+    assertThat(a.text(), a.status(), is(400));
+    assertThat(a.code(), is("DELIVERY_PINCODE_REQUIRED"));
+    assertThat(pincodes(b.owner(), b.store()), hasSize(0));
+  }
 }

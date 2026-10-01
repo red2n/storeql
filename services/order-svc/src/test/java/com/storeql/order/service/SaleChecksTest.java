@@ -126,6 +126,18 @@ class SaleChecksTest {
   }
 
   @Test
+  void theKeptListsAreSweptSoTheyDoNotGrowWithEveryBusinessEverSeen() {
+    when(recalls.active(org.mockito.ArgumentMatchers.any())).thenReturn(Optional.of(List.of()));
+    for (int i = 0; i <= SaleChecks.SWEEP_ABOVE; i++) {
+      checks.activeRecalls(Ids.newId());
+    }
+    assertThat(checks.heldCount() > SaleChecks.SWEEP_ABOVE, is(true));
+    clock.now = clock.now.plusSeconds(60);
+    checks.activeRecalls(Ids.newId());
+    assertThat(checks.heldCount(), is(1));
+  }
+
+  @Test
   void recallsThatCannotBeReadRefuseNothing() {
     when(recalls.active(TENANT)).thenReturn(Optional.empty());
     assertDoesNotThrow(() -> checks.refuseRecalledStock(TENANT, jam()));

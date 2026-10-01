@@ -10,7 +10,7 @@ import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
-import io.helidon.microprofile.testing.junit5.AddConfig;
+import io.helidon.microprofile.testing.AddConfig;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.json.JsonArray;
@@ -127,6 +127,18 @@ class AccountingIT {
             OWNER),
         400,
         "ACCOUNTING_CREDENTIALS_MISSING");
+    // A token expiry that is not an instant is refused by name, and nothing is kept.
+    assertError(
+        call(
+            "PUT",
+            CONNECTION,
+            xeroJson().replace("2026-09-23T10:00:00Z", "tomorrow"),
+            T,
+            "OWNER",
+            OWNER),
+        400,
+        "ACCOUNTING_CREDENTIALS_INVALID");
+    assertError(call("GET", CONNECTION, null, T, "OWNER", OWNER), 404, "ACCOUNTING_NOT_CONNECTED");
     assertError(
         call(
             "PUT",
@@ -501,6 +513,19 @@ class AccountingIT {
             MANAGER),
         400,
         "ACCOUNTING_EXTERNAL_ID_REQUIRED");
+    // A note longer than the package would take is refused, and the push stays uncertain.
+    assertError(
+        call(
+            "POST",
+            resolve,
+            "{\"outcome\":\"LANDED\",\"externalId\":\"SIM-1\",\"note\":\""
+                + "x".repeat(501)
+                + "\"}",
+            T,
+            "MANAGER",
+            MANAGER),
+        400,
+        "ACCOUNTING_NOTE_TOO_LONG");
     assertThat(syncOf(landedId).getString("status"), is("UNCERTAIN"));
 
     // It did land: delivered under the package's reference, who and when on the row.
@@ -612,6 +637,28 @@ class AccountingIT {
         com.storeql.test.Envelopes.scalar(
             PG, "SELECT count(*) FROM purchase.accounting_syncs WHERE tenant_id = '" + T + "'"),
         is("0"));
+  }
+
+  @Test
+  @DisplayName("A sync status nobody defined is refused by name, for management only")
+  void aSyncStatusNobodyKnowsIsRefused() {
+    object(call("PUT", CONNECTION, simulated(null), T, "OWNER", OWNER), 200);
+    assertError(
+        call("GET", ACCOUNTING + "/syncs?status=LOST", null, T, "MANAGER", MANAGER),
+        400,
+        "ACCOUNTING_STATUS_INVALID");
+    // Lower case is read as the status it names, so a known one still answers.
+    assertThat(
+        call("GET", ACCOUNTING + "/syncs?status=pending", null, T, "MANAGER", MANAGER).getStatus(),
+        is(200));
+    assertThat(
+        call("GET", ACCOUNTING + "/syncs?status=PENDING", null, T, "CASHIER", CASHIER).getStatus(),
+        is(403));
+    // Another business has no connection to list, whatever it asks for.
+    assertError(
+        call("GET", ACCOUNTING + "/syncs?status=PENDING", null, T2, "OWNER", OWNER),
+        404,
+        "ACCOUNTING_NOT_CONNECTED");
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

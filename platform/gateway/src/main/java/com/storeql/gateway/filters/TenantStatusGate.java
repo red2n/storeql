@@ -1,14 +1,17 @@
 package com.storeql.gateway.filters;
 
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.gateway.ControlPlane;
+import com.storeql.ids.Ids;
 import com.storeql.web.HttpHeaders;
 import io.helidon.webclient.api.WebClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.json.Json;
+import jakarta.json.JsonObject;
+import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Storefront suspension gate. A deactivated tenant's online shop must stop serving — but the
@@ -25,45 +28,36 @@ public class TenantStatusGate {
   private static final Logger LOG = System.getLogger(TenantStatusGate.class.getName());
   private static final long TTL_MILLIS = 15_000;
 
-  /** Hard cap matching RateLimitFilter.MAX_BUCKETS — bounds memory under tenant-id churn/abuse. */
+  /** Hard cap, least recently used out — bounds memory under tenant-id churn/abuse. */
   static final int MAX_ENTRIES = 10_000;
 
   @Inject ServiceRegistry registry;
-  @Inject WebClient webClient;
+  @Inject @ControlPlane WebClient webClient;
 
-  private record Cached(boolean active, long expiresAt) {}
+  private final LookupCache<Boolean> cache =
+      new LookupCache<>(MAX_ENTRIES, TTL_MILLIS, true, System::currentTimeMillis);
 
-  private final Map<String, Cached> cache = new ConcurrentHashMap<>();
-
-  /** True if the tenant may transact. Cached for {@value #TTL_MILLIS}ms; fails open on error. */
+  /**
+   * True if the tenant may transact. Cached for {@value #TTL_MILLIS}ms, one lookup however many ask
+   * at once, the last answer kept while it is refreshed; fails open on error. An id that is not a
+   * UUIDv7 names no tenant: it is refused without a lookup and without being remembered, so garbage
+   * in a header costs neither tenant-svc a call nor this cache a slot.
+   */
   public boolean isActive(String tenantId) {
-    long now = System.currentTimeMillis();
-    Cached c = cache.get(tenantId);
-    if (c != null && c.expiresAt() > now) {
-      return c.active();
+    String id;
+    try {
+      id = Ids.parse(tenantId).toString();
+    } catch (RuntimeException e) {
+      return false;
     }
-    boolean active = lookup(tenantId);
-    if (cache.size() >= MAX_ENTRIES && !cache.containsKey(tenantId)) {
-      evictExpired(now);
-      // Eviction of expired entries freed nothing (cache saturated with live entries) — drop an
-      // arbitrary one so the cap is a real bound, not a suggestion an attacker can blow past.
-      if (cache.size() >= MAX_ENTRIES) {
-        var it = cache.keySet().iterator();
-        if (it.hasNext()) {
-          it.next();
-          it.remove();
-        }
-      }
-    }
-    cache.put(tenantId, new Cached(active, now + TTL_MILLIS));
-    return active;
+    return cache.get(id, this::lookup, v -> true);
   }
 
-  private void evictExpired(long now) {
-    cache.values().removeIf(c -> c.expiresAt() <= now);
+  int cacheSize() {
+    return cache.size();
   }
 
-  private boolean lookup(String tenantId) {
+  private Boolean lookup(String tenantId) {
     var instance = registry.resolve("tenant-svc");
     if (instance.isEmpty()) {
       return true; // can't resolve tenant-svc → fail open
@@ -86,13 +80,23 @@ public class TenantStatusGate {
       }
       String body = resp.as(String.class);
       // Inactive only on an explicit, successfully-read negative — otherwise fail open.
-      boolean active = !body.replaceAll("\\s", "").contains("\"active\":false");
+      boolean active = parseActive(body);
       if (!active) {
         LOG.log(Level.INFO, "Storefront gate: tenant {0} is suspended — blocking", tenantId);
       }
       return active;
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "tenant-status lookup failed for " + tenantId + ": " + e.getMessage());
+      return true;
+    }
+  }
+
+  /** Inactive only on an explicit {@code data.active: false}; anything unreadable is active. */
+  static boolean parseActive(String body) {
+    try (var reader = Json.createReader(new StringReader(body))) {
+      JsonObject data = reader.readObject().getJsonObject("data");
+      return data == null || data.getBoolean("active", true);
+    } catch (RuntimeException e) {
       return true;
     }
   }

@@ -1382,6 +1382,16 @@ public class PurchaseService {
             () -> ApiException.notFound("PURCHASE_RTV_NOT_FOUND", "No such return to vendor"));
   }
 
+  /**
+   * The lines of the returns just listed for this tenant, in one query and keyed by return; a
+   * return with none maps to nothing, so read it with {@code getOrDefault}.
+   */
+  public java.util.Map<UUID, List<Domain.VendorReturnLine>> vendorReturnLinesOf(
+      TenantContext ctx, List<Domain.VendorReturn> returns) {
+    return repo.findVendorReturnLinesFor(
+        ctx.requireTenantId(), returns.stream().map(Domain.VendorReturn::id).toList());
+  }
+
   /** The lines of a return this tenant owns. */
   public List<Domain.VendorReturnLine> vendorReturnLines(TenantContext ctx, UUID id) {
     getVendorReturn(ctx, id);

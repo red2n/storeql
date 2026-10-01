@@ -507,4 +507,50 @@ class StoreScopeIT {
     }
     assertThat(statusOfInventory(ours), is("OPEN"));
   }
+
+  @Test
+  @DisplayName("Ending a bond approval and working a kanban card hold to the caller's stores")
+  void bondEndAndKanbanCardsHoldToTheCallersStores() {
+    assertThat(
+        owner(
+                "PUT",
+                "/admin/inventory/bond/approvals/" + B,
+                "{\"approvalNumber\":\"AP-SCOPE-1\",\"regime\":\"EXCISE\"}")
+            .getStatus(),
+        is(200));
+    refusedForStore(
+        managerOf(A, "POST", "/admin/inventory/bond/approvals/" + B + "/end", "{}"),
+        "a manager of A ending B's approval");
+    // nothing moved: the approval is still live
+    Response live = owner("GET", "/admin/inventory/bond/approvals", null);
+    String approvals = live.readEntity(String.class);
+    assertThat(approvals, containsString("AP-SCOPE-1"));
+    assertThat(approvals, containsString("\"active\":true"));
+    assertThat(
+        managerOf(B, "POST", "/admin/inventory/bond/approvals/" + B + "/end", "{}").getStatus(),
+        is(200));
+
+    String card =
+        data(owner(
+                "POST",
+                "/admin/inventory/kanban-cards",
+                "{\"storeId\":\""
+                    + B
+                    + "\",\"variantId\":\""
+                    + V
+                    + "\",\"kanbanType\":\"PRODUCTION\",\"reorderQty\":5}"))
+            .getString("id");
+    String path = "/admin/inventory/kanban-cards/" + card;
+    refusedForStore(keeperOfA("POST", path + "/trigger", "{}"), "trigger B's card from A");
+    refusedForStore(keeperOfA("POST", path + "/replenish", ""), "replenish B's card from A");
+    assertThat(data(owner("GET", path, null)).getString("status"), is("EMPTY"));
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      for (String step : new String[] {"trigger", "replenish"}) {
+        Response r = stranger(role, "POST", path + "/" + step, "{}");
+        assertThat(role + " " + step, r.getStatus(), is(404));
+        r.close();
+      }
+    }
+    assertThat(keeperOfB("POST", path + "/trigger", "{}").getStatus(), is(200));
+  }
 }

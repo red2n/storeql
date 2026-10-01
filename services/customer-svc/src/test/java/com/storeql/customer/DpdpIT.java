@@ -27,7 +27,12 @@ import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -52,6 +57,9 @@ class DpdpIT {
   /** A second Indian business, untouched by the other tests: the notice test starts clean. */
   private static final String T3 = Ids.newId().toString();
 
+  /** A third Indian business, where the race for a first notice is run. */
+  private static final String T4 = Ids.newId().toString();
+
   private static final String OWNER = Ids.newId().toString();
   private static final AtomicBoolean NOTIFY_DOWN = new AtomicBoolean(false);
 
@@ -60,6 +68,7 @@ class DpdpIT {
     TenantSvcStub.start()
         .with(T, "INR", "IN")
         .with(T3, "INR", "IN")
+        .with(T4, "INR", "IN")
         .withObligation("IN", "DPDP", "COUNTRY", "2020-01-01", null)
         .with(T2, "GBP", "GB");
     NOTIFY =
@@ -563,6 +572,166 @@ class DpdpIT {
             .post(json("{\"subject\":\"s\",\"body\":\"b\",\"customerIds\":[\"" + a + "\"]}")),
         409,
         "PRIVACY_NOBODY_TO_TELL");
+  }
+
+  // ── what is refused ──────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A guardian with no name is refused and none is recorded")
+  void aGuardianWithNoNameIsRefused() {
+    publish(T, "en");
+    String login = Ids.newId().toString();
+    claim(T, login, "nameless-guardian@example.in");
+    String dob = LocalDate.now(ZoneOffset.UTC).minusYears(12).toString();
+    data(
+        shopper(T, login, "/customers/me")
+            .put(json("{\"firstName\":\"Mani\",\"lastName\":\"R\",\"dob\":\"" + dob + "\"}")),
+        200);
+    String customerId = data(shopper(T, login, "/customers/me").get(), 200).getString("id");
+
+    for (String blank : new String[] {"   ", "\\t", ""}) {
+      assertCode(
+          staff(T, "MANAGER", "/customers/" + customerId + "/privacy/guardian")
+              .post(
+                  json("{\"guardianName\":\"" + blank + "\",\"verification\":\"DOCUMENT_SEEN\"}")),
+          400,
+          "PRIVACY_GUARDIAN_NAME_INVALID");
+    }
+    JsonObject view = data(shopper(T, login, "/customers/me/privacy").get(), 200);
+    assertThat("no guardian was recorded", absent(view, "guardian"), is(true));
+    assertThat("the child is still not tracked", view.getBoolean("canTrack"), is(false));
+  }
+
+  @Test
+  @DisplayName("A breach naming more than five hundred customers is refused and nothing is sent")
+  void aBreachNamingMoreThanFiveHundredIsRefused() {
+    String reachable = create(T, "reachable-breach@example.in", "Rani");
+    int before =
+        dataArray(staff(T, "OWNER", "/customers/privacy/breach-intimations").get(), 200).size();
+    NOTIFY.reset();
+    NOTIFY_DOWN.set(false);
+
+    StringBuilder ids = new StringBuilder("\"" + reachable + "\"");
+    for (int i = 0; i < 500; i++) ids.append(",\"").append(Ids.newId()).append('"');
+    assertCode(
+        staff(T, "OWNER", "/customers/privacy/breach-intimations")
+            .post(json("{\"subject\":\"s\",\"body\":\"b\",\"customerIds\":[" + ids + "]}")),
+        400,
+        "PRIVACY_INTIMATION_TOO_MANY_NAMED");
+
+    assertThat(
+        "nothing was sent",
+        NOTIFY.calls().stream().filter(c -> c.path().equals("/notifications/send")).count(),
+        is(0L));
+    assertThat(
+        "no intimation was written",
+        dataArray(staff(T, "OWNER", "/customers/privacy/breach-intimations").get(), 200).size(),
+        is(before));
+  }
+
+  @Test
+  @DisplayName("Eight first notices at once are each published or told to retry, never lost")
+  void twoFirstNoticesAtOnceAreOneVersionOrBusy() throws Exception {
+    int callers = 8;
+    CountDownLatch start = new CountDownLatch(1);
+    var pool = Executors.newFixedThreadPool(callers);
+    List<Integer> statuses = new ArrayList<>();
+    List<String> bodies = new ArrayList<>();
+    try {
+      List<Future<String[]>> results = new ArrayList<>();
+      for (int i = 0; i < callers; i++) {
+        results.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  Response r =
+                      staff(T4, "OWNER", "/customers/privacy/notices")
+                          .post(json("{\"language\":\"ta\",\"title\":\"t\",\"body\":\"b\"}"));
+                  String body = r.readEntity(String.class);
+                  return new String[] {String.valueOf(r.getStatus()), body};
+                }));
+      }
+      start.countDown();
+      for (Future<String[]> f : results) {
+        String[] answer = f.get(60, TimeUnit.SECONDS);
+        statuses.add(Integer.parseInt(answer[0]));
+        bodies.add(answer[1]);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+    long published = 0;
+    for (int i = 0; i < callers; i++) {
+      int status = statuses.get(i);
+      if (status == 201) {
+        published++;
+      } else {
+        assertThat(bodies.get(i), status, is(409));
+        assertThat(bodies.get(i), containsString("PRIVACY_NOTICE_BUSY"));
+      }
+    }
+    assertThat(statuses.toString(), published >= 1, is(true));
+
+    // The list answers only the current version of a language, so the rows are read back.
+    List<Integer> versions = noticeVersions(T4, "ta");
+    List<Integer> expected = new ArrayList<>();
+    for (int v = 1; v <= published; v++) expected.add(v);
+    assertThat("one row per answer of 201, contiguous, no duplicate", versions, is(expected));
+  }
+
+  @Test
+  @DisplayName("Withdrawing every consent needs a record here and a login, and writes nothing")
+  void withdrawingEveryConsentWithoutARecordIsRefused() throws Exception {
+    String login = Ids.newId().toString();
+    claim(T, login, "withdraw-owner@example.in");
+    long loggedT = consentLogRows(T);
+    long loggedT2 = consentLogRows(T2);
+
+    assertCode(
+        shopper(T, Ids.newId().toString(), "/customers/me/privacy/consents").delete(),
+        404,
+        "CUSTOMER_NOT_FOUND");
+    assertCode(
+        shopper(T2, login, "/customers/me/privacy/consents").delete(), 404, "CUSTOMER_NOT_FOUND");
+    assertCode(
+        WebTargets.at(target, "/customers/me/privacy/consents")
+            .request(MediaType.APPLICATION_JSON)
+            .header("X-Tenant-Id", T)
+            .header("X-Roles", "CUSTOMER")
+            .delete(),
+        401,
+        "NO_USER");
+
+    assertThat("nothing was logged in this shop", consentLogRows(T), is(loggedT));
+    assertThat("nothing was logged in the rival shop", consentLogRows(T2), is(loggedT2));
+  }
+
+  private List<Integer> noticeVersions(String tenant, String language) throws Exception {
+    List<Integer> versions = new ArrayList<>();
+    try (var c = PG.dataSource().getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT version FROM customer.privacy_notices"
+                    + " WHERE tenant_id = ? AND language = ? ORDER BY version")) {
+      ps.setObject(1, Ids.parse(tenant));
+      ps.setString(2, language);
+      try (var rs = ps.executeQuery()) {
+        while (rs.next()) versions.add(rs.getInt(1));
+      }
+    }
+    return versions;
+  }
+
+  private long consentLogRows(String tenant) throws Exception {
+    try (var c = PG.dataSource().getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT COUNT(*) FROM customer.purpose_consent_log WHERE tenant_id = ?")) {
+      ps.setObject(1, Ids.parse(tenant));
+      try (var rs = ps.executeQuery()) {
+        return rs.next() ? rs.getLong(1) : 0L;
+      }
+    }
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────────

@@ -758,9 +758,11 @@ public class CustomerRepository extends BaseOutboxRepository {
     String pattern = term == null ? null : CustomerSearch.pattern(term);
     String digits = term == null ? null : CustomerSearch.phonePattern(term);
     if (pattern != null) {
-      // concat_ws skips a null half, so a record with only a first or a last name still matches.
+      // A null half is read as empty, so a record with only a first or a last name still matches.
+      // The expression is IMMUTABLE and the same as the trigram index on it (V13), which a
+      // concat_ws (only STABLE) could not be.
       sql.append(
-          " AND (concat_ws(' ', first_name, last_name) ILIKE ? ESCAPE '\\'"
+          " AND ((COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ? ESCAPE '\\'"
               + " OR email ILIKE ? ESCAPE '\\' OR phone ILIKE ? ESCAPE '\\'");
       // The stored phone as its ASCII digits, against the term's digits — both bound, so however
       // either was spaced or punctuated, the same number is found. Kept alongside the E.164 exact
@@ -939,30 +941,42 @@ public class CustomerRepository extends BaseOutboxRepository {
    * loyalty movement and no consent change since. Candidates for the retention purge, which erases
    * each as the customer could have asked.
    */
-  public List<UUID> inactiveSince(UUID tenantId, Instant cutoff) {
+  public List<UUID> inactiveSince(UUID tenantId, Instant cutoff, UUID after, int limit) {
     return query(
         "SELECT c.id FROM customers c WHERE c.tenant_id = ? AND c.status = 'ACTIVE'"
             + " AND c.updated_at < ?"
+            + (after == null ? "" : " AND c.id > ?")
             + " AND NOT EXISTS (SELECT 1 FROM loyalty_ledger l WHERE l.tenant_id = c.tenant_id"
             + "   AND l.customer_id = c.id AND l.created_at >= ?)"
             + " AND NOT EXISTS (SELECT 1 FROM marketing_consent_log m WHERE m.tenant_id = c.tenant_id"
             + "   AND m.customer_id = c.id AND m.recorded_at >= ?)"
-            + " ORDER BY c.id",
+            + " ORDER BY c.id LIMIT ?",
         ps -> {
           var at = cutoff.atOffset(java.time.ZoneOffset.UTC);
-          ps.setObject(1, tenantId);
-          ps.setObject(2, at);
-          ps.setObject(3, at);
-          ps.setObject(4, at);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          ps.setObject(i++, at);
+          if (after != null) ps.setObject(i++, after);
+          ps.setObject(i++, at);
+          ps.setObject(i++, at);
+          ps.setInt(i, limit);
         },
         rs -> rs.getObject("id", UUID.class),
         "inactive customers");
   }
 
-  /** Every business with a customer: the tenants a retention sweep visits. */
+  /**
+   * Every business with a customer: the tenants a retention sweep visits. A loose index scan (one
+   * probe of the tenant index per business) rather than a DISTINCT over every customer row.
+   */
   public List<UUID> tenantsWithCustomers() {
     return query(
-        "SELECT DISTINCT c.tenant_id FROM customers c ORDER BY c.tenant_id",
+        "WITH RECURSIVE t(tenant_id) AS ("
+            + " (SELECT c.tenant_id FROM customers c ORDER BY c.tenant_id LIMIT 1)"
+            + " UNION ALL"
+            + " SELECT (SELECT c.tenant_id FROM customers c WHERE c.tenant_id > t.tenant_id"
+            + "   ORDER BY c.tenant_id LIMIT 1) FROM t WHERE t.tenant_id IS NOT NULL)"
+            + " SELECT tenant_id FROM t WHERE tenant_id IS NOT NULL ORDER BY tenant_id",
         ps -> {},
         rs -> rs.getObject("tenant_id", UUID.class),
         "tenants with customers");

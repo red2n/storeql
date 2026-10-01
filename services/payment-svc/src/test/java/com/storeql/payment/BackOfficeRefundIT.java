@@ -13,6 +13,7 @@ import com.storeql.service.OutboxRow;
 import com.storeql.test.Envelopes;
 import com.storeql.test.PermissionGate;
 import com.storeql.test.PostgresSupport;
+import com.storeql.web.ApiException;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.client.WebTarget;
@@ -325,5 +326,129 @@ class BackOfficeRefundIT {
     assertThat(list.list().size(), is(0));
     // The refund made by us stands, once.
     assertThat(refundRows(s), is("1"));
+  }
+
+  @Test
+  @DisplayName("A payment of another order of the same business is not refunded under this one")
+  void aPaymentOfAnotherOrderIsNotRefundedUnderThisOne() {
+    Sale a = sale("20.00");
+    // A second sale in the SAME business, on another order.
+    UUID otherOrder = Ids.newId();
+    UUID otherPayment = Ids.newId();
+    payments.createTender(
+        new PaymentTender(
+            otherPayment,
+            a.tenant(),
+            otherOrder,
+            new BigDecimal("20.00"),
+            PaymentTender.METHOD_CARD,
+            "auth-2",
+            null,
+            PaymentTender.STATUS_CAPTURED,
+            null,
+            Instant.now(),
+            Ids.newId()),
+        new OutboxRow(
+            "PaymentCaptured", "storeql.payment.payment-captured", a.tenant(), otherPayment, "{}"));
+    Sale b = new Sale(a.tenant(), otherOrder, otherPayment);
+    String eventsBefore = refundEvents(a);
+
+    // Order A's URL, payment B's id.
+    Answer refused =
+        ItCalls.call(
+            target,
+            "POST",
+            "/payments/by-order/" + a.order() + "/refunds",
+            manager(a.tenant()),
+            refundBody(b, "1.00", "CARD"),
+            Ids.newId().toString());
+
+    assertThat(refused.body().toString(), refused.status(), is(409));
+    assertThat(refused.code(), is("PAYMENT_ORDER_MISMATCH"));
+    assertThat(refundRows(a), is("0"));
+    assertThat(refundRows(b), is("0"));
+    assertThat(refundEvents(a), is(eventsBefore));
+    // Under its own order the same payment is refunded, so the refusal was the mismatch.
+    Answer own =
+        ItCalls.call(
+            target,
+            "POST",
+            "/payments/by-order/" + b.order() + "/refunds",
+            manager(a.tenant()),
+            refundBody(b, "1.00", "CARD"),
+            Ids.newId().toString());
+    assertThat(own.body().toString(), own.status(), is(201));
+  }
+
+  @Test
+  @DisplayName("The same tender key at the same time takes one tender: the rest replay or retry")
+  void theSameTenderKeyAtTheSameTimeTakesOneTender() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    String key = Ids.newId().toString();
+    int n = 8;
+    ExecutorService pool = Executors.newFixedThreadPool(n);
+    CountDownLatch ready = new CountDownLatch(n);
+    CountDownLatch go = new CountDownLatch(1);
+    List<Future<Object>> futures = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      UUID id = Ids.newId();
+      futures.add(
+          pool.submit(
+              () -> {
+                ready.countDown();
+                go.await();
+                try {
+                  return payments.createTender(
+                      new PaymentTender(
+                          id,
+                          tenant,
+                          order,
+                          new BigDecimal("5.00"),
+                          PaymentTender.METHOD_CARD,
+                          "auth-race",
+                          key,
+                          PaymentTender.STATUS_CAPTURED,
+                          null,
+                          Instant.now(),
+                          Ids.newId()),
+                      new OutboxRow(
+                          "PaymentCaptured", "storeql.payment.payment-captured", tenant, id, "{}"));
+                } catch (ApiException e) {
+                  return e;
+                }
+              }));
+    }
+    ready.await();
+    go.countDown();
+    int taken = 0;
+    for (Future<Object> f : futures) {
+      Object r = f.get();
+      if (r instanceof ApiException e) {
+        assertThat(e.getMessage(), e.status(), is(409));
+        assertThat(e.code(), is("IDEMPOTENCY_CONFLICT"));
+      } else {
+        taken++;
+      }
+    }
+    pool.shutdown();
+
+    assertThat(taken >= 1, is(true));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM payment.payment_tenders WHERE tenant_id = '"
+                + tenant
+                + "' AND order_id = '"
+                + order
+                + "'"),
+        is("1"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM payment.outbox WHERE tenant_id = '"
+                + tenant
+                + "' AND event_type = 'PaymentCaptured'"),
+        is("1"));
   }
 }

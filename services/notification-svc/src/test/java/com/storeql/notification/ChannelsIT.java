@@ -255,17 +255,16 @@ class ChannelsIT {
     String others =
         as("/notifications/devices", T, "CUSTOMER", Ids.newId().toString()).get(String.class);
     assertThat(others, not(containsString(deviceId)));
-    assertThat(
-        as("/notifications/devices/" + deviceId, T, "CUSTOMER", Ids.newId().toString())
-            .delete()
-            .getStatus(),
-        is(404));
+    Response notTheirs =
+        as("/notifications/devices/" + deviceId, T, "CUSTOMER", Ids.newId().toString()).delete();
+    assertThat(notTheirs.getStatus(), is(404));
+    assertThat(notTheirs.readEntity(String.class), containsString("DEVICE_NOT_FOUND"));
     assertThat(
         as("/notifications/devices/" + deviceId, T, "CUSTOMER", login).delete().getStatus(),
         is(204));
-    assertThat(
-        as("/notifications/devices/" + deviceId, T, "CUSTOMER", login).delete().getStatus(),
-        is(404));
+    Response twice = as("/notifications/devices/" + deviceId, T, "CUSTOMER", login).delete();
+    assertThat(twice.getStatus(), is(404));
+    assertThat(twice.readEntity(String.class), containsString("DEVICE_NOT_FOUND"));
     assertThat(send(noDevice).getStatus(), is(409));
   }
 

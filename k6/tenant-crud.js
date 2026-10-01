@@ -69,7 +69,7 @@ export default function ({ admin, tenant, rival }) {
   expect(warehouse, '[+] create a warehouse', 201);
   const warehouseId = data(warehouse).id;
   truthy('[+] a second store is not the default', data(warehouse).isDefault === false && data(warehouse).type === 'WAREHOUSE', data(warehouse));
-  expect(call('POST', '/api/tenant-svc/admin/stores', { token: t, body: { name: 'Clash', code, timezone: 'Europe/London' } }), '[-] create store: code taken', 409);
+  expect(call('POST', '/api/tenant-svc/admin/stores', { token: t, body: { name: 'Clash', code, timezone: 'Europe/London' } }), '[-] create store: code taken', 409, 'CODE_ALREADY_EXISTS');
   expect(call('POST', '/api/tenant-svc/admin/stores', { token: rival.owner.token, body: { name: 'Same code, other tenant', code, timezone: 'Europe/London' } }), '[+] store codes are per tenant', 201);
 
   const page1 = call('GET', '/api/tenant-svc/admin/stores?limit=1', { token: t });
@@ -149,7 +149,7 @@ export default function ({ admin, tenant, rival }) {
   expect(call('POST', '/api/tenant-svc/admin/staff', { token: founder.token, body: { userId: founder.userId, storeId, role: 'OWNER' } }), '[-] a customer cannot assign staff', 403);
 
   // ── inventory settings ──────────────────────────────────────────────────────
-  expect(call('GET', '/api/tenant-svc/admin/inventory-config', { token: t }), '[-] inventory settings before any are saved', 404);
+  expect(call('GET', '/api/tenant-svc/admin/inventory-config', { token: t }), '[-] inventory settings before any are saved', 404, 'INVENTORY_CONFIG_NOT_FOUND');
   const settings = { lotControlEnabled: true, serialControlEnabled: false, gradeControlEnabled: true, expiryTrackingEnabled: true, costingMethod: 'FIFO', defaultUom: 'EA', reorderAlertEnabled: true, autoReserveOnOrder: false };
   expect(call('PUT', '/api/tenant-svc/admin/inventory-config', { token: t, body: settings }), '[+] save inventory settings', 200);
   const saved = call('GET', '/api/tenant-svc/admin/inventory-config', { token: t });
@@ -159,7 +159,7 @@ export default function ({ admin, tenant, rival }) {
   const partial = data(call('GET', '/api/tenant-svc/admin/inventory-config', { token: t }));
   truthy('[+] other settings keep their values', partial.costingMethod === 'AVERAGE' && partial.lotControlEnabled === true, partial);
   expect(call('PUT', '/api/tenant-svc/admin/inventory-config', { token: t, body: { costingMethod: 'LIFO' } }), '[-] costing method must be FIFO, AVERAGE or STANDARD', 400);
-  expect(call('GET', '/api/tenant-svc/admin/inventory-config', { token: rival.owner.token }), "[-] a rival does not get our settings", 404);
+  expect(call('GET', '/api/tenant-svc/admin/inventory-config', { token: rival.owner.token }), "[-] a rival does not get our settings", 404, 'INVENTORY_CONFIG_NOT_FOUND');
 
   // ── storefront view ─────────────────────────────────────────────────────────
   const shop = { storefront: tenant.tenantId };

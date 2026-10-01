@@ -18,6 +18,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterAll;
@@ -40,6 +41,19 @@ class PolicyWritesIT {
   private static final String STRANGER = Ids.newId().toString();
   private static final String BASE = "/admin/inventory";
   private static final AtomicInteger SEQ = new AtomicInteger();
+
+  /** What another business's staff are told when they name one of our records by id. */
+  private static final Map<String, String> NOT_FOUND_CODES =
+      Map.ofEntries(
+          Map.entry("close period", "PERIOD_NOT_FOUND"),
+          Map.entry("activate source type", "SOURCE_TYPE_NOT_FOUND"),
+          Map.entry("deactivate source type", "SOURCE_TYPE_NOT_FOUND"),
+          Map.entry("activate reason code", "REASON_CODE_NOT_FOUND"),
+          Map.entry("deactivate reason code", "REASON_CODE_NOT_FOUND"),
+          Map.entry("kanban order modifiers", "KANBAN_NOT_FOUND"),
+          Map.entry("deactivate picking rule", "PICKING_RULE_NOT_FOUND"),
+          Map.entry("picking rule zone priorities", "PICKING_RULE_NOT_FOUND"),
+          Map.entry("delete picking rule assignment", "ASSIGNMENT_NOT_FOUND"));
 
   @Inject WebTarget target;
 
@@ -66,6 +80,7 @@ class PolicyWritesIT {
     Entity<String> body =
         Entity.entity(r.body() == null ? "" : r.body(), MediaType.APPLICATION_JSON);
     return switch (r.method()) {
+      case "GET" -> b.get();
       case "PUT" -> b.put(body);
       case "DELETE" -> b.delete();
       default -> b.post(body);
@@ -395,7 +410,9 @@ class PolicyWritesIT {
       for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER"}) {
         Req r = route.build().get();
         assertThat(
-            route.name() + " " + role, call(r, OTHER_T, role, r.store()).getStatus(), is(404));
+            route.name() + " " + role,
+            code(call(r, OTHER_T, role, r.store()), 404),
+            is(NOT_FOUND_CODES.get(route.name())));
       }
     }
     // Ours are as they were.
@@ -435,5 +452,303 @@ class PolicyWritesIT {
     assertThat(other.getStatus(), is(404));
     JsonObject none = Envelopes.parse(other.readEntity(String.class));
     assertThat(none.containsKey("code"), is(true));
+  }
+
+  // ── refusals: what a write says when it is wrong, and that nothing moved ────
+
+  private Response owner(String method, String path, String body) {
+    return call(new Req(method, path, body, null), T, "OWNER", null);
+  }
+
+  private static String count(String sql) {
+    return Envelopes.scalar(PG, sql);
+  }
+
+  @Test
+  @DisplayName("An ABC compile with criteria, thresholds or a class nobody defined is refused")
+  void anAbcCompileOrFilterNobodyDefinedIsRefused() {
+    String store = Ids.newId().toString();
+    String runs =
+        "SELECT count(*) FROM inventory.abc_compile_runs WHERE tenant_id = '"
+            + T
+            + "' AND store_id = '"
+            + store
+            + "'";
+    assertThat(
+        code(
+            owner(
+                "POST",
+                BASE + "/abc/compile",
+                "{\"storeId\":\"" + store + "\",\"criteria\":\"COST\"}"),
+            400),
+        is("INVALID_ABC_CRITERIA"));
+    assertThat(
+        code(
+            owner(
+                "POST",
+                BASE + "/abc/compile",
+                "{\"storeId\":\""
+                    + store
+                    + "\",\"criteria\":\"VALUE\",\"thresholdA\":90,\"thresholdAB\":70}"),
+            400),
+        is("INVALID_ABC_THRESHOLDS"));
+    assertThat(
+        code(
+            owner(
+                "POST", BASE + "/abc/compile", "{\"storeId\":\"" + store + "\",\"thresholdA\":0}"),
+            400),
+        is("INVALID_ABC_THRESHOLDS"));
+    assertThat(count(runs), is("0"));
+
+    assertThat(
+        code(owner("GET", BASE + "/abc/assignments?class=X", null), 400), is("INVALID_ABC_CLASS"));
+    assertThat(
+        code(owner("GET", BASE + "/abc/assignments/" + store + "/" + Ids.newId(), null), 404),
+        is("ABC_ASSIGNMENT_NOT_FOUND"));
+    // Another business's owner finds nothing either.
+    assertThat(
+        code(
+            call(
+                new Req("GET", BASE + "/abc/assignments/" + store + "/" + Ids.newId(), null, null),
+                OTHER_T,
+                "OWNER",
+                null),
+            404),
+        is("ABC_ASSIGNMENT_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName("Safety stock with a method nobody defined, or no percentage, is refused")
+  void aSafetyStockSettingThatIsWrongIsRefused() {
+    String store = Ids.newId().toString();
+    String variant = Ids.newId().toString();
+    String rows =
+        "SELECT count(*) FROM inventory.safety_stock_params WHERE tenant_id = '"
+            + T
+            + "' AND store_id = '"
+            + store
+            + "'";
+    assertThat(
+        code(
+            owner(
+                "POST",
+                BASE + "/safety-stock",
+                "{\"storeId\":\""
+                    + store
+                    + "\",\"variantId\":\""
+                    + variant
+                    + "\",\"method\":\"INVALID_METHOD\"}"),
+            400),
+        is("INVALID_SAFETY_STOCK_METHOD"));
+    for (String body :
+        new String[] {
+          "{\"storeId\":\"%s\",\"variantId\":\"%s\",\"method\":\"USER_DEFINED\"}",
+          "{\"storeId\":\"%s\",\"variantId\":\"%s\",\"method\":\"USER_DEFINED\","
+              + "\"userDefinedPct\":0}"
+        }) {
+      assertThat(
+          code(owner("POST", BASE + "/safety-stock", body.formatted(store, variant)), 400),
+          is("USER_DEFINED_PCT_REQUIRED"));
+    }
+    assertThat(count(rows), is("0"));
+    assertThat(
+        code(owner("GET", BASE + "/safety-stock/" + store + "/" + variant, null), 404),
+        is("SAFETY_STOCK_PARAMS_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName("A second period on the same day, or closing one twice, is refused")
+  void aPeriodOpenedTwiceOrClosedTwiceIsRefused() {
+    String store = Ids.newId().toString();
+    String body =
+        "{\"storeId\":\""
+            + store
+            + "\",\"periodName\":\"P"
+            + tail()
+            + "\",\"periodDate\":\"1999-03-04\"}";
+    Response first =
+        call(new Req("POST", BASE + "/accounting-periods", body, store), T, "OWNER", null);
+    String id = id(first.readEntity(String.class));
+    assertThat(first.getStatus(), is(201));
+
+    assertThat(
+        code(
+            call(
+                new Req(
+                    "POST",
+                    BASE + "/accounting-periods",
+                    body.replaceFirst("\"P[^\"]*\"", "\"Again\""),
+                    store),
+                T,
+                "OWNER",
+                null),
+            409),
+        is("PERIOD_DUPLICATE_DATE"));
+    assertThat(
+        count(
+            "SELECT count(*) FROM inventory.accounting_periods WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + store
+                + "'"),
+        is("1"));
+
+    assertThat(
+        owner("POST", BASE + "/accounting-periods/" + id + "/close", "").getStatus(), is(200));
+    assertThat(
+        code(owner("POST", BASE + "/accounting-periods/" + id + "/close", ""), 409),
+        is("PERIOD_NOT_OPEN"));
+    assertThat(
+        code(owner("POST", BASE + "/accounting-periods/" + Ids.newId() + "/close", ""), 404),
+        is("PERIOD_NOT_FOUND"));
+    assertThat(
+        count(
+            "SELECT status FROM inventory.accounting_periods WHERE tenant_id = '"
+                + T
+                + "' AND id = '"
+                + id
+                + "'"),
+        is("CLOSED"));
+  }
+
+  @Test
+  @DisplayName("A kanban card of a type nobody defined is refused; triggers and refills keep order")
+  void aKanbanCardThatIsWrongOrOutOfTurnIsRefused() {
+    String store = Ids.newId().toString();
+    String variant = Ids.newId().toString();
+    for (String type : new String[] {"INVALID", "TRANSFER"}) {
+      assertThat(
+          type,
+          code(
+              owner(
+                  "POST",
+                  BASE + "/kanban-cards",
+                  "{\"storeId\":\""
+                      + store
+                      + "\",\"variantId\":\""
+                      + variant
+                      + "\",\"kanbanType\":\""
+                      + type
+                      + "\",\"reorderQty\":5}"),
+              400),
+          is("INVALID_KANBAN_TYPE"));
+    }
+    assertThat(
+        count(
+            "SELECT count(*) FROM inventory.kanban_cards WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + store
+                + "'"),
+        is("0"));
+
+    String card = card(store);
+    String cardState =
+        "SELECT status FROM inventory.kanban_cards WHERE tenant_id = '"
+            + T
+            + "' AND id = '"
+            + card
+            + "'";
+    // An EMPTY card cannot be replenished.
+    assertThat(
+        code(owner("POST", BASE + "/kanban-cards/" + card + "/replenish", ""), 409),
+        is("KANBAN_NOT_TRIGGERED"));
+    assertThat(count(cardState), is("EMPTY"));
+    // Triggered once; the second trigger is refused and the card stays triggered.
+    assertThat(
+        owner("POST", BASE + "/kanban-cards/" + card + "/trigger", "{}").getStatus(), is(200));
+    assertThat(
+        code(owner("POST", BASE + "/kanban-cards/" + card + "/trigger", "{}"), 409),
+        is("KANBAN_NOT_EMPTY"));
+    assertThat(count(cardState), is("TRIGGERED"));
+    // A card that is not there, and one of another business, are not found, and ours is unmoved.
+    assertThat(
+        code(owner("POST", BASE + "/kanban-cards/" + Ids.newId() + "/trigger", "{}"), 404),
+        is("KANBAN_NOT_FOUND"));
+    assertThat(
+        code(
+            call(
+                new Req("POST", BASE + "/kanban-cards/" + card + "/replenish", "", null),
+                OTHER_T,
+                "OWNER",
+                null),
+            404),
+        is("KANBAN_NOT_FOUND"));
+    assertThat(count(cardState), is("TRIGGERED"));
+  }
+
+  @Test
+  @DisplayName(
+      "A picking rule or assignment that is wrong or not there is refused, and none is made")
+  void aPickingRuleOrAssignmentThatIsWrongIsRefused() {
+    assertThat(
+        code(
+            owner(
+                "POST",
+                BASE + "/picking-rules",
+                "{\"name\":\"R" + tail() + "\",\"strategy\":\"RANDOM\"}"),
+            400),
+        is("INVALID_STRATEGY"));
+    assertThat(
+        code(owner("GET", BASE + "/picking-rules/" + Ids.newId(), null), 404),
+        is("PICKING_RULE_NOT_FOUND"));
+
+    String rule = rule();
+    String assignments =
+        "SELECT count(*) FROM inventory.picking_rule_assignments WHERE tenant_id = '"
+            + T
+            + "' AND rule_id = '"
+            + rule
+            + "'";
+    assertThat(
+        code(
+            owner(
+                "POST",
+                BASE + "/picking-rule-assignments",
+                "{\"ruleId\":\""
+                    + rule
+                    + "\",\"scopeType\":\"CATEGORY\",\"scopeId\":\""
+                    + Ids.newId()
+                    + "\"}"),
+            400),
+        is("INVALID_SCOPE_TYPE"));
+    assertThat(
+        code(
+            owner(
+                "POST",
+                BASE + "/picking-rule-assignments",
+                "{\"ruleId\":\"" + rule + "\",\"scopeType\":\"PRODUCT\"}"),
+            400),
+        is("SCOPE_ID_REQUIRED"));
+    assertThat(
+        code(
+            owner(
+                "POST",
+                BASE + "/picking-rule-assignments",
+                "{\"ruleId\":\"" + Ids.newId() + "\",\"scopeType\":\"GLOBAL\"}"),
+            404),
+        is("PICKING_RULE_NOT_FOUND"));
+    assertThat(count(assignments), is("0"));
+
+    String store = Ids.newId().toString();
+    String assignment = assignment(store);
+    assertThat(
+        owner("DELETE", BASE + "/picking-rule-assignments/" + assignment, null).getStatus(),
+        oneOf(200, 204));
+    assertThat(
+        code(owner("DELETE", BASE + "/picking-rule-assignments/" + assignment, null), 404),
+        is("ASSIGNMENT_NOT_FOUND"));
+    assertThat(
+        code(owner("DELETE", BASE + "/picking-rule-assignments/" + Ids.newId(), null), 404),
+        is("ASSIGNMENT_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName("Resolving a picking rule needs both a store and a variant")
+  void aPickingRuleResolvedWithoutItsStoreAndVariantIsRefused() {
+    assertThat(code(owner("GET", BASE + "/picking-rules/resolve", null), 400), is("MISSING_PARAM"));
+    assertThat(
+        code(owner("GET", BASE + "/picking-rules/resolve?store=" + Ids.newId(), null), 400),
+        is("MISSING_PARAM"));
   }
 }

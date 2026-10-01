@@ -474,6 +474,28 @@ class ReturnsIT {
     assertThat(theirs.getBoolean("usingDefault"), is(true));
   }
 
+  @Test
+  @DisplayName("A caller held to stores cannot set the whole business's return policy")
+  void aStoreHeldManagerCannotSetTheBusinessPolicy() {
+    String valid = "{\"windowDays\":3,\"cashierCeiling\":1.00,\"noReceiptAllowed\":true}";
+    for (String role : new String[] {"MANAGER", "OWNER"}) {
+      Response r =
+          as("/admin/return-policy", T, role, MANAGER, STORE)
+              .put(Entity.entity(valid, MediaType.APPLICATION_JSON));
+      String text = r.readEntity(String.class);
+      assertThat(role + ": " + text, r.getStatus(), is(403));
+      assertThat(role, text, containsString("BUSINESS_WIDE_ONLY"));
+    }
+    // Nothing changed: still the default, 30 days, no cashier ceiling.
+    JsonObject policy = data(get("/admin/return-policy", T, "OWNER", MANAGER), 200);
+    assertThat(policy.getBoolean("usingDefault"), is(true));
+    assertThat(policy.getInt("windowDays"), is(30));
+    assertThat(nullish(policy, "cashierCeiling"), is(true));
+    assertThat(policy.getBoolean("noReceiptAllowed"), is(false));
+    // A store-held manager still reads it: the refusal is of the write.
+    assertThat(as("/admin/return-policy", T, "MANAGER", MANAGER, STORE).get().getStatus(), is(200));
+  }
+
   // ── retries ───────────────────────────────────────────────────────────────
 
   @Test
@@ -606,7 +628,21 @@ class ReturnsIT {
     Response code =
         returnAs(order, body(1, "SEALED", ",\"giftCardCode\":\"ABCD\""), T, "CASHIER", CASHIER);
     assertThat(code.getStatus(), is(400));
+    assertThat(
+        code.readEntity(String.class), containsString("ORDER_RETURN_GIFT_CARD_CODE_UNEXPECTED"));
     assertThat(returnRows(T, order), is(0L));
+  }
+
+  @Test
+  @DisplayName("A return of nothing is refused and writes nothing")
+  void aReturnOfNothingIsRefused() {
+    String order = sale(T, STORE, null);
+    Response r = returnAs(order, "{\"reason\":\"r\",\"items\":[]}", T, "CASHIER", CASHIER);
+    String text = r.readEntity(String.class);
+    assertThat(text, r.getStatus(), is(400));
+    assertThat(text, containsString("ORDER_RETURN_NO_ITEMS"));
+    assertThat(returnRows(T, order), is(0L));
+    assertThat(events(order, "OrderReturned"), is(0L));
   }
 
   @Test

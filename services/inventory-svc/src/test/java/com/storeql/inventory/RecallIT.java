@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -668,6 +669,7 @@ class RecallIT {
     Response foreignRead =
         send("GET", "/admin/inventory/recalls/" + recallId, null, OTHER, "OWNER", MANAGER, null);
     assertThat(foreignRead.getStatus(), is(404));
+    assertThat(foreignRead.readEntity(String.class), containsString("RECALL_NOT_FOUND"));
     JsonArray foreignActive =
         okArray(
             send("GET", "/admin/inventory/recalls/active", null, OTHER, "CASHIER", STAFF, null));
@@ -686,6 +688,108 @@ class RecallIT {
             .getString("id");
     assertThat(materialStatus(foreignBatch), is("AVAILABLE"));
     assertThat(materialStatus(batch), is("RECALLED"));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return com.storeql.test.Envelopes.parse(body).getString("code");
+  }
+
+  @Test
+  @DisplayName("A batch the recall does not hold cannot be released, and nothing is recorded")
+  void aBatchTheRecallDoesNotHoldIsNotReleased() {
+    String store = uuid();
+    String variant = uuid();
+    receive(store, variant, "3", "L1", null);
+    String recallId = created(open("HELD-1", "WITHDRAWAL", lotLine(variant, "L1"))).getString("id");
+    String elsewhere = receive(store, uuid(), "2", "L9", null);
+
+    for (String batch : new String[] {elsewhere, uuid()}) {
+      assertThat(
+          codeOf(release(recallId, batch, "STOREKEEPER", null), 404), is("RECALL_BATCH_NOT_HELD"));
+    }
+    assertThat(materialStatus(elsewhere), is("AVAILABLE"));
+    assertThat(
+        scalar(
+            PG,
+            "SELECT count(*) FROM inventory.recall_batch_releases WHERE recall_id = '"
+                + recallId
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A store action with a negative or over-precise quantity is refused; none is kept")
+  void aStoreActionWithANegativeOrOverPreciseQuantityIsRefused() {
+    String store = uuid();
+    String variant = uuid();
+    receive(store, variant, "3", "L1", null);
+    String recallId = created(open("QTY-1", "WITHDRAWAL", lotLine(variant, "L1"))).getString("id");
+
+    for (String qty : new String[] {"-1", "1.2345"}) {
+      assertThat(
+          qty,
+          codeOf(action(recallId, store, qty, "DESTROYED", null), 400),
+          is("RECALL_QTY_INVALID"));
+    }
+    assertThat(
+        scalar(
+            PG,
+            "SELECT count(*) FROM inventory.recall_store_actions WHERE recall_id = '"
+                + recallId
+                + "'"),
+        is("0"));
+    assertThat(onHand(store, variant), is("0"));
+    assertThat(remainingQty(heldBatchOf(store, variant)), is("3.000"));
+  }
+
+  private static String heldBatchOf(String store, String variant) {
+    return scalar(
+        PG,
+        "SELECT id FROM inventory.inventory_batches WHERE store_id = '"
+            + store
+            + "' AND variant_id = '"
+            + variant
+            + "'");
+  }
+
+  @Test
+  @DisplayName("A recall of more than a hundred items is refused, and none is opened")
+  void aRecallOfMoreThanAHundredItemsIsRefused() {
+    StringBuilder items = new StringBuilder();
+    for (int i = 0; i < 101; i++) {
+      items.append(i == 0 ? "" : ",").append("{\"variantId\":\"").append(uuid()).append("\"}");
+    }
+    Response r = open("BIG-1", "WITHDRAWAL", items.toString());
+    assertThat(codeOf(r, 400), is("RECALL_SCOPE_TOO_LARGE"));
+    assertThat(
+        scalar(
+            PG,
+            "SELECT count(*) FROM inventory.recalls WHERE tenant_id = '"
+                + T
+                + "' AND reference = 'BIG-1'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A recall list filtered by a status nobody defined is refused")
+  void aRecallListByAStatusNobodyDefinedIsRefused() {
+    for (String status : new String[] {"PENDING", "open"}) {
+      Response r =
+          target
+              .path("/admin/inventory/recalls")
+              .queryParam("status", status)
+              .request()
+              .header("X-Tenant-Id", T)
+              .header("X-Roles", "OWNER")
+              .header("X-User-Id", MANAGER)
+              .get();
+      assertThat(status, codeOf(r, 400), is("RECALL_STATUS_INVALID"));
+    }
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

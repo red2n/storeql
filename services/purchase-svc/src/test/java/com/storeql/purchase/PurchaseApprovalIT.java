@@ -235,8 +235,25 @@ class PurchaseApprovalIT {
   @DisplayName("An order not awaiting a decision cannot be approved")
   void cannotApproveWhatIsNotPending() {
     String po = order("Draft Ltd", "GBP", "10", "1.00");
+    Response approve = post("/purchase-orders/" + po + "/approve", "{}", "OWNER", BOSS);
+    String approveBody = approve.readEntity(String.class);
+    assertThat(approveBody, approve.getStatus(), is(409));
     assertThat(
-        post("/purchase-orders/" + po + "/approve", "{}", "OWNER", BOSS).getStatus(), is(409));
+        approveBody,
+        com.storeql.test.Envelopes.parse(approveBody).getString("code", null),
+        is("PURCHASE_PO_NOT_PENDING_APPROVAL"));
+    // Nor rejected: the same refusal, and the order is still a draft either way.
+    Response reject =
+        post("/purchase-orders/" + po + "/reject", "{\"reason\":\"too much\"}", "OWNER", BOSS);
+    String rejectBody = reject.readEntity(String.class);
+    assertThat(rejectBody, reject.getStatus(), is(409));
+    assertThat(
+        rejectBody,
+        com.storeql.test.Envelopes.parse(rejectBody).getString("code", null),
+        is("PURCHASE_PO_NOT_PENDING_APPROVAL"));
+    assertThat(
+        get("/purchase-orders/" + po, "OWNER", BOSS).readEntity(String.class),
+        containsString("\"status\":\"DRAFT\""));
   }
 
   // ── multi-currency, which is what makes the ceiling meaningful ──────────────

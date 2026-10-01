@@ -1,9 +1,9 @@
 package com.storeql.order.einvoice;
 
+import com.storeql.order.config.Json;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
 import io.helidon.webclient.api.WebClient;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import jakarta.json.JsonValue;

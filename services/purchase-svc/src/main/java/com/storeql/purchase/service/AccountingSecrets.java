@@ -1,12 +1,12 @@
 package com.storeql.purchase.service;
 
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Accounting.Credentials;
 import com.storeql.service.SealedSecrets;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Typed;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonReader;
@@ -35,7 +35,7 @@ public class AccountingSecrets extends SealedSecrets {
   }
 
   public String sealCredentials(Credentials c) {
-    JsonObjectBuilder b = Json.createObjectBuilder().add("accessToken", c.accessToken());
+    JsonObjectBuilder b = Jsons.PROVIDER.createObjectBuilder().add("accessToken", c.accessToken());
     if (c.refreshToken() != null) b.add("refreshToken", c.refreshToken());
     if (c.clientId() != null) b.add("clientId", c.clientId());
     if (c.clientSecret() != null) b.add("clientSecret", c.clientSecret());
@@ -44,7 +44,7 @@ public class AccountingSecrets extends SealedSecrets {
   }
 
   public Credentials openCredentials(String sealed) {
-    try (JsonReader reader = Json.createReader(new StringReader(open(sealed)))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(open(sealed)))) {
       JsonObject o = reader.readObject();
       return new Credentials(
           o.getString("accessToken"),

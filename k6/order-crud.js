@@ -29,13 +29,15 @@ export const options = { vus: 1, iterations: 1, thresholds: ALL_CHECKS_PASS, set
 const UNKNOWN = '01a0b000-0000-7000-8000-000000000000';
 
 export function setup() {
-  const tenant = onboardTenant('order', { stores: 1 });
+  const tenant = onboardTenant('order', { stores: 2 });
   const rival = onboardTenant('order-rival', { stores: 1 });
   const storeId = tenant.stores[0].id;
   tenant.variantId = sellableVariant(tenant, 'Ordered mug').variantId;
   priceVariants(tenant, [tenant.variantId], '12.50');
   if (receive(tenant, storeId, tenant.variantId, 200).status !== 201) throw new Error('receive failed');
   tenant.cashier = staffUser(tenant, 'CASHIER', [storeId]);
+  // A manager held to the second store: staff of the business, but not of the store the sales are rung up at.
+  tenant.managerElsewhere = staffUser(tenant, 'MANAGER', [tenant.stores[1].id]);
   return { tenant, rival, shopper: register('order-shopper'), stranger: register('order-stranger') };
 }
 
@@ -74,6 +76,13 @@ export default function ({ tenant, rival, shopper, stranger }) {
   truthy('[+] ...includes both', [order.id, data(exempt).id].every((id) => (data(list) || []).some((o) => o.id === id)), (data(list) || []).length);
   expect(call('GET', '/api/order-svc/orders', { token: shopper.token }), "[-] a shopper cannot list the tenant's orders", 403);
 
+  // ── confirming a till sale also hands it over: staff at its store only ────────────────────────
+  const confirmAs = (id, opts) => call('POST', `/api/order-svc/orders/${id}/confirm`, { body: {}, ...opts });
+  expect(confirmAs(order.id, { token: tenant.managerElsewhere.token }), '[-] confirm: a manager held to another store cannot confirm our sale', 403, 'STORE_ACCESS_DENIED');
+  expect(confirmAs(order.id, { token: rival.owner.token }), '[-] confirm: another business finds no such order', 404, 'ORDER_NOT_FOUND');
+  expect(confirmAs(order.id, { token: shopper.token, storefront: tenant.tenantId }), '[-] confirm: a shopper cannot confirm a sale', 403);
+  truthy('[-] ...and the sale is still PENDING, nothing confirmed or handed over', statusOf(order.id) === 'PENDING', statusOf(order.id));
+
   // ── pay, fulfil, return ─────────────────────────────────────────────────────
   expect(
     call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, idem: true, body: { reason: 'Too early', items: [{ variantId, qty: 1, condition: 'SEALED' }] } }),
@@ -86,6 +95,7 @@ export default function ({ tenant, rival, shopper, stranger }) {
   poll(30, () => statusOf(order.id) === 'FULFILLED');
   truthy('[+] paying for a till sale fulfils it', statusOf(order.id) === 'FULFILLED', statusOf(order.id));
   expect(call('POST', `/api/order-svc/orders/${order.id}/fulfil`, { token: t }), '[-] fulfil twice', 409, 'ORDER_NOT_FULFILLABLE');
+  expect(confirmAs(order.id, { token: t }), '[-] confirm a sale that is already FULFILLED', 404, 'ORDER_NOT_FOUND_OR_WRONG_STATUS');
   expect(call('POST', `/api/order-svc/orders/${order.id}/cancel`, { token: t, body: { reason: 'Too late' } }), '[-] cancel a fulfilled order', 409);
   expect(call('POST', `/api/order-svc/orders/${order.id}/returns`, { token: t, idem: true, body: { items: [{ variantId, qty: 1, condition: 'SEALED' }] } }), '[-] return: reason required', 400);
   expect(

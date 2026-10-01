@@ -410,13 +410,16 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
    * proxy route {@code /api/{service}/{service-local path}}. Strip that prefix so the allowlists
    * match the same service-local path at the gateway and at the business service.
    */
+  private static final java.util.regex.Pattern API_VERSION =
+      java.util.regex.Pattern.compile("^v\\d+/");
+
   private static String stripGatewayPrefix(String path) {
     if (!path.startsWith("/api/")) {
       return path;
     }
     // The canonical form carries a version segment (22.8): /api/v1/{service}/… strips to the same
     // service-local path as the alias /api/{service}/…, so a public read is public on both.
-    String rest = path.substring("/api/".length()).replaceFirst("^v\\d+/", "");
+    String rest = API_VERSION.matcher(path.substring("/api/".length())).replaceFirst("");
     int afterService = rest.indexOf('/');
     return afterService >= 0 ? rest.substring(afterService) : "/";
   }

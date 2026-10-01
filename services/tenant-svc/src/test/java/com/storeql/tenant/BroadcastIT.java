@@ -422,10 +422,13 @@ class BroadcastIT {
     Answer stranger = ack(shop, Ids.newId().toString(), "CASHIER", id, shop.storeA());
     assertThat(stranger.code(), is("WORKFORCE_NOT_ASSIGNED"));
     Shop rival = shop();
-    assertThat(
-        call("GET", ADMIN + "/" + id, null, rival.tenant(), rival.manager(), "OWNER").status(),
-        is(404));
-    assertThat(ack(rival, rival.cashierA(), "CASHIER", id, rival.storeA()).status(), is(404));
+    Answer theirRead =
+        call("GET", ADMIN + "/" + id, null, rival.tenant(), rival.manager(), "OWNER");
+    assertThat(theirRead.status(), is(404));
+    assertThat(theirRead.code(), is("BROADCAST_NOT_FOUND"));
+    Answer theirAck = ack(rival, rival.cashierA(), "CASHIER", id, rival.storeA());
+    assertThat(theirAck.status(), is(404));
+    assertThat(theirAck.code(), is("BROADCAST_NOT_FOUND"));
     assertThat(current(rival, rival.cashierA(), "CASHIER", rival.storeA()), hasSize(0));
     assertThat(
         call("GET", READ + "?storeId=" + shop.storeA(), null, shop.tenant(), null, null).data(),

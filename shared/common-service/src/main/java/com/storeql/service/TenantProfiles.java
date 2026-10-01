@@ -306,6 +306,7 @@ public class TenantProfiles {
                             + " try again",
                         List.of()));
     storeCache.put(tenantId, new CachedStores(read, now));
+    CacheSweep.trim(storeCache, c -> !c.readAt().plus(TTL).isAfter(now));
     return read;
   }
 
@@ -491,7 +492,11 @@ public class TenantProfiles {
     CachedName hit = names.get(tenantId);
     if (hit != null && hit.expiresAt().isAfter(now)) return Optional.of(hit.name());
     Optional<String> read = fetch.apply(tenantId).flatMap(TenantProfiles::parseName);
-    read.ifPresent(n -> names.put(tenantId, new CachedName(n, now.plus(TTL))));
+    read.ifPresent(
+        n -> {
+          names.put(tenantId, new CachedName(n, now.plus(TTL)));
+          CacheSweep.trim(names, c -> !c.expiresAt().isAfter(now));
+        });
     return read;
   }
 
@@ -515,7 +520,11 @@ public class TenantProfiles {
     Cached hit = cache.get(tenantId);
     if (hit != null && hit.expiresAt().isAfter(now)) return Optional.of(hit.profile());
     Optional<Profile> read = fetch.apply(tenantId).flatMap(body -> parse(tenantId, body));
-    read.ifPresent(p -> cache.put(tenantId, new Cached(p, now.plus(TTL))));
+    read.ifPresent(
+        p -> {
+          cache.put(tenantId, new Cached(p, now.plus(TTL)));
+          CacheSweep.trim(cache, c -> !c.expiresAt().isAfter(now));
+        });
     return read;
   }
 

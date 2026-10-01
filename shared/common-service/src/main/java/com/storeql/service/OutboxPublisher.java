@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -41,8 +42,10 @@ public class OutboxPublisher {
   @Inject Instance<OutboxStore> storeInstance;
 
   private OutboxStore store;
-  private KafkaProducer<String, String> producer;
+  private Producer<String, String> producer;
   private ScheduledExecutorService scheduler;
+  private int batchSize = 100;
+  private long drainBudgetMillis = 5000L;
 
   /**
    * CDI observer — makes this {@code @ApplicationScoped} bean eager so {@link #start()} runs at
@@ -83,7 +86,12 @@ public class OutboxPublisher {
     props.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "3000");
     this.producer = new KafkaProducer<>(props);
 
-    long poll = settings.outboxPollSeconds();
+    // storeql.outbox.poll-millis (when > 0) overrides the whole-second interval for a tighter idle
+    // tick; a drain that returns a full batch does not wait for the tick at all (see drainQuietly).
+    long pollMillis = cfgLong("storeql.outbox.poll-millis", 0L);
+    if (pollMillis <= 0) pollMillis = settings.outboxPollSeconds() * 1000L;
+    this.batchSize = (int) Math.max(1, cfgLong("storeql.outbox.batch-size", 100L));
+    this.drainBudgetMillis = Math.max(0, cfgLong("storeql.outbox.drain-budget-ms", 5000L));
     this.scheduler =
         Executors.newSingleThreadScheduledExecutor(
             r -> {
@@ -91,23 +99,77 @@ public class OutboxPublisher {
               t.setDaemon(true);
               return t;
             });
-    scheduler.scheduleWithFixedDelay(this::drainQuietly, poll, poll, TimeUnit.SECONDS);
+    scheduler.scheduleWithFixedDelay(
+        this::drainQuietly, pollMillis, pollMillis, TimeUnit.MILLISECONDS);
+    long purgeMinutes = Math.max(1, cfgLong("storeql.outbox.purge.interval-minutes", 60L));
+    if (cfgLong("storeql.outbox.purge.enabled", 1L) > 0) {
+      scheduler.scheduleWithFixedDelay(
+          this::purgeQuietly, Math.min(5, purgeMinutes), purgeMinutes, TimeUnit.MINUTES);
+    }
     LOG.log(Level.INFO, "Outbox publisher started (bootstrap={0})", settings.kafkaBootstrap());
   }
 
   /**
-   * One drain tick: claims up to 100 pending rows via {@link #store} and publishes them. Never
-   * throws — any failure (claim query error, Kafka unreachable) is logged and deferred to the next
-   * tick, since rows that aren't confirmed published simply stay pending.
+   * One drain tick: claims up to {@code storeql.outbox.batch-size} (default 100) pending rows via
+   * {@link #store} and publishes them, and keeps going while batches come back full, within {@code
+   * storeql.outbox.drain-budget-ms} (default 5000), so a backlog drains at the speed of Kafka and
+   * not at one batch per tick. Never throws: any failure (claim query error, Kafka unreachable) is
+   * logged and deferred to the next tick, since rows that aren't confirmed published stay pending.
    */
-  private void drainQuietly() {
+  void drainQuietly() {
     try {
-      // The claim (FOR UPDATE SKIP LOCKED) and the published-mark below run in the repo's single
-      // transaction, so two replicas draining at the same instant never claim the same row.
-      store.drainAndPublish(100, this::publishBatch);
+      long deadline = System.nanoTime() + drainBudgetMillis * 1_000_000L;
+      int drained;
+      do {
+        // The claim (FOR UPDATE SKIP LOCKED) and the published-mark run in the repo's single
+        // transaction, so two replicas draining at the same instant never claim the same row.
+        drained = store.drainAndPublish(batchSize, this::publishBatch).size();
+      } while (drained >= batchSize
+          && System.nanoTime() < deadline
+          && !Thread.currentThread().isInterrupted());
     } catch (Exception e) {
       LOG.log(Level.WARNING, "Outbox drain deferred: " + e.getMessage());
     }
+  }
+
+  /**
+   * Housekeeping tick: deletes PUBLISHED outbox rows older than {@code
+   * storeql.outbox.retention-days} (default 7) and consumer dedupe rows older than {@code
+   * storeql.processed-events.retention-days} (default 30; must exceed the longest Kafka topic
+   * retention plus consumer lag, Kafka's own default being 7 days), in batches of {@code
+   * storeql.outbox.purge.batch-size} (default 1000), at most {@code
+   * storeql.outbox.purge.max-batches} (default 50) per kind per tick. Never throws.
+   */
+  void purgeQuietly() {
+    try {
+      long outboxDays = Math.max(1, cfgLong("storeql.outbox.retention-days", 7L));
+      long dedupeDays = Math.max(1, cfgLong("storeql.processed-events.retention-days", 30L));
+      int batch = (int) Math.max(1, cfgLong("storeql.outbox.purge.batch-size", 1000L));
+      int maxBatches = (int) Math.max(1, cfgLong("storeql.outbox.purge.max-batches", 50L));
+      java.time.Instant now = java.time.Instant.now();
+      int outbox = 0;
+      for (int i = 0; i < maxBatches; i++) {
+        int n = store.purgePublished(now.minus(Duration.ofDays(outboxDays)), batch);
+        outbox += n;
+        if (n < batch) break;
+      }
+      int dedupe = 0;
+      for (int i = 0; i < maxBatches; i++) {
+        int n = store.purgeProcessedEvents(now.minus(Duration.ofDays(dedupeDays)), batch);
+        dedupe += n;
+        if (n < batch) break;
+      }
+      if (outbox + dedupe > 0) {
+        LOG.log(
+            Level.INFO, "Purged {0} published outbox rows, {1} processed_events", outbox, dedupe);
+      }
+    } catch (Exception e) {
+      LOG.log(Level.WARNING, "Outbox purge deferred: " + e.getMessage());
+    }
+  }
+
+  private static long cfgLong(String key, long fallback) {
+    return Cfg.getLong(key, fallback);
   }
 
   /**
@@ -119,14 +181,18 @@ public class OutboxPublisher {
    * @return the ids of {@code rows} whose send was confirmed by the broker; a subset when some
    *     sends failed or timed out
    */
-  private List<UUID> publishBatch(List<OutboxStore.PendingOutbox> rows) {
+  List<UUID> publishBatch(List<OutboxStore.PendingOutbox> rows) {
     var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>(rows.size());
     for (var row : rows) {
       futures.add(producer.send(new ProducerRecord<>(row.topic(), row.key(), row.payload())));
     }
     producer.flush();
     var published = new java.util.ArrayList<UUID>(rows.size());
+    // Once a row fails, later rows about the SAME aggregate are not marked published, so the
+    // retry sends them after it (per-aggregate order); other aggregates are unaffected.
+    var failedKeys = new java.util.HashSet<String>();
     for (int i = 0; i < rows.size(); i++) {
+      if (failedKeys.contains(rows.get(i).key())) continue;
       try {
         futures.get(i).get();
         published.add(rows.get(i).id());
@@ -134,6 +200,7 @@ public class OutboxPublisher {
         Thread.currentThread().interrupt();
         break;
       } catch (Exception e) {
+        failedKeys.add(rows.get(i).key());
         LOG.log(
             Level.WARNING, "Publish failed for outbox {0}: {1}", rows.get(i).id(), e.getMessage());
       }

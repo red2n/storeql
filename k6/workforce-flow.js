@@ -21,7 +21,7 @@
 //
 //   k6/run.sh workforce-flow
 import { Counter } from 'k6/metrics';
-import { ALL_CHECKS_PASS, call, data, expect, poll, sellingTenant, truthy, uniq } from './lib/storeql.js';
+import { ALL_CHECKS_PASS, addStore, call, data, expect, poll, sellingTenant, staffUser, truthy, uniq } from './lib/storeql.js';
 
 const completed = new Counter('flow_completed');
 export const options = {
@@ -203,6 +203,17 @@ export default function ({ shop, rival }) {
     attendance.some((d) => d.userId === keeper.userId && d.absent === true),
     attendance,
   );
+
+  // A manager held to one store reads that store's attendance and is refused another store's.
+  const otherStore = addStore(shop.tenant, 'WF2');
+  const heldManager = staffUser(shop.tenant, 'MANAGER', [store]);
+  expect(
+    get(`${W}/attendance?store=${otherStore.id}`, heldManager.token),
+    '[-] a manager held to one store does not read another store\'s attendance',
+    403,
+    'STORE_ACCESS_DENIED',
+  );
+  expect(get(`${W}/attendance?store=${store}`, heldManager.token), '[+] ...but reads their own store\'s', 200);
 
   // ── who may press what ───────────────────────────────────────────────────────────────────────────
   expect(get(`${W}/shifts?from=${at(0, 0)}`, cashier.token), '[-] the management roster is management\'s', 403);

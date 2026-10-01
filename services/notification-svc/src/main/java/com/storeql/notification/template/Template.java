@@ -5,7 +5,9 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * The words of one message, with gaps for what changes (13.x, message templates): {@code {{name}}}
@@ -36,6 +38,27 @@ public final class Template {
 
   private record Section(String name, boolean inverted, List<Node> body) implements Node {}
 
+  private static final Pattern NAME = Pattern.compile("[a-z][a-z0-9_]{0,63}");
+
+  /**
+   * Parsed templates by source text (a Template is immutable once built). Bounded: the catalogue's
+   * texts are constants and a business's are few, but a full cache is simply emptied.
+   */
+  private static final java.util.concurrent.ConcurrentMap<String, Template> PARSED =
+      new ConcurrentHashMap<>();
+
+  private static final int CACHE_MAX = cacheMax();
+
+  private static int cacheMax() {
+    try {
+      return org.eclipse.microprofile.config.ConfigProvider.getConfig()
+          .getOptionalValue("storeql.notification.template-cache-size", Integer.class)
+          .orElse(512);
+    } catch (RuntimeException e) {
+      return 512;
+    }
+  }
+
   private final List<Node> nodes;
 
   private Template(List<Node> nodes) {
@@ -48,6 +71,17 @@ public final class Template {
    * @throws Invalid when a gap is unclosed or empty, or a section is closed that was not opened
    */
   public static Template parse(String source) {
+    Template cached = PARSED.get(source);
+    if (cached != null) return cached;
+    Template parsed = parseUncached(source);
+    if (CACHE_MAX > 0) {
+      if (PARSED.size() >= CACHE_MAX) PARSED.clear();
+      PARSED.put(source, parsed);
+    }
+    return parsed;
+  }
+
+  private static Template parseUncached(String source) {
     List<List<Node>> stack = new ArrayList<>();
     List<Section> open = new ArrayList<>();
     List<Node> current = new ArrayList<>();
@@ -65,7 +99,7 @@ public final class Template {
       if (tag.isEmpty()) throw new Invalid("an empty {{}} at character " + (start + 1));
       char kind = tag.charAt(0);
       String name = (kind == '#' || kind == '^' || kind == '/') ? tag.substring(1).strip() : tag;
-      if (!name.matches("[a-z][a-z0-9_]{0,63}")) {
+      if (!NAME.matcher(name).matches()) {
         throw new Invalid(
             "{{" + tag + "}} at character " + (start + 1) + " is not a name this template knows");
       }

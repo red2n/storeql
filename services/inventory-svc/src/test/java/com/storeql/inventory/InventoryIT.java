@@ -17,6 +17,7 @@ import jakarta.ws.rs.core.Response;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -38,6 +39,8 @@ class InventoryIT {
     System.setProperty("storeql.db.schema", "inventory");
     System.setProperty("storeql.consul.enabled", "false");
     System.setProperty("storeql.kafka.enabled", "false");
+    // Small chunks, so the purge test below moves its rows in several statements.
+    System.setProperty("storeql.inventory.archive.chunk-rows", "2");
   }
 
   private static final String T = "01a090ae-611e-700b-bde4-50df0324c37c";
@@ -356,6 +359,43 @@ class InventoryIT {
   }
 
   @Test
+  void expiringBatches_leaveOutBatchesThatAreEmpty() {
+    UUID variant = Ids.newId();
+    String expiry = java.time.LocalDate.now().plusDays(4).toString();
+    for (String lot : new String[] {"EXP-EMPTY", "EXP-LIVE"}) {
+      assertThat(
+          post(
+                  "/admin/inventory/receive",
+                  "{\"storeId\":\""
+                      + S
+                      + "\",\"variantId\":\""
+                      + variant
+                      + "\",\"qty\":2,\"batchNo\":\""
+                      + lot
+                      + "\",\"expiryDate\":\""
+                      + expiry
+                      + "\"}",
+                  T)
+              .getStatus(),
+          is(201));
+    }
+    // the first batch drawn (oldest, same date) is emptied by a sale of two
+    sell(T, variant.toString(), 2);
+
+    String resp =
+        target
+            .path("/admin/inventory/batches/expiring")
+            .queryParam("store", S)
+            .queryParam("withinDays", 30)
+            .request()
+            .header("X-Tenant-Id", T)
+            .header("X-Roles", "OWNER")
+            .get(String.class);
+    assertThat(resp, containsString("EXP-LIVE"));
+    assertThat(resp, not(containsString("EXP-EMPTY")));
+  }
+
+  @Test
   void expiringBatches_invalidDays_returns400() {
     Response r =
         target
@@ -367,6 +407,19 @@ class InventoryIT {
             .header("X-Roles", "OWNER")
             .get();
     assertThat(r.getStatus(), is(400));
+    assertThat(r.readEntity(String.class), containsString("\"INVALID_DAYS\""));
+    // Nought days is no window either.
+    Response none =
+        target
+            .path("/admin/inventory/batches/expiring")
+            .queryParam("store", S)
+            .queryParam("withinDays", 0)
+            .request()
+            .header("X-Tenant-Id", T)
+            .header("X-Roles", "OWNER")
+            .get();
+    assertThat(none.getStatus(), is(400));
+    assertThat(none.readEntity(String.class), containsString("\"INVALID_DAYS\""));
   }
 
   // ── Tier-1 Gap #25: Grade control ────────────────────────────────────────
@@ -529,6 +582,7 @@ class InventoryIT {
                         + "\",\"parQty\":10,\"reviewCycle\":\"YEARLY\"}",
                     MediaType.APPLICATION_JSON));
     assertThat(r.getStatus(), is(400));
+    assertThat(r.readEntity(String.class), containsString("\"INVALID_REVIEW_CYCLE\""));
   }
 
   // ── Tier-1 Gap #28: Order modifiers ──────────────────────────────────────
@@ -676,6 +730,49 @@ class InventoryIT {
         try (var rs = ps.executeQuery()) {
           assertThat("row must survive in the archive", rs.next(), is(true));
         }
+      }
+    }
+  }
+
+  @Test
+  void purgeMovements_movesAWholeHistoryInChunks() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID store = Ids.newId();
+    UUID variant = Ids.newId();
+    try (var c = PG.dataSource().getConnection();
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO inventory.stock_movements (id, tenant_id, store_id, variant_id,"
+                    + " type, qty, created_at) VALUES (?,?,?,?,'ADJUST',1,?)")) {
+      for (int i = 0; i < 5; i++) {
+        ps.setObject(1, Ids.newId());
+        ps.setObject(2, tenant);
+        ps.setObject(3, store);
+        ps.setObject(4, variant);
+        ps.setObject(5, OffsetDateTime.parse("2019-01-01T00:00:00Z").plusDays(i));
+        ps.executeUpdate();
+      }
+    }
+    Response r =
+        post(
+            "/admin/inventory/movements/purge",
+            "{\"before\":\"2020-01-01T00:00:00Z\"}",
+            tenant.toString());
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(200));
+    assertThat(body, containsString("\"purged\":5"));
+    try (var c = PG.dataSource().getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT (SELECT count(*) FROM inventory.stock_movements WHERE tenant_id=?) AS hot,"
+                    + " (SELECT count(*) FROM inventory.stock_movements_archive WHERE tenant_id=?)"
+                    + " AS archived")) {
+      ps.setObject(1, tenant);
+      ps.setObject(2, tenant);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        assertThat(rs.getInt("hot"), is(0));
+        assertThat(rs.getInt("archived"), is(5));
       }
     }
   }
@@ -1844,6 +1941,340 @@ class InventoryIT {
               .get();
       assertThat(limit, r.getStatus(), is(200));
     }
+  }
+
+  // ── refusals: what is refused says why, and nothing is written ──────────────
+
+  private Response send(String method, String path, String json, String tenant) {
+    var request =
+        target.path(path).request().header("X-Tenant-Id", tenant).header("X-Roles", "OWNER");
+    return switch (method) {
+      case "GET" -> request.get();
+      case "PUT" -> request.put(Entity.entity(json, MediaType.APPLICATION_JSON));
+      default -> request.post(Entity.entity(json == null ? "" : json, MediaType.APPLICATION_JSON));
+    };
+  }
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String refusedWith(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return com.storeql.test.Envelopes.parse(body).getString("code");
+  }
+
+  private static String scalar(String sql) {
+    return com.storeql.test.Envelopes.scalar(PG, sql);
+  }
+
+  /** Receives one batch of a fresh variant at a fresh store; returns {store, variant, batch}. */
+  private String[] freshBatch(int qty) {
+    String store = Ids.newId().toString();
+    String variant = Ids.newId().toString();
+    Response r =
+        post(
+            "/admin/inventory/receive",
+            "{\"storeId\":\"" + store + "\",\"variantId\":\"" + variant + "\",\"qty\":" + qty + "}",
+            T);
+    assertThat(r.getStatus(), is(201));
+    return new String[] {store, variant, field(r.readEntity(String.class), "id")};
+  }
+
+  @Test
+  @DisplayName("A serial registration with no serials and no quantity is refused; none are made")
+  void aSerialRegistrationWithNoSerialsAndNoQuantityIsRefused() {
+    String[] b = freshBatch(5);
+    String base =
+        "\"batchId\":\"" + b[2] + "\",\"storeId\":\"" + b[0] + "\",\"variantId\":\"" + b[1] + "\"";
+    for (String extra : new String[] {"", ",\"autoQty\":0", ",\"serials\":[]", ",\"autoQty\":-3"}) {
+      assertThat(
+          extra,
+          refusedWith(
+              send("POST", "/admin/inventory/serials/register", "{" + base + extra + "}", T), 400),
+          is("SERIALS_REQUIRED"));
+    }
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.serial_numbers WHERE tenant_id = '"
+                + T
+                + "' AND batch_id = '"
+                + b[2]
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("More than two hundred serials at once are refused; none are registered")
+  void moreThanTwoHundredSerialsAtOnceAreRefused() {
+    String[] b = freshBatch(5);
+    String base =
+        "\"batchId\":\"" + b[2] + "\",\"storeId\":\"" + b[0] + "\",\"variantId\":\"" + b[1] + "\"";
+    assertThat(
+        refusedWith(
+            send("POST", "/admin/inventory/serials/register", "{" + base + ",\"autoQty\":201}", T),
+            400),
+        is("TOO_MANY_SERIALS"));
+    String tail = Ids.newId().toString();
+    tail = tail.substring(tail.length() - 8);
+    StringBuilder list = new StringBuilder();
+    for (int i = 0; i < 201; i++) {
+      list.append(i == 0 ? "" : ",").append("\"TM").append(tail).append('-').append(i).append('"');
+    }
+    assertThat(
+        refusedWith(
+            send(
+                "POST",
+                "/admin/inventory/serials/register",
+                "{" + base + ",\"serials\":[" + list + "]}",
+                T),
+            400),
+        is("TOO_MANY_SERIALS"));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.serial_numbers WHERE tenant_id = '"
+                + T
+                + "' AND batch_id = '"
+                + b[2]
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A serial status nobody defined is refused; an unknown serial is not found")
+  void aSerialSetToAStatusNobodyDefinedIsRefused() {
+    String unknown = Ids.newId().toString();
+    assertThat(
+        refusedWith(
+            send(
+                "PUT",
+                "/admin/inventory/serials/" + unknown + "/status",
+                "{\"status\":\"MELTED\"}",
+                T),
+            400),
+        is("INVALID_SERIAL_STATUS"));
+    assertThat(
+        refusedWith(
+            send(
+                "PUT",
+                "/admin/inventory/serials/" + unknown + "/status",
+                "{\"status\":\"SOLD\"}",
+                T),
+            404),
+        is("SERIAL_NOT_FOUND"));
+    assertThat(
+        refusedWith(send("GET", "/admin/inventory/serials/" + unknown, null, T), 404),
+        is("SERIAL_NOT_FOUND"));
+    assertThat(
+        refusedWith(send("GET", "/admin/inventory/serials/" + unknown + "/history", null, T), 404),
+        is("SERIAL_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName("A serial lookup needs a number, finds none for an unknown one, and is per business")
+  void aSerialLookupWithNoNumberIsRefused() {
+    assertThat(
+        refusedWith(send("GET", "/admin/inventory/serials/lookup", null, T), 400),
+        is("SERIAL_NO_REQUIRED"));
+    assertThat(
+        refusedWith(
+            target
+                .path("/admin/inventory/serials/lookup")
+                .queryParam("serial_no", "")
+                .request()
+                .header("X-Tenant-Id", T)
+                .header("X-Roles", "OWNER")
+                .get(),
+            400),
+        is("SERIAL_NO_REQUIRED"));
+    String tail = Ids.newId().toString();
+    String serial = "LK" + tail.substring(tail.length() - 10);
+    assertThat(
+        refusedWith(
+            target
+                .path("/admin/inventory/serials/lookup")
+                .queryParam("serial_no", serial)
+                .request()
+                .header("X-Tenant-Id", T)
+                .header("X-Roles", "OWNER")
+                .get(),
+            404),
+        is("SERIAL_NOT_FOUND"));
+
+    // Registered by us, it is found by us and by nobody else.
+    String[] b = freshBatch(2);
+    Response reg =
+        send(
+            "POST",
+            "/admin/inventory/serials/register",
+            "{\"batchId\":\""
+                + b[2]
+                + "\",\"storeId\":\""
+                + b[0]
+                + "\",\"variantId\":\""
+                + b[1]
+                + "\",\"serials\":[\""
+                + serial
+                + "\"]}",
+            T);
+    assertThat(reg.getStatus(), is(201));
+    for (String tenant : new String[] {T, OTHER}) {
+      Response found =
+          target
+              .path("/admin/inventory/serials/lookup")
+              .queryParam("serial_no", serial)
+              .request()
+              .header("X-Tenant-Id", tenant)
+              .header("X-Roles", "OWNER")
+              .get();
+      assertThat(tenant, found.getStatus(), is(T.equals(tenant) ? 200 : 404));
+    }
+  }
+
+  @Test
+  @DisplayName("A suggestion resolved to a status it cannot take, or not there, is refused")
+  void aSuggestionResolvedToAStatusItCannotTakeIsRefused() {
+    String unknown = Ids.newId().toString();
+    for (String status : new String[] {"ACCEPTED", "DISMISSED"}) {
+      assertThat(
+          status,
+          refusedWith(
+              send(
+                  "PUT",
+                  "/admin/inventory/planning/suggestions/" + unknown + "/status",
+                  "{\"status\":\"" + status + "\"}",
+                  T),
+              400),
+          is("INVALID_SUGGESTION_STATUS"));
+    }
+    assertThat(
+        refusedWith(
+            send(
+                "PUT",
+                "/admin/inventory/planning/suggestions/" + unknown + "/status",
+                "{\"status\":\"ORDERED\"}",
+                T),
+            404),
+        is("SUGGESTION_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName("A demand bucket nobody defined is refused")
+  void aDemandBucketNobodyDefinedIsRefused() {
+    String store = Ids.newId().toString();
+    assertThat(
+        refusedWith(
+            send(
+                "POST",
+                "/admin/inventory/demand/aggregate",
+                "{\"storeId\":\"" + store + "\",\"bucketType\":\"YEAR\"}",
+                T),
+            400),
+        is("INVALID_BUCKET_TYPE"));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.demand_history WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + store
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A reservation that is not there is not found, and another business cannot use ours")
+  void aReservationThatIsNotThereIsNotFound() {
+    String unknown = Ids.newId().toString();
+    assertThat(
+        refusedWith(send("GET", "/inventory/reservations/" + unknown, null, T), 404),
+        is("RESERVATION_NOT_FOUND"));
+    assertThat(
+        refusedWith(send("POST", "/inventory/reservations/" + unknown + "/consume", null, T), 404),
+        is("RESERVATION_NOT_FOUND"));
+    assertThat(
+        refusedWith(send("POST", "/inventory/reservations/" + unknown + "/release", null, T), 404),
+        is("RESERVATION_NOT_FOUND"));
+
+    String[] b = freshBatch(5);
+    Response held =
+        post(
+            "/inventory/reservations",
+            "{\"storeId\":\"" + b[0] + "\",\"variantId\":\"" + b[1] + "\",\"qty\":2}",
+            T);
+    assertThat(held.getStatus(), is(201));
+    String id = field(held.readEntity(String.class), "id");
+    for (String action : new String[] {"consume", "release"}) {
+      assertThat(
+          action,
+          refusedWith(
+              send("POST", "/inventory/reservations/" + id + "/" + action, null, OTHER), 404),
+          is("RESERVATION_NOT_FOUND"));
+    }
+    assertThat(
+        scalar(
+            "SELECT status FROM inventory.reservations WHERE tenant_id = '"
+                + T
+                + "' AND id = '"
+                + id
+                + "'"),
+        is("HELD"));
+  }
+
+  @Test
+  @DisplayName("A batch status nobody defined is refused, and the batch keeps its status")
+  void aMaterialStatusNobodyDefinedIsRefused() {
+    String[] b = freshBatch(3);
+    for (String status : new String[] {"SHINY", "HOLD", "REJECTED"}) {
+      assertThat(
+          status,
+          refusedWith(
+              send(
+                  "PUT",
+                  "/admin/inventory/batches/" + b[2] + "/material-status",
+                  "{\"materialStatus\":\"" + status + "\"}",
+                  T),
+              400),
+          is("INVALID_MATERIAL_STATUS"));
+    }
+    assertThat(
+        scalar(
+            "SELECT material_status FROM inventory.inventory_batches WHERE tenant_id = '"
+                + T
+                + "' AND id = '"
+                + b[2]
+                + "'"),
+        is("AVAILABLE"));
+  }
+
+  @Test
+  @DisplayName("A lot link of an unknown kind is refused, and the same link twice is a conflict")
+  void aLotLinkOfAnUnknownKindOrTwiceIsRefused() {
+    String[] parent = freshBatch(10);
+    String[] child = freshBatch(4);
+    String links =
+        "SELECT count(*) FROM inventory.lot_genealogy WHERE tenant_id = '"
+            + T
+            + "' AND parent_batch_id = '"
+            + parent[2]
+            + "'";
+    String body =
+        "{\"parentBatchId\":\""
+            + parent[2]
+            + "\",\"childBatchId\":\""
+            + child[2]
+            + "\",\"qty\":4,\"relationType\":\"%s\"}";
+    assertThat(
+        refusedWith(
+            send("POST", "/admin/inventory/lot-genealogy", body.formatted("INVALID"), T), 400),
+        is("INVALID_RELATION_TYPE"));
+    assertThat(scalar(links), is("0"));
+
+    assertThat(
+        send("POST", "/admin/inventory/lot-genealogy", body.formatted("SPLIT"), T).getStatus(),
+        is(201));
+    assertThat(
+        refusedWith(
+            send("POST", "/admin/inventory/lot-genealogy", body.formatted("SPLIT"), T), 409),
+        is("LOT_LINK_EXISTS"));
+    assertThat(scalar(links), is("1"));
   }
 
   @org.junit.jupiter.api.Test

@@ -307,6 +307,24 @@ class ObligationIT {
   }
 
   @Test
+  @DisplayName("A business whose country cannot be read is told so, never matched to a law")
+  void aBusinessWithNoReadableCountryIsToldSo() {
+    // Sign-up checks only the length of the country, so two ideographic spaces are stored. The
+    // underlying gap (sign-up takes a country that is no ISO code) is not closed here.
+    String odd = onboard("\\u3000\\u3000", "GBP");
+    Response r = read(odd, "OWNER", null, null);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(409));
+    assertThat(body, containsString("TENANT_COUNTRY_MISSING"));
+
+    // Naming a country by hand still works for that business, and a bad one is still refused.
+    assertThat(read(odd, "OWNER", "GB", null).getStatus(), is(200));
+    Response bad = read(odd, "OWNER", "ZZ", null);
+    assertThat(bad.getStatus(), is(400));
+    assertThat(bad.readEntity(String.class), containsString("COUNTRY_INVALID"));
+  }
+
+  @Test
   @DisplayName("Twenty reads at once all answer, with the same rules")
   void concurrentReadsAgree() throws Exception {
     String de = onboard("DE", "EUR");

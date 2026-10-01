@@ -1,12 +1,12 @@
 package com.storeql.notification.provider;
 
+import com.storeql.notification.json.Jsons;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
 import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonReader;
@@ -64,8 +64,17 @@ public class FcmPushProvider implements PushProvider {
   String clientEmail = "";
   PrivateKey privateKey;
   private WebClient webClient;
-  private volatile String accessToken;
-  private volatile Instant accessTokenExpiry = Instant.EPOCH;
+
+  /** A token and the moment it stops being good: read whole, so a reader never sees half of one. */
+  private record Token(String value, Instant expiry) {
+    boolean fresh() {
+      return Instant.now().isBefore(expiry.minusSeconds(60));
+    }
+  }
+
+  private volatile Token token;
+  private final java.util.concurrent.locks.ReentrantLock renewal =
+      new java.util.concurrent.locks.ReentrantLock();
 
   @PostConstruct
   void init() {
@@ -99,7 +108,7 @@ public class FcmPushProvider implements PushProvider {
       if (!json.startsWith("{")) {
         json = Files.readString(Path.of(json), StandardCharsets.UTF_8);
       }
-      try (JsonReader r = Json.createReader(new StringReader(json))) {
+      try (JsonReader r = Jsons.reader(new StringReader(json))) {
         JsonObject o = r.readObject();
         clientEmail = o.getString("client_email", "");
         if (projectId.isEmpty()) projectId = o.getString("project_id", "");
@@ -132,17 +141,15 @@ public class FcmPushProvider implements PushProvider {
     if (!isConfigured()) {
       throw new ProviderException("PUSH_NOT_CONFIGURED", "FCM is not configured", false);
     }
-    JsonObjectBuilder payload = Json.createObjectBuilder();
+    JsonObjectBuilder payload = Jsons.object();
     data.forEach(payload::add);
     String message =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add(
                 "message",
-                Json.createObjectBuilder()
+                Jsons.object()
                     .add("token", token)
-                    .add(
-                        "notification",
-                        Json.createObjectBuilder().add("title", title).add("body", body))
+                    .add("notification", Jsons.object().add("title", title).add("body", body))
                     .add("data", payload))
             .build()
             .toString();
@@ -153,7 +160,7 @@ public class FcmPushProvider implements PushProvider {
             .header(HeaderNames.CONTENT_TYPE, "application/json")
             .submit(message)) {
       int status = res.status().code();
-      String text = res.as(String.class);
+      String text = Bodies.text(res);
       if (status == 200) {
         return field(text, "name", "unknown");
       }
@@ -176,10 +183,27 @@ public class FcmPushProvider implements PushProvider {
   }
 
   /** A cached OAuth2 access token, renewed a minute before it expires. */
-  synchronized String accessToken() {
-    if (accessToken != null && Instant.now().isBefore(accessTokenExpiry.minusSeconds(60))) {
-      return accessToken;
+  String accessToken() {
+    Token current = token;
+    if (current != null && current.fresh()) {
+      return current.value();
     }
+    // One caller renews, the rest wait for it and use what it fetched. A ReentrantLock, not
+    // synchronized: the exchange is a blocking HTTP call and a monitor would pin the carrier.
+    renewal.lock();
+    try {
+      current = token;
+      if (current != null && current.fresh()) {
+        return current.value();
+      }
+      token = exchange();
+      return token.value();
+    } finally {
+      renewal.unlock();
+    }
+  }
+
+  private Token exchange() {
     String assertion = signedJwt();
     String form =
         "grant_type="
@@ -192,16 +216,16 @@ public class FcmPushProvider implements PushProvider {
             .post(tokenUrl)
             .header(HeaderNames.CONTENT_TYPE, "application/x-www-form-urlencoded")
             .submit(form)) {
-      String text = res.as(String.class);
+      String text = Bodies.text(res);
       if (res.status().code() != 200) {
         throw new ProviderException(
             "PUSH_AUTH_FAILED", "FCM token exchange answered " + res.status().code(), true);
       }
-      try (JsonReader r = Json.createReader(new StringReader(text))) {
+      try (JsonReader r = Jsons.reader(new StringReader(text))) {
         JsonObject o = r.readObject();
-        accessToken = o.getString("access_token");
-        accessTokenExpiry = Instant.now().plusSeconds(o.getJsonNumber("expires_in").longValue());
-        return accessToken;
+        return new Token(
+            o.getString("access_token"),
+            Instant.now().plusSeconds(o.getJsonNumber("expires_in").longValue()));
       }
     }
   }
@@ -212,7 +236,7 @@ public class FcmPushProvider implements PushProvider {
     String header = b64("{\"alg\":\"RS256\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));
     String claims =
         b64(
-            Json.createObjectBuilder()
+            Jsons.object()
                 .add("iss", clientEmail)
                 .add("scope", SCOPE)
                 .add("aud", tokenUrl)
@@ -237,7 +261,7 @@ public class FcmPushProvider implements PushProvider {
   }
 
   private static String errorStatus(String json) {
-    try (JsonReader r = Json.createReader(new StringReader(json))) {
+    try (JsonReader r = Jsons.reader(new StringReader(json))) {
       JsonObject o = r.readObject();
       JsonObject err = o.getJsonObject("error");
       return err == null ? "UNKNOWN" : err.getString("status", "UNKNOWN");
@@ -247,7 +271,7 @@ public class FcmPushProvider implements PushProvider {
   }
 
   private static String field(String json, String key, String fallback) {
-    try (JsonReader r = Json.createReader(new StringReader(json))) {
+    try (JsonReader r = Jsons.reader(new StringReader(json))) {
       JsonObject o = r.readObject();
       return o.containsKey(key) && !o.isNull(key) ? o.getString(key) : fallback;
     } catch (RuntimeException e) {

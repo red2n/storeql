@@ -124,6 +124,24 @@ class ReceiptAccessIT {
   }
 
   @Test
+  @DisplayName("An email receipt needs an address, and nothing is recorded without one")
+  void anEmailReceiptNeedsAnAddress() {
+    String order = rig().sale(T, STORE, V_A, 1, null, MANAGER);
+    for (String body :
+        new String[] {
+          "{\"receiptType\":\"EMAIL\"}", "{\"receiptType\":\"EMAIL\",\"emailedTo\":\"  \"}"
+        }) {
+      Response r =
+          rig()
+              .postHeld("/admin/orders/" + order + "/receipts", body, T, "CASHIER", CASHIER, STORE);
+      String text = r.readEntity(String.class);
+      assertThat(text, r.getStatus(), is(400));
+      assertThat(text, containsString("RECEIPT_EMAIL_REQUIRED"));
+    }
+    assertThat(copies(order), is(0L));
+  }
+
+  @Test
   @DisplayName("A shopper can neither make a copy of a receipt nor read the log of copies")
   void aShopperIsRefused() {
     String order = rig().sale(T, STORE, V_A, 1, SHOPPER, MANAGER);

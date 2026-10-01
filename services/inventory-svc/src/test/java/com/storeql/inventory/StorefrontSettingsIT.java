@@ -272,4 +272,20 @@ class StorefrontSettingsIT {
   private static boolean blank(JsonObject o, String key) {
     return !o.containsKey(key) || o.isNull(key);
   }
+
+  // ── refusals ────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A store that is not an id is refused, and a store naming nothing still answers")
+  void aStoreThatIsNotAnIdIsRefused() {
+    String tenant = Ids.newId().toString();
+    // The second is a well-formed id of another version: this platform reads only version 7.
+    for (String store : new String[] {"not-a-store", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"}) {
+      Response r = availability(tenant, store);
+      String body = r.readEntity(String.class);
+      assertThat(store + " " + body, r.getStatus(), is(400));
+      assertThat(body, Envelopes.parse(body).getString("code"), is("INVALID_STORE"));
+    }
+    assertThat(as("/inventory/availability", tenant, "OWNER", null).get().getStatus(), is(200));
+  }
 }

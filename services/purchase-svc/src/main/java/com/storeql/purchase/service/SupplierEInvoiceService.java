@@ -11,6 +11,7 @@ import com.storeql.einvoice.ElectronicAddress;
 import com.storeql.einvoice.Invoice;
 import com.storeql.einvoice.Violation;
 import com.storeql.ids.Ids;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.PurchaseOrderLine;
 import com.storeql.purchase.domain.EInvoiceIntake;
@@ -37,7 +38,6 @@ import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -762,10 +762,11 @@ public class SupplierEInvoiceService {
   }
 
   private static String violationsJson(List<Violation> violations) {
-    JsonArrayBuilder array = Json.createArrayBuilder();
+    JsonArrayBuilder array = Jsons.PROVIDER.createArrayBuilder();
     for (Violation v : violations) {
       array.add(
-          Json.createObjectBuilder()
+          Jsons.PROVIDER
+              .createObjectBuilder()
               .add("rule", v.rule())
               .add("severity", v.severity().name())
               .add("message", v.message()));

@@ -83,6 +83,7 @@ public class FxRates {
       return Optional.empty();
     }
     cache.put(tenantId, new Cached(read, now.plus(TTL)));
+    CacheSweep.trim(cache, c -> !c.expiresAt().isAfter(now));
     return Optional.of(read);
   }
 

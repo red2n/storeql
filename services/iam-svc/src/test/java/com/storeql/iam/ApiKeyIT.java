@@ -331,7 +331,9 @@ class ApiKeyIT {
     assertThat(unknown.data().getString("reason"), is("unknown"));
     assertThat(absent(unknown.data(), "tenantId"), is(true));
     assertThat(introspect(Caller.PLATFORM, "sqk_short").data().getBoolean("active"), is(false));
-    assertThat(introspect(Caller.PLATFORM, "").status(), is(400));
+    Answer noKey = introspect(Caller.PLATFORM, "");
+    assertThat(noKey.status(), is(400));
+    assertThat(noKey.code(), is("API_KEY_MISSING"));
 
     // Revoking: only this business's owner, once.
     Business other = business("look-other");

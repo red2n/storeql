@@ -19,6 +19,7 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.time.LocalDate;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -363,6 +364,7 @@ class CommissionIT {
     Answer unknown =
         call("GET", C + "/schemes/" + Ids.newId(), null, shop.tenant(), shop.manager(), "OWNER");
     assertThat(unknown.status(), is(404));
+    assertThat(unknown.code(), is("COMMISSION_SCHEME_NOT_FOUND"));
     Answer badPeriod = rate(shop, "2026-09-30", "2026-09-01", "[]");
     assertThat(badPeriod.status(), is(400));
     assertThat(badPeriod.code(), is("COMMISSION_PERIOD_INVALID"));
@@ -386,6 +388,7 @@ class CommissionIT {
     Answer theirs =
         call("GET", C + "/schemes/" + schemeId, null, rival.tenant(), rival.manager(), "OWNER");
     assertThat("another business's arrangement is not there at all", theirs.status(), is(404));
+    assertThat(theirs.code(), is("COMMISSION_SCHEME_NOT_FOUND"));
     Answer rivalList = call("GET", C + "/schemes", null, rival.tenant(), rival.manager(), "OWNER");
     assertThat(rivalList.list(), hasSize(0));
     // And a rival cannot rate against this business's arrangements.
@@ -486,5 +489,43 @@ class CommissionIT {
     assertThat(rows.get(2).getString("schemeId"), is(first));
     assertThat(history.text(), not(containsString("null")));
     assertThat(rows.get(0).get("note"), is(nullValue()));
+  }
+
+  @Test
+  @DisplayName(
+      "A rating call with more day-rows than one call takes is refused, and nothing is rated")
+  void aRatingCallTooLargeIsRefused() {
+    Shop shop = shop();
+    Answer made = scheme(shop, flat("Counter", "2"));
+    assertThat(made.text(), made.status(), is(201));
+
+    // 26 sellers of 390 days each is 10,140 rows: every figure valid, the total over the limit.
+    StringBuilder sellers = new StringBuilder();
+    for (int s = 0; s < 26; s++) {
+      if (s > 0) sellers.append(',');
+      sellers.append("{\"userId\":\"").append(Ids.newId()).append("\",\"days\":[");
+      for (int d = 0; d < 390; d++) {
+        if (d > 0) sellers.append(',');
+        sellers
+            .append("{\"day\":\"")
+            .append(LocalDate.of(2025, 1, 1).plusDays(d))
+            .append("\",\"net\":1,\"units\":1}");
+      }
+      sellers.append("]}");
+    }
+    Answer refused =
+        call(
+            "POST",
+            C + "/rate",
+            "{\"from\":\"2025-01-01\",\"to\":\"2026-01-31\",\"sellers\":[" + sellers + "]}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(refused.status(), is(400));
+    assertThat(refused.code(), is("COMMISSION_PERIOD_TOO_LARGE"));
+    assertThat(
+        "the arrangements are as they were",
+        call("GET", C + "/schemes", null, shop.tenant(), shop.manager(), "OWNER").list(),
+        hasSize(1));
   }
 }

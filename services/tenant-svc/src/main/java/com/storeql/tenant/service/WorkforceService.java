@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -543,6 +544,10 @@ public class WorkforceService {
 
   // ── attendance ──────────────────────────────────────────────────────────────
 
+  private static boolean within(Set<UUID> stores, UUID storeId) {
+    return stores == null || stores.contains(storeId);
+  }
+
   /**
    * Planned against worked, day by day and person by person.
    *
@@ -552,7 +557,9 @@ public class WorkforceService {
    * neither.
    */
   public List<AttendanceDay> attendance(
-      UUID tenantId, UUID storeId, UUID userId, LocalDate from, LocalDate to) {
+      UUID tenantId, Set<UUID> stores, UUID userId, LocalDate from, LocalDate to) {
+    // One store is a narrower query; several are read together and kept to the caller's own.
+    UUID storeId = stores != null && stores.size() == 1 ? stores.iterator().next() : null;
     Instant start = from.atStartOfDay().toInstant(ZoneOffset.UTC);
     Instant end = to.atStartOfDay().toInstant(ZoneOffset.UTC);
     // [planned minutes, worked minutes, entries] per (day, person, store).
@@ -561,13 +568,14 @@ public class WorkforceService {
     Map<String, Instant[]> firsts = new HashMap<>();
 
     for (Shift s : repo.shifts(tenantId, storeId, userId, start, end)) {
-      if (!s.live()) continue;
+      if (!s.live() || !within(stores, s.storeId())) continue;
       String key = key(s.day(), s.userId(), s.storeId());
       minutes.computeIfAbsent(key, k -> new long[3])[0] += s.length().toMinutes();
       Instant[] first = firsts.computeIfAbsent(key, k -> new Instant[2]);
       if (first[0] == null || s.startsAt().isBefore(first[0])) first[0] = s.startsAt();
     }
     for (Entry e : repo.entries(tenantId, storeId, userId, start, end)) {
+      if (!within(stores, e.storeId())) continue;
       String key = key(e.day(), e.userId(), e.storeId());
       long[] both = minutes.computeIfAbsent(key, k -> new long[3]);
       Duration worked = e.worked();

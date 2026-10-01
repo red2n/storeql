@@ -391,7 +391,7 @@ public class OrderRepository extends BaseOutboxRepository {
             409, "ORDER_DUPLICATE_KEY", "duplicate idempotency key", java.util.List.of(), sqle);
       throw sqle;
     }
-    for (OrderItem item : n.items()) insertOrderItem(c, item);
+    insertOrderItems(c, n.items());
     for (var deposit : n.deposits()) DepositRepository.insertDeposit(c, deposit);
     appendStatusHistory(c, order.tenantId(), order.id(), null, order.status(), "created", null);
     if (n.discount() != null) insertOrderDiscount(c, n.discount());
@@ -3859,6 +3859,12 @@ public class OrderRepository extends BaseOutboxRepository {
   // ── private helpers ───────────────────────────────────────────────────────
 
   private void insertOrderItem(Connection c, OrderItem item) throws SQLException {
+    insertOrderItems(c, List.of(item));
+  }
+
+  /** The lines of an order in one batch: one round trip however many lines the basket has. */
+  private void insertOrderItems(Connection c, List<OrderItem> items) throws SQLException {
+    if (items.isEmpty()) return;
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO order_items"
@@ -3866,24 +3872,27 @@ public class OrderRepository extends BaseOutboxRepository {
                 + "  weighing_instrument_id, vat_amount, markdown_id, vat_code, vat_rate,"
                 + "  fulfilled_qty, short_qty, substitutes_item_id)"
                 + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
-      ps.setObject(1, item.id());
-      ps.setObject(2, item.tenantId());
-      ps.setObject(3, item.orderId());
-      ps.setObject(4, item.variantId());
-      ps.setBigDecimal(5, item.qty());
-      ps.setBigDecimal(6, item.unitPrice());
-      ps.setBigDecimal(7, item.lineTotal());
-      ps.setString(8, item.notes());
-      ps.setObject(9, item.weighingInstrumentId());
-      ps.setBigDecimal(10, item.vatAmount());
-      ps.setObject(11, item.markdownId());
-      ps.setString(12, item.vatCode());
-      ps.setBigDecimal(13, item.vatRate());
-      ps.setBigDecimal(
-          14, item.fulfilledQty() == null ? java.math.BigDecimal.ZERO : item.fulfilledQty());
-      ps.setBigDecimal(15, item.shortQty() == null ? java.math.BigDecimal.ZERO : item.shortQty());
-      ps.setObject(16, item.substitutesItemId());
-      ps.executeUpdate();
+      for (OrderItem item : items) {
+        ps.setObject(1, item.id());
+        ps.setObject(2, item.tenantId());
+        ps.setObject(3, item.orderId());
+        ps.setObject(4, item.variantId());
+        ps.setBigDecimal(5, item.qty());
+        ps.setBigDecimal(6, item.unitPrice());
+        ps.setBigDecimal(7, item.lineTotal());
+        ps.setString(8, item.notes());
+        ps.setObject(9, item.weighingInstrumentId());
+        ps.setBigDecimal(10, item.vatAmount());
+        ps.setObject(11, item.markdownId());
+        ps.setString(12, item.vatCode());
+        ps.setBigDecimal(13, item.vatRate());
+        ps.setBigDecimal(
+            14, item.fulfilledQty() == null ? java.math.BigDecimal.ZERO : item.fulfilledQty());
+        ps.setBigDecimal(15, item.shortQty() == null ? java.math.BigDecimal.ZERO : item.shortQty());
+        ps.setObject(16, item.substitutesItemId());
+        ps.addBatch();
+      }
+      ps.executeBatch();
     }
   }
 
@@ -3925,9 +3934,10 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " FROM orders WHERE tenant_id=? AND id=?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, orderId);
-      ResultSet rs = ps.executeQuery();
-      if (!rs.next()) throw ApiException.notFound("ORDER_NOT_FOUND", "order not found");
-      return mapOrder(rs);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) throw ApiException.notFound("ORDER_NOT_FOUND", "order not found");
+        return mapOrder(rs);
+      }
     }
   }
 
@@ -3973,9 +3983,10 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " FROM layaways WHERE tenant_id=? AND id=?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, layawayId);
-      ResultSet rs = ps.executeQuery();
-      if (!rs.next()) throw ApiException.notFound("LAYAWAY_NOT_FOUND", "layaway not found");
-      return mapLayaway(rs);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) throw ApiException.notFound("LAYAWAY_NOT_FOUND", "layaway not found");
+        return mapLayaway(rs);
+      }
     }
   }
 
@@ -4043,9 +4054,10 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " FROM gift_cards WHERE tenant_id=? AND code=? FOR UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setString(2, code);
-      ResultSet rs = ps.executeQuery();
-      if (!rs.next()) return null;
-      return mapGiftCard(rs);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) return null;
+        return mapGiftCard(rs);
+      }
     }
   }
 

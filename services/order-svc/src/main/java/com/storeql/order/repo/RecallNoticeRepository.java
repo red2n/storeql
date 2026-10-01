@@ -335,12 +335,22 @@ public class RecallNoticeRepository extends BaseOutboxRepository {
    * Settles a notice: the buyer was refunded, given a replacement, had the product repaired, or
    * wanted nothing. A remedy nobody had chosen is recorded as the one the settlement implies.
    *
-   * @throws ApiException 404 {@code RECALL_NOTICE_NOT_FOUND}; 409 {@code RECALL_NOTICE_RESOLVED}
+   * @param guard run on the locked notice before anything is written; it throws when the caller may
+   *     not act at the notice's store
+   * @throws ApiException 404 {@code RECALL_NOTICE_NOT_FOUND}; whatever {@code guard} throws; 409
+   *     {@code RECALL_NOTICE_RESOLVED}
    */
-  public Detail resolve(UUID tenantId, UUID id, Resolution resolution, String notes, UUID actor) {
+  public Detail resolve(
+      UUID tenantId,
+      UUID id,
+      Resolution resolution,
+      String notes,
+      UUID actor,
+      java.util.function.Consumer<Notice> guard) {
     inTx(
         c -> {
           Notice n = lock(c, tenantId, id);
+          guard.accept(n);
           n.requireOpen();
           settle(c, tenantId, id, resolution, null, notes, actor);
           return null;

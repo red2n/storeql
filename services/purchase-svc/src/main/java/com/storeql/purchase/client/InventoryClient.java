@@ -1,21 +1,15 @@
 package com.storeql.purchase.client;
 
-import com.storeql.discovery.ConsulClient;
-import com.storeql.discovery.ServiceInstance;
-import com.storeql.discovery.ServiceRegistry;
 import com.storeql.ids.Ids;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.config.ServiceConfig;
+import com.storeql.purchase.domain.Accounting;
 import com.storeql.purchase.domain.OrderProposal;
 import com.storeql.purchase.domain.PeriodControl;
 import com.storeql.service.ServiceReader;
-import com.storeql.web.HttpHeaders;
-import io.helidon.http.HeaderNames;
-import io.helidon.webclient.api.HttpClientResponse;
-import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
@@ -24,7 +18,6 @@ import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.math.BigDecimal;
-import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -33,9 +26,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import org.eclipse.microprofile.faulttolerance.CircuitBreaker;
-import org.eclipse.microprofile.faulttolerance.Retry;
-import org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException;
 
 /**
  * Asks inventory-svc, which owns stock (golden rule #1), what a store has on hand of a variant — so
@@ -57,9 +47,6 @@ public class InventoryClient {
 
   @Inject ServiceConfig config;
 
-  private ServiceRegistry registry;
-  private WebClient webClient;
-
   /**
    * The planning reads (06.x), through the shared reader so a test or a deployment without
    * discovery can name the address.
@@ -68,12 +55,6 @@ public class InventoryClient {
 
   @PostConstruct
   void init() {
-    registry = new ConsulClient(config.consulHost(), config.consulPort());
-    webClient =
-        WebClient.builder()
-            .connectTimeout(Duration.ofSeconds(2))
-            .readTimeout(Duration.ofSeconds(5))
-            .build();
     planning =
         new ServiceReader(
             config,
@@ -138,7 +119,7 @@ public class InventoryClient {
         return Optional.empty();
       }
       JsonObject envelope;
-      try (JsonReader reader = Json.createReader(new StringReader(reply.body()))) {
+      try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(reply.body()))) {
         envelope = reader.readObject();
       }
       JsonArray data = envelope.getJsonArray("data");
@@ -227,7 +208,7 @@ public class InventoryClient {
     if (!reply.ok()) {
       return Optional.empty();
     }
-    try (JsonReader reader = Json.createReader(new StringReader(reply.body()))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(reply.body()))) {
       JsonObject d = reader.readObject().getJsonObject("data");
       if (d == null) return Optional.of(Sourcing.ALONE);
       UUID servedBy =
@@ -324,7 +305,7 @@ public class InventoryClient {
   }
 
   private static List<JsonObject> dataArray(String body) {
-    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
       JsonArray data = reader.readObject().getJsonArray("data");
       return data == null ? List.of() : data.getValuesAs(JsonObject.class);
     }
@@ -343,47 +324,38 @@ public class InventoryClient {
    * @param variantId the variant
    * @return the quantity, or empty when inventory-svc could not be reached or refused
    */
-  @Retry(maxRetries = 2, delay = 200)
-  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
   public Optional<BigDecimal> onHand(UUID tenantId, UUID storeId, UUID variantId) {
-    ServiceInstance instance = registry.resolve(INVENTORY_SERVICE).orElse(null);
-    if (instance == null) {
-      LOG.log(Level.WARNING, "inventory-svc not in discovery — on-hand not checked");
+    // Through the shared reader: the address configured at storeql.clients.inventory-svc.url when
+    // there is one (a deployment without discovery, an integration test's stub), else discovery;
+    // tried again on a server error. It answers a status rather than throwing, so a failure is an
+    // empty answer here, which the caller reads as "not checked".
+    ServiceReader.Reply reply =
+        planning.get(
+            tenantId,
+            "/admin/inventory/batches",
+            Map.of(
+                "store",
+                storeId.toString(),
+                "variant",
+                variantId.toString(),
+                "material_status",
+                "AVAILABLE",
+                "limit",
+                "100"));
+    if (!reply.ok()) {
+      LOG.log(Level.WARNING, "on-hand lookup HTTP {0}: not checked", reply.status());
       return Optional.empty();
     }
-    try (HttpClientResponse res =
-        webClient
-            .get(instance.baseUri() + "/admin/inventory/batches")
-            .queryParam("store", storeId.toString())
-            .queryParam("variant", variantId.toString())
-            .queryParam("material_status", "AVAILABLE")
-            .queryParam("limit", "100")
-            .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
-            .header(HeaderNames.create(HttpHeaders.ROLES), INTERNAL_ROLE)
-            .request()) {
-      int status = res.status().code();
-      String body = res.as(String.class);
-      if (status != 200) {
-        LOG.log(Level.WARNING, "on-hand lookup HTTP {0}: {1}", status, body);
-        return Optional.empty();
-      }
+    try {
       BigDecimal total = BigDecimal.ZERO;
-      try (JsonReader reader = Json.createReader(new StringReader(body))) {
-        JsonArray data = reader.readObject().getJsonArray("data");
-        if (data != null) {
-          for (JsonObject b : data.getValuesAs(JsonObject.class)) {
-            if (b.containsKey("remainingQty") && !b.isNull("remainingQty")) {
-              total = total.add(new BigDecimal(b.get("remainingQty").toString()));
-            }
-          }
+      for (JsonObject b : dataArray(reply.body())) {
+        if (b.containsKey("remainingQty") && !b.isNull("remainingQty")) {
+          total = total.add(new BigDecimal(b.get("remainingQty").toString()));
         }
       }
       return Optional.of(total);
-    } catch (CircuitBreakerOpenException e) {
-      LOG.log(Level.WARNING, "inventory-svc circuit open — on-hand not checked");
-      return Optional.empty();
     } catch (RuntimeException e) {
-      LOG.log(Level.WARNING, "on-hand lookup failed: {0}", e.getMessage());
+      LOG.log(Level.WARNING, "on-hand answer unreadable: {0}", e.getMessage());
       return Optional.empty();
     }
   }
@@ -401,8 +373,6 @@ public class InventoryClient {
    * @param storeId the store the goods were received into
    * @return the mapped nominal code, or empty
    */
-  @Retry(maxRetries = 2, delay = 200)
-  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
   public Optional<String> storeNominalCode(UUID tenantId, UUID storeId) {
     return fetch(
         "/admin/inventory/zone-gl-mappings",
@@ -423,8 +393,6 @@ public class InventoryClient {
    * @param storeId the store whose periods to read
    * @return the periods, or empty when they could not be read
    */
-  @Retry(maxRetries = 2, delay = 200)
-  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
   public Optional<List<PeriodControl.Period>> accountingPeriods(UUID tenantId, UUID storeId) {
     return fetch(
         "/admin/inventory/accounting-periods",
@@ -440,30 +408,15 @@ public class InventoryClient {
       UUID tenantId,
       String what,
       java.util.function.Function<String, Optional<T>> parser) {
-    ServiceInstance instance = registry.resolve(INVENTORY_SERVICE).orElse(null);
-    if (instance == null) {
-      LOG.log(Level.WARNING, "inventory-svc not in discovery — {0} not read", what);
+    ServiceReader.Reply reply = planning.get(tenantId, path, Map.of("store", storeId.toString()));
+    if (!reply.ok()) {
+      LOG.log(Level.WARNING, "{0} lookup HTTP {1}: not read", what, reply.status());
       return Optional.empty();
     }
-    try (HttpClientResponse res =
-        webClient
-            .get(instance.baseUri() + path)
-            .queryParam("store", storeId.toString())
-            .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
-            .header(HeaderNames.create(HttpHeaders.ROLES), INTERNAL_ROLE)
-            .request()) {
-      int status = res.status().code();
-      String body = res.as(String.class);
-      if (status != 200) {
-        LOG.log(Level.WARNING, "{0} lookup HTTP {1}: {2}", what, status, body);
-        return Optional.empty();
-      }
-      return parser.apply(body);
-    } catch (CircuitBreakerOpenException e) {
-      LOG.log(Level.WARNING, "inventory-svc circuit open — {0} not read", what);
-      return Optional.empty();
+    try {
+      return parser.apply(reply.body());
     } catch (RuntimeException e) {
-      LOG.log(Level.WARNING, "{0} lookup failed: {1}", what, e.getMessage());
+      LOG.log(Level.WARNING, "{0} answer unreadable: {1}", what, e.getMessage());
       return Optional.empty();
     }
   }
@@ -475,14 +428,16 @@ public class InventoryClient {
    * @return the code, trimmed, or empty when no store-level row carries one
    */
   static Optional<String> parseStoreNominalCode(String body) {
-    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
       JsonObject env = reader.readObject();
       if (!env.containsKey("data") || env.isNull("data")) return Optional.empty();
       JsonArray data = env.getJsonArray("data");
       for (JsonObject m : data.getValuesAs(JsonObject.class)) {
         boolean storeLevel = !m.containsKey("zoneId") || m.isNull("zoneId");
         String code = m.getString("nominalCode", "");
-        if (storeLevel && !code.isBlank() && code.trim().matches("[A-Za-z0-9]{1,10}")) {
+        if (storeLevel
+            && !code.isBlank()
+            && Accounting.NOMINAL_CODE.matcher(code.trim()).matches()) {
           return Optional.of(code.trim());
         }
       }
@@ -502,7 +457,7 @@ public class InventoryClient {
    */
   static List<PeriodControl.Period> parsePeriods(String body) {
     List<PeriodControl.Period> out = new ArrayList<>();
-    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
       JsonObject env = reader.readObject();
       if (!env.containsKey("data") || env.isNull("data")) return out;
       for (JsonObject p : env.getJsonArray("data").getValuesAs(JsonObject.class)) {

@@ -8,6 +8,8 @@ import java.util.regex.Pattern;
  * {@code GB123456789}, {@code DE123456789}, {@code EL094259216} for Greece.
  */
 public final class VatIdentifier {
+  private static final java.util.regex.Pattern SEPARATORS =
+      java.util.regex.Pattern.compile("[\\s.\\-]");
 
   private static final Pattern SHAPE = Pattern.compile("[A-Z0-9]{2}[A-Z0-9+*]{2,15}");
 
@@ -19,7 +21,7 @@ public final class VatIdentifier {
    */
   public static String normalise(String vatId) {
     if (vatId == null) return null;
-    String s = vatId.replaceAll("[\\s.\\-]", "").toUpperCase(Locale.ROOT);
+    String s = SEPARATORS.matcher(vatId).replaceAll("").toUpperCase(Locale.ROOT);
     return s.isEmpty() ? null : s;
   }
 

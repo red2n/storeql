@@ -111,6 +111,27 @@ public class CategoryRepository extends BaseJdbcRepository {
   }
 
   /**
+   * Every category of the tenant, of any status, as id to parent id (a root maps to {@code null}):
+   * one query for a caller that walks many paths, instead of one per level per path.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @return the parent of each category
+   */
+  public java.util.Map<UUID, UUID> parentIds(UUID tenantId) {
+    java.util.Map<UUID, UUID> parents = new java.util.HashMap<>();
+    for (Category c :
+        query(
+            "SELECT id, tenant_id, parent_id, name, status, created_at, updated_at"
+                + " FROM categories WHERE tenant_id = ?",
+            ps -> ps.setObject(1, tenantId),
+            CategoryRepository::mapCategory,
+            "category parents")) {
+      parents.put(c.id(), c.parentId());
+    }
+    return parents;
+  }
+
+  /**
    * Writes a category back with its new values.
    *
    * @param tenantId owning tenant; the first condition of the query

@@ -155,6 +155,34 @@ public final class Values {
     return out;
   }
 
+  // DateTimeFormatters are immutable and thread-safe: built once, and once per locale. A locale
+  // cache that grew past the platform's handful of languages is emptied rather than left to grow.
+  private static final DateTimeFormatter HOURS_MINUTES = DateTimeFormatter.ofPattern("HH:mm");
+  private static final java.util.Map<Locale, DateTimeFormatter> LONG_DATES =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private static final java.util.Map<Locale, DateTimeFormatter> WEEKDAY_DATES =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private static DateTimeFormatter longDate(Locale locale) {
+    return DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale);
+  }
+
+  private static DateTimeFormatter weekdayDate(Locale locale) {
+    return DateTimeFormatter.ofPattern("EEEE d MMMM", locale);
+  }
+
+  private static DateTimeFormatter cached(
+      java.util.Map<Locale, DateTimeFormatter> cache,
+      Locale locale,
+      java.util.function.Function<Locale, DateTimeFormatter> make) {
+    DateTimeFormatter f = cache.get(locale);
+    if (f != null) return f;
+    if (cache.size() > 256) cache.clear();
+    f = make.apply(locale);
+    cache.put(locale, f);
+    return f;
+  }
+
   static String money(BigDecimal amount, String currency, Locale locale) {
     NumberFormat f = NumberFormat.getCurrencyInstance(locale);
     try {
@@ -185,9 +213,9 @@ public final class Values {
    */
   public static String moment(Instant value, Locale locale) {
     var at = value.atOffset(ZoneOffset.UTC);
-    return DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale).format(at)
+    return cached(LONG_DATES, locale, Values::longDate).format(at)
         + ", "
-        + DateTimeFormatter.ofPattern("HH:mm").format(at)
+        + HOURS_MINUTES.format(at)
         + " UTC";
   }
 
@@ -201,9 +229,9 @@ public final class Values {
     ZonedDateTime start = w.startsAt().atZone(w.zone());
     ZonedDateTime end = w.endsAt().atZone(w.zone());
     String label = w.delivery() ? "Delivery" : "Collection";
-    String date = DateTimeFormatter.ofPattern("EEEE d MMMM", locale).format(start);
-    String from = DateTimeFormatter.ofPattern("HH:mm", locale).format(start);
-    String to = DateTimeFormatter.ofPattern("HH:mm", locale).format(end);
+    String date = cached(WEEKDAY_DATES, locale, Values::weekdayDate).format(start);
+    String from = HOURS_MINUTES.format(start);
+    String to = HOURS_MINUTES.format(end);
     return label + ": " + date + ", " + from + "–" + to;
   }
 }

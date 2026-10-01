@@ -1,5 +1,6 @@
 package com.storeql.payment;
 
+import static com.storeql.test.Envelopes.scalar;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.hasSize;
@@ -9,14 +10,23 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.ids.Ids;
+import com.storeql.payment.ItCalls.Answer;
+import com.storeql.payment.ItCalls.Caller;
 import com.storeql.payment.domain.Terminals;
 import com.storeql.payment.service.TerminalService;
 import com.storeql.test.PostgresSupport;
 import com.storeql.web.ApiException;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.client.WebTarget;
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -56,6 +66,7 @@ class TerminalPaymentIT {
   }
 
   @Inject TerminalService svc;
+  @Inject WebTarget target;
 
   @AfterAll
   static void stopDb() {
@@ -321,5 +332,196 @@ class TerminalPaymentIT {
     assertThrows(ApiException.class, () -> TerminalService.refuseCardData("4242-4242-4242-4242"));
     // And an ordinary label is not mistaken for one.
     TerminalService.refuseCardData("Till 2", "SN-90210", null, "");
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  private static String terminalRows(UUID tenantId) {
+    return scalar(
+        PG, "SELECT count(*) FROM payment.card_terminals WHERE tenant_id = '" + tenantId + "'");
+  }
+
+  @Test
+  @DisplayName("A terminal retired twice is refused the second time and keeps the first reason")
+  void aRetiredTerminalIsNotRetiredAgain() {
+    Terminals.Terminal t = aTerminal("till");
+    svc.retire(tenant, t.id(), "cracked");
+
+    ApiException e = assertThrows(ApiException.class, () -> svc.retire(tenant, t.id(), "other"));
+
+    assertThat(e.status(), is(409));
+    assertThat(e.code(), is("TERMINAL_ALREADY_RETIRED"));
+    assertThat(
+        scalar(PG, "SELECT retired_reason FROM payment.card_terminals WHERE id = '" + t.id() + "'"),
+        is("cracked"));
+
+    // Over HTTP, for a terminal of a business of its own.
+    UUID biz = Ids.newId();
+    Caller owner = Caller.owner(biz);
+    Terminals.Terminal mine =
+        svc.register(biz, store, "Till " + Ids.newId(), "SIMULATED", null, actor);
+    String path = "/admin/payments/terminals/" + mine.id() + "/retire";
+    assertThat(ItCalls.post(target, path, owner, "{\"reason\":\"first\"}").status(), is(200));
+    Answer again = ItCalls.post(target, path, owner, "{\"reason\":\"second\"}");
+    assertThat(again.body().toString(), again.status(), is(409));
+    assertThat(again.code(), is("TERMINAL_ALREADY_RETIRED"));
+    assertThat(
+        scalar(
+            PG, "SELECT retired_reason FROM payment.card_terminals WHERE id = '" + mine.id() + "'"),
+        is("first"));
+  }
+
+  @Test
+  @DisplayName("Another business cannot refund, cancel or read an attempt it does not hold")
+  void anAttemptOfAnotherBusinessIsNotFound() {
+    var sale = take(aTerminal("till"), "20.00", Ids.newId().toString());
+    UUID rival = Ids.newId();
+
+    ApiException refund =
+        assertThrows(
+            ApiException.class,
+            () ->
+                svc.refund(
+                    rival, sale.id(), new BigDecimal("1.00"), actor, Ids.newId().toString()));
+    assertThat(refund.status(), is(404));
+    assertThat(refund.code(), is("TERMINAL_ATTEMPT_NOT_FOUND"));
+    ApiException cancel = assertThrows(ApiException.class, () -> svc.cancel(rival, sale.id()));
+    assertThat(cancel.status(), is(404));
+    assertThat(cancel.code(), is("TERMINAL_ATTEMPT_NOT_FOUND"));
+
+    for (String role : new String[] {"OWNER", "MANAGER", "CASHIER"}) {
+      Answer read =
+          ItCalls.get(
+              target, "/payments/terminal/" + sale.id(), new Caller(rival, Ids.newId(), role));
+      assertThat(role + " " + read.body(), read.status(), is(404));
+      assertThat(role, read.code(), is("TERMINAL_ATTEMPT_NOT_FOUND"));
+    }
+    // And one nobody made is no more found by the business that asks.
+    Answer none =
+        ItCalls.get(
+            target, "/payments/terminal/" + Ids.newId(), new Caller(tenant, actor, "CASHIER"));
+    assertThat(none.status(), is(404));
+    assertThat(none.code(), is("TERMINAL_ATTEMPT_NOT_FOUND"));
+    // The sale is untouched: one attempt, no refund written.
+    assertThat(svc.attemptsOf(tenant, sale.orderId()), hasSize(1));
+  }
+
+  @Test
+  @DisplayName("An id that is not an id is 400 TERMINAL_ID_INVALID, and nothing is stored")
+  void anIdThatIsNotAnIdIsRefused() {
+    UUID biz = Ids.newId();
+    Caller owner = Caller.owner(biz);
+    Answer register =
+        ItCalls.post(
+            target,
+            "/admin/payments/terminals",
+            owner,
+            "{\"storeId\":\"till-1\",\"label\":\"Till 1\",\"vendor\":\"SIMULATED\"}");
+    assertThat(register.body().toString(), register.status(), is(400));
+    assertThat(register.code(), is("TERMINAL_ID_INVALID"));
+    assertThat(terminalRows(biz), is("0"));
+
+    Answer sale =
+        ItCalls.post(
+            target,
+            "/payments/terminal",
+            new Caller(biz, Ids.newId(), "CASHIER"),
+            "{\"terminalId\":\"abc\",\"orderId\":\""
+                + Ids.newId()
+                + "\",\"amount\":5.00,\"currency\":\"GBP\"}");
+    assertThat(sale.body().toString(), sale.status(), is(400));
+    assertThat(sale.code(), is("TERMINAL_ID_INVALID"));
+    assertThat(
+        scalar(
+            PG, "SELECT count(*) FROM payment.terminal_payments WHERE tenant_id = '" + biz + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A label of only spaces is refused, in the service and over HTTP")
+  void aLabelOfOnlySpacesIsRefused() {
+    ApiException e =
+        assertThrows(
+            ApiException.class, () -> svc.register(tenant, store, "   ", "SIMULATED", null, actor));
+    assertThat(e.status(), is(400));
+    assertThat(e.code(), is("TERMINAL_LABEL_REQUIRED"));
+
+    UUID biz = Ids.newId();
+    Answer http =
+        ItCalls.post(
+            target,
+            "/admin/payments/terminals",
+            Caller.owner(biz),
+            "{\"storeId\":\"" + store + "\",\"label\":\"\\u2003\",\"vendor\":\"SIMULATED\"}");
+    assertThat(http.body().toString(), http.status(), is(400));
+    assertThat(http.code(), is("TERMINAL_LABEL_REQUIRED"));
+    assertThat(terminalRows(biz), is("0"));
+  }
+
+  @Test
+  @DisplayName("A vendor that is known but not deployed cannot be registered")
+  void aVendorNotDeployedIsRefused() {
+    UUID biz = Ids.newId();
+    for (String vendor : new String[] {"ADYEN", "STRIPE_TERMINAL", "VERIFONE"}) {
+      ApiException e =
+          assertThrows(
+              ApiException.class,
+              () -> svc.register(biz, store, "Till Y " + Ids.newId(), vendor, null, actor));
+      assertThat(vendor, e.status(), is(409));
+      assertThat(vendor, e.code(), is("TERMINAL_VENDOR_UNAVAILABLE"));
+    }
+    Answer http =
+        ItCalls.post(
+            target,
+            "/admin/payments/terminals",
+            Caller.owner(biz),
+            "{\"storeId\":\"" + store + "\",\"label\":\"Till Y\",\"vendor\":\"ADYEN\"}");
+    assertThat(http.body().toString(), http.status(), is(409));
+    assertThat(http.code(), is("TERMINAL_VENDOR_UNAVAILABLE"));
+    assertThat(terminalRows(biz), is("0"));
+  }
+
+  @Test
+  @DisplayName("The same key pressed at once makes one attempt row")
+  void theSameKeyPressedAtOnceMakesOneAttemptRow() throws Exception {
+    Terminals.Terminal t = aTerminal("till");
+    UUID order = Ids.newId();
+    String key = Ids.newId().toString();
+    int n = 8;
+    ExecutorService pool = Executors.newFixedThreadPool(n);
+    CountDownLatch ready = new CountDownLatch(n);
+    CountDownLatch go = new CountDownLatch(1);
+    List<Future<Object>> futures = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      futures.add(
+          pool.submit(
+              () -> {
+                ready.countDown();
+                go.await();
+                try {
+                  return svc.sale(
+                      tenant, t.id(), order, new BigDecimal("12.50"), "GBP", actor, key);
+                } catch (ApiException e) {
+                  return e;
+                }
+              }));
+    }
+    ready.await();
+    go.countDown();
+    UUID attempt = null;
+    for (Future<Object> f : futures) {
+      Object r = f.get();
+      if (r instanceof ApiException e) {
+        assertThat(e.getMessage(), e.status(), is(409));
+        assertThat(e.code(), is("TERMINAL_REQUEST_IN_FLIGHT"));
+      } else {
+        UUID id = ((Terminals.Attempt) r).id();
+        if (attempt == null) attempt = id;
+        assertThat("every answer is the one attempt", id, is(attempt));
+      }
+    }
+    pool.shutdown();
+
+    assertThat(svc.attemptsOf(tenant, order), hasSize(1));
   }
 }

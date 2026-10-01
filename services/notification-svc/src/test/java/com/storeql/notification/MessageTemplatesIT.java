@@ -4,8 +4,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.in;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.isIn;
 import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
@@ -343,7 +343,7 @@ class MessageTemplatesIT {
     List<Integer> statuses = new ArrayList<>();
     for (Future<Integer> f : pool.invokeAll(saves)) statuses.add(f.get());
     pool.shutdown();
-    assertThat(statuses, everyItem(isIn(List.of(200, 409))));
+    assertThat(statuses, everyItem(is(in(List.of(200, 409)))));
     assertThat(statuses, hasItem(200));
     try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
       c.setSchema("notification");

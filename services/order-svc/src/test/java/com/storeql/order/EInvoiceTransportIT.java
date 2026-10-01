@@ -304,7 +304,8 @@ class EInvoiceTransportIT {
     if (call.body().contains("REFUSE")) {
       return new JsonStub.Answer(
           201,
-          "{\"id\":\"F-2\",\"status\":{\"code\":210,\"label\":\"Refusée\",\"reason\":\"bon de commande inconnu\"}}");
+          "{\"id\":\"F-2\",\"status\":{\"code\":210,\"label\":\"Refusée\",\"reason\":\"bon de"
+              + " commande inconnu\"}}");
     }
     return new JsonStub.Answer(
         201, "{\"id\":\"F-1\",\"status\":{\"code\":200,\"label\":\"Déposée\"}}");
@@ -696,12 +697,23 @@ class EInvoiceTransportIT {
     assertThat(code(unknown), is("EINVOICE_TRANSMISSION_STATUS_UNKNOWN"));
 
     assertThat(dataArray(till().get("/admin/einvoicing/transmissions", T_OTHER)), hasSize(0));
-    assertThat(
-        till()
-            .get("/admin/sales-invoices/" + inv.getString("id") + "/transmissions", T_OTHER)
-            .getStatus(),
-        is(404));
-    assertThat(send(inv.getString("id"), T_OTHER).getStatus(), is(404));
+    int attempts = transmissions(inv.getString("id")).size();
+    Response theirs =
+        till().get("/admin/sales-invoices/" + inv.getString("id") + "/transmissions", T_OTHER);
+    assertThat(theirs.getStatus(), is(404));
+    assertThat(code(theirs), is("ORDER_INVOICE_NOT_FOUND"));
+    Response theirSend = send(inv.getString("id"), T_OTHER);
+    assertThat(theirSend.getStatus(), is(404));
+    assertThat(code(theirSend), is("ORDER_INVOICE_NOT_FOUND"));
+    // An invoice nobody issued has no transmissions to read or send, in our own business too.
+    Response unissued = till().get("/admin/sales-invoices/" + Ids.newId() + "/transmissions", T);
+    assertThat(unissued.getStatus(), is(404));
+    assertThat(code(unissued), is("ORDER_INVOICE_NOT_FOUND"));
+    Response unissuedSend = send(Ids.newId().toString(), T);
+    assertThat(unissuedSend.getStatus(), is(404));
+    assertThat(code(unissuedSend), is("ORDER_INVOICE_NOT_FOUND"));
+    // Nothing was queued by the refused sends.
+    assertThat(transmissions(inv.getString("id")).size(), is(attempts));
   }
 
   @Test
@@ -722,7 +734,8 @@ class EInvoiceTransportIT {
 
   @Test
   @DisplayName(
-      "An Indian business signs in to the portal with its own credential, kept sealed, and registers its invoices")
+      "An Indian business signs in to the portal with its own credential, kept sealed, and"
+          + " registers its invoices")
   void irp() {
     JsonObject offered = data(till().get("/admin/einvoicing/transport", T_IN));
     assertThat(offered.getString("suggestedNetwork", null), nullValue());

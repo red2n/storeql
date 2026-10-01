@@ -176,11 +176,14 @@ public class AssortmentService {
   public SweepResult applyDue(UUID tenantId, LocalDate asOf) {
     List<NotApplied> refused = new ArrayList<>();
     int applied = 0;
+    // Cluster membership is read once per sweep, not once per change aimed at it.
+    java.util.Map<UUID, List<UUID>> clusterStores = new java.util.HashMap<>();
     for (Change ch : repo.due(tenantId, asOf == null ? LocalDate.now() : asOf)) {
       List<UUID> stores =
           ch.storeId() != null
               ? List.of(ch.storeId())
-              : cluster(tenantId, ch.clusterId()).storeIds();
+              : clusterStores.computeIfAbsent(
+                  ch.clusterId(), id -> cluster(tenantId, id).storeIds());
       if (stores.isEmpty()) {
         refused.add(
             new NotApplied(

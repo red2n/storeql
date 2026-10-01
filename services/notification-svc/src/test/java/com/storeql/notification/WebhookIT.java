@@ -1,7 +1,6 @@
 package com.storeql.notification;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
@@ -37,6 +36,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -57,6 +59,9 @@ import org.junit.jupiter.api.Test;
 class WebhookIT {
 
   private static final PostgresSupport PG;
+  private static final CountDownLatch SLOW_ARRIVED = new CountDownLatch(2);
+  private static final AtomicInteger SLOW_MET = new AtomicInteger();
+
   private static final HttpServer RECEIVER;
   private static final String BASE;
   private static final List<Received> RECEIVED = new CopyOnWriteArrayList<>();
@@ -79,6 +84,8 @@ class WebhookIT {
     System.setProperty("storeql.webhooks.disable-after-failures", "3");
     try {
       RECEIVER = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+      // The JDK server answers on one thread by default, which would serialise any receiver.
+      RECEIVER.setExecutor(Executors.newCachedThreadPool());
     } catch (IOException e) {
       throw new IllegalStateException(e);
     }
@@ -100,6 +107,20 @@ class WebhookIT {
           exchange.getResponseHeaders().add("Content-Type", "application/json");
           exchange.sendResponseHeaders(status, answer.length);
           exchange.getResponseBody().write(answer);
+          exchange.close();
+        });
+    RECEIVER.createContext(
+        "/slow",
+        exchange -> {
+          exchange.getRequestBody().readAllBytes();
+          SLOW_ARRIVED.countDown();
+          try {
+            // Each waits for the other: only receivers sent to together can both get past.
+            if (SLOW_ARRIVED.await(10, TimeUnit.SECONDS)) SLOW_MET.incrementAndGet();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          exchange.sendResponseHeaders(200, -1);
           exchange.close();
         });
     RECEIVER.start();
@@ -380,6 +401,60 @@ class WebhookIT {
   // ── delivering ─────────────────────────────────────────────────────────────
 
   @Test
+  void anEndpointWithoutADescriptionOrWithAnEssayIsRefused() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    String url = BASE + "/hook";
+
+    for (String description : new String[] {null, "", "   ", "d".repeat(121)}) {
+      Answer refused =
+          call(
+              "POST",
+              "/admin/webhooks/endpoints",
+              own,
+              endpointJson(url, description, "OrderPlaced"));
+      assertThat(refused.body().toString(), refused.status(), is(400));
+      assertThat(refused.code(), is("WEBHOOK_DESCRIPTION_INVALID"));
+    }
+    assertThat(
+        "nothing was stored",
+        call("GET", "/admin/webhooks/endpoints", own, null).items(),
+        hasSize(0));
+
+    Answer made = register(own, url, "OrderPlaced");
+    assertThat(made.body().toString(), made.status(), is(201));
+    String id = made.data().getString("id");
+    for (String description : new String[] {"  ", "", "d".repeat(121)}) {
+      Answer refused =
+          call(
+              "PUT",
+              "/admin/webhooks/endpoints/" + id,
+              own,
+              "{\"description\":\"" + description + "\"}");
+      assertThat(refused.body().toString(), refused.status(), is(400));
+      assertThat(refused.code(), is("WEBHOOK_DESCRIPTION_INVALID"));
+    }
+    Answer unchanged = call("GET", "/admin/webhooks/endpoints/" + id, own, null);
+    assertThat(unchanged.data().getString("description"), is("ERP"));
+  }
+
+  @Test
+  void slowReceiversAreSentToTogetherNotOneAfterTheOther() {
+    UUID tenantA = Ids.newId();
+    UUID tenantB = Ids.newId();
+    assertThat(register(owner(tenantA), BASE + "/slow", "OrderPlaced").status(), is(201));
+    assertThat(register(owner(tenantB), BASE + "/slow", "OrderPlaced").status(), is(201));
+    fanout.accept(orderPlaced(tenantA, Ids.newId()));
+    fanout.accept(orderPlaced(tenantB, Ids.newId()));
+
+    int sent = deliverer.tick();
+
+    assertThat(sent, is(2));
+    // Both receivers were in flight at once: each saw the other arrive before it answered.
+    assertThat("receivers that overlapped", SLOW_MET.get(), is(2));
+  }
+
+  @Test
   void anEventOfASubscribedTypeIsDeliveredSignedOnceAndOnlyToItsBusiness() {
     UUID tenant = Ids.newId();
     Caller own = owner(tenant);
@@ -572,9 +647,9 @@ class WebhookIT {
     assertThat(rest.data().getJsonArray("items"), hasSize(1));
     assertThat(rest.data().getJsonArray("items").getJsonObject(0).getString("id"), is(id));
     assertThat(absent(rest.data(), "nextCursor"), is(true));
-    assertThat(
-        call("GET", "/admin/webhooks/deliveries?status=LOST", own, null).status(),
-        anyOf(is(400), is(200)));
+    Answer lost = call("GET", "/admin/webhooks/deliveries?status=LOST", own, null);
+    assertThat(lost.body().toString(), lost.status(), is(400));
+    assertThat(lost.code(), is("WEBHOOK_STATUS_INVALID"));
   }
 
   @Test

@@ -106,6 +106,8 @@ public class ScriptIntegrityMonitor {
   @PreDestroy
   void stop() {
     if (scheduler != null) scheduler.shutdownNow();
+    // Not close(): it waits for requests in flight; shutdownNow() cancels them.
+    http.shutdownNow();
   }
 
   /** Whether a web url is configured, so a check can run. */

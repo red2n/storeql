@@ -46,6 +46,22 @@ public class SmtpAccountEmailSender implements AccountEmailSender {
   @ConfigProperty(name = "storeql.notification.smtp.starttls", defaultValue = "true")
   boolean startTls;
 
+  @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.connect-timeout-ms", defaultValue = "5000")
+  int connectTimeoutMs;
+
+  @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.read-timeout-ms", defaultValue = "10000")
+  int readTimeoutMs;
+
+  @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.write-timeout-ms", defaultValue = "10000")
+  int writeTimeoutMs;
+
+  @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.sender-threads", defaultValue = "4")
+  int senderThreads;
+
   @Override
   public boolean live() {
     return "email".equalsIgnoreCase(channelName) || "smtp".equalsIgnoreCase(channelName);
@@ -54,7 +70,15 @@ public class SmtpAccountEmailSender implements AccountEmailSender {
   @Override
   public boolean send(String recipient, String subject, String body) {
     try {
-      new SmtpChannel(host, port, blankToNull(username), blankToNull(password), from, startTls)
+      new SmtpChannel(
+              host,
+              port,
+              blankToNull(username),
+              blankToNull(password),
+              from,
+              startTls,
+              new SmtpChannel.Timeouts(
+                  connectTimeoutMs, readTimeoutMs, writeTimeoutMs, senderThreads))
           .send(null, recipient, subject, body);
       return true;
     } catch (RuntimeException e) {

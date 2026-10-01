@@ -1,10 +1,10 @@
 package com.storeql.order.einvoice;
 
+import com.storeql.order.config.Json;
 import com.storeql.order.domain.EInvoiceTransports;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;

@@ -403,26 +403,33 @@ public class StoreTaskRepository extends BaseOutboxRepository {
   // ── plumbing ────────────────────────────────────────────────────────────────
 
   private List<Template> withTemplateItems(UUID tenantId, List<Template> templates) {
+    if (templates.isEmpty()) return templates;
+    // One query for every list's lines, grouped here.
+    Object[] ids = templates.stream().map(Template::id).toArray();
+    Map<UUID, List<TemplateItem>> byTemplate = new LinkedHashMap<>();
+    for (TemplateItem item :
+        query(
+            "SELECT "
+                + TEMPLATE_ITEM_COLUMNS
+                + " FROM task_template_items"
+                + " WHERE tenant_id = ? AND template_id = ANY(?) ORDER BY template_id, position",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids));
+            },
+            rs ->
+                new TemplateItem(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("template_id", UUID.class),
+                    rs.getInt("position"),
+                    rs.getString("text"),
+                    rs.getBoolean("required")),
+            "read a list's lines")) {
+      byTemplate.computeIfAbsent(item.templateId(), k -> new ArrayList<>()).add(item);
+    }
     List<Template> out = new ArrayList<>(templates.size());
     for (Template t : templates) {
-      List<TemplateItem> items =
-          query(
-              "SELECT "
-                  + TEMPLATE_ITEM_COLUMNS
-                  + " FROM task_template_items"
-                  + " WHERE tenant_id = ? AND template_id = ? ORDER BY position",
-              ps -> {
-                ps.setObject(1, tenantId);
-                ps.setObject(2, t.id());
-              },
-              rs ->
-                  new TemplateItem(
-                      rs.getObject("id", UUID.class),
-                      rs.getObject("template_id", UUID.class),
-                      rs.getInt("position"),
-                      rs.getString("text"),
-                      rs.getBoolean("required")),
-              "read a list's lines");
+      List<TemplateItem> items = byTemplate.getOrDefault(t.id(), List.of());
       out.add(
           new Template(
               t.id(),
@@ -448,29 +455,29 @@ public class StoreTaskRepository extends BaseOutboxRepository {
 
   private List<Instance> withInstanceItems(UUID tenantId, List<Instance> instances) {
     if (instances.isEmpty()) return instances;
+    Object[] ids = instances.stream().map(Instance::id).toArray();
     Map<UUID, List<InstanceItem>> items = new LinkedHashMap<>();
-    for (Instance i : instances) {
-      items.put(
-          i.id(),
-          query(
-              "SELECT "
-                  + INSTANCE_ITEM_COLUMNS
-                  + " FROM task_instance_items"
-                  + " WHERE tenant_id = ? AND instance_id = ? ORDER BY position",
-              ps -> {
-                ps.setObject(1, tenantId);
-                ps.setObject(2, i.id());
-              },
-              rs ->
-                  new InstanceItem(
-                      rs.getObject("id", UUID.class),
-                      rs.getObject("instance_id", UUID.class),
-                      rs.getInt("position"),
-                      rs.getString("text"),
-                      rs.getBoolean("required"),
-                      instant(rs, "ticked_at"),
-                      rs.getObject("ticked_by", UUID.class)),
-              "read a task's lines"));
+    for (InstanceItem item :
+        query(
+            "SELECT "
+                + INSTANCE_ITEM_COLUMNS
+                + " FROM task_instance_items"
+                + " WHERE tenant_id = ? AND instance_id = ANY(?) ORDER BY instance_id, position",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids));
+            },
+            rs ->
+                new InstanceItem(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("instance_id", UUID.class),
+                    rs.getInt("position"),
+                    rs.getString("text"),
+                    rs.getBoolean("required"),
+                    instant(rs, "ticked_at"),
+                    rs.getObject("ticked_by", UUID.class)),
+            "read a task's lines")) {
+      items.computeIfAbsent(item.instanceId(), k -> new ArrayList<>()).add(item);
     }
     List<Instance> out = new ArrayList<>(instances.size());
     for (Instance i : instances) {

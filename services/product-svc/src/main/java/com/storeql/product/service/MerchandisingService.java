@@ -427,17 +427,19 @@ public class MerchandisingService {
   }
 
   /**
-   * @throws ApiException 409 {@code RESET_NOT_OPEN}
+   * @throws ApiException 404 {@code RESET_NOT_FOUND}; 409 {@code RESET_NOT_OPEN}
    */
   public Reset complete(UUID tenantId, UUID id) {
     if (!repo.moveReset(tenantId, id, Merchandising.PLANNED, Merchandising.COMPLETED, null)) {
+      requireReset(tenantId, id); // not this business's, or no such reset: 404, not "not open"
       throw ApiException.conflict("RESET_NOT_OPEN", "That reset is not open");
     }
     return requireReset(tenantId, id);
   }
 
   /**
-   * @throws ApiException 400 {@code RESET_REASON_REQUIRED}; 409 {@code RESET_NOT_OPEN}
+   * @throws ApiException 400 {@code RESET_REASON_REQUIRED}; 404 {@code RESET_NOT_FOUND}; 409 {@code
+   *     RESET_NOT_OPEN}
    */
   public Reset cancel(UUID tenantId, UUID id, String reason) {
     String why = blankToNull(reason);
@@ -448,6 +450,7 @@ public class MerchandisingService {
               + "is the thing somebody asks about in six months");
     }
     if (!repo.moveReset(tenantId, id, Merchandising.PLANNED, Merchandising.CANCELLED, why)) {
+      requireReset(tenantId, id);
       throw ApiException.conflict("RESET_NOT_OPEN", "That reset is not open");
     }
     return requireReset(tenantId, id);

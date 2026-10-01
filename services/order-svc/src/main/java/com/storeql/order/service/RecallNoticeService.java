@@ -102,11 +102,18 @@ public class RecallNoticeService {
    * repair done, or a buyer who wanted nothing. A refund is recorded through {@code POST
    * /orders/{id}/returns} with the notice named, so the money and the goods stay on one record.
    *
-   * @throws ApiException 404 {@code RECALL_NOTICE_NOT_FOUND}; 409 {@code RECALL_NOTICE_RESOLVED};
-   *     400 {@code RECALL_REFUND_THROUGH_RETURN} for REFUNDED
+   * @param ctx the caller, who must keep the store of the notice's order
+   * @throws ApiException 404 {@code RECALL_NOTICE_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED} for
+   *     staff held to other stores; 409 {@code RECALL_NOTICE_RESOLVED}; 400 {@code
+   *     RECALL_REFUND_THROUGH_RETURN} for REFUNDED
    */
   public Detail resolve(
-      UUID tenantId, UUID noticeId, UUID actorId, Resolution resolution, String notes) {
+      UUID tenantId,
+      UUID noticeId,
+      UUID actorId,
+      Resolution resolution,
+      String notes,
+      com.storeql.web.TenantContext ctx) {
     if (resolution == Resolution.REFUNDED) {
       throw ApiException.badRequest(
           "RECALL_REFUND_THROUGH_RETURN",
@@ -118,6 +125,7 @@ public class RecallNoticeService {
         noticeId,
         resolution,
         notes == null || notes.isBlank() ? null : notes.trim(),
-        actorId);
+        actorId,
+        n -> ctx.requireStoreAccess(n.storeId()));
   }
 }

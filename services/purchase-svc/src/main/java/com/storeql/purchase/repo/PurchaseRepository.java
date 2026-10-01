@@ -2110,6 +2110,39 @@ public class PurchaseRepository extends BaseOutboxRepository {
         "list vendor returns by po");
   }
 
+  /** The lines of several returns in one query, grouped by return, each in creation order. */
+  public java.util.Map<UUID, List<Domain.VendorReturnLine>> findVendorReturnLinesFor(
+      UUID tenantId, java.util.Collection<UUID> returnIds) {
+    java.util.Map<UUID, List<Domain.VendorReturnLine>> out = new java.util.HashMap<>();
+    if (returnIds.isEmpty()) return out;
+    UUID[] ids = returnIds.toArray(new UUID[0]);
+    List<Domain.VendorReturnLine> rows =
+        query(
+            "SELECT id, tenant_id, return_id, variant_id, qty, unit_price, vat_code, line_net,"
+                + " created_at FROM vendor_return_lines WHERE tenant_id = ? AND return_id = ANY(?)"
+                + " ORDER BY created_at",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids));
+            },
+            rs ->
+                new Domain.VendorReturnLine(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("tenant_id", UUID.class),
+                    rs.getObject("return_id", UUID.class),
+                    rs.getObject("variant_id", UUID.class),
+                    rs.getBigDecimal("qty"),
+                    rs.getBigDecimal("unit_price"),
+                    rs.getString("vat_code"),
+                    rs.getBigDecimal("line_net"),
+                    rs.getObject("created_at", OffsetDateTime.class).toInstant()),
+            "list vendor return lines for several returns");
+    for (Domain.VendorReturnLine l : rows) {
+      out.computeIfAbsent(l.returnId(), k -> new java.util.ArrayList<>()).add(l);
+    }
+    return out;
+  }
+
   /** The lines of one return, in the order they were raised. */
   public List<Domain.VendorReturnLine> findVendorReturnLines(UUID tenantId, UUID returnId) {
     return query(

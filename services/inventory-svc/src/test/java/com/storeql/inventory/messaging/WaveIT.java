@@ -23,6 +23,7 @@ import java.sql.DriverManager;
 import java.time.Instant;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -768,9 +769,8 @@ class WaveIT {
     JsonObject wave =
         Envelopes.created(call("POST", "/admin/inventory/waves", body, T, "STOREKEEPER", STORE));
     assertThat(
-        call("GET", "/admin/inventory/waves/" + wave.getString("id"), null, T2, "OWNER")
-            .getStatus(),
-        is(404));
+        code(call("GET", "/admin/inventory/waves/" + wave.getString("id"), null, T2, "OWNER"), 404),
+        is("INVENTORY_WAVE_NOT_FOUND"));
     assertThat(
         call(
                 "POST",
@@ -1215,5 +1215,75 @@ class WaveIT {
         is("0"));
     assertThat(
         Envelopes.ok(get("/admin/inventory/waves/" + waveId)).getString("status"), is("OPEN"));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A pick for a line that is not on the wave is refused and nothing is recorded")
+  void aPickForALineNotOnTheWaveIsRefused() {
+    receive(APPLES, 20, ZONE_A, "A-1", null);
+    receive(PEARS, 8, ZONE_A, "P-1", null);
+    twoOrdersWaiting();
+    JsonObject wave =
+        Envelopes.created(
+            call(
+                "POST",
+                "/admin/inventory/waves",
+                "{\"storeId\":\"" + STORE + "\"}",
+                T,
+                "STOREKEEPER",
+                STORE));
+    String waveId = wave.getString("id");
+
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/admin/inventory/waves/" + waveId + "/picks",
+                "{\"lines\":[{\"lineId\":\"" + Ids.newId() + "\",\"pickedQty\":1}]}",
+                T,
+                "STOREKEEPER",
+                STORE),
+            400),
+        is("INVENTORY_WAVE_LINE_UNKNOWN"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM inventory.pick_wave_lines WHERE tenant_id = '"
+                + T
+                + "' AND wave_id = '"
+                + waveId
+                + "' AND picked_qty IS NOT NULL"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A wave list filtered by a status nobody defined is refused")
+  void aWaveListByAStatusNobodyDefinedIsRefused() {
+    for (String status : new String[] {"DONE", "PENDING"}) {
+      assertThat(
+          status,
+          code(
+              call(
+                  "GET",
+                  "/admin/inventory/waves?storeId=" + STORE + "&status=" + status,
+                  null,
+                  T,
+                  "STOREKEEPER",
+                  STORE),
+              400),
+          is("INVENTORY_WAVE_STATUS_INVALID"));
+    }
+    assertThat(
+        call(
+                "GET",
+                "/admin/inventory/waves?storeId=" + STORE + "&status=OPEN",
+                null,
+                T,
+                "STOREKEEPER",
+                STORE)
+            .getStatus(),
+        is(200));
   }
 }

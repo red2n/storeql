@@ -263,7 +263,7 @@ export default function ({ shop, rival }) {
 
   const rivalToken = rival.owner.token;
   truthy('[abuse] another business sees none of these arrangements', (data(get(`${C}/schemes?all=true`, rivalToken)) || []).length === 0, 'rival schemes');
-  expect(get(`${C}/schemes/${corrected.id}`, rivalToken), '[abuse] nor reads one by id', 404);
+  expect(get(`${C}/schemes/${corrected.id}`, rivalToken), '[abuse] nor reads one by id', 404, 'COMMISSION_SCHEME_NOT_FOUND');
   expect(get(`${O}/statements/${statement.id}`, rivalToken), '[abuse] nor a statement', 404);
   expect(put(`${O}/sales/${sale.id}/seller`, { sellerUserId: keeper.userId, reason: 'not theirs to credit' }, rivalToken), '[abuse] nor credits this business sale', 404);
   const rivalRated = data(post(`${C}/rate`, { from: day(400), to: day(390), sellers: [{ userId: cashier.userId, days: [{ day: day(395), net: '1000.00' }] }] }, rivalToken));

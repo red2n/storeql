@@ -185,7 +185,7 @@ public final class Dtos {
 
   @Schema(name = "BatchUpsertPriceListItemsRequest")
   public record BatchUpsertPriceListItemsRequest(
-      @NotNull @Valid java.util.List<UpsertPriceListItemRequest> items) {}
+      @NotNull @Size(max = 500) @Valid java.util.List<UpsertPriceListItemRequest> items) {}
 
   @Schema(
       name = "BatchUpsertResult",
@@ -403,7 +403,8 @@ public final class Dtos {
    * was issuing one synchronous {@code /prices/resolve} call per order line.
    */
   @Schema(name = "ResolvePriceBatchRequest")
-  public record ResolvePriceBatchRequest(@NotEmpty @Valid List<ResolvePriceRequest> lines) {}
+  public record ResolvePriceBatchRequest(
+      @NotEmpty @Size(max = 500) @Valid List<ResolvePriceRequest> lines) {}
 
   /** Results are in the same order as the request's {@code lines}. */
   @Schema(
@@ -526,7 +527,7 @@ public final class Dtos {
               + " line independently and therefore cannot see a spend threshold, a basket"
               + " percentage or a buy-one-get-one.")
   public record QuoteBasketRequest(
-      @NotEmpty @Valid List<QuoteLineRequest> lines,
+      @NotEmpty @Size(max = 500) @Valid List<QuoteLineRequest> lines,
       @Schema(description = "UUID of the store; selects store-scoped prices and promotions.")
           String storeId,
       @Schema(description = "ONLINE or POS. Defaults to ALL.") String channel,

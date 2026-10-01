@@ -13,12 +13,13 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -36,7 +37,6 @@ public class PasswordPolicy {
 
   private static final System.Logger LOG = System.getLogger(PasswordPolicy.class.getName());
   private static final Duration RANGE_TTL = Duration.ofHours(1);
-  private static final int RANGE_CACHE_MAX = 4096;
 
   @Inject
   @ConfigProperty(name = "storeql.iam.password.min-length", defaultValue = "15")
@@ -60,13 +60,61 @@ public class PasswordPolicy {
   @ConfigProperty(name = "storeql.iam.password.breach-check.timeout-ms", defaultValue = "3000")
   long breachTimeoutMs;
 
+  /**
+   * The most breached-password ranges kept at once; each is a sorted array of 8-byte suffix keys
+   * (about 8 KB), so the whole cache stays in the low megabytes whatever the sign-up traffic.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.iam.password.breach-check.cache-max-ranges", defaultValue = "256")
+  int cacheMaxRanges = 256;
+
   private final HttpClient http =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
-  /** Breached-suffix sets by SHA-1 prefix, so a busy sign-up page does not ask twice. */
-  private final Map<String, CachedRange> ranges = new ConcurrentHashMap<>();
+  /**
+   * Breached-suffix keys by SHA-1 prefix, so a busy sign-up page does not ask twice: a least
+   * recently used map bounded by {@code cacheMaxRanges}, guarded by a lock that is never held
+   * across I/O.
+   */
+  private final ReentrantLock rangesLock = new ReentrantLock();
 
-  private record CachedRange(Set<String> breachedSuffixes, Instant expiresAt) {}
+  private final Map<String, CachedRange> ranges =
+      new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, CachedRange> eldest) {
+          return size() > Math.max(1, cacheMaxRanges);
+        }
+      };
+
+  private record CachedRange(long[] sortedKeys, Instant expiresAt) {
+    CachedRange {
+      sortedKeys = sortedKeys.clone();
+    }
+
+    @Override
+    public long[] sortedKeys() {
+      return sortedKeys.clone();
+    }
+
+    boolean contains(long key) {
+      return Arrays.binarySearch(sortedKeys, key) >= 0;
+    }
+  }
+
+  /** How many ranges are cached now (for tests and diagnostics). */
+  int cachedRanges() {
+    rangesLock.lock();
+    try {
+      return ranges.size();
+    } finally {
+      rangesLock.unlock();
+    }
+  }
+
+  /** The first 16 hex characters of a suffix as a long: 64 bits, ample against a 35-char suffix. */
+  private static long key(String suffix) {
+    return Long.parseUnsignedLong(suffix.substring(0, 16), 16);
+  }
 
   /**
    * The fewest characters a password may have.
@@ -153,23 +201,39 @@ public class PasswordPolicy {
     String sha1 = sha1Hex(password);
     String prefix = sha1.substring(0, 5);
     String suffix = sha1.substring(5);
-    CachedRange cached = ranges.get(prefix);
-    if (cached != null && cached.expiresAt().isAfter(Instant.now())) {
-      return Optional.of(cached.breachedSuffixes().contains(suffix));
+    long wanted = key(suffix);
+    CachedRange cached;
+    rangesLock.lock();
+    try {
+      cached = ranges.get(prefix);
+      if (cached != null && !cached.expiresAt().isAfter(Instant.now())) {
+        ranges.remove(prefix);
+        cached = null;
+      }
+    } finally {
+      rangesLock.unlock();
     }
-    Optional<Set<String>> fetched = fetchRange(prefix);
+    if (cached != null) {
+      return Optional.of(cached.contains(wanted));
+    }
+    Optional<long[]> fetched = fetchRange(prefix);
     if (fetched.isEmpty()) {
       LOG.log(
           System.Logger.Level.WARNING,
           "breached-password screen unavailable; the password was accepted unscreened");
       return Optional.empty();
     }
-    if (ranges.size() >= RANGE_CACHE_MAX) ranges.clear();
-    ranges.put(prefix, new CachedRange(fetched.get(), Instant.now().plus(RANGE_TTL)));
-    return Optional.of(fetched.get().contains(suffix));
+    CachedRange fresh = new CachedRange(fetched.get(), Instant.now().plus(RANGE_TTL));
+    rangesLock.lock();
+    try {
+      ranges.put(prefix, fresh);
+    } finally {
+      rangesLock.unlock();
+    }
+    return Optional.of(fresh.contains(wanted));
   }
 
-  private Optional<Set<String>> fetchRange(String prefix) {
+  private Optional<long[]> fetchRange(String prefix) {
     try {
       HttpResponse<String> res =
           http.send(
@@ -181,7 +245,8 @@ public class PasswordPolicy {
                   .build(),
               HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
       if (res.statusCode() != 200) return Optional.empty();
-      Set<String> breachedSuffixes = ConcurrentHashMap.newKeySet();
+      long[] keys = new long[64];
+      int n = 0;
       for (String line : res.body().split("\\r?\\n")) {
         int colon = line.indexOf(':');
         if (colon <= 0) continue;
@@ -192,10 +257,21 @@ public class PasswordPolicy {
         } catch (NumberFormatException e) {
           continue;
         }
-        if (count > 0)
-          breachedSuffixes.add(line.substring(0, colon).trim().toUpperCase(Locale.ROOT));
+        String hex = line.substring(0, colon).trim();
+        if (count > 0 && hex.length() >= 16) {
+          long k;
+          try {
+            k = key(hex);
+          } catch (NumberFormatException e) {
+            continue;
+          }
+          if (n == keys.length) keys = Arrays.copyOf(keys, n * 2);
+          keys[n++] = k;
+        }
       }
-      return Optional.of(breachedSuffixes);
+      keys = Arrays.copyOf(keys, n);
+      Arrays.sort(keys);
+      return Optional.of(keys);
     } catch (IOException | IllegalArgumentException e) {
       return Optional.empty();
     } catch (InterruptedException e) {

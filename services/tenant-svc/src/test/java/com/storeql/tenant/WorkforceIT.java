@@ -23,7 +23,13 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -893,5 +899,503 @@ class WorkforceIT {
             shop.manager(),
             "OWNER");
     assertThat("and not in a window it does not belong to", today.list().size(), is(0));
+  }
+
+  // ── refusals: who may read, what is a date, what is an id ─────────────────
+
+  /** A second store in the shop's business, and somebody who works there. */
+  private Shop secondStore(Shop shop) {
+    Answer store =
+        call(
+            "POST",
+            "/admin/stores",
+            "{\"name\":\"Low Street\",\"code\":\"LS-"
+                + Ids.newId().toString().substring(28)
+                + "\",\"line1\":\"2 Low Street\",\"city\":\"London\",\"country\":\"GB\","
+                + "\"pincode\":\"E1 6AN\",\"timezone\":\"Europe/London\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(store.text(), store.status(), is(201));
+    String storeId = store.data().getString("id");
+    String person = Ids.newId().toString();
+    Answer assigned =
+        call(
+            "POST",
+            "/admin/staff",
+            "{\"userId\":\"" + person + "\",\"storeId\":\"" + storeId + "\",\"role\":\"CASHIER\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(assigned.text(), assigned.status(), is(201));
+    return new Shop(shop.tenant(), storeId, person, shop.manager());
+  }
+
+  private Answer attendanceOf(Shop shop, String roles, String heldTo, String store) {
+    String path =
+        W
+            + "/attendance?from="
+            + LocalDate.now(ZoneOffset.UTC).minusDays(2)
+            + "&to="
+            + LocalDate.now(ZoneOffset.UTC).plusDays(1)
+            + (store == null ? "" : "&store=" + store);
+    return call("GET", path, null, shop.tenant(), shop.manager(), roles, heldTo);
+  }
+
+  private static Set<String> storesIn(Answer a) {
+    Set<String> out = new HashSet<>();
+    for (JsonObject d : a.list()) out.add(d.getString("storeId"));
+    return out;
+  }
+
+  /** The status of a shift, read back through the roster of the whole business. */
+  private String shiftStatus(Shop shop, String shiftId) {
+    Answer roster =
+        call(
+            "GET",
+            W + "/shifts?from=" + iso(-3, 0) + "&to=" + iso(5, 0),
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(roster.text(), roster.status(), is(200));
+    for (JsonObject sh : roster.data().getJsonArray("shifts").getValuesAs(JsonObject.class)) {
+      if (shiftId.equals(sh.getString("id"))) return sh.getString("status");
+    }
+    throw new AssertionError("shift " + shiftId + " is not on the roster");
+  }
+
+  @Test
+  @DisplayName("Attendance is read only at the stores the caller keeps, and by management only")
+  void attendanceIsKeptToTheCallersStores() {
+    Shop a = shop();
+    Shop b = secondStore(a);
+    assertThat(plan(a, iso(-1, 9), iso(-1, 17)).status(), is(201));
+    assertThat(plan(b, iso(-1, 9), iso(-1, 17)).status(), is(201));
+
+    Answer whole = attendanceOf(a, "OWNER", null, null);
+    assertThat(whole.text(), whole.status(), is(200));
+    assertThat(
+        "a caller held to no store reads the whole business",
+        storesIn(whole),
+        is(Set.of(a.store(), b.store())));
+
+    Answer heldNone = attendanceOf(a, "MANAGER", a.store(), null);
+    assertThat(heldNone.text(), heldNone.status(), is(200));
+    assertThat(
+        "naming none is exactly the caller's stores", storesIn(heldNone), is(Set.of(a.store())));
+
+    Answer ownStore = attendanceOf(a, "MANAGER", a.store(), a.store());
+    assertThat(ownStore.status(), is(200));
+    assertThat(storesIn(ownStore), is(Set.of(a.store())));
+
+    Answer elsewhere = attendanceOf(a, "MANAGER", a.store(), b.store());
+    assertThat(elsewhere.text(), elsewhere.status(), is(403));
+    assertThat(elsewhere.code(), is("STORE_ACCESS_DENIED"));
+    assertThat(
+        "nothing of the other store leaks", elsewhere.text(), not(containsString(b.person())));
+
+    Answer both = attendanceOf(a, "MANAGER", a.store() + "," + b.store(), null);
+    assertThat(
+        "a manager of two branches reads both", storesIn(both), is(Set.of(a.store(), b.store())));
+
+    for (String role : new String[] {"CASHIER", "STOREKEEPER"}) {
+      Answer staff = attendanceOf(a, role, null, null);
+      assertThat(role, staff.status(), is(403));
+    }
+
+    // Another business naming our store reads nothing of ours.
+    Shop rival = shop();
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer theirs = attendanceOf(rival, role, null, a.store());
+      assertThat(theirs.text(), theirs.status(), is(200));
+      assertThat(role + " finds none of our days", theirs.list().size(), is(0));
+    }
+  }
+
+  @Test
+  @DisplayName("A day or an instant that is not one is refused, and nothing is written")
+  void aDayThatIsNotADateIsRefused() {
+    Shop shop = shop();
+    Answer roster =
+        call("GET", W + "/shifts?from=next-tuesday", null, shop.tenant(), shop.manager(), "OWNER");
+    assertThat(roster.status(), is(400));
+    assertThat(roster.code(), is("WORKFORCE_DATE_INVALID"));
+
+    Answer report =
+        call(
+            "GET", W + "/attendance?from=14/09/2026", null, shop.tenant(), shop.manager(), "OWNER");
+    assertThat(report.status(), is(400));
+    assertThat(report.code(), is("WORKFORCE_DATE_INVALID"));
+
+    Answer rate =
+        call(
+            "POST",
+            W + "/pay-rates",
+            "{\"userId\":\""
+                + shop.person()
+                + "\",\"hourlyRate\":\"12.50\",\"effectiveFrom\":\"14/09/2026\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(rate.status(), is(400));
+    assertThat(rate.code(), is("WORKFORCE_DATE_INVALID"));
+    Answer rates =
+        call(
+            "GET",
+            W + "/pay-rates?user=" + shop.person(),
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat("no rate was recorded", rates.list().size(), is(0));
+  }
+
+  @Test
+  @DisplayName("An id that is not an id, or is missing, is refused before anything is read")
+  void anIdThatIsNotAnIdIsRefused() {
+    Shop shop = shop();
+    Answer clock =
+        call(
+            "POST",
+            CLOCK + "/in",
+            "{\"storeId\":\"not-a-store\"}",
+            shop.tenant(),
+            shop.person(),
+            "CASHIER");
+    assertThat(clock.status(), is(400));
+    assertThat(clock.code(), is("WORKFORCE_ID_INVALID"));
+    Answer none = call("GET", CLOCK + "/open", null, shop.tenant(), shop.person(), "CASHIER");
+    assertThat("nobody was clocked in", none.body().get("data"), is(nullValue()));
+
+    Answer roster =
+        call("GET", W + "/shifts?store=nope", null, shop.tenant(), shop.manager(), "OWNER");
+    assertThat(roster.status(), is(400));
+    assertThat(roster.code(), is("WORKFORCE_ID_INVALID"));
+
+    // An id of another version is no id of ours either.
+    Answer oldId =
+        call(
+            "GET",
+            W + "/shifts?user=00000000-0000-4000-8000-000000000000",
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(oldId.status(), is(400));
+  }
+
+  @Test
+  @DisplayName("Whose hours must be named: a missing person is refused and nobody is clocked in")
+  void whoseHoursMustBeNamed() {
+    Shop shop = shop();
+    Answer rates = call("GET", W + "/pay-rates", null, shop.tenant(), shop.manager(), "OWNER");
+    assertThat(rates.status(), is(400));
+    assertThat(rates.code(), is("WORKFORCE_ID_REQUIRED"));
+
+    Answer entry =
+        call(
+            "POST",
+            W + "/time-entries",
+            "{\"storeId\":\"" + shop.store() + "\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(entry.status(), is(400));
+    assertThat(entry.code(), is("WORKFORCE_ID_REQUIRED"));
+    Answer hours =
+        call(
+            "GET",
+            W + "/time-entries?from=" + iso(-1, 0) + "&to=" + iso(1, 0),
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat("no entry was written", hours.list().size(), is(0));
+  }
+
+  @Test
+  @DisplayName("A break is REST or MEAL, and ending one that is not running is refused")
+  void aBreakIsRestOrMeal() {
+    Shop shop = shop();
+    // Not on the clock: neither a break starts nor ends.
+    Answer notIn =
+        call("POST", CLOCK + "/breaks/end", null, shop.tenant(), shop.person(), "CASHIER");
+    assertThat(notIn.status(), is(409));
+    assertThat(notIn.code(), is("WORKFORCE_NOT_CLOCKED_IN"));
+    Answer startNotIn =
+        call(
+            "POST",
+            CLOCK + "/breaks/start",
+            "{\"kind\":\"MEAL\",\"paid\":false}",
+            shop.tenant(),
+            shop.person(),
+            "CASHIER");
+    assertThat(startNotIn.code(), is("WORKFORCE_NOT_CLOCKED_IN"));
+
+    assertThat(
+        call(
+                "POST",
+                CLOCK + "/in",
+                "{\"storeId\":\"" + shop.store() + "\"}",
+                shop.tenant(),
+                shop.person(),
+                "CASHIER")
+            .status(),
+        is(201));
+
+    // On the clock with no break running.
+    Answer noBreak =
+        call("POST", CLOCK + "/breaks/end", null, shop.tenant(), shop.person(), "CASHIER");
+    assertThat(noBreak.status(), is(409));
+    assertThat(noBreak.code(), is("WORKFORCE_NO_BREAK"));
+
+    Answer nap =
+        call(
+            "POST",
+            CLOCK + "/breaks/start",
+            "{\"kind\":\"NAP\",\"paid\":false}",
+            shop.tenant(),
+            shop.person(),
+            "CASHIER");
+    assertThat(nap.status(), is(400));
+    assertThat(nap.code(), is("WORKFORCE_BREAK_KIND_UNKNOWN"));
+    Answer open = call("GET", CLOCK + "/open", null, shop.tenant(), shop.person(), "CASHIER");
+    assertThat("no break was recorded", open.data().getJsonArray("breaks").size(), is(0));
+  }
+
+  @Test
+  @DisplayName("A window that is not one is refused, for a shift and for corrected hours")
+  void aWindowThatIsNotOneIsRefused() {
+    Shop shop = shop();
+    Answer backwards = plan(shop, iso(2, 17), iso(2, 9));
+    assertThat(backwards.status(), is(400));
+    assertThat(backwards.code(), is("WORKFORCE_WINDOW_INVALID"));
+    Answer tooLong = plan(shop, iso(2, 9), iso(4, 9));
+    assertThat(tooLong.status(), is(400));
+    assertThat(tooLong.code(), is("WORKFORCE_WINDOW_INVALID"));
+    Answer roster =
+        call(
+            "GET",
+            W + "/shifts?from=" + iso(0, 0) + "&to=" + iso(6, 0),
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat("neither shift was rostered", roster.data().getJsonArray("shifts").size(), is(0));
+
+    Answer in =
+        call(
+            "POST",
+            CLOCK + "/in",
+            "{\"storeId\":\"" + shop.store() + "\"}",
+            shop.tenant(),
+            shop.person(),
+            "CASHIER");
+    String entryId = in.data().getString("id");
+    call("POST", CLOCK + "/out", null, shop.tenant(), shop.person(), "CASHIER");
+    Answer fixBackwards =
+        call(
+            "POST",
+            W + "/time-entries/" + entryId + "/adjust",
+            "{\"clockedInAt\":\""
+                + iso(-1, 17)
+                + "\",\"clockedOutAt\":\""
+                + iso(-1, 9)
+                + "\",\"reason\":\"fix\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(fixBackwards.status(), is(400));
+    assertThat(fixBackwards.code(), is("WORKFORCE_WINDOW_INVALID"));
+    Answer fixTooLong =
+        call(
+            "POST",
+            W + "/time-entries/" + entryId + "/adjust",
+            "{\"clockedInAt\":\""
+                + iso(-3, 9)
+                + "\",\"clockedOutAt\":\""
+                + iso(-1, 9)
+                + "\",\"reason\":\"fix\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(fixTooLong.status(), is(400));
+    assertThat(fixTooLong.code(), is("WORKFORCE_WINDOW_INVALID"));
+    Answer hours =
+        call(
+            "GET",
+            W + "/time-entries?from=" + iso(-1, 0) + "&to=" + iso(1, 0),
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat("the entry was not corrected", hours.list().size(), is(1));
+    assertThat(hours.list().get(0).getString("id"), is(entryId));
+  }
+
+  @Test
+  @DisplayName("A called-off shift stays called off, and nobody clocks on to it")
+  void aCalledOffShiftStaysCalledOff() {
+    Shop shop = shop();
+    Answer shift = plan(shop, iso(1, 9), iso(1, 17));
+    String id = shift.data().getString("id");
+    assertThat(
+        call(
+                "POST",
+                W + "/shifts/" + id + "/cancel",
+                "{\"reason\":\"closed\"}",
+                shop.tenant(),
+                shop.manager(),
+                "OWNER")
+            .status(),
+        is(200));
+
+    Answer again =
+        call(
+            "POST",
+            W + "/shifts/" + id + "/cancel",
+            "{\"reason\":\"again\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(again.status(), is(409));
+    assertThat(again.code(), is("WORKFORCE_SHIFT_CANCELLED"));
+
+    Answer clock =
+        call(
+            "POST",
+            CLOCK + "/in",
+            "{\"storeId\":\"" + shop.store() + "\",\"shiftId\":\"" + id + "\"}",
+            shop.tenant(),
+            shop.person(),
+            "CASHIER");
+    assertThat(clock.status(), is(409));
+    assertThat(clock.code(), is("WORKFORCE_SHIFT_CANCELLED"));
+    Answer open = call("GET", CLOCK + "/open", null, shop.tenant(), shop.person(), "CASHIER");
+    assertThat("nobody was clocked in", open.body().get("data"), is(nullValue()));
+    assertThat(shiftStatus(shop, id), is("CANCELLED"));
+  }
+
+  @Test
+  @DisplayName("Another business cannot publish, cancel or clock on to our shift")
+  void anotherBusinessCannotPublishOrCancelOurShift() {
+    Shop shop = shop();
+    Shop rival = shop();
+    String id = plan(shop, iso(1, 9), iso(1, 17)).data().getString("id");
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer publish =
+          call(
+              "POST",
+              W + "/shifts/" + id + "/publish",
+              null,
+              rival.tenant(),
+              rival.manager(),
+              role);
+      assertThat(role, publish.status(), is(404));
+      assertThat(publish.code(), is("WORKFORCE_SHIFT_NOT_FOUND"));
+      Answer cancel =
+          call(
+              "POST",
+              W + "/shifts/" + id + "/cancel",
+              "{\"reason\":\"x\"}",
+              rival.tenant(),
+              rival.manager(),
+              role);
+      assertThat(role, cancel.status(), is(404));
+      assertThat(cancel.code(), is("WORKFORCE_SHIFT_NOT_FOUND"));
+    }
+    // The rival's own staff, naming our shift on their own store, or a shift nobody rostered.
+    Answer theirClock =
+        call(
+            "POST",
+            CLOCK + "/in",
+            "{\"storeId\":\"" + rival.store() + "\",\"shiftId\":\"" + id + "\"}",
+            rival.tenant(),
+            rival.person(),
+            "CASHIER");
+    assertThat(theirClock.status(), is(404));
+    assertThat(theirClock.code(), is("WORKFORCE_SHIFT_NOT_FOUND"));
+    Answer unknown =
+        call(
+            "POST",
+            CLOCK + "/in",
+            "{\"storeId\":\"" + shop.store() + "\",\"shiftId\":\"" + Ids.newId() + "\"}",
+            shop.tenant(),
+            shop.person(),
+            "CASHIER");
+    assertThat(unknown.status(), is(404));
+    assertThat(unknown.code(), is("WORKFORCE_SHIFT_NOT_FOUND"));
+    assertThat("our shift is as it was", shiftStatus(shop, id), is("PLANNED"));
+    Answer open = call("GET", CLOCK + "/open", null, rival.tenant(), rival.person(), "CASHIER");
+    assertThat("nobody was clocked in", open.body().get("data"), is(nullValue()));
+  }
+
+  @Test
+  @DisplayName("Ten cancels at once call a shift off once")
+  void tenCancelsAtOnceCallAShiftOffOnce() throws Exception {
+    Shop shop = shop();
+    String id = plan(shop, iso(1, 9), iso(1, 17)).data().getString("id");
+    int n = 10;
+    var pool = Executors.newFixedThreadPool(n);
+    var go = new CountDownLatch(1);
+    List<Future<Answer>> results = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      results.add(
+          pool.submit(
+              () -> {
+                go.await();
+                return call(
+                    "POST",
+                    W + "/shifts/" + id + "/cancel",
+                    "{\"reason\":\"x\"}",
+                    shop.tenant(),
+                    shop.manager(),
+                    "OWNER");
+              }));
+    }
+    go.countDown();
+    int done = 0;
+    for (Future<Answer> f : results) {
+      Answer a = f.get();
+      if (a.status() == 200) {
+        done++;
+      } else {
+        assertThat(a.text(), a.status(), is(409));
+        assertThat(
+            a.text(),
+            a.code(),
+            org.hamcrest.Matchers.either(is("WORKFORCE_SHIFT_CHANGED"))
+                .or(is("WORKFORCE_SHIFT_CANCELLED")));
+      }
+    }
+    pool.shutdown();
+    assertThat("one cancel wins", done, is(1));
+    assertThat(shiftStatus(shop, id), is("CANCELLED"));
+  }
+
+  @Test
+  @DisplayName("A roster, hours or attendance window longer than the limit is refused")
+  void aWindowLongerThanTheLimitIsRefused() {
+    Shop shop = shop();
+    for (String path :
+        List.of(
+            "/shifts?from=2026-01-01&to=2026-12-31",
+            "/time-entries?from=2026-01-01&to=2026-12-31",
+            "/attendance?from=2026-01-01&to=2026-12-31")) {
+      Answer a = call("GET", W + path, null, shop.tenant(), shop.manager(), "OWNER");
+      assertThat(path, a.status(), is(400));
+      assertThat(path, a.code(), is("WORKFORCE_WINDOW_INVALID"));
+    }
+    Answer fine =
+        call(
+            "GET",
+            W + "/shifts?from=2026-01-01&to=2026-02-15",
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(fine.text(), fine.status(), is(200));
   }
 }

@@ -155,7 +155,7 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     classHold = data(place({ subjectKind: 'ALL', dataClass: 'NOTIFICATION_LOG', reason: 'Regulator enquiry' }));
     truthy('[+] a hold on a whole class', classHold.active === true && classHold.dataClass === 'NOTIFICATION_LOG', classHold);
     truthy('[+] three holds in force', (sheet().holds || []).length === 3, sheet().holds);
-    expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: rival.owner.token, body: { reason: 'x' } }), "[-] a rival cannot release our hold", 404);
+    expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: rival.owner.token, body: { reason: 'x' } }), "[-] a rival cannot release our hold", 404, 'RETENTION_HOLD_NOT_FOUND');
     truthy('[-] and sees none of ours', (data(call('GET', `${SHEET}/holds`, { token: rival.owner.token })) || []).length === 0);
     expect(call('GET', `${SHEET}/holds`, { token: storekeeper.token }), '[-] a storekeeper does not read the holds', 403);
   });

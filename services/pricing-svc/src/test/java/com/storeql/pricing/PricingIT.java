@@ -8,6 +8,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -198,7 +199,7 @@ class PricingIT {
 
     // Tenant isolation — other tenant cannot see T1
     Response rIso = getAs("/vat-rates/T1", "01a090ae-611e-701d-9d60-a9d7516ed03b", "OWNER");
-    assertThat(rIso.getStatus(), is(404));
+    assertThat(codeOf(rIso, 404), is("PRICING_VAT_CODE_NOT_FOUND"));
 
     // Duplicate code is 409
     Response rDup =
@@ -207,7 +208,32 @@ class PricingIT {
             "{\"code\":\"T1\",\"name\":\"Dup\",\"rate\":0.10,"
                 + "\"exempt\":false,\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
             T);
-    assertThat(rDup.getStatus(), is(409));
+    assertThat(codeOf(rDup, 409), is("PRICING_VAT_CODE_EXISTS"));
+    // Codes are matched without regard to case, so a lower-case twin is the same code.
+    Response rLower =
+        post(
+            "/vat-rates",
+            "{\"code\":\"t1\",\"name\":\"Lower\",\"rate\":0.10,"
+                + "\"exempt\":false,\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
+            T);
+    assertThat(codeOf(rLower, 409), is("PRICING_VAT_CODE_EXISTS"));
+    assertThat(
+        "the refused twins were not kept",
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM pricing.vat_rates WHERE tenant_id = '" + T + "'"),
+        is("2"));
+  }
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return Envelopes.parse(body).getString("code");
+  }
+
+  private static String count(String table, String tenant) {
+    return Envelopes.scalar(
+        PG, "SELECT count(*) FROM pricing." + table + " WHERE tenant_id = '" + tenant + "'");
   }
 
   /** Past the column's size or the rate CHECK the insert failed in Postgres: 500, not 400. */
@@ -469,8 +495,9 @@ class PricingIT {
 
     // Unknown groupBy is the caller's mistake, and storeId must be a UUID.
     assertThat(
-        getAs("/admin/reports/tax-summary?" + period + "&groupBy=SUPPLIER", T, "OWNER").getStatus(),
-        is(400));
+        codeOf(
+            getAs("/admin/reports/tax-summary?" + period + "&groupBy=SUPPLIER", T, "OWNER"), 400),
+        is("PRICING_INVALID_GROUPING"));
     assertThat(
         getAs("/admin/reports/tax-summary?" + period + "&storeId=nope", T, "OWNER").getStatus(),
         is(400));
@@ -1004,7 +1031,24 @@ class PricingIT {
                 + "\"startsAt\":\"2020-01-01T00:00:00Z\"}");
 
     // A switch with no stated reason is a discount that vanished with nobody accountable.
-    assertThat(post("/admin/promotions/" + id + "/deactivate", "{}", T).getStatus(), is(400));
+    assertThat(
+        codeOf(post("/admin/promotions/" + id + "/deactivate", "{}", T), 400),
+        is("PRICING_REASON_REQUIRED"));
+    assertThat(
+        codeOf(post("/admin/promotions/" + id + "/deactivate", "{\"reason\":\"  \"}", T), 400),
+        is("PRICING_REASON_REQUIRED"));
+    String listId = createPriceList(T, "Reasoned", "GBP");
+    assertThat(
+        codeOf(post("/admin/price-lists/" + listId + "/deactivate", "{}", T), 400),
+        is("PRICING_REASON_REQUIRED"));
+    assertThat(
+        "a refused switch left the price list on",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.price_lists WHERE id = '" + listId + "'"),
+        is("true"));
+    assertThat(
+        "a refused switch left the promotion on",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.promotions WHERE id = '" + id + "'"),
+        is("true"));
 
     post("/admin/promotions/" + id + "/deactivate", "{\"reason\":\"stopped\"}", T);
     post("/admin/promotions/" + id + "/activate", "{\"reason\":\"restarted\"}", T);
@@ -1189,12 +1233,18 @@ class PricingIT {
 
     // And one tenant cannot reach into another's switch, even knowing the id.
     assertThat(
-        post(
+        codeOf(
+            post(
                 "/admin/price-lists/" + lists.get(jp) + "/activate",
                 "{\"reason\":\"not mine to restart\"}",
-                "01a090ae-611e-700f-b645-a14095230b77")
-            .getStatus(),
-        is(404));
+                "01a090ae-611e-700f-b645-a14095230b77"),
+            404),
+        is("PRICING_SUBJECT_NOT_FOUND"));
+    assertThat(
+        "the other business's switch did not move",
+        Envelopes.scalar(
+            PG, "SELECT active FROM pricing.price_lists WHERE id = '" + lists.get(jp) + "'"),
+        is("false"));
   }
 
   /** SJ-D37: proved against the running stack — a CASHIER token created a price list, 201. */
@@ -1323,7 +1373,15 @@ class PricingIT {
             "{\"name\":\"Second\",\"type\":\"BASKET_FLAT\",\"value\":9,"
                 + "\"couponCode\":\"dupe\",\"startsAt\":\"2020-01-01T00:00:00Z\"}",
             T);
-    assertThat(second.getStatus(), is(409));
+    assertThat(codeOf(second, 409), is("PRICING_COUPON_CODE_TAKEN"));
+    assertThat(
+        "only the first promotion with that code was kept",
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM pricing.promotions WHERE tenant_id = '"
+                + T
+                + "' AND lower(coupon_code) = 'dupe'"),
+        is("1"));
   }
 
   /**
@@ -2061,5 +2119,134 @@ class PricingIT {
       }
     }
     assertThat(TENANTS.requests(), is(before));
+  }
+
+  // ── refusals that keep nothing ─────────────────────────────────────────────
+
+  @Test
+  @org.junit.jupiter.api.DisplayName("A promotion type nobody knows is refused and none is stored")
+  void aPromotionTypeNobodyKnowsIsRefused() {
+    Response r =
+        post(
+            "/admin/promotions",
+            "{\"name\":\"Magic\",\"type\":\"MAGIC\",\"value\":5,"
+                + "\"startsAt\":\"2020-01-01T00:00:00Z\"}",
+            T);
+    assertThat(codeOf(r, 400), is("PRICING_INVALID_PROMOTION_TYPE"));
+    assertThat(count("promotions", T), is("0"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A percentage above a hundred is refused for both percent types")
+  void aPercentageAboveAHundredIsRefused() {
+    for (String type : new String[] {"PERCENT", "BASKET_PERCENT"}) {
+      Response r =
+          post(
+              "/admin/promotions",
+              "{\"name\":\"Too generous\",\"type\":\""
+                  + type
+                  + "\",\"value\":150,\"startsAt\":\"2020-01-01T00:00:00Z\"}",
+              T);
+      assertThat(type, codeOf(r, 400), is("PRICING_INVALID_PERCENT"));
+    }
+    assertThat(count("promotions", T), is("0"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A quote line of no quantity, or a negative weight, is refused")
+  void aQuoteLineOfNothingIsRefused() {
+    seedPricedVariant(V, "10.00");
+    for (String qty : new String[] {"0", "-1", "-0.250"}) {
+      Response r =
+          postAs(
+              "/prices/quote",
+              "{\"lines\":[{\"variantId\":\"" + V + "\",\"qty\":" + qty + "}]}",
+              T,
+              "CASHIER");
+      assertThat(qty, codeOf(r, 400), is("PRICING_INVALID_QTY"));
+    }
+    assertThat("a quote prices only, it stores nothing", count("tax_transactions", T), is("0"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A price list name is taken once per business; another business may use it")
+  void aPriceListNameIsTakenOncePerBusiness() {
+    String body =
+        "{\"name\":\"Standard GBP\",\"channel\":\"ALL\",\"currency\":\"GBP\","
+            + "\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}";
+    assertThat(post("/admin/price-lists", body, T).getStatus(), is(201));
+    assertThat(codeOf(post("/admin/price-lists", body, T), 409), is("PRICING_LIST_NAME_EXISTS"));
+    assertThat("the twin was not stored", count("price_lists", T), is("1"));
+    String inYen = body.replace("\"currency\":\"GBP\",", "");
+    assertThat(post("/admin/price-lists", inYen, YEN_BUSY).getStatus(), is(201));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A report or return with no start, or no end, is refused by name")
+  void aPeriodWithNoStartIsRefused() {
+    String instant = "2024-07-01T00:00:00Z";
+    String[] paths = {"/vat-return", "/admin/reports/tax-summary", "/vat-return/mtd/obligations"};
+    for (String path : paths) {
+      assertThat(
+          path,
+          codeOf(getAs(path + "?to=" + instant, T, "OWNER"), 400),
+          is("PRICING_MISSING_FROM"));
+    }
+    for (String path : new String[] {"/vat-return", "/admin/reports/tax-summary"}) {
+      assertThat(
+          path,
+          codeOf(getAs(path + "?from=" + instant, T, "OWNER"), 400),
+          is("PRICING_MISSING_TO"));
+    }
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName("Tax lines asked for with no order are refused")
+  void taxLinesForNoOrderAreRefused() {
+    assertThat(
+        codeOf(getAs("/tax-transactions", T, "CASHIER"), 400), is("PRICING_MISSING_ORDER_ID"));
+    assertThat(getAs("/tax-transactions", T, "CUSTOMER").getStatus(), is(403));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A customer with no VAT status, or another business's customer, is not found")
+  void aCustomerWithNoVatStatusIsNotFound() {
+    String customerId = Ids.newId().toString();
+    assertThat(
+        codeOf(getAs("/customer-vat-status/" + customerId, T, "CASHIER"), 404),
+        is("PRICING_CUSTOMER_VAT_NOT_FOUND"));
+    String ours = Ids.newId().toString();
+    Response created =
+        post(
+            "/customer-vat-status",
+            "{\"customerId\":\""
+                + ours
+                + "\",\"vatNumber\":\"GB123456789\",\"vatRegistered\":true,"
+                + "\"reverseChargeEligible\":false,\"countryCode\":\"GB\"}",
+            T);
+    assertThat(created.getStatus(), is(200));
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          codeOf(getAs("/customer-vat-status/" + ours, YEN_BUSY, role), 404),
+          is("PRICING_CUSTOMER_VAT_NOT_FOUND"));
+    }
+    assertThat(getAs("/customer-vat-status/" + ours, YEN_BUSY, "CUSTOMER").getStatus(), is(403));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "The currencies list needs a business, and shows only that business's own")
+  void theCurrenciesListNeedsABusinessAndShowsOnlyItsOwn() {
+    Response none = target.path("/prices/currencies").request().get();
+    assertThat(codeOf(none, 401), is("NO_TENANT"));
+    String yen = getAs("/prices/currencies", YEN, "CASHIER").readEntity(String.class);
+    assertThat(yen, containsString("\"home\":\"JPY\""));
+    assertThat(yen, not(containsString("GBP")));
   }
 }

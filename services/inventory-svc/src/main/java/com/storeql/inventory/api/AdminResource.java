@@ -13,6 +13,7 @@ import com.storeql.inventory.dto.Dtos.PurgeResult;
 import com.storeql.inventory.dto.Dtos.ReceiveRequest;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
+import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.Cursor;
 import com.storeql.web.TenantContext;
@@ -32,6 +33,7 @@ import jakarta.ws.rs.core.Response;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -56,6 +58,11 @@ public class AdminResource {
 
   @Inject InventoryService service;
   @Inject TenantContext ctx;
+
+  /** The most lines one bulk receive takes; each line is its own transaction. */
+  @Inject
+  @ConfigProperty(name = "storeql.inventory.bulk.receive-max-lines", defaultValue = "500")
+  int bulkReceiveMaxLines;
 
   // ── receive ──────────────────────────────────────────────────────────────
 
@@ -130,6 +137,11 @@ public class AdminResource {
       return ApiResponse.ok(new BatchReceiveResult(0, List.of()));
     }
     Validations.validate(req);
+    if (req.items().size() > bulkReceiveMaxLines) {
+      throw ApiException.badRequest(
+          "INVENTORY_BULK_TOO_LARGE",
+          "a bulk receive takes at most " + bulkReceiveMaxLines + " lines");
+    }
     UUID tenantId = ctx.requireTenantId();
     int received = 0;
     var errors = new java.util.ArrayList<String>();

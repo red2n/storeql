@@ -80,7 +80,19 @@ class CustomerIT {
   void duplicateEmailReturns409() {
     String json = "{\"email\":\"bob@example.com\",\"firstName\":\"Bob\",\"lastName\":\"Jones\"}";
     assertThat(post("/customers", json).getStatus(), is(201));
-    assertThat(post("/customers", json).getStatus(), is(409));
+    Response again = post("/customers", json);
+    String body = again.readEntity(String.class);
+    assertThat(body, again.getStatus(), is(409));
+    assertThat(body, containsString("CUSTOMER_ALREADY_EXISTS"));
+
+    // The same address in capitals is the same address.
+    Response shouted =
+        post(
+            "/customers",
+            "{\"email\":\"BOB@example.com\",\"firstName\":\"Bob\",\"lastName\":\"Jones\"}");
+    String shoutedBody = shouted.readEntity(String.class);
+    assertThat(shoutedBody, shouted.getStatus(), is(409));
+    assertThat(shoutedBody, containsString("CUSTOMER_ALREADY_EXISTS"));
   }
 
   @Test
@@ -173,12 +185,17 @@ class CustomerIT {
             .getStatus(),
         is(200));
 
-    assertThat(
+    Response over =
         post(
-                "/customers/" + id + "/store-credit/redeem",
-                "{\"amount\":999.00,\"reason\":\"over-limit\"}")
-            .getStatus(),
-        is(422));
+            "/customers/" + id + "/store-credit/redeem",
+            "{\"amount\":999.00,\"reason\":\"over-limit\"}");
+    String overBody = over.readEntity(String.class);
+    assertThat(overBody, over.getStatus(), is(422));
+    assertThat(overBody, containsString("STORE_CREDIT_INSUFFICIENT"));
+    assertThat(
+        "the refused redeem took nothing",
+        creditBalance(id).compareTo(new java.math.BigDecimal("30")),
+        is(0));
   }
 
   @Test
@@ -482,6 +499,90 @@ class CustomerIT {
     StoreQlArchRules.DTOS_DO_NOT_EXPOSE_DOMAIN.check(classes);
   }
 
+  @Test
+  @org.junit.jupiter.api.DisplayName("A lookup naming neither an email nor a phone is refused")
+  void aLookupNamingNeitherEmailNorPhoneIsRefused() {
+    for (String[] query : new String[][] {{}, {"email", ""}, {"phone", ""}, {"email", "  "}}) {
+      WebTarget t = target.path("/customers/lookup");
+      for (int i = 0; i < query.length; i += 2) t = t.queryParam(query[i], query[i + 1]);
+      Response r =
+          t.request(MediaType.APPLICATION_JSON)
+              .header("X-Tenant-Id", TENANT)
+              .header("X-Roles", "OWNER")
+              .get();
+      assertRefusal("lookup " + String.join("=", query), r, 400, "LOOKUP_PARAM_REQUIRED");
+    }
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "Another business's staff and a shopper cannot replace a customer's address")
+  void anAddressIsReplacedOnlyByThisBusinessesStaffForThisCustomer() {
+    String ana = newCustomer("addr-put-a");
+    String ben = newCustomer("addr-put-b");
+    String home = newAddress(ana, "1 Original Road");
+    newAddress(ben, "9 Ben Street");
+    String replacement = "{\"type\":\"WORK\",\"line1\":\"2 Changed Road\",\"country\":\"JP\"}";
+    String path = "/customers/" + ana + "/addresses/" + home;
+    String stranger = Ids.newId().toString();
+
+    for (String role : STAFF) {
+      assertRefusal(
+          "another business's " + role,
+          as("PUT", path, stranger, role, replacement),
+          404,
+          "ADDRESS_NOT_FOUND");
+    }
+    assertRefusal(
+        "an address of another customer of this business",
+        put("/customers/" + ben + "/addresses/" + home, replacement),
+        404,
+        "ADDRESS_NOT_FOUND");
+    assertRefusal(
+        "an address that is nobody's",
+        put("/customers/" + ana + "/addresses/" + Ids.newId(), replacement),
+        404,
+        "ADDRESS_NOT_FOUND");
+    assertRefusal("a shopper", as("PUT", path, TENANT, "CUSTOMER", replacement), 403, null);
+    assertRefusal(
+        "no line1", put(path, "{\"type\":\"WORK\",\"country\":\"JP\"}"), 400, "VALIDATION_FAILED");
+
+    String book = addressBook(ana);
+    assertThat(book, containsString("1 Original Road"));
+    assertThat(book, not(containsString("2 Changed Road")));
+    assertThat(addressBook(ben), containsString("9 Ben Street"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "Another business's staff and a shopper cannot remove a customer's address")
+  void anAddressIsRemovedOnlyByThisBusinessesStaffForThisCustomer() {
+    String ana = newCustomer("addr-del-a");
+    String ben = newCustomer("addr-del-b");
+    String home = newAddress(ana, "1 Keep Road");
+    String path = "/customers/" + ana + "/addresses/" + home;
+    String stranger = Ids.newId().toString();
+
+    for (String role : STAFF) {
+      assertRefusal(
+          "another business's " + role,
+          as("DELETE", path, stranger, role, null),
+          404,
+          "ADDRESS_NOT_FOUND");
+    }
+    assertRefusal(
+        "an address of another customer of this business",
+        delete("/customers/" + ben + "/addresses/" + home),
+        404,
+        "ADDRESS_NOT_FOUND");
+    assertRefusal("a shopper", as("DELETE", path, TENANT, "CUSTOMER", null), 403, null);
+    assertThat("nothing was removed", addressBook(ana), containsString("1 Keep Road"));
+
+    assertThat(delete(path).getStatus(), is(204));
+    assertRefusal("deleting twice", delete(path), 404, "ADDRESS_NOT_FOUND");
+    assertThat(addressBook(ana), not(containsString("1 Keep Road")));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   private Response post(String path, String json) {
@@ -525,6 +626,79 @@ class CustomerIT {
         .header("X-User-Id", userId)
         .header("X-Roles", roles)
         .get();
+  }
+
+  private java.math.BigDecimal creditBalance(String customerId) {
+    String body =
+        target
+            .path("/customers/" + customerId + "/store-credit")
+            .request(MediaType.APPLICATION_JSON)
+            .header("X-Tenant-Id", TENANT)
+            .header("X-Roles", "OWNER")
+            .get(String.class);
+    return jakarta.json.Json.createReader(new java.io.StringReader(body))
+        .readObject()
+        .getJsonObject("data")
+        .getJsonNumber("balance")
+        .bigDecimalValue();
+  }
+
+  /** A request as any business's person of any role; the tenant is whatever the token says. */
+  private Response as(String method, String path, String tenant, String role, String json) {
+    var b =
+        target
+            .path(path)
+            .request(MediaType.APPLICATION_JSON)
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", Ids.newId().toString())
+            .header("X-Roles", role);
+    return switch (method) {
+      case "GET" -> b.get();
+      case "DELETE" -> b.delete();
+      case "PUT" -> b.put(Entity.entity(json, MediaType.APPLICATION_JSON));
+      default -> b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+    };
+  }
+
+  private static final String[] STAFF = {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"};
+
+  private String newCustomer(String label) {
+    Response r =
+        post(
+            "/customers",
+            "{\"email\":\""
+                + label
+                + "-"
+                + Ids.newId()
+                + "@example.com\",\"firstName\":\"A\",\"lastName\":\"B\"}");
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(201));
+    return field(body, "id");
+  }
+
+  private String newAddress(String customerId, String line1) {
+    Response r =
+        post(
+            "/customers/" + customerId + "/addresses",
+            "{\"type\":\"HOME\",\"line1\":\"" + line1 + "\",\"country\":\"JP\"}");
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(201));
+    return field(body, "id");
+  }
+
+  private String addressBook(String customerId) {
+    return target
+        .path("/customers/" + customerId + "/addresses")
+        .request(MediaType.APPLICATION_JSON)
+        .header("X-Tenant-Id", TENANT)
+        .header("X-Roles", "OWNER")
+        .get(String.class);
+  }
+
+  private static void assertRefusal(String what, Response r, int status, String code) {
+    String body = r.readEntity(String.class);
+    assertThat(what + ": " + body, r.getStatus(), is(status));
+    if (code != null) assertThat(what + ": " + body, body, containsString(code));
   }
 
   private static String field(String json, String name) {

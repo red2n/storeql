@@ -1,7 +1,6 @@
 package com.storeql.events.contract;
 
 import com.storeql.ids.Ids;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonNumber;
 import jakarta.json.JsonObject;
@@ -24,6 +23,9 @@ import java.util.UUID;
  */
 public final class EventReader {
 
+  /** One provider for the module: Json.createReader looks one up (ServiceLoader) on every call. */
+  static final jakarta.json.spi.JsonProvider JSON = jakarta.json.spi.JsonProvider.provider();
+
   private final JsonObject o;
 
   private EventReader(JsonObject o) {
@@ -33,7 +35,7 @@ public final class EventReader {
   /** Parses {@code json}, checks it is an event of {@code expectedType}, and returns its reader. */
   public static EventReader open(String json, String expectedType) {
     JsonObject obj;
-    try (var r = Json.createReader(new StringReader(json))) {
+    try (var r = JSON.createReader(new StringReader(json))) {
       obj = r.readObject();
     } catch (RuntimeException e) {
       throw new IllegalArgumentException("Not a JSON object payload for " + expectedType, e);

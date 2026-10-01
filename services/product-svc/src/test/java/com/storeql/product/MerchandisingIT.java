@@ -17,6 +17,11 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -440,7 +445,7 @@ class MerchandisingIT {
         body(
             get("/admin/merchandising/fixtures/" + fixtureId + "/planogram", null, null, RIVAL),
             404),
-        containsString("NOT_FOUND"));
+        containsString("PLANOGRAM_NOT_FOUND"));
     assertThat(
         body(post("/admin/merchandising/fixtures/" + fixtureId + "/retire", "{}", RIVAL), 404),
         containsString("FIXTURE_NOT_FOUND"));
@@ -460,5 +465,463 @@ class MerchandisingIT {
             .header("X-User-Id", USER)
             .get();
     assertThat(r.readEntity(String.class), r.getStatus(), is(403));
+  }
+
+  // ── refusals the negative-coverage audit found untested (1 Oct 2026) ─────────
+
+  private Response send(String method, String path, String json, String tenant, String roles) {
+    var b =
+        target
+            .path(path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", USER)
+            .header("X-Roles", roles);
+    return json == null
+        ? b.method(method)
+        : b.method(method, Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  private static void assertRefused(Response r, int status, String code) {
+    assertThat(body(r, status), containsString(code));
+  }
+
+  /** Rows this test can see for itself: a count over the product schema, read behind the app. */
+  private static int count(String sql, String... params) {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps = c.prepareStatement(sql)) {
+      for (int i = 0; i < params.length; i++) {
+        ps.setString(i + 1, params[i]);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    } catch (SQLException e) {
+      throw new AssertionError(e);
+    }
+  }
+
+  private static String tail() {
+    String raw = Ids.newId().toString();
+    return raw.substring(raw.length() - 12);
+  }
+
+  private String category(String tenant) {
+    return id(post("/admin/categories", "{\"name\":\"Cat " + Ids.newId() + "\"}", tenant));
+  }
+
+  /** A published layout on a fixture of its own, ready to be put in a reset. */
+  private String published(String tenant) {
+    String fixtureId = fixture(tenant, 2, 2000);
+    String planogram = draft(tenant, fixtureId);
+    String v = variant(tenant, 100);
+    body(
+        put(
+            "/admin/merchandising/planograms/" + planogram + "/positions",
+            "{\"positions\":[" + position(v, 1, 1, 2, 2) + "]}",
+            tenant),
+        200);
+    body(post("/admin/merchandising/planograms/" + planogram + "/publish", "{}", tenant), 200);
+    return planogram;
+  }
+
+  private String reset(String tenant, String categoryId) {
+    return id(
+        post(
+            "/admin/merchandising/resets",
+            "{\"categoryId\":\""
+                + categoryId
+                + "\",\"name\":\"Reset "
+                + Ids.newId()
+                + "\",\"scheduledFor\":\"2026-12-01\"}",
+            tenant));
+  }
+
+  private static String attachBody(String planogram) {
+    return "{\"planogramId\":\"" + planogram + "\"}";
+  }
+
+  @Test
+  @DisplayName("A brand is made own-brand only by its own business's management")
+  void aBrandIsMadeOwnBrandOnlyByItsOwnManagement() {
+    String brand = id(post("/admin/brands", "{\"name\":\"Own " + Ids.newId() + "\"}", T));
+    String path = "/admin/merchandising/brands/" + brand + "/own-brand";
+    String untouched = "SELECT count(*) FROM product.brands WHERE id = ?::uuid AND NOT own_brand";
+
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertRefused(send("PUT", path, "{\"ownBrand\":true}", T, role), 403, "FORBIDDEN");
+    }
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(send("PUT", path, "{\"ownBrand\":true}", RIVAL, role), 404, "BRAND_NOT_FOUND");
+    }
+    assertRefused(
+        send(
+            "PUT",
+            "/admin/merchandising/brands/" + Ids.newId() + "/own-brand",
+            "{\"ownBrand\":true}",
+            T,
+            "OWNER"),
+        404,
+        "BRAND_NOT_FOUND");
+    assertThat("the flag never moved", count(untouched, brand), is(1));
+
+    // Its own manager can, and can take it back.
+    body(send("PUT", path, "{\"ownBrand\":true}", T, "MANAGER"), 200);
+    assertThat(count(untouched, brand), is(0));
+    body(send("PUT", path, "{\"ownBrand\":false}", T, "OWNER"), 200);
+    assertThat(count(untouched, brand), is(1));
+  }
+
+  @Test
+  @DisplayName("A fixture of an unknown kind, a code already in use, or a lower role is refused")
+  void aFixtureIsRefusedWhenItsKindCodeOrCallerIsWrong() {
+    String code = "P-" + tail();
+    String json =
+        "{\"storeId\":\""
+            + STORE
+            + "\",\"code\":\""
+            + code
+            + "\",\"name\":\"Pallet\",\"kind\":\"PALLET\",\"shelfCount\":1,\"shelfWidthMm\":1200}";
+    String named =
+        "SELECT count(*) FROM product.merch_fixtures WHERE tenant_id = ?::uuid"
+            + " AND lower(code) = lower(?)";
+    assertRefused(
+        send("POST", "/admin/merchandising/fixtures", json, T, "OWNER"),
+        400,
+        "FIXTURE_KIND_UNKNOWN");
+    assertThat(count(named, T, code), is(0));
+
+    String gondola = json.replace("PALLET", "GONDOLA");
+    assertRefused(
+        send("POST", "/admin/merchandising/fixtures", gondola, T, "CASHIER"), 403, "FORBIDDEN");
+    assertThat(count(named, T, code), is(0));
+
+    String first = id(send("POST", "/admin/merchandising/fixtures", gondola, T, "OWNER"));
+    // The same code in another case is the same code: the index is on lower(code).
+    assertRefused(
+        send(
+            "POST",
+            "/admin/merchandising/fixtures",
+            gondola.replace(code, code.toLowerCase(java.util.Locale.ROOT)),
+            T,
+            "OWNER"),
+        409,
+        "FIXTURE_CODE_TAKEN");
+    assertThat("still one", count(named, T, code), is(1));
+
+    // Another business may use it.
+    body(send("POST", "/admin/merchandising/fixtures", gondola, RIVAL, "OWNER"), 201);
+
+    // Retired, the code is free again, and retiring twice is refused.
+    body(send("POST", "/admin/merchandising/fixtures/" + first + "/retire", "{}", T, "OWNER"), 200);
+    assertRefused(
+        send("POST", "/admin/merchandising/fixtures/" + first + "/retire", "{}", T, "OWNER"),
+        409,
+        "FIXTURE_ALREADY_RETIRED");
+    body(
+        send("POST", "/admin/merchandising/fixtures/" + first + "/retire", "{}", T, "CASHIER"),
+        403);
+    body(send("POST", "/admin/merchandising/fixtures", gondola, T, "OWNER"), 201);
+    assertThat(count(named, T, code), is(2));
+  }
+
+  @Test
+  @DisplayName("Nothing new is drawn for a retired fixture")
+  void nothingNewIsDrawnForARetiredFixture() {
+    String fixtureId = fixture(T, 2, 1000);
+    body(post("/admin/merchandising/fixtures/" + fixtureId + "/retire", "{}", T), 200);
+    assertRefused(
+        post(
+            "/admin/merchandising/fixtures/" + fixtureId + "/planograms",
+            "{\"effectiveFrom\":\"2026-10-01\"}",
+            T),
+        409,
+        "FIXTURE_RETIRED");
+    assertThat(
+        "no layout was started",
+        count("SELECT count(*) FROM product.planograms WHERE fixture_id = ?::uuid", fixtureId),
+        is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "An id that is missing or not a UUIDv7, and a day not written as a date, are refused")
+  void aBadIdOrDayIsRefused() {
+    String code = "X-" + tail();
+    String fixtures = "SELECT count(*) FROM product.merch_fixtures WHERE code = ?";
+    assertRefused(
+        post(
+            "/admin/merchandising/fixtures",
+            "{\"storeId\":\"store-1\",\"code\":\""
+                + code
+                + "\",\"name\":\"x\",\"kind\":\"GONDOLA\",\"shelfCount\":1,\"shelfWidthMm\":900}",
+            T),
+        400,
+        "MERCH_ID_INVALID");
+    assertThat(count(fixtures, code), is(0));
+    assertRefused(get("/admin/merchandising/space", "store", "abc", T), 400, "MERCH_ID_INVALID");
+    assertRefused(get("/admin/merchandising/fixtures", null, null, T), 400, "MERCH_ID_REQUIRED");
+    assertRefused(get("/admin/merchandising/space", null, null, T), 400, "MERCH_ID_REQUIRED");
+
+    String fixtureId = fixture(T, 1, 1000);
+    assertRefused(
+        post(
+            "/admin/merchandising/fixtures/" + fixtureId + "/planograms",
+            "{\"effectiveFrom\":\"next week\"}",
+            T),
+        400,
+        "MERCH_DATE_INVALID");
+    assertThat(
+        count("SELECT count(*) FROM product.planograms WHERE fixture_id = ?::uuid", fixtureId),
+        is(0));
+
+    String categoryId = category(T);
+    String name = "Reset " + Ids.newId();
+    assertRefused(
+        post(
+            "/admin/merchandising/resets",
+            "{\"categoryId\":\""
+                + categoryId
+                + "\",\"name\":\""
+                + name
+                + "\",\"scheduledFor\":\"31/12/2026\"}",
+            T),
+        400,
+        "MERCH_DATE_INVALID");
+    // A reset needs its day and its name, said before the service is asked.
+    assertRefused(
+        post(
+            "/admin/merchandising/resets",
+            "{\"categoryId\":\"" + categoryId + "\",\"name\":\"" + name + "\"}",
+            T),
+        400,
+        "VALIDATION_FAILED");
+    assertRefused(
+        post(
+            "/admin/merchandising/resets",
+            "{\"categoryId\":\""
+                + categoryId
+                + "\",\"name\":\"  \",\"scheduledFor\":\"2026-12-01\"}",
+            T),
+        400,
+        "VALIDATION_FAILED");
+    assertRefused(
+        send(
+            "POST",
+            "/admin/merchandising/resets",
+            "{\"categoryId\":\""
+                + categoryId
+                + "\",\"name\":\""
+                + name
+                + "\",\"scheduledFor\":\"2026-12-01\"}",
+            T,
+            "CASHIER"),
+        403,
+        "FORBIDDEN");
+    assertThat(
+        "no reset was planned",
+        count(
+            "SELECT count(*) FROM product.category_resets WHERE category_id = ?::uuid", categoryId),
+        is(0));
+    assertRefused(
+        put(
+            "/admin/merchandising/space-plans",
+            "{\"storeId\":\""
+                + STORE
+                + "\",\"categoryId\":\""
+                + categoryId
+                + "\",\"targetShare\":0.1,\"reviewOn\":\"tomorrow\"}",
+            T),
+        400,
+        "MERCH_DATE_INVALID");
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.category_space_plans WHERE category_id = ?::uuid",
+            categoryId),
+        is(0));
+  }
+
+  @Test
+  @DisplayName("A planogram, reset or layout that is not there, or not ours, is not found")
+  void anUnknownPlanogramOrResetIsNotFound() {
+    String categoryId = category(T);
+    String published = published(T);
+    String mine = reset(T, categoryId);
+
+    assertRefused(
+        put(
+            "/admin/merchandising/planograms/" + Ids.newId() + "/positions",
+            "{\"positions\":[]}",
+            T),
+        404,
+        "PLANOGRAM_NOT_FOUND");
+    assertRefused(
+        post("/admin/merchandising/planograms/" + Ids.newId() + "/publish", "{}", T),
+        404,
+        "PLANOGRAM_NOT_FOUND");
+    assertRefused(
+        get("/admin/merchandising/planograms/" + Ids.newId(), null, null, T),
+        404,
+        "PLANOGRAM_NOT_FOUND");
+    assertRefused(
+        get("/admin/merchandising/planograms/" + published, null, null, RIVAL),
+        404,
+        "PLANOGRAM_NOT_FOUND");
+    assertRefused(
+        post(
+            "/admin/merchandising/resets/" + mine + "/planograms",
+            attachBody(Ids.newId().toString()),
+            T),
+        404,
+        "PLANOGRAM_NOT_FOUND");
+
+    // A reset that is not ours is not found, whatever it is asked to do.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(
+          send("POST", "/admin/merchandising/resets/" + mine + "/complete", "{}", RIVAL, role),
+          404,
+          "RESET_NOT_FOUND");
+      assertRefused(
+          send(
+              "POST",
+              "/admin/merchandising/resets/" + mine + "/cancel",
+              "{\"reason\":\"not yours\"}",
+              RIVAL,
+              role),
+          404,
+          "RESET_NOT_FOUND");
+      assertRefused(
+          send(
+              "POST",
+              "/admin/merchandising/resets/" + mine + "/planograms",
+              attachBody(published),
+              RIVAL,
+              role),
+          404,
+          "RESET_NOT_FOUND");
+    }
+    assertRefused(
+        post("/admin/merchandising/resets/" + Ids.newId() + "/complete", "{}", T),
+        404,
+        "RESET_NOT_FOUND");
+    assertRefused(
+        post(
+            "/admin/merchandising/resets/" + Ids.newId() + "/planograms", attachBody(published), T),
+        404,
+        "RESET_NOT_FOUND");
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertRefused(
+          send("POST", "/admin/merchandising/resets/" + mine + "/complete", "{}", T, role),
+          403,
+          "FORBIDDEN");
+    }
+    assertThat(
+        "our reset never moved",
+        count(
+            "SELECT count(*) FROM product.category_resets WHERE id = ?::uuid"
+                + " AND status = 'PLANNED'",
+            mine),
+        is(1));
+    assertThat(
+        "and holds no layout",
+        count(
+            "SELECT count(*) FROM product.category_reset_planograms WHERE reset_id = ?::uuid",
+            mine),
+        is(0));
+  }
+
+  @Test
+  @DisplayName("A reset ends once, and a finished one takes nothing more")
+  void aResetEndsOnce() {
+    String categoryId = category(T);
+    String published = published(T);
+    String r = reset(T, categoryId);
+    body(post("/admin/merchandising/resets/" + r + "/complete", "{}", T), 200);
+
+    assertRefused(
+        post("/admin/merchandising/resets/" + r + "/complete", "{}", T), 409, "RESET_NOT_OPEN");
+    assertRefused(
+        post("/admin/merchandising/resets/" + r + "/cancel", "{\"reason\":\"late\"}", T),
+        409,
+        "RESET_NOT_OPEN");
+    assertRefused(
+        post("/admin/merchandising/resets/" + r + "/planograms", attachBody(published), T),
+        409,
+        "RESET_NOT_OPEN");
+    String status =
+        "SELECT count(*) FROM product.category_resets WHERE id = ?::uuid AND status = ?";
+    assertThat("still completed", count(status, r, "COMPLETED"), is(1));
+    assertThat(
+        "nothing was attached",
+        count("SELECT count(*) FROM product.category_reset_planograms WHERE reset_id = ?::uuid", r),
+        is(0));
+
+    // A cancelled one cannot be completed either.
+    String called = reset(T, categoryId);
+    body(
+        post(
+            "/admin/merchandising/resets/" + called + "/cancel",
+            "{\"reason\":\"range changed\"}",
+            T),
+        200);
+    assertRefused(
+        post("/admin/merchandising/resets/" + called + "/complete", "{}", T),
+        409,
+        "RESET_NOT_OPEN");
+    assertThat("still cancelled", count(status, called, "CANCELLED"), is(1));
+  }
+
+  @Test
+  @DisplayName("A reset moves published layouts only, and two resets cannot move one shelf")
+  void aResetMovesOnlyPublishedLayoutsOnce() {
+    String categoryId = category(T);
+    String attached =
+        "SELECT count(*) FROM product.category_reset_planograms WHERE reset_id = ?::uuid";
+
+    String draft = draft(T, fixture(T, 1, 1000));
+    String r0 = reset(T, categoryId);
+    assertRefused(
+        post("/admin/merchandising/resets/" + r0 + "/planograms", attachBody(draft), T),
+        409,
+        "PLANOGRAM_NOT_PUBLISHED");
+    assertThat("a draft was not attached", count(attached, r0), is(0));
+
+    String published = published(T);
+    String r1 = reset(T, categoryId);
+    String r2 = reset(T, categoryId);
+    body(post("/admin/merchandising/resets/" + r1 + "/planograms", attachBody(published), T), 200);
+    assertRefused(
+        post("/admin/merchandising/resets/" + r2 + "/planograms", attachBody(published), T),
+        409,
+        "RESET_PLANOGRAM_CLAIMED");
+    assertThat(count(attached, r1), is(1));
+    assertThat("the second reset holds none", count(attached, r2), is(0));
+  }
+
+  @Test
+  @DisplayName("A category's plan saved with the id in capitals is answered, not lost")
+  void aPlanSavedWithAnUppercaseCategoryIdIsAnswered() {
+    String store = Ids.newId().toString();
+    String categoryId = category(T);
+    Response saved =
+        put(
+            "/admin/merchandising/space-plans",
+            "{\"storeId\":\""
+                + store
+                + "\",\"categoryId\":\""
+                + categoryId.toUpperCase(java.util.Locale.ROOT)
+                + "\",\"targetShare\":0.0800}",
+            T);
+    String answer = body(saved, 200);
+    assertThat(answer, containsString(categoryId));
+    assertThat(
+        "one plan, in the store it was saved for",
+        count(
+            "SELECT count(*) FROM product.category_space_plans WHERE category_id = ?::uuid"
+                + " AND store_id = ?::uuid",
+            categoryId,
+            store),
+        is(1));
   }
 }

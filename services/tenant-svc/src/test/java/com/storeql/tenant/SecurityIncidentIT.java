@@ -364,6 +364,7 @@ class SecurityIncidentIT {
             .post(
                 Entity.json("{\"duty\":\"PRINCIPALS_TOLD\",\"doneAt\":\"2099-01-01T00:00:00Z\"}"));
     assertThat(future.getStatus(), is(400));
+    assertThat(future.readEntity(String.class), containsString("SECURITY_NOTICE_DONE_AT_FUTURE"));
     assertThat(
         as(
                 "/admin/tenant/security-notices/" + noticeId + "/reports",

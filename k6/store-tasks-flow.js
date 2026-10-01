@@ -106,7 +106,7 @@ export default function ({ shop, mumbai, rival }) {
   const ticked = data(asCashier('POST', `${WORK}/${list.id}/lines/2/tick`));
   truthy('[+] ...by whoever is at the till, and the count comes down', ticked && ticked.outstanding === 0 && ticked.items[1].tickedBy === cashier.userId, ticked);
   expect(asCashier('POST', `${WORK}/${list.id}/lines/2/tick`), '[-] a line ticked twice is a conflict, not a second tick', 409, 'TASK_LINE_TICKED');
-  expect(asCashier('POST', `${WORK}/${list.id}/lines/9/tick`), '[-] a line that is not on the list is not there', 404);
+  expect(asCashier('POST', `${WORK}/${list.id}/lines/9/tick`), '[-] a line that is not on the list is not there', 404, 'TASK_LINE_NOT_FOUND');
   const done = data(asCashier('POST', `${WORK}/${list.id}/complete`, { note: 'all quiet' }));
   truthy('[+] finished: done, by the cashier, with the optional line left as it was', done && done.status === 'DONE' && done.completedBy === cashier.userId && !done.items[2].tickedAt, done);
   truthy('[+] ...and late, because it fell due at one minute past midnight — late is not missed', done && done.late === true, done);
@@ -139,7 +139,7 @@ export default function ({ shop, mumbai, rival }) {
   // ── who may press what ───────────────────────────────────────────────────────────────────────────
   expect(asCashier('POST', `${ADMIN}/lists`, { title: 'Sneak', kind: 'DAILY', dueTime: '09:00' }), '[-] a cashier does not write the list', 403);
   expect(asCashier('GET', `${ADMIN}/summary?storeId=${store}&from=${london}&to=${london}`), "[-] nor reads the manager's day", 403);
-  expect(call('POST', `${WORK}/${raised.id}/lines/1/tick`, { token: shop.storekeeper.token }), '[-] a line that is not there is not there for anybody', 404);
+  expect(call('POST', `${WORK}/${raised.id}/lines/1/tick`, { token: shop.storekeeper.token }), '[-] a line that is not there is not there for anybody', 404, 'TASK_LINE_NOT_FOUND');
   expect(call('POST', `${WORK}/${raised.id}/complete`, { token: rival.owner.token, body: {} }), '[abuse] another business does not finish this one\'s work', 404);
   expect(get(`${WORK}/${raised.id}`, rival.owner.token), '[abuse] nor sees it', 404);
   truthy('[abuse] nor its lists', (data(get(`${ADMIN}/lists?all=true`, rival.owner.token)) || []).length === 0, 'rival lists');

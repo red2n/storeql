@@ -71,6 +71,21 @@ class FiscalExportsTest {
         pt);
   }
 
+  @Test
+  void aDocumentsLinesAndTendersComeFromTheIndexNotAScanOfTheYear() {
+    RegisterSnapshot snap = snapshot(true);
+    for (var d : snap.documents()) {
+      assertEquals(
+          snap.lines().stream().filter(l -> l.number() == d.number()).toList(),
+          snap.linesOf(d.number()));
+      assertEquals(
+          snap.tenders().stream().filter(t -> t.number() == d.number()).toList(),
+          snap.tendersOf(d.number()));
+    }
+    assertTrue(snap.linesOf(9999).isEmpty());
+    assertTrue(snap.tendersOf(9999).isEmpty());
+  }
+
   static RegisterSnapshot snapshot(boolean german) {
     TseDevice device =
         german

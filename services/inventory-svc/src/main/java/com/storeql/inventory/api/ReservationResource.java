@@ -6,6 +6,7 @@ import com.storeql.inventory.dto.Dtos.ReservationResponse;
 import com.storeql.inventory.dto.Dtos.ReserveRequest;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
+import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
@@ -23,6 +24,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -40,6 +42,11 @@ public class ReservationResource {
 
   @Inject InventoryService service;
   @Inject TenantContext ctx;
+
+  /** The most lines one bulk reserve takes; each opens a savepoint in one transaction. */
+  @Inject
+  @ConfigProperty(name = "storeql.inventory.bulk.reserve-max-lines", defaultValue = "100")
+  int bulkReserveMaxLines;
 
   /**
    * Holds stock for an order.
@@ -181,6 +188,11 @@ public class ReservationResource {
   @Path("/batch")
   public ApiResponse<BatchReserveResponse> bulkReserve(BatchReserveRequest req) {
     Validations.validate(req);
+    if (req.reservations() != null && req.reservations().size() > bulkReserveMaxLines) {
+      throw ApiException.badRequest(
+          "INVENTORY_BULK_TOO_LARGE",
+          "a bulk reserve takes at most " + bulkReserveMaxLines + " lines");
+    }
     UUID tenantId = ctx.requireTenantId();
     var result = service.bulkReserve(tenantId, req.reservations());
     var responses = result.results().stream().map(Mappers::toReservation).toList();

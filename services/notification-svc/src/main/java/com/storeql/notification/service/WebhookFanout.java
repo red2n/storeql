@@ -4,10 +4,10 @@ import com.storeql.ids.Ids;
 import com.storeql.notification.domain.Webhooks;
 import com.storeql.notification.domain.Webhooks.Delivery;
 import com.storeql.notification.domain.Webhooks.Endpoint;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.repo.WebhookRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
@@ -34,6 +34,7 @@ public class WebhookFanout {
   private static final Logger LOG = System.getLogger(WebhookFanout.class.getName());
 
   @Inject WebhookRepository repo;
+  @Inject FanoutInterest interest;
 
   /** Types already reported as unidentifiable, so the warning is said once. */
   private final Set<String> unidentifiable = ConcurrentHashMap.newKeySet();
@@ -46,8 +47,16 @@ public class WebhookFanout {
     UUID eventId;
     UUID tenantId;
     String type;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
+      // A message with no type or business is not an event of ours: skipped without an exception.
+      if (!obj.containsKey("eventType")
+          || !obj.containsKey("tenantId")
+          || obj.isNull("eventType")
+          || obj.isNull("tenantId")) {
+        LOG.log(Level.DEBUG, "Webhook fan-out: a message without eventType or tenantId");
+        return 0;
+      }
       type = obj.getString("eventType");
       // Most topics carry only catalogue events, but a type nobody can subscribe to is expected
       // traffic, not a fault: nothing to say, whatever it does or does not carry.
@@ -74,8 +83,12 @@ public class WebhookFanout {
       LOG.log(Level.WARNING, "Event skipped by the webhook fan-out: " + e.getMessage());
       return 0;
     }
+    if (interest.knownEmpty(tenantId, type)) return 0;
     List<Endpoint> endpoints = repo.subscribed(tenantId, type);
-    if (endpoints.isEmpty()) return 0;
+    if (endpoints.isEmpty()) {
+      interest.noteEmpty(tenantId, type);
+      return 0;
+    }
     Instant now = Instant.now();
     List<Delivery> rows = new ArrayList<>();
     for (Endpoint e : endpoints) {

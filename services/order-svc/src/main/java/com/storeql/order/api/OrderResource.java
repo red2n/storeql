@@ -258,7 +258,8 @@ public class OrderResource {
       responseCode = "400",
       description =
           "No items, missing delivery address for DELIVERY orders, invalid paymentMethod, missing"
-              + " Idempotency-Key, missing price in non-enforced mode, or discount exceeds subtotal")
+              + " Idempotency-Key, missing price in non-enforced mode, or discount exceeds"
+              + " subtotal")
   @APIResponse(responseCode = "403", description = "Non-staff caller attempted to apply a discount")
   @APIResponse(
       responseCode = "409",
@@ -360,19 +361,23 @@ public class OrderResource {
    *
    * @param id the order to confirm
    * @return the confirmed order with its lines
-   * @throws com.storeql.web.ApiException {@code 404} when the order does not exist; {@code 409}
-   *     when it is not PENDING
+   * @throws com.storeql.web.ApiException {@code 403} a shopper, or staff held to other stores
+   *     ({@code STORE_ACCESS_DENIED}); {@code 404} when the order does not exist in this business
+   *     ({@code ORDER_NOT_FOUND}) or is no longer PENDING ({@code ORDER_NOT_FOUND_OR_WRONG_STATUS})
    */
   @Operation(
       summary = "Confirm an order",
-      description = "Transitions a PENDING order to CONFIRMED and emits OrderConfirmed.")
+      description =
+          "Staff at the order's store transition a PENDING order to CONFIRMED and emit"
+              + " OrderConfirmed; a till sale is handed over at the same time.")
   @APIResponse(responseCode = "200", description = "Order confirmed")
-  @APIResponse(responseCode = "404", description = "Order not found")
-  @APIResponse(responseCode = "409", description = "Order is not in PENDING status")
+  @APIResponse(responseCode = "403", description = "Not staff, or not staff at the order's store")
+  @APIResponse(responseCode = "404", description = "Order not found, or not in PENDING status")
   @POST
   @Path("/{id}/confirm")
   public Response confirm(@PathParam("id") String id) {
-    var order = svc.confirmOrder(ctx.tenantId(), Parsing.uuid(id, "id"), ctx.userId());
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
+    var order = svc.confirmOrder(ctx.tenantId(), Parsing.uuid(id, "id"), ctx.userId(), ctx);
     var items = svc.getOrderItems(ctx.tenantId(), order.id());
     return Response.ok(
             ApiResponse.ok(
@@ -407,8 +412,9 @@ public class OrderResource {
   @APIResponse(
       responseCode = "409",
       description =
-          "Order is not PENDING or CONFIRMED, so it cannot be cancelled; for a shopper: ORDER_CANNOT_CANCEL"
-              + " (not an unpaid PENDING online order of their own) or ORDER_CANCEL_PAID_NEEDS_STAFF")
+          "Order is not PENDING or CONFIRMED, so it cannot be cancelled; for a shopper:"
+              + " ORDER_CANNOT_CANCEL (not an unpaid PENDING online order of their own) or"
+              + " ORDER_CANCEL_PAID_NEEDS_STAFF")
   @POST
   @Path("/{id}/cancel")
   public Response cancel(@PathParam("id") String id, String raw) {

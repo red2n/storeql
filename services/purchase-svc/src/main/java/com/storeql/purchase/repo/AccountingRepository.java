@@ -1,6 +1,7 @@
 package com.storeql.purchase.repo;
 
 import com.storeql.ids.Ids;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Accounting;
 import com.storeql.purchase.domain.Accounting.Attempt;
 import com.storeql.purchase.domain.Accounting.Connection;
@@ -9,7 +10,6 @@ import com.storeql.purchase.domain.Accounting.Mapping;
 import com.storeql.purchase.domain.Accounting.Sync;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonReader;
@@ -48,9 +48,10 @@ public class AccountingRepository extends BaseJdbcRepository {
       "SELECT "
           + SYNC_CORE
           + ", j.entry_date, j.description, j.source_type, j.total FROM accounting_syncs s"
-          + " JOIN (SELECT journal_id, MIN(entry_date) AS entry_date, MIN(description) AS description,"
+          + " JOIN LATERAL (SELECT MIN(entry_date) AS entry_date, MIN(description) AS description,"
           + " MIN(source_type) AS source_type, SUM(debit) AS total FROM nominal_ledger_entries"
-          + " WHERE tenant_id = ? GROUP BY journal_id) j ON j.journal_id = s.journal_id";
+          + " WHERE tenant_id = s.tenant_id AND journal_id = s.journal_id HAVING COUNT(*) > 0) j"
+          + " ON TRUE";
 
   // ── connections ─────────────────────────────────────────────────────────────
 
@@ -340,7 +341,6 @@ public class AccountingRepository extends BaseJdbcRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
-          ps.setObject(i++, tenantId);
           ps.setObject(i++, connectionId);
           if (status != null) ps.setString(i++, status);
           if (after != null) ps.setObject(i++, after);
@@ -355,8 +355,7 @@ public class AccountingRepository extends BaseJdbcRepository {
             SYNC_WITH_JOURNAL + " WHERE s.tenant_id = ? AND s.id = ?",
             ps -> {
               ps.setObject(1, tenantId);
-              ps.setObject(2, tenantId);
-              ps.setObject(3, id);
+              ps.setObject(2, id);
             },
             rs -> readSync(rs, true),
             "accounting sync")
@@ -563,7 +562,7 @@ public class AccountingRepository extends BaseJdbcRepository {
   }
 
   static String settingsJson(Map<String, String> settings) {
-    JsonObjectBuilder b = Json.createObjectBuilder();
+    JsonObjectBuilder b = Jsons.PROVIDER.createObjectBuilder();
     for (var e : new java.util.TreeMap<>(settings).entrySet()) {
       if (e.getValue() != null) b.add(e.getKey(), e.getValue());
     }
@@ -573,7 +572,7 @@ public class AccountingRepository extends BaseJdbcRepository {
   static Map<String, String> settingsOf(String json) {
     Map<String, String> out = new LinkedHashMap<>();
     if (json == null || json.isBlank()) return out;
-    try (JsonReader reader = Json.createReader(new StringReader(json))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject o = reader.readObject();
       for (var e : o.entrySet()) {
         if (e.getValue().getValueType() == jakarta.json.JsonValue.ValueType.STRING) {

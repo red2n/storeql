@@ -1,10 +1,10 @@
 package com.storeql.purchase.client.accounting;
 
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Accounting;
 import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.NominalLedgerEntry;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonValue;
@@ -63,20 +63,23 @@ public class SagePackage implements AccountingPackage {
       Accounting.Credentials creds,
       Domain.Journal j,
       Function<String, String> account) {
-    JsonArrayBuilder lines = Json.createArrayBuilder();
+    JsonArrayBuilder lines = Jsons.PROVIDER.createArrayBuilder();
     for (NominalLedgerEntry line : j.lines()) {
       lines.add(
-          Json.createObjectBuilder()
+          Jsons.PROVIDER
+              .createObjectBuilder()
               .add("ledger_account_id", account.apply(line.nominalCode()))
               .add("details", line.nominalName())
               .add("debit", line.debit())
               .add("credit", line.credit()));
     }
     JsonObject body =
-        Json.createObjectBuilder()
+        Jsons.PROVIDER
+            .createObjectBuilder()
             .add(
                 "journal",
-                Json.createObjectBuilder()
+                Jsons.PROVIDER
+                    .createObjectBuilder()
                     .add("date", j.entryDate().toString())
                     .add("reference", j.journalId().toString())
                     .add("description", j.description())

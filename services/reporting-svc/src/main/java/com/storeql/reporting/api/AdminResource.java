@@ -4,6 +4,7 @@ import com.storeql.ids.Ids;
 import com.storeql.reporting.mapper.Mappers;
 import com.storeql.reporting.service.ReportingService;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.Parsing;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.inject.Inject;
@@ -13,6 +14,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
+import java.time.ZoneOffset;
 import java.util.Set;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
@@ -76,7 +78,10 @@ public class AdminResource {
           "Nets on-hand quantity against open in-transit supply lines per store/variant, to show"
               + " net available. Optionally filtered by store and/or variant. A store that is"
               + " named must be one the caller may act at; naming none reads the caller's own"
-              + " stores added together, or the whole business for an unrestricted caller.")
+              + " stores added together, or the whole business for an unrestricted caller. The"
+              + " window is from/to (inclusive yyyy-MM-dd, UTC); with no from it is the last 90"
+              + " days (storeql.reporting.movement-stats.default-days) and it is never longer"
+              + " than 366 days (max-days).")
   @APIResponse(responseCode = "200", description = "Netting rows")
   @APIResponse(responseCode = "400", description = "storeId or variantId is not a valid UUID")
   @APIResponse(
@@ -106,7 +111,11 @@ public class AdminResource {
               + " is named must be one the caller may act at; naming none reads the caller's own"
               + " stores added together, or the whole business for an unrestricted caller.")
   @APIResponse(responseCode = "200", description = "Movement statistic rows")
-  @APIResponse(responseCode = "400", description = "storeId or variantId is not a valid UUID")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "storeId or variantId is not a valid UUID, from/to is not a yyyy-MM-dd date, or the"
+              + " period is backwards or longer than the allowed window")
   @APIResponse(
       responseCode = "403",
       description = "storeId names a store the caller is not assigned to")
@@ -115,14 +124,22 @@ public class AdminResource {
   public ApiResponse<Object> movementStats(
       @QueryParam("storeId") String storeId,
       @QueryParam("variantId") String variantId,
-      @QueryParam("bucketDays") @DefaultValue("7") int bucketDays) {
+      @QueryParam("bucketDays") @DefaultValue("7") int bucketDays,
+      @QueryParam("from") String from,
+      @QueryParam("to") String to) {
     Set<UUID> stores = ctx.reportStores(storeId != null ? Ids.parse(storeId) : null);
     var stats =
         service.movementStats(
             ctx.requireTenantId(),
             stores,
             variantId != null ? Ids.parse(variantId) : null,
-            bucketDays);
+            bucketDays,
+            from == null || from.isBlank()
+                ? null
+                : Parsing.date(from, "from").atStartOfDay(ZoneOffset.UTC).toInstant(),
+            to == null || to.isBlank()
+                ? null
+                : Parsing.date(to, "to").plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant());
     return ApiResponse.ok(Mappers.toMovementStatsReport(stats));
   }
 }

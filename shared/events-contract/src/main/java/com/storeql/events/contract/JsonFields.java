@@ -11,12 +11,13 @@ import java.util.UUID;
  * are null are left out (JSON-B and every reader in the platform treat an absent member as empty),
  * required ones refuse null so a producer cannot publish half an event.
  */
+@SuppressWarnings("PMD.AvoidStringBufferField") // one short-lived builder per event
 final class JsonFields {
 
-  private String out;
+  private final StringBuilder out;
 
   JsonFields(String base) {
-    this.out = base;
+    this.out = new StringBuilder(Math.max(256, base.length() * 2)).append(base);
   }
 
   JsonFields str(String name, String value) {
@@ -83,11 +84,11 @@ final class JsonFields {
   }
 
   String close() {
-    return out + "}";
+    return out.toString() + "}";
   }
 
   private JsonFields put(String name, String jsonValue) {
-    out = out + ",\"" + name + "\":" + jsonValue;
+    out.append(",\"").append(name).append("\":").append(jsonValue);
     return this;
   }
 

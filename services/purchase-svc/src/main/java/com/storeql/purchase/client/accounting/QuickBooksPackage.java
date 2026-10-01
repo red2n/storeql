@@ -1,10 +1,10 @@
 package com.storeql.purchase.client.accounting;
 
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Accounting;
 import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.NominalLedgerEntry;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonValue;
@@ -78,25 +78,29 @@ public class QuickBooksPackage implements AccountingPackage {
       Accounting.Credentials creds,
       Domain.Journal j,
       Function<String, String> account) {
-    JsonArrayBuilder lines = Json.createArrayBuilder();
+    JsonArrayBuilder lines = Jsons.PROVIDER.createArrayBuilder();
     for (NominalLedgerEntry line : j.lines()) {
       boolean debit = line.debit().compareTo(BigDecimal.ZERO) > 0;
       lines.add(
-          Json.createObjectBuilder()
+          Jsons.PROVIDER
+              .createObjectBuilder()
               .add("Amount", debit ? line.debit() : line.credit())
               .add("DetailType", "JournalEntryLineDetail")
               .add("Description", line.nominalName())
               .add(
                   "JournalEntryLineDetail",
-                  Json.createObjectBuilder()
+                  Jsons.PROVIDER
+                      .createObjectBuilder()
                       .add("PostingType", debit ? "Debit" : "Credit")
                       .add(
                           "AccountRef",
-                          Json.createObjectBuilder()
+                          Jsons.PROVIDER
+                              .createObjectBuilder()
                               .add("value", account.apply(line.nominalCode())))));
     }
     JsonObject body =
-        Json.createObjectBuilder()
+        Jsons.PROVIDER
+            .createObjectBuilder()
             .add("TxnDate", j.entryDate().toString())
             .add("PrivateNote", j.description())
             .add("Line", lines)

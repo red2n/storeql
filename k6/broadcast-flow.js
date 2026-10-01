@@ -100,8 +100,8 @@ export default function ({ shop, second, cashierB, rival }) {
   // no store scope gets as far as the staff list, and is refused there.
   expect(ack(shop.storekeeper, notice.id, second.id), '[-] a store-scoped login does not acknowledge at another store', 403, 'STORE_ACCESS_DENIED');
   expect(ack({ token: owner }, notice.id, second.id), '[-] somebody not on that store\'s staff does not acknowledge its notices', 409, 'WORKFORCE_NOT_ASSIGNED');
-  expect(get(`${ADMIN}/${notice.id}`, rival.owner.token), '[abuse] another business does not see the notice', 404);
-  expect(call('POST', `${READ}/${notice.id}/acknowledgement`, { token: rival.owner.token, body: { storeId: rival.stores[0].id } }), '[abuse] nor acknowledges it', 404);
+  expect(get(`${ADMIN}/${notice.id}`, rival.owner.token), '[abuse] another business does not see the notice', 404, 'BROADCAST_NOT_FOUND');
+  expect(call('POST', `${READ}/${notice.id}/acknowledgement`, { token: rival.owner.token, body: { storeId: rival.stores[0].id } }), '[abuse] nor acknowledges it', 404, 'BROADCAST_NOT_FOUND');
   expect(call('GET', `${READ}?storeId=${storeA}`, {}), '[abuse] nobody at all is refused at the door', 401);
 
   completed.add(1);

@@ -1,7 +1,6 @@
 package com.storeql.events.contract;
 
 import com.storeql.ids.Ids;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.util.List;
@@ -45,7 +44,7 @@ public final class EventContracts {
    * another version). For tests and for a consumer that must drop an event that has none.
    */
   public static Optional<UUID> eventIdOf(String json) {
-    try (var r = Json.createReader(new StringReader(json))) {
+    try (var r = EventReader.JSON.createReader(new StringReader(json))) {
       JsonObject o = r.readObject();
       if (!o.containsKey("eventId") || o.isNull("eventId")) {
         return Optional.empty();

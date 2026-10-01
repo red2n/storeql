@@ -384,11 +384,14 @@ public class InventoryRepository extends BaseOutboxRepository {
             try {
               Reservation r = reserveTx(c, item.reservation(), item.event(), item.idempotencyKey());
               outcomes.add(ReserveOutcome.success(r));
+              c.releaseSavepoint(sp);
             } catch (ApiException e) {
               c.rollback(sp);
+              c.releaseSavepoint(sp);
               outcomes.add(ReserveOutcome.failure(e));
             } catch (SQLException e) {
               c.rollback(sp);
+              c.releaseSavepoint(sp);
               outcomes.add(
                   ReserveOutcome.failure(handleTxSqlException("reserve stock (batch item)", e)));
             }
@@ -507,12 +510,12 @@ public class InventoryRepository extends BaseOutboxRepository {
       setReservationStatus(c, reservationId, Reservation.CONSUMED);
       return r;
     }
-    Optional<PickingRule> rule = resolvePickingRule(tenantId, r.storeId(), r.variantId());
+    Optional<PickingRule> rule = resolvePickingRuleTx(c, tenantId, r.storeId(), r.variantId());
     List<UUID> zonePriorities =
         rule.filter(rr -> PickingRule.ZONE_PRIORITY.equals(rr.strategy()))
             .map(
                 rr ->
-                    listZonePriorities(tenantId, rr.id()).stream()
+                    listZonePrioritiesTx(c, tenantId, rr.id()).stream()
                         .map(PickingRuleZonePriority::zoneId)
                         .toList())
             .orElse(null);
@@ -925,7 +928,7 @@ public class InventoryRepository extends BaseOutboxRepository {
   public List<ReservationRef> expiredHeldReservationsWithTenant(int limit) {
     return query(
         "SELECT id, tenant_id FROM reservations WHERE status = 'HELD'"
-            + " AND expires_at IS NOT NULL AND expires_at < now() LIMIT ?",
+            + " AND expires_at IS NOT NULL AND expires_at < now() ORDER BY expires_at LIMIT ?",
         ps -> ps.setInt(1, limit),
         rs ->
             new ReservationRef(
@@ -1328,7 +1331,8 @@ public class InventoryRepository extends BaseOutboxRepository {
     return inTx(
         c -> {
           List<CycleCountLine> approved =
-              query(
+              queryTx(
+                  c,
                   "SELECT id, tenant_id, header_id, store_id, variant_id, system_qty,"
                       + " counted_qty, variance, variance_pct, status, counted_at"
                       + " FROM cycle_count_lines"
@@ -2615,7 +2619,17 @@ public class InventoryRepository extends BaseOutboxRepository {
    * @return the matching rows
    */
   public List<MoveOrderLine> listMoveOrderLines(UUID moveOrderId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return listMoveOrderLinesTx(c, moveOrderId);
+    } catch (SQLException e) {
+      throw dbError("list move order lines", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection. */
+  List<MoveOrderLine> listMoveOrderLinesTx(Connection c, UUID moveOrderId) {
+    return queryTx(
+        c,
         "SELECT id, tenant_id, move_order_id, variant_id, requested_qty, picked_qty"
             + " FROM move_order_lines WHERE move_order_id = ? ORDER BY id",
         ps -> ps.setObject(1, moveOrderId),
@@ -2636,7 +2650,7 @@ public class InventoryRepository extends BaseOutboxRepository {
             throw ApiException.unprocessable(
                 "MOVE_ORDER_NOT_PICKABLE", "Move order is " + order.status());
           }
-          List<MoveOrderLine> lines = listMoveOrderLines(orderId);
+          List<MoveOrderLine> lines = listMoveOrderLinesTx(c, orderId);
           for (MoveOrderLine line : lines) {
             // A move that names its from-zone draws what sits there and nothing else.
             List<Drawn> drawn =
@@ -2908,7 +2922,18 @@ public class InventoryRepository extends BaseOutboxRepository {
    * @return the matching rows
    */
   public List<TransferOrderLine> listTransferOrderLines(UUID tenantId, UUID transferOrderId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return listTransferOrderLinesTx(c, tenantId, transferOrderId);
+    } catch (SQLException e) {
+      throw dbError("list transfer order lines", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection. */
+  List<TransferOrderLine> listTransferOrderLinesTx(
+      Connection c, UUID tenantId, UUID transferOrderId) {
+    return queryTx(
+        c,
         "SELECT id, tenant_id, transfer_order_id, variant_id,"
             + " requested_qty, shipped_qty, received_qty, reason, source_batch_id"
             + " FROM transfer_order_lines WHERE tenant_id = ? AND transfer_order_id = ? ORDER BY id",
@@ -2933,7 +2958,7 @@ public class InventoryRepository extends BaseOutboxRepository {
             throw ApiException.unprocessable(
                 "TRANSFER_ORDER_NOT_SHIPPABLE", "Transfer order is " + order.status());
           }
-          List<TransferOrderLine> lines = listTransferOrderLines(tenantId, orderId);
+          List<TransferOrderLine> lines = listTransferOrderLinesTx(c, tenantId, orderId);
           boolean isDirect = TransferOrder.TYPE_DIRECT.equals(order.transferType());
 
           for (TransferOrderLine line : lines) {
@@ -3026,7 +3051,7 @@ public class InventoryRepository extends BaseOutboxRepository {
                 "TRANSFER_ORDER_DIRECT_AUTO_RECEIVED",
                 "DIRECT transfers are auto-received on ship");
           }
-          List<TransferOrderLine> lines = listTransferOrderLines(tenantId, orderId);
+          List<TransferOrderLine> lines = listTransferOrderLinesTx(c, tenantId, orderId);
           for (TransferOrderLine line : lines) {
             BigDecimal qty = line.shippedQty() == null ? line.requestedQty() : line.shippedQty();
             // What arrives is what left the sending store, read back from the ledger the shipment
@@ -3211,21 +3236,23 @@ public class InventoryRepository extends BaseOutboxRepository {
    * @param tenantId owning tenant; the first condition of the query
    * @param storeId the store id
    * @param withinDays the within days
-   * @return the matching rows
+   * @param maxRows the most rows returned, soonest to expire first
+   * @return the matching rows, only batches that still hold stock
    */
-  public List<Batch> listExpiringBatches(UUID tenantId, UUID storeId, int withinDays) {
+  public List<Batch> listExpiringBatches(UUID tenantId, UUID storeId, int withinDays, int maxRows) {
     return query(
         "SELECT id,tenant_id,store_id,variant_id,batch_no,received_qty,remaining_qty,"
             + "cost_price,expiry_date,created_at,status,material_status,material_status_reason,grade,zone_id,ownership,owner_supplier_id,duty_status"
             + " FROM inventory_batches"
             + " WHERE tenant_id=? AND store_id=? AND status='ACTIVE'"
-            + " AND expiry_date IS NOT NULL"
+            + " AND remaining_qty > 0 AND expiry_date IS NOT NULL"
             + " AND expiry_date <= CURRENT_DATE + make_interval(days => ?)"
-            + " ORDER BY expiry_date ASC",
+            + " ORDER BY expiry_date ASC, id ASC LIMIT ?",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, storeId);
           ps.setInt(3, withinDays);
+          ps.setInt(4, maxRows);
         },
         InventoryRepository::mapBatch,
         "list expiring batches");
@@ -3333,14 +3360,44 @@ public class InventoryRepository extends BaseOutboxRepository {
   }
 
   /**
+   * A SELECT on the caller's own connection. Inside {@code inTx} never use {@code query()}: it
+   * checks out a second pooled connection while the transaction still holds its own, and enough
+   * concurrent transactions then wait on each other for the pool.
+   */
+  private <T> List<T> queryTx(
+      Connection c, String sql, Binder binder, RowMapper<T> mapper, String what) {
+    try (PreparedStatement ps = c.prepareStatement(sql)) {
+      binder.bind(ps);
+      try (ResultSet rs = ps.executeQuery()) {
+        List<T> out = new ArrayList<>();
+        while (rs.next()) out.add(mapper.map(rs));
+        return out;
+      }
+    } catch (SQLException e) {
+      throw dbError(what, e);
+    }
+  }
+
+  /**
    * Internal-only copy of the picking-rule resolution used by {@code consumeTx} so FIFO/FEFO/zone
    * deduction picks the right strategy. The public, service-facing CRUD for picking rules lives in
    * {@link PickingRuleRepository}; this duplicates just the read path rather than injecting that
-   * repo. Matches the original (pre-extraction) behavior exactly: {@code query()} acquires its own
-   * connection, so this was never part of {@code consumeTx}'s transaction even before the split.
+   * repo. {@code consumeTx} reads it through {@link #resolvePickingRuleTx} on its own connection;
+   * this overload opens a connection of its own for callers outside a transaction.
    */
   Optional<PickingRule> resolvePickingRule(UUID tenantId, UUID storeId, UUID variantId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return resolvePickingRuleTx(c, tenantId, storeId, variantId);
+    } catch (SQLException e) {
+      throw dbError("resolve picking rule", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection (no second pool checkout). */
+  Optional<PickingRule> resolvePickingRuleTx(
+      Connection c, UUID tenantId, UUID storeId, UUID variantId) {
+    return queryTx(
+            c,
             "SELECT pr.id,pr.tenant_id,pr.name,pr.strategy,pr.grade_preference,pr.status,"
                 + "pr.created_at,pr.updated_at"
                 + " FROM picking_rule_assignments pra"
@@ -3363,7 +3420,17 @@ public class InventoryRepository extends BaseOutboxRepository {
   }
 
   List<PickingRuleZonePriority> listZonePriorities(UUID tenantId, UUID ruleId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return listZonePrioritiesTx(c, tenantId, ruleId);
+    } catch (SQLException e) {
+      throw dbError("list zone priorities", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection. */
+  List<PickingRuleZonePriority> listZonePrioritiesTx(Connection c, UUID tenantId, UUID ruleId) {
+    return queryTx(
+        c,
         "SELECT id,tenant_id,rule_id,zone_id,priority FROM picking_rule_zone_priorities"
             + " WHERE tenant_id=? AND rule_id=? ORDER BY priority ASC",
         ps -> {

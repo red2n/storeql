@@ -249,10 +249,11 @@ public class MerchandisingResource {
     Validations.validate(req);
     UUID storeId = uuid(req.storeId(), "storeId");
     ctx.requireStoreAccess(storeId);
+    UUID categoryId = uuid(req.categoryId(), "categoryId");
     svc.setSpacePlan(
         ctx.requireTenantId(),
         storeId,
-        uuid(req.categoryId(), "categoryId"),
+        categoryId,
         req.targetShare(),
         req.reviewOn() == null || req.reviewOn().isBlank() ? null : day(req.reviewOn(), "reviewOn"),
         req.note(),
@@ -261,7 +262,7 @@ public class MerchandisingResource {
     // had.
     return ApiResponse.ok(
         MerchandisingMappers.spaceLines(svc.spaceReport(ctx.requireTenantId(), storeId)).stream()
-            .filter(l -> l.categoryId().equals(req.categoryId()))
+            .filter(l -> l.categoryId().equals(categoryId.toString()))
             .findFirst()
             .orElseThrow(
                 () -> ApiException.notFound("SPACE_PLAN_NOT_FOUND", "The plan was not saved")));

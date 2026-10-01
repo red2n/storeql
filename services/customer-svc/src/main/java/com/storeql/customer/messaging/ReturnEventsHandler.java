@@ -1,10 +1,10 @@
 package com.storeql.customer.messaging;
 
+import com.storeql.customer.json.Jsons;
 import com.storeql.customer.service.CustomerService;
 import com.storeql.ids.Ids;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
@@ -41,7 +41,7 @@ class ReturnEventsHandler {
     UUID tenantId;
     UUID orderId;
     BigDecimal refund;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventId = Ids.parse(obj.getString("eventId"));
       tenantId = Ids.parse(obj.getString("tenantId"));
@@ -58,7 +58,7 @@ class ReturnEventsHandler {
     UUID eventId;
     UUID tenantId;
     UUID orderId;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventId = Ids.parse(obj.getString("eventId"));
       tenantId = Ids.parse(obj.getString("tenantId"));
@@ -79,7 +79,7 @@ class ReturnEventsHandler {
     UUID returnId;
     BigDecimal amount;
     String currency;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       if (!"STORE_CREDIT".equals(text(obj, "refundMethod"))) {
         return; // a refund to the original tender or a gift card credits no store credit
@@ -118,7 +118,7 @@ class ReturnEventsHandler {
     UUID returnId;
     BigDecimal amount;
     String currency;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       if (!"STORE_CREDIT".equals(text(obj, "refundMethod"))) {
         return; // a gift card is issued elsewhere; nothing to credit here

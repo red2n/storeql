@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.startsWith;
 
+import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -103,6 +104,13 @@ class MarkdownIT {
     try (JsonReader r = Json.createReader(new StringReader(body))) {
       return r.readObject();
     }
+  }
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return json(body).getString("code");
   }
 
   private static JsonObject data(Response r) {
@@ -271,8 +279,8 @@ class MarkdownIT {
     assertThat(get("/markdowns/" + m.getString("id"), "STOREKEEPER").getStatus(), is(200));
     assertThat(
         "another tenant's is 404",
-        at("/markdowns/" + m.getString("id"), OTHER_T, "OWNER", null).get().getStatus(),
-        is(404));
+        codeOf(at("/markdowns/" + m.getString("id"), OTHER_T, "OWNER", null).get(), 404),
+        is("PRICING_MARKDOWN_NOT_FOUND"));
     assertThat(
         json(get("/markdowns", "MANAGER", "storeId", S).readEntity(String.class))
             .getJsonArray("data")
@@ -475,7 +483,8 @@ class MarkdownIT {
     assertThat(tooMany.readEntity(String.class), containsString("PRICING_MARKDOWN_EXHAUSTED"));
     assertThat(
         "a made-up markdown",
-        post(
+        codeOf(
+            post(
                 "/prices/quote",
                 "{\"storeId\":\""
                     + S
@@ -484,9 +493,24 @@ class MarkdownIT {
                     + "\",\"qty\":1,\"markdownId\":\""
                     + ORDER
                     + "\"}]}",
-                "CASHIER")
-            .getStatus(),
-        is(404));
+                "CASHIER"),
+            404),
+        is("PRICING_MARKDOWN_NOT_FOUND"));
+    assertThat(
+        "an id nobody issued",
+        codeOf(
+            post(
+                "/prices/quote",
+                "{\"storeId\":\""
+                    + S
+                    + "\",\"lines\":[{\"variantId\":\""
+                    + V
+                    + "\",\"qty\":1,\"markdownId\":\""
+                    + Ids.newId()
+                    + "\"}]}",
+                "CASHIER"),
+            404),
+        is("PRICING_MARKDOWN_NOT_FOUND"));
 
     // The sale is recorded once, and counts the sticker down.
     String redemption =
@@ -594,17 +618,20 @@ class MarkdownIT {
             .getJsonArray("data")
             .size(),
         is(0));
-    assertThat(get("/markdowns", "MANAGER", "storeId", S, "status", "LOST").getStatus(), is(400));
+    assertThat(
+        codeOf(get("/markdowns", "MANAGER", "storeId", S, "status", "LOST"), 400),
+        is("PRICING_MARKDOWN_STATUS_UNKNOWN"));
     assertThat(
         "the code is free for a new sticker",
         sticker("1", "50").getString("labelCode").equals(code),
         is(false));
     assertThat(
         "another tenant cannot cancel it",
-        at("/markdowns/" + id + "/cancel", OTHER_T, "OWNER", null)
-            .post(Entity.entity("{\"reason\":\"x\"}", MediaType.APPLICATION_JSON))
-            .getStatus(),
-        is(404));
+        codeOf(
+            at("/markdowns/" + id + "/cancel", OTHER_T, "OWNER", null)
+                .post(Entity.entity("{\"reason\":\"x\"}", MediaType.APPLICATION_JSON)),
+            404),
+        is("PRICING_MARKDOWN_NOT_FOUND"));
   }
 
   @Test
@@ -650,5 +677,36 @@ class MarkdownIT {
         "expired can still be cancelled to tidy up",
         post("/markdowns/" + id + "/cancel", "{\"reason\":\"binned\"}", "STOREKEEPER").getStatus(),
         is(200));
+  }
+
+  @Test
+  void aStickerCodeStillLiveIsNeverIssuedTwice() throws Exception {
+    seedPosPrice(V, "2.99");
+    JsonObject first = sticker("6", "25");
+    String code = first.getString("labelCode");
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      // The tenant's series has gone round: the next number is 100001, which reads as 1 again.
+      st.execute(
+          "UPDATE pricing.markdown_label_series SET next_number = 100001 WHERE tenant_id = '"
+              + T
+              + "'");
+    }
+    Response again =
+        post(
+            "/markdowns",
+            create(S, V, "6", "\"percentOff\":25", "SHORT_DATED", LocalDate.now().plusDays(2)),
+            "STOREKEEPER");
+    assertThat(codeOf(again, 409), is("PRICING_MARKDOWN_LABEL_COLLISION"));
+    assertThat(
+        "the refused sticker was not kept",
+        json(get("/markdowns", "MANAGER", "storeId", S).readEntity(String.class))
+            .getJsonArray("data")
+            .size(),
+        is(1));
+    assertThat(
+        "the first sticker still scans",
+        data(get("/prices/markdown-labels/" + code, "CASHIER")).getString("markdownId"),
+        is(first.getString("id")));
   }
 }

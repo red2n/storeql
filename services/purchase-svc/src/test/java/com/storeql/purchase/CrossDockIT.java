@@ -288,6 +288,72 @@ class CrossDockIT {
         is("0"));
   }
 
+  private int allocationRows(String po) {
+    return list(call("GET", "/purchase-orders/" + po + "/allocations", null, T, "OWNER"), 200)
+        .size();
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "Filling from the shops' needs is refused by name and allocates nothing")
+  void aFillIsRefusedByNameAndAllocatesNothing() {
+    // Reached before anything else: the order is not this business's, or the caller may not buy.
+    String[] o = order(DC, null);
+    String fill = "/purchase-orders/" + o[0] + "/lines/" + o[1] + "/allocations/fill";
+    list(
+        call(
+            "PUT",
+            "/purchase-orders/" + o[0] + "/lines/" + o[1] + "/allocations",
+            allocations(LEEDS, "10"),
+            T,
+            "OWNER"),
+        200);
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(role, code(call("POST", fill, "{}", T2, role), 404), is("PURCHASE_PO_NOT_FOUND"));
+    }
+    // The till is refused by role in either business, before the order is looked up.
+    assertThat(call("POST", fill, "{}", T2, "CASHIER").getStatus(), is(403));
+    assertThat(call("POST", fill, "{}", T, "CASHIER").getStatus(), is(403));
+    assertThat(call("POST", fill, "{}", T, "CUSTOMER").getStatus(), is(403));
+    assertThat(allocationRows(o[0]), is(1));
+
+    // inventory-svc cannot say what the shops need: nothing is allocated, the buyer is told why.
+    INVENTORY.on("GET", "/admin/inventory/network/needs", 500, "{}");
+    assertThat(code(post(fill, "{}"), 503), is("PURCHASE_NETWORK_UNAVAILABLE"));
+    JsonArray kept =
+        list(call("GET", "/purchase-orders/" + o[0] + "/allocations", null, T, "OWNER"), 200);
+    assertThat("the earlier allocation stands", kept.size(), is(1));
+    assertThat(
+        kept.getJsonObject(0)
+            .getJsonNumber("qty")
+            .bigDecimalValue()
+            .compareTo(new BigDecimal("10")),
+        is(0));
+
+    // Not a warehouse's order, or not stock the business owns outright.
+    String[] shop = order(LEEDS, null);
+    assertThat(
+        code(
+            post("/purchase-orders/" + shop[0] + "/lines/" + shop[1] + "/allocations/fill", "{}"),
+            400),
+        is("PURCHASE_ALLOCATION_NOT_A_WAREHOUSE"));
+    assertThat(allocationRows(shop[0]), is(0));
+    String[] consigned = order(DC, "CONSIGNMENT");
+    assertThat(
+        code(
+            post(
+                "/purchase-orders/" + consigned[0] + "/lines/" + consigned[1] + "/allocations/fill",
+                "{}"),
+            409),
+        is("PURCHASE_ALLOCATION_STOCK_NOT_OWNED"));
+    assertThat(allocationRows(consigned[0]), is(0));
+
+    // A submitted order is the supplier's: the fill is refused and the allocations stay as sent.
+    data(post("/purchase-orders/" + o[0] + "/submit", ""), 200);
+    assertThat(code(post(fill, "{}"), 409), is("PURCHASE_ALLOCATION_ORDER_NOT_DRAFT"));
+    assertThat(allocationRows(o[0]), is(1));
+  }
+
   // ── a draft's line is changed or removed only with its allocations in step ─
 
   private BigDecimal totalNet(String po) {

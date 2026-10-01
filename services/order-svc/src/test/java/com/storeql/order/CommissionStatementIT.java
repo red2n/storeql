@@ -206,8 +206,8 @@ class CommissionStatementIT {
       if (supply) {
         try (PreparedStatement ps =
             c.prepareStatement(
-                "UPDATE order_status_history SET changed_at = changed_at -"
-                    + " make_interval(days => ?) WHERE tenant_id = ?::uuid AND order_id = ?::uuid")) {
+                "UPDATE order_status_history SET changed_at = changed_at - make_interval(days => ?)"
+                    + " WHERE tenant_id = ?::uuid AND order_id = ?::uuid")) {
           ps.setInt(1, days);
           ps.setString(2, tenant);
           ps.setString(3, orderId);
@@ -423,13 +423,18 @@ class CommissionStatementIT {
   @DisplayName("Nothing is produced when the arrangements cannot be read")
   void failsClosed() {
     sold(T, S, ALICE, 609);
+    // Every test here trades in the same business and leaves its drafts, so "none" is judged
+    // against what stood before, not against zero.
+    int before = statements(T, "status", "DRAFT").size();
     TENANTS.ratingDown(true);
     try {
       Response refused = draft(T, day(612), day(608), null);
       assertThat(refused.getStatus(), is(503));
       assertThat(code(refused), is("COMMISSION_RATES_UNAVAILABLE"));
       assertThat(
-          "no half-made statement is left behind", statements(T, "status", "DRAFT").size(), is(0));
+          "no half-made statement is left behind",
+          statements(T, "status", "DRAFT").size(),
+          is(before));
     } finally {
       TENANTS.ratingDown(false);
     }
@@ -462,9 +467,17 @@ class CommissionStatementIT {
     // Another business's statements are not there at all.
     sold(T, S, ALICE, 711);
     String id = drafted(T, day(713), day(710), null).getString("id");
-    assertThat(
-        till(MANAGER).get("/admin/commission/statements/" + id, T_OTHER).getStatus(), is(404));
+    Response unseen = till(MANAGER).get("/admin/commission/statements/" + id, T_OTHER);
+    assertThat(unseen.getStatus(), is(404));
+    assertThat(code(unseen), is("COMMISSION_STATEMENT_NOT_FOUND"));
     assertThat(statements(T_OTHER).size(), is(0));
+
+    // A restatement naming a statement nobody drafted finds none, and drafts nothing.
+    int standing = statements(T).size();
+    Response unknown = draft(T, day(1105), day(1100), "\"supersedes\":\"" + Ids.newId() + "\"");
+    assertThat(unknown.getStatus(), is(404));
+    assertThat(code(unknown), is("COMMISSION_STATEMENT_NOT_FOUND"));
+    assertThat(statements(T).size(), is(standing));
     // Nor can another business re-credit this one's sale.
     String order = sold(T, S, ALICE, 712);
     Response theirs =
@@ -475,6 +488,62 @@ class CommissionStatementIT {
                 T_OTHER,
                 "OWNER");
     assertThat(theirs.getStatus(), is(404));
+  }
+
+  @Test
+  @DisplayName("Only an approved statement can be restated; a draft cannot be named as replaced")
+  void onlyAnApprovedStatementCanBeRestated() {
+    sold(T, S, ALICE, 1000);
+    String draftId = drafted(T, day(1005), day(995), null).getString("id");
+    int before = statements(T).size();
+    Response restate = draft(T, day(1005), day(995), "\"supersedes\":\"" + draftId + "\"");
+    assertThat(restate.getStatus(), is(409));
+    assertThat(code(restate), is("COMMISSION_STATEMENT_NOT_STANDING"));
+    assertThat(statements(T).size(), is(before));
+    assertThat(statement(T, draftId).getString("status"), is("DRAFT"));
+  }
+
+  @Test
+  @DisplayName("A store, a statement or a seller that is not an id is refused and nothing changes")
+  void anIdThatIsNotAnIdIsRefused() {
+    String order = sold(T, S, ALICE, 1010);
+    int before = statements(T).size();
+
+    Response storeInBody = draft(T, day(1015), day(1005), "\"storeId\":\"not-an-id\"");
+    assertThat(storeInBody.getStatus(), is(400));
+    assertThat(code(storeInBody), is("COMMISSION_ID_INVALID"));
+    Response supersedes = draft(T, day(1015), day(1005), "\"supersedes\":\"not-an-id\"");
+    assertThat(supersedes.getStatus(), is(400));
+    assertThat(code(supersedes), is("COMMISSION_ID_INVALID"));
+    Response storeInQuery =
+        till(MANAGER).get("/admin/commission/statements", T, "storeId", "not-an-id");
+    assertThat(storeInQuery.getStatus(), is(400));
+    assertThat(code(storeInQuery), is("COMMISSION_ID_INVALID"));
+    assertThat(statements(T).size(), is(before));
+
+    Response seller =
+        till(MANAGER)
+            .put(
+                "/admin/commission/sales/" + order + "/seller",
+                "{\"sellerUserId\":\"nope\",\"reason\":\"typo\"}",
+                T,
+                "OWNER");
+    assertThat(seller.getStatus(), is(400));
+    assertThat(code(seller), is("COMMISSION_ID_INVALID"));
+    assertThat(order(T, order).getString("sellerUserId"), is(ALICE));
+  }
+
+  @Test
+  @DisplayName("A till sale naming a seller that is not an id is refused and nothing is placed")
+  void aSellerThatIsNotAnIdIsRefused() {
+    String body = basket(S, null, "GBP", V_STD, "1");
+    body = body.substring(0, body.length() - 1) + ",\"sellerUserId\":\"alice\"}";
+    String count = "SELECT count(*) FROM \"order\".orders WHERE tenant_id = '" + T + "'";
+    String before = com.storeql.test.Envelopes.scalar(PG, count);
+    Response refused = till(MANAGER).post("/orders", body, T);
+    assertThat(refused.getStatus(), is(400));
+    assertThat(code(refused), is("ORDER_SELLER_INVALID"));
+    assertThat(com.storeql.test.Envelopes.scalar(PG, count), is(before));
   }
 
   @Test

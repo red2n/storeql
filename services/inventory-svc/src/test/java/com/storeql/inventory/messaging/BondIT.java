@@ -21,6 +21,7 @@ import java.sql.DriverManager;
 import java.time.LocalDate;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -498,5 +499,71 @@ class BondIT {
     // The keeper of the bonded store, holding the permission by their tier, releases.
     Envelopes.created(callAs("POST", path, body, T, "STOREKEEPER", null, BOND));
     assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.bond_releases"), is("1"));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  private static String approvalActive(String tenant, String store) {
+    return Envelopes.scalar(
+        PG,
+        "SELECT active FROM inventory.bond_approvals WHERE tenant_id = '"
+            + tenant
+            + "' AND store_id = '"
+            + store
+            + "'");
+  }
+
+  /**
+   * Ending an approval is management's and only of a live approval of the caller's own business:
+   * the shop floor and a shopper are refused, a store with no live approval and another business's
+   * manager naming ours are not found, and our approval stays live through all of it.
+   */
+  @Test
+  @DisplayName("Ending a bond approval is management's, of a live approval of one's own business")
+  void endingAnApprovalThatIsNotLiveOrNotOursIsRefused() {
+    bondTheWarehouse();
+    String path = "/admin/inventory/bond/approvals/" + BOND + "/end";
+
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(role, code(callAs("POST", path, "{}", T, role, null, null), 403), is("FORBIDDEN"));
+    }
+    assertThat(callAs("POST", path, "{}", T, "CUSTOMER", null, null).getStatus(), is(403));
+    assertThat(approvalActive(T, BOND), is("true"));
+
+    // A store that never had an approval has none to end.
+    assertThat(
+        code(call("POST", "/admin/inventory/bond/approvals/" + SHOP + "/end", "{}", "OWNER"), 404),
+        is("INVENTORY_BOND_APPROVAL_NOT_FOUND"));
+
+    // Another business's management, naming our store, find no approval of theirs and end none of
+    // ours.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          code(callAs("POST", path, "{}", OTHER_T, role, null, BOND), 404),
+          is("INVENTORY_BOND_APPROVAL_NOT_FOUND"));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role, code(callAs("POST", path, "{}", OTHER_T, role, null, BOND), 403), is("FORBIDDEN"));
+    }
+    assertThat(approvalActive(T, BOND), is("true"));
+
+    // Ours ends once; a second end is not found, and the approval stays ended.
+    assertThat(call("POST", path, "{}", "MANAGER").getStatus(), is(200));
+    assertThat(approvalActive(T, BOND), is("false"));
+    assertThat(
+        code(call("POST", path, "{}", "OWNER"), 404), is("INVENTORY_BOND_APPROVAL_NOT_FOUND"));
+    assertThat(approvalActive(T, BOND), is("false"));
+  }
+
+  @Test
+  @DisplayName("A release period that ends before it starts is refused")
+  void aReleasePeriodEndingBeforeItStartsIsRefused() {
+    assertThat(
+        code(get("/admin/inventory/bond/releases?from=2026-02-01&to=2026-01-01"), 400),
+        is("INVENTORY_PERIOD_INVALID"));
+    assertThat(
+        get("/admin/inventory/bond/releases?from=2026-01-01&to=2026-01-01").getStatus(), is(200));
   }
 }

@@ -20,6 +20,7 @@ import java.sql.DriverManager;
 import java.time.LocalDate;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -531,5 +532,58 @@ class YieldIT {
         code(post("/admin/inventory/yield/runs", run(templateId, 120, 40, 50, "")), 409),
         is("INVENTORY_YIELD_INPUT_NOT_OWNED"));
     assertThat(level(SIDE, "onHand"), comparesEqualTo(new BigDecimal("150")));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A cut named twice, in a template or in a run, is refused and nothing is drawn")
+  void aCutNamedTwiceIsRefused() {
+    String twice =
+        "{\"name\":\"Side\",\"inputVariantId\":\""
+            + SIDE
+            + "\",\"outputs\":[{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"expectedPct\":30},{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"expectedPct\":20}]}";
+    assertThat(
+        code(post("/admin/inventory/yield/templates", twice), 400),
+        is("INVENTORY_YIELD_OUTPUT_DUPLICATE"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.yield_templates WHERE tenant_id = '" + T + "'"),
+        is("0"));
+
+    String templateId = template();
+    receiveSide(20, null);
+    String body =
+        "{\"storeId\":\""
+            + STORE
+            + "\",\"templateId\":\""
+            + templateId
+            + "\",\"inputQty\":10,\"outputs\":[{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"qty\":3},{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"qty\":3}]}";
+    assertThat(
+        code(post("/admin/inventory/yield/runs", body), 400),
+        is("INVENTORY_YIELD_OUTPUT_DUPLICATE"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.yield_runs WHERE tenant_id = '" + T + "'"),
+        is("0"));
+    assertThat(level(SIDE, "onHand"), comparesEqualTo(new BigDecimal("20")));
+  }
+
+  @Test
+  @DisplayName("A yield report whose period ends before it starts is refused")
+  void aYieldPeriodEndingBeforeItStartsIsRefused() {
+    assertThat(
+        code(get("/admin/inventory/yield/runs?from=2026-02-01&to=2026-01-01"), 400),
+        is("INVENTORY_PERIOD_INVALID"));
+    assertThat(
+        get("/admin/inventory/yield/runs?from=2026-01-01&to=2026-01-01").getStatus(), is(200));
   }
 }

@@ -10,6 +10,7 @@ import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantLock;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -43,6 +44,7 @@ public class RedisClientProducer {
   @ConfigProperty(name = "storeql.redis.password")
   Optional<String> redisPassword;
 
+  private final ReentrantLock lock = new ReentrantLock();
   private RedisClient client;
   private StatefulRedisConnection<String, String> connection;
 
@@ -66,14 +68,33 @@ public class RedisClientProducer {
   @Produces
   @ApplicationScoped
   public RedisCommands<String, String> redisCommands() {
-    RedisURI.Builder uriBuilder =
-        RedisURI.Builder.redis(redisHost, redisPort).withTimeout(COMMAND_TIMEOUT);
-    if (redisPassword.isPresent() && !redisPassword.get().isBlank()) {
-      uriBuilder.withPassword(redisPassword.get().toCharArray());
+    lock.lock();
+    try {
+      // ONE client for the life of the bean (it owns Netty event-loop threads). When Redis is
+      // unreachable connect() throws; CDI then calls this producer again on the next use, and that
+      // retry must reuse this client, never build another one that nobody shuts down.
+      if (client == null) {
+        RedisURI.Builder uriBuilder =
+            RedisURI.Builder.redis(redisHost, redisPort).withTimeout(COMMAND_TIMEOUT);
+        if (redisPassword.isPresent() && !redisPassword.get().isBlank()) {
+          uriBuilder.withPassword(redisPassword.get().toCharArray());
+        }
+        client = RedisClient.create(uriBuilder.build());
+      }
+      if (connection != null) {
+        connection.close();
+        connection = null;
+      }
+      connection = client.connect();
+      return connection.sync();
+    } finally {
+      lock.unlock();
     }
-    client = RedisClient.create(uriBuilder.build());
-    connection = client.connect();
-    return connection.sync();
+  }
+
+  /** Whether a client has been built (at most one is ever built); for tests. */
+  boolean hasClient() {
+    return client != null;
   }
 
   /**
@@ -83,11 +104,18 @@ public class RedisClientProducer {
    *     underlying connection/client fields instead)
    */
   void close(@Disposes RedisCommands<String, String> commands) {
-    if (connection != null) {
-      connection.close();
-    }
-    if (client != null) {
-      client.shutdown();
+    lock.lock();
+    try {
+      if (connection != null) {
+        connection.close();
+        connection = null;
+      }
+      if (client != null) {
+        client.shutdown();
+        client = null;
+      }
+    } finally {
+      lock.unlock();
     }
   }
 }

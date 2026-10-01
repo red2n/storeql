@@ -36,19 +36,24 @@ public class SimulatedPushProvider implements PushProvider {
   }
 
   @Override
-  public synchronized String send(
-      String token, String title, String body, Map<String, String> data) {
+  public String send(String token, String title, String body, Map<String, String> data) {
     if (token.startsWith("gone-")) {
       throw new ProviderException(
           ProviderException.UNREGISTERED, "the device is no longer registered", false);
     }
-    sent.addFirst(new Sent(token, title, body, new java.util.TreeMap<>(data).toString()));
-    while (sent.size() > KEEP) sent.removeLast();
+    Sent entry = new Sent(token, title, body, new java.util.TreeMap<>(data).toString());
+    // Only the in-memory list is guarded; the log line (a blocking console write) is outside it.
+    synchronized (sent) {
+      sent.addFirst(entry);
+      while (sent.size() > KEEP) sent.removeLast();
+    }
     LOG.log(Level.INFO, "[simulated push -> {0}] {1}", token, title);
     return "sim-" + Ids.newId();
   }
 
-  public synchronized List<Sent> sent() {
-    return List.copyOf(sent);
+  public List<Sent> sent() {
+    synchronized (sent) {
+      return List.copyOf(sent);
+    }
   }
 }

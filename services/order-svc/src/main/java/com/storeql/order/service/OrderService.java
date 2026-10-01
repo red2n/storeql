@@ -1889,8 +1889,12 @@ public class OrderService {
     if (customerId == null && loginId == null) {
       return List.of();
     }
-    return repo.listOrdersForSubject(tenantId, customerId, loginId, EXPORT_MAX_ORDERS).stream()
-        .map(o -> new OrderWithItems(o, repo.findOrderItems(tenantId, o.id())))
+    List<Order> orders =
+        repo.listOrdersForSubject(tenantId, customerId, loginId, EXPORT_MAX_ORDERS);
+    // One read for every order's lines, not one per order.
+    var items = repo.findOrderItems(tenantId, orders.stream().map(Order::id).toList());
+    return orders.stream()
+        .map(o -> new OrderWithItems(o, items.getOrDefault(o.id(), List.of())))
         .toList();
   }
 
@@ -2054,14 +2058,17 @@ public class OrderService {
    * @param tenantId owning tenant
    * @param orderId the order to confirm
    * @param userId the staff member or system actor confirming it
+   * @param ctx the caller, who must be staff allowed to act at the order's store
    * @return the confirmed order
-   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; a conflict when
-   *     the order is not awaiting confirmation
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists in this business;
+   *     {@code STORE_ACCESS_DENIED} (403) for staff held to other stores; {@code
+   *     ORDER_NOT_FOUND_OR_WRONG_STATUS} (404) when the order is not awaiting confirmation
    */
-  public Order confirmOrder(UUID tenantId, UUID orderId, UUID userId) {
+  public Order confirmOrder(UUID tenantId, UUID orderId, UUID userId, TenantContext ctx) {
     // Load the order so OrderConfirmed can carry the buyer + settled amount (loyalty accrual)
     // and its lines (sales by category).
     Order order = getOrder(tenantId, orderId);
+    ctx.requireStoreAccess(order.storeId());
     var confirmEvent =
         Events.orderConfirmed(
             tenantId,
@@ -2214,20 +2221,25 @@ public class OrderService {
       UUID tenantId, UUID orderId, TenantContext ctx, int waitSeconds) {
     requireReadAccess(getOrder(tenantId, orderId), ctx);
     long deadline = System.nanoTime() + Math.min(Math.max(waitSeconds, 0), 20) * 1_000_000_000L;
+    // Polls back off (250 ms, 500 ms, then every second) so a long wait is a handful of reads.
+    long pauseMillis = 250;
     do {
       var found = receiptRepo.findByOrder(tenantId, orderId);
       if (found.isPresent()) {
         return found.get();
       }
-    } while (System.nanoTime() < deadline && pauseBriefly());
+      long leftMillis = (deadline - System.nanoTime()) / 1_000_000L;
+      if (leftMillis <= 0 || !pauseBriefly(Math.min(pauseMillis, leftMillis))) break;
+      pauseMillis = Math.min(pauseMillis * 2, 1000);
+    } while (System.nanoTime() < deadline);
     throw ApiException.notFound(
         "ORDER_RECEIPT_NOT_ISSUED", "No fiscal receipt has been issued for this sale");
   }
 
   /** One poll interval; false when the thread was interrupted, which ends the wait. */
-  private static boolean pauseBriefly() {
+  private static boolean pauseBriefly(long millis) {
     try {
-      Thread.sleep(250);
+      Thread.sleep(millis);
       return true;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -2344,8 +2356,8 @@ public class OrderService {
   public Object exportRegister(
       UUID tenantId, UUID storeId, String series, String period, String format) {
     String s = seriesOrDefault(series);
-    var docs = receiptRepo.listSeries(tenantId, storeId, s, period, 1_000_000);
     if ("json".equalsIgnoreCase(format)) {
+      var docs = receiptRepo.listSeries(tenantId, storeId, s, period, 1_000_000);
       var lines = new java.util.HashMap<Long, List<Map<String, Object>>>();
       for (var l : receiptRepo.linesInSeries(tenantId, storeId, s, period)) {
         var line = new LinkedHashMap<String, Object>();
@@ -2387,31 +2399,42 @@ public class OrderService {
         new StringBuilder(
             "number,fullNumber,issuedAt,orderId,currency,grossTotal,taxTotal,voidedAt,voidReason,"
                 + "prevHash,hash\n");
-    for (var d : docs) {
-      csv.append(d.number())
-          .append(',')
-          .append(csvCell(d.fullNumber()))
-          .append(',')
-          .append(d.issuedAt())
-          .append(',')
-          .append(d.orderId())
-          .append(',')
-          .append(d.currency())
-          .append(',')
-          .append(d.grossTotal().toPlainString())
-          .append(',')
-          .append(d.taxTotal().toPlainString())
-          .append(',')
-          .append(d.voidedAt() == null ? "" : d.voidedAt().toString())
-          .append(',')
-          .append(csvCell(d.voidReason()))
-          .append(',')
-          .append(csvCell(d.prevHash()))
-          .append(',')
-          .append(csvCell(d.hash()))
-          .append('\n');
-    }
+    receiptRepo.forEachInSeries(
+        tenantId,
+        storeId,
+        s,
+        period,
+        com.storeql.order.repo.FiscalReceiptRepository.pageSize(),
+        d -> {
+          appendCsvRow(csv, d);
+          return true;
+        });
     return csv.toString();
+  }
+
+  private static void appendCsvRow(StringBuilder csv, Domain.FiscalReceipt d) {
+    csv.append(d.number())
+        .append(',')
+        .append(csvCell(d.fullNumber()))
+        .append(',')
+        .append(d.issuedAt())
+        .append(',')
+        .append(d.orderId())
+        .append(',')
+        .append(d.currency())
+        .append(',')
+        .append(d.grossTotal().toPlainString())
+        .append(',')
+        .append(d.taxTotal().toPlainString())
+        .append(',')
+        .append(d.voidedAt() == null ? "" : d.voidedAt().toString())
+        .append(',')
+        .append(csvCell(d.voidReason()))
+        .append(',')
+        .append(csvCell(d.prevHash()))
+        .append(',')
+        .append(csvCell(d.hash()))
+        .append('\n');
   }
 
   private static String csvCell(String v) {

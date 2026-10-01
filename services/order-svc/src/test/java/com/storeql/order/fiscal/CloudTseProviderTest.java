@@ -50,7 +50,7 @@ class CloudTseProviderTest {
           if (path.equals("/auth")) {
             reply =
                 body.contains("\"api_key\":\"key\"")
-                    ? "{\"access_token\":\"tok\"}"
+                    ? "{\"access_token\":\"tok\",\"access_token_expires_in\":300}"
                     : "{\"error\":\"no\"}";
             status = body.contains("\"api_key\":\"key\"") ? 200 : 401;
           } else if (path.startsWith("/tss/tss-1/tx/") && path.endsWith("tx_revision=1")) {
@@ -123,6 +123,16 @@ class CloudTseProviderTest {
         List.of(
             new SaleFigures.TenderAmount("CASH", new BigDecimal("10.00")),
             new SaleFigures.TenderAmount("CARD", new BigDecimal("4.04"))));
+  }
+
+  @Test
+  void theBearerTokenIsReusedUntilItExpiresNotFetchedPerSale() {
+    CloudTseProvider p = provider("key");
+    p.sign(device(), sale());
+    p.sign(device(), sale());
+    p.sign(device(), sale());
+    assertEquals(1, paths.stream().filter(x -> x.equals("POST /auth")).count());
+    assertEquals(6, paths.stream().filter(x -> x.startsWith("PUT ")).count());
   }
 
   @Test

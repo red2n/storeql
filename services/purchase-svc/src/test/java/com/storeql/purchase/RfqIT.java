@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.comparesEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
+import com.storeql.ids.Ids;
 import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
@@ -851,5 +852,75 @@ class RfqIT {
         call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "1", null), T2, "MANAGER")
             .getStatus(),
         is(404));
+    // A status nobody defined is refused by name, not answered with an empty list.
+    assertThat(code(get("/rfqs?status=OPEN"), 400), is("PURCHASE_RFQ_STATUS_INVALID"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A decline is refused before issue, after award or cancel, for a stranger, by the till and by"
+          + " another business, and records nothing")
+  void aDeclineIsRefusedByNameAndRecordsNothing() {
+    String s1 = supplier("Highland Meats", "GBP");
+    String s2 = supplier("Quiet Farm", "GBP");
+    String stranger = supplier("Stranger", "GBP");
+    String id = raise(s1, s2).getString("id");
+
+    // Still a draft: nothing has gone out, so nobody can have declined.
+    assertThat(
+        code(post("/rfqs/" + id + "/quotes/" + s1 + "/decline", "{}"), 409),
+        is("PURCHASE_RFQ_NOT_ISSUED"));
+    Envelopes.ok(post("/rfqs/" + id + "/issue", "{}"));
+
+    // A supplier nobody invited.
+    assertThat(
+        code(post("/rfqs/" + id + "/quotes/" + stranger + "/decline", "{}"), 400),
+        is("PURCHASE_RFQ_SUPPLIER_NOT_INVITED"));
+    // A request nobody raised.
+    assertThat(
+        code(post("/rfqs/" + Ids.newId() + "/quotes/" + s1 + "/decline", "{}"), 404),
+        is("PURCHASE_RFQ_NOT_FOUND"));
+    // The till and the shopper are refused by role; another business's staff find nothing.
+    for (String role : new String[] {"CASHIER", "CUSTOMER"}) {
+      assertThat(
+          role,
+          call("POST", "/rfqs/" + id + "/quotes/" + s1 + "/decline", "{}", T, role).getStatus(),
+          is(403));
+    }
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(
+          role,
+          code(call("POST", "/rfqs/" + id + "/quotes/" + s1 + "/decline", "{}", T2, role), 404),
+          is("PURCHASE_RFQ_NOT_FOUND"));
+    }
+    JsonObject untouched = Envelopes.ok(get("/rfqs/" + id));
+    assertThat(
+        find(untouched.getJsonArray("bids"), "supplierId", s1).getString("status"), is("INVITED"));
+    assertThat(
+        find(untouched.getJsonArray("bids"), "supplierId", s2).getString("status"), is("INVITED"));
+
+    // Once awarded, the request is closed to a decline.
+    Envelopes.ok(
+        call("PUT", "/rfqs/" + id + "/quotes/" + s1, quote("GBP", "10.00", "4.00"), T, "OWNER"));
+    assertThat(
+        Envelopes.ok(
+                post("/rfqs/" + id + "/award", awardBody(VARIANT_A, s1, null, VARIANT_B, s1, null)))
+            .getString("status"),
+        is("AWARDED"));
+    assertThat(
+        code(post("/rfqs/" + id + "/quotes/" + s2 + "/decline", "{}"), 409),
+        is("PURCHASE_RFQ_NOT_ISSUED"));
+
+    // Nor after a cancel.
+    String other = raise(s1, s2).getString("id");
+    Envelopes.ok(post("/rfqs/" + other + "/issue", "{}"));
+    Envelopes.ok(post("/rfqs/" + other + "/cancel", "{\"reason\":\"not needed\"}"));
+    assertThat(
+        code(post("/rfqs/" + other + "/quotes/" + s2 + "/decline", "{}"), 409),
+        is("PURCHASE_RFQ_NOT_ISSUED"));
+    assertThat(
+        find(Envelopes.ok(get("/rfqs/" + other)).getJsonArray("bids"), "supplierId", s2)
+            .getString("status"),
+        is("INVITED"));
   }
 }

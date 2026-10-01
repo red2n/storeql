@@ -27,6 +27,7 @@ import java.io.StringReader;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -614,6 +615,22 @@ class AccountSecurityIT {
     assertThat(second.status(), is(200));
     assertThat(unknown.status(), is(200));
     assertThat(refresh(refresh).status(), is(401));
+  }
+
+  @Test
+  @DisplayName("Logout with no token is refused and revokes nothing")
+  void logoutWithNoTokenIsRefused() {
+    String email = "logout-none-" + Ids.newId() + "@example.com";
+    register(email, STRONG);
+    String refresh = login(email, STRONG).data().getString("refreshToken");
+
+    List<String> bodies = List.of("{}", "{\"refreshToken\":\"\"}", "{\"refreshToken\":\"   \"}");
+    for (String body : bodies) {
+      Answer refused = post("/auth/logout", body);
+      assertThat(body, refused.status(), is(400));
+      assertThat(body, refused.code(), is("VALIDATION_FAILED"));
+    }
+    assertThat("the session was not ended", refresh(refresh).status(), is(200));
   }
 
   /**

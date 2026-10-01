@@ -50,7 +50,9 @@ public class SupplierInvoiceEventHandler {
     Instant taxPoint;
     boolean rejected;
     try {
-      obj = Json.createReader(new StringReader(json)).readObject();
+      try (var reader = Json.createReader(new StringReader(json))) {
+        obj = reader.readObject();
+      }
       String type = obj.getString("eventType", "");
       // A rejection carries the same figures as the capture it undoes. It is projected as a
       // second, negative row rather than a delete: the table is append-only, and box 4 is a sum.

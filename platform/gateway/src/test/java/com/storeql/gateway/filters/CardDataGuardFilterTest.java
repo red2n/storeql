@@ -172,4 +172,27 @@ class CardDataGuardFilterTest {
     filter.filter(ctx);
     verify(ctx, never()).abortWith(any());
   }
+
+  @Test
+  @DisplayName("A binary upload is not decoded and scanned as text (group-3)")
+  void aBinaryBodyIsNotScanned() throws IOException {
+    when(ctx.getMediaType()).thenReturn(MediaType.valueOf("application/pdf"));
+    body("%PDF 4111111111111111");
+    filter.filter(ctx);
+    verify(ctx, never()).abortWith(any());
+    verify(ctx, never()).getEntityStream();
+  }
+
+  @Test
+  @DisplayName("Only the scan window is read ahead, and the proxy still gets the whole body")
+  void theWholeBodyReachesTheProxyAfterAWindowedScan() throws IOException {
+    when(config.cardDataGuardMaxScanBytes()).thenReturn(16);
+    String json = "{\"a\":\"xxxxxxxxxx\",\"note\":\"plain text tail\"}";
+    body(json);
+    filter.filter(ctx);
+    ArgumentCaptor<java.io.InputStream> restored =
+        ArgumentCaptor.forClass(java.io.InputStream.class);
+    verify(ctx).setEntityStream(restored.capture());
+    assertEquals(json, new String(restored.getValue().readAllBytes(), StandardCharsets.UTF_8));
+  }
 }

@@ -239,6 +239,8 @@ public class PaymentRunService {
 
     List<NominalLedgerEntry> posting = new ArrayList<>();
     List<OutboxRow> events = new ArrayList<>();
+    // One period check per store for the run (one payment date), not one per supplier and store.
+    java.util.Set<UUID> periodChecked = new java.util.HashSet<>();
     for (PaymentProposal.SupplierPayment payment : view.proposal().payments()) {
       Supplier supplier = suppliers.get(payment.supplierId());
       Map<UUID, BigDecimal> byStore = new LinkedHashMap<>();
@@ -248,7 +250,9 @@ public class PaymentRunService {
         byStore.merge(d.storeId(), signed, BigDecimal::add);
       }
       for (var store : byStore.entrySet()) {
-        purchases.requireOpenPeriod(tenantId, store.getKey(), run.paymentDate());
+        if (periodChecked.add(store.getKey())) {
+          purchases.requireOpenPeriod(tenantId, store.getKey(), run.paymentDate());
+        }
         posting.addAll(paymentPosting(run, supplier, store.getKey(), store.getValue()));
       }
       List<Item> advised =

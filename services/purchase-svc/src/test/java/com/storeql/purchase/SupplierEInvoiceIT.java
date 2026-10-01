@@ -447,6 +447,96 @@ class SupplierEInvoiceIT {
         is("CREDITED"));
   }
 
+  @Test
+  @DisplayName("A credit note cannot be matched to a return that is not open on that order")
+  void aCreditNoteCannotCloseAReturnThatIsNotOpen() {
+    String supplier = supplier("Not Open Ltd", "GB999999973", null, null);
+    String po = receivedOrder(supplier, 10, "2.50");
+    sendApples("NO-1", po, "Apples");
+    // No return has been raised, so the credit note has nothing to close and waits.
+    byte[] credit =
+        ubl(
+            invoice(
+                "CN-NO-1",
+                "GB999999973",
+                null,
+                OUR_VAT,
+                null,
+                "381",
+                "NO-1",
+                line("Apples returned", null, null, "2", "2.50")));
+    JsonObject waiting = data(send(credit, "application/xml", T, "OWNER"), 201);
+    String id = waiting.getString("id");
+    String status = waiting.getString("status");
+    assertThat(
+        waiting.toString(),
+        status,
+        anyOf(is("NEEDS_RETURN"), is("NEEDS_ORDER"), is("NEEDS_SUPPLIER")));
+
+    String body = "{\"supplierId\":\"" + supplier + "\",\"poId\":\"" + po + "\",\"returnId\":\"";
+    // A return nobody raised.
+    assertCode(
+        post("/e-invoices/" + id + "/match", body + Ids.newId() + "\"}", T, "OWNER"),
+        400,
+        "PURCHASE_EINVOICE_RETURN_NOT_OPEN");
+    // A return already credited is not open either.
+    JsonObject ret =
+        data(
+            post(
+                "/vendor-returns",
+                "{\"poId\":\""
+                    + po
+                    + "\",\"reason\":\"DAMAGED\",\"lines\":[{\"variantId\":\""
+                    + VARIANT
+                    + "\",\"qty\":2}]}",
+                T,
+                "OWNER"),
+            201);
+    assertThat(
+        post(
+                "/vendor-returns/" + ret.getString("id") + "/credit",
+                "{\"creditNoteNumber\":\"CN-OTHER\",\"creditNoteDate\":\"2026-09-20\"}",
+                T,
+                "OWNER")
+            .getStatus(),
+        is(200));
+    assertCode(
+        post("/e-invoices/" + id + "/match", body + ret.getString("id") + "\"}", T, "OWNER"),
+        400,
+        "PURCHASE_EINVOICE_RETURN_NOT_OPEN");
+    // Nothing was captured: the document waits as it did and the return keeps its other credit.
+    JsonObject still = data(get("/e-invoices/" + id, T, "OWNER"), 200);
+    assertThat(still.getString("status"), is(status));
+    assertThat(still.containsKey("vendorReturnId") && !still.isNull("vendorReturnId"), is(false));
+    assertThat(
+        data(get("/vendor-returns/" + ret.getString("id"), T, "OWNER"), 200)
+            .getString("creditNoteNumber"),
+        is("CN-OTHER"));
+  }
+
+  @Test
+  @DisplayName("A document sent with no usable media type is refused by name and nothing is kept")
+  void aDocumentWithNoMediaTypeIsRefusedByName() {
+    byte[] doc =
+        ubl(
+            invoice(
+                "AP-MT",
+                "GB999999973",
+                null,
+                OUR_VAT,
+                null,
+                "380",
+                null,
+                line("Apples", "A-1", null, "10", "2.50")));
+    // A wildcard is not a type the document can be read as.
+    assertCode(send(doc, "application/*", T, "OWNER"), 415, "PURCHASE_EINVOICE_MEDIA_TYPE");
+    assertCode(
+        deliver("peppol", DELIVERY_KEY, null, doc, "application/*"),
+        415,
+        "PURCHASE_EINVOICE_MEDIA_TYPE");
+    assertThat(count("supplier_einvoices"), is(0));
+  }
+
   // ── refusals ─────────────────────────────────────────────────────────────────
 
   @Test

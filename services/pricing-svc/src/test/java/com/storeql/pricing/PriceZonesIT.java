@@ -180,6 +180,17 @@ class PriceZonesIT {
     return Envelopes.ok(r).getJsonNumber("unitPrice").bigDecimalValue();
   }
 
+  private static int count(String table, String tenant) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT count(*) FROM pricing." + table + " WHERE tenant_id = '" + tenant + "'")) {
+      rs.next();
+      return rs.getInt(1);
+    }
+  }
+
   // ── zones ──────────────────────────────────────────────────────────────────
 
   @Test
@@ -350,7 +361,7 @@ class PriceZonesIT {
   }
 
   @Test
-  void repricingIsRefusedByName() {
+  void repricingIsRefusedByName() throws Exception {
     standardVat();
     String everywhere = priceList("Everywhere", null, "10.00");
     String nobody = Ids.newId().toString();
@@ -406,6 +417,45 @@ class PriceZonesIT {
             post("/admin/repricing/rules", String.format(rule, everywhere, "MATCH_LOWEST", 0, 0)),
             400),
         is("VALIDATION_FAILED"));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(rule, everywhere, "MATCH_LOWEST", 0, 80)
+                    .replace("\"maxAgeDays\":14", "\"maxAgeDays\":0")),
+            400),
+        is("REPRICING_MAX_AGE_INVALID"));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(rule, everywhere, "MATCH_LOWEST", 0, 80)
+                    .replace("\"maxAgeDays\":14", "\"maxAgeDays\":366")),
+            400),
+        is("REPRICING_MAX_AGE_INVALID"));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(rule, everywhere, "MATCH_LOWEST", 0, 80)
+                    .replace("\"rounding\":\"NONE\"", "\"rounding\":\"UP\"")),
+            400),
+        is("REPRICING_ROUNDING_INVALID"));
+    assertThat(
+        code(get("/admin/repricing/proposals?status=LOST"), 400), is("REPRICING_STATUS_INVALID"));
+    assertThat("no rule was stored by a refusal", count("repricing_rules", T), is(0));
+    // A rule's name is taken once per business; another business may use it.
+    String undercut = rule.replace("\"name\":\"r\"", "\"name\":\"North undercut\"");
+    Envelopes.created(
+        post("/admin/repricing/rules", String.format(undercut, everywhere, "MATCH_LOWEST", 0, 80)));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(undercut, everywhere, "MATCH_LOWEST", 0, 80)),
+            409),
+        is("REPRICING_RULE_NAME_EXISTS"));
+    assertThat("the refused twin was not stored", count("repricing_rules", T), is(1));
     // A dismissed proposal stays dismissed and a run with no fresh observation proposes nothing.
     Envelopes.created(
         post(
@@ -592,6 +642,92 @@ class PriceZonesIT {
       }
     }
     assertThat(Envelopes.okArray(get("/admin/repricing/proposals?status=PROPOSED")).size(), is(1));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
+  }
+
+  // ── bulk observations and running a rule: refusals that keep nothing ───────
+
+  private static String observationJson(String competitor, String extra) {
+    return "{\"variantId\":\""
+        + V
+        + "\",\"competitor\":\""
+        + competitor
+        + "\",\"price\":8.50"
+        + extra
+        + "}";
+  }
+
+  @Test
+  void oneBadRowRefusesTheWholeBatchAndKeepsNothing() throws Exception {
+    standardVat();
+    String good = observationJson("Rival A", "");
+    String nobody = Ids.newId().toString();
+    String[][] bad = {
+      {observationJson("Rival B", ",\"currency\":\"USD\""), "PRICING_COMPETITOR_CURRENCY_MISMATCH"},
+      {
+        observationJson("Rival B", ",\"observedOn\":\"2999-01-01\""),
+        "PRICING_COMPETITOR_DATE_INVALID"
+      },
+      {observationJson("Rival B", ",\"zoneId\":\"" + nobody + "\""), "PRICING_ZONE_UNKNOWN"},
+    };
+    for (String[] row : bad) {
+      assertThat(
+          code(
+              post(
+                  "/admin/competitor-prices/batch",
+                  "{\"observations\":[" + good + "," + row[0] + "]}"),
+              400),
+          is(row[1]));
+      assertThat("the good row was not kept either", count("competitor_prices", T), is(0));
+    }
+    assertThat(
+        code(post("/admin/competitor-prices/batch", "{\"observations\":[]}"), 400),
+        is("VALIDATION_FAILED"));
+    StringBuilder many = new StringBuilder("{\"observations\":[");
+    for (int i = 0; i < 501; i++) many.append(i == 0 ? "" : ",").append(good);
+    many.append("]}");
+    assertThat(
+        code(post("/admin/competitor-prices/batch", many.toString()), 400),
+        is("VALIDATION_FAILED"));
+    assertThat(
+        call(
+                "POST",
+                "/admin/competitor-prices/batch",
+                "{\"observations\":[" + good + "]}",
+                T,
+                "CASHIER")
+            .getStatus(),
+        is(403));
+    assertThat(count("competitor_prices", T), is(0));
+    assertThat(count("competitor_prices", RIVAL_TENANT), is(0));
+  }
+
+  @Test
+  void anotherBusinessOrAnUnknownRuleCannotBeRun() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    Envelopes.created(post("/admin/competitor-prices", observationJson("Rival A", "")));
+    JsonObject rule =
+        Envelopes.created(
+            post(
+                "/admin/repricing/rules",
+                "{\"name\":\"Match\",\"priceListId\":\""
+                    + list
+                    + "\",\"strategy\":\"MATCH_LOWEST\",\"value\":0,\"floorPercent\":50,"
+                    + "\"rounding\":\"NONE\",\"maxAgeDays\":14}"));
+    String ours = "/admin/repricing/rules/" + rule.getString("id") + "/run";
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          code(call("POST", ours, "{}", RIVAL_TENANT, role), 404), is("REPRICING_RULE_NOT_FOUND"));
+    }
+    assertThat(
+        code(post("/admin/repricing/rules/" + Ids.newId() + "/run", "{}"), 404),
+        is("REPRICING_RULE_NOT_FOUND"));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER"}) {
+      assertThat(call("POST", ours, "{}", T, role).getStatus(), is(403));
+    }
+    assertThat("no proposal was made", count("repricing_proposals", T), is(0));
+    assertThat(count("repricing_proposals", RIVAL_TENANT), is(0));
     assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
   }
 }

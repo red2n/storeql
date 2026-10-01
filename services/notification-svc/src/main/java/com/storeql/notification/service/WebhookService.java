@@ -6,13 +6,13 @@ import com.storeql.notification.domain.Webhooks.Attempt;
 import com.storeql.notification.domain.Webhooks.Delivery;
 import com.storeql.notification.domain.Webhooks.Endpoint;
 import com.storeql.notification.dto.WebhookDtos;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.repo.WebhookRepository;
 import com.storeql.service.Egress;
 import com.storeql.web.ApiException;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -41,6 +41,7 @@ public class WebhookService {
   private static final SecureRandom RANDOM = new SecureRandom();
 
   @Inject WebhookRepository repo;
+  @Inject FanoutInterest interest;
   @Inject WebhookSecrets secrets;
 
   @Inject
@@ -95,6 +96,7 @@ public class WebhookService {
             now,
             now);
     repo.insertEndpoint(e);
+    interest.invalidate(tenantId);
     return new Made(e, secret);
   }
 
@@ -134,6 +136,7 @@ public class WebhookService {
     if (!repo.updateEndpoint(changed)) {
       throw ApiException.notFound("WEBHOOK_ENDPOINT_NOT_FOUND", "No such endpoint");
     }
+    interest.invalidate(tenantId);
     return changed;
   }
 
@@ -159,7 +162,7 @@ public class WebhookService {
     Instant now = Instant.now();
     UUID eventId = Ids.newId();
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", eventId.toString())
             .add("eventType", Webhooks.PING)
             .add("tenantId", tenantId.toString())

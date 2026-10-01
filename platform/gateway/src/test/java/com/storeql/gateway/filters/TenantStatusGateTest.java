@@ -18,6 +18,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 /** Finding #5 — the per-tenant active/inactive cache must be bounded, not grow forever. */
 @ExtendWith(MockitoExtension.class)
+@org.mockito.junit.jupiter.MockitoSettings(strictness = org.mockito.quality.Strictness.LENIENT)
 class TenantStatusGateTest {
 
   @Mock ServiceRegistry registry;
@@ -64,5 +65,23 @@ class TenantStatusGateTest {
   @Test
   void failsOpenWhenTenantServiceIsUnresolvable() {
     assertTrue(gate.isActive(Ids.newId().toString()));
+  }
+
+  @Test
+  void aHeaderThatIsNotAUuidIsRefusedWithoutALookupOrACacheSlot() {
+    for (String garbage : new String[] {"tenant-abc", "", "x".repeat(5000), "1-1-1-1-1"}) {
+      org.junit.jupiter.api.Assertions.assertFalse(gate.isActive(garbage));
+    }
+    verify(registry, org.mockito.Mockito.never()).resolve(any());
+    org.junit.jupiter.api.Assertions.assertEquals(0, gate.cacheSize());
+  }
+
+  @Test
+  void onlyAnExplicitInactiveFlagInDataSuspends() {
+    org.junit.jupiter.api.Assertions.assertFalse(
+        TenantStatusGate.parseActive("{ \"data\" : { \"active\" : false } }"));
+    assertTrue(TenantStatusGate.parseActive("{\"data\":{\"active\":true}}"));
+    assertTrue(TenantStatusGate.parseActive("<html>oops</html>"));
+    assertTrue(TenantStatusGate.parseActive("{}"));
   }
 }

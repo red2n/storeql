@@ -261,10 +261,9 @@ class VatRateIT {
       assertThat(body, r.getStatus(), is(400));
       assertThat(body, errorCode(r), is("REQUEST_BODY_INVALID"));
     }
-    assertThat(
-        "nothing refused was stored",
-        send("GET", "/vat-rates/T1", null, gb, "OWNER").getStatus(),
-        is(404));
+    Response none = send("GET", "/vat-rates/T1", null, gb, "OWNER");
+    assertThat("nothing refused was stored", none.getStatus(), is(404));
+    assertThat(errorCode(none), is("PRICING_VAT_CODE_NOT_FOUND"));
   }
 
   @Test
@@ -338,5 +337,55 @@ class VatRateIT {
       pool.shutdownNow();
     }
     assertThat(resolve(pt, v).getStatus(), is(200));
+  }
+
+  @Test
+  @DisplayName(
+      "A variant with no VAT category, an unknown VAT code, and another business's variant are refused by name")
+  void anUncategorisedVariantHasNoVatCategory() {
+    Shop gb = shop("GBP", "GB");
+    Shop rival = shop("GBP", "GB");
+    String v = Ids.newId().toString();
+    String other = Ids.newId().toString();
+    assertThat(
+        send("POST", "/vat-rates", rate("T1", "0.20", false), gb, "OWNER").getStatus(), is(201));
+    assertThat(
+        send("POST", "/vat-rates", rate("T1", "0.20", false), rival, "OWNER").getStatus(), is(201));
+
+    Response none = send("GET", "/product-vat-categories/" + v, null, gb, "OWNER");
+    assertThat(none.getStatus(), is(404));
+    assertThat(errorCode(none), is("PRICING_VAT_CATEGORY_NOT_FOUND"));
+
+    // A code the business has not configured: refused, and the variant is still uncategorised.
+    Response unknown =
+        send(
+            "POST",
+            "/product-vat-categories",
+            "{\"variantId\":\"" + v + "\",\"vatCode\":\"ZZ\"}",
+            gb,
+            "OWNER");
+    assertThat(unknown.getStatus(), is(404));
+    assertThat(errorCode(unknown), is("PRICING_VAT_CODE_NOT_FOUND"));
+    Response still = send("GET", "/product-vat-categories/" + v, null, gb, "OWNER");
+    assertThat(still.getStatus(), is(404));
+    assertThat(errorCode(still), is("PRICING_VAT_CATEGORY_NOT_FOUND"));
+
+    // Another business's categorised variant is not ours to read, whatever the role.
+    assertThat(
+        send(
+                "POST",
+                "/product-vat-categories",
+                "{\"variantId\":\"" + other + "\",\"vatCode\":\"T1\"}",
+                rival,
+                "OWNER")
+            .getStatus(),
+        is(200));
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response foreign = send("GET", "/product-vat-categories/" + other, null, gb, role);
+      assertThat(role, foreign.getStatus(), is(404));
+      assertThat(role, errorCode(foreign), is("PRICING_VAT_CATEGORY_NOT_FOUND"));
+    }
+    assertThat(
+        send("GET", "/product-vat-categories/" + other, null, rival, "OWNER").getStatus(), is(200));
   }
 }

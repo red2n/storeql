@@ -435,6 +435,41 @@ class ManualGrantsIT {
   }
 
   @Test
+  @DisplayName("Another business's staff, and a shopper, cannot spend our customer's store credit")
+  void otherBusinessCannotRedeemStoreCredit() throws SQLException {
+    String id = customer();
+    assertThat(
+        post("/customers/" + id + "/store-credit/issue", "OWNER", key(), ISSUE).getStatus(),
+        is(200));
+    String redeem = "{\"amount\":5.00,\"reason\":\"tender\",\"orderId\":\"" + Ids.newId() + "\"}";
+    for (String role : STAFF) {
+      Response r =
+          post("/customers/" + id + "/store-credit/redeem", other, role, null, redeem, Ids.newId());
+      String body = r.readEntity(String.class);
+      assertThat(role + " " + body, r.getStatus(), is(404));
+      assertThat(role + " " + body, body, containsString("CUSTOMER_NOT_FOUND"));
+    }
+    UUID shopper = Ids.newId();
+    for (UUID business : new UUID[] {tenant, other}) {
+      Response r =
+          post(
+              "/customers/" + id + "/store-credit/redeem",
+              business,
+              "CUSTOMER",
+              null,
+              redeem,
+              shopper);
+      assertThat("a shopper of " + business, r.getStatus(), is(403));
+    }
+    assertThat("the balance is as issued", credit(id).compareTo(new BigDecimal("15")), is(0));
+    assertThat("only the issue is in the ledger", count("store_credit_ledger", id), is(1L));
+    assertThat(
+        "nothing was written under the other business",
+        sql("SELECT COUNT(*) FROM customer.store_credit_ledger WHERE tenant_id = ?", other),
+        is("0"));
+  }
+
+  @Test
   @DisplayName("A shopper, whoever they name, is refused on every manual grant")
   void shopperIsRefused() throws SQLException {
     String id = customer();

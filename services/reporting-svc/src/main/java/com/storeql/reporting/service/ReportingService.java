@@ -9,13 +9,17 @@ import com.storeql.reporting.domain.Domain.SalesCategoryStat;
 import com.storeql.reporting.domain.Domain.SalesDayStat;
 import com.storeql.reporting.domain.Domain.SalesSummary;
 import com.storeql.reporting.repo.ReportingRepository;
+import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * Business logic for reporting-svc. Thin resource → this service → repository.
@@ -30,6 +34,16 @@ import java.util.UUID;
 public class ReportingService {
 
   @Inject ReportingRepository repo;
+
+  /** Days of movement history read when the caller names no start. */
+  @Inject
+  @ConfigProperty(name = "storeql.reporting.movement-stats.default-days", defaultValue = "90")
+  int movementDefaultDays;
+
+  /** The longest window one movement report may cover. */
+  @Inject
+  @ConfigProperty(name = "storeql.reporting.movement-stats.max-days", defaultValue = "366")
+  int movementMaxDays;
 
   // ── Gap #47: Cross-store on-hand ─────────────────────────────────────────
 
@@ -82,12 +96,24 @@ public class ReportingService {
    * @param variantId restrict to one variant, or {@code null} for every variant
    * @param bucketDays days per bucket (1 daily, 7 weekly, 30 monthly-ish); values outside 1..365
    *     are silently coerced to 7 rather than rejected, so a nonsense query still returns a report
+   * @param from inclusive start; {@code null} reads the default window (days) ending at {@code to}
+   * @param to exclusive end; {@code null} for now
    * @return one row per bucket per store/variant
    */
   public List<MovementStat> movementStats(
-      UUID tenantId, Set<UUID> stores, UUID variantId, int bucketDays) {
+      UUID tenantId, Set<UUID> stores, UUID variantId, int bucketDays, Instant from, Instant to) {
     int days = (bucketDays < 1 || bucketDays > 365) ? 7 : bucketDays;
-    return repo.queryMovementStats(tenantId, stores, variantId, days);
+    Instant end = to == null ? Instant.now() : to;
+    Instant start = from == null ? end.minus(movementDefaultDays, ChronoUnit.DAYS) : from;
+    if (!start.isBefore(end)) {
+      throw ApiException.badRequest("REPORT_PERIOD_INVALID", "from must be before to");
+    }
+    if (Duration.between(start, end).compareTo(Duration.ofDays(movementMaxDays)) > 0) {
+      throw ApiException.badRequest(
+          "REPORT_PERIOD_TOO_LONG",
+          "The movement report covers at most " + movementMaxDays + " days at a time");
+    }
+    return repo.queryMovementStats(tenantId, stores, variantId, days, start, to);
   }
 
   // ── Projection update helpers (called by Kafka handlers) ─────────────────

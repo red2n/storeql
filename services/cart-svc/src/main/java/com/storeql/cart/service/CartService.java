@@ -166,7 +166,8 @@ public class CartService {
    * @return the item with its updated quantity
    * @throws ApiException {@code CART_NOT_FOUND} (404) when the cart does not exist or the caller
    *     does not own it; {@code CART_ITEM_NOT_FOUND} (404) when the item does not exist or belongs
-   *     to a different cart
+   *     to a different cart; {@code CART_NOT_ACTIVE}, {@code TENANT_NOT_OPERATIONAL} and {@code
+   *     STORE_NOT_OPERATIONAL} (409) exactly as for add-item
    */
   public CartItemResponse updateItemQty(TenantContext ctx, UUID itemId, UpdateItemQtyRequest req) {
     UUID tenantId = ctx.requireTenantId();
@@ -176,6 +177,9 @@ public class CartService {
         repo.findById(tenantId, cartId)
             .orElseThrow(() -> ApiException.notFound("CART_NOT_FOUND", "cart not found"));
     requireOwnership(cart, ctx, req.sessionId());
+    if (!Cart.STATUS_ACTIVE.equals(cart.status()))
+      throw ApiException.conflict("CART_NOT_ACTIVE", "cart is not active");
+    guardTenantAndStore(tenantId, cart.storeId());
 
     CartItem item =
         repo.findItemById(tenantId, itemId)
@@ -203,7 +207,8 @@ public class CartService {
    * @param sessionId guest session token, or {@code null} for an authenticated caller
    * @throws ApiException {@code CART_NOT_FOUND} (404) when the cart does not exist or the caller
    *     does not own it; {@code CART_ITEM_NOT_FOUND} (404) when the item does not exist or belongs
-   *     to a different cart
+   *     to a different cart; {@code CART_NOT_ACTIVE}, {@code TENANT_NOT_OPERATIONAL} and {@code
+   *     STORE_NOT_OPERATIONAL} (409) exactly as for add-item
    */
   public void removeItem(TenantContext ctx, UUID itemId, String cartIdStr, String sessionId) {
     UUID tenantId = ctx.requireTenantId();
@@ -213,6 +218,9 @@ public class CartService {
         repo.findById(tenantId, cartId)
             .orElseThrow(() -> ApiException.notFound("CART_NOT_FOUND", "cart not found"));
     requireOwnership(cart, ctx, sessionId);
+    if (!Cart.STATUS_ACTIVE.equals(cart.status()))
+      throw ApiException.conflict("CART_NOT_ACTIVE", "cart is not active");
+    guardTenantAndStore(tenantId, cart.storeId());
 
     CartItem item =
         repo.findItemById(tenantId, itemId)

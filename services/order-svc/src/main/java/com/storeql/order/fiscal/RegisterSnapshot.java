@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Everything a fiscal file is written from (18.5): the register for one store, series and period,
@@ -32,6 +33,8 @@ import java.util.UUID;
  * @param tenders every tender, in document order
  * @param orders the order header behind each document, by number
  * @param productNames variant id to a printable name, for the lines
+ * @param linesByNumber the lines grouped by document number (derived)
+ * @param tendersByNumber the tenders grouped by document number (derived)
  */
 public record RegisterSnapshot(
     FiscalStoreSettings settings,
@@ -46,15 +49,69 @@ public record RegisterSnapshot(
     List<RegisterLine> lines,
     List<RegisterTender> tenders,
     Map<Long, RegisterOrder> orders,
-    Map<UUID, ProductName> productNames) {
+    Map<UUID, ProductName> productNames,
+    Map<Long, List<RegisterLine>> linesByNumber,
+    Map<Long, List<RegisterTender>> tendersByNumber) {
 
-  /** Defensive copies: a snapshot handed to a writer is not changed under it. */
+  /**
+   * Defensive copies: a snapshot handed to a writer is not changed under it. The lines and tenders
+   * are indexed once by document number (null here means "work them out"), so a writer asking for
+   * one document's lines does not scan the whole year's.
+   */
   public RegisterSnapshot {
     documents = List.copyOf(documents);
     lines = List.copyOf(lines);
     tenders = List.copyOf(tenders);
     orders = Map.copyOf(orders);
     productNames = Map.copyOf(productNames);
+    if (linesByNumber == null) {
+      linesByNumber = lines.stream().collect(Collectors.groupingBy(RegisterLine::number));
+    }
+    if (tendersByNumber == null) {
+      tendersByNumber = tenders.stream().collect(Collectors.groupingBy(RegisterTender::number));
+    }
+    // Map.copyOf over the copied lists: immutable all the way down, and visibly so.
+    linesByNumber =
+        Map.copyOf(
+            linesByNumber.entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> List.copyOf(e.getValue()))));
+    tendersByNumber =
+        Map.copyOf(
+            tendersByNumber.entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> List.copyOf(e.getValue()))));
+  }
+
+  /** The snapshot as the service assembles it; the per-document indexes are built here. */
+  public RegisterSnapshot(
+      FiscalStoreSettings settings,
+      TseDevice device,
+      Business business,
+      Store store,
+      String seriesCode,
+      String period,
+      String currency,
+      Instant generatedAt,
+      List<FiscalReceipt> documents,
+      List<RegisterLine> lines,
+      List<RegisterTender> tenders,
+      Map<Long, RegisterOrder> orders,
+      Map<UUID, ProductName> productNames) {
+    this(
+        settings,
+        device,
+        business,
+        store,
+        seriesCode,
+        period,
+        currency,
+        generatedAt,
+        documents,
+        lines,
+        tenders,
+        orders,
+        productNames,
+        null,
+        null);
   }
 
   /** The legal entity: what the file's header names. */
@@ -77,12 +134,12 @@ public record RegisterSnapshot(
 
   /** The lines behind one document. */
   public List<RegisterLine> linesOf(long number) {
-    return lines.stream().filter(l -> l.number() == number).toList();
+    return linesByNumber.getOrDefault(number, List.of());
   }
 
   /** The tenders behind one document. */
   public List<RegisterTender> tendersOf(long number) {
-    return tenders.stream().filter(t -> t.number() == number).toList();
+    return tendersByNumber.getOrDefault(number, List.of());
   }
 
   /**

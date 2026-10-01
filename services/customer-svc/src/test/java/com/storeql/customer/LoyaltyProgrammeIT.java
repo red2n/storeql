@@ -46,6 +46,8 @@ class LoyaltyProgrammeIT {
 
   static {
     System.setProperty("storeql.customer.loyalty.sweep-seconds", "0");
+    // A small page, so a re-tier of five accounts crosses three transactions.
+    System.setProperty("storeql.customer.loyalty.retier-batch", "2");
   }
 
   private static final TenantSvcStub TENANTS = TenantSvcStub.start();
@@ -378,6 +380,37 @@ class LoyaltyProgrammeIT {
                 + " AND payload LIKE '%\"fromTier\":\"SILVER\",\"toTier\":\"BRONZE\"%'",
             tenant),
         is("1"));
+  }
+
+  @Test
+  @DisplayName(
+      "A re-tier of more accounts than one page re-tiers every one, once, and announces each")
+  void aReTierCrossesPages() throws SQLException {
+    data(put("/admin/loyalty/programme", "OWNER", programme(null, 12, LADDER)));
+    for (int i = 0; i < 5; i++) {
+      String id = customer("page" + i + "@example.com");
+      earn(id, "40");
+      assertThat(loyalty(id).getString("tier"), is("SILVER"));
+    }
+    sql(
+        "UPDATE customer.loyalty_ledger SET created_at = now() - interval '13 months'"
+            + " WHERE tenant_id = ? AND type = 'EARN'",
+        tenant);
+    JsonObject run = data(post("/admin/loyalty/expiry/run", "OWNER", ""));
+    assertThat(run.getInt("retiered"), is(5));
+    assertThat(
+        sql(
+            "SELECT COUNT(*) FROM customer.loyalty_accounts WHERE tenant_id = ? AND tier = 'BRONZE'",
+            tenant),
+        is("5"));
+    assertThat(
+        sql(
+            "SELECT COUNT(*) FROM customer.outbox WHERE tenant_id = ? AND event_type ="
+                + " 'LoyaltyTierChanged' AND payload LIKE '%\"toTier\":\"BRONZE\"%'",
+            tenant),
+        is("5"));
+    // Nothing moves on a second run.
+    assertThat(data(post("/admin/loyalty/expiry/run", "OWNER", "")).getInt("retiered"), is(0));
   }
 
   // ── the shopper's own view ──────────────────────────────────────────────────

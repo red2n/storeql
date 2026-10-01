@@ -86,9 +86,11 @@ public class VendorReturnResource {
   @APIResponse(responseCode = "404", description = "Purchase order not found")
   @GET
   public Response list(@QueryParam("poId") UUID poId) {
+    var returns = svc.listVendorReturns(ctx, poId);
+    var lines = svc.vendorReturnLinesOf(ctx, returns);
     List<Object> out =
-        svc.listVendorReturns(ctx, poId).stream()
-            .map(r -> (Object) Mappers.toDto(r, svc.vendorReturnLines(ctx, r.id())))
+        returns.stream()
+            .map(r -> (Object) Mappers.toDto(r, lines.getOrDefault(r.id(), List.of())))
             .toList();
     return Response.ok(ApiResponse.ok(out)).build();
   }

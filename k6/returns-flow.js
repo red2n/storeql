@@ -109,7 +109,8 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
       ...(key ? { idem: key } : {}),
       body: { reason: 'k6 return', refundMethod: method, items, ...extra },
     });
-  const policy = (body, token = manager.token) => call('PUT', `${O}/admin/return-policy`, { token, body });
+  // The policy covers every store, so it is set by a caller held to none: the owner (a manager held to the store is refused).
+  const policy = (body, token = owner) => call('PUT', `${O}/admin/return-policy`, { token, body });
   const reasonsOf = (res) => {
     try {
       const b = JSON.parse(res.body);
@@ -142,7 +143,10 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
   truthy('[+] a business that set nothing has the default: a 30-day window, no cashier limit, no no-receipt returns', dflt.windowDays === 30 && (dflt.cashierCeiling == null) && dflt.noReceiptAllowed === false, dflt);
   expect(policy({ windowDays: 30, cashierCeiling: 1, noReceiptAllowed: false }, cashier.token), '[-] a cashier cannot set the policy', 403);
   expect(call('GET', `${O}/admin/return-policy`, { token: cashier.token }), '[-] ...nor read it', 403);
-  expect(policy({ windowDays: 30, cashierCeiling: 1, noReceiptAllowed: false }), '[+] a manager sets a tiny cashier limit', 200);
+  expect(policy({ windowDays: 30, cashierCeiling: 1, noReceiptAllowed: false }, manager.token), '[-] a manager held to one store cannot set the whole business\'s policy', 403, 'BUSINESS_WIDE_ONLY');
+  const unchanged = data(call('GET', `${O}/admin/return-policy`, { token: owner }));
+  truthy('[-] ...and the policy is unchanged: still the default', unchanged.usingDefault === true && unchanged.windowDays === 30 && unchanged.cashierCeiling == null, unchanged);
+  expect(policy({ windowDays: 30, cashierCeiling: 1, noReceiptAllowed: false }), '[+] the owner sets a tiny cashier limit', 200);
   truthy('[+] ...and it is kept', num(data(call('GET', `${O}/admin/return-policy`, { token: owner })).cashierCeiling) === 1);
 
   // ── 2. what a return must say ───────────────────────────────────────────────────────────────────
@@ -180,7 +184,7 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
 
   // ── 5. the shelf follows the condition ──────────────────────────────────────────────────────────
   truthy('[+] a sealed item is back on sale: available rises by one, once', poll(60, () => available() === 93) >= 0, available());
-  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: false }), '[+] the manager takes the limit off', 200);
+  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: false }), '[+] the owner takes the limit off', 200);
   const opened = giveBack(sale.id, { token: cashier.token, items: [line(1, 'OPENED')] });
   expect(opened, '[+] inside the policy the cashier takes an opened item back alone', 201);
   truthy('[+] ...with nobody to approve it', !data(opened).approvedBy, data(opened));
@@ -295,7 +299,7 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
   truthy('[+] ...and no second refund follows', paidBack(refundsOfOrder(cheapSale.id)).length === 1 && count(refundsOfOrder(cheapSale.id), 'EXCHANGE') === 1, refundsOfOrder(cheapSale.id));
 
   // An exchange is held to the same policy as a return.
-  expect(policy({ windowDays: 30, cashierCeiling: 1, noReceiptAllowed: false }), '[+] a manager sets the cashier limit again', 200);
+  expect(policy({ windowDays: 30, cashierCeiling: 1, noReceiptAllowed: false }), '[+] the owner sets the cashier limit again', 200);
   const exSale = tillSale(1, customer);
   const held = exchange(exSale.id, { token: cashier.token });
   expect(held, "[-] a cashier's exchange over the limit needs a manager", 403, 'ORDER_RETURN_NEEDS_MANAGER');
@@ -309,9 +313,9 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
       ...(key ? { idem: key } : {}),
       body: { storeId: store.id, reason: 'k6 no receipt', customerContact: '+447700900123', items: [line(1, 'SEALED')], ...body },
     });
-  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: false }), '[+] a manager takes the cashier limit off', 200);
+  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: false }), '[+] the owner takes the cashier limit off', 200);
   expect(noReceipt({ refundMethod: 'GIFT_CARD' }), '[-] a business that has not switched it on takes no return without a receipt', 409, 'ORDER_NO_RECEIPT_RETURNS_OFF');
-  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: true, noReceiptCeiling: 100000 }), '[+] a manager switches no-receipt returns on', 200);
+  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: true, noReceiptCeiling: 100000 }), '[+] the owner switches no-receipt returns on', 200);
   const noReceiptOn = noReceipt({ refundMethod: 'GIFT_CARD' }, { token: cashier.token });
   expect(noReceiptOn, '[-] a cashier cannot take a return without a receipt', 403, 'ORDER_RETURN_NEEDS_MANAGER');
   truthy('[-] ...and the reason is the missing receipt', reasonsOf(noReceiptOn).includes('NO_RECEIPT'), reasonsOf(noReceiptOn));
@@ -341,7 +345,7 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
   expect(rivalTry, "[-] the rival's manager cannot take a return into our store or customer", [403, 404, 409]);
   truthy('[-] ...and no credit moved', rivalCredit() === 0 && close(credit(), creditBefore2 + nrAmount));
 
-  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: true, noReceiptCeiling: 1 }), '[+] a manager sets a tiny no-receipt ceiling', 200);
+  expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: true, noReceiptCeiling: 1 }), '[+] the owner sets a tiny no-receipt ceiling', 200);
   expect(noReceipt({ refundMethod: 'GIFT_CARD' }), '[-] a return over the ceiling is refused', 422, 'ORDER_NO_RECEIPT_OVER_CEILING');
 
   // ── 13. the till's gift-card tender: the card is charged first, by its redeem ───────────────────

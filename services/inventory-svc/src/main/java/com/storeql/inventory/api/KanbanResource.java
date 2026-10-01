@@ -141,6 +141,7 @@ public class KanbanResource {
   public ApiResponse<KanbanCardResponse> triggerKanbanCard(
       @PathParam("id") UUID id, TriggerKanbanRequest req) {
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getKanbanCard(tenantId, id).storeId());
     return ApiResponse.ok(
         Mappers.toKanbanCard(
             service.triggerKanbanCard(tenantId, id, req != null ? req.notes() : null)));
@@ -162,6 +163,7 @@ public class KanbanResource {
   @Path("/kanban-cards/{id}/replenish")
   public ApiResponse<KanbanCardResponse> replenishKanbanCard(@PathParam("id") UUID id) {
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getKanbanCard(tenantId, id).storeId());
     return ApiResponse.ok(Mappers.toKanbanCard(service.replenishKanbanCard(tenantId, id)));
   }
 

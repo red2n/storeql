@@ -92,6 +92,14 @@ public class InventoryService {
   private static final System.Logger LOG = System.getLogger(InventoryService.class.getName());
 
   @Inject ServiceConfig config;
+
+  /** The most batches the expiring list returns, soonest first. */
+  @Inject
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.inventory.expiring.max-rows",
+      defaultValue = "500")
+  int expiringMaxRows;
+
   @Inject InventoryRepository repo;
   @Inject com.storeql.inventory.repo.BondRepository bonds;
   @Inject com.storeql.inventory.repo.ShrinkageRepository shrinkageRepo;
@@ -3270,7 +3278,7 @@ public class InventoryService {
     if (withinDays < 1 || withinDays > 3650) {
       throw ApiException.badRequest("INVALID_DAYS", "withinDays must be 1–3650");
     }
-    return repo.listExpiringBatches(tenantId, storeId, withinDays);
+    return repo.listExpiringBatches(tenantId, storeId, withinDays, Math.max(1, expiringMaxRows));
   }
 
   // ── Tier-1 Gap #25: Grade control ─────────────────────────────────────────

@@ -119,6 +119,7 @@ class OnboardingIT {
             "X-Roles",
             "OWNER");
     assertThat(dup.getStatus(), is(409));
+    assertThat(dup.readEntity(String.class), containsString("CODE_ALREADY_EXISTS"));
 
     // onboarding status reflects the store that now exists
     String status =
@@ -488,6 +489,41 @@ class OnboardingIT {
             "X-Roles",
             "OWNER");
     assertThat(ownerStore.getStatus(), is(201));
+  }
+
+  @Test
+  void inventorySettingsNotSavedAreNotFoundAndNotShared() {
+    String a = TenantOnboarding.onboard(target, "Inventory Config A", "GB", "GBP");
+    String b = TenantOnboarding.onboard(target, "Inventory Config B", "GB", "GBP");
+    var read =
+        (java.util.function.Function<String, Response>)
+            tenant ->
+                target
+                    .path("/admin/inventory-config")
+                    .request()
+                    .header("X-Tenant-Id", tenant)
+                    .header("X-User-Id", owner)
+                    .header("X-Roles", "OWNER")
+                    .get();
+    Response none = read.apply(a);
+    assertThat(none.getStatus(), is(404));
+    assertThat(none.readEntity(String.class), containsString("INVENTORY_CONFIG_NOT_FOUND"));
+
+    Response saved =
+        target
+            .path("/admin/inventory-config")
+            .request()
+            .header("X-Tenant-Id", a)
+            .header("X-User-Id", owner)
+            .header("X-Roles", "OWNER")
+            .put(Entity.entity("{\"costingMethod\":\"FIFO\"}", MediaType.APPLICATION_JSON));
+    assertThat(saved.readEntity(String.class), saved.getStatus(), is(200));
+    assertThat(read.apply(a).getStatus(), is(200));
+
+    // The other business never saved any: ours is not theirs to read.
+    Response theirs = read.apply(b);
+    assertThat(theirs.getStatus(), is(404));
+    assertThat(theirs.readEntity(String.class), containsString("INVENTORY_CONFIG_NOT_FOUND"));
   }
 
   @Test

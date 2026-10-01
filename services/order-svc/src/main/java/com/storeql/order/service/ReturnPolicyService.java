@@ -63,8 +63,15 @@ public class ReturnPolicyService {
    * @param req the new policy, already validated
    * @param ctx caller context; supplies who changed it
    * @return the policy as now in force
+   * @throws com.storeql.web.ApiException 403 {@code BUSINESS_WIDE_ONLY} when the caller is held to
+   *     stores: the policy covers every store, so only a caller held to none changes it
    */
   public View set(UUID tenantId, ReturnPolicyRequest req, TenantContext ctx) {
+    if (!ctx.storeIds().isEmpty()) {
+      throw com.storeql.web.ApiException.forbidden(
+          "BUSINESS_WIDE_ONLY",
+          "the return policy covers every store, so it is set by a caller held to no store");
+    }
     repo.save(
         tenantId,
         new ReturnPolicy(

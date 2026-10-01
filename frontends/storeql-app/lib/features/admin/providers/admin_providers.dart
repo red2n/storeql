@@ -1068,9 +1068,10 @@ final variantPricesProvider =
     FutureProvider.autoDispose<Map<String, double>>((ref) async {
   final listId = await ref.watch(defaultPriceListProvider.future);
   final dio = ref.read(apiClientProvider).dio;
-  final resp =
-      await dio.get('/${ApiConstants.pricing}/price-lists/$listId/items');
-  final items = (resp.data['data'] as List?) ?? [];
+  // The server pages a list's items (meta.nextCursor): every price is needed here.
+  final items = await fetchAllPages(
+      dio, '/${ApiConstants.pricing}/price-lists/$listId/items',
+      pageSize: 500);
   final map = <String, double>{};
   for (final it in items) {
     final m = it as Map<String, dynamic>;

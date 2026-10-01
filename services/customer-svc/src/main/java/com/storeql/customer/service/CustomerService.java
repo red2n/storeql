@@ -30,6 +30,7 @@ import com.storeql.customer.dto.Dtos.SetMarketingPreferencesRequest;
 import com.storeql.customer.dto.Dtos.StoreCreditAccountResponse;
 import com.storeql.customer.dto.Dtos.StoreCreditLedgerEntryResponse;
 import com.storeql.customer.dto.Dtos.UpdateCustomerRequest;
+import com.storeql.customer.json.Jsons;
 import com.storeql.customer.mapper.Mappers;
 import com.storeql.customer.repo.CustomerRepository;
 import com.storeql.customer.repo.LoyaltyProgrammeRepository;
@@ -40,7 +41,6 @@ import com.storeql.web.ErrorCodes;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
@@ -113,7 +113,7 @@ public class CustomerService {
             phoneResult.e164(),
             phoneResult.checkedAt());
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", id.toString())
             .add("tenantId", tenantId.toString())
             .add("email", req.email())
@@ -174,7 +174,7 @@ public class CustomerService {
     String normalized = email.trim().toLowerCase(Locale.ROOT);
     UUID newId = Ids.newId();
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", newId.toString())
             .add("tenantId", tenantId.toString())
             .add("email", normalized)
@@ -490,7 +490,7 @@ public class CustomerService {
     // the shopper's login, so an erasure that named only the customer id could not reach the
     // delivery name, phone and address on exactly the orders that carry them (SJ-D44).
     var builder =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "CustomerErased")
             .add("tenantId", tenantId.toString())
@@ -914,7 +914,7 @@ public class CustomerService {
     }
     String cur = storeCreditCurrency(tenantId, currency);
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", customerId.toString())
             .add("tenantId", tenantId.toString())
             .add("amount", amount)
@@ -961,7 +961,7 @@ public class CustomerService {
       BigDecimal orderTotal,
       BigDecimal orderTax) {
     var b =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", eventType)
             .add("customerId", customerId.toString())
@@ -980,7 +980,7 @@ public class CustomerService {
    */
   static OutboxRow tierChangedEvent(TierChange change) {
     var b =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "LoyaltyTierChanged")
             .add("tenantId", change.tenantId().toString())
@@ -999,7 +999,7 @@ public class CustomerService {
   /** {@code LoyaltyExpired}: points that died, for the deferred revenue they carried (17.11). */
   static OutboxRow expiredEvent(Expired expired) {
     var b =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "LoyaltyExpired")
             .add("tenantId", expired.tenantId().toString())
@@ -1220,7 +1220,7 @@ public class CustomerService {
     String cur = storeCreditCurrency(tenantId, req.currency());
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", customerId.toString())
             .add("tenantId", tenantId.toString())
             .add("amount", req.amount())
@@ -1272,7 +1272,7 @@ public class CustomerService {
     String cur = storeCreditCurrency(tenantId, req.currency());
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", customerId.toString())
             .add("tenantId", tenantId.toString())
             .add("amount", req.amount())

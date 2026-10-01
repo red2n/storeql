@@ -196,16 +196,17 @@ class InventoryControlsIT {
       assertThat(role, Envelopes.okArray(list), hasSize(0));
       assertThat(
           role,
-          call(
+          code(
+              call(
                   "GET",
                   path + "/by-variant?store=" + store + "&variant=" + variant,
                   null,
                   OTHER_T,
                   role,
                   store,
-                  null)
-              .getStatus(),
-          is(404));
+                  null),
+              404),
+          is("ROP_NOT_FOUND"));
     }
     for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
       assertThat(
@@ -505,5 +506,43 @@ class InventoryControlsIT {
           role, call("PUT", path, modifiers("1"), OTHER_T, role, store, null).getStatus(), is(403));
     }
     assertThat(minOrderQtyOf(T, store, variant), comparesEqualTo(new BigDecimal("8")));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A costing method nobody defined is refused, and one never set is not found")
+  void aCostingMethodThatIsWrongOrNeverSetIsRefused() {
+    String store = Ids.newId().toString();
+    String variant = Ids.newId().toString();
+    String path = "/admin/inventory/costing-methods";
+    String rows =
+        "SELECT count(*) FROM inventory.costing_methods WHERE tenant_id = '"
+            + T
+            + "' AND store_id = '"
+            + store
+            + "'";
+
+    assertThat(
+        code(
+            as(
+                "PUT",
+                path,
+                costing(store, variant, "3").replace("\"AVERAGE\"", "\"LIFO\""),
+                "OWNER"),
+            400),
+        is("INVALID_COSTING_METHOD"));
+    assertThat(Envelopes.scalar(PG, rows), is("0"));
+
+    String read = path + "/by-variant?store=" + store + "&variant=" + variant;
+    assertThat(code(as("GET", read, null, "OWNER"), 404), is("COSTING_METHOD_NOT_FOUND"));
+
+    // Ours is set; another business's owner, naming our store and variant, still finds none.
+    assertThat(as("PUT", path, costing(store, variant, "3"), "MANAGER").getStatus(), is(200));
+    assertThat(as("GET", read, null, "OWNER").getStatus(), is(200));
+    assertThat(
+        code(call("GET", read, null, OTHER_T, "OWNER", null, null), 404),
+        is("COSTING_METHOD_NOT_FOUND"));
+    assertThat(averageCostOf(T, store, variant), comparesEqualTo(new BigDecimal("3")));
   }
 }

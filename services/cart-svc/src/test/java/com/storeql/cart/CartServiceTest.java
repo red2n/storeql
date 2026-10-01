@@ -350,6 +350,76 @@ class CartServiceTest {
     assertThat(trace == null, is(true));
   }
 
+  // ── Change and removal obey the same guards as add ────────────────────────
+
+  private Cart cartWithAnItem(String status) {
+    insertedCart = shoppersCart();
+    service.addItem(
+        ctx(TENANT, CUSTOMER, Set.of("CUSTOMER")),
+        new AddItemRequest(
+            insertedCart.id().toString(), Ids.newId().toString(), BigDecimal.ONE, null, null));
+    var c = insertedCart;
+    insertedCart =
+        new Cart(c.id(), TENANT, CUSTOMER, null, STORE, status, c.createdAt(), c.updatedAt());
+    plainWrites = 0;
+    return insertedCart;
+  }
+
+  @Test
+  void changeAndRemoveRefuseACartThatIsNotActive() {
+    for (String status : List.of(Cart.STATUS_CHECKED_OUT, Cart.STATUS_ABANDONED)) {
+      Cart cart = cartWithAnItem(status);
+      var mine = ctx(TENANT, CUSTOMER, Set.of("CUSTOMER"));
+      UUID item = insertedItem.id();
+      ApiException a =
+          assertThrows(
+              ApiException.class,
+              () ->
+                  service.updateItemQty(
+                      mine,
+                      item,
+                      new UpdateItemQtyRequest(cart.id().toString(), BigDecimal.TEN, null)));
+      assertThat(a.code(), is("CART_NOT_ACTIVE"));
+      ApiException b =
+          assertThrows(
+              ApiException.class, () -> service.removeItem(mine, item, cart.id().toString(), null));
+      assertThat(b.code(), is("CART_NOT_ACTIVE"));
+      assertThat(plainWrites, is(0));
+    }
+  }
+
+  @Test
+  void changeAndRemoveRefuseASuspendedBusinessAndAClosedStore() {
+    Cart cart = cartWithAnItem(Cart.STATUS_ACTIVE);
+    var mine = ctx(TENANT, CUSTOMER, Set.of("CUSTOMER"));
+    UUID item = insertedItem.id();
+    var change = new UpdateItemQtyRequest(cart.id().toString(), BigDecimal.TEN, null);
+
+    tenantActive = false;
+    assertThat(
+        assertThrows(ApiException.class, () -> service.updateItemQty(mine, item, change)).code(),
+        is("TENANT_NOT_OPERATIONAL"));
+    assertThat(
+        assertThrows(
+                ApiException.class,
+                () -> service.removeItem(mine, item, cart.id().toString(), null))
+            .code(),
+        is("TENANT_NOT_OPERATIONAL"));
+
+    tenantActive = true;
+    storeActive = false;
+    assertThat(
+        assertThrows(ApiException.class, () -> service.updateItemQty(mine, item, change)).code(),
+        is("STORE_NOT_OPERATIONAL"));
+    assertThat(
+        assertThrows(
+                ApiException.class,
+                () -> service.removeItem(mine, item, cart.id().toString(), null))
+            .code(),
+        is("STORE_NOT_OPERATIONAL"));
+    assertThat(plainWrites, is(0));
+  }
+
   @Test
   void addItem_guestCartRequiresMatchingSessionId() {
     insertedCart =

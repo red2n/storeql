@@ -24,6 +24,7 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -46,6 +47,11 @@ public class WorkforceResource {
 
   @Inject WorkforceService svc;
   @Inject TenantContext ctx;
+
+  /** The longest window a roster, hours or attendance read may span. */
+  @Inject
+  @ConfigProperty(name = "storeql.workforce.window.max-days", defaultValue = "62")
+  int maxWindowDays;
 
   // ── the roster ──────────────────────────────────────────────────────────────
 
@@ -93,14 +99,15 @@ public class WorkforceResource {
       @QueryParam("from") String from,
       @QueryParam("to") String to) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    Instant[] w = window(instant(from, "from"), instant(to, "to"));
     return ApiResponse.ok(
         WorkforceMappers.toDto(
             svc.roster(
                 ctx.requireTenantId(),
                 optionalUuid(store, "store"),
                 optionalUuid(user, "user"),
-                instant(from, "from"),
-                instant(to, "to"))));
+                w[0],
+                w[1])));
   }
 
   @Operation(summary = "Publish a shift", description = "What staff may see and rely on.")
@@ -143,14 +150,15 @@ public class WorkforceResource {
       @QueryParam("from") String from,
       @QueryParam("to") String to) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    Instant[] w = window(instant(from, "from"), instant(to, "to"));
     return ApiResponse.ok(
         WorkforceMappers.entries(
             svc.entries(
                 ctx.requireTenantId(),
                 optionalUuid(store, "store"),
                 optionalUuid(user, "user"),
-                instant(from, "from"),
-                instant(to, "to"))));
+                w[0],
+                w[1])));
   }
 
   @Operation(
@@ -285,17 +293,39 @@ public class WorkforceResource {
       @QueryParam("from") String from,
       @QueryParam("to") String to) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    // A named store must be one of the caller's; naming none is exactly the caller's stores (the
+    // whole business only for a caller held to none).
+    var stores = ctx.reportStores(optionalUuid(store, "store"));
+    LocalDate[] d = dayWindow(day(from, "from"), day(to, "to"));
     return ApiResponse.ok(
         WorkforceMappers.attendance(
-            svc.attendance(
-                ctx.requireTenantId(),
-                optionalUuid(store, "store"),
-                optionalUuid(user, "user"),
-                day(from, "from"),
-                day(to, "to"))));
+            svc.attendance(ctx.requireTenantId(), stores, optionalUuid(user, "user"), d[0], d[1])));
   }
 
   // ── parsing ─────────────────────────────────────────────────────────────────
+
+  /**
+   * A window held to the longest span a read may cover.
+   *
+   * @throws ApiException 400 {@code WORKFORCE_WINDOW_INVALID} for one longer than the limit
+   */
+  private Instant[] window(Instant from, Instant to) {
+    if (java.time.Duration.between(from, to).compareTo(java.time.Duration.ofDays(maxWindowDays))
+        > 0) {
+      throw tooLong();
+    }
+    return new Instant[] {from, to};
+  }
+
+  private LocalDate[] dayWindow(LocalDate from, LocalDate to) {
+    if (java.time.temporal.ChronoUnit.DAYS.between(from, to) > maxWindowDays) throw tooLong();
+    return new LocalDate[] {from, to};
+  }
+
+  private ApiException tooLong() {
+    return ApiException.badRequest(
+        "WORKFORCE_WINDOW_INVALID", "read at most " + maxWindowDays + " days at a time");
+  }
 
   /** An instant, or the window's default: a rota is read a week at a time. */
   static Instant instant(String value, String field) {

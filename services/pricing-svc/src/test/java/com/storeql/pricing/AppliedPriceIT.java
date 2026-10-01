@@ -1065,4 +1065,37 @@ class AppliedPriceIT {
       }
     }
   }
+
+  @Test
+  @DisplayName(
+      "A claimed whole-tenant evaluation keeps its claim while it works: the lease is renewed")
+  void leaseIsRenewedWhileWorking() throws Exception {
+    UUID tenant = com.storeql.ids.Ids.newId();
+    queue.enqueue(tenant, null, null, "WHOLE_TENANT_TEST");
+    List<UUID> held = new ArrayList<>();
+    try {
+      PriceEvaluation mine =
+          claim(held).stream().filter(e -> e.tenantId().equals(tenant)).findFirst().orElseThrow();
+      queue.renewLease(tenant, mine.id(), Duration.ofHours(1));
+      try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+          var ps =
+              c.prepareStatement(
+                  "SELECT due_at > clock_timestamp() + interval '50 minutes'"
+                      + " FROM pricing.price_evaluations WHERE id = ?")) {
+        ps.setObject(1, mine.id());
+        try (var rs = ps.executeQuery()) {
+          assertThat(rs.next() && rs.getBoolean(1), is(true));
+        }
+      }
+    } finally {
+      // Others' claims are handed back; ours is deleted by its tenant (a throwaway).
+      release(held);
+      try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+          var ps =
+              c.prepareStatement("DELETE FROM pricing.price_evaluations WHERE tenant_id = ?")) {
+        ps.setObject(1, tenant);
+        ps.executeUpdate();
+      }
+    }
+  }
 }

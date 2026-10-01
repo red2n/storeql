@@ -1,12 +1,12 @@
 package com.storeql.purchase.repo;
 
 import com.storeql.ids.Ids;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.ProposalRun;
 import com.storeql.purchase.domain.Domain.SkippedItem;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
@@ -268,10 +268,11 @@ public class ProposalRepository extends BaseJdbcRepository {
   }
 
   private static String skippedJson(List<SkippedItem> skipped) {
-    JsonArrayBuilder arr = Json.createArrayBuilder();
+    JsonArrayBuilder arr = Jsons.PROVIDER.createArrayBuilder();
     for (SkippedItem s : skipped) {
       arr.add(
-          Json.createObjectBuilder()
+          Jsons.PROVIDER
+              .createObjectBuilder()
               .add("variantId", s.variantId().toString())
               .add("reason", s.reason()));
     }
@@ -283,7 +284,7 @@ public class ProposalRepository extends BaseJdbcRepository {
       return List.of();
     }
     List<SkippedItem> out = new ArrayList<>();
-    try (JsonReader reader = Json.createReader(new StringReader(json))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       for (JsonObject o : reader.readArray().getValuesAs(JsonObject.class)) {
         out.add(new SkippedItem(Ids.parse(o.getString("variantId")), o.getString("reason")));
       }

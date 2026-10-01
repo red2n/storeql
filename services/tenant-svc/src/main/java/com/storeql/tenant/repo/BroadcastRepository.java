@@ -193,6 +193,27 @@ public class BroadcastRepository extends BaseOutboxRepository {
     return out;
   }
 
+  /** When one person acknowledged each notice they have, by notice: one query for their feed. */
+  public Map<UUID, Instant> ackTimesBy(UUID tenantId, UUID userId) {
+    Map<UUID, Instant> out = new LinkedHashMap<>();
+    for (Map.Entry<UUID, Instant> e :
+        query(
+            "SELECT broadcast_id, acked_at FROM store_broadcast_acks WHERE tenant_id = ? AND user_id = ?"
+                + " ORDER BY acked_at",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, userId);
+            },
+            rs ->
+                Map.entry(
+                    rs.getObject("broadcast_id", UUID.class),
+                    rs.getObject("acked_at", OffsetDateTime.class).toInstant()),
+            "a person's acknowledgement times")) {
+      out.put(e.getKey(), e.getValue());
+    }
+    return out;
+  }
+
   /** The notices one person has acknowledged, for their own view. */
   public List<UUID> acknowledgedBy(UUID tenantId, UUID userId) {
     return query(

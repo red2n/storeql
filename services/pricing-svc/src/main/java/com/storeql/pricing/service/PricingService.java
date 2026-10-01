@@ -430,6 +430,38 @@ public class PricingService {
     return repo.findPriceListItems(ctx.tenantId(), priceListId);
   }
 
+  /**
+   * One page of a price list's items, keyed on {@code (variant, quantity break)}.
+   *
+   * @param ctx caller context; supplies the tenant
+   * @param priceListId the price list whose items to list
+   * @param after the previous page's {@code meta.nextCursor}, or {@code null} for the first page
+   * @param limit the page size, already clamped
+   * @return the page with its next cursor
+   * @throws ApiException {@code PRICING_LIST_NOT_FOUND} (404) when the price list does not exist in
+   *     this tenant; {@code INVALID_CURSOR} (400) for a cursor that is not ours
+   */
+  public com.storeql.web.Cursor.Page<PriceListItem> listPriceListItemsPage(
+      TenantContext ctx, UUID priceListId, String after, int limit) {
+    getPriceList(ctx, priceListId);
+    String raw = com.storeql.web.Cursor.decode(after);
+    UUID afterVariant = null;
+    java.math.BigDecimal afterQty = null;
+    if (raw != null) {
+      int bar = raw.indexOf('|');
+      try {
+        afterVariant = Ids.parse(raw.substring(0, bar));
+        afterQty = new java.math.BigDecimal(raw.substring(bar + 1));
+      } catch (RuntimeException e) {
+        throw new ApiException(400, "INVALID_CURSOR", "Malformed pagination cursor", List.of(), e);
+      }
+    }
+    List<PriceListItem> rows =
+        repo.findPriceListItems(ctx.tenantId(), priceListId, afterVariant, afterQty, limit + 1);
+    return com.storeql.web.Cursor.page(
+        rows, limit, it -> it.variantId() + "|" + it.minQty().toPlainString());
+  }
+
   // ── Price Resolution ──────────────────────────────────────────────────────
 
   /**

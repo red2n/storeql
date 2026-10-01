@@ -308,9 +308,12 @@ public class EInvoiceFetchService {
     int already = 0;
     int refused = 0;
     List<String> notes = new ArrayList<>();
+    String access = null;
     for (Waiting w : waiting) {
       try {
-        byte[] document = ksef.download(s.providerAccount(), token, w.reference());
+        // One sign-in for the whole fetch, held in this local only.
+        if (access == null) access = ksef.signIn(s.providerAccount(), token);
+        byte[] document = ksef.download(access, w.reference());
         var receipt =
             inbox.receive(
                 ctx,

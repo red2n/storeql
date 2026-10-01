@@ -1,12 +1,12 @@
 package com.storeql.inventory.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.inventory.domain.ReturnDisposition;
 import com.storeql.inventory.service.InventoryService;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
@@ -38,7 +38,7 @@ class NoReceiptReturnHandler {
     UUID returnId;
     UUID storeId;
     JsonArray items;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventId = Ids.parse(obj.getString("eventId"));
       tenantId = Ids.parse(obj.getString("tenantId"));

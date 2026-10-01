@@ -1,10 +1,10 @@
 package com.storeql.payment.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.payment.config.Jsons;
 import com.storeql.payment.service.PaymentService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
@@ -54,7 +54,7 @@ class OrderEventHandler {
     String reason;
     String kind = null;
     PaymentService.ReturnRefund returnRefund = null;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventType = obj.getString("eventType", null);
       if ("OrderReturned".equals(eventType)) {
@@ -164,7 +164,7 @@ class OrderEventHandler {
     UUID orderId;
     UUID storeId;
     BigDecimal amount;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       if (!"GiftCardRedeemed".equals(obj.getString("eventType", null))) return;
       eventId = Ids.parse(obj.getString("eventId"));
@@ -196,7 +196,7 @@ class OrderEventHandler {
     UUID tillSessionId;
     UUID refundedBy;
     BigDecimal amount;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       if (!"ContainerDepositRefunded".equals(obj.getString("eventType", null))) return;
       eventId = Ids.parse(obj.getString("eventId"));

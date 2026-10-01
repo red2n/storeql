@@ -3,6 +3,7 @@ package com.storeql.tenant;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
@@ -193,9 +194,73 @@ class DunningIT {
     assertThat(run.text(), run.status(), is(200));
     assertThat("named, by tenant", run.text(), containsString("\"tenantId\":\"" + tenant + "\""));
     assertThat(run.text(), containsString("no billing email"));
+    assertThat(
+        "and the refusal's own code is carried, not a constant",
+        run.data().getJsonArray("skipped").getValuesAs(JsonObject.class).stream()
+            .filter(k -> tenant.equals(k.getString("tenantId")))
+            .map(k -> k.getString("code"))
+            .toList(),
+        everyItem(is("DUNNING_NO_BILLING_EMAIL")));
+    assertThat(
+        "this business is among those passed over",
+        run.data().getJsonArray("skipped").toString(),
+        containsString(tenant));
     assertThat(steps(invoice.getString("id")), is(empty()));
     assertThat(notices(tenant), is(empty()));
     assertThat(tenantStatus(tenant), is("ACTIVE"));
+  }
+
+  @Test
+  @DisplayName("A subscription that has ended takes no more changes, and no invoice is raised")
+  void aSubscriptionThatHasEndedTakesNoMoreChanges() {
+    sellerIs();
+    tightPolicy();
+    // A second plan on sale, to move to: the business signs up on whichever is the default.
+    String other =
+        planOnSale(
+            "IT-DUN-ENDED-"
+                + Ids.newId().toString().substring(28).toUpperCase(java.util.Locale.ROOT));
+    planOnSale(
+        "IT-DUN-OTHER-" + Ids.newId().toString().substring(28).toUpperCase(java.util.Locale.ROOT));
+    String shop = onboard("Ended already");
+    JsonObject invoice = onlyInvoice(shop);
+    LocalDate due = LocalDate.parse(invoice.getString("dueDate"));
+    assertThat(platform("POST", DUNNING + "/run?asOf=" + plus(due, 6), null).status(), is(200));
+    assertThat(
+        owner("GET", "/admin/tenant/billing", null, shop)
+            .data()
+            .getJsonObject("subscription")
+            .getString("status"),
+        is("CANCELLED"));
+    int invoices =
+        owner("GET", "/admin/tenant/billing/invoices?limit=50", null, shop).list().size();
+
+    Answer cancel = owner("POST", "/admin/tenant/billing/cancel", "{\"reason\":\"again\"}", shop);
+    assertThat(cancel.text(), cancel.status(), is(409));
+    assertThat(cancel.code(), is("BILLING_NOT_ACTIVE"));
+    Answer resume = owner("POST", "/admin/tenant/billing/resume", null, shop);
+    assertThat(resume.status(), is(409));
+    assertThat(resume.code(), is("BILLING_NOT_ACTIVE"));
+    Answer now =
+        owner(
+            "POST",
+            "/admin/tenant/billing/plan",
+            "{\"planId\":\"" + other + "\",\"when\":\"NOW\"}",
+            shop);
+    assertThat(now.status(), is(409));
+    assertThat(now.code(), is("BILLING_NOT_ACTIVE"));
+    Answer later =
+        owner(
+            "POST",
+            "/admin/tenant/billing/plan",
+            "{\"planId\":\"" + other + "\",\"when\":\"PERIOD_END\"}",
+            shop);
+    assertThat(later.status(), is(409));
+    assertThat(later.code(), is("BILLING_NOT_ACTIVE"));
+    assertThat(
+        "no invoice was raised by any of it",
+        owner("GET", "/admin/tenant/billing/invoices?limit=50", null, shop).list().size(),
+        is(invoices));
   }
 
   /** Every notice queued for a business, oldest first, as the event notification-svc will read. */
@@ -337,7 +402,7 @@ class DunningIT {
   }
 
   /** A plan on sale, with no trial and due the day it is issued, so it is overdue tomorrow. */
-  private void planOnSale(String code) {
+  private String planOnSale(String code) {
     Answer written =
         platform(
             "POST",
@@ -356,6 +421,7 @@ class DunningIT {
         is(200));
     assertThat(platform("POST", PLANS + "/" + id + "/activate", null).status(), is(200));
     assertThat(platform("POST", PLANS + "/" + id + "/default", null).status(), is(200));
+    return id;
   }
 
   private String onboard(String name) {

@@ -26,6 +26,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -64,12 +65,15 @@ public class BondResource {
 
   @Operation(summary = "End a store's approval", description = "It takes no more suspended stock.")
   @APIResponse(responseCode = "200", description = "Ended")
+  @APIResponse(responseCode = "403", description = "STORE_ACCESS_DENIED")
   @APIResponse(responseCode = "404", description = "INVENTORY_BOND_APPROVAL_NOT_FOUND")
   @POST
   @Path("/approvals/{storeId}/end")
   public Response end(@PathParam("storeId") String storeId) {
     ctx.requireAnyRole(MANAGEMENT);
-    svc.end(ctx, Ids.parse(storeId));
+    UUID store = Ids.parse(storeId);
+    ctx.requireStoreAccess(store);
+    svc.end(ctx, store);
     return Response.ok(ApiResponse.ok("ended")).build();
   }
 

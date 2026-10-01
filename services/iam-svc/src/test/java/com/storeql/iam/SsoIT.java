@@ -388,6 +388,61 @@ class SsoIT {
     assertThat(down.body().toString(), containsString("did not answer"));
   }
 
+  @Test
+  @DisplayName("Readiness is the owner's and the manager's alone, and each business reads its own")
+  void readinessIsRefusedToOthersAndStaysWithinTheBusiness() {
+    Business b = business("sso-readyneg");
+    UUID managerId = staff(b, "sso-readyneg-manager@example.com", "MANAGER");
+    connect(b, "sso-readyneg", "");
+    Business other = business("sso-readyneg-other");
+    String path = "/auth/admin/sso/readiness";
+
+    for (String role : List.of("CASHIER", "STOREKEEPER", "CUSTOMER")) {
+      Answer refused = call("GET", path, new Caller(Ids.newId(), role, b.tenant()), null);
+      assertThat(role, refused.status(), is(403));
+      assertThat(role, refused.body().containsKey("data"), is(false));
+    }
+    assertThat(
+        "a manager may read it",
+        call("GET", path, new Caller(managerId, "MANAGER", b.tenant()), null).status(),
+        is(200));
+
+    Answer theirs = call("GET", path, other.owner(), null);
+    assertThat(theirs.body().toString(), theirs.status(), is(200));
+    assertThat(
+        "the other business has connected nothing, whatever ours has",
+        theirs.data().getBoolean("ready"),
+        is(false));
+    assertThat(
+        "ours is untouched by the other's read",
+        call("GET", path, b.owner(), null).data().getBoolean("ready"),
+        is(true));
+  }
+
+  @Test
+  @DisplayName("A ticket for a login taken off the business after the callback is refused")
+  void aTicketForALoginTakenOffTheBusinessIsRefused() throws Exception {
+    Business b = business("sso-gone");
+    UUID cashierId = staff(b, "sso-gone-cashier@example.com", "CASHIER");
+    connect(b, "sso-gone", "");
+    Started[] s = new Started[1];
+    Map<String, String> back =
+        signIn("sso-gone", Person.verified("g", "sso-gone-cashier@example.com"), s);
+    assertThat(back.toString(), back.containsKey("sso_ticket"), is(true));
+
+    // The login leaves the business between the callback and the app's redeem.
+    sql("UPDATE users SET tenant_id = NULL, type = 'CUSTOMER' WHERE id = ?", cashierId);
+
+    Answer refused = redeem(back.get("sso_ticket"), s[0].verifier());
+    assertThat(refused.body().toString(), refused.status(), is(401));
+    assertThat(refused.code(), is("SSO_ACCOUNT_UNAVAILABLE"));
+    assertThat("no tokens are issued", refused.body().containsKey("data"), is(false));
+    assertThat(
+        "the ticket was spent by the attempt",
+        redeem(back.get("sso_ticket"), s[0].verifier()).code(),
+        is("SSO_TICKET_INVALID"));
+  }
+
   // ── a sign-in ──────────────────────────────────────────────────────────────
 
   @Test
@@ -601,10 +656,9 @@ class SsoIT {
                 null)
             .status(),
         is(403));
-    assertThat(
-        "not another business's link",
-        call("DELETE", "/auth/admin/sso/identities/" + linkId, other.owner(), null).status(),
-        is(404));
+    Answer notOurs = call("DELETE", "/auth/admin/sso/identities/" + linkId, other.owner(), null);
+    assertThat("not another business's link", notOurs.status(), is(404));
+    assertThat(notOurs.code(), is("SSO_LINK_NOT_FOUND"));
     assertThat(
         call("DELETE", "/auth/admin/sso/identities/" + linkId, b.owner(), null).status(), is(200));
     assertThat(

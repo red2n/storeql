@@ -1,5 +1,6 @@
 package com.storeql.purchase.mapper;
 
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.EInvoiceIntake;
 import com.storeql.purchase.domain.SupplierEInvoices.Document;
 import com.storeql.purchase.domain.SupplierEInvoices.Line;
@@ -7,7 +8,6 @@ import com.storeql.purchase.dto.EInvoiceDtos.DeliveryResponse;
 import com.storeql.purchase.dto.EInvoiceDtos.RuleViolationResponse;
 import com.storeql.purchase.dto.EInvoiceDtos.SupplierEInvoiceLineResponse;
 import com.storeql.purchase.dto.EInvoiceDtos.SupplierEInvoiceResponse;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import jakarta.json.JsonValue;
@@ -91,7 +91,7 @@ public final class EInvoiceMappers {
   static List<RuleViolationResponse> violations(String json) {
     List<RuleViolationResponse> out = new ArrayList<>();
     if (json == null || json.isBlank()) return out;
-    try (JsonReader reader = Json.createReader(new StringReader(json))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       for (JsonValue v : reader.readArray()) {
         JsonObject o = v.asJsonObject();
         out.add(

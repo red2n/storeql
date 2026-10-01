@@ -234,6 +234,28 @@ class BankFileIT {
     assertThat(body, containsString("Acme Ltd"));
   }
 
+  @Test
+  @DisplayName("A payee name no bank can carry is refused by name, and the CSV is still there")
+  void aPayeeNameNoBankCanCarryIsRefusedByName() {
+    data(api.put("/payment-runs/paying-accounts/EUR", EUR_ACCOUNT, "OWNER", USER), 200);
+    String tokyo =
+        api.supplier(
+            "Tokyo Trading",
+            "EUR",
+            "\"bankAccountName\":\"\u682a\u5f0f\u4f1a\u793e\",\"bankIban\":\"DE89 3704 0044 0532 0130 00\"");
+    api.dueInvoice(tokyo, "INV-T1", "EUR", 1, "10.00");
+    String id = api.approvedRun("EUR", TODAY.plusDays(3)).getString("id");
+    assertCode(
+        api.get("/payment-runs/" + id + "/bank-file?format=PAIN001", "MANAGER", USER),
+        409,
+        "PURCHASE_BANK_FILE_REFUSED");
+    // The refusal is the file's alone: the run is still approved and the CSV still reads.
+    assertThat(api.get("/payment-runs/" + id + "/bank-file", "MANAGER", USER).getStatus(), is(200));
+    assertThat(
+        data(api.get("/payment-runs/" + id, "MANAGER", USER), 200).getString("status"),
+        is("APPROVED"));
+  }
+
   // ── Bacs Standard 18 ────────────────────────────────────────────────────────
 
   @Test

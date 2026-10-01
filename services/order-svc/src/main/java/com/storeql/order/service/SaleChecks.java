@@ -388,8 +388,31 @@ public class SaleChecks {
       return Optional.of(hit.recalls());
     }
     Optional<List<ActiveRecall>> read = recalls.active(tenantId);
-    read.ifPresent(list -> kept.put(tenantId, new Kept(list, now, null)));
+    read.ifPresent(
+        list -> {
+          kept.put(tenantId, new Kept(list, now, null));
+          evictStale(kept, now);
+        });
     return read;
+  }
+
+  /** Entries held past this many are swept for stale ones on the next write. */
+  static final int SWEEP_ABOVE = 256;
+
+  /**
+   * Drops the entries whose time to be kept has passed, so the maps hold the businesses read within
+   * the last few seconds and not every business ever seen. Run on a write, and only once the map
+   * has grown past {@link #SWEEP_ABOVE}, so a small deployment pays nothing.
+   */
+  private void evictStale(Map<UUID, Kept> map, Instant now) {
+    if (map.size() <= SWEEP_ABOVE) return;
+    Duration keep = keepFor();
+    map.values().removeIf(k -> !k.readAt().plus(keep).isAfter(now));
+  }
+
+  /** How many businesses' lists are held now, for tests. */
+  int heldCount() {
+    return kept.size() + keptSince.size();
   }
 
   /**
@@ -412,6 +435,7 @@ public class SaleChecks {
     Optional<List<ActiveRecall>> read = recalls.openOrEndedSince(tenantId, since);
     if (read.isPresent()) {
       keptSince.put(tenantId, new Kept(read.get(), now, since));
+      evictStale(keptSince, now);
       return read;
     }
     LOG.log(

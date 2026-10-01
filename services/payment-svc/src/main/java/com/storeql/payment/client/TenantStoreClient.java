@@ -3,6 +3,7 @@ package com.storeql.payment.client;
 import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.payment.config.Jsons;
 import com.storeql.payment.config.ServiceConfig;
 import com.storeql.web.HttpHeaders;
 import io.helidon.http.HeaderNames;
@@ -11,7 +12,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -19,12 +19,14 @@ import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.ReentrantLock;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.faulttolerance.CircuitBreaker;
 import org.eclipse.microprofile.faulttolerance.Fallback;
 
@@ -49,9 +51,66 @@ public class TenantStoreClient {
   private ServiceRegistry registry;
   private WebClient webClient;
 
+  /** The most (tenant, store) answers kept; the least recently used goes first. */
+  @Inject
+  @ConfigProperty(name = "storeql.payment.store-methods-cache.max-entries", defaultValue = "10000")
+  int cacheMaxEntries = 10_000;
+
+  /**
+   * How long an expired answer may still be served when tenant-svc cannot be read; older than this
+   * it is dropped, so a closed store or an erased business does not stay in memory.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.payment.store-methods-cache.max-stale-hours", defaultValue = "6")
+  int cacheMaxStaleHours = 6;
+
   private record CacheEntry(Set<String> methods, long fetchedAt) {}
 
-  private final ConcurrentMap<String, CacheEntry> cache = new ConcurrentHashMap<>();
+  /** Access-ordered, so the eldest entry is the least recently used. Guarded by {@link #lock}. */
+  private final Map<String, CacheEntry> cache = new LinkedHashMap<>(64, 0.75f, true);
+
+  /** Held for map operations only, never across the HTTP call. */
+  private final ReentrantLock lock = new ReentrantLock();
+
+  /** How many answers are cached now. */
+  int cacheSize() {
+    lock.lock();
+    try {
+      return cache.size();
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  private CacheEntry cached(String key, long now) {
+    lock.lock();
+    try {
+      CacheEntry e = cache.get(key);
+      long maxStale = Duration.ofHours(Math.max(1, cacheMaxStaleHours)).toMillis();
+      if (e != null && now - e.fetchedAt() > maxStale) {
+        cache.remove(key);
+        return null;
+      }
+      return e;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  private void remember(String key, CacheEntry entry) {
+    lock.lock();
+    try {
+      cache.put(key, entry);
+      int max = Math.max(1, cacheMaxEntries);
+      var eldest = cache.entrySet().iterator();
+      while (cache.size() > max && eldest.hasNext()) {
+        eldest.next();
+        eldest.remove();
+      }
+    } finally {
+      lock.unlock();
+    }
+  }
 
   @PostConstruct
   void init() {
@@ -70,14 +129,14 @@ public class TenantStoreClient {
    */
   public Optional<Set<String>> enabledMethods(UUID tenantId, UUID storeId) {
     String key = tenantId + ":" + storeId;
-    CacheEntry cached = cache.get(key);
     long now = System.currentTimeMillis();
+    CacheEntry cached = cached(key, now);
     if (cached != null && now - cached.fetchedAt() < CACHE_TTL_MILLIS) {
       return Optional.of(cached.methods());
     }
     Optional<Set<String>> fetched = fetch(tenantId, storeId);
     if (fetched.isPresent()) {
-      cache.put(key, new CacheEntry(fetched.get(), now));
+      remember(key, new CacheEntry(fetched.get(), now));
       return fetched;
     }
     // Serve stale over nothing: an expired entry still reflects the owner's last-known intent.
@@ -132,7 +191,7 @@ public class TenantStoreClient {
         return Optional.empty();
       }
       String body = res.as(String.class);
-      try (JsonReader reader = Json.createReader(new StringReader(body))) {
+      try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
         JsonObject data = reader.readObject().getJsonObject("data");
         var arr = data.getJsonArray("enabledPaymentMethods");
         if (arr == null) return Optional.empty();

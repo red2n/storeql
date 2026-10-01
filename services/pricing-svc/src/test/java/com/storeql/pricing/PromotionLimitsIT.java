@@ -382,7 +382,9 @@ class PromotionLimitsIT {
                 "{\"reason\":\"nope\"}",
                 OTHER,
                 role);
-        assertThat(r.readEntity(String.class), r.getStatus(), is(404));
+        String refused = r.readEntity(String.class);
+        assertThat(refused, r.getStatus(), is(404));
+        assertThat(refused, containsString("PRICING_SUBJECT_NOT_FOUND"));
         r =
             sendR(
                 "POST",
@@ -390,18 +392,24 @@ class PromotionLimitsIT {
                 "{\"reason\":\"nope\"}",
                 OTHER,
                 role);
-        assertThat(r.readEntity(String.class), r.getStatus(), is(404));
+        refused = r.readEntity(String.class);
+        assertThat(refused, r.getStatus(), is(404));
+        assertThat(refused, containsString("PRICING_SUBJECT_NOT_FOUND"));
       }
-      assertThat(sendR("GET", "/price-lists/" + list, null, OTHER, role).getStatus(), is(404));
-      assertThat(
+      Response read = sendR("GET", "/price-lists/" + list, null, OTHER, role);
+      String readBody = read.readEntity(String.class);
+      assertThat(readBody, read.getStatus(), is(404));
+      assertThat(readBody, containsString("PRICING_LIST_NOT_FOUND"));
+      Response item =
           sendR(
-                  "POST",
-                  "/admin/price-lists/" + list + "/items",
-                  "{\"variantId\":\"" + V + "\",\"price\":0.01,\"minQty\":1}",
-                  OTHER,
-                  role)
-              .getStatus(),
-          is(404));
+              "POST",
+              "/admin/price-lists/" + list + "/items",
+              "{\"variantId\":\"" + V + "\",\"price\":0.01,\"minQty\":1}",
+              OTHER,
+              role);
+      String itemBody = item.readEntity(String.class);
+      assertThat(itemBody, item.getStatus(), is(404));
+      assertThat(itemBody, containsString("PRICING_LIST_NOT_FOUND"));
     }
     // Lower roles: a shopper cannot switch a promotion of ours, nor can staff below management.
     for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {

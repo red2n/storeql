@@ -79,6 +79,15 @@ import java.util.UUID;
 @ApplicationScoped
 public class ProductService {
 
+  private static final java.util.regex.Pattern COUNTRY_CODE =
+      java.util.regex.Pattern.compile("[A-Z]{2}");
+  private static final java.util.regex.Pattern HSN_SEPARATORS =
+      java.util.regex.Pattern.compile("[\\s.]");
+  private static final java.util.regex.Pattern HSN_CODE =
+      java.util.regex.Pattern.compile("[0-9]{4}|[0-9]{6}|[0-9]{8}");
+  private static final java.util.regex.Pattern NON_NUMERIC =
+      java.util.regex.Pattern.compile("[^0-9.]");
+
   @Inject ProductRepository repo;
   @Inject com.storeql.service.Entitlements entitlements;
   @Inject BrandRepository brandRepo;
@@ -355,6 +364,30 @@ public class ProductService {
     return path;
   }
 
+  /**
+   * The same walk as {@link #categoryPath(UUID, UUID)}, over a parent map read once, so a catalogue
+   * republish costs one query for the tree rather than one per level per product.
+   */
+  static List<UUID> pathIn(java.util.Map<UUID, UUID> parents, UUID categoryId) {
+    List<UUID> path = new java.util.ArrayList<>();
+    UUID current = categoryId;
+    while (current != null && path.size() < 32 && !path.contains(current)) {
+      path.add(current);
+      current = parents.get(current);
+    }
+    return path;
+  }
+
+  private OutboxRow categorised(
+      UUID tenantId, UUID productId, List<UUID> categoryPath, List<UUID> variantIds) {
+    return new OutboxRow(
+        "ProductCategorised",
+        "storeql.catalog.product-categorised",
+        tenantId,
+        productId,
+        Events.productCategorised(tenantId, productId, categoryPath, variantIds));
+  }
+
   private OutboxRow categorised(
       UUID tenantId, UUID productId, UUID categoryId, List<UUID> variantIds) {
     return new OutboxRow(
@@ -379,12 +412,14 @@ public class ProductService {
     var products = repo.listCatalogueForRepublish(tenantId);
     var variantsByProduct = repo.listVariantIdsByProduct(tenantId);
     List<OutboxRow> events = new java.util.ArrayList<>(products.size());
+    // The tree is read once; each product's path is then worked out in memory.
+    var parents = categoryRepo.parentIds(tenantId);
     for (var p : products) {
       events.add(
           categorised(
               tenantId,
               p.productId(),
-              p.categoryId(),
+              pathIn(parents, p.categoryId()),
               variantsByProduct.getOrDefault(p.productId(), List.of())));
     }
     // Each variant's measure too (03.13), so pricing-svc's unit prices catch up with the catalogue.
@@ -1164,7 +1199,7 @@ public class ProductService {
     String origin = null;
     if (req.countryOfOrigin() != null && !req.countryOfOrigin().isBlank()) {
       origin = req.countryOfOrigin().trim().toUpperCase(java.util.Locale.ROOT);
-      if (!origin.matches("[A-Z]{2}")) {
+      if (!COUNTRY_CODE.matcher(origin).matches()) {
         throw ApiException.badRequest(
             "PRODUCT_INVALID_COUNTRY", "countryOfOrigin must be an ISO 3166-1 alpha-2 code");
       }
@@ -1206,8 +1241,8 @@ public class ProductService {
     String hsn =
         req.hsnCode() == null || req.hsnCode().isBlank()
             ? null
-            : req.hsnCode().replaceAll("[\\s.]", "");
-    if (hsn != null && !hsn.matches("[0-9]{4}|[0-9]{6}|[0-9]{8}")) {
+            : HSN_SEPARATORS.matcher(req.hsnCode()).replaceAll("");
+    if (hsn != null && !HSN_CODE.matcher(hsn).matches()) {
       throw ApiException.badRequest(
           "PRODUCT_INVALID_HSN_CODE", "An HSN or SAC code is 4, 6 or 8 digits");
     }
@@ -1414,7 +1449,7 @@ public class ProductService {
       throw ApiException.badRequest("PRODUCT_COUNTRY_REQUIRED", "country is required");
     }
     String cc = country.trim().toUpperCase(java.util.Locale.ROOT);
-    if (!cc.matches("[A-Z]{2}")) {
+    if (!COUNTRY_CODE.matcher(cc).matches()) {
       throw ApiException.badRequest(
           "PRODUCT_INVALID_COUNTRY", "country must be an ISO 3166-1 alpha-2 code");
     }
@@ -2870,7 +2905,7 @@ public class ProductService {
   private static String buildAttributes(String caseSizeStr, String priceStr) {
     var sb = new StringBuilder("{");
     if (!caseSizeStr.isEmpty()) {
-      sb.append("\"caseSize\":").append(caseSizeStr.replaceAll("[^0-9.]", ""));
+      sb.append("\"caseSize\":").append(NON_NUMERIC.matcher(caseSizeStr).replaceAll(""));
     }
     if (!priceStr.isEmpty()) {
       if (sb.length() > 1) sb.append(",");

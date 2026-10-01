@@ -208,10 +208,16 @@ public class ReportingRepository extends BaseJdbcRepository {
   /**
    * Gap #49: movement stats aggregated by (store, variant, date-bucket). bucketDays controls the
    * truncation unit: 1=day, 7=week, 30=month (approximate, uses date_trunc). Store scope as in
-   * {@link #queryOnHand}.
+   * {@link #queryOnHand}. Only movements from {@code from} (inclusive) and before {@code to}
+   * (exclusive, {@code null} for no upper bound) are read.
    */
   public List<MovementStat> queryMovementStats(
-      UUID tenantId, Set<UUID> stores, UUID variantId, int bucketDays) {
+      UUID tenantId,
+      Set<UUID> stores,
+      UUID variantId,
+      int bucketDays,
+      java.time.Instant from,
+      java.time.Instant to) {
     String trunc = bucketDays <= 1 ? "day" : bucketDays <= 7 ? "week" : "month";
     StringBuilder sb =
         new StringBuilder(
@@ -222,6 +228,9 @@ public class ReportingRepository extends BaseJdbcRepository {
                 + "       COALESCE(SUM(CASE WHEN qty_change > 0 THEN qty_change ELSE 0 END),0) AS total_in,"
                 + "       COALESCE(SUM(CASE WHEN qty_change < 0 THEN ABS(qty_change) ELSE 0 END),0) AS total_out"
                 + " FROM movement_events WHERE tenant_id = ?");
+    // The window is always bounded below, so idx_mvt_tenant_store can range-scan.
+    sb.append(" AND occurred_at >= ?");
+    if (to != null) sb.append(" AND occurred_at < ?");
     if (stores != null) sb.append(" AND store_id = ANY(?)");
     if (variantId != null) sb.append(" AND variant_id = ?");
     sb.append(
@@ -232,6 +241,8 @@ public class ReportingRepository extends BaseJdbcRepository {
         ps -> {
           ps.setObject(1, tenantId);
           int i = 2;
+          ps.setObject(i++, from.atOffset(ZoneOffset.UTC));
+          if (to != null) ps.setObject(i++, to.atOffset(ZoneOffset.UTC));
           if (stores != null) {
             bindStores(ps, i++, stores);
           }

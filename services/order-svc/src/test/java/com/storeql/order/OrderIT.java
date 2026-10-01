@@ -341,7 +341,8 @@ class OrderIT {
     try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
         var ps =
             c.prepareStatement(
-                "SELECT count(*) FROM \"order\".outbox WHERE aggregate_id = ? AND event_type = ?")) {
+                "SELECT count(*) FROM \"order\".outbox WHERE aggregate_id = ? AND event_type ="
+                    + " ?")) {
       ps.setObject(1, orderId);
       ps.setString(2, eventType);
       try (var rs = ps.executeQuery()) {
@@ -1808,6 +1809,320 @@ class OrderIT {
     assertThat(extractId(replay.readEntity(String.class)), is(firstId));
   }
 
+  // ── refusals: confirming, special orders, layaways, pricing ───────────────
+
+  /**
+   * Confirming a till sale also hands it over, so it is held to staff at the sale's store like the
+   * cancel and the void beside it: by role, then tenant, then store. A refused caller moves
+   * nothing, and a sale that is no longer PENDING is not confirmed twice.
+   */
+  @Test
+  @DisplayName("A sale is confirmed only by staff at its store, and only once")
+  void confirmIsScopedByRoleThenTenantThenStore() {
+    UUID sale = placeAt("POS", "INSTORE");
+    String elsewhere = Ids.newId().toString();
+    // Staff held to another store, of every role that may confirm: refused by store.
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "MANAGER"}) {
+      Response held = postHeld("/orders/" + sale + "/confirm", "{}", T, role, elsewhere);
+      String body = held.readEntity(String.class);
+      assertThat(role + ": " + body, held.getStatus(), is(403));
+      assertThat(role, body, containsString("STORE_ACCESS_DENIED"));
+    }
+    // A shopper is not staff: refused by role before the order is even looked up.
+    Response shopper = postHeld("/orders/" + sale + "/confirm", "{}", T, "CUSTOMER", null);
+    assertThat(shopper.getStatus(), is(403));
+    shopper.close();
+    // Another business's staff of every role, even holding our store's id: no such order.
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      Response rival =
+          postHeld(
+              "/orders/" + sale + "/confirm",
+              "{}",
+              "01a090ae-611e-7014-8cd5-baf0862fa319",
+              role,
+              S);
+      String body = rival.readEntity(String.class);
+      assertThat(role + ": " + body, rival.getStatus(), is(404));
+      assertThat(role, body, containsString("\"ORDER_NOT_FOUND\""));
+    }
+    // Nothing moved: still PENDING, no event, no history row beyond its placement.
+    assertThat(statusOf(sale), is("PENDING"));
+    assertThat(outboxCount(sale, "OrderConfirmed"), is(0L));
+    assertThat(outboxCount(sale, "OrderFulfilled"), is(0L));
+    assertThat(
+        countOf(
+            "SELECT count(*) FROM \"order\".order_status_history WHERE order_id = '"
+                + sale
+                + "' AND to_status <> 'PENDING'"),
+        is(0L));
+
+    // Held to its own store, a cashier confirms it, and it is handed over with it.
+    Response atItsStore = postHeld("/orders/" + sale + "/confirm", "{}", T, "CASHIER", S);
+    assertThat(atItsStore.readEntity(String.class), atItsStore.getStatus(), is(200));
+    assertThat(statusOf(sale), is("FULFILLED"));
+    assertThat(outboxCount(sale, "OrderConfirmed"), is(1L));
+    assertThat(outboxCount(sale, "OrderFulfilled"), is(1L));
+
+    // Confirming it again is refused and records nothing more.
+    Response again = postHeld("/orders/" + sale + "/confirm", "{}", T, "CASHIER", S);
+    String body = again.readEntity(String.class);
+    assertThat(body, again.getStatus(), is(404));
+    assertThat(body, containsString("ORDER_NOT_FOUND_OR_WRONG_STATUS"));
+    assertThat(statusOf(sale), is("FULFILLED"));
+    assertThat(outboxCount(sale, "OrderConfirmed"), is(1L));
+    assertThat(outboxCount(sale, "OrderFulfilled"), is(1L));
+
+    // A cancelled order cannot be confirmed either.
+    UUID cancelled = placeAt("POS", "INSTORE");
+    assertThat(
+        post("/orders/" + cancelled + "/cancel", "{\"reason\":\"rang twice\"}", T).getStatus(),
+        is(200));
+    Response late = postHeld("/orders/" + cancelled + "/confirm", "{}", T, "MANAGER", S);
+    String lateBody = late.readEntity(String.class);
+    assertThat(lateBody, late.getStatus(), is(404));
+    assertThat(lateBody, containsString("ORDER_NOT_FOUND_OR_WRONG_STATUS"));
+    assertThat(statusOf(cancelled), is("CANCELLED"));
+    assertThat(outboxCount(cancelled, "OrderConfirmed"), is(0L));
+  }
+
+  private String specialOrderJson(String items) {
+    return "{\"storeId\":\"" + S + "\",\"items\":" + items + "}";
+  }
+
+  private static final String ONE_SPECIAL_LINE =
+      "[{\"variantId\":\"" + V + "\",\"qty\":1,\"unitPrice\":5.00}]";
+
+  private String newSpecialOrder() {
+    Response r = post("/admin/special-orders", specialOrderJson(ONE_SPECIAL_LINE), T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(201));
+    return extractId(body);
+  }
+
+  private String specialStatus(String id) {
+    return scalarOf("SELECT status FROM \"order\".special_orders WHERE id = '" + id + "'");
+  }
+
+  @Test
+  @DisplayName("A special order sent twice under one key is made once; the retry is refused")
+  void aSpecialOrderSentTwiceUnderOneKeyIsMadeOnce() {
+    String key = Ids.newId().toString();
+    String json = specialOrderJson(ONE_SPECIAL_LINE);
+    Response first = post("/admin/special-orders", json, T, key);
+    assertThat(first.readEntity(String.class), first.getStatus(), is(201));
+    Response second = post("/admin/special-orders", json, T, key);
+    String body = second.readEntity(String.class);
+    assertThat(body, second.getStatus(), is(409));
+    assertThat(body, containsString("SPECIAL_ORDER_DUPLICATE_KEY"));
+    assertThat(
+        countOf(
+            "SELECT count(*) FROM \"order\".special_orders WHERE idempotency_key = '" + key + "'"),
+        is(1L));
+  }
+
+  @Test
+  @DisplayName("A special order of nothing is refused and nothing is written")
+  void aSpecialOrderOfNothingIsRefused() {
+    long before =
+        countOf("SELECT count(*) FROM \"order\".special_orders WHERE tenant_id = '" + T + "'");
+    Response r = post("/admin/special-orders", specialOrderJson("[]"), T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(400));
+    assertThat(body, containsString("SPECIAL_ORDER_NO_ITEMS"));
+    assertThat(
+        countOf("SELECT count(*) FROM \"order\".special_orders WHERE tenant_id = '" + T + "'"),
+        is(before));
+  }
+
+  @Test
+  @DisplayName("A special order is confirmed before it is fulfilled")
+  void aSpecialOrderIsConfirmedBeforeItIsFulfilled() {
+    String id = newSpecialOrder();
+    Response r = post("/admin/special-orders/" + id + "/fulfil", "{}", T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(409));
+    assertThat(body, containsString("SPECIAL_ORDER_INVALID_TRANSITION"));
+    assertThat(specialStatus(id), is("PENDING"));
+    // Confirming twice is the same refusal.
+    assertThat(post("/admin/special-orders/" + id + "/confirm", "{}", T).getStatus(), is(200));
+    Response twice = post("/admin/special-orders/" + id + "/confirm", "{}", T);
+    String twiceBody = twice.readEntity(String.class);
+    assertThat(twiceBody, twice.getStatus(), is(409));
+    assertThat(twiceBody, containsString("SPECIAL_ORDER_INVALID_TRANSITION"));
+    assertThat(specialStatus(id), is("CONFIRMED"));
+  }
+
+  @Test
+  @DisplayName("A fulfilled special order cannot be cancelled")
+  void aFulfilledSpecialOrderCannotBeCancelled() {
+    String id = newSpecialOrder();
+    assertThat(post("/admin/special-orders/" + id + "/confirm", "{}", T).getStatus(), is(200));
+    assertThat(post("/admin/special-orders/" + id + "/fulfil", "{}", T).getStatus(), is(200));
+    Response r = post("/admin/special-orders/" + id + "/cancel", "{}", T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(409));
+    assertThat(body, containsString("SPECIAL_ORDER_FULFILLED"));
+    assertThat(specialStatus(id), is("FULFILLED"));
+  }
+
+  @Test
+  @DisplayName("Another business cannot read or move our special order")
+  void anotherBusinessCannotSeeOurSpecialOrder() {
+    String id = newSpecialOrder();
+    String rival = "01a090ae-611e-7014-8cd5-baf0862fa319";
+    Response read = get("/admin/special-orders/" + id, rival);
+    String readBody = read.readEntity(String.class);
+    assertThat(readBody, read.getStatus(), is(404));
+    assertThat(readBody, containsString("SPECIAL_ORDER_NOT_FOUND"));
+    for (String action : new String[] {"confirm", "fulfil", "cancel"}) {
+      Response r = post("/admin/special-orders/" + id + "/" + action, "{}", rival);
+      String body = r.readEntity(String.class);
+      assertThat(action + ": " + body, r.getStatus(), is(404));
+      assertThat(action, body, containsString("SPECIAL_ORDER_NOT_FOUND"));
+    }
+    assertThat(specialStatus(id), is("PENDING"));
+    assertThat(get("/admin/special-orders/" + id, T).getStatus(), is(200));
+  }
+
+  private static String layawayJson(String items, String deposit) {
+    return "{\"storeId\":\""
+        + S
+        + "\",\"items\":"
+        + items
+        + ",\"initialDeposit\":"
+        + deposit
+        + ",\"paymentMethod\":\"CASH\"}";
+  }
+
+  @Test
+  @DisplayName("A layaway of nothing is refused and nothing is written")
+  void aLayawayOfNothingIsRefused() {
+    long before = countOf("SELECT count(*) FROM \"order\".layaways WHERE tenant_id = '" + T + "'");
+    Response r = post("/layaways", layawayJson("[]", "10.00"), T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(400));
+    assertThat(body, containsString("LAYAWAY_NO_ITEMS"));
+    assertThat(
+        countOf("SELECT count(*) FROM \"order\".layaways WHERE tenant_id = '" + T + "'"),
+        is(before));
+  }
+
+  @Test
+  @DisplayName("A layaway deposit above the layaway's total is refused and nothing is written")
+  void aLayawayDepositAboveItsTotalIsRefused() {
+    long before = countOf("SELECT count(*) FROM \"order\".layaways WHERE tenant_id = '" + T + "'");
+    long depositsBefore =
+        countOf("SELECT count(*) FROM \"order\".layaway_deposits WHERE tenant_id = '" + T + "'");
+    Response r =
+        post(
+            "/layaways",
+            layawayJson("[{\"variantId\":\"" + V + "\",\"qty\":1,\"unitPrice\":10.00}]", "99.00"),
+            T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(409));
+    assertThat(body, containsString("DEPOSIT_EXCEEDS_TOTAL"));
+    assertThat(
+        countOf("SELECT count(*) FROM \"order\".layaways WHERE tenant_id = '" + T + "'"),
+        is(before));
+    assertThat(
+        countOf("SELECT count(*) FROM \"order\".layaway_deposits WHERE tenant_id = '" + T + "'"),
+        is(depositsBefore));
+  }
+
+  @Test
+  @DisplayName("A layaway with a balance outstanding cannot be completed")
+  void anUnpaidLayawayCannotBeCompleted() {
+    Response created =
+        post(
+            "/layaways",
+            layawayJson("[{\"variantId\":\"" + V + "\",\"qty\":1,\"unitPrice\":100.00}]", "30.00"),
+            T);
+    assertThat(created.getStatus(), is(201));
+    String layawayId = extractLayawayId(created.readEntity(String.class));
+    long events =
+        countOf("SELECT count(*) FROM \"order\".outbox WHERE aggregate_id = '" + layawayId + "'");
+    Response r = post("/layaways/" + layawayId + "/complete", "{}", T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(409));
+    assertThat(body, containsString("LAYAWAY_CANNOT_COMPLETE"));
+    assertThat(
+        scalarOf("SELECT status FROM \"order\".layaways WHERE id = '" + layawayId + "'"),
+        is("ACTIVE"));
+    assertThat(
+        countOf("SELECT count(*) FROM \"order\".outbox WHERE aggregate_id = '" + layawayId + "'"),
+        is(events));
+  }
+
+  @Test
+  @DisplayName("Pricing an order for one of its two lines is refused and prices nothing")
+  void everyLineMustBePriced() {
+    String v2 = Ids.newId().toString();
+    Response placed =
+        post(
+            "/orders",
+            "{\"storeId\":\""
+                + S
+                + "\",\"channel\":\"POS\",\"fulfilmentType\":\"PICKUP\","
+                + "\"awaitingPrice\":true,\"items\":[{\"variantId\":\""
+                + V
+                + "\",\"qty\":1,\"unitPrice\":0},{\"variantId\":\""
+                + v2
+                + "\",\"qty\":1,\"unitPrice\":0}],\"currency\":\"USD\"}",
+            T,
+            Ids.newId().toString());
+    String placedBody = placed.readEntity(String.class);
+    assertThat(placedBody, placed.getStatus(), is(201));
+    UUID order = Ids.parse(extractId(placedBody));
+    Response r =
+        postAs("/orders/" + order + "/price", priceBody(V, "4.50", "0"), T, USER, "MANAGER", null);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(400));
+    assertThat(body, containsString("ORDER_PRICE_LINE_MISSING"));
+    assertThat(statusOf(order), is("AWAITING_PRICE"));
+    assertThat(
+        countOf(
+            "SELECT count(*) FROM \"order\".order_items WHERE order_id = '"
+                + order
+                + "' AND unit_price <> 0"),
+        is(0L));
+  }
+
+  @Test
+  @DisplayName("A shopper's order history needs a login on the token")
+  void aShopperTokenWithNoLoginHasNoHistory() {
+    Response r =
+        target
+            .path("/orders/mine")
+            .request()
+            .header("X-Tenant-Id", T)
+            .header("X-Roles", "CUSTOMER")
+            .get();
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(401));
+    assertThat(body, containsString("NO_CUSTOMER"));
+  }
+
+  /** POST as a role held to the stores named (comma-separated), or to none when null. */
+  private Response postHeld(String path, String json, String tenant, String role, String stores) {
+    var req =
+        target
+            .path(path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", Ids.newId().toString())
+            .header("X-Roles", role);
+    if (stores != null) req = req.header("X-Store-Ids", stores);
+    return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  private static String scalarOf(String sql) {
+    return com.storeql.test.Envelopes.scalar(PG, sql);
+  }
+
+  private static long countOf(String sql) {
+    return Long.parseLong(scalarOf(sql));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   /** GET with one query parameter — `get` bakes its argument into the path, which encodes '?'. */
@@ -2358,6 +2673,7 @@ class OrderIT {
     Response empty =
         postAs("/orders/" + order + "/price", "{\"lines\":[]}", T, USER, "MANAGER", null);
     assertThat(empty.getStatus(), is(400));
+    assertThat(empty.readEntity(String.class), containsString("ORDER_PRICE_LINE_MISSING"));
     // Nothing moved.
     String body = get("/orders/" + order, T).readEntity(String.class);
     assertThat(body, containsString("\"status\":\"AWAITING_PRICE\""));

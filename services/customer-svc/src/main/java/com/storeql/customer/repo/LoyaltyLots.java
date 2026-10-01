@@ -192,6 +192,37 @@ final class LoyaltyLots {
     }
   }
 
+  /**
+   * The qualifying points of many customers in one grouped read (the windowed programme): a
+   * customer with none earned in the window is absent from the map, meaning zero.
+   */
+  static java.util.Map<UUID, BigDecimal> qualifyingPointsFor(
+      Connection c,
+      UUID tenantId,
+      java.util.List<UUID> customerIds,
+      LoyaltyProgramme programme,
+      Instant now)
+      throws SQLException {
+    Instant since =
+        now.atOffset(ZoneOffset.UTC).minusMonths(programme.qualifyingMonths()).toInstant();
+    java.util.Map<UUID, BigDecimal> out = new java.util.HashMap<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT customer_id, SUM(points) AS qualifying FROM loyalty_ledger"
+                + " WHERE tenant_id = ? AND customer_id = ANY (?) AND points > 0"
+                + " AND type IN ('EARN', 'ADJUST') AND created_at >= ? GROUP BY customer_id")) {
+      ps.setObject(1, tenantId);
+      ps.setArray(2, c.createArrayOf("uuid", customerIds.toArray()));
+      ps.setObject(3, odt(since));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.put(rs.getObject("customer_id", UUID.class), rs.getBigDecimal("qualifying"));
+        }
+      }
+    }
+    return out;
+  }
+
   static OffsetDateTime odt(Instant at) {
     return at == null ? null : at.atOffset(ZoneOffset.UTC);
   }

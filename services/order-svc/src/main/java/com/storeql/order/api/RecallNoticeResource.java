@@ -171,8 +171,9 @@ public class RecallNoticeResource {
    *
    * @param id the notice
    * @param req the resolution and notes
-   * @throws com.storeql.web.ApiException {@code 400} REFUNDED here; {@code 404} no such notice;
-   *     {@code 409} already settled
+   * @throws com.storeql.web.ApiException {@code 400} REFUNDED here; {@code 403} staff held to other
+   *     stores than the notice's ({@code STORE_ACCESS_DENIED}); {@code 404} no such notice; {@code
+   *     409} already settled
    */
   @Operation(
       summary = "Settle a notice",
@@ -181,6 +182,7 @@ public class RecallNoticeResource {
               + " recorded through POST /orders/{id}/returns naming the notice. Staff only.")
   @APIResponse(responseCode = "200", description = "The settled notice")
   @APIResponse(responseCode = "400", description = "A refund belongs on a return")
+  @APIResponse(responseCode = "403", description = "Staff not held to the notice's store")
   @APIResponse(responseCode = "404", description = "No such notice")
   @APIResponse(responseCode = "409", description = "Already settled")
   @POST
@@ -194,7 +196,8 @@ public class RecallNoticeResource {
             Parsing.uuid(id, "id"),
             ctx.requireUserId(),
             Resolution.valueOf(req.resolution()),
-            req.notes());
+            req.notes(),
+            ctx);
     return ApiResponse.ok(
         RecallNoticeMappers.toNotice(detail), ApiResponse.Meta.of(ctx.requestId()));
   }

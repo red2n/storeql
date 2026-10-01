@@ -335,4 +335,60 @@ class PhysicalInventoryIT {
     assertThat(negative.getStatus(), is(400));
     negative.close();
   }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return com.storeql.test.Envelopes.parse(body).getString("code");
+  }
+
+  @Test
+  @DisplayName("A count that is not there is not found, whatever is asked of it")
+  void aCountThatIsNotThereIsNotFound() {
+    String unknown = Ids.newId().toString();
+    String base = "/admin/inventory/physical-inventories/" + unknown;
+    assertThat(codeOf(send("OWNER", "GET", base, null), 404), is("PI_NOT_FOUND"));
+    assertThat(
+        codeOf(
+            send("MANAGER", "POST", base + "/tags", "{\"variantId\":\"" + Ids.newId() + "\"}"),
+            404),
+        is("PI_NOT_FOUND"));
+    assertThat(codeOf(send("MANAGER", "POST", base + "/complete", ""), 404), is("PI_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName(
+      "A tag that is not on the count, or is on another count, is not found; none is counted")
+  void aTagThatIsNotOnTheCountIsNotFound() {
+    String variant = Ids.newId().toString();
+    receive(variant, 4, null);
+    String pi = start();
+    String other = start();
+    String foreignTag = tag(other, variant, null, null).getString("id");
+
+    for (String tagId : new String[] {Ids.newId().toString(), foreignTag}) {
+      assertThat(
+          codeOf(
+              send(
+                  "MANAGER",
+                  "POST",
+                  "/admin/inventory/physical-inventories/" + pi + "/tags/" + tagId + "/count",
+                  "{\"countedQty\":1}"),
+              404),
+          is("TAG_NOT_FOUND"));
+    }
+    // The other count's tag is untouched.
+    JsonObject untouched =
+        data(send("OWNER", "GET", "/admin/inventory/physical-inventories/" + other, null));
+    JsonObject theTag =
+        untouched.getJsonArray("tags").stream()
+            .map(JsonValue::asJsonObject)
+            .filter(t -> foreignTag.equals(t.getString("id")))
+            .findFirst()
+            .orElseThrow();
+    // JSON-B omits a null member, so an uncounted tag has no countedQty key (or a JSON null).
+    assertThat(!theTag.containsKey("countedQty") || theTag.isNull("countedQty"), is(true));
+  }
 }

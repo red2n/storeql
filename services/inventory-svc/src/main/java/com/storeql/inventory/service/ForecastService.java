@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * The statistical demand forecast (06.x): a run over a store's daily demand history, one forecast
@@ -73,6 +74,11 @@ public class ForecastService {
   @Inject DemandHistoryRepository demandHistoryRepo;
   @Inject PricingClient pricing;
 
+  /** How many variants a run reads and forecasts at a time (bounds the run's memory). */
+  @Inject
+  @ConfigProperty(name = "storeql.inventory.forecast.page-variants", defaultValue = "500")
+  int pageVariants;
+
   /** What a run did: how many items, by which method, and how the forecasts rate themselves. */
   public record RunResult(
       UUID storeId,
@@ -90,18 +96,29 @@ public class ForecastService {
   }
 
   /**
-   * One item's history, read and shaped, waiting for the store's pooled uplift before it is
-   * forecast.
+   * One item's long history, read and shaped: its zero-filled series, which days were promoted, its
+   * seasonal indices and its promotion facts.
    */
   private record Prepared(
       UUID variantId,
       List<BigDecimal> series,
-      LocalDate first,
-      FreshProfile fresh,
       List<BigDecimal> indices,
       UpliftFacts facts,
-      boolean[] promotedHistory,
-      boolean[] promotedAhead) {}
+      boolean[] promotedHistory) {}
+
+  private static Prepared prepare(
+      UUID variant,
+      Map<LocalDate, BigDecimal> days,
+      List<PromotionWindow> windows,
+      UUID storeId,
+      LocalDate to) {
+    LocalDate first = days.keySet().iterator().next(); // a TreeMap: the earliest day
+    List<BigDecimal> longSeries = zeroFilled(days, first, to);
+    boolean[] promotedLong = Promotions.days(windows, variant, storeId, first, to);
+    List<BigDecimal> indices = Forecasting.seasonalIndices(longSeries, to, promotedLong);
+    UpliftFacts facts = Forecasting.upliftFacts(longSeries, to, promotedLong, indices);
+    return new Prepared(variant, longSeries, indices, facts, promotedLong);
+  }
 
   /**
    * Forecasts every item with demand history at a store (or one item), replacing earlier forecasts.
@@ -123,8 +140,6 @@ public class ForecastService {
     LocalDate longFrom = to.minusDays(LONG_HISTORY_DAYS - 1L);
     LocalDate from = to.minusDays(HISTORY_DAYS - 1L);
     demandHistoryRepo.aggregateDemand(tenantId, storeId, DemandBucket.BUCKET_DAY, longFrom);
-    Map<UUID, Map<LocalDate, BigDecimal>> history =
-        repo.dailyDemand(tenantId, storeId, variantId, longFrom, to);
     Map<UUID, FreshFacts> freshFacts = repo.freshFacts(tenantId, storeId, from);
     List<PromotionWindow> windows =
         pricing
@@ -138,92 +153,108 @@ public class ForecastService {
                       tenantId);
                   return List.of();
                 });
+    int page = Math.max(1, pageVariants);
 
-    // First pass: read and shape every item, pooling what its promotions sold.
-    List<Prepared> prepared = new ArrayList<>();
+    // First pass: a page of items at a time, pool what their promotions sold and keep only the
+    // small
+    // facts, never the 730-day series of every item at once.
     UpliftFacts pooled = UpliftFacts.NONE;
-    for (Map.Entry<UUID, Map<LocalDate, BigDecimal>> e : history.entrySet()) {
-      UUID variant = e.getKey();
-      LocalDate first = e.getValue().keySet().iterator().next(); // a TreeMap: the earliest day
-      List<BigDecimal> longSeries = zeroFilled(e.getValue(), first, to);
-      boolean[] promotedLong = Promotions.days(windows, variant, storeId, first, to);
-      List<BigDecimal> indices = Forecasting.seasonalIndices(longSeries, to, promotedLong);
-      UpliftFacts facts = Forecasting.upliftFacts(longSeries, to, promotedLong, indices);
-      pooled = pooled.plus(facts);
-      List<BigDecimal> recent = tail(longSeries, HISTORY_DAYS);
-      FreshProfile fresh = freshProfile(freshFacts.get(variant), recent);
-      int window = fresh.fresh() ? FRESH_HISTORY_DAYS : HISTORY_DAYS;
-      List<BigDecimal> series = tail(longSeries, window);
-      boolean[] promotedHistory = tail(promotedLong, window);
-      boolean[] promotedAhead =
-          Promotions.days(windows, variant, storeId, to.plusDays(1), to.plusDays(horizon));
-      prepared.add(
-          new Prepared(
-              variant,
-              series,
-              to.minusDays(series.size() - 1L),
-              fresh,
-              indices,
-              facts,
-              promotedHistory,
-              promotedAhead));
+    UUID after = null;
+    while (true) {
+      List<UUID> ids =
+          repo.variantsWithDemand(tenantId, storeId, variantId, longFrom, to, after, page);
+      if (ids.isEmpty()) {
+        break;
+      }
+      for (Map.Entry<UUID, Map<LocalDate, BigDecimal>> e :
+          repo.dailyDemandFor(tenantId, storeId, ids, longFrom, to).entrySet()) {
+        pooled = pooled.plus(prepare(e.getKey(), e.getValue(), windows, storeId, to).facts());
+      }
+      after = ids.get(ids.size() - 1);
+      if (ids.size() < page) {
+        break;
+      }
     }
     BigDecimal storeUplift =
         pooled.promotedDays() >= STORE_UPLIFT_MIN_PROMOTED_DAYS
             ? Forecasting.upliftOf(pooled)
             : null;
 
-    // Second pass: forecast, each item's own uplift first, the store's when it has too little.
+    // Second pass: forecast a page at a time, each item's own uplift first, the store's when it has
+    // too little, and write the page before reading the next.
     Instant now = Instant.now();
-    List<DemandForecast> forecasts = new ArrayList<>();
     Map<String, Integer> byMethod = new TreeMap<>();
     BigDecimal mapeSum = BigDecimal.ZERO;
     int mapeCount = 0;
     int freshCount = 0;
     int seasonalCount = 0;
     int promotedCount = 0;
-    for (Prepared p : prepared) {
-      BigDecimal itemUplift = Forecasting.upliftOf(p.facts());
-      Shape shape;
-      if (itemUplift != null) {
-        shape = new Shape(p.indices(), itemUplift, Shape.UPLIFT_ITEM);
-      } else if (storeUplift != null) {
-        shape = new Shape(p.indices(), storeUplift, Shape.UPLIFT_STORE);
-      } else {
-        shape = new Shape(p.indices(), null, null);
+    int written = 0;
+    after = null;
+    while (true) {
+      List<UUID> ids =
+          repo.variantsWithDemand(tenantId, storeId, variantId, longFrom, to, after, page);
+      if (ids.isEmpty()) {
+        break;
       }
-      Forecast f =
-          Forecasting.forecast(
-              p.series(), to, horizon, shape, new Calendar(p.promotedHistory(), p.promotedAhead()));
-      forecasts.add(
-          new DemandForecast(
-              Ids.newId(),
-              tenantId,
-              storeId,
-              p.variantId(),
-              p.first(),
-              to,
-              horizon,
-              f,
-              now,
-              p.fresh()));
-      byMethod.merge(f.method(), 1, Integer::sum);
-      if (f.accuracy().mape() != null) {
-        mapeSum = mapeSum.add(f.accuracy().mape());
-        mapeCount++;
+      List<DemandForecast> forecasts = new ArrayList<>();
+      for (Map.Entry<UUID, Map<LocalDate, BigDecimal>> e :
+          repo.dailyDemandFor(tenantId, storeId, ids, longFrom, to).entrySet()) {
+        Prepared p = prepare(e.getKey(), e.getValue(), windows, storeId, to);
+        List<BigDecimal> recent = tail(p.series(), HISTORY_DAYS);
+        FreshProfile fresh = freshProfile(freshFacts.get(p.variantId()), recent);
+        int window = fresh.fresh() ? FRESH_HISTORY_DAYS : HISTORY_DAYS;
+        List<BigDecimal> series = tail(p.series(), window);
+        boolean[] promotedHistory = tail(p.promotedHistory(), window);
+        boolean[] promotedAhead =
+            Promotions.days(windows, p.variantId(), storeId, to.plusDays(1), to.plusDays(horizon));
+        BigDecimal itemUplift = Forecasting.upliftOf(p.facts());
+        Shape shape;
+        if (itemUplift != null) {
+          shape = new Shape(p.indices(), itemUplift, Shape.UPLIFT_ITEM);
+        } else if (storeUplift != null) {
+          shape = new Shape(p.indices(), storeUplift, Shape.UPLIFT_STORE);
+        } else {
+          shape = new Shape(p.indices(), null, null);
+        }
+        Forecast f =
+            Forecasting.forecast(
+                series, to, horizon, shape, new Calendar(promotedHistory, promotedAhead));
+        forecasts.add(
+            new DemandForecast(
+                Ids.newId(),
+                tenantId,
+                storeId,
+                p.variantId(),
+                to.minusDays(series.size() - 1L),
+                to,
+                horizon,
+                f,
+                now,
+                fresh));
+        byMethod.merge(f.method(), 1, Integer::sum);
+        if (f.accuracy().mape() != null) {
+          mapeSum = mapeSum.add(f.accuracy().mape());
+          mapeCount++;
+        }
+        if (fresh.fresh()) freshCount++;
+        if (!f.seasonalIndices().isEmpty()) seasonalCount++;
+        if (f.promotedAheadDays() > 0) promotedCount++;
       }
-      if (p.fresh().fresh()) freshCount++;
-      if (!f.seasonalIndices().isEmpty()) seasonalCount++;
-      if (f.promotedAheadDays() > 0) promotedCount++;
+      repo.upsertAll(forecasts);
+      written += forecasts.size();
+      after = ids.get(ids.size() - 1);
+      if (ids.size() < page) {
+        break;
+      }
     }
-    repo.upsertAll(forecasts);
     BigDecimal meanMape =
         mapeCount == 0
             ? null
             : mapeSum.divide(BigDecimal.valueOf(mapeCount), 2, RoundingMode.HALF_UP);
     return new RunResult(
         storeId,
-        forecasts.size(),
+        written,
         byMethod,
         meanMape,
         horizon,

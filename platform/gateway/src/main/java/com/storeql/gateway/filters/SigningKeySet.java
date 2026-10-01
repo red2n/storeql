@@ -1,6 +1,7 @@
 package com.storeql.gateway.filters;
 
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.gateway.ControlPlane;
 import io.helidon.webclient.api.WebClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -17,7 +18,10 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -35,8 +39,11 @@ public class SigningKeySet {
   private static final String JWKS_PATH = "/auth/.well-known/jwks.json";
   private static final Duration MIN_REFETCH = Duration.ofSeconds(5);
 
+  /** The pause between two reads; a field so a test can shorten it. */
+  Duration minRefetch = MIN_REFETCH;
+
   @Inject ServiceRegistry registry;
-  @Inject WebClient webClient;
+  @Inject @ControlPlane WebClient webClient;
 
   @Inject
   @ConfigProperty(name = "storeql.clients.iam-svc.url")
@@ -46,7 +53,18 @@ public class SigningKeySet {
   @ConfigProperty(name = "storeql.gateway.jwks.refresh-seconds", defaultValue = "300")
   long refreshSeconds;
 
-  private final Map<String, RSAPublicKey> keys = new ConcurrentHashMap<>();
+  /**
+   * How long a caller that finds no key set at all waits for the refresh already running. Once a
+   * set has been read, nobody waits: they use the last good one while one caller refreshes.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.jwks.first-load-wait-ms", defaultValue = "3000")
+  long firstLoadWaitMs = 3000;
+
+  /** The last good key set, replaced whole (never edited) so readers see one consistent set. */
+  private volatile Map<String, RSAPublicKey> keys = Map.of();
+
+  private final ReentrantLock refreshLock = new ReentrantLock();
   private volatile Instant fetchedAt = Instant.EPOCH;
   private volatile Instant attemptedAt = Instant.EPOCH;
 
@@ -60,16 +78,54 @@ public class SigningKeySet {
     if (kid == null || kid.isBlank()) return Optional.empty();
     Instant now = Instant.now();
     boolean stale = Duration.between(fetchedAt, now).getSeconds() > refreshSeconds;
+    // Before any set has been read, a caller arriving while the first read is under way must wait
+    // for it (refresh bounds the wait), not find the pause since that read began and go without.
+    boolean firstReadRunning = !loaded() && refreshLock.isLocked();
     if ((stale || !keys.containsKey(kid))
-        && Duration.between(attemptedAt, now).compareTo(MIN_REFETCH) > 0) {
+        && (firstReadRunning || Duration.between(attemptedAt, now).compareTo(minRefetch) > 0)) {
       refresh(now);
     }
     return Optional.ofNullable(keys.get(kid));
   }
 
-  private synchronized void refresh(Instant now) {
-    if (Duration.between(attemptedAt, now).compareTo(MIN_REFETCH) <= 0) return;
-    attemptedAt = now;
+  /** The whole key set held now (immutable). */
+  Map<String, RSAPublicKey> snapshot() {
+    return keys;
+  }
+
+  /** The ids of the keys held now: what a verifier cache may keep, and nothing more. */
+  public Set<String> kids() {
+    return keys.keySet();
+  }
+
+  /**
+   * One caller reads the key set; the others do not queue behind it, they use the last good set (a
+   * virtual thread parked on a monitor across network calls is how a slow iam-svc would stall every
+   * request). Only while no set has ever been read does a caller wait, a bounded time, for the one
+   * already reading.
+   */
+  private void refresh(Instant now) {
+    boolean locked;
+    try {
+      locked =
+          loaded()
+              ? refreshLock.tryLock()
+              : refreshLock.tryLock(firstLoadWaitMs, TimeUnit.MILLISECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return;
+    }
+    if (!locked) return;
+    try {
+      if (Duration.between(attemptedAt, now).compareTo(minRefetch) <= 0) return;
+      attemptedAt = now;
+      read(now);
+    } finally {
+      refreshLock.unlock();
+    }
+  }
+
+  private void read(Instant now) {
     Optional<String> base =
         iamUrl
             .filter(u -> !u.isBlank())
@@ -85,8 +141,7 @@ public class SigningKeySet {
       }
       Map<String, RSAPublicKey> fresh = parse(res.as(String.class));
       if (fresh.isEmpty()) return;
-      keys.keySet().retainAll(fresh.keySet());
-      keys.putAll(fresh);
+      keys = Map.copyOf(fresh);
       fetchedAt = now;
     } catch (RuntimeException e) {
       LOG.log(System.Logger.Level.WARNING, "key set could not be read: " + e.getMessage());
@@ -118,7 +173,7 @@ public class SigningKeySet {
   /** For tests: a key set already in hand. */
   static SigningKeySet of(Map<String, RSAPublicKey> known) {
     SigningKeySet set = new SigningKeySet();
-    set.keys.putAll(known);
+    set.keys = Map.copyOf(known);
     set.fetchedAt = Instant.now();
     set.attemptedAt = Instant.now();
     set.refreshSeconds = 3600;

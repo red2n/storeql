@@ -1,10 +1,10 @@
 package com.storeql.notification.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.service.Notifier;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
@@ -28,7 +28,7 @@ class UserRegisteredHandler {
     UUID tenantId;
     UUID userId;
     String email;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventId = Ids.parse(obj.getString("eventId"));
       email = obj.getString("email", null);
