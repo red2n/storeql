@@ -116,6 +116,15 @@ class EscPosReceipt {
 
     _fiscal(b, d);
 
+    // The gift cards this sale issued: the code is the customer's to keep.
+    if (d.soldCards.isNotEmpty) {
+      _divider(b, '-');
+      for (final c in d.soldCards) {
+        _row(b, c.topUp ? 'Gift card top-up' : 'Gift card', _money(d.currency, c.amount));
+        _line(b, c.code ?? 'Code not available');
+      }
+    }
+
     // The receipt number as a scannable code, so the Returns screen finds the sale.
     final code = d.receiptCode;
     if (code != null) {

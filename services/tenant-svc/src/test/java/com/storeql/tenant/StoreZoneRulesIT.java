@@ -330,6 +330,96 @@ class StoreZoneRulesIT {
     assertThat(list.body(), not(containsString("Planted")));
   }
 
+  private List<String> zoneEvents(Biz b, String zoneId) throws Exception {
+    List<String> out = new ArrayList<>();
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "SELECT payload FROM tenant.outbox WHERE tenant_id = ?::uuid"
+                    + " AND event_type = 'ZoneStatusChanged' AND aggregate_id = ?::uuid"
+                    + " ORDER BY created_at, id")) {
+      ps.setString(1, b.tenant());
+      ps.setString(2, zoneId);
+      var rs = ps.executeQuery();
+      while (rs.next()) out.add(rs.getString(1));
+    }
+    return out;
+  }
+
+  private int zoneAudits(Biz b, String zoneId) throws Exception {
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "SELECT count(*) FROM tenant.tenant_admin_audit WHERE tenant_id = ?::uuid"
+                    + " AND type = 'ZONE_STATUS_CHANGED' AND subject_id = ?::uuid")) {
+      ps.setString(1, b.tenant());
+      ps.setString(2, zoneId);
+      var rs = ps.executeQuery();
+      rs.next();
+      return rs.getInt(1);
+    }
+  }
+
+  @Test
+  @DisplayName(
+      "workforce-rules slice 9: a zone's status is ACTIVE, OUT_OF_SERVICE or RETIRED; a change is announced once with old and new, audited, and nothing else moves")
+  void zoneStatusIsAVocabularyAndAnnounced() throws Exception {
+    Biz b = AdminRig.biz(target, "Zone Status Ltd", "DE", "EUR");
+    Biz rival = AdminRig.biz(target, "Zone Status Rival", "DE", "EUR");
+    String zones = "/admin/stores/" + b.store() + "/zones";
+    String zone =
+        call(target, "POST", zones, "{\"name\":\"Cold\",\"code\":\"C9\"}", b.owner())
+            .data()
+            .getString("id");
+    String path = zones + "/" + zone + "/status";
+    assertThat(zoneEvents(b, zone), hasSize(0));
+
+    Answer bogus = call(target, "PATCH", path, "{\"status\":\"INACTIVE\"}", b.manager());
+    assertThat(bogus.text(), bogus.status(), is(400));
+    assertThat(bogus.code(), is("ZONE_STATUS_INVALID"));
+    assertThat(zoneEvents(b, zone), hasSize(0));
+
+    Answer out = call(target, "PATCH", path, "{\"status\":\"out_of_service\"}", b.manager());
+    assertThat(out.text(), out.status(), is(200));
+    assertThat(out.data().getString("status"), is("OUT_OF_SERVICE"));
+    List<String> events = zoneEvents(b, zone);
+    assertThat(events, hasSize(1));
+    assertThat(events.get(0), containsString("\"eventId\":\""));
+    assertThat(events.get(0), containsString("\"storeId\":\"" + b.store() + "\""));
+    assertThat(events.get(0), containsString("\"zoneId\":\"" + zone + "\""));
+    assertThat(events.get(0), containsString("\"oldStatus\":\"ACTIVE\""));
+    assertThat(events.get(0), containsString("\"newStatus\":\"OUT_OF_SERVICE\""));
+    assertThat(zoneAudits(b, zone), is(1));
+
+    // The same status again changes nothing and says nothing.
+    assertThat(
+        call(target, "PATCH", path, "{\"status\":\"OUT_OF_SERVICE\"}", b.manager()).status(),
+        is(200));
+    assertThat(zoneEvents(b, zone), hasSize(1));
+    assertThat(zoneAudits(b, zone), is(1));
+
+    assertThat(
+        call(target, "PATCH", path, "{\"status\":\"RETIRED\"}", b.manager()).status(), is(200));
+    List<String> after = zoneEvents(b, zone);
+    assertThat(after, hasSize(2));
+    assertThat(after.get(1), containsString("\"oldStatus\":\"OUT_OF_SERVICE\""));
+    assertThat(after.get(1), containsString("\"newStatus\":\"RETIRED\""));
+
+    // Another business, and a manager held to another store, change nothing and announce nothing.
+    String path2 = "/admin/stores/" + b.store() + "/zones/" + zone + "/status";
+    for (Who caller : new Who[] {rival.owner(), rival.manager(), rival.manager(b.store())}) {
+      assertThat(call(target, "PATCH", path2, "{\"status\":\"ACTIVE\"}", caller).status(), is(404));
+    }
+    assertThat(
+        call(target, "PATCH", path2, "{\"status\":\"ACTIVE\"}", b.manager(Ids.newId().toString()))
+            .status(),
+        is(403));
+    assertThat(zoneEvents(b, zone), hasSize(2));
+    assertThat(
+        call(target, "GET", zones + "/" + zone, null, b.owner()).data().getString("status"),
+        is("RETIRED"));
+  }
+
   @Test
   @DisplayName(
       "STF-104, STF-110: a store nobody has is a 404 and none named is a 400, and nothing is assigned or removed")

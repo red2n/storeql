@@ -964,6 +964,26 @@ public final class Domain {
     public static final String STATUS_CANCELLED = "CANCELLED";
   }
 
+  /**
+   * A gift card sold as a line of an order. The card is issued (or topped up, when {@code
+   * targetCode} names one) when the order is paid, for {@code amount}; {@code giftCardId} is null
+   * until then and written once.
+   */
+  public record GiftCardLoadLine(
+      UUID id,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal amount,
+      String targetCode,
+      UUID giftCardId) {}
+
+  /**
+   * A gift-card line of an order as staff read it: pending (no card) until the sale is paid, then
+   * the card's id and code, whether it was a new card or a top-up, and when it was loaded.
+   */
+  public record GiftCardLoadView(
+      UUID id, BigDecimal amount, UUID giftCardId, String code, String kind, Instant loadedAt) {}
+
   /** Append-only debit/credit ledger for a gift card. */
   public record GiftCardTransaction(
       UUID id,

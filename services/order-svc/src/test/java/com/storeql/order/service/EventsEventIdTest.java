@@ -189,6 +189,13 @@ class EventsEventIdTest {
         Events.orderVoided(
             TENANT, ORDER, STORE, CUSTOMER, List.of(new RestockLine(VARIANT, BigDecimal.ONE))));
     carriesEventId("giftCardLoaded", Events.giftCardLoaded(card, tx, "CASH"));
+    carriesEventId(
+        "giftCardLoadedByHand", Events.giftCardLoadedByHand(card, tx, "GOODWILL", "a note"));
+    carriesEventId("giftCardLoadedBySale", Events.giftCardLoadedBySale(card, tx, "CASH"));
+    carriesEventId(
+        "orderPriceOverdue",
+        Events.orderPriceOverdue(
+            TENANT, ORDER, STORE, java.time.Instant.now(), new BigDecimal("12.00")));
     carriesEventId("giftCardLoadedByReturn", Events.giftCardLoadedByReturn(card, tx, RETURN));
     carriesEventId("giftCardRedeemed", Events.giftCardRedeemed(card, tx, order()));
     carriesEventId(

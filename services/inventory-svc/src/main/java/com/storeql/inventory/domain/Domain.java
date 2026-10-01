@@ -802,7 +802,11 @@ public final class Domain {
       String notes,
       String status,
       Instant createdAt,
-      Instant pickedAt) {
+      Instant pickedAt,
+      /** tenant-svc's zone the stock is drawn from, or null for anywhere in the store. */
+      UUID fromZoneId,
+      /** tenant-svc's zone the drawn stock is put down in, or null for none named. */
+      UUID toZoneId) {
     public static final String DRAFT = "DRAFT";
     public static final String OPEN = "OPEN";
     public static final String COMPLETED = "COMPLETED";

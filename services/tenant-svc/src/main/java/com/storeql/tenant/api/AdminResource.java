@@ -297,7 +297,8 @@ public class AdminResource {
   /**
    * Changes a zone's status.
    *
-   * <p>Publishes nothing: no other service projects zone status.
+   * <p>The vocabulary is ACTIVE, OUT_OF_SERVICE and RETIRED (400 {@code ZONE_STATUS_INVALID}
+   * otherwise). A change publishes {@code ZoneStatusChanged}, which inventory-svc reads.
    *
    * @param storeId the store in the path; the lookup is tenant-scoped and does not match on it
    * @param zoneId the zone whose status to change
@@ -307,6 +308,7 @@ public class AdminResource {
    *     tenant
    */
   @Operation(summary = "Change a zone's status", description = "Updates a zone's status.")
+  @APIResponse(responseCode = "400", description = "Not ACTIVE, OUT_OF_SERVICE or RETIRED")
   @APIResponse(responseCode = "404", description = "No such zone")
   @PATCH
   @Path("/stores/{storeId}/zones/{zoneId}/status")
@@ -317,7 +319,7 @@ public class AdminResource {
     Validations.validate(req);
     requireZoneHeld(storeId, zoneId);
     return ApiResponse.ok(
-        Mappers.toZone(service.patchZoneStatus(ctx.requireTenantId(), zoneId, req)));
+        Mappers.toZone(service.patchZoneStatus(ctx.requireTenantId(), zoneId, req, ctx.userId())));
   }
 
   // ── staff ────────────────────────────────────────────────────────────────

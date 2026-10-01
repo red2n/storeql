@@ -92,6 +92,11 @@ class OrderIT {
     if (path.endsWith("/returns") || path.endsWith("/void") || path.endsWith("/redeem")) {
       req = req.header("Idempotency-Key", Ids.newId().toString());
     }
+    // A manager's hand issue or reload is retryable too, and is kept with who gave it.
+    if (path.startsWith("/gift-cards") && !path.endsWith("/redeem")) {
+      req = req.header("Idempotency-Key", Ids.newId().toString());
+      req = req.header("X-User-Id", Ids.newId().toString());
+    }
     return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
@@ -909,7 +914,9 @@ class OrderIT {
     Response r1 =
         post(
             "/gift-cards",
-            "{\"storeId\":\"" + S + "\",\"amount\":50.00,\"currency\":\"USD\",\"paidBy\":\"CASH\"}",
+            "{\"storeId\":\""
+                + S
+                + "\",\"amount\":50.00,\"currency\":\"USD\",\"reason\":\"GOODWILL\"}",
             T);
     assertThat(r1.getStatus(), is(201));
     String gcBody = r1.readEntity(String.class);
@@ -922,7 +929,7 @@ class OrderIT {
 
     // reload
     Response r2 =
-        post("/gift-cards/" + code + "/reload", "{\"amount\":20.00,\"paidBy\":\"CARD\"}", T);
+        post("/gift-cards/" + code + "/reload", "{\"amount\":20.00,\"reason\":\"GOODWILL\"}", T);
     assertThat(r2.getStatus(), is(200));
     assertThat(r2.readEntity(String.class), containsString("70"));
 
@@ -976,7 +983,10 @@ class OrderIT {
   @Test
   void giftCardRedeemIsIdempotentPerOrder() {
     String gcBody =
-        post("/gift-cards", "{\"storeId\":\"" + S + "\",\"amount\":50.00,\"paidBy\":\"CASH\"}", T)
+        post(
+                "/gift-cards",
+                "{\"storeId\":\"" + S + "\",\"amount\":50.00,\"reason\":\"GOODWILL\"}",
+                T)
             .readEntity(String.class);
     String code = extractCode(gcBody);
 
@@ -1032,52 +1042,61 @@ class OrderIT {
   }
 
   /**
-   * A gift card sold is a liability against the money taken (17.11): issuing and reloading say how
-   * the value was paid for, refuse what is not a tender, and announce the load once, with the
-   * write.
+   * Value a manager hands out by hand has no sale behind it: a reason from the list is required,
+   * money taken is refused (it is a sale), and the load is announced once, with the write, as given
+   * away and saying why.
    */
   @Test
-  void aGiftCardLoadSaysHowItWasPaidForAndIsAnnouncedOnce() {
+  void aHandLoadSaysWhyAndIsAnnouncedOnce() {
     String body = "{\"storeId\":\"" + S + "\",\"amount\":40.00";
-    assertThat(post("/gift-cards", body + "}", T).getStatus(), is(400));
-    for (String refused : new String[] {"GIFT_CARD", "VOUCHER", "STORE_CREDIT", "IOU", " "}) {
-      assertThat(
-          refused,
-          post("/gift-cards", body + ",\"paidBy\":\"" + refused + "\"}", T).getStatus(),
-          is(400));
+    Response noReason = post("/gift-cards", body + "}", T);
+    assertThat(noReason.getStatus(), is(400));
+    assertThat(noReason.readEntity(String.class), containsString("GIFT_CARD_REASON_REQUIRED"));
+    for (String refused : new String[] {"CASH", "CARD", "VOUCHER", "STORE_CREDIT"}) {
+      Response r =
+          post("/gift-cards", body + ",\"reason\":\"GOODWILL\",\"paidBy\":\"" + refused + "\"}", T);
+      assertThat(refused, r.getStatus(), is(409));
+      assertThat(r.readEntity(String.class), containsString("GIFT_CARD_NEEDS_SALE"));
     }
-    assertThat(
-        post("/gift-cards", body + ",\"paidBy\":\"VOUCHER\"}", T).readEntity(String.class),
-        containsString("GIFT_CARD_PAID_BY_INVALID"));
 
-    String issued = post("/gift-cards", body + ",\"paidBy\":\"card\"}", T).readEntity(String.class);
+    String issued =
+        post("/gift-cards", body + ",\"reason\":\"promotion\",\"note\":\"launch week\"}", T)
+            .readEntity(String.class);
     UUID cardId = Ids.parse(extractId(issued));
     String code = extractCode(issued);
     assertThat(outboxCount(cardId, "GiftCardLoaded"), is(1L));
     String issue = outboxPayload(cardId, "GiftCardLoaded");
     assertThat(issue, containsString("\"kind\":\"ISSUE\""));
-    assertThat(issue, containsString("\"paidBy\":\"CARD\""));
+    assertThat(issue, containsString("\"paidBy\":\"PROMOTIONAL\""));
+    assertThat(issue, containsString("\"source\":\"PROMOTION\""));
+    assertThat(issue, containsString("\"note\":\"launch week\""));
     assertThat(issue, containsString("\"amount\":40"));
 
     assertThat(
         post("/gift-cards/" + code + "/reload", "{\"amount\":10.00}", T).getStatus(), is(400));
     assertThat(
-        post("/gift-cards/" + code + "/reload", "{\"amount\":10.00,\"paidBy\":\"STORE_CREDIT\"}", T)
+        post(
+                "/gift-cards/" + code + "/reload",
+                "{\"amount\":10.00,\"reason\":\"GOODWILL\",\"paidBy\":\"CASH\"}",
+                T)
             .getStatus(),
-        is(400));
+        is(409));
     assertThat(outboxCount(cardId, "GiftCardLoaded"), is(1L));
     assertThat(
-        post("/gift-cards/" + code + "/reload", "{\"amount\":10.00,\"paidBy\":\"PROMOTIONAL\"}", T)
+        post("/gift-cards/" + code + "/reload", "{\"amount\":10.00,\"reason\":\"COMPENSATION\"}", T)
             .getStatus(),
         is(200));
     assertThat(outboxCount(cardId, "GiftCardLoaded"), is(2L));
     assertThat(
         outboxPayloads(cardId, "GiftCardLoaded").stream()
             .anyMatch(
-                p -> p.contains("\"kind\":\"RELOAD\"") && p.contains("\"paidBy\":\"PROMOTIONAL\"")),
+                p ->
+                    p.contains("\"kind\":\"RELOAD\"")
+                        && p.contains("\"paidBy\":\"PROMOTIONAL\"")
+                        && p.contains("\"source\":\"COMPENSATION\"")),
         is(true));
     assertThat(
-        post("/gift-cards/NOPE-NOPE-NOPE/reload", "{\"amount\":10.00,\"paidBy\":\"CASH\"}", T)
+        post("/gift-cards/NOPE-NOPE-NOPE/reload", "{\"amount\":10.00,\"reason\":\"GOODWILL\"}", T)
             .getStatus(),
         is(404));
   }
@@ -1951,7 +1970,7 @@ class OrderIT {
     Response giftCard =
         post(
             "/gift-cards",
-            "{\"storeId\":\"" + S + "\",\"amount\":25.00,\"paidBy\":\"CASH\"}",
+            "{\"storeId\":\"" + S + "\",\"amount\":25.00,\"reason\":\"GOODWILL\"}",
             tenant);
     assertThat(giftCard.getStatus(), is(201));
     assertThat(giftCard.readEntity(String.class), containsString("\"currency\":\"GBP\""));

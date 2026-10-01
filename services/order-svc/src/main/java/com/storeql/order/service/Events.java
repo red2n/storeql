@@ -90,7 +90,26 @@ public final class Events {
    * taken, or the value given away, against the gift card liability, once per card transaction.
    */
   static OutboxRow giftCardLoaded(GiftCard gc, GiftCardTransaction tx, String paidBy) {
-    return giftCardLoaded(gc, tx, paidBy, null);
+    return giftCardLoaded(gc, tx, paidBy, null, null, null);
+  }
+
+  /**
+   * Value a manager handed out by hand, with no sale behind it: {@code source} says why (GOODWILL,
+   * PROMOTION, COMPENSATION or MIGRATION) and {@code note} is what they wrote. paidBy is
+   * PROMOTIONAL, so purchase-svc books it as value given away.
+   */
+  static OutboxRow giftCardLoadedByHand(
+      GiftCard gc, GiftCardTransaction tx, String source, String note) {
+    return giftCardLoaded(gc, tx, "PROMOTIONAL", null, source, note);
+  }
+
+  /**
+   * Value paid for with a sale: the card was loaded when the order was paid, for what was paid.
+   * {@code paidBy} is the tender taken (empty when the capture did not say); the sale is the
+   * transaction's order.
+   */
+  static OutboxRow giftCardLoadedBySale(GiftCard gc, GiftCardTransaction tx, String paidBy) {
+    return giftCardLoaded(gc, tx, paidBy == null ? "" : paidBy, null, "SALE", null);
   }
 
   /**
@@ -99,11 +118,16 @@ public final class Events {
    * refund is booked from payment-svc's {@code PaymentRefunded}.
    */
   static OutboxRow giftCardLoadedByReturn(GiftCard gc, GiftCardTransaction tx, UUID returnId) {
-    return giftCardLoaded(gc, tx, "RETURN", returnId);
+    return giftCardLoaded(gc, tx, "RETURN", returnId, "RETURN", null);
   }
 
   private static OutboxRow giftCardLoaded(
-      GiftCard gc, GiftCardTransaction tx, String paidBy, UUID returnId) {
+      GiftCard gc,
+      GiftCardTransaction tx,
+      String paidBy,
+      UUID returnId,
+      String source,
+      String note) {
     JsonObjectBuilder b =
         Json.createObjectBuilder()
             .add("eventId", Ids.newId().toString())
@@ -117,6 +141,11 @@ public final class Events {
             .add("paidBy", paidBy);
     nullable(b, "storeId", gc.storeId() == null ? null : gc.storeId().toString());
     if (returnId != null) b.add("returnId", returnId.toString());
+    // Where the value came from, added last and optional: consumers that do not read it are
+    // unaffected. A note is what a manager wrote for a hand load.
+    if (tx.orderId() != null) b.add("orderId", tx.orderId().toString());
+    if (source != null) b.add("source", source);
+    if (note != null && !note.isBlank()) b.add("note", note);
     return new OutboxRow(
         "GiftCardLoaded", TOPIC_GIFT_CARD_LOADED, gc.tenantId(), gc.id(), b.build().toString());
   }
@@ -592,6 +621,30 @@ public final class Events {
             "{\"eventId\":\"%s\",\"eventType\":\"OrderCancelled\",\"tenantId\":\"%s\","
                 + "\"orderId\":\"%s\",\"reason\":\"%s\"%s}",
             Ids.newId(), tenantId, orderId, esc(reason), kind(channel, fulfilmentType)));
+  }
+
+  /**
+   * An order has waited too long for a price (unit-pricing slice 5). Announced once, at the
+   * business's first limit. No consumer yet: notification-svc and reporting-svc take it with the
+   * alerts work.
+   */
+  static OutboxRow orderPriceOverdue(
+      UUID tenantId, UUID orderId, UUID storeId, Instant awaitingSince, BigDecimal total) {
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventType", "OrderPriceOverdue")
+            .add("tenantId", tenantId.toString())
+            .add("orderId", orderId.toString())
+            .add("storeId", storeId.toString())
+            .add("awaitingSince", awaitingSince.toString());
+    if (total != null && total.signum() > 0) b.add("total", total);
+    b.add("eventId", Ids.newId().toString());
+    return new OutboxRow(
+        "OrderPriceOverdue",
+        "storeql.order.price-overdue",
+        tenantId,
+        orderId,
+        b.build().toString());
   }
 
   /** The {@code channel} and {@code fulfilmentType} members, when known; nothing when not. */

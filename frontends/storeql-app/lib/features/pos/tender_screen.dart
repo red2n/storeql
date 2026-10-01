@@ -89,7 +89,8 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   double get _discount {
     // An exchange's new order is already priced by the server.
     if (ref.read(posExchangeSettlementProvider) != null) return 0;
-    final subtotal = ref.read(posCartProvider.notifier).total;
+    // Off the goods only: a gift card being sold is never discounted.
+    final subtotal = ref.read(posCartProvider.notifier).goodsTotal;
     return ref.read(posDiscountProvider).clamp(0, subtotal).toDouble();
   }
 
@@ -299,8 +300,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           'discountReason': ref.read(posDiscountReasonProvider).trim(),
         if (customer != null) 'customerId': customer.id,
         'contactPhone': customer != null ? '' : walkInPhone,
+        // Cards sold on this sale: issued when it is paid, for what was paid.
+        if (cart.any((l) => l.giftCard)) 'giftCardLoads': giftCardLoadsOf(cart),
         'items': [
-          for (final l in cart)
+          for (final l in productLines(cart))
             {
               'variantId': l.variantId,
               'qty': l.qty,
@@ -435,6 +438,12 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
       final fiscalStamp = await awaitFiscalReceipt(dio, orderId);
       final fiscalNumber = fiscalStamp?.fullNumber;
 
+      // The cards this sale issued, whose codes the customer takes away: asked
+      // once the payment has landed, since that is when they exist.
+      final soldCards = cart.any((l) => l.giftCard)
+          ? await fetchSoldGiftCards(dio, orderId)
+          : const <SoldGiftCard>[];
+
       // Capture everything needed for the receipt before clearing state.
       final receiptData = _buildReceiptData(
         orderId: orderId,
@@ -451,7 +460,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
         customerName: customer?.fullName.isNotEmpty == true
             ? customer!.fullName
             : customer?.email,
-      );
+      ).withSoldCards(soldCards);
 
       final change = _change;
       final email = customer?.email;
@@ -533,6 +542,18 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
         _snack(
             returnRefusalLabel(code) ??
                 friendlyError(e, fallback: 'Sale failed.'),
+            error: true);
+        return;
+      }
+      // A gift card is not issued offline. If the order never reached the server
+      // nothing has been sent: the sale is kept as it is rather than queued, so
+      // the customer is not handed a receipt with no card behind it.
+      if (sale.orderId == null && cart.any((l) => l.giftCard)) {
+        if (!mounted) return;
+        setState(() => _processing = false);
+        _snack(
+            'A gift card cannot be sold while the till is offline. Nothing was '
+            'sent: take the payment back, or try again once the network is back.',
             error: true);
         return;
       }
@@ -636,6 +657,16 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
               textAlign: TextAlign.center,
               style: TextStyle(color: Theme.of(ctx).colorScheme.onSurfaceVariant),
             ),
+            if (receiptData.items.any((l) => l.giftCard)) ...[
+              const SizedBox(height: 8),
+              Text(
+                'The gift card is issued when this sale is sent. Its code is not '
+                'available until then.',
+                key: const Key('offline-gift-card-note'),
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Theme.of(ctx).colorScheme.onSurfaceVariant),
+              ),
+            ],
             const SizedBox(height: 16),
             // No "Email receipt": that needs the server this sale is waiting for.
             Wrap(
@@ -836,6 +867,29 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
                   fontSize: 18,
                 ),
               ),
+            ],
+            // The card's code, once: it is the customer's to keep.
+            for (final c in receiptData.soldCards) ...[
+              const SizedBox(height: 12),
+              Text(
+                '${c.topUp ? 'Gift card top-up' : 'Gift card'} ${AppFormat.money(c.amount, currencyCode: currency)}',
+                style: Theme.of(ctx).textTheme.labelLarge,
+              ),
+              c.code != null
+                  ? SelectableText(
+                      c.code!,
+                      key: const Key('sold-gift-card-code'),
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    )
+                  : Text(
+                      'The card is not issued yet, so it has no code to show. It is issued once the payment lands.',
+                      key: const Key('sold-gift-card-no-code'),
+                      style: TextStyle(color: Theme.of(ctx).colorScheme.onSurfaceVariant),
+                    ),
             ],
             const SizedBox(height: 16),
             Wrap(

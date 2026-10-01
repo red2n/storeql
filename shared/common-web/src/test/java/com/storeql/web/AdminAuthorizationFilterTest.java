@@ -304,6 +304,18 @@ class AdminAuthorizationFilterTest {
   }
 
   @Test
+  void aPersonsOwnSessionsAreTheirsToListAndEnd() throws Exception {
+    // iam-svc lists and ends only the sessions of the login in the token.
+    assertNotAborted(invoke("GET", "/auth/sessions"));
+    assertNotAborted(invoke("DELETE", "/auth/sessions/01a09509-72ec-72e9-9f08-94a93df26a36"));
+    assertAborted(invoke("DELETE", "/auth/sessions/mine"), 403);
+    assertAborted(
+        invoke("DELETE", "/auth/sessions/01a09509-72ec-72e9-9f08-94a93df26a36/other"), 403);
+    // Who is signed in at which till stays management's.
+    assertAborted(invoke("GET", "/auth/pos/sessions"), 403);
+  }
+
+  @Test
   void aShopperCanOpenAndPollTheirOwnPaymentIntent() throws Exception {
     assertNotAborted(invoke("POST", "/payments/intents"));
     assertNotAborted(invoke("GET", "/payments/intents/abc"));

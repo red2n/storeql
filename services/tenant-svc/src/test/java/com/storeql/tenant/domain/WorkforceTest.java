@@ -133,80 +133,34 @@ class WorkforceTest {
   }
 
   @Test
-  @DisplayName("A rota that leaves too little rest says so, and is not refused")
-  void restIsFlaggedNotRefused() {
-    // Eight hours between a late shift and an early one: the directive expects eleven, and an
-    // employer
-    // with a derogation is entitled to roster it — so it is said, not stopped.
-    var concerns =
-        Workforce.concerns(
-            List.of(
-                shift("2026-09-14T16:00:00Z", "2026-09-14T22:00:00Z"),
-                shift("2026-09-15T06:00:00Z", "2026-09-15T12:00:00Z")));
-    assertEquals(1, concerns.size(), concerns.toString());
-    assertEquals(Workforce.REST_SHORT, concerns.get(0).code());
-    assertTrue(concerns.get(0).detail().contains("8.0"), concerns.get(0).detail());
-    assertTrue(concerns.get(0).detail().contains("art. 3"));
-
-    // A long shift raises its own concern as well, and both are said: they are different problems
-    // with different remedies — one wants a break in the day, the other a later start tomorrow.
-    var both =
-        Workforce.concerns(
-            List.of(
-                shift("2026-09-14T14:00:00Z", "2026-09-14T22:00:00Z"),
-                shift("2026-09-15T06:00:00Z", "2026-09-15T12:00:00Z")));
-    assertEquals(2, both.size(), both.toString());
-  }
-
-  @Test
-  @DisplayName("A long shift with no break expected is flagged; a six-hour one is not")
-  void breakAfterSix() {
-    var longShift =
-        Workforce.concerns(List.of(shift("2026-09-14T08:00:00Z", "2026-09-14T17:00:00Z")));
-    assertEquals(1, longShift.size());
-    assertEquals(Workforce.NO_BREAK, longShift.get(0).code());
-
-    var exactlySix =
-        Workforce.concerns(List.of(shift("2026-09-14T08:00:00Z", "2026-09-14T14:00:00Z")));
-    assertTrue(exactlySix.isEmpty(), "six hours is not yet more than six");
-  }
-
-  @Test
-  @DisplayName("Overlapping shifts are a mistake, and are reported as one")
-  void overlapsFirst() {
-    var concerns =
-        Workforce.concerns(
-            List.of(
-                shift("2026-09-14T08:00:00Z", "2026-09-14T14:00:00Z"),
-                shift("2026-09-14T13:00:00Z", "2026-09-14T18:00:00Z")));
+  @DisplayName(
+      "A correction raises paid minutes only when it lengthens the hours net of unpaid breaks")
+  void raisesPaidMinutes() {
+    Entry before = entry("2026-09-14T08:00:00Z", "2026-09-14T16:00:00Z", List.of());
     assertTrue(
-        concerns.stream().anyMatch(c -> Workforce.OVERLAPS.equals(c.code())), concerns.toString());
-    // ...and the rest arithmetic is not also reported for them, because it would be nonsense.
-    assertFalse(concerns.stream().anyMatch(c -> Workforce.REST_SHORT.equals(c.code())));
-  }
-
-  @Test
-  @DisplayName("A cancelled shift is not rostered, so it raises nothing")
-  void cancelledShiftsAreNotRostered() {
-    Shift cancelled =
-        new Shift(
-            Ids.newId(),
-            T,
-            STORE,
-            WHO,
-            at("2026-09-14T22:00:00Z"),
-            at("2026-09-15T06:00:00Z"),
-            null,
-            Workforce.CANCELLED,
-            null,
-            "store closed",
-            at("2026-09-01T00:00:00Z"),
-            WHO,
-            at("2026-09-01T00:00:00Z"));
+        Workforce.raisesPaidMinutes(
+            before, entry("2026-09-14T08:00:00Z", "2026-09-14T17:00:00Z", List.of())));
+    assertFalse(
+        Workforce.raisesPaidMinutes(
+            before, entry("2026-09-14T08:00:00Z", "2026-09-14T15:00:00Z", List.of())),
+        "shorter hours are not a raise");
+    assertFalse(
+        Workforce.raisesPaidMinutes(
+            before, entry("2026-09-14T08:00:00Z", "2026-09-14T16:00:00Z", List.of())),
+        "the same hours are not a raise");
+    assertFalse(
+        Workforce.raisesPaidMinutes(
+            before,
+            entry(
+                "2026-09-14T07:00:00Z",
+                "2026-09-14T16:00:00Z",
+                List.of(rest("2026-09-14T12:00:00Z", "2026-09-14T13:00:00Z", false)))),
+        "an hour more on site less an unpaid hour is the same pay");
     assertTrue(
-        Workforce.concerns(
-                List.of(cancelled, shift("2026-09-15T08:00:00Z", "2026-09-15T12:00:00Z")))
-            .isEmpty());
+        Workforce.raisesPaidMinutes(
+            entry("2026-09-14T08:00:00Z", null, List.of()),
+            entry("2026-09-14T08:00:00Z", "2026-09-14T16:00:00Z", List.of())),
+        "closing an open entry raises hours from nothing");
   }
 
   @Test

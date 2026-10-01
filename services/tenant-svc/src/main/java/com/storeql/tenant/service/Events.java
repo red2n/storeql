@@ -89,6 +89,19 @@ final class Events {
   }
 
   /**
+   * A zone's status changed (workforce-rules slice 9): what inventory-svc reads to steer putaway
+   * and waves. Built by the shared contract, so producer and consumers cannot drift.
+   *
+   * <p>{@code storageClass} is added by receiving-controls slice 4 (a class change with the two
+   * statuses equal is also announced); it is absent until then.
+   */
+  static String zoneStatusChanged(
+      UUID tenantId, UUID storeId, UUID zoneId, String oldStatus, String newStatus) {
+    return com.storeql.events.contract.ZoneStatusChanged.payload(
+        tenantId, storeId, zoneId, oldStatus, newStatus, null);
+  }
+
+  /**
    * A staff role bound at a store. {@code role} is the tier iam-svc binds; {@code roleCode} and
    * {@code permissions} ride beside it when the assignment was made through a custom role (20.10).
    */

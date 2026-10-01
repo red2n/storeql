@@ -107,38 +107,25 @@ class OrderServiceTillPhoneTest {
   }
 
   private static PlaceOrderRequest sale(String channel, UUID customerId, String phone) {
-    return new PlaceOrderRequest(
-        SHOP.toString(),
-        customerId == null ? null : customerId.toString(),
-        channel,
-        "POS".equals(channel) ? "INSTORE" : "PICKUP",
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null, null, null)),
-        null,
-        null,
-        null,
-        "INR",
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        phone,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(SHOP.toString())
+        .customerId(customerId == null ? null : customerId.toString())
+        .channel(channel)
+        .fulfilmentType("POS".equals(channel) ? "INSTORE" : "PICKUP")
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    BigDecimal.ONE,
+                    BigDecimal.TEN,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .currency("INR")
+        .contactPhone(phone)
+        .build();
   }
 
   @Test

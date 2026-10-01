@@ -85,11 +85,15 @@ class GiftCardRedeemIT {
             rig()
                 .post(
                     "/gift-cards",
-                    "{\"storeId\":\"" + store + "\",\"amount\":" + amount + ",\"paidBy\":\"CASH\"}",
+                    "{\"storeId\":\""
+                        + store
+                        + "\",\"amount\":"
+                        + amount
+                        + ",\"reason\":\"GOODWILL\"}",
                     tenant,
                     "MANAGER",
                     MANAGER,
-                    null),
+                    Ids.newId().toString()),
             201);
     return new String[] {c.getString("id"), c.getString("code")};
   }

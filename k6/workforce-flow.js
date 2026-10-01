@@ -46,7 +46,9 @@ function at(daysFromNow, hour) {
 
 export function setup() {
   // sellingTenant gives a shop with a store and the two staff roles, so no fixture is built twice.
-  const shop = sellingTenant(`workforce-${uniq().slice(0, 6)}`);
+  // A business in Germany: the daily-rest and break rules asserted below are the EU working-time directive's,
+  // and they are applied only to a business they bind. One outside that regime is not flagged for them.
+  const shop = sellingTenant(`workforce-${uniq().slice(0, 6)}`, { country: 'DE', currency: 'EUR' });
   const rival = shop.rival;
   return { shop, rival };
 }

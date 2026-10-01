@@ -996,6 +996,41 @@ class JwtAuthFilterTest {
     org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Auth-Methods"));
   }
 
+  @Test
+  void theSessionAskingIsStampedFromTheTokenAndNeverFromTheClient() throws IOException {
+    String mine = "01a090ae-611e-700f-b645-a14095230b78";
+    headers.putSingle("X-Session-Id", "01a090ae-611e-700f-b645-a14095230b79");
+    String token =
+        com.auth0
+            .jwt
+            .JWT
+            .create()
+            .withKeyId(KID)
+            .withIssuer("storeql")
+            .withSubject("01a090ae-611e-700f-b645-a14095230b77")
+            .withClaim("tenant", "tenant-xyz")
+            .withArrayClaim("roles", new String[] {"CASHIER"})
+            .withClaim("sid", mine)
+            .sign(SIGNER);
+    protectedRead(token);
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+    org.junit.jupiter.api.Assertions.assertEquals(mine, headers.getFirst("X-Session-Id"));
+  }
+
+  @Test
+  void aTokenThatNamesNoSessionStampsNoneAndAForgedHeaderGoes() throws IOException {
+    headers.putSingle("X-Session-Id", "01a090ae-611e-700f-b645-a14095230b79");
+    protectedRead(staffToken(new String[] {"OWNER"}, null));
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Session-Id"));
+  }
+
   // ── Token signing (20.15; RFC 8725) ────────────────────────────────────────
 
   /** An owner's token for tenant-xyz under this key id (null for none), signed by this signer. */

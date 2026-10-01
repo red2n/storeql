@@ -90,38 +90,29 @@ class OrderServiceDarkStoreTest {
 
   private static PlaceOrderRequest request(String channel, String fulfilmentType) {
     boolean delivery = "DELIVERY".equals(fulfilmentType);
-    return new PlaceOrderRequest(
-        DARK.toString(),
-        null,
-        channel,
-        fulfilmentType,
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null, null, null)),
-        null,
-        null,
-        null,
-        "USD",
-        null,
-        null,
-        null,
-        null,
-        null,
-        delivery ? "1 Park Row" : null,
-        null,
-        delivery ? "Leeds" : null,
-        delivery ? "LS1 5AB" : null,
-        delivery ? "Sam Shopper" : null,
-        delivery ? "07700900123" : null,
-        "07700900123",
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(DARK.toString())
+        .channel(channel)
+        .fulfilmentType(fulfilmentType)
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    BigDecimal.ONE,
+                    BigDecimal.TEN,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .currency("USD")
+        .deliveryLine1(delivery ? "1 Park Row" : null)
+        .deliveryCity(delivery ? "Leeds" : null)
+        .deliveryPostalCode(delivery ? "LS1 5AB" : null)
+        .deliveryRecipientName(delivery ? "Sam Shopper" : null)
+        .deliveryRecipientPhone(delivery ? "07700900123" : null)
+        .contactPhone("07700900123")
+        .build();
   }
 
   @Test

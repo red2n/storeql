@@ -14,6 +14,7 @@ import {
   data,
   errorCode,
   expect,
+  issueGiftCardByHand,
   must,
   onboardTenant,
   priceVariants,
@@ -92,10 +93,11 @@ export default function ({ yen, pound, dinar, variantId, bare, bareVariant, bare
   truthy('[+] ...in yen', data(z).currency === 'JPY', data(z));
 
   // ── a gift card and a till sale: the tenant's own currency, and no other ─────
-  const card = call('POST', '/api/order-svc/gift-cards', { token: yen.owner.token, idem: true, body: { storeId: store.id, amount: 1000, paidBy: 'CASH' } });
+  // Given by hand, for a reason (a card a customer pays for is a line on a sale): no currency named.
+  const card = issueGiftCardByHand(yen.owner.token, store.id, 1000);
   expect(card, '[+] a gift card with no currency is issued', [200, 201]);
   truthy('[+] ...in yen', data(card).currency === 'JPY', data(card));
-  expect(call('POST', '/api/order-svc/gift-cards', { token: yen.owner.token, idem: true, body: { storeId: store.id, amount: 1000, currency: 'GBP', paidBy: 'CASH' } }), '[-] a gift card in pounds for a yen tenant is refused', 400, 'ORDER_CURRENCY_MISMATCH');
+  expect(issueGiftCardByHand(yen.owner.token, store.id, 1000, { extra: { currency: 'GBP' } }), '[-] a gift card in pounds for a yen tenant is refused', 400, 'ORDER_CURRENCY_MISMATCH');
   const sale = call('POST', '/api/order-svc/orders', { token: yen.owner.token, idem: true, body: { storeId: store.id, channel: 'POS', items: [{ variantId, qty: 1, unitPrice: 500 }] } });
   expect(sale, '[+] a till sale with no currency is placed', 201);
   truthy('[+] ...in yen', data(sale).currency === 'JPY', data(sale));

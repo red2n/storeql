@@ -93,7 +93,10 @@ public class DeferredRevenueService {
             new Source(load.tenantId(), load.transactionId(), load.storeId(), today()),
             load.kind(),
             load.paidBy(),
-            load.amount());
+            load.amount(),
+            load.source(),
+            load.orderId(),
+            load.note());
     return repo.recordGiftCardLoad(load, posting);
   }
 

@@ -44,6 +44,10 @@ class PosReceiptData {
   /// the totals, as the regime requires. Null under NONE or before issue.
   final FiscalStamp? fiscalStamp;
 
+  /// The gift cards this sale issued, with their codes as the server said them:
+  /// printed once, under the totals. Empty for a sale that sold none.
+  final List<SoldGiftCard> soldCards;
+
   const PosReceiptData({
     required this.orderId,
     required this.storeName,
@@ -62,7 +66,30 @@ class PosReceiptData {
     this.fiscalNumber,
     this.fiscalNumberNote,
     this.fiscalStamp,
+    this.soldCards = const [],
   });
+
+  /// The same receipt, now carrying the codes of the cards it sold.
+  PosReceiptData withSoldCards(List<SoldGiftCard> cards) => PosReceiptData(
+    orderId: orderId,
+    storeName: storeName,
+    storeAddress: storeAddress,
+    dateTime: dateTime,
+    cashierEmail: cashierEmail,
+    items: items,
+    subtotal: subtotal,
+    discount: discount,
+    deposit: deposit,
+    total: total,
+    currency: currency,
+    tenders: tenders,
+    change: change,
+    customerName: customerName,
+    fiscalNumber: fiscalNumber,
+    fiscalNumberNote: fiscalNumberNote,
+    fiscalStamp: fiscalStamp,
+    soldCards: cards,
+  );
 
   /// The same receipt, now carrying the number that was not issued in time.
   PosReceiptData withFiscalNumber(String number) => withFiscalStamp(
@@ -87,6 +114,7 @@ class PosReceiptData {
     customerName: customerName,
     fiscalNumber: stamp.fullNumber,
     fiscalStamp: stamp,
+    soldCards: soldCards,
   );
 
   String get shortId => shortRef(orderId).toUpperCase();
@@ -244,6 +272,16 @@ class PosReceiptData {
   </div>''';
     }
 
+    // The cards this sale issued: the code is the customer's to keep.
+    final cardBlock = StringBuffer();
+    for (final c in soldCards) {
+      cardBlock.write(
+          '<div class="info-row" data-gift-card="1"><span>${c.topUp ? 'Gift card top-up' : 'Gift card'} ${_esc(_fmt(c.amount))}:</span>'
+          '<span class="mono">${_esc(c.code ?? 'code not available')}</span></div>');
+    }
+    final giftCardBlock =
+        soldCards.isEmpty ? '' : '<hr class="divider">\n  $cardBlock';
+
     // A scannable code of the receipt number, so the Returns screen's scan
     // finds this sale.
     final code = receiptCode;
@@ -344,6 +382,7 @@ class PosReceiptData {
     $changeRow
   </table>
   $fiscalBlock
+  $giftCardBlock
   $codeBlock
 
   <hr class="divider-solid">

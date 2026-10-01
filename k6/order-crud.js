@@ -3,6 +3,7 @@
 // shopper's view — with the refusals around each.
 //
 //   k6/run.sh order-crud
+import { sleep } from 'k6';
 import http from 'k6/http';
 import {
   ALL_CHECKS_PASS,
@@ -10,12 +11,14 @@ import {
   call,
   data,
   expect,
+  issueGiftCardByHand,
   newKey,
   onboardTenant,
   poll,
   priceVariants,
   receive,
   register,
+  sellGiftCard,
   sellableVariant,
   staffUser,
   truthy,
@@ -273,24 +276,65 @@ export default function ({ tenant, rival, shopper, stranger }) {
   expect(call('POST', '/api/order-svc/pos/no-sale', { token: shopper.token, body: { storeId } }), '[-] a customer cannot open the drawer', 403);
 
   // ── gift cards ──────────────────────────────────────────────────────────────
-  const card = call('POST', '/api/order-svc/gift-cards', { token: t, body: { storeId, amount: 50, currency: 'GBP', paidBy: 'CARD' } });
-  expect(card, '[+] issue a £50 gift card', 201);
+  // Value handed out by hand is management's: a reason, an Idempotency-Key and no tender. A card a
+  // customer pays for is a gift-card line on a till sale, loaded when the sale is paid.
+  const giftCards = '/api/order-svc/gift-cards';
+  const issueKey = newKey('gift-issue');
+  const issued = () => issueGiftCardByHand(t, storeId, 50, { key: issueKey, extra: { currency: 'GBP', note: 'a late order' } });
+  const card = issued();
+  expect(card, '[+] the owner issues a £50 gift card by hand, for a reason', 201);
   const code = data(card).code;
-  expect(call('POST', '/api/order-svc/gift-cards', { token: t, body: { storeId, amount: 0, paidBy: 'CASH' } }), '[-] gift card: amount above zero', 400);
-  expect(call('POST', '/api/order-svc/gift-cards', { token: t, body: { storeId, amount: 50 } }), '[-] gift card: how it was paid for is required', 400);
-  expect(call('POST', '/api/order-svc/gift-cards', { token: t, body: { storeId, amount: 50, paidBy: 'GIFT_CARD' } }), '[-] gift card: not bought with another gift card', 400, 'GIFT_CARD_PAID_BY_INVALID');
-  expect(call('GET', `/api/order-svc/gift-cards/${code}`, { token: t }), '[+] check a gift card', 200);
-  expect(call('GET', `/api/order-svc/gift-cards/${code}`, { token: rival.owner.token }), "[-] another tenant's card is unknown", 404);
-  expect(call('POST', `/api/order-svc/gift-cards/${code}/redeem`, { token: t, idem: true, body: { amount: 20, orderId: order.id } }), '[+] redeem £20', [200, 201]);
-  expect(call('POST', `/api/order-svc/gift-cards/${code}/redeem`, { token: t, idem: true, body: { amount: 31, orderId: order.id } }), '[-] redeem more than the balance', [409, 422]);
-  expect(call('POST', `/api/order-svc/gift-cards/${code}/redeem`, { token: t, body: { amount: 1, orderId: order.id } }), '[-] redeem: an Idempotency-Key is required', 400);
-  expect(call('POST', `/api/order-svc/gift-cards/${code}/reload`, { token: t, body: { amount: 10, paidBy: 'CASH' } }), '[+] reload £10', 200);
-  const balance = data(call('GET', `/api/order-svc/gift-cards/${code}`, { token: t }));
-  truthy('[+] balance is 50 - 20 + 10', Number(balance.currentBalance) === 40 && Number(balance.initialBalance) === 50, balance);
-  const tx = call('GET', `/api/order-svc/gift-cards/${code}/transactions`, { token: t });
+  const cardAgain = issued();
+  truthy('[+] ...and the same issue sent again with its key is the first card, not a second', [200, 201].includes(cardAgain.status) && data(cardAgain).code === code, { first: code, again: data(cardAgain).code, status: cardAgain.status });
+  expect(issueGiftCardByHand(t, storeId, 60, { key: issueKey }), '[-] gift card: a key that issued one card does not issue another amount', 409, 'IDEMPOTENCY_KEY_REUSED');
+  expect(issueGiftCardByHand(t, storeId, 0), '[-] gift card: amount above zero', 400);
+  expect(issueGiftCardByHand(t, storeId, 50, { reason: null }), '[-] gift card: a hand issue says why', 400, 'GIFT_CARD_REASON_REQUIRED');
+  expect(issueGiftCardByHand(t, storeId, 50, { reason: 'BIRTHDAY' }), '[-] gift card: a reason that is none of the four is refused', 400, 'GIFT_CARD_REASON_REQUIRED');
+  expect(issueGiftCardByHand(t, storeId, 50, { key: false }), '[-] gift card: a hand issue needs an Idempotency-Key', 400, 'IDEMPOTENCY_KEY_REQUIRED');
+  expect(issueGiftCardByHand(t, storeId, 50, { extra: { paidBy: 'CARD' } }), '[-] gift card: money taken for a card is a sale, never a hand issue', 409, 'GIFT_CARD_NEEDS_SALE');
+  expect(issueGiftCardByHand(cashierToken, storeId, 50), '[-] gift card: a cashier cannot issue one by hand', 403, 'GIFT_CARD_NEEDS_SALE');
+  expect(call('GET', `${giftCards}/${code}`, { token: t }), '[+] check a gift card', 200);
+  expect(call('GET', `${giftCards}/${code}`, { token: rival.owner.token }), "[-] another tenant's card is unknown", 404);
+  expect(call('POST', `${giftCards}/${code}/redeem`, { token: t, idem: true, body: { amount: 20, orderId: order.id } }), '[+] redeem £20', [200, 201]);
+  expect(call('POST', `${giftCards}/${code}/redeem`, { token: t, idem: true, body: { amount: 31, orderId: order.id } }), '[-] redeem more than the balance', [409, 422]);
+  expect(call('POST', `${giftCards}/${code}/redeem`, { token: t, body: { amount: 1, orderId: order.id } }), '[-] redeem: an Idempotency-Key is required', 400);
+  const reload = (body, opts = {}) => call('POST', `${giftCards}/${code}/reload`, { token: t, idem: true, body, ...opts });
+  expect(reload({ amount: 10, reason: 'COMPENSATION' }), '[+] the owner reloads £10 by hand, for a reason', 200);
+  expect(reload({ amount: 10 }), '[-] reload: a hand reload says why', 400, 'GIFT_CARD_REASON_REQUIRED');
+  expect(reload({ amount: 10, reason: 'GOODWILL' }, { idem: false }), '[-] reload: a hand reload needs an Idempotency-Key', 400, 'IDEMPOTENCY_KEY_REQUIRED');
+  expect(reload({ amount: 10, reason: 'GOODWILL', paidBy: 'CASH' }), '[-] reload: money taken for a top-up is a sale', 409, 'GIFT_CARD_NEEDS_SALE');
+  expect(reload({ amount: 10, reason: 'GOODWILL' }, { token: cashierToken }), '[-] reload: a cashier cannot reload one by hand', 403, 'GIFT_CARD_NEEDS_SALE');
+  const balance = data(call('GET', `${giftCards}/${code}`, { token: t }));
+  truthy('[+] balance is 50 - 20 + 10, and none of the refusals moved it', Number(balance.currentBalance) === 40 && Number(balance.initialBalance) === 50, balance);
+
+  // Sold at the till, by the cashier: the card is a line of the sale and is loaded by the payment.
+  const cardLine = (loads, extra = {}) => ({ storeId, channel: 'POS', fulfilmentType: 'INSTORE', items: [], giftCardLoads: loads, ...extra });
+  const sold = sellGiftCard(tenant, storeId, 25, { code, token: cashierToken });
+  truthy('[+] a cashier sells a £25 top-up as a line of a till sale: the card is the whole total', Number(sold.order.total) === 25 && sold.order.status === 'PENDING', sold.order);
+  truthy('[+] ...nothing is loaded while the sale is unpaid', sold.unpaid === 40, sold);
+  truthy('[+] ...and the card is loaded when the sale is paid', sold.landed >= 0 && sold.after === 65, sold);
+  const mixed = sellGiftCard(tenant, storeId, 10, { code, token: cashierToken, items: [{ variantId, qty: 1 }] });
+  truthy('[+] goods and a card on one sale: the card is added to what the goods cost, with no VAT of its own', Math.abs(Number(mixed.order.total) - (Number(mixed.order.subtotal) + Number(mixed.order.taxAmount) + 10)) < 0.005 && Number(mixed.order.subtotal) > 0, mixed.order);
+  truthy('[+] ...and the card is loaded with its own line, not the goods', mixed.landed >= 0 && mixed.after === 75, mixed);
+  const fresh = sellGiftCard(tenant, storeId, 30, { token: cashierToken });
+  truthy('[+] a new card sold with nothing else is a sale of its own, handed over when paid', Number(fresh.order.total) === 30 && poll(30, () => statusOf(fresh.order.id) === 'FULFILLED') >= 0, { total: fresh.order.total, status: statusOf(fresh.order.id) });
+  const freshLoad = (fresh.loads || [])[0] || {};
+  truthy('[+] ...and the sale itself says which card it made: a new one, loaded, with its code', fresh.landed >= 0 && freshLoad.status === 'LOADED' && freshLoad.kind === 'NEW' && !!freshLoad.code && Number(freshLoad.amount) === 30, fresh.loads);
+  truthy('[+] ...and that card holds the £30', !!freshLoad.code && Number((data(call('GET', `${giftCards}/${freshLoad.code}`, { token: t })) || {}).currentBalance) === 30, freshLoad);
+  expect(call('GET', `/api/order-svc/orders/${fresh.order.id}/gift-card-loads`, { token: rival.owner.token }), "[-] a rival cannot read the card our sale made", 404, 'ORDER_NOT_FOUND');
+  expect(place(cardLine([{ amount: 10 }], { fulfilmentType: 'PICKUP' })), '[-] a gift card is sold across the counter, never for collection', 400, 'ORDER_GIFT_CARD_INSTORE_ONLY');
+  expect(place(cardLine([{ amount: 0 }])), '[-] a gift-card line: amount above zero', 400);
+  expect(place(cardLine([{ amount: 10, code: 'NO-SUCH-CARD' }])), '[-] a gift-card line naming a card nobody holds is refused', 404, 'GIFT_CARD_NOT_FOUND');
+  expect(place({ ...cardLine([{ amount: 10, code }]), storeId: rival.stores[0].id }, { token: rival.owner.token }), "[-] a rival's sale cannot top up our card", 404, 'GIFT_CARD_NOT_FOUND');
+  sleep(3);
+  const loaded = data(call('GET', `${giftCards}/${code}`, { token: t }));
+  truthy('[+] each sale loaded the card once, and the refused lines loaded nothing', Number(loaded.currentBalance) === 75, loaded);
+  const tx = call('GET', `${giftCards}/${code}/transactions`, { token: t });
   expect(tx, '[+] gift card transactions', 200);
-  truthy('[+] ...issue, redeem and reload', (data(tx) || []).length >= 3, data(tx));
-  expect(call('GET', '/api/order-svc/gift-cards/NO-SUCH-CARD', { token: t }), '[-] unknown gift card', 404);
+  const txs = Array.isArray(data(tx)) ? data(tx) : [];
+  truthy('[+] ...the issue, the redemption, the hand reload and a reload for each sale', txs.filter((x) => x.txType === 'ISSUE').length === 1 && txs.filter((x) => x.txType === 'REDEEM').length === 1 && txs.filter((x) => x.txType === 'RELOAD').length === 3, txs);
+  truthy('[+] ...each sale named on its own load', [sold, mixed].every((s) => txs.filter((x) => x.txType === 'RELOAD' && x.orderId === s.order.id).length === 1), txs);
+  expect(call('GET', `${giftCards}/NO-SUCH-CARD`, { token: t }), '[-] unknown gift card', 404);
 
   // ── layaways ────────────────────────────────────────────────────────────────
   const lay = { storeId, items: [{ variantId, qty: 2, unitPrice: 12.5 }], initialDeposit: 5, paymentMethod: 'CASH', dueDate: '2027-01-31T00:00:00Z' };

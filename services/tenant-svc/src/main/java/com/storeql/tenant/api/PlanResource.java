@@ -199,7 +199,7 @@ public class PlanResource {
     ctx.requireAnyRole("PLATFORM_ADMIN");
     return ApiResponse.ok(
         new PlanDtos.CatalogueResponse(
-            Plans.CATALOGUE.stream()
+            Plans.enforced().stream()
                 .map(
                     e -> new PlanDtos.CatalogueEntry(e.key(), e.label(), e.limit(), e.enforcedBy()))
                 .toList()));

@@ -43,7 +43,7 @@ class AuditTest {
             Audit.ROLE_DELETED)) {
       assertEquals(t, Audit.type(t));
     }
-    assertEquals(8, Audit.TYPES.size());
+    assertEquals(9, Audit.TYPES.size());
   }
 
   @Test

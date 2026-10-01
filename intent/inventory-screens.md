@@ -102,9 +102,9 @@ Named here so none is lost; the mechanism is designed once elsewhere.
 
 ## Acceptance
 
-- [ ] Each policy write in slice 1 is refused `403 FORBIDDEN` to a storekeeper and cashier and nothing is written; a manager writes; a manager held to another store is `403 STORE_ACCESS_DENIED`; staff still read — `InventoryControlsIT.policyWritesAreManagements` (one case per endpoint)
-- [ ] Another business's staff of every role naming our ids see nothing and change nothing on each of those endpoints — `InventoryControlsIT.policyWritesStayInTheirBusiness`
-- [ ] A move order with zone ids draws from the from-zone and places in the to-zone; a zone of another store is `422 MOVE_ORDER_ZONE_NOT_IN_STORE` — `MoveOrderIT.zonesAreIds`
+- [x] Each policy write in slice 1 is refused `403 FORBIDDEN` to a storekeeper and cashier and nothing is written; a manager writes; a manager held to another store is `403 STORE_ACCESS_DENIED`; staff still read — `PolicyWritesIT.policyWritesAreManagements` (one case per endpoint; written, awaiting the lead's IT run)
+- [x] Another business's staff of every role naming our ids see nothing and change nothing on each of those endpoints — `PolicyWritesIT.policyWritesStayInTheirBusiness`
+- [ ] A move order with zone ids draws from the from-zone and places in the to-zone; a zone of another store is `422 MOVE_ORDER_ZONE_NOT_IN_STORE` — `MoveOrderZonesIT.theMoveDrawsFromOneZoneAndPutsDownInTheOther`, `aShortFromZoneMovesNothing`, `badZonesAreRefusedAndNoZonesStillWorks`, `aMoveOrderStaysInItsBusinessAndStore`. PART: the store-membership refusal waits on the `zone_status` projection ([workforce-rules](workforce-rules.md) slice 9); until then a from-zone that holds too little is `422 INSUFFICIENT_STOCK`
 - [ ] Floor writes still work for a storekeeper (kanban trigger, serial register, lot split) — `PermissionsIT.floorWritesStayStaffs`
 - [ ] Move orders: list, create, pick and cancel from the screen, refusals in words — `move_orders_screen_test`
 - [ ] Reorder plans: table shows computed figures; manager edits and recomputes; storekeeper sees no edit control — `rop_plans_screen_test`
@@ -126,3 +126,4 @@ Named here so none is lost; the mechanism is designed once elsewhere.
 ## Decisions
 
 - 2026-09-30: settled by industry standard as above; nothing built yet. Found while checking, not in the catalogue: accounting periods, zone-to-ledger mappings, source types, ABC compile, safety stock, par levels, kanban creation and picking-rule writes carry no role check and only the staff tier's path gate; slice 1 closes it.
+- 2026-09-30 (slices 1 and 2 server, built): policy writes are management's by `ctx.requireAnyRole(PLATFORM_ADMIN, OWNER, MANAGER)` first, then the store (`requireStoreAccess`; by id where the route names a period, kanban card or STORE-scoped assignment; `scopeStore` for ABC compile and safety-stock compute so a held manager who names none acts on their own store). Reason codes, source types, picking rules and zone priorities name no store and are management's business-wide. `POST /rop-plans/compute` was documented as gated but was not: now it is. Move orders carry `fromZoneId`/`toZoneId` (V48); the pick draws only batches in the from-zone (`deductBatches(..., onlyZone, ...)`) and places the children in the to-zone; the text labels stay readable. Zone membership of a store is not knowable inside inventory-svc yet (no zone projection), so `MOVE_ORDER_ZONE_NOT_IN_STORE` is not raised; the same zone at both ends of one store is `400 MOVE_ORDER_SAME_ZONE`.

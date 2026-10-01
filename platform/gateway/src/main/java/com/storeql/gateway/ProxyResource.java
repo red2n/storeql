@@ -326,6 +326,8 @@ public class ProxyResource {
           HttpHeaders.AUTH_SCOPE,
           // How the session was authenticated (20.12, SSO): stamped from the token's amr claim.
           HttpHeaders.AUTH_METHODS,
+          // Which of the person's sessions is asking: stamped from the token's sid claim.
+          HttpHeaders.SESSION_ID,
           // Client-controlled, not identity — forwarded so downstream writes can dedupe retries
           // (golden rule #11). Not stripped/overwritten: the client owns this value.
           HttpHeaders.IDEMPOTENCY_KEY,

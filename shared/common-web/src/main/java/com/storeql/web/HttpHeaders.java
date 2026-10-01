@@ -66,6 +66,13 @@ public final class HttpHeaders {
    */
   public static final String AUTH_METHODS = "X-Auth-Methods";
 
+  /**
+   * The caller's own signed-in session, as the access token's {@code sid} claim names it. Stamped
+   * by the gateway from the verified token, never trusted from a client. iam-svc reads it to mark
+   * which of a person's sessions is the one asking.
+   */
+  public static final String SESSION_ID = "X-Session-Id";
+
   /** Idempotency key for retryable writes (checkout, payment capture, stock receipt). */
   public static final String IDEMPOTENCY_KEY = "Idempotency-Key";
 

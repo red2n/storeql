@@ -24,6 +24,7 @@ public final class Audit {
   public static final String STORE_CREATED = "STORE_CREATED";
   public static final String STORE_STATUS_CHANGED = "STORE_STATUS_CHANGED";
   public static final String STORE_TILL_PHONE_CHANGED = "STORE_TILL_PHONE_CHANGED";
+  public static final String ZONE_STATUS_CHANGED = "ZONE_STATUS_CHANGED";
   public static final String STAFF_ASSIGNED = "STAFF_ASSIGNED";
   public static final String STAFF_UNASSIGNED = "STAFF_UNASSIGNED";
   public static final String ROLE_DEFINED = "ROLE_DEFINED";
@@ -36,6 +37,7 @@ public final class Audit {
           STORE_CREATED,
           STORE_STATUS_CHANGED,
           STORE_TILL_PHONE_CHANGED,
+          ZONE_STATUS_CHANGED,
           STAFF_ASSIGNED,
           STAFF_UNASSIGNED,
           ROLE_DEFINED,

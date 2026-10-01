@@ -112,7 +112,8 @@ export default function ({ admin, tenant, rival }) {
   expect(call('POST', `/api/tenant-svc/admin/stores/${warehouseId}/zones`, { token: rival.owner.token, body: { name: 'Squat', code: 'SQUAT' } }), "[-] a rival cannot add zones to our store", 404);
   expect(call('GET', `/api/tenant-svc/admin/stores/${warehouseId}/zones/${data(cold).id}`, { token: t }), '[+] get zone', 200);
   expect(call('PUT', `/api/tenant-svc/admin/stores/${warehouseId}/zones/${data(cold).id}`, { token: t, body: { name: 'Freezer', code: 'COLD', type: 'COLD_ROOM' } }), '[+] update zone', 200);
-  expect(call('PATCH', `/api/tenant-svc/admin/stores/${warehouseId}/zones/${data(cold).id}/status`, { token: t, body: { status: 'INACTIVE' } }), '[+] deactivate zone', 200);
+  expect(call('PATCH', `/api/tenant-svc/admin/stores/${warehouseId}/zones/${data(cold).id}/status`, { token: t, body: { status: 'OUT_OF_SERVICE' } }), '[+] take a zone out of service', 200);
+  expect(call('PATCH', `/api/tenant-svc/admin/stores/${warehouseId}/zones/${data(cold).id}/status`, { token: t, body: { status: 'INACTIVE' } }), '[-] a zone status outside the vocabulary', 400, 'ZONE_STATUS_INVALID');
   expect(call('GET', `/api/tenant-svc/admin/stores/${warehouseId}/zones/${UNKNOWN}`, { token: t }), '[-] get unknown zone', 404);
 
   // ── delivery areas and fulfilment routing ──────────────────────────────────

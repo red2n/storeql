@@ -260,6 +260,19 @@ public final class Dtos {
   public record SessionsRevokedResponse(
       @Schema(description = "How many signed-in sessions of this login were ended.") int revoked) {}
 
+  @Schema(name = "SessionResponse", description = "One place the caller is signed in.")
+  public record SessionResponse(
+      String id,
+      @Schema(description = "A short label of the client, e.g. Chrome on Windows.")
+          String deviceLabel,
+      @Schema(description = "The network as a truncated prefix (IPv4 /24, IPv6 /48); may be null.")
+          String network,
+      String startedAt,
+      @Schema(description = "When the session's token was last renewed.") String lastUsedAt,
+      @Schema(description = "How it was signed in: pwd, pwd+otp, sso, ...; null for an old one.")
+          String authMethod,
+      @Schema(description = "True for the session making this request.") boolean current) {}
+
   @Schema(name = "ChangePasswordRequest")
   public record ChangePasswordRequest(
       @Schema(description = "The user's current password, re-verified before the change.") @NotBlank

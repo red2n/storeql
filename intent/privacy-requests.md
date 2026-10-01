@@ -127,5 +127,7 @@ A person can phone or write to a shop and say "give me everything you hold on me
 
 ## Decisions
 
+- (2026-09-30 evening, reconciliation of the second set of pages) **More services now hold a customer id and so acknowledge with `SubjectErasureCompleted`:** product-svc (reviews, [product-reviews-and-ratings](product-reviews-and-ratings.md) slice 6, which replaces the plan's earlier "staff ids only" line for product-svc), notification-svc (campaign sends, [campaigns](campaigns.md)), pricing-svc (customer-linked redemptions and offer views, [personalised-offers](personalised-offers.md)), and customer-svc's own new tables (cases, house accounts, segments, households, earning breakdowns). Financial ledgers (house accounts, deal and invoice records) are declared RETAIN with the reason and the link removed.
+
 - **No standalone export or erasure by staff any more** (2026-09-30, industry standard): a request and its check are the evidence.
 - **Field names only in the correction trail** (2026-09-30, industry standard): the trail must survive an erasure.

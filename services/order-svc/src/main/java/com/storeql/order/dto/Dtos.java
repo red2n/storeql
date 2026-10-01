@@ -166,7 +166,280 @@ public final class Dtos {
                       + " read as rung up by an unknown member of staff, and the sale is placed"
                       + " all the same. A UUIDv7 or absent (400 INVALID_UUID otherwise). POS"
                       + " only; not read online.")
-          String rungUpBy) {}
+          String rungUpBy,
+      @Schema(
+              description =
+                  "Gift cards sold on this order (a GIFT_CARD_LOAD line each): the card is issued,"
+                      + " or the named card topped up, when the order is paid, for what was paid."
+                      + " Added to the total with no VAT, no stock and no fulfilment; an order may"
+                      + " carry only these, and then send items as an empty list ([]): items is"
+                      + " required.")
+          @Valid
+          List<GiftCardLoadRequest> giftCardLoads) {
+
+    /** A builder with every member unset; name only what the request carries. */
+    public static Builder builder() {
+      return new Builder();
+    }
+
+    /** A builder starting from this request, to change a member or two. */
+    public Builder toBuilder() {
+      Builder b = new Builder();
+      b.storeId = storeId;
+      b.customerId = customerId;
+      b.channel = channel;
+      b.fulfilmentType = fulfilmentType;
+      b.items = items;
+      b.taxAmount = taxAmount;
+      b.discountAmount = discountAmount;
+      b.discountReason = discountReason;
+      b.currency = currency;
+      b.notes = notes;
+      b.couponCodes = couponCodes;
+      b.idempotencyKey = idempotencyKey;
+      b.taxExempt = taxExempt;
+      b.exemptReason = exemptReason;
+      b.deliveryLine1 = deliveryLine1;
+      b.deliveryLine2 = deliveryLine2;
+      b.deliveryCity = deliveryCity;
+      b.deliveryPostalCode = deliveryPostalCode;
+      b.deliveryRecipientName = deliveryRecipientName;
+      b.deliveryRecipientPhone = deliveryRecipientPhone;
+      b.contactPhone = contactPhone;
+      b.paymentMethod = paymentMethod;
+      b.awaitingPrice = awaitingPrice;
+      b.sellerUserId = sellerUserId;
+      b.allowSubstitutions = allowSubstitutions;
+      b.slotWindowId = slotWindowId;
+      b.slotStartsAt = slotStartsAt;
+      b.capturedAt = capturedAt;
+      b.rungUpBy = rungUpBy;
+      b.giftCardLoads = giftCardLoads;
+      return b;
+    }
+
+    /**
+     * Named construction of a {@link PlaceOrderRequest}; a member added later touches nothing here.
+     */
+    public static final class Builder {
+      private String storeId;
+      private String customerId;
+      private String channel;
+      private String fulfilmentType;
+      private List<OrderItemRequest> items;
+      private BigDecimal taxAmount;
+      private BigDecimal discountAmount;
+      private String discountReason;
+      private String currency;
+      private String notes;
+      private List<String> couponCodes;
+      private String idempotencyKey;
+      private Boolean taxExempt;
+      private String exemptReason;
+      private String deliveryLine1;
+      private String deliveryLine2;
+      private String deliveryCity;
+      private String deliveryPostalCode;
+      private String deliveryRecipientName;
+      private String deliveryRecipientPhone;
+      private String contactPhone;
+      private String paymentMethod;
+      private Boolean awaitingPrice;
+      private String sellerUserId;
+      private Boolean allowSubstitutions;
+      private String slotWindowId;
+      private String slotStartsAt;
+      private String capturedAt;
+      private String rungUpBy;
+      private List<GiftCardLoadRequest> giftCardLoads;
+
+      private Builder() {}
+
+      public Builder storeId(String v) {
+        this.storeId = v;
+        return this;
+      }
+
+      public Builder customerId(String v) {
+        this.customerId = v;
+        return this;
+      }
+
+      public Builder channel(String v) {
+        this.channel = v;
+        return this;
+      }
+
+      public Builder fulfilmentType(String v) {
+        this.fulfilmentType = v;
+        return this;
+      }
+
+      public Builder items(List<OrderItemRequest> v) {
+        this.items = v;
+        return this;
+      }
+
+      public Builder taxAmount(BigDecimal v) {
+        this.taxAmount = v;
+        return this;
+      }
+
+      public Builder discountAmount(BigDecimal v) {
+        this.discountAmount = v;
+        return this;
+      }
+
+      public Builder discountReason(String v) {
+        this.discountReason = v;
+        return this;
+      }
+
+      public Builder currency(String v) {
+        this.currency = v;
+        return this;
+      }
+
+      public Builder notes(String v) {
+        this.notes = v;
+        return this;
+      }
+
+      public Builder couponCodes(List<String> v) {
+        this.couponCodes = v;
+        return this;
+      }
+
+      public Builder idempotencyKey(String v) {
+        this.idempotencyKey = v;
+        return this;
+      }
+
+      public Builder taxExempt(Boolean v) {
+        this.taxExempt = v;
+        return this;
+      }
+
+      public Builder exemptReason(String v) {
+        this.exemptReason = v;
+        return this;
+      }
+
+      public Builder deliveryLine1(String v) {
+        this.deliveryLine1 = v;
+        return this;
+      }
+
+      public Builder deliveryLine2(String v) {
+        this.deliveryLine2 = v;
+        return this;
+      }
+
+      public Builder deliveryCity(String v) {
+        this.deliveryCity = v;
+        return this;
+      }
+
+      public Builder deliveryPostalCode(String v) {
+        this.deliveryPostalCode = v;
+        return this;
+      }
+
+      public Builder deliveryRecipientName(String v) {
+        this.deliveryRecipientName = v;
+        return this;
+      }
+
+      public Builder deliveryRecipientPhone(String v) {
+        this.deliveryRecipientPhone = v;
+        return this;
+      }
+
+      public Builder contactPhone(String v) {
+        this.contactPhone = v;
+        return this;
+      }
+
+      public Builder paymentMethod(String v) {
+        this.paymentMethod = v;
+        return this;
+      }
+
+      public Builder awaitingPrice(Boolean v) {
+        this.awaitingPrice = v;
+        return this;
+      }
+
+      public Builder sellerUserId(String v) {
+        this.sellerUserId = v;
+        return this;
+      }
+
+      public Builder allowSubstitutions(Boolean v) {
+        this.allowSubstitutions = v;
+        return this;
+      }
+
+      public Builder slotWindowId(String v) {
+        this.slotWindowId = v;
+        return this;
+      }
+
+      public Builder slotStartsAt(String v) {
+        this.slotStartsAt = v;
+        return this;
+      }
+
+      public Builder capturedAt(String v) {
+        this.capturedAt = v;
+        return this;
+      }
+
+      public Builder rungUpBy(String v) {
+        this.rungUpBy = v;
+        return this;
+      }
+
+      public Builder giftCardLoads(List<GiftCardLoadRequest> v) {
+        this.giftCardLoads = v;
+        return this;
+      }
+
+      public PlaceOrderRequest build() {
+        return new PlaceOrderRequest(
+            storeId,
+            customerId,
+            channel,
+            fulfilmentType,
+            items,
+            taxAmount,
+            discountAmount,
+            discountReason,
+            currency,
+            notes,
+            couponCodes,
+            idempotencyKey,
+            taxExempt,
+            exemptReason,
+            deliveryLine1,
+            deliveryLine2,
+            deliveryCity,
+            deliveryPostalCode,
+            deliveryRecipientName,
+            deliveryRecipientPhone,
+            contactPhone,
+            paymentMethod,
+            awaitingPrice,
+            sellerUserId,
+            allowSubstitutions,
+            slotWindowId,
+            slotStartsAt,
+            capturedAt,
+            rungUpBy,
+            giftCardLoads);
+      }
+    }
+  }
 
   @Schema(
       name = "PriceOrderRequest",
@@ -307,7 +580,56 @@ public final class Dtos {
                   "contactPhone in international form, e.g. +919886021001 (a phone at the till):"
                       + " read in the store's own country, then the business's. Absent when no"
                       + " number was given, or the one given could not be read.")
-          String contactPhoneE164) {}
+          String contactPhoneE164,
+      @Schema(
+              description =
+                  "When a PENDING order lapses if it is not paid (ISO instant): its creation plus"
+                      + " the business's unpaid-order limit, or the platform's default while it has"
+                      + " set none. Absent once the order is no longer waiting for payment.")
+          String expiresAt) {
+
+    /** This answer with the time a PENDING order lapses; unchanged when it is null. */
+    public OrderResponse withExpiresAt(String at) {
+      if (at == null) return this;
+      return new OrderResponse(
+          id,
+          storeId,
+          customerId,
+          loginId,
+          channel,
+          fulfilmentType,
+          status,
+          subtotal,
+          taxAmount,
+          discountAmount,
+          promotionDiscount,
+          total,
+          currency,
+          notes,
+          createdAt,
+          updatedAt,
+          items,
+          taxExempt,
+          exemptReason,
+          deliveryLine1,
+          deliveryLine2,
+          deliveryCity,
+          deliveryPostalCode,
+          deliveryRecipientName,
+          deliveryRecipientPhone,
+          contactPhone,
+          paymentMethod,
+          depositAmount,
+          deposits,
+          sellerUserId,
+          group,
+          handover,
+          allowSubstitutions,
+          slot,
+          contactPhoneE164,
+          at);
+    }
+  }
 
   @Schema(
       name = "SlotResponse",
@@ -602,6 +924,38 @@ public final class Dtos {
           String receiptNumber,
       List<ReturnableLineResponse> lines) {}
 
+  @Schema(name = "PendingLimitRequest")
+  public record PendingLimitRequest(
+      @Schema(
+              description =
+                  "Whole hours an unpaid order is held before it is cancelled, 1 or more"
+                      + " (ORDER_PENDING_LIMIT_INVALID otherwise); null puts the platform's own"
+                      + " default back.")
+          Integer pendingLimitHours) {}
+
+  @Schema(name = "PendingLimitResponse")
+  public record PendingLimitResponse(
+      @Schema(description = "The business's own limit; null while it has set none.")
+          Integer pendingLimitHours,
+      @Schema(description = "The hours in force: the business's own, else the platform's default.")
+          int effectiveHours,
+      boolean usingDefault) {}
+
+  @Schema(name = "PriceWaitRequest")
+  public record PriceWaitRequest(
+      @Schema(
+              description =
+                  "Minutes an order waits for a price before a manager is told; null for never.")
+          Integer flagMinutes,
+      @Schema(
+              description =
+                  "Minutes before the order is cancelled and its stock released; null for never."
+                      + " Not before flagMinutes (ORDER_PRICE_WAIT_INVALID).")
+          Integer cancelMinutes) {}
+
+  @Schema(name = "PriceWaitResponse")
+  public record PriceWaitResponse(Integer flagMinutes, Integer cancelMinutes) {}
+
   @Schema(name = "ReturnPolicyRequest")
   public record ReturnPolicyRequest(
       @Schema(description = "Calendar days from handover in which a cashier may take a return.")
@@ -671,7 +1025,12 @@ public final class Dtos {
               description =
                   "The delivery or collection window this order holds (delivery and collection"
                       + " slots); null for a till sale or an order at a store with no windows.")
-          SlotResponse slot) {}
+          SlotResponse slot,
+      @Schema(
+              description =
+                  "When an order still waiting for payment lapses, as an ISO instant; absent for"
+                      + " an order that is not PENDING.")
+          String expiresAt) {}
 
   @Schema(name = "VoidRequest")
   public record VoidRequest(
@@ -735,7 +1094,12 @@ public final class Dtos {
 
   // ── Gift cards (Gap #14) ──────────────────────────────────────────────────
 
-  @Schema(name = "IssueGiftCardRequest")
+  @Schema(
+      name = "IssueGiftCardRequest",
+      description =
+          "A manager's issue of a gift card with no sale behind it. A card a customer pays for is a"
+              + " GIFT_CARD_LOAD line on the sale (giftCardLoads on the order), issued when the"
+              + " sale is paid; a cashier cannot issue one (GIFT_CARD_NEEDS_SALE).")
   public record IssueGiftCardRequest(
       @NotBlank String storeId,
       @Schema(description = "Initial stored-value amount.") @NotNull @Positive BigDecimal amount,
@@ -744,18 +1108,60 @@ public final class Dtos {
                   "ISO 4217 currency code. Defaults to the tenant's own currency; a value that contradicts it is rejected with ORDER_CURRENCY_MISMATCH.")
           String currency,
       String expiresAt,
-      @Schema(description = PAID_BY_DESCRIPTION) @NotBlank String paidBy) {}
+      @Schema(description = HAND_PAID_BY_DESCRIPTION) String paidBy,
+      @Schema(description = REASON_DESCRIPTION) String reason,
+      @Schema(description = "A note kept with the reason and who gave it.") @Size(max = 200)
+          String note) {}
 
-  @Schema(name = "ReloadGiftCardRequest")
+  @Schema(
+      name = "ReloadGiftCardRequest",
+      description =
+          "A manager's top-up of a gift card with no sale behind it; a card topped up by a"
+              + " customer's payment is a GIFT_CARD_LOAD line naming its code.")
   public record ReloadGiftCardRequest(
       @NotNull @Positive BigDecimal amount,
       String reference,
-      @Schema(description = PAID_BY_DESCRIPTION) @NotBlank String paidBy) {}
+      @Schema(description = HAND_PAID_BY_DESCRIPTION) String paidBy,
+      @Schema(description = REASON_DESCRIPTION) String reason,
+      @Schema(description = "A note kept with the reason and who gave it.") @Size(max = 200)
+          String note) {}
 
-  static final String PAID_BY_DESCRIPTION =
-      "How the value was paid for: CASH, CARD, UPI or WALLET, or PROMOTIONAL for value given away."
-          + " A gift card sold is a liability against the money taken (17.11); another gift card,"
-          + " a voucher or store credit is refused with GIFT_CARD_PAID_BY_INVALID.";
+  static final String REASON_DESCRIPTION =
+      "Required: why value is being given, one of GOODWILL, PROMOTION, COMPENSATION or MIGRATION"
+          + " (GIFT_CARD_REASON_REQUIRED otherwise). Kept with who gave it.";
+
+  static final String HAND_PAID_BY_DESCRIPTION =
+      "Optional, and only PROMOTIONAL when given: value handed out by hand is given away. Money"
+          + " taken for a card is a sale (GIFT_CARD_NEEDS_SALE).";
+
+  /** A gift-card line on a sale: value the customer pays for with the order. */
+  @Schema(
+      name = "GiftCardLoadRequest",
+      description =
+          "A gift card sold as a line of the order. The card is issued (or topped up, when code"
+              + " names one) when the order is paid, for this amount, and not before.")
+  public record GiftCardLoadRequest(
+      @Schema(description = "What the card is loaded with, in the order's currency.")
+          @NotNull
+          @Positive
+          BigDecimal amount,
+      @Schema(description = "An existing card of this business to top up; absent for a new card.")
+          String code) {}
+
+  @Schema(
+      name = "GiftCardLoadResponse",
+      description =
+          "A gift card sold on an order. PENDING until the sale is paid (no card, no code); then"
+              + " LOADED with the card's id and code, whether it is a NEW card or a TOP_UP, and when.")
+  public record GiftCardLoadResponse(
+      String id,
+      BigDecimal amount,
+      @Schema(description = "PENDING or LOADED.") String status,
+      String giftCardId,
+      @Schema(description = "The card's code; absent while PENDING.") String code,
+      @Schema(description = "NEW or TOP_UP; absent while PENDING.") String kind,
+      @Schema(description = "ISO instant the card was loaded; absent while PENDING.")
+          String loadedAt) {}
 
   @Schema(name = "RedeemGiftCardRequest")
   public record RedeemGiftCardRequest(

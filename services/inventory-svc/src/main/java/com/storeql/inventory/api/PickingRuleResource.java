@@ -60,6 +60,7 @@ public class PickingRuleResource {
   @POST
   @Path("/picking-rules")
   public Response createPickingRule(CreatePickingRuleRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     return Response.status(Response.Status.CREATED)
         .entity(
@@ -111,6 +112,7 @@ public class PickingRuleResource {
   @DELETE
   @Path("/picking-rules/{id}")
   public ApiResponse<PickingRuleResponse> deactivatePickingRule(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     return ApiResponse.ok(
         Mappers.toPickingRule(service.deactivatePickingRule(ctx.requireTenantId(), id)));
   }
@@ -132,6 +134,7 @@ public class PickingRuleResource {
   @Path("/picking-rules/{id}/zone-priorities")
   public ApiResponse<List<PickingRuleZonePriorityResponse>> setZonePriorities(
       @PathParam("id") UUID id, SetZonePrioritiesRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     return ApiResponse.ok(
         service.setZonePriorities(ctx.requireTenantId(), id, req).stream()
@@ -174,7 +177,13 @@ public class PickingRuleResource {
   @POST
   @Path("/picking-rule-assignments")
   public Response createPickingRuleAssignment(CreatePickingRuleAssignmentRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
+    if ("STORE".equalsIgnoreCase(req.scopeType())
+        && req.scopeId() != null
+        && !req.scopeId().isBlank()) {
+      ctx.requireStoreAccess(uuid(req.scopeId(), "scopeId"));
+    }
     return Response.status(Response.Status.CREATED)
         .entity(
             ApiResponse.ok(
@@ -214,6 +223,11 @@ public class PickingRuleResource {
   @DELETE
   @Path("/picking-rule-assignments/{id}")
   public Response deletePickingRuleAssignment(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    var existing = service.getPickingRuleAssignment(ctx.requireTenantId(), id);
+    if (existing.scopeId() != null && "STORE".equals(existing.scopeType())) {
+      ctx.requireStoreAccess(existing.scopeId());
+    }
     service.deletePickingRuleAssignment(ctx.requireTenantId(), id);
     return Response.noContent().build();
   }

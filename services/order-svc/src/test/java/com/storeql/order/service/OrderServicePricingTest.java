@@ -89,38 +89,25 @@ class OrderServicePricingTest {
 
   private static PlaceOrderRequest request(
       BigDecimal clientUnitPrice, BigDecimal discount, String discountReason) {
-    return new PlaceOrderRequest(
-        STORE.toString(),
-        null,
-        "POS",
-        "INSTORE",
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, clientUnitPrice, null, null, null, null, null)),
-        null,
-        discount,
-        discountReason,
-        "USD",
-        null,
-        null, // couponCodes
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(STORE.toString())
+        .channel("POS")
+        .fulfilmentType("INSTORE")
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    BigDecimal.ONE,
+                    clientUnitPrice,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .discountAmount(discount)
+        .discountReason(discountReason)
+        .currency("USD")
+        .build();
   }
 
   @Test
@@ -343,45 +330,23 @@ class OrderServicePricingTest {
   private static final UUID MARKDOWN = Ids.newId();
 
   private static PlaceOrderRequest stickered() {
-    return new PlaceOrderRequest(
-        STORE.toString(),
-        null,
-        "POS",
-        "INSTORE",
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(),
-                new BigDecimal("2"),
-                null,
-                null,
-                null,
-                MARKDOWN.toString(),
-                null,
-                null)),
-        null,
-        null,
-        null,
-        "USD",
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(STORE.toString())
+        .channel("POS")
+        .fulfilmentType("INSTORE")
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    new BigDecimal("2"),
+                    null,
+                    null,
+                    null,
+                    MARKDOWN.toString(),
+                    null,
+                    null)))
+        .currency("USD")
+        .build();
   }
 
   /**

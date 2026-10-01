@@ -78,11 +78,11 @@ class GiftCardAccessIT {
   }
 
   private static String issueBody(String store, String amount) {
-    return "{\"storeId\":\"" + store + "\",\"amount\":" + amount + ",\"paidBy\":\"CASH\"}";
+    return "{\"storeId\":\"" + store + "\",\"amount\":" + amount + ",\"reason\":\"GOODWILL\"}";
   }
 
   private static String reloadBody(String amount) {
-    return "{\"amount\":" + amount + ",\"paidBy\":\"CASH\"}";
+    return "{\"amount\":" + amount + ",\"reason\":\"GOODWILL\"}";
   }
 
   private long cards(String tenant) {
@@ -100,7 +100,15 @@ class GiftCardAccessIT {
 
   private JsonObject issued(String store, String amount) {
     return data(
-        rig().post("/gift-cards", issueBody(store, amount), T, "MANAGER", MANAGER, null), 201);
+        rig()
+            .post(
+                "/gift-cards",
+                issueBody(store, amount),
+                T,
+                "MANAGER",
+                MANAGER,
+                Ids.newId().toString()),
+        201);
   }
 
   @Test
@@ -139,7 +147,7 @@ class GiftCardAccessIT {
     long before = cards(T);
 
     Response issue =
-        rig().postHeld("/gift-cards", issueBody(STORE, "50"), T, "CASHIER", CASHIER, OTHER_STORE);
+        rig().postHeld("/gift-cards", issueBody(STORE, "50"), T, "MANAGER", MANAGER, OTHER_STORE);
     assertThat(issue.getStatus(), is(403));
     assertThat(issue.readEntity(String.class), containsString("STORE_ACCESS_DENIED"));
     Response reload =
@@ -148,8 +156,8 @@ class GiftCardAccessIT {
                 "/gift-cards/" + card.getString("code") + "/reload",
                 reloadBody("50"),
                 T,
-                "CASHIER",
-                CASHIER,
+                "MANAGER",
+                MANAGER,
                 OTHER_STORE);
     assertThat(reload.getStatus(), is(403));
     assertThat(reload.readEntity(String.class), containsString("STORE_ACCESS_DENIED"));
@@ -157,20 +165,36 @@ class GiftCardAccessIT {
     assertThat(balanceOf(id).compareTo(new BigDecimal("20.00")), is(0));
     assertThat(ledger(id), is(1L));
 
-    // The same cashier at the card's own store, and a caller held to no store, both may.
+    // A cashier, at the card's own store or held to another, cannot create value with no sale.
+    for (String held : new String[] {STORE, OTHER_STORE}) {
+      Response cashier =
+          rig()
+              .postHeld(
+                  "/gift-cards/" + card.getString("code") + "/reload",
+                  reloadBody("5.00"),
+                  T,
+                  "CASHIER",
+                  CASHIER,
+                  held);
+      assertThat(cashier.getStatus(), is(403));
+      assertThat(cashier.readEntity(String.class), containsString("GIFT_CARD_NEEDS_SALE"));
+    }
+    assertThat(balanceOf(id).compareTo(new BigDecimal("20.00")), is(0));
+
+    // A manager at the card's own store, and a caller held to no store, both may.
     Response ok =
         rig()
             .postHeld(
                 "/gift-cards/" + card.getString("code") + "/reload",
                 reloadBody("5.00"),
                 T,
-                "CASHIER",
-                CASHIER,
+                "MANAGER",
+                MANAGER,
                 STORE);
     assertThat(ok.readEntity(String.class), ok.getStatus(), is(200));
     Response whole =
         rig()
-            .post(
+            .postHeld(
                 "/gift-cards/" + card.getString("code") + "/reload",
                 reloadBody("5.00"),
                 T,
@@ -191,18 +215,20 @@ class GiftCardAccessIT {
     for (String role : new String[] {"OWNER", "MANAGER", "CASHIER", "STOREKEEPER", "CUSTOMER"}) {
       Response reload =
           rig()
-              .post(
+              .postHeld(
                   "/gift-cards/" + card.getString("code") + "/reload",
                   reloadBody("50"),
                   OTHER_T,
                   role,
                   Ids.newId().toString(),
                   null);
-      assertThat(role, reload.getStatus(), is("CUSTOMER".equals(role) ? 403 : 404));
+      // Staff below management are refused before the card is looked for; management finds none.
+      boolean management = "OWNER".equals(role) || "MANAGER".equals(role);
+      assertThat(role, reload.getStatus(), is(management ? 404 : 403));
       // Naming our store from their business makes a card of theirs, never one of ours.
       Response issue =
           rig().postHeld("/gift-cards", issueBody(STORE, "50"), OTHER_T, role, SHOPPER, null);
-      assertThat(role, issue.getStatus(), is("CUSTOMER".equals(role) ? 403 : 201));
+      assertThat(role, issue.getStatus(), is(management ? 201 : 403));
       Response read =
           rig()
               .getHeld(

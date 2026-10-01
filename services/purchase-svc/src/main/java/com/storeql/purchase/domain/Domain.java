@@ -1050,7 +1050,35 @@ public final class Domain {
       String kind,
       String paidBy,
       BigDecimal amount,
-      String currency) {}
+      String currency,
+      UUID orderId,
+      String source,
+      String note) {
+
+    /** A load whose event named no order, source or note (before order-svc sent them). */
+    public GiftCardLoad(
+        UUID tenantId,
+        UUID transactionId,
+        UUID giftCardId,
+        UUID storeId,
+        String kind,
+        String paidBy,
+        BigDecimal amount,
+        String currency) {
+      this(
+          tenantId,
+          transactionId,
+          giftCardId,
+          storeId,
+          kind,
+          paidBy,
+          amount,
+          currency,
+          null,
+          null,
+          null);
+    }
+  }
 
   /** Where deferred revenue stands for a tenant (17.11). */
   public record DeferredRevenueView(

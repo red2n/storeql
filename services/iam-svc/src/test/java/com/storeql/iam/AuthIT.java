@@ -967,4 +967,84 @@ class AuthIT {
     com.storeql.test.TenantDataChecks.assertExportable(
         target, "01a090ae-611e-702c-a97b-d1b8025478e1");
   }
+
+  /**
+   * Storefront trust slice 1: a sign-in that names its kind opens only that kind, and an address
+   * holding only the other kind answers exactly as a wrong password; naming none is unchanged.
+   */
+  @Test
+  void aSignInThatNamesItsKindNeverOpensTheOther() throws Exception {
+    String tail = Ids.newId().toString().replace("-", "");
+    tail = tail.substring(tail.length() - 12);
+    String pw = "strongpass1 for storeql";
+    String shopperOnly = "shopper-" + tail + "@example.com";
+    String staffOnly = "staff-" + tail + "@example.com";
+    String both = "both-" + tail + "@example.com";
+    String tmp1 = "tmp1-" + tail + "@example.com";
+    String tmp2 = "tmp2-" + tail + "@example.com";
+    for (String e : new String[] {shopperOnly, both, tmp1}) {
+      assertThat(
+          post("/auth/register", "{\"email\":\"" + e + "\",\"password\":\"" + pw + "\"}")
+              .getStatus(),
+          is(201));
+    }
+    assertThat(
+        post("/auth/register", "{\"email\":\"" + tmp2 + "\",\"password\":\"" + pw + "\"}")
+            .getStatus(),
+        is(201));
+    // Turn two of the shoppers' logins into business logins, the second at an address that also
+    // holds a shopper's.
+    try (var c = iamConnection();
+        var ps = c.prepareStatement("UPDATE users SET type = 'STAFF', email = ? WHERE email = ?")) {
+      ps.setString(1, staffOnly);
+      ps.setString(2, tmp1);
+      ps.executeUpdate();
+      ps.setString(1, both);
+      ps.setString(2, tmp2);
+      ps.executeUpdate();
+    }
+    java.util.function.BiFunction<String, String, Response> login =
+        (email, kind) ->
+            post(
+                "/auth/login",
+                "{\"email\":\""
+                    + email
+                    + "\",\"password\":\""
+                    + pw
+                    + "\""
+                    + (kind == null ? "" : ",\"accountType\":\"" + kind + "\"")
+                    + "}");
+
+    // Wrong kind for an address holding only the other: the answer of a wrong password.
+    Response wrongPassword =
+        post("/auth/login", "{\"email\":\"" + shopperOnly + "\",\"password\":\"nope nope nope\"}");
+    for (Response r :
+        new Response[] {login.apply(shopperOnly, "STAFF"), login.apply(staffOnly, "CUSTOMER")}) {
+      String body = r.readEntity(String.class);
+      assertThat(body, r.getStatus(), is(401));
+      assertThat(body, containsString("INVALID_CREDENTIALS"));
+      assertThat(body, not(containsString("accessToken")));
+    }
+    assertThat(wrongPassword.getStatus(), is(401));
+    assertThat(wrongPassword.readEntity(String.class), containsString("INVALID_CREDENTIALS"));
+
+    // The right kind signs in.
+    assertThat(login.apply(shopperOnly, "CUSTOMER").getStatus(), is(200));
+    assertThat(login.apply(staffOnly, "STAFF").getStatus(), is(200));
+
+    // An address holding both: each kind opens its own account, never the other's.
+    String asShopper = login.apply(both, "CUSTOMER").readEntity(String.class);
+    String asStaff = login.apply(both, "STAFF").readEntity(String.class);
+    String shopperSub = JWT.decode(extract(asShopper, "accessToken")).getSubject();
+    String staffSub = JWT.decode(extract(asStaff, "accessToken")).getSubject();
+    assertThat(shopperSub.equals(staffSub), is(false));
+
+    // Naming no kind is unchanged: staff first, the other kind when none exists.
+    assertThat(login.apply(shopperOnly, null).getStatus(), is(200));
+    assertThat(login.apply(staffOnly, null).getStatus(), is(200));
+    assertThat(
+        JWT.decode(extract(login.apply(both, null).readEntity(String.class), "accessToken"))
+            .getSubject(),
+        is(staffSub));
+  }
 }

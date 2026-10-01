@@ -118,6 +118,8 @@ Gift cards and store credit are money the business owes. Today a card can carry 
 
 ## Decisions
 
+- (2026-09-30 evening, reconciliation) **Ledger account codes are now single** and identical on every page (the existing chart uses 1xxx assets, 2xxx liabilities, 4xxx income, 5xxx purchases, 6xxx expenses; the free numbers were checked against `Domain.java`): Here: the unclaimed-balances payable is `2340`; a goodwill card posts to `6420`. The full list: `1110` Customer accounts, `1120` Supplier rebates receivable, `1215` Cash in transit to bank, `2340` Unclaimed balances payable, `4040` Supplier promotional funding, `4050` Delivery income, `5040` Purchase rebates, `5050` Purchase price variance, `6420` Gift cards given (existing; goodwill cards), `6530` Cash over and short, `6540` Exchange differences, `6560` Bad debts, `6570` Stock shrinkage, `6571` Stock shrinkage, unexplained, `6572` Stock lost in transit. One seed adds each that is missing (idempotent, by whichever page builds first).
+
 - **No fee, ever** (2026-09-30, industry standard).
 - **A replacement never extends life** (2026-09-30): the same balance and the same expiry, so replacing cannot be used to refresh a card.
 - **The register is data and starts empty** (2026-09-30): no law is asserted without a citation; the acknowledgement is the safeguard.

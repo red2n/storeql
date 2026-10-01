@@ -384,6 +384,18 @@ class PlanIT {
             .code(),
         is("PLAN_ENTITLEMENT_SHAPE"));
 
+    for (String key :
+        java.util.List.of("images.per-product.max", "proofs.mb.max", "sms.per-month")) {
+      assertThat(
+          key + " is named but nothing refuses on it yet",
+          platform(
+                  "PUT",
+                  PLANS + "/" + id + "/includes",
+                  "{\"grants\":[{\"key\":\"" + key + "\",\"limitValue\":3}]}")
+              .code(),
+          is("PLAN_ENTITLEMENT_NOT_ENFORCED"));
+    }
+
     assertThat(platform("GET", PLANS + "/" + Ids.newId()).code(), is("PLAN_NOT_FOUND"));
     assertThat(
         platform("PUT", "/platform/tenants/" + Ids.newId() + "/plan", "{\"planId\":\"" + id + "\"}")
@@ -480,6 +492,11 @@ class PlanIT {
     assertThat(body, containsString("requests.per-minute"));
     assertThat(body, containsString("images.mb.max"));
     assertThat(body, containsString("documents.mb.max"));
+    assertThat(body, containsString("Purchasing documents (MB)"));
+    // 0.4: named but not enforced yet, so not offered.
+    assertThat(body, not(containsString("images.per-product.max")));
+    assertThat(body, not(containsString("proofs.mb.max")));
+    assertThat(body, not(containsString("sms.per-month")));
     assertThat("each names who refuses when it is exceeded", body, containsString("tenant-svc"));
     assertThat(body, containsString("gateway"));
     assertThat(call("GET", PLANS + "/entitlement-keys", null, null, "OWNER").status(), is(403));

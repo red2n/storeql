@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
 import '../../core/auth/passkeys.dart';
 import '../../core/format.dart';
 import '../../core/network/api_error.dart';
@@ -9,7 +10,9 @@ import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../core/network/api_client.dart';
 import 'mfa_api.dart';
+import 'my_sessions.dart';
 import 'mfa_widgets.dart';
 import 'sign_out_everywhere.dart';
 
@@ -121,6 +124,14 @@ class _Factors extends ConsumerWidget {
             ),
           ),
         ),
+      // Each place this login is signed in, with a way out of any but this one.
+      MySessionsCard(
+        dio: ref.watch(apiClientProvider).dio,
+        accessToken: switch (ref.watch(authNotifierProvider).value) {
+          AuthAuthenticated(:final accessToken) => accessToken,
+          _ => null,
+        },
+      ),
       Card(
         child: ListTile(
           leading: const Icon(Icons.devices_outlined),

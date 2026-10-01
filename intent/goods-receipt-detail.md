@@ -61,7 +61,7 @@ A delivery arrives with some units crushed, some the wrong item and some past th
 - **Currency:** the order's own; nothing new.
 - **Ledger postings:** the receipt posts Dr Stock / Cr GR/IR for good plus damaged at the order's price, as now; a refusal posts nothing. A damaged return then posts through the existing vendor-return path (debit note, and the credit note when it arrives).
 - **Dates:** the receipt's instant, as now; expiry is a date, judged in the store's zone.
-- **Plan limits:** the existing `documents.mb.max` allowance now covers **all purchasing documents**, supplier e-invoices and receipt documents, spent from one pool by purchase-svc through `Entitlements.requireBytesWithin`, measured as the write would leave it. tenant-svc's `Plans.CATALOGUE` label changes from "Supplier e-invoice documents (MB)" to "Purchasing documents (MB)"; the key is unchanged, so no plan is edited. Fails open, as limits do. A per-file safety cap is a service config value equal to the e-invoice upload's, not a policy number.
+- **Plan limits:** the existing `documents.mb.max` allowance now covers **all purchasing documents**, supplier e-invoices and receipt documents, spent from one pool by purchase-svc through `Entitlements.requireBytesWithin`, measured as the write would leave it. tenant-svc's `Plans.CATALOGUE` label changes from "Supplier e-invoice documents (MB)" to "Purchasing documents (MB)"; the key is unchanged, so no plan is edited. Fails open, as limits do. **A document delivered by a receiving network is never refused by this allowance** ([e-invoices-received](e-invoices-received.md) slice 4: kept, flagged `allowance_exceeded`, the owner told); only an upload is. A per-file safety cap is a service config value equal to the e-invoice upload's, not a policy number.
 
 ## Constraints
 
@@ -106,5 +106,7 @@ A delivery arrives with some units crushed, some the wrong item and some past th
 - **Admin shell, Procurement, Receipts tab** (and the store's receiving view): per line, three quantity fields (arrived, damaged, refused), a defect reason picker when either is above 0, and for a tracked product a lot list (lot number, expiry date picker, quantity, condition); a delivery note reference field and an *Attach photo or scan* action showing the remaining allowance; `DELIVERY_NOTE_SEEN` as a banner. After saving, a *Return damaged stock* button on the receipt. The vendor return dialog gains a condition per line and, for a manager, an override reason field that asks for approval. `EmptyState`, `ErrorView`, tokens and widgets from `lib/shared/widgets/`; words not codes.
 
 ## Decisions
+
+- (2026-09-30 evening, reconciliation of the second set of pages) **A receipt corrected afterwards is [shipping-notices-and-direct-deliveries](shipping-notices-and-direct-deliveries.md) slice 7** (`goods_receipt_adjustments`, signed quantity, reason, `stock.receipt-correct`); this page's receipts stay append-only and its "return or adjustment" line points there.
 
 <!-- Filled while building. -->

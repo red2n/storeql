@@ -59,11 +59,15 @@ public class AbcAnalysisResource {
   @POST
   @Path("/abc/compile")
   public Response runAbcCompile(RunAbcRequest req) {
+    // A compile sets the classes every replenishment and count plan reads: management's, at a
+    // store the caller keeps (a caller held to stores who names none compiles their own store).
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
     UUID storeId =
-        req != null && req.storeId() != null && !req.storeId().isBlank()
-            ? uuid(req.storeId(), "storeId")
-            : null;
+        ctx.scopeStore(
+            req != null && req.storeId() != null && !req.storeId().isBlank()
+                ? uuid(req.storeId(), "storeId")
+                : null);
     String criteria = req != null ? req.criteria() : null;
     var thA = req != null ? req.thresholdA() : null;
     var thAB = req != null ? req.thresholdAB() : null;

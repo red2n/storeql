@@ -571,10 +571,22 @@ public final class Dtos {
                   "UUID of the destination store (same as fromStoreId for intra-store" + " moves).")
           @NotBlank
           String toStoreId,
-      String fromZone,
-      String toZone,
+      @Schema(description = "Free-text label; kept for old clients. Prefer fromZoneId.")
+          String fromZone,
+      @Schema(description = "Free-text label; kept for old clients. Prefer toZoneId.")
+          String toZone,
       String notes,
-      @NotNull @Valid List<MoveOrderLineRequest> lines) {}
+      @NotNull @Valid List<MoveOrderLineRequest> lines,
+      @Schema(
+              description =
+                  "UUID of the zone (tenant-svc's) to draw from; the pick takes only batches"
+                      + " sitting there. Omit to draw from anywhere in the store.")
+          String fromZoneId,
+      @Schema(
+              description =
+                  "UUID of the zone (tenant-svc's) the picked stock is put down in. Omit to put"
+                      + " nothing in a zone.")
+          String toZoneId) {}
 
   @Schema(name = "MoveOrderLineResponse", description = "One line of a move order.")
   public record MoveOrderLineResponse(
@@ -591,13 +603,23 @@ public final class Dtos {
       String id,
       @Schema(description = "UUID of the source store.") String fromStoreId,
       @Schema(description = "UUID of the destination store.") String toStoreId,
-      String fromZone,
-      String toZone,
+      @Schema(description = "Free-text label of an order made before zones were ids.")
+          String fromZone,
+      @Schema(description = "Free-text label of an order made before zones were ids.")
+          String toZone,
       String notes,
-      @Schema(description = "PENDING, PICKED, or CANCELLED.") String status,
+      @Schema(
+              description =
+                  "DRAFT (raised, not picked), OPEN, COMPLETED (picked; the stock has moved) or"
+                      + " CANCELLED.")
+          String status,
       String createdAt,
       String pickedAt,
-      List<MoveOrderLineResponse> lines) {}
+      List<MoveOrderLineResponse> lines,
+      @Schema(description = "UUID of the zone the stock is drawn from, when one was named.")
+          String fromZoneId,
+      @Schema(description = "UUID of the zone the stock is put down in, when one was named.")
+          String toZoneId) {}
 
   // ── Transfer Orders (Gap #6) ─────────────────────────────────────────────────
 

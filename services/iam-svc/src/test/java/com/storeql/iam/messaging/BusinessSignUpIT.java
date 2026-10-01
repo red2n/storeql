@@ -484,18 +484,24 @@ class BusinessSignUpIT {
   }
 
   @Test
-  @DisplayName("A person with one account signs in with it from anywhere, as before")
-  void oneAccountSignsInFromAnywhere() {
+  @DisplayName(
+      "A person with one account signs in with it when naming its kind or none, and never through"
+          + " the other kind")
+  void oneAccountSignsInOnlyAsItsKindOrUnnamed() {
     String shopperOnly = "only-shopping-" + suffix() + "@example.com";
     UUID shopper = signedUp(SHOPPER, shopperOnly);
     String founderOnly = "only-founding-" + suffix() + "@example.com";
     UUID founder = signedUp(BUSINESS, founderOnly);
-    for (String kind : Arrays.asList("CUSTOMER", "STAFF", null)) {
-      Answer asShopper = signIn(shopperOnly, PASSWORD, kind);
-      assertThat(String.valueOf(kind), token(asShopper).getSubject(), is(shopper.toString()));
-      Answer asFounder = signIn(founderOnly, PASSWORD, kind);
-      assertThat(String.valueOf(kind), token(asFounder).getSubject(), is(founder.toString()));
-    }
+    // Naming no kind is unchanged: the address's one account opens from anywhere.
+    assertThat(token(signIn(shopperOnly, PASSWORD, null)).getSubject(), is(shopper.toString()));
+    assertThat(token(signIn(founderOnly, PASSWORD, null)).getSubject(), is(founder.toString()));
+    // Naming its own kind opens it.
+    assertThat(
+        token(signIn(shopperOnly, PASSWORD, "CUSTOMER")).getSubject(), is(shopper.toString()));
+    assertThat(token(signIn(founderOnly, PASSWORD, "STAFF")).getSubject(), is(founder.toString()));
+    // Naming the other kind is answered as a wrong password (storefront-trust slice 1).
+    assertRefused(signIn(shopperOnly, PASSWORD, "STAFF"));
+    assertRefused(signIn(founderOnly, PASSWORD, "CUSTOMER"));
   }
 
   @Test

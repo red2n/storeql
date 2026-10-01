@@ -286,7 +286,10 @@ public final class Mappers {
                         o.effectiveTo() == null ? null : o.effectiveTo().toString(),
                         o.citation(),
                         o.summary(),
-                        o.statusOn(sheet.on())))
+                        o.statusOn(sheet.on()),
+                        o.limitValue(),
+                        o.limitUnit(),
+                        o.qualifier()))
             .toList(),
         sheet.cashLimits().stream()
             .map(

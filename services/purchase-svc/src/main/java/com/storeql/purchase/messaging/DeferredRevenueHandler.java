@@ -74,11 +74,18 @@ public class DeferredRevenueHandler {
               o.getString("kind"),
               o.getString("paidBy"),
               o.getJsonNumber("amount").bigDecimalValue(),
-              o.getString("currency"));
+              o.getString("currency"),
+              EventJson.optUuid(o, "orderId"),
+              optString(o, "source"),
+              optString(o, "note"));
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "GiftCardLoaded not posted, malformed: " + e.getMessage());
       return;
     }
     deferred.giftCardLoaded(load);
+  }
+
+  private static String optString(JsonObject o, String name) {
+    return o.containsKey(name) && !o.isNull(name) ? o.getString(name) : null;
   }
 }

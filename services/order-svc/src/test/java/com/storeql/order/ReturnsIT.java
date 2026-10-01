@@ -687,11 +687,11 @@ class ReturnsIT {
         data(
             post(
                 "/gift-cards",
-                "{\"storeId\":\"" + STORE + "\",\"amount\":5.00,\"paidBy\":\"CASH\"}",
+                "{\"storeId\":\"" + STORE + "\",\"amount\":5.00,\"reason\":\"GOODWILL\"}",
                 T,
                 "MANAGER",
                 MANAGER,
-                null),
+                Ids.newId().toString()),
             201);
     String code = mine.getString("code");
 
@@ -739,11 +739,11 @@ class ReturnsIT {
         data(
             post(
                 "/gift-cards",
-                "{\"storeId\":\"" + OTHER_T_STORE + "\",\"amount\":5.00,\"paidBy\":\"CASH\"}",
+                "{\"storeId\":\"" + OTHER_T_STORE + "\",\"amount\":5.00,\"reason\":\"GOODWILL\"}",
                 OTHER_T,
                 "MANAGER",
                 MANAGER,
-                null),
+                Ids.newId().toString()),
             201);
     String second = sale(T, STORE, null);
     Response foreign =

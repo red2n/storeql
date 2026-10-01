@@ -121,4 +121,6 @@ Four small doors are open in the goods-in path.
 
 ## Decisions
 
+- (2026-09-30 evening, reconciliation of the second set of pages) **One path per kind of delivery.** A supplier's delivery with no order goes through [shipping-notices-and-direct-deliveries](shipping-notices-and-direct-deliveries.md) slice 2 (purchase-svc `POST /direct-deliveries`, for a supplier flagged `direct_delivery_allowed`, cost typed, booked to GR/IR through `GoodsReceived`). Slice 1 here stays the inventory-side rule for a direct receipt (`POST /admin/inventory/receive`): it needs a source, and where that source is a supplier flagged for direct deliveries it is refused `409 INVENTORY_USE_DIRECT_DELIVERY` and points to that route, so a supplier's goods are never booked by two doors. Both enforce the one approvals key `stock.receipt-unordered`.
+
 - 2026-09-30: settled by industry standard as above; nothing built yet.

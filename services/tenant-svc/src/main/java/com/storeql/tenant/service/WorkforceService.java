@@ -10,13 +10,17 @@ import com.storeql.tenant.domain.Workforce.Entry;
 import com.storeql.tenant.domain.Workforce.PayRate;
 import com.storeql.tenant.domain.Workforce.Rest;
 import com.storeql.tenant.domain.Workforce.Shift;
+import com.storeql.tenant.domain.WorkingTime;
+import com.storeql.tenant.repo.TenantRepository;
 import com.storeql.tenant.repo.WorkforceRepository;
+import com.storeql.tenant.repo.WorkingTimeRuleRepository;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -50,7 +54,12 @@ import java.util.UUID;
 @ApplicationScoped
 public class WorkforceService {
 
+  private static final java.util.logging.Logger LOG =
+      java.util.logging.Logger.getLogger(WorkforceService.class.getName());
+
   @Inject WorkforceRepository repo;
+  @Inject WorkingTimeRuleRepository rules;
+  @Inject TenantRepository tenants;
   @Inject TenantProfiles profiles;
 
   /** A roster, with what is worth saying about it. */
@@ -111,17 +120,67 @@ public class WorkforceService {
    * <p>Concerns are per person and not per store, because the rest between two shifts is a fact
    * about a person: two people's shifts back to back is a shop staying open, not somebody going
    * without sleep.
+   *
+   * <p>What the law says is found through the store the shift is at (its country, else the
+   * business's) and the day is the store's own, in its zone. A store whose country has no rule gets
+   * only the concern that holds anywhere: overlapping shifts.
    */
   public Roster roster(UUID tenantId, UUID storeId, UUID userId, Instant from, Instant to) {
     List<Shift> shifts = repo.shifts(tenantId, storeId, userId, from, to);
     Map<UUID, List<Shift>> byPerson = new LinkedHashMap<>();
     for (Shift s : shifts) byPerson.computeIfAbsent(s.userId(), k -> new ArrayList<>()).add(s);
+    Map<UUID, Judging> stores = new HashMap<>();
+    Map<String, List<WorkingTime.Rule>> byCountry = new HashMap<>();
     Map<UUID, List<Concern>> concerns = new LinkedHashMap<>();
     for (Map.Entry<UUID, List<Shift>> e : byPerson.entrySet()) {
-      List<Concern> found = Workforce.concerns(e.getValue());
+      List<Shift> mine = e.getValue();
+      // Shifts at stores that are judged alike are judged together, so the rest between two of them
+      // counts; stores in another country or zone are judged by their own.
+      Map<String, List<Shift>> groups = new LinkedHashMap<>();
+      Map<String, Judging> basis = new LinkedHashMap<>();
+      for (Shift s : mine) {
+        Judging j = stores.computeIfAbsent(s.storeId(), id -> judging(tenantId, id, byCountry));
+        groups.computeIfAbsent(j.key(), k -> new ArrayList<>()).add(s);
+        basis.putIfAbsent(j.key(), j);
+      }
+      List<Concern> found =
+          new ArrayList<>(WorkingTime.overlaps(mine, basis.values().iterator().next().zone()));
+      for (Map.Entry<String, List<Shift>> g : groups.entrySet()) {
+        Judging j = basis.get(g.getKey());
+        found.addAll(WorkingTime.judge(g.getValue(), j.rules(), j.zone()));
+      }
       if (!found.isEmpty()) concerns.put(e.getKey(), found);
     }
     return new Roster(shifts, concerns);
+  }
+
+  /**
+   * What judges a store's roster: the rules that reach its country and the zone its days are in.
+   */
+  private record Judging(String key, List<WorkingTime.Rule> rules, ZoneId zone) {}
+
+  private Judging judging(
+      UUID tenantId, UUID storeId, Map<String, List<WorkingTime.Rule>> byCountry) {
+    var basis = repo.storeBasis(tenantId, storeId);
+    String country =
+        basis
+            .map(WorkforceRepository.StoreBasis::country)
+            .map(c -> c.strip().toUpperCase(Locale.ROOT))
+            .orElse("");
+    ZoneId zone = zoneOf(basis.map(WorkforceRepository.StoreBasis::timezone).orElse(null));
+    List<WorkingTime.Rule> found =
+        country.isEmpty() ? List.of() : byCountry.computeIfAbsent(country, rules::forCountry);
+    return new Judging(country + "|" + zone.getId(), found, zone);
+  }
+
+  /** The store's zone; UTC only when it cannot be read, which the stores' own checks prevent. */
+  private static ZoneId zoneOf(String timezone) {
+    try {
+      return timezone == null || timezone.isBlank() ? ZoneOffset.UTC : ZoneId.of(timezone.strip());
+    } catch (java.time.DateTimeException e) {
+      LOG.log(java.util.logging.Level.WARNING, "unreadable store zone {0}", timezone);
+      return ZoneOffset.UTC;
+    }
   }
 
   /** Publishes a shift: what staff may see and rely on. */
@@ -161,10 +220,16 @@ public class WorkforceService {
    * @param userId whose hours these are; the resource makes a member of staff their own
    * @param source {@link Workforce#SOURCE_CLOCK} when the person did it, {@code MANAGER} otherwise
    * @throws ApiException 409 {@code WORKFORCE_ALREADY_CLOCKED_IN} (the index decides, so two taps
-   *     on a slow terminal are one entry), {@code WORKFORCE_NOT_ASSIGNED}
+   *     on a slow terminal are one entry), {@code WORKFORCE_NOT_ASSIGNED}; 403 {@code
+   *     WORKFORCE_SELF_ADJUST_REFUSED} when a manager writes their own hours
    */
   public Entry clockIn(
       UUID tenantId, UUID userId, UUID storeId, UUID shiftId, String source, UUID actorId) {
+    // Nobody writes their own hours by hand: the clock is the person's, a manager's entry is for
+    // somebody else (workforce-rules slice 6 (a)). A fixed control, not a setting.
+    if (Workforce.SOURCE_MANAGER.equals(source) && userId.equals(actorId)) {
+      throw selfAdjust();
+    }
     requireWorksAt(tenantId, userId, storeId);
     if (shiftId != null) {
       Shift shift = requireShift(tenantId, shiftId);
@@ -262,7 +327,7 @@ public class WorkforceService {
    * the time — leaves a record nobody can be held to.
    *
    * @throws ApiException 400 without a reason or on a window that is not one; 409 when the entry
-   *     has already been corrected
+   *     has already been corrected; 403 {@code WORKFORCE_SELF_ADJUST_REFUSED} for one's own hours
    */
   public Entry adjust(
       UUID tenantId,
@@ -277,6 +342,9 @@ public class WorkforceService {
         repo.entry(tenantId, entryId)
             .orElseThrow(
                 () -> ApiException.notFound("WORKFORCE_ENTRY_NOT_FOUND", "no such time entry"));
+    if (original.userId().equals(actorId)) {
+      throw selfAdjust();
+    }
     if (!original.stands()) {
       throw ApiException.conflict(
           "WORKFORCE_ENTRY_NOT_STANDING", "that entry has already been corrected");
@@ -308,8 +376,61 @@ public class WorkforceService {
             now,
             actorId,
             original.breaks());
+    requireSecondPersonWhenRaised(original, correction);
     repo.adjust(correction, original.breaks(), labour(correction, original.id()));
     return repo.entry(tenantId, correction.id()).orElse(correction);
+  }
+
+  /**
+   * The store an entry belongs to, so the caller can be judged against it before anything is
+   * written: another business's entry is a 404, and a manager held to stores acts only at theirs.
+   *
+   * @throws ApiException 404 {@code WORKFORCE_ENTRY_NOT_FOUND}
+   */
+  public UUID storeOfEntry(UUID tenantId, UUID entryId) {
+    return repo.entry(tenantId, entryId)
+        .map(Entry::storeId)
+        .orElseThrow(
+            () -> ApiException.notFound("WORKFORCE_ENTRY_NOT_FOUND", "no such time entry"));
+  }
+
+  /**
+   * The store a manual clock-in is judged at: it must be the business's (404), and the caller then
+   * holds it or not (the resource asks).
+   *
+   * @throws ApiException 404 {@code STORE_NOT_FOUND}
+   */
+  public UUID requireStore(UUID tenantId, UUID storeId) {
+    return tenants
+        .findStore(tenantId, storeId)
+        .map(s -> storeId)
+        .orElseThrow(
+            () -> ApiException.notFound("STORE_NOT_FOUND", "No such store in this tenant"));
+  }
+
+  private static ApiException selfAdjust() {
+    return ApiException.forbidden(
+        "WORKFORCE_SELF_ADJUST_REFUSED",
+        "nobody corrects or clocks in their own hours; ask somebody else to do it");
+  }
+
+  /**
+   * Where the approval of a correction that raises paid hours plugs in (workforce-rules slice 6
+   * (c)). A correction that would raise the person's paid minutes is to become a pending
+   * correction, the approvals action {@code staff.time-correction-up}, applied and announced only
+   * when a second person with {@code staff.manage} approves — so that labour cost never moves on an
+   * unapproved figure. That needs the approvals mechanism (stage 0.5) and the business's switch,
+   * which is off until set; until they exist a raise applies at once, as it always has, and this
+   * says so where it is decided. The switch reads here, and returns the pending answer instead of
+   * falling through to {@code repo.adjust}.
+   */
+  private void requireSecondPersonWhenRaised(Entry original, Entry correction) {
+    if (Workforce.raisesPaidMinutes(original, correction)) {
+      LOG.log(
+          java.util.logging.Level.FINE,
+          "correction {0} raises paid minutes; approval is not switched on for this business",
+          correction.id());
+    }
   }
 
   public List<Entry> entries(UUID tenantId, UUID storeId, UUID userId, Instant from, Instant to) {

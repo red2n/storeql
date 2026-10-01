@@ -59,9 +59,13 @@ public class KanbanResource {
   @POST
   @Path("/kanban-cards")
   public Response createKanbanCard(CreateKanbanCardRequest req) {
+    // A card fixes what a store reorders: management's, at a store the caller keeps. Triggering
+    // and replenishing a card stay the floor's.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(req.storeId(), "storeId");
+    ctx.requireStoreAccess(storeId);
     UUID variantId = uuid(req.variantId(), "variantId");
     UUID sourceStoreId =
         req.sourceStoreId() != null && !req.sourceStoreId().isBlank()
@@ -181,7 +185,9 @@ public class KanbanResource {
   @Path("/kanban-cards/{id}/order-modifiers")
   public ApiResponse<KanbanCardResponse> updateKanbanModifiers(
       @PathParam("id") UUID id, UpdateOrderModifiersRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getKanbanCard(tenantId, id).storeId());
     return ApiResponse.ok(
         Mappers.toKanbanCard(
             service.updateKanbanOrderModifiers(

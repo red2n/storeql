@@ -333,6 +333,17 @@ class _ServerOrderTileState extends ConsumerState<_ServerOrderTile> {
     final stage = order.stageLabel;
     final slot = order.slot;
     final placed = AppFormat.dateTime(order.placedAt.toIso8601String());
+    // An unpaid order lapses; say when, in words (the list omits it, so the
+    // order is asked for its own).
+    final pending = order.status.toUpperCase() == 'PENDING';
+    final expiresAt = !pending
+        ? null
+        : order.expiresAt ?? ref.watch(orderExpiryProvider(order.id)).value;
+    final lapses = expiresAt == null
+        ? null
+        : expiresAt.isAfter(DateTime.now())
+            ? 'Lapses if not paid by ${AppFormat.dateTime(expiresAt.toIso8601String())}'
+            : 'Lapsing shortly if not paid';
     return _OrderCard(
       orderId: order.id,
       detailKey: Key('order-subtitle-${order.id}'),
@@ -344,9 +355,12 @@ class _ServerOrderTileState extends ConsumerState<_ServerOrderTile> {
       // The window this order holds (delivery-and-collection-slots), worded
       // with which kind it is, in the store's own local date and clock —
       // never converted on the device.
-      detail: slot == null
-          ? placed
-          : '$placed\n${slotWindowLabel(fulfilmentType: order.fulfilmentType, date: slot.date, startTime: slot.startTime, endTime: slot.endTime)}',
+      detail: [
+        slot == null
+            ? placed
+            : '$placed\n${slotWindowLabel(fulfilmentType: order.fulfilmentType, date: slot.date, startTime: slot.startTime, endTime: slot.endTime)}',
+        ?lapses,
+      ].join('\n'),
       amount: showPrices
           ? AppFormat.money(order.total, currencyCode: order.currency)
           : (delivery ? 'Price on delivery' : 'Price in store'),

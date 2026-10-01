@@ -236,6 +236,8 @@ function post(path, body, token) {
   if (/^\/api\/order-svc\/orders\/[^/]+\/(returns|void)$/.test(path)) headers['Idempotency-Key'] = newKey('retail-return-or-void');
   // ...and a gift-card redeem (the till's gift-card tender): header only.
   if (/^\/api\/order-svc\/gift-cards\/[^/]+\/redeem$/.test(path)) headers['Idempotency-Key'] = newKey('retail-gift-redeem');
+  // ...and a gift card issued or reloaded by hand (management only, with a reason): header only.
+  if (path === '/api/order-svc/gift-cards' || /^\/api\/order-svc\/gift-cards\/[^/]+\/reload$/.test(path)) headers['Idempotency-Key'] = newKey('retail-gift-hand');
   // ...and points handed out or changed by hand (management only, and retry-safe).
   if (/^\/api\/customer-svc\/customers\/[^/]+\/loyalty\/(earn|adjust)$/.test(path)) headers['Idempotency-Key'] = newKey('retail-loyalty');
   if (/^\/api\/customer-svc\/customers\/[^/]+\/store-credit\/issue$/.test(path)) headers['Idempotency-Key'] = newKey('retail-store-credit');
@@ -2601,6 +2603,9 @@ export function layawayManagement(d) {
 }
 
 // ── Gap #14: Gift card management ─────────────────────────────────────────────
+// A card given by hand is management's, with a reason and an Idempotency-Key (the `post` helper
+// sends the key); a card a customer pays for is a gift-card line on a paid till sale. The API gives
+// no code for a card a sale makes new, so the sale here tops up the card just issued.
 export function giftCardManagement(d) {
   if (!d || !d.india || !d.uk) return;
   const tenant = tenantCtx(d);
@@ -2608,14 +2613,15 @@ export function giftCardManagement(d) {
   if (!store) return;
   const storeId = store.storeId;
   const tag     = `giftCard[${tenant.name}]`;
+  const balanceOf = (res) => { try { return Number(JSON.parse(res.body).data.currentBalance); } catch (_) { return NaN; } };
 
-  // 1. Issue gift card
+  // 1. Issue gift card by hand, for a reason
   const t0 = Date.now();
   const issueRes = post('/api/order-svc/gift-cards', {
     storeId,
     amount: '50.00',
     currency: tenant.currency,
-    paidBy: 'CASH',
+    reason: 'PROMOTION',
   }, tenant.ownerToken);
   giftCardLatency.add(Date.now() - t0);
   if (!ok(issueRes, `${tag} issue gift card 201`)) { sleep(1); return; }
@@ -2627,9 +2633,9 @@ export function giftCardManagement(d) {
   const getRes = get(`/api/order-svc/gift-cards/${code}`, tenant.ownerToken);
   ok(getRes, `${tag} get gift card 200`);
 
-  // 3. Reload
+  // 3. Reload by hand, for a reason
   const reloadRes = post(`/api/order-svc/gift-cards/${code}/reload`,
-    { amount: '20.00', reference: `reload-${__VU}-${__ITER}`, paidBy: 'CARD' }, tenant.ownerToken);
+    { amount: '20.00', reference: `reload-${__VU}-${__ITER}`, reason: 'GOODWILL' }, tenant.ownerToken);
   ok(reloadRes, `${tag} reload gift card 200`);
   check(reloadRes, {
     [`${tag} balance after reload is 70`]: r => {
@@ -2637,10 +2643,61 @@ export function giftCardManagement(d) {
     },
   });
 
-  // 4. Redeem
-  const redeemRes = post(`/api/order-svc/gift-cards/${code}/redeem`,
-    { amount: '30.00', reference: `redeem-${__VU}-${__ITER}` }, tenant.ownerToken);
-  ok(redeemRes, `${tag} redeem gift card 200`);
+  // 3b. Money taken for a card is a sale, never a hand load
+  check(post(`/api/order-svc/gift-cards/${code}/reload`,
+    { amount: '20.00', reason: 'GOODWILL', paidBy: 'CARD' }, tenant.ownerToken), {
+    [`${tag} hand reload naming a tender 409`]: r => r.status === 409,
+  });
+
+  // 3c. A top-up sold at the till: a gift-card line on a sale, loaded when the sale is paid
+  const saleRes = post('/api/order-svc/orders', {
+    storeId,
+    channel: 'POS',
+    fulfilmentType: 'INSTORE',
+    items: [],
+    giftCardLoads: [{ amount: '20.00', code }],
+    currency: tenant.currency,
+    idempotencyKey: newId(),
+  }, tenant.ownerToken);
+  if (ok(saleRes, `${tag} sell a gift card top-up 201`)) {
+    const saleId = body(saleRes).id;
+    check(get(`/api/order-svc/gift-cards/${code}`, tenant.ownerToken), {
+      [`${tag} nothing loaded while the sale is unpaid`]: r => balanceOf(r) === 70,
+    });
+    const payRes = post('/api/payment-svc/payments', {
+      orderId: saleId,
+      amount: '20.00',
+      method: 'CASH',
+      idempotencyKey: newId(),
+    }, tenant.ownerToken);
+    if (ok(payRes, `${tag} pay for the gift card top-up 201`)) {
+      // The load arrives over Kafka: a read-back, not counted as an error when the load is slow.
+      let loaded = NaN;
+      for (let i = 0; i < 15 && loaded !== 90; i++) {
+        sleep(1);
+        loaded = balanceOf(get(`/api/order-svc/gift-cards/${code}`, tenant.ownerToken));
+      }
+      check(null, { [`${tag} balance after the paid top-up is 90`]: () => loaded === 90 });
+    }
+  }
+
+  // 4. Redeem: the card is charged for a sale
+  const variantId = tenant.variantIds[0];
+  if (variantId) {
+    const spendRes = post('/api/order-svc/orders', {
+      storeId,
+      channel: 'POS',
+      fulfilmentType: 'INSTORE',
+      items: [{ variantId, qty: 2, unitPrice: '15.00' }],
+      currency: tenant.currency,
+      idempotencyKey: newId(),
+    }, tenant.ownerToken);
+    if (ok(spendRes, `${tag} place a sale to spend the card on 201`)) {
+      const redeemRes = post(`/api/order-svc/gift-cards/${code}/redeem`,
+        { amount: '30.00', orderId: body(spendRes).id, reference: `redeem-${__VU}-${__ITER}` }, tenant.ownerToken);
+      ok(redeemRes, `${tag} redeem gift card 200`);
+    }
+  }
 
   // 5. Transaction history
   const txRes = get(`/api/order-svc/gift-cards/${code}/transactions`, tenant.ownerToken);
@@ -3192,24 +3249,46 @@ export function negativeTests(d) {
 
   // Issue gift card missing storeId → 400
   neg(post('/api/order-svc/gift-cards',
-    { amount: '50.00', paidBy: 'CASH' }, tenant.ownerToken),
+    { amount: '50.00', reason: 'GOODWILL' }, tenant.ownerToken),
     'issue gift card missing storeId 400', 400);
 
   // Issue gift card zero amount → 400
   neg(post('/api/order-svc/gift-cards',
-    { storeId: store.storeId, amount: 0, paidBy: 'CASH' }, tenant.ownerToken), 'issue gift card zero amount 400', 400);
+    { storeId: store.storeId, amount: 0, reason: 'GOODWILL' }, tenant.ownerToken), 'issue gift card zero amount 400', 400);
+
+  // Issue gift card by hand with no reason → 400
+  neg(post('/api/order-svc/gift-cards',
+    { storeId: store.storeId, amount: '10.00' }, tenant.ownerToken), 'issue gift card by hand without a reason 400', 400);
+
+  // Issue gift card by hand naming a tender → 409 (money taken for a card is a sale)
+  neg(post('/api/order-svc/gift-cards',
+    { storeId: store.storeId, amount: '10.00', reason: 'GOODWILL', paidBy: 'CASH' }, tenant.ownerToken),
+    'issue gift card by hand with a tender 409', 409);
+
+  // Issue gift card by hand with no Idempotency-Key → 400 (sent without the helper, which adds one)
+  neg(http.post(`${BASE}/api/order-svc/gift-cards`,
+    JSON.stringify({ storeId: store.storeId, amount: '10.00', reason: 'GOODWILL' }), { headers: hdrs(tenant.ownerToken) }),
+    'issue gift card by hand without a key 400', 400);
 
   // GET non-existent gift card code → 404
   neg(get('/api/order-svc/gift-cards/XXXX-XXXX-XXXX-XXXX', tenant.ownerToken), 'get nonexistent gift card 404', 404);
 
   // Redeem more than balance → 409
   const gcForRedeemRes = post('/api/order-svc/gift-cards',
-    { storeId: store.storeId, amount: '10.00', currency: tenant.currency }, tenant.ownerToken);
-  if (gcForRedeemRes.status === 201) {
+    { storeId: store.storeId, amount: '10.00', currency: tenant.currency, reason: 'GOODWILL' }, tenant.ownerToken);
+  const gcOrderRes = post('/api/order-svc/orders', {
+    storeId: store.storeId,
+    channel: 'POS',
+    fulfilmentType: 'INSTORE',
+    items: [{ variantId: vid, qty: 1, unitPrice: '15.00' }],
+    currency: tenant.currency,
+    idempotencyKey: newId(),
+  }, tenant.ownerToken);
+  if (gcForRedeemRes.status === 201 && gcOrderRes.status === 201) {
     const gcCode = (() => { try { return JSON.parse(gcForRedeemRes.body).data.code; } catch (_) { return null; } })();
     if (gcCode) {
       neg(post(`/api/order-svc/gift-cards/${gcCode}/redeem`,
-        { amount: '999.00' }, tenant.ownerToken),
+        { amount: '999.00', orderId: body(gcOrderRes).id }, tenant.ownerToken),
         'redeem gift card exceeds balance 409', 409);
     }
   }

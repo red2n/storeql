@@ -147,7 +147,12 @@ void main() {
     expect(find.textContaining('GOLD is 23 pts away'), findsOneWidget);
     expect(find.textContaining('earns ×1.5'), findsOneWidget);
     expect(find.text('20 pts expire on 23 Oct 2026.'), findsOneWidget);
-    expect(_last(recorder, 'GET').path, contains('/customers/me/'));
+    // The list of where the login is signed in (iam-svc) is not a customer record.
+    expect(
+        recorder.calls
+            .lastWhere((c) => c.method == 'GET' && c.path.contains('/customer-svc/'))
+            .path,
+        contains('/customers/me/'));
   });
 
   testWidgets('the profile is shown and saved trimmed, with the email left alone', (tester) async {
@@ -305,7 +310,12 @@ void main() {
     await tester.tap(find.byKey(const Key('address-menu-a-1')));
     await tester.pumpAndSettle();
     expect(find.text('Make default'), findsNothing);
-    expect(recorder.calls.every((c) => c.path.contains('/customers/me')), isTrue);
+    // Every customer record request is the shopper's own path; the sessions list is iam-svc's.
+    expect(
+        recorder.calls
+            .where((c) => c.path.contains('/customer-svc/'))
+            .every((c) => c.path.contains('/customers/me')),
+        isTrue);
   });
 
   // ── Layout and the date of birth (the design system's Storefront_Account card) ──

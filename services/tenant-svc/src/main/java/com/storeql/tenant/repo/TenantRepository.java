@@ -749,26 +749,34 @@ public class TenantRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Sets a zone's status.
+   * Sets a zone's status only if it is still {@code from}, with its event and change-log entry on
+   * the same transaction.
    *
    * @param tenantId owning tenant; the first condition of the query
-   * @param zoneId the zone to update
-   * @param status the status to set
-   * @return the zone with its new status
+   * @param from the status the caller read; the write is refused if it moved since
+   * @return false when the zone was not at {@code from} any more (nothing written, nothing sent)
    */
-  public Zone updateZoneStatus(UUID tenantId, UUID zoneId, String status) {
+  public boolean updateZoneStatusWithOutbox(
+      UUID tenantId, UUID zoneId, String from, String to, OutboxRow event, Audit.Entry audit) {
     Instant now = Instant.now();
-    exec(
-        "UPDATE zones SET status = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
-        ps -> {
-          ps.setString(1, status);
-          ps.setObject(2, now.atOffset(ZoneOffset.UTC));
-          ps.setObject(3, tenantId);
-          ps.setObject(4, zoneId);
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE zones SET status = ?, updated_at = ?"
+                      + " WHERE tenant_id = ? AND id = ? AND status = ?")) {
+            ps.setString(1, to);
+            ps.setObject(2, now.atOffset(ZoneOffset.UTC));
+            ps.setObject(3, tenantId);
+            ps.setObject(4, zoneId);
+            ps.setString(5, from);
+            if (ps.executeUpdate() != 1) return false;
+          }
+          insertOutbox(c, event);
+          AuditRepository.insert(c, audit);
+          return true;
         },
         "update zone status");
-    return findZone(tenantId, zoneId)
-        .orElseThrow(() -> ApiException.notFound("ZONE_NOT_FOUND", "Zone not found"));
   }
 
   // ──────────────────────────────────────────────────────── staff reads/writes

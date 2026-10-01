@@ -62,7 +62,9 @@ public class ReceiptResource {
   public Response generate(@PathParam("orderId") UUID orderId, GenerateReceiptRequest req) {
     Validations.validate(req);
     var receipt = svc.generateReceipt(ctx.requireTenantId(), orderId, req, ctx);
-    return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(receipt))).build();
+    return Response.status(201)
+        .entity(ApiResponse.ok(Mappers.toDto(receipt, svc.mayReadReceiptAddresses(ctx))))
+        .build();
   }
 
   /**
@@ -72,7 +74,9 @@ public class ReceiptResource {
    * numbered tax document.
    *
    * @param orderId the sale whose receipt records to read
-   * @return the receipt records, empty when no copy was ever produced
+   * @return the receipt records, empty when no copy was ever produced; the address a copy was
+   *     emailed to is masked ({@code j***@example.com}) for everyone but management (OWNER,
+   *     MANAGER) at the sale's store
    * @throws com.storeql.web.ApiException {@code 404} when the order does not exist; {@code 403}
    *     {@code STORE_ACCESS_DENIED} for staff not assigned to the sale's store
    */
@@ -84,7 +88,9 @@ public class ReceiptResource {
   @GET
   public Response list(@PathParam("orderId") UUID orderId) {
     var receipts =
-        svc.listReceipts(ctx.requireTenantId(), orderId, ctx).stream().map(Mappers::toDto).toList();
+        svc.listReceipts(ctx.requireTenantId(), orderId, ctx).stream()
+            .map(r -> Mappers.toDto(r, svc.mayReadReceiptAddresses(ctx)))
+            .toList();
     return Response.ok(ApiResponse.ok(receipts)).build();
   }
 }

@@ -38,6 +38,15 @@ class UserTest {
     assertEquals(List.of(), User.signInCandidates(List.of(), User.TYPE_STAFF));
   }
 
+  @Test
+  void aSignInThatNamesItsKindNeverOpensTheOther() {
+    List<User> logins = List.of(CASHIER, SHOPPER, FOUNDER);
+    assertEquals(List.of(SHOPPER), User.ofKind(logins, User.TYPE_CUSTOMER));
+    assertEquals(List.of(CASHIER, FOUNDER), User.ofKind(logins, User.TYPE_STAFF));
+    assertEquals(List.of(), User.ofKind(List.of(SHOPPER), User.TYPE_STAFF));
+    assertEquals(List.of(), User.ofKind(List.of(FOUNDER), User.TYPE_CUSTOMER));
+  }
+
   private static User login(UUID tenantId, String type) {
     Instant now = Instant.now();
     return new User(

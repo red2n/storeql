@@ -107,7 +107,7 @@ A genuine person who mistypes a password five times is locked out for fifteen mi
 - [ ] Nobody unlocks themselves (`403 UNLOCK_SELF_REFUSED`); an administrator is unlocked only by another administrator (`403 UNLOCK_ADMINISTRATOR_REFUSED` for an owner naming one) — `LockoutIT.selfAndAdministratorRules`
 - [ ] Unlocking a login that is not locked is `409 LOGIN_NOT_LOCKED`; a replay with the same `Idempotency-Key` answers the first result — `LockoutIT.notLockedAndReplay`
 - [ ] The person is told by email their sign-in was unlocked, once per event — notification-svc `LoginUnlockedHandlerTest`, `NotificationIT.unlockNoticeOncePerEvent`
-- [ ] The list of sessions shows the caller's own only; ending one revokes that chain and no other; ending it twice is `404` — iam-svc `SessionsIT.ownListAndEndOne`
+- [x] The list of sessions shows the caller's own only; ending one revokes that chain and no other; ending it twice is `404` — iam-svc `SessionsIT.ownListAndEndOne` [iam half built as `SessionsIT.ownListAndEndOne` and `.otherLoginsSessionsAreNeverVisibleOrEndable`; the owner-ends-staff and POS/deny-list halves are not built]
 - [ ] An owner lists and ends one member of staff's sessions; another business's owner and a store-held manager are refused; a shopper's sessions are never visible to a business — `SessionsIT.ownerEndsAStaffSession`, `.otherBusinessSeesNone`
 - [ ] Ending a session ends the POS session it opened and refuses that access token at the gateway — `SessionsIT.endingOneEndsItsPosSession`, gateway `DenyListFilterTest` (after platform-administration slice 1)
 - [ ] The device label and network are derived, truncated, never the raw header or address; a client-sent `X-Client-Network` is stripped — pure `SessionLabelTest`, gateway `ClientHeadersTest`
@@ -129,3 +129,5 @@ A genuine person who mistypes a password five times is locked out for fifteen mi
 ## Decisions
 
 Filled while building. Known ahead of time (the exception is stated once here, for every page that touches it): a shared `LockoutKeys` class in `common-service` is a deliberate exception to "no shared state between services" because the counters are the gateway's and iam-svc only clears them; it is one class, tested from both sides.
+
+- **Decision (slice 3, iam half built):** a session is the `session_id` shared by a refresh chain (V20 `refresh_tokens.session_id/started_at/device_label/network`); the access token carries it as `sid`; last used is the newest token's issue time (a renewal, not each call). `current` is marked from an optional `X-Session-Id` header, which the app reads from its own `sid` until the gateway forwards it. Labels only: device from User-Agent, network truncated to /24 or /48 from `X-Forwarded-For`. Not built: ending a session's POS session, the deny list, the admin list/end of staff sessions.

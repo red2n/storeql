@@ -202,7 +202,13 @@ public final class Dtos {
       @Schema(description = "Physically counted cash in the till at close time.")
           @NotNull
           @PositiveOrZero
-          BigDecimal countedCash) {}
+          BigDecimal countedCash,
+      @Schema(
+              description =
+                  "Why the count differs from expected (optional, up to 500 characters). Kept with"
+                      + " the closed session and announced in TillSessionClosed.")
+          @jakarta.validation.constraints.Size(max = 500)
+          String note) {}
 
   /** Breakdown of sales and refunds per tender method (used in X/Z reports). */
   @Schema(
@@ -225,7 +231,10 @@ public final class Dtos {
       @Schema(description = "Sales/refunds/net breakdown keyed by tender method.")
           Map<String, TenderSummary> tenderSummary,
       BigDecimal cashDropsTotal,
-      @Schema(description = "Float plus cash sales minus cash refunds and cash drops.")
+      @Schema(
+              description =
+                  "Float plus cash sales minus cash refunds, plus pay-ins, minus pay-outs and"
+                      + " cash drops.")
           BigDecimal expectedCashInTill,
       @Schema(description = "Physically counted cash; null for an X-report.")
           BigDecimal countedCash,
@@ -233,7 +242,20 @@ public final class Dtos {
           BigDecimal overShort,
       BigDecimal grossSales,
       BigDecimal totalRefunds,
-      BigDecimal netSales) {}
+      BigDecimal netSales,
+      @Schema(description = "Cash tenders taken at the session's store in the session's window.")
+          BigDecimal cashSales,
+      @Schema(description = "Cash refunds made at the session's store in the session's window.")
+          BigDecimal cashRefunds,
+      @Schema(description = "Cash put in during the session (pay-ins).") BigDecimal payIns,
+      @Schema(description = "Cash taken out during the session (pay-outs).") BigDecimal payOuts,
+      @Schema(
+              description =
+                  "How the money was attributed: WINDOW (everything at the session's store while"
+                      + " it was open). SESSION arrives with registers.")
+          String basis,
+      @Schema(description = "The closer's note on a difference; null on an X-report.")
+          String note) {}
 
   // ── Pay-in / Pay-out (petty cash) ─────────────────────────────────────────
 
@@ -263,11 +285,22 @@ public final class Dtos {
   @Schema(name = "GenerateZReportRequest", description = "Generate (or retrieve) a daily Z-report.")
   public record GenerateZReportRequest(
       @Schema(description = "UUID of the store.") @NotBlank String storeId,
-      @Schema(description = "Business date the report covers, ISO-8601 yyyy-MM-dd.") @NotBlank
+      @Schema(
+              description =
+                  "Business date the report covers, ISO-8601 yyyy-MM-dd; today in the store's own"
+                      + " time zone when omitted.")
           String businessDate,
       @Schema(description = "Physically counted cash for the day.") @NotNull @PositiveOrZero
           BigDecimal countedCash,
-      @Schema(description = "ISO currency code; the tenant's own when omitted.") String currency) {}
+      @Schema(description = "ISO currency code; the tenant's own when omitted.") String currency,
+      @Schema(
+              description =
+                  "To correct a settled day: the id of the stored report being replaced (it must be"
+                      + " the latest version). The correction is a new version; nothing is"
+                      + " overwritten.")
+          String correctionOf,
+      @Schema(description = "Why the day is corrected; required with correctionOf.")
+          String reason) {}
 
   @Schema(
       name = "ZReportResponse",
@@ -289,13 +322,35 @@ public final class Dtos {
       BigDecimal cashDrops,
       BigDecimal payIns,
       BigDecimal payOuts,
-      @Schema(description = "Float plus cash sales minus cash refunds, drops, and pay-outs.")
+      @Schema(
+              description =
+                  "Float plus cash sales minus cash refunds, plus pay-ins, minus pay-outs and"
+                      + " cash drops.")
           BigDecimal expectedCash,
       @Schema(description = "Physically counted cash for the day.") BigDecimal countedCash,
       @Schema(description = "countedCash minus expectedCash.") BigDecimal overShort,
       int transactionCount,
       @Schema(description = "ISO currency code.") String currency,
-      Instant generatedAt) {}
+      Instant generatedAt,
+      @Schema(description = "Cash refunded at the store during the day (a term of expectedCash).")
+          BigDecimal cashRefunds,
+      @Schema(description = "1 for the first report of a day; a correction is the next number.")
+          int version,
+      @Schema(description = "The report this version corrects; null for version 1.")
+          UUID replacesId,
+      @Schema(description = "Why the day was corrected; null for version 1.")
+          String correctionReason,
+      @Schema(description = "IANA zone the day was counted in (the store's own).") String timeZone,
+      @Schema(
+              description =
+                  "True when the store's zone could not be read and UTC was used instead; the day"
+                      + " then runs midnight to midnight UTC.")
+          boolean zoneAssumed,
+      @Schema(
+              description =
+                  "False when this is a stored report answered again; true when this request wrote"
+                      + " it.")
+          boolean regenerated) {}
 
   @Schema(
       name = "TenderMixRowResponse",

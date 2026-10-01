@@ -337,6 +337,31 @@ class DeferredRevenueTest {
   }
 
   @Test
+  @DisplayName(
+      "A card sold in a sale debits clearing on the order; by hand it is the goodwill cost")
+  void aCardSoldInASaleIsPostedAgainstClearing() {
+    UUID order = com.storeql.ids.Ids.newId();
+    BigDecimal amount = new BigDecimal("40.00");
+    for (String tender : new String[] {"CASH", "CARD", ""}) {
+      List<NominalLedgerEntry> sold =
+          DeferredRevenue.giftCardLoaded(SRC, "ISSUE", tender, amount, "SALE", order, null);
+      assertThat(net(sold, Domain.CODE_SALES_CLEARING), comparesEqualTo(amount));
+      assertThat(net(sold, Domain.CODE_CASH_IN_TILLS), comparesEqualTo(BigDecimal.ZERO));
+      assertThat(net(sold, Domain.CODE_CARD_CLEARING), comparesEqualTo(BigDecimal.ZERO));
+      assertThat(net(sold, Domain.CODE_GIFT_CARD_LIABILITY), comparesEqualTo(amount.negate()));
+      assertThat(sold.get(0).sourceRef(), is(order));
+    }
+    List<NominalLedgerEntry> hand =
+        DeferredRevenue.giftCardLoaded(
+            SRC, "ISSUE", "PROMOTIONAL", amount, "GOODWILL", null, "late order");
+    assertThat(net(hand, Domain.CODE_GIFT_CARDS_GIVEN), comparesEqualTo(amount));
+    assertThat(hand.get(0).description(), containsString("(GOODWILL): late order"));
+    assertThat(
+        DeferredRevenue.giftCardLoaded(SRC, "ISSUE", "RETURN", amount, "RETURN", order, null),
+        is(empty()));
+  }
+
+  @Test
   @DisplayName("A gift card sold is a liability against the money taken; one given away is a cost")
   void aGiftCardSoldIsALiability() {
     BigDecimal amount = new BigDecimal("25.00");

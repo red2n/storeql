@@ -332,11 +332,11 @@ class NoReceiptReturnIT {
             rig()
                 .post(
                     "/gift-cards",
-                    "{\"storeId\":\"" + STORE + "\",\"amount\":5.00,\"paidBy\":\"CASH\"}",
+                    "{\"storeId\":\"" + STORE + "\",\"amount\":5.00,\"reason\":\"GOODWILL\"}",
                     T_ON,
                     "MANAGER",
                     MANAGER,
-                    null),
+                    Ids.newId().toString()),
             201);
     JsonObject ret =
         data(
@@ -362,11 +362,11 @@ class NoReceiptReturnIT {
             rig()
                 .post(
                     "/gift-cards",
-                    "{\"storeId\":\"" + STORE + "\",\"amount\":5.00,\"paidBy\":\"CASH\"}",
+                    "{\"storeId\":\"" + STORE + "\",\"amount\":5.00,\"reason\":\"GOODWILL\"}",
                     OTHER_T,
                     "MANAGER",
                     MANAGER,
-                    null),
+                    Ids.newId().toString()),
             201);
     long before = returnsOf(T_ON);
     Response foreign =

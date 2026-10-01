@@ -458,6 +458,70 @@ export function receive(tenant, storeId, variantId, qty, costPrice = '10.00') {
   });
 }
 
+// ── gift cards ────────────────────────────────────────────────────────────────
+
+/**
+ * A gift card given by hand: a manager's or owner's act, with no sale behind it. It needs a
+ * `reason` (GOODWILL, PROMOTION, COMPENSATION or MIGRATION) and an Idempotency-Key, and takes no
+ * tender: money taken for a card is a sale (see sellGiftCard). Returns the response.
+ */
+export function issueGiftCardByHand(token, storeId, amount, { reason = 'GOODWILL', key = true, extra = {} } = {}) {
+  return call('POST', '/api/order-svc/gift-cards', {
+    token,
+    ...(key ? { idem: key } : {}),
+    body: { storeId, amount, ...(reason ? { reason } : {}), ...extra },
+  });
+}
+
+/**
+ * A gift card sold at the till: a gift-card line (`giftCardLoads`) on a till sale, whose value
+ * reaches the card when the payment that completes the sale is captured — over Kafka, so the
+ * balance is polled.
+ *
+ * The API answers no code for a card a sale makes new (not on the order, not on the payment, and
+ * there is no list), so a flow that goes on to read or spend the card names one it already holds
+ * (`code`) and the sale tops that card up. With no `code` a new card is sold and only the sale
+ * comes back.
+ *
+ * @param tenant the business; its owner reads the card and takes the payment
+ * @param opts.code the card to top up, or none for a new card
+ * @param opts.token who rings the sale up (default the owner; a cashier sells cards too)
+ * @param opts.method the tender the sale is paid with
+ * @param opts.items goods sold on the same sale, if any
+ * @returns { order, before, unpaid, after, landed }: the placed sale; the card's balance before the
+ *   sale, once the sale is placed and not yet paid, and at the end; and the seconds the load took to
+ *   land (-1 when it never did, null when no card was named)
+ */
+export function sellGiftCard(tenant, storeId, amount, { code, token, method = 'CASH', items = [], seconds = 90 } = {}) {
+  const owner = tenant.owner.token;
+  const balance = () =>
+    code ? Number(data(call('GET', `/api/order-svc/gift-cards/${encodeURIComponent(code)}`, { token: owner })).currentBalance) : NaN;
+  const before = balance();
+  const order = must(
+    call('POST', '/api/order-svc/orders', {
+      token: token || owner,
+      idem: true,
+      // `items` is sent even when empty: the request must carry the member, and may carry only cards.
+      body: { storeId, channel: 'POS', fulfilmentType: 'INSTORE', items, giftCardLoads: [{ amount, ...(code ? { code } : {}) }] },
+    }),
+    201,
+    'a gift card sold at the till'
+  );
+  const unpaid = balance();
+  must(
+    call('POST', '/api/payment-svc/payments', { token: owner, idem: true, body: { orderId: order.id, amount: order.total, method, storeId } }),
+    [200, 201],
+    `the gift card sale paid by ${method}`
+  );
+  const want = before + Number(amount);
+  // The sale's own read says which card each line loaded: a new card's code is known only from it.
+  const loadsOf = () => data(call('GET', `/api/order-svc/orders/${order.id}/gift-card-loads`, { token: owner })) || [];
+  const landed = code
+    ? poll(seconds, () => Math.abs(balance() - want) < 0.005)
+    : poll(seconds, () => loadsOf().every((l) => l.status === 'LOADED'));
+  return { order, before, unpaid, after: balance(), landed, loads: loadsOf() };
+}
+
 /** k6 thresholds shared by the functional suites: every check must pass. */
 export const ALL_CHECKS_PASS = { checks: ['rate==1.0'] };
 

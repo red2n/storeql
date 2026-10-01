@@ -72,6 +72,17 @@ class WorkforceIT {
 
   private Answer call(
       String method, String path, String json, String tenant, String user, String roles) {
+    return call(method, path, json, tenant, user, roles, null);
+  }
+
+  private Answer call(
+      String method,
+      String path,
+      String json,
+      String tenant,
+      String user,
+      String roles,
+      String stores) {
     WebTarget t = target;
     int q = path.indexOf('?');
     if (q < 0) {
@@ -90,6 +101,7 @@ class WorkforceIT {
     if (user != null) b = b.header("X-User-Id", user);
     if (tenant != null) b = b.header("X-Tenant-Id", tenant);
     if (roles != null) b = b.header("X-Roles", roles);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
     Entity<String> body = Entity.entity(json == null ? "{}" : json, MediaType.APPLICATION_JSON);
     Response r = "GET".equals(method) ? b.get() : b.post(body);
     String text = r.readEntity(String.class);
@@ -109,7 +121,12 @@ class WorkforceIT {
   private record Shop(String tenant, String store, String person, String manager) {}
 
   private Shop shop() {
-    String tenant = TenantOnboarding.onboard(target, "workforce", "GB", "GBP");
+    return shop("GB", "GBP", "London", "Europe/London", "E1 6AN");
+  }
+
+  /** A business with one store in a country and zone of the test's choosing. */
+  private Shop shop(String country, String currency, String city, String zone, String pincode) {
+    String tenant = TenantOnboarding.onboard(target, "workforce", country, currency);
     String manager = Ids.newId().toString();
     Answer store =
         call(
@@ -117,8 +134,16 @@ class WorkforceIT {
             "/admin/stores",
             "{\"name\":\"High Street\",\"code\":\"HS-"
                 + Ids.newId().toString().substring(0, 8)
-                + "\",\"line1\":\"1 High Street\",\"city\":\"London\",\"country\":\"GB\","
-                + "\"pincode\":\"E1 6AN\",\"timezone\":\"Europe/London\"}",
+                + "\",\"line1\":\"1 High Street\",\"city\":\""
+                + city
+                + "\",\"country\":\""
+                + country
+                + "\","
+                + "\"pincode\":\""
+                + pincode
+                + "\",\"timezone\":\""
+                + zone
+                + "\"}",
             tenant,
             manager,
             "OWNER");
@@ -356,7 +381,9 @@ class WorkforceIT {
   @Test
   @DisplayName("A rota is planned, published, and says what is worth saying about it")
   void theRoster() {
-    Shop shop = shop();
+    // The concerns are the law's, read through the store's country: an EU store (workforce-rules
+    // slice 1). A store outside every pack gets none, below.
+    Shop shop = shop("DE", "EUR", "Berlin", "Europe/Berlin", "10115");
     Answer late = plan(shop, iso(1, 14), iso(1, 22));
     assertThat(late.text(), late.status(), is(201));
     assertThat(late.data().getString("status"), is("PLANNED"));
@@ -380,6 +407,9 @@ class WorkforceIT {
         concerns,
         containsString("DAILY_REST_SHORT"));
     assertThat("and a long shift asks for a break", concerns, containsString("BREAK_EXPECTED"));
+    assertThat("saying who says so", concerns, containsString("Directive 2003/88/EC art. 3"));
+    assertThat(concerns, containsString("\"severity\":\"ADVISORY\""));
+    assertThat(concerns, containsString("\"source\":\"LAW\""));
 
     String shiftId = late.data().getString("id");
     Answer published =
@@ -420,6 +450,190 @@ class WorkforceIT {
             "OWNER");
     assertThat(cancelled.data().getString("status"), is("CANCELLED"));
     assertThat(cancelled.data().getString("cancelledReason"), containsString("delivery"));
+  }
+
+  @Test
+  @DisplayName(
+      "A store whose country has no rule gets no legal flag; overlapping shifts flag everywhere")
+  void noPackNoLegalFlag() {
+    // Britain left the EU regime on 31 January 2020, and no other pack is carried: the eight hours
+    // of rest and the long shift that an EU store is told about are not said here.
+    Shop shop = shop();
+    assertThat(plan(shop, iso(1, 14), iso(1, 22)).status(), is(201));
+    assertThat(plan(shop, iso(2, 6), iso(2, 12)).status(), is(201));
+    assertThat(plan(shop, iso(2, 10), iso(2, 13)).status(), is(201));
+    Answer roster =
+        call(
+            "GET",
+            W + "/shifts?from=" + iso(0, 0) + "&to=" + iso(5, 0),
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(roster.text(), roster.status(), is(200));
+    String concerns = roster.data().getJsonArray("concerns").toString();
+    assertThat(concerns, not(containsString("DAILY_REST_SHORT")));
+    assertThat(concerns, not(containsString("BREAK_EXPECTED")));
+    assertThat("overlap holds anywhere", concerns, containsString("SHIFTS_OVERLAP"));
+    assertThat(concerns, containsString("\"source\":\"ROSTER\""));
+  }
+
+  @Test
+  @DisplayName(
+      "Every working-time rule carries a citation and an effective date, and only the EU pack ships")
+  void workingTimeRulesAreCited() throws Exception {
+    try (Connection c = PG.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT scope, code, citation, effective_from FROM tenant.working_time_rules"
+                    + " ORDER BY code")) {
+      var rs = ps.executeQuery();
+      int rows = 0;
+      while (rs.next()) {
+        rows++;
+        assertThat(rs.getString("scope"), is("EU"));
+        assertThat(rs.getString("citation"), containsString("Directive 2003/88/EC"));
+        assertThat(rs.getDate("effective_from"), not(nullValue()));
+      }
+      assertThat("the two rules the code always applied", rows, is(2));
+    }
+    try (Connection c = PG.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "INSERT INTO tenant.working_time_rules (scope_kind, scope, code, applies_to,"
+                    + " effective_from, rule_value, unit, severity, citation, summary)"
+                    + " VALUES ('COUNTRY', 'XX', 'MIN_DAILY_REST', 'ALL', DATE '2020-01-01', 11,"
+                    + " 'HOURS', 'ADVISORY', '  ', 'no citation')")) {
+      try {
+        ps.executeUpdate();
+        throw new AssertionError("a rule with no citation must be refused by the database");
+      } catch (SQLException expected) {
+        assertThat(expected.getMessage(), containsString("chk_wtr_citation"));
+      }
+    }
+  }
+
+  @Test
+  @DisplayName(
+      "Nobody corrects or hand-clocks their own hours; adjust and a manual clock-in judge the entry's own store; another business is 404")
+  void selfAndStore() {
+    Shop shop = shop();
+    Shop rival = shop();
+    Answer in =
+        call(
+            "POST",
+            CLOCK + "/in",
+            "{\"storeId\":\"" + shop.store() + "\"}",
+            shop.tenant(),
+            shop.person(),
+            "CASHIER");
+    String entryId = in.data().getString("id");
+    call("POST", CLOCK + "/out", null, shop.tenant(), shop.person(), "CASHIER");
+    String fix = "{\"clockedOutAt\":\"" + iso(0, 17) + "\",\"reason\":\"terminal was down\"}";
+
+    // Their own hours: refused for a manager and an owner alike, and nothing is superseded.
+    for (String role : new String[] {"MANAGER", "OWNER"}) {
+      Answer own =
+          call(
+              "POST",
+              W + "/time-entries/" + entryId + "/adjust",
+              fix,
+              shop.tenant(),
+              shop.person(),
+              role);
+      assertThat(own.text(), own.status(), is(403));
+      assertThat(own.code(), is("WORKFORCE_SELF_ADJUST_REFUSED"));
+    }
+    Answer handClock =
+        call(
+            "POST",
+            W + "/time-entries?user=" + shop.person(),
+            "{\"storeId\":\"" + shop.store() + "\"}",
+            shop.tenant(),
+            shop.person(),
+            "MANAGER");
+    assertThat(handClock.text(), handClock.status(), is(403));
+    assertThat(handClock.code(), is("WORKFORCE_SELF_ADJUST_REFUSED"));
+
+    // A manager held to another store of the business cannot correct this store's entry.
+    String other = Ids.newId().toString();
+    Answer elsewhere =
+        call(
+            "POST",
+            W + "/time-entries/" + entryId + "/adjust",
+            fix,
+            shop.tenant(),
+            shop.manager(),
+            "MANAGER",
+            other);
+    assertThat(elsewhere.text(), elsewhere.status(), is(403));
+    assertThat(elsewhere.code(), is("STORE_ACCESS_DENIED"));
+    Answer clockElsewhere =
+        call(
+            "POST",
+            W + "/time-entries?user=" + Ids.newId(),
+            "{\"storeId\":\"" + shop.store() + "\"}",
+            shop.tenant(),
+            shop.manager(),
+            "MANAGER",
+            other);
+    assertThat(clockElsewhere.status(), is(403));
+    assertThat(clockElsewhere.code(), is("STORE_ACCESS_DENIED"));
+
+    // Another business, naming our entry or our store, finds nothing and writes nothing.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer theirs =
+          call(
+              "POST",
+              W + "/time-entries/" + entryId + "/adjust",
+              fix,
+              rival.tenant(),
+              rival.manager(),
+              role);
+      assertThat(theirs.status(), is(404));
+      Answer theirClock =
+          call(
+              "POST",
+              W + "/time-entries?user=" + rival.person(),
+              "{\"storeId\":\"" + shop.store() + "\"}",
+              rival.tenant(),
+              rival.manager(),
+              role);
+      assertThat(theirClock.status(), is(404));
+    }
+    // A cashier and a storekeeper cannot correct hours at all.
+    assertThat(
+        call(
+                "POST",
+                W + "/time-entries/" + entryId + "/adjust",
+                fix,
+                shop.tenant(),
+                shop.manager(),
+                "CASHIER")
+            .status(),
+        is(403));
+
+    // A manager who is not the person, at the entry's store, still corrects it.
+    Answer ok =
+        call(
+            "POST",
+            W + "/time-entries/" + entryId + "/adjust",
+            fix,
+            shop.tenant(),
+            shop.manager(),
+            "MANAGER",
+            shop.store());
+    assertThat(ok.text(), ok.status(), is(200));
+    assertThat(ok.data().getString("supersedes"), is(entryId));
+    Answer entries =
+        call(
+            "GET",
+            W + "/time-entries?from=" + iso(0, 0),
+            null,
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat("only the one correction was written", entries.list().size(), is(1));
   }
 
   @Test

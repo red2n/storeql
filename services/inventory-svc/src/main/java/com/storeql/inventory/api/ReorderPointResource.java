@@ -133,6 +133,7 @@ public class ReorderPointResource {
   @POST
   @Path("/rop-plans/compute")
   public ApiResponse<ComputeRopResult> computeRopPlans(@QueryParam("store") String store) {
+    ctx.requireAnyRole(MANAGEMENT);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(store, "store");
     ctx.requireStoreAccess(storeId);

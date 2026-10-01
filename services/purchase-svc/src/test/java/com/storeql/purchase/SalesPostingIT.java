@@ -44,6 +44,7 @@ class SalesPostingIT {
 
   @Inject WebTarget target;
   @Inject SalesEventHandler handler;
+  @Inject com.storeql.purchase.messaging.DeferredRevenueHandler cards;
 
   @AfterAll
   static void stopDb() {
@@ -139,6 +140,131 @@ class SalesPostingIT {
     handler.orderConfirmed(confirmed(T, order, "120.00", "20.00"));
     assertThat(lines("SALE").size(), is(3));
     assertThat(lines("SALE_TENDER").size(), is(4));
+  }
+
+  // ── a gift card sold in a sale ──────────────────────────────────────────────
+
+  /** The event order-svc writes for a card issued by the capture that completes a sale. */
+  private static String cardSold(String tenant, String order, String amount, String paidBy) {
+    return "{\"eventId\":\""
+        + Ids.newId()
+        + "\",\"eventType\":\"GiftCardLoaded\",\"tenantId\":\""
+        + tenant
+        + "\",\"giftCardId\":\""
+        + Ids.newId()
+        + "\",\"transactionId\":\""
+        + Ids.newId()
+        + "\",\"kind\":\"ISSUE\",\"amount\":"
+        + amount
+        + ",\"currency\":\"GBP\",\"paidBy\":\""
+        + paidBy
+        + "\",\"storeId\":\""
+        + STORE_A
+        + "\",\"orderId\":\""
+        + order
+        + "\",\"source\":\"SALE\"}";
+  }
+
+  @Test
+  @DisplayName(
+      "Goods plus a card paid in cash: the card's value credits the liability once, against"
+          + " clearing, and the order nets to zero")
+  void goodsPlusACardNetsClearingAndPostsTheLiabilityOnce() {
+    String order = Ids.newId().toString();
+    String tender = captured(T, Ids.newId().toString(), order, "100.00", "CASH");
+    // OrderConfirmed is net of the 40.00 card: 60.00 of goods, 10.00 of VAT inside it.
+    String sale = confirmed(T, order, "60.00", "10.00");
+    String card = cardSold(T, order, "40.00", "CASH");
+    handler.paymentCaptured(tender);
+    handler.orderConfirmed(sale);
+    cards.giftCardLoaded(card);
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "1210"), "100.00");
+    same(row(tb, "4010"), "-50.00");
+    same(row(tb, "2200"), "-10.00");
+    same(row(tb, "2310"), "-40.00");
+    same(row(tb, "1105"), "0");
+    assertThat(clearing("").size(), is(0));
+    assertThat(lines("GIFT_CARD_LOAD").size(), is(2));
+    assertThat(lines("GIFT_CARD_LOAD").get(0).asJsonObject().getString("sourceRef"), is(order));
+
+    // Replayed: the same event, and the tender and sale again, move nothing.
+    cards.giftCardLoaded(card);
+    handler.paymentCaptured(tender);
+    handler.orderConfirmed(sale);
+    same(row(trialBalance(), "2310"), "-40.00");
+    same(row(trialBalance(), "1210"), "100.00");
+    assertThat(lines("GIFT_CARD_LOAD").size(), is(2));
+    assertThat(clearing("").size(), is(0));
+  }
+
+  @Test
+  @DisplayName("A split tender pays for goods and a card; the card is not debited to either tender")
+  void aSplitTenderSaleWithACardNetsClearing() {
+    String order = Ids.newId().toString();
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "70.00", "CASH"));
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "50.00", "CARD"));
+    // 120.00 taken: 80.00 of goods (VAT 10.00) and a 40.00 card. The capture that completed the
+    // sale was the card tender, and that is the paidBy the event carries.
+    handler.orderConfirmed(confirmed(T, order, "80.00", "10.00"));
+    cards.giftCardLoaded(cardSold(T, order, "40.00", "CARD"));
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "1210"), "70.00");
+    same(row(tb, "1250"), "50.00");
+    same(row(tb, "2310"), "-40.00");
+    same(row(tb, "4010"), "-70.00");
+    same(row(tb, "1105"), "0");
+    assertThat(clearing("").size(), is(0));
+  }
+
+  @Test
+  @DisplayName("A sale of a card alone (a confirmation of nothing) posts the liability and nets")
+  void aCardOnlySaleNetsClearing() {
+    String order = Ids.newId().toString();
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "25.00", "CARD"));
+    handler.orderConfirmed(confirmed(T, order, "0", "0"));
+    // The order has no goods lines: a confirmation without any is read as it always was.
+    handler.orderConfirmed(
+        confirmed(T, order, "0", "0").replace("\"currency\"", "\"lines\":[],\"currency\""));
+    cards.giftCardLoaded(cardSold(T, order, "25.00", "CARD"));
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "1250"), "25.00");
+    same(row(tb, "2310"), "-25.00");
+    same(row(tb, "4010"), "0");
+    same(row(tb, "1105"), "0");
+    assertThat(lines("SALE").size(), is(0));
+    assertThat(clearing("").size(), is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "A card loaded by hand is value given away: the goodwill expense against the liability, with"
+          + " the reason on the journal, once; it never touches clearing")
+  void aHandLoadedCardIsAnExpense() {
+    String order = Ids.newId().toString();
+    String hand =
+        cardSold(T, order, "15.00", "PROMOTIONAL")
+            .replace(",\"orderId\":\"" + order + "\"", "")
+            .replace("\"source\":\"SALE\"", "\"source\":\"GOODWILL\",\"note\":\"late delivery\"");
+    cards.giftCardLoaded(hand);
+    cards.giftCardLoaded(hand);
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "6420"), "15.00");
+    same(row(tb, "2310"), "-15.00");
+    same(row(tb, "1105"), "0");
+    JsonArray posted = lines("GIFT_CARD_LOAD");
+    assertThat(posted.size(), is(2));
+    assertThat(
+        posted.get(0).asJsonObject().getString("description"),
+        containsString("free of charge (GOODWILL): late delivery"));
+    assertThat(clearing("").size(), is(0));
   }
 
   @Test

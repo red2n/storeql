@@ -42,4 +42,17 @@ public record User(
     List<User> asked = logins.stream().filter(u -> kind.equals(u.type())).toList();
     return asked.isEmpty() ? logins : asked;
   }
+
+  /**
+   * The logins a sign-in that says what it is may open: only those of the kind it named, never the
+   * other kind. An address that holds only the other kind yields none, which the caller answers
+   * exactly as an unknown address (same work, same {@code 401}).
+   *
+   * @param logins every login holding the address
+   * @param kind {@link #TYPE_CUSTOMER} or {@link #TYPE_STAFF}
+   * @return the logins of that kind, in the order given
+   */
+  public static List<User> ofKind(List<User> logins, String kind) {
+    return logins.stream().filter(u -> kind.equals(u.type())).toList();
+  }
 }

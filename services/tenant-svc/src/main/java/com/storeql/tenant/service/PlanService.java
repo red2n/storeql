@@ -229,7 +229,14 @@ public class PlanService {
                           "PLAN_ENTITLEMENT_UNKNOWN",
                           g.key()
                               + " is not something the platform enforces: "
-                              + Plans.CATALOGUE.stream().map(Entitlement::key).sorted().toList()));
+                              + Plans.enforced().stream().map(Entitlement::key).sorted().toList()));
+      if (!e.enforced()) {
+        throw ApiException.badRequest(
+            "PLAN_ENTITLEMENT_NOT_ENFORCED",
+            e.key()
+                + " is named but not enforced yet, so a plan cannot promise it: "
+                + Plans.enforced().stream().map(Entitlement::key).sorted().toList());
+      }
       if (e.limit() && g.enabled() != null) {
         throw ApiException.badRequest(
             "PLAN_ENTITLEMENT_SHAPE", e.key() + " is a number, not a yes or no");
@@ -386,7 +393,7 @@ public class PlanService {
   public List<Usage> usage(UUID tenantId, UUID planId) {
     List<Grant> grants = repo.grants(planId);
     List<Usage> out = new ArrayList<>();
-    for (Entitlement e : Plans.CATALOGUE) {
+    for (Entitlement e : Plans.enforced()) {
       if (!e.limit()) continue;
       Optional<Grant> grant = grants.stream().filter(g -> g.key().equals(e.key())).findFirst();
       if (grant.isEmpty()) continue;

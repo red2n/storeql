@@ -13,6 +13,7 @@ import com.storeql.iam.dto.Dtos.StaffUserResponse;
 import com.storeql.iam.dto.Dtos.TokenResponse;
 import com.storeql.iam.service.AuthService;
 import com.storeql.iam.service.StaffDirectory;
+import com.storeql.ids.Ids;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
@@ -293,6 +294,53 @@ public class AuthResource {
   public ApiResponse<Dtos.SessionsRevokedResponse> revokeAllSessions() {
     return ApiResponse.ok(
         new Dtos.SessionsRevokedResponse(auth.revokeAllSessions(ctx.requireUserId())));
+  }
+
+  /**
+   * The caller's own signed-in sessions.
+   *
+   * @param sessionId the caller's current session, stamped by the gateway as {@code X-Session-Id}
+   *     from the {@code sid} claim of the verified access token (a client's own copy is stripped
+   *     there); marks which one is this one, and only ever among the caller's own
+   * @return the live sessions, most recently used first
+   */
+  @Operation(
+      summary = "List my sessions",
+      description =
+          "Where the signed-in login is signed in: when each began, when it was last renewed, the"
+              + " client as far as iam knows it, and which one is the caller's.")
+  @APIResponse(responseCode = "200", description = "The caller's live sessions")
+  @GET
+  @Path("/sessions")
+  public ApiResponse<List<Dtos.SessionResponse>> mySessions(
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.SESSION_ID) String sessionId) {
+    java.util.UUID current = null;
+    try {
+      if (sessionId != null && !sessionId.isBlank()) current = Ids.parse(sessionId.trim());
+    } catch (RuntimeException e) {
+      current = null;
+    }
+    return ApiResponse.ok(auth.sessionsOf(ctx.requireUserId(), current));
+  }
+
+  /**
+   * Signs one of the caller's own sessions out.
+   *
+   * @param id the session
+   * @return {@code 204}
+   * @throws com.storeql.web.ApiException {@code 404 SESSION_NOT_FOUND} for another login's, an
+   *     unknown or an already ended session
+   */
+  @Operation(
+      summary = "Sign one session out",
+      description = "Revokes the session's refresh token chain. Only the caller's own.")
+  @APIResponse(responseCode = "204", description = "Session ended")
+  @APIResponse(responseCode = "404", description = "No such live session of the caller's")
+  @jakarta.ws.rs.DELETE
+  @Path("/sessions/{id}")
+  public Response endSession(@jakarta.ws.rs.PathParam("id") java.util.UUID id) {
+    auth.endSession(ctx.requireUserId(), id);
+    return Response.noContent().build();
   }
 
   /**

@@ -545,7 +545,18 @@ public final class Dtos {
       String summary,
       @org.eclipse.microprofile.openapi.annotations.media.Schema(
               description = "IN_FORCE on the day asked about, or UPCOMING.")
-          String status) {}
+          String status,
+      @org.eclipse.microprofile.openapi.annotations.media.Schema(
+              description =
+                  "The number the law sets (a period, a minimum, a share); null when it"
+                      + " sets none. Comes with limitUnit.")
+          java.math.BigDecimal limitValue,
+      @org.eclipse.microprofile.openapi.annotations.media.Schema(
+              description = "What limitValue counts, such as DAYS or MONTHS; null with no limit.")
+          String limitUnit,
+      @org.eclipse.microprofile.openapi.annotations.media.Schema(
+              description = "The case the row is for, such as a channel; null when it is for all.")
+          String qualifier) {}
 
   @org.eclipse.microprofile.openapi.annotations.media.Schema(name = "ObligationsResponse")
   public record ObligationsResponse(

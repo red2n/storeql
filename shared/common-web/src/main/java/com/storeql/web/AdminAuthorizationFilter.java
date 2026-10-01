@@ -369,6 +369,9 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         || "/promotions".equals(path)
         // The caller's own principal — it describes the caller, so it leaks nothing new.
         || "/auth/me".equals(path)
+        // A person's own sessions (sign-in protection): the login comes from the verified token,
+        // so the only sessions listed are the caller's, shopper or staff.
+        || "/auth/sessions".equals(path)
         // The password rules (password reset): read by a sign-up form and the reset page before
         // anyone has signed in. The same for every login, and nothing about any of them.
         || "/auth/password-policy".equals(path)
@@ -464,6 +467,17 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
     return looksLikeUuid(id);
   }
 
+  /**
+   * {@code DELETE /auth/sessions/{id}} with an id-shaped segment and nothing after it.
+   *
+   * @param path the service-local request path
+   * @return {@code true} for exactly that shape
+   */
+  private static boolean isOwnSession(String path) {
+    String prefix = "/auth/sessions/";
+    return path.startsWith(prefix) && looksLikeUuid(path.substring(prefix.length()));
+  }
+
   private static boolean isOpenMutation(String path) {
     return IDENTITY_PATHS.contains(path)
         // Second factors (20.12): answering one at sign-in (no token yet — the mfaToken in the
@@ -536,6 +550,9 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         // online order, and answers 404 to anyone else. Matched by shape, so nothing else under
         // /orders/{id}/ is opened by it.
         || isOwnOrderCancel(path)
+        // Signing one of the caller's own sessions out: iam-svc ends only a session of the login
+        // in the token and answers 404 for anyone else's. Matched by shape.
+        || isOwnSession(path)
         // Shopping cart self-service: a guest (sessionId) or authenticated CUSTOMER manages their
         // own cart with no staff role. Object-level authorization (only the owning
         // customer/session,

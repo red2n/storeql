@@ -18,6 +18,8 @@ import 'sales_providers.dart';
 import 'widgets/variant_picker.dart';
 import '../../shared/util/short_ref.dart';
 import 'package:storeql_app/core/ids.dart';
+import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
 
 class SalesScreen extends ConsumerWidget {
   const SalesScreen({super.key, this.initialTab});
@@ -94,6 +96,11 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
   bool _submitting = false;
   String? _error;
 
+  /// The Idempotency-Key of a reload: the same for a retry of the same submit
+  /// (same card, amount and reason), a new one once any of them changes.
+  String? _reloadKey;
+  String? _reloadSig;
+
   @override
   void dispose() {
     _codeCtrl.dispose();
@@ -135,17 +142,33 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
     final card = _card;
     if (card == null) return;
     final reload = action == 'reload';
-    // Value put on a card says how it was paid for: the card is a liability against it (17.11).
+    // Value put on a card by hand is a manager's and says why (order-svc, 30 Sep 2026).
     final value = await _valueDialog(
         context, reload ? 'Reload gift card' : 'Redeem gift card',
-        askPaidBy: reload);
+        askReason: reload);
     if (value == null || !mounted) return;
+    Options? options;
+    if (reload) {
+      final sig = '${card.code}|${value.amount}|${value.reason}|${value.note}';
+      if (sig != _reloadSig || _reloadKey == null) {
+        _reloadSig = sig;
+        _reloadKey = newId();
+      }
+      options = Options(headers: {'Idempotency-Key': _reloadKey});
+    }
     setState(() => _submitting = true);
     try {
       await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.order}/gift-cards/${card.code}/$action',
-        data: {'amount': value.amount, if (reload) 'paidBy': value.paidBy},
+        data: {
+          'amount': value.amount,
+          if (reload) 'reason': value.reason,
+          if (reload && value.note != null) 'note': value.note,
+        },
+        options: options,
       );
+      _reloadKey = null;
+      _reloadSig = null;
       await _lookup();
     } catch (e) {
       if (!mounted) return;
@@ -163,6 +186,9 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final card = _card;
+    final auth = ref.watch(authNotifierProvider).value;
+    // Value by hand is an owner's or a manager's; a till sells a card.
+    final byHand = auth is AuthAuthenticated && auth.isManager;
     return ListView(
       padding: context.pagePadding,
       children: [
@@ -177,14 +203,25 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
           ),
           actions: [
             FilledButton(onPressed: _lookup, child: const Text('Look up')),
-            OutlinedButton.icon(
-              onPressed: () => showDialog(
-                  context: context, builder: (_) => const _IssueGiftCardDialog()),
-              icon: const Icon(Icons.add),
-              label: const Text('Issue'),
-            ),
+            if (byHand)
+              OutlinedButton.icon(
+                onPressed: () => showDialog(
+                    context: context,
+                    builder: (_) => const _IssueGiftCardDialog()),
+                icon: const Icon(Icons.add),
+                label: const Text('Issue'),
+              ),
           ],
         ),
+        if (!byHand)
+          Padding(
+            padding: const EdgeInsetsDirectional.only(top: AppSpacing.sm),
+            child: Text(
+                'A gift card is sold at the till. An owner or a manager gives or reloads one by hand.',
+                key: const Key('gift-card-sold-at-till'),
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: cs.onSurfaceVariant)),
+          ),
         const SizedBox(height: AppSpacing.lg),
         if (_loading) const LinearProgressIndicator(),
         if (_error != null)
@@ -222,11 +259,13 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
                     spacing: AppSpacing.sm,
                     runSpacing: AppSpacing.sm,
                     children: [
-                      OutlinedButton.icon(
-                        onPressed: _submitting ? null : () => _reloadOrRedeem('reload'),
-                        icon: const Icon(Icons.add, size: 18),
-                        label: const Text('Reload'),
-                      ),
+                      if (byHand)
+                        OutlinedButton.icon(
+                          onPressed:
+                              _submitting ? null : () => _reloadOrRedeem('reload'),
+                          icon: const Icon(Icons.add, size: 18),
+                          label: const Text('Reload'),
+                        ),
                       OutlinedButton.icon(
                         onPressed: _submitting ? null : () => _reloadOrRedeem('redeem'),
                         icon: const Icon(Icons.remove, size: 18),
@@ -356,21 +395,34 @@ class _IssueGiftCardDialogState extends ConsumerState<_IssueGiftCardDialog> {
   String? _storeId;
   final _amountCtrl = TextEditingController();
   String? _currency;
-  String? _paidBy;
+  String? _reason;
+  final _noteCtrl = TextEditingController();
   bool _loading = false;
   String? _error;
 
+  /// The Idempotency-Key of this issue: kept for a retry of the same submit,
+  /// new once the store, amount, currency, reason or note changes.
+  String? _key;
+  String? _keySig;
+
   @override
   void dispose() {
+    _noteCtrl.dispose();
     _amountCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _submit() async {
     final amount = double.tryParse(_amountCtrl.text.trim());
-    if (_storeId == null || amount == null || amount <= 0 || _paidBy == null) {
-      setState(() => _error = 'Pick a store, enter an amount and say how it was paid for.');
+    if (_storeId == null || amount == null || amount <= 0 || _reason == null) {
+      setState(() => _error = 'Pick a store, enter an amount and say why the card is given.');
       return;
+    }
+    final note = _noteCtrl.text.trim();
+    final sig = '$_storeId|$amount|$_currency|$_reason|$note';
+    if (sig != _keySig || _key == null) {
+      _keySig = sig;
+      _key = newId();
     }
     setState(() {
       _loading = true;
@@ -384,8 +436,10 @@ class _IssueGiftCardDialogState extends ConsumerState<_IssueGiftCardDialog> {
           'amount': amount,
           // Omitted, order-svc issues it in the tenant's own currency (SJ-D53).
           if (_currency != null) 'currency': _currency,
-          'paidBy': _paidBy,
+          'reason': _reason,
+          if (note.isNotEmpty) 'note': note,
         },
+        options: Options(headers: {'Idempotency-Key': _key}),
       );
       final card = resp.data['data'] as Map<String, dynamic>;
       if (!mounted) return;
@@ -466,8 +520,14 @@ class _IssueGiftCardDialogState extends ConsumerState<_IssueGiftCardDialog> {
               ],
             ),
             const SizedBox(height: 12),
-            _PaidByField(
-                value: _paidBy, onChanged: (v) => setState(() => _paidBy = v)),
+            _ReasonField(
+                value: _reason, onChanged: (v) => setState(() => _reason = v)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _noteCtrl,
+              maxLength: 200,
+              decoration: const InputDecoration(labelText: 'Note (optional)'),
+            ),
           ],
         ),
       ),
@@ -1098,21 +1158,21 @@ StatusTone _specialOrderStatusTone(String status) =>
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 Future<double?> _amountDialog(BuildContext context, String title) async =>
-    (await _valueDialog(context, title, askPaidBy: false))?.amount;
+    (await _valueDialog(context, title, askReason: false))?.amount;
 
-/// An amount and, for value put on a gift card, how it was paid for (17.11).
-Future<({double amount, String? paidBy})?> _valueDialog(
+/// An amount and, for value put on a gift card by hand, why (a manager's act).
+Future<({double amount, String? reason, String? note})?> _valueDialog(
         BuildContext context, String title,
-        {required bool askPaidBy}) =>
-    showDialog<({double amount, String? paidBy})>(
+        {required bool askReason}) =>
+    showDialog<({double amount, String? reason, String? note})>(
       context: context,
-      builder: (_) => _ValueDialog(title: title, askPaidBy: askPaidBy),
+      builder: (_) => _ValueDialog(title: title, askReason: askReason),
     );
 
 class _ValueDialog extends StatefulWidget {
   final String title;
-  final bool askPaidBy;
-  const _ValueDialog({required this.title, required this.askPaidBy});
+  final bool askReason;
+  const _ValueDialog({required this.title, required this.askReason});
 
   @override
   State<_ValueDialog> createState() => _ValueDialogState();
@@ -1121,11 +1181,13 @@ class _ValueDialog extends StatefulWidget {
 class _ValueDialogState extends State<_ValueDialog> {
   // Owned by the dialog, so it outlives the closing animation that still draws it.
   final _amount = TextEditingController();
-  String? _paidBy;
+  final _note = TextEditingController();
+  String? _reason;
 
   @override
   void dispose() {
     _amount.dispose();
+    _note.dispose();
     super.dispose();
   }
 
@@ -1142,10 +1204,16 @@ class _ValueDialogState extends State<_ValueDialog> {
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             decoration: const InputDecoration(labelText: 'Amount'),
           ),
-          if (widget.askPaidBy) ...[
+          if (widget.askReason) ...[
             const SizedBox(height: 12),
-            _PaidByField(
-                value: _paidBy, onChanged: (v) => setState(() => _paidBy = v)),
+            _ReasonField(
+                value: _reason, onChanged: (v) => setState(() => _reason = v)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _note,
+              maxLength: 200,
+              decoration: const InputDecoration(labelText: 'Note (optional)'),
+            ),
           ],
         ],
       ),
@@ -1155,8 +1223,13 @@ class _ValueDialogState extends State<_ValueDialog> {
         FilledButton(
           onPressed: () {
             final v = double.tryParse(_amount.text.trim());
-            if (v != null && v > 0 && (!widget.askPaidBy || _paidBy != null)) {
-              Navigator.pop(context, (amount: v, paidBy: _paidBy));
+            if (v != null && v > 0 && (!widget.askReason || _reason != null)) {
+              final note = _note.text.trim();
+              Navigator.pop(context, (
+                amount: v,
+                reason: _reason,
+                note: note.isEmpty ? null : note
+              ));
             }
           },
           child: const Text('OK'),
@@ -1166,28 +1239,26 @@ class _ValueDialogState extends State<_ValueDialog> {
   }
 }
 
-/// How value put on a gift card was paid for (17.11). A card sold is a liability
-/// against the money taken and one given away is a marketing cost, so the ledger
-/// has to know which; another card, a voucher or store credit is not offered.
-class _PaidByField extends StatelessWidget {
+/// Why value is put on a gift card by hand. A card is *sold* at the till, so a
+/// tender is never asked here: a hand-made card is a cost, never takings.
+class _ReasonField extends StatelessWidget {
   final String? value;
   final ValueChanged<String?> onChanged;
-  const _PaidByField({required this.value, required this.onChanged});
+  const _ReasonField({required this.value, required this.onChanged});
 
   static const _options = [
-    ('CASH', 'Cash'),
-    ('CARD', 'Card'),
-    ('UPI', 'UPI'),
-    ('WALLET', 'Wallet'),
-    ('PROMOTIONAL', 'Given away (promotional)'),
+    ('GOODWILL', 'Goodwill'),
+    ('PROMOTION', 'Promotion'),
+    ('COMPENSATION', 'Compensation'),
+    ('MIGRATION', 'Migration from another system'),
   ];
 
   @override
   Widget build(BuildContext context) => DropdownButtonFormField<String>(
-        key: const Key('gift-card-paid-by'),
+        key: const Key('gift-card-reason'),
         initialValue: value,
         isExpanded: true,
-        decoration: const InputDecoration(labelText: 'Paid by *'),
+        decoration: const InputDecoration(labelText: 'Reason *'),
         items: [
           for (final (code, label) in _options)
             DropdownMenuItem(value: code, child: Text(label)),

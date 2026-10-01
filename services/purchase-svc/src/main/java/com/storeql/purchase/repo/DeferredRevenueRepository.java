@@ -160,7 +160,8 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO gift_card_loads (tenant_id, transaction_id, gift_card_id, store_id,"
-                      + " kind, paid_by, amount, currency, journal_id) VALUES (?,?,?,?,?,?,?,?,?)"
+                      + " kind, paid_by, amount, currency, journal_id, order_id, source, note)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
                       + " ON CONFLICT (tenant_id, transaction_id) DO NOTHING")) {
             ps.setObject(1, load.tenantId());
             ps.setObject(2, load.transactionId());
@@ -172,6 +173,10 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
             ps.setString(8, load.currency());
             // A load paid for by a return's refund posts nothing: the refund owes the card.
             ps.setObject(9, posting.isEmpty() ? null : posting.get(0).journalId());
+            if (load.orderId() == null) ps.setNull(10, java.sql.Types.OTHER);
+            else ps.setObject(10, load.orderId());
+            ps.setString(11, load.source());
+            ps.setString(12, load.note());
             if (ps.executeUpdate() == 0) return false;
           }
           GiftCardPool pool = lockGiftCardPool(c, load.tenantId());

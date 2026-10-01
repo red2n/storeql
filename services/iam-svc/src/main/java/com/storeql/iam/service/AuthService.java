@@ -44,6 +44,7 @@ public class AuthService {
   @Inject UserRepository users;
   @Inject RefreshTokenRepository refreshTokens;
   @Inject MqttSessionRevoker mqttSessions;
+  @Inject com.storeql.iam.config.ClientInfo clientInfo;
   @Inject TenantStatusRepository tenantStatus;
   @Inject MfaService mfa;
   @Inject SsoRepository sso;
@@ -179,9 +180,9 @@ public class AuthService {
    * clients, scripts — signs in here without needing to say, while the storefront is the one place
    * that signs a shopper in and says so; and a storefront that forgot would get a business token
    * its app refuses to use, never a shopper's session silently standing in for the business. A
-   * login of the other kind is tried only when the address holds none of the kind asked for ({@link
-   * User#signInCandidates}), so a person with only one account signs in with it from anywhere, as
-   * before.
+   * sign-in that names a kind opens only that kind ({@link User#ofKind}); one that names none tries
+   * STAFF first and the other kind only when the address holds no staff login ({@link
+   * User#signInCandidates}), as before.
    *
    * <p>PLATFORM_ADMIN accounts are deliberately excluded here — the platform admin is a separate
    * identity from any store/tenant, so it must not be a valid credential on a store-scoped login
@@ -192,8 +193,15 @@ public class AuthService {
    * @param accountType {@code CUSTOMER} or {@code STAFF}; null means STAFF
    */
   public TokenResponse login(String email, String password, String accountType) {
-    String kind = accountType == null ? User.TYPE_STAFF : accountType;
-    var candidates = User.signInCandidates(users.findAllByEmail(email), kind);
+    // A sign-in that says what it is (CUSTOMER or STAFF) opens only that kind: a shopper's sign-in
+    // never returns a staff token nor a staff sign-in a shopper's, and an address holding only the
+    // other kind is answered as an unknown one (below: same Argon2 work, same 401). One that
+    // says nothing keeps the older behaviour: STAFF first, the other kind only when none exists.
+    var logins = users.findAllByEmail(email);
+    var candidates =
+        accountType == null
+            ? User.signInCandidates(logins, User.TYPE_STAFF)
+            : User.ofKind(logins, accountType);
     boolean audited = false;
     for (User user : candidates) {
       if (!User.STATUS_ACTIVE.equals(user.status())) {
@@ -330,7 +338,7 @@ public class AuthService {
       throw ApiException.unauthorized(
           "SSO_REQUIRED", "This business now signs its staff in through its identity provider");
     }
-    return issueTokens(user, amr, session.authenticatedAt());
+    return issueTokens(user, amr, session.authenticatedAt(), session);
   }
 
   /**
@@ -438,6 +446,54 @@ public class AuthService {
         .flatMap(users::findById)
         .filter(user -> user.tenantId() != null)
         .ifPresent(user -> mqttSessions.revoke(user.tenantId(), user.id()));
+  }
+
+  /**
+   * The caller's own live sign-ins, most recently used first.
+   *
+   * @param userId the caller's login, from the token
+   * @param currentSessionId the session making the request (its token's {@code sid}), or null
+   * @return its live sessions
+   */
+  public List<com.storeql.iam.dto.Dtos.SessionResponse> sessionsOf(
+      UUID userId, UUID currentSessionId) {
+    return refreshTokens.liveSessions(userId).stream()
+        .map(
+            s ->
+                new com.storeql.iam.dto.Dtos.SessionResponse(
+                    s.id().toString(),
+                    s.deviceLabel() == null
+                        ? com.storeql.iam.domain.ClientLabel.UNKNOWN
+                        : s.deviceLabel(),
+                    s.network(),
+                    s.startedAt().toString(),
+                    s.lastUsedAt().toString(),
+                    s.amr() == null ? "pwd" : s.amr().replace(',', '+'),
+                    s.id().equals(currentSessionId)))
+        .toList();
+  }
+
+  /**
+   * Signs one of the caller's own sessions out: its refresh chain is revoked, the login's push
+   * session is kicked and the act is audited. An access token already issued lives out its minutes
+   * (the gateway's deny list is the next step).
+   *
+   * @param userId the caller's login, from the token
+   * @param sessionId the session to end
+   * @throws ApiException 404 {@code SESSION_NOT_FOUND} when the login holds no such live session
+   *     (another login's, an unknown one, one already ended)
+   */
+  public void endSession(UUID userId, UUID sessionId) {
+    if (refreshTokens.endSession(userId, sessionId) == 0) {
+      throw ApiException.notFound("SESSION_NOT_FOUND", "session not found");
+    }
+    users
+        .findById(userId)
+        .ifPresent(
+            u -> {
+              users.audit(u.tenantId(), userId, "SESSION_ENDED", sessionId.toString());
+              if (u.tenantId() != null) mqttSessions.revoke(u.tenantId(), userId);
+            });
   }
 
   /**
@@ -625,6 +681,20 @@ public class AuthService {
    *     null for a session older than the record of it
    */
   private TokenResponse issueTokens(User user, List<String> amr, Instant authenticatedAt) {
+    return issueTokens(user, amr, authenticatedAt, null);
+  }
+
+  /**
+   * @param renewing the session being renewed, whose id and start carry over; null for a new
+   *     sign-in, which begins a session of its own
+   */
+  private TokenResponse issueTokens(
+      User user,
+      List<String> amr,
+      Instant authenticatedAt,
+      RefreshTokenRepository.Session renewing) {
+    UUID sessionId = renewing != null ? renewing.sessionId() : Ids.newId();
+    Instant startedAt = renewing != null ? renewing.startedAt() : Instant.now();
     // Read again, and all at once (SJ-D63). The row in hand was read before the password was
     // checked, and that check takes long enough for a staff removal to commit meanwhile: the old
     // row's tenant beside the new roles made a token naming a business the login had just left.
@@ -646,7 +716,8 @@ public class AuthService {
             who.roles(),
             who.storeIds(),
             permissions,
-            amr);
+            amr,
+            sessionId);
 
     String refresh = Tokens.newOpaqueToken();
     refreshTokens.store(
@@ -654,7 +725,13 @@ public class AuthService {
         Tokens.hash(refresh),
         Instant.now().plusSeconds(config.refreshTtlSeconds()),
         String.join(",", amr),
-        authenticatedAt);
+        authenticatedAt,
+        sessionId,
+        startedAt,
+        renewing != null && renewing.deviceLabel() != null
+            ? renewing.deviceLabel()
+            : clientInfo.device(),
+        renewing != null && renewing.network() != null ? renewing.network() : clientInfo.network());
 
     return TokenResponse.bearer(access, refresh, config.accessTtlSeconds());
   }

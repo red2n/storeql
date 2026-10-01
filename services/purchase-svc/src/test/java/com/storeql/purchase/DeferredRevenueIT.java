@@ -379,6 +379,46 @@ class DeferredRevenueIT {
 
   @Test
   @DisplayName(
+      "Cards loaded in a sale, by hand and by a return are all in the pool; the report reconciles"
+          + " and breakage is recognised on what was loaded")
+  void cardsLoadedThreeWaysReconcile() {
+    data(put(ESTIMATES, T, "OWNER"));
+    String order = Ids.newId().toString();
+    handler.giftCardLoaded(
+        loaded("ISSUE", "CASH", "40.00")
+            .replace("}", ",\"orderId\":\"" + order + "\",\"source\":\"SALE\"}"));
+    handler.giftCardLoaded(
+        loaded("ISSUE", "PROMOTIONAL", "20.00")
+            .replace("}", ",\"source\":\"GOODWILL\",\"note\":\"apology\"}"));
+    handler.giftCardLoaded(
+        loaded("ISSUE", "RETURN", "15.00").replace("}", ",\"source\":\"RETURN\"}"));
+
+    // Sale: Dr clearing / Cr 2310; hand: Dr 6420 / Cr 2310; return: nothing (the refund posts it).
+    assertThat(net("GIFT_CARD_LOAD", "1105"), comparesEqualTo(new BigDecimal("40.00")));
+    assertThat(net("GIFT_CARD_LOAD", "6420"), comparesEqualTo(new BigDecimal("20.00")));
+    assertThat(net("GIFT_CARD_LOAD", "2310"), comparesEqualTo(new BigDecimal("-60.00")));
+    assertThat(net("GIFT_CARD_LOAD", "1210"), comparesEqualTo(BigDecimal.ZERO));
+
+    JsonObject view = data(get(T, "OWNER"));
+    assertThat(
+        view.getJsonNumber("giftCardsLoaded").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("75.00")));
+    assertThat(
+        view.getJsonNumber("giftCardLiability").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("75.00")));
+
+    // 27.00 spent: 27 x 10% / 90% = 3.00 breakage, well within a tenth of the 75 loaded.
+    sales.paymentCaptured(tender("GIFT_CARD", "27.00"));
+    assertThat(net("GIFT_CARD_BREAKAGE", "4031"), comparesEqualTo(new BigDecimal("-3.00")));
+    view = data(get(T, "OWNER"));
+    assertThat(
+        view.getJsonNumber("giftCardLiability").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("45.00")));
+    assertThat(trialBalance().getBoolean("balanced"), is(true));
+  }
+
+  @Test
+  @DisplayName(
       "Payloads that are not what the producers send, and events from before 17.11, post nothing")
   void malformedAndOldEventsPostNothing() {
     data(put(ESTIMATES, T, "OWNER"));

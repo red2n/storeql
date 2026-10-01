@@ -541,7 +541,9 @@ public final class Mappers {
         o.status(),
         ts(o.createdAt()),
         ts(o.pickedAt()),
-        lines.stream().map(Mappers::toMoveOrderLine).toList());
+        lines.stream().map(Mappers::toMoveOrderLine).toList(),
+        o.fromZoneId() == null ? null : o.fromZoneId().toString(),
+        o.toZoneId() == null ? null : o.toZoneId().toString());
   }
 
   /**

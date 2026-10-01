@@ -1140,20 +1140,51 @@ public class TenantService {
   }
 
   /**
-   * Changes a zone's status.
+   * Changes a zone's status and announces it.
    *
-   * <p>Unlike a store status change, this publishes no event — no other service projects zone
-   * status; inventory-svc only references the zone id a batch sits in.
+   * <p>The vocabulary is ACTIVE, OUT_OF_SERVICE and RETIRED. {@code ZoneStatusChanged} goes through
+   * the outbox on the transaction of the change (so inventory-svc steers putaway and waves by it),
+   * with a line in the business's change log. Setting the status a zone already has changes nothing
+   * and announces nothing.
    *
    * @param tenantId owning tenant
    * @param zoneId the zone whose status to change
    * @param req the new status
+   * @param actorId who did it, for the change log
    * @return the zone with its new status
-   * @throws ApiException {@code ZONE_NOT_FOUND} (404) when it does not exist in this tenant
+   * @throws ApiException {@code ZONE_NOT_FOUND} (404) when it does not exist in this tenant; {@code
+   *     ZONE_STATUS_INVALID} (400) for a status outside the vocabulary
    */
-  public Zone patchZoneStatus(UUID tenantId, UUID zoneId, PatchStatusRequest req) {
-    getZone(tenantId, zoneId);
-    return repo.updateZoneStatus(tenantId, zoneId, req.status());
+  public Zone patchZoneStatus(UUID tenantId, UUID zoneId, PatchStatusRequest req, UUID actorId) {
+    String wanted = req.status() == null ? "" : req.status().strip().toUpperCase(Locale.ROOT);
+    if (!Zone.STATUSES.contains(wanted)) {
+      throw ApiException.badRequest(
+          "ZONE_STATUS_INVALID", "a zone's status is one of " + Zone.STATUSES);
+    }
+    Zone zone = getZone(tenantId, zoneId);
+    if (zone.status().equals(wanted)) return zone;
+    OutboxRow event =
+        new OutboxRow(
+            "ZoneStatusChanged",
+            "storeql.tenant.zone-status-changed",
+            tenantId,
+            zoneId,
+            Events.zoneStatusChanged(tenantId, zone.storeId(), zoneId, zone.status(), wanted));
+    Audit.Entry audit =
+        Audit.Entry.of(
+            tenantId,
+            Audit.ZONE_STATUS_CHANGED,
+            actorId,
+            zone.storeId(),
+            zoneId,
+            zone.code(),
+            zone.status(),
+            wanted);
+    if (!repo.updateZoneStatusWithOutbox(tenantId, zoneId, zone.status(), wanted, event, audit)) {
+      throw ApiException.conflict(
+          "ZONE_STATUS_CHANGED", "that zone's status changed as it was read; read it and retry");
+    }
+    return getZone(tenantId, zoneId);
   }
 
   /**

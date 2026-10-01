@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import '../../core/constants.dart';
+import '../../core/ids.dart';
 import '../../core/network/api_client.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
@@ -64,6 +65,13 @@ class PosLine {
   /// back. Never part of the item's price.
   final double depositEach;
 
+  /// A gift card sold on this sale rather than a product: [unitPrice] is what
+  /// the card is loaded with, [giftCardCode] the existing card it tops up (null
+  /// for a new card). It goes to the server as `giftCardLoads`, never `items`;
+  /// the card is issued when the sale is paid.
+  final bool giftCard;
+  final String? giftCardCode;
+
   const PosLine({
     required this.variantId,
     required this.sku,
@@ -81,7 +89,26 @@ class PosLine {
     this.depositMaterial,
     this.depositVolumeMl,
     this.depositEach = 0,
+    this.giftCard = false,
+    this.giftCardCode,
   });
+
+  /// A gift card to sell: [amount] in [currency], topping up [code] when it
+  /// names a card of this business, else a new one. Every card is its own line.
+  factory PosLine.giftCardSale({
+    required double amount,
+    required String currency,
+    String? code,
+  }) => PosLine(
+    variantId: 'gift-card:${newId()}',
+    sku: code ?? 'New card',
+    name: code == null ? 'Gift card' : 'Gift card top-up',
+    qty: 1,
+    unitPrice: amount,
+    currency: currency,
+    giftCard: true,
+    giftCardCode: code,
+  );
 
   bool get measured => soldBy != 'EACH';
 
@@ -126,6 +153,8 @@ class PosLine {
     depositMaterial: depositMaterial,
     depositVolumeMl: depositVolumeMl,
     depositEach: depositEach,
+    giftCard: giftCard,
+    giftCardCode: giftCardCode,
   );
 }
 
@@ -217,6 +246,13 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
 
   double get total => state.fold(0.0, (s, l) => s + l.lineTotal);
 
+  /// What the goods come to: the total less the gift cards being sold. A
+  /// discount is taken off this, never off a card's value.
+  double get goodsTotal =>
+      state.fold(0.0, (s, l) => l.giftCard ? s : s + l.lineTotal);
+
+  bool get hasGiftCard => state.any((l) => l.giftCard);
+
   /// The return-scheme deposits on the sale's containers (09.16): shown as
   /// their own line, added to what is due, never discounted.
   double get deposits => state.fold(0.0, (s, l) => s + l.depositTotal);
@@ -225,6 +261,72 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
 final posCartProvider = StateNotifierProvider<PosCartNotifier, List<PosLine>>(
   (ref) => PosCartNotifier(),
 );
+
+/// The products of a sale, for the order's `items`: the gift cards on it are
+/// not products.
+List<PosLine> productLines(List<PosLine> lines) =>
+    [for (final l in lines) if (!l.giftCard) l];
+
+/// The gift cards of a sale, for the order's `giftCardLoads`.
+List<Map<String, dynamic>> giftCardLoadsOf(List<PosLine> lines) => [
+  for (final l in lines)
+    if (l.giftCard)
+      {'amount': l.unitPrice, if (l.giftCardCode != null) 'code': l.giftCardCode},
+];
+
+/// A card sold on a paid sale, as the server says it was issued.
+class SoldGiftCard {
+  final double amount;
+
+  /// The card's code; null while the card is not yet issued (the sale's payment
+  /// has not completed) or when the server has not said it.
+  final String? code;
+
+  /// True when an existing card was topped up rather than a new one issued.
+  final bool topUp;
+  const SoldGiftCard({required this.amount, this.code, this.topUp = false});
+}
+
+/// The cards a paid sale issued or topped up, with their codes (order-svc
+/// `GET /orders/{id}/gift-card-loads`: PENDING lines have no code until the
+/// payment that completes the sale lands, LOADED ones do). A pending line is
+/// asked for again a few times, briefly. Empty when the answer cannot be
+/// read: the till never blocks a paid sale on this.
+Future<List<SoldGiftCard>> fetchSoldGiftCards(
+  Dio dio,
+  String orderId, {
+  int attempts = 4,
+  Duration interval = const Duration(milliseconds: 750),
+}) async {
+  var last = const <SoldGiftCard>[];
+  for (var i = 0; i < attempts; i++) {
+    try {
+      final resp =
+          await dio.get('/${ApiConstants.order}/orders/$orderId/gift-card-loads');
+      final raw = resp.data['data'];
+      var pending = false;
+      last = [
+        for (final e in raw is List ? raw : const [])
+          if (e is Map)
+            () {
+              final loaded = (e['status'] as String?)?.toUpperCase() == 'LOADED';
+              if (!loaded) pending = true;
+              final code = e['code'] as String?;
+              return SoldGiftCard(
+                amount: (e['amount'] as num?)?.toDouble() ?? 0,
+                code: loaded && code != null && code.isNotEmpty ? code : null,
+                topUp: (e['kind'] as String?)?.toUpperCase() == 'TOP_UP',
+              );
+            }(),
+      ];
+      if (!pending) return last;
+    } catch (_) {
+      return last;
+    }
+    if (i < attempts - 1) await Future<void>.delayed(interval);
+  }
+  return last;
+}
 
 /// What a reduced-price sticker means (05.4): the markdown behind a code in
 /// the shop's own range, priced at the sticker. Null when the code is not a

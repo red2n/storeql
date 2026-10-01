@@ -127,5 +127,7 @@ The platform refuses only an exact email that already exists. The same person wh
 
 ## Decisions
 
+- (2026-09-30 evening, reconciliation of the second set of pages) **House accounts** ([till-tenders-foreign-cash-and-accounts](till-tenders-foreign-cash-and-accounts.md)) join the merge rules: refused `409 CUSTOMER_MERGE_BOTH_HAVE_ACCOUNTS` when both records have one; otherwise the account moves with a paired ledger entry and its open statements. Segments' facts, households ([customer-segments](customer-segments.md)) and service cases ([customer-service-cases](customer-service-cases.md)) repoint on `CustomersMerged` in customer-svc's own transaction; `campaign_sends.customer_id` (notification-svc) and `promotion_redemptions.customer_id` (pricing-svc) repoint from the same event.
+
 - **Reasons, not scores** (2026-09-30, industry standard): every flag names its rule so a person can judge and explain it.
 - **The folded record keeps its email** so the address can never be created again as a new customer; lookups redirect to the survivor.

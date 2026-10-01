@@ -48,8 +48,12 @@ public class OrderResource {
     UUID tenantId = ctx.requireTenantId();
     var groups = svc.groupIdsOf(tenantId, orders);
     var handovers = svc.handoversOf(tenantId, orders);
+    var expiries = svc.expiriesOf(tenantId, orders);
     return orders.stream()
-        .map(o -> Mappers.toSummary(o, groups.get(o.id()), handovers.get(o.id())))
+        .map(
+            o ->
+                Mappers.toSummary(
+                    o, groups.get(o.id()), handovers.get(o.id()), expiries.get(o.id())))
         .toList();
   }
 
@@ -286,10 +290,11 @@ public class OrderResource {
         .entity(
             ApiResponse.ok(
                 Mappers.toDto(
-                    order,
-                    items,
-                    svc.depositsOf(order.tenantId(), order.id()),
-                    svc.groupOf(order.tenantId(), order.id()).orElse(null))))
+                        order,
+                        items,
+                        svc.depositsOf(order.tenantId(), order.id()),
+                        svc.groupOf(order.tenantId(), order.id()).orElse(null))
+                    .withExpiresAt(svc.expiresAtOf(order))))
         .build();
   }
 
@@ -318,12 +323,36 @@ public class OrderResource {
     return Response.ok(
             ApiResponse.ok(
                 Mappers.toDto(
-                    order,
-                    items,
-                    svc.depositsOf(order.tenantId(), order.id()),
-                    svc.groupOf(order.tenantId(), order.id()).orElse(null),
-                    svc.handoverOf(order.tenantId(), order.id()).orElse(null))))
+                        order,
+                        items,
+                        svc.depositsOf(order.tenantId(), order.id()),
+                        svc.groupOf(order.tenantId(), order.id()).orElse(null),
+                        svc.handoverOf(order.tenantId(), order.id()).orElse(null))
+                    .withExpiresAt(svc.expiresAtOf(order))))
         .build();
+  }
+
+  /**
+   * The gift cards this order sold, for the till to show and print once the sale is paid.
+   *
+   * @param id the order
+   * @return each card line: PENDING without a code before payment, LOADED with the card's id, code,
+   *     NEW or TOP_UP and when, after
+   * @throws com.storeql.web.ApiException {@code 404} another business's order; {@code 403} a
+   *     shopper, or staff held to other stores
+   */
+  @Operation(
+      summary = "The gift cards an order sold",
+      description =
+          "Staff at the order's store read the cards a paid sale issued, with their codes."
+              + " A shopper is refused: a code is bearer value and the till hands it over.")
+  @APIResponse(responseCode = "200", description = "The order's gift-card lines")
+  @GET
+  @Path("/{id}/gift-card-loads")
+  public Response giftCardLoads(@PathParam("id") String id) {
+    ctx.requireAnyRole("OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
+    var loads = svc.giftCardLoadsOf(ctx.requireTenantId(), Parsing.uuid(id, "id"), ctx);
+    return Response.ok(ApiResponse.ok(loads.stream().map(Mappers::toDto).toList())).build();
   }
 
   /**

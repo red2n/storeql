@@ -67,6 +67,42 @@ public class PosSessionRepository extends BaseJdbcRepository {
   }
 
   /**
+   * Closes a session on a supervisor's word, recording who and why, and revokes the cashier's
+   * refresh tokens on the same transaction.
+   *
+   * @param id the session to close
+   * @param endedBy the supervisor
+   * @param reason why
+   * @return true when this call closed it, false when it was already closed
+   */
+  public boolean endBySupervisor(UUID id, UUID endedBy, String reason) {
+    return inTx(
+        c -> {
+          UUID owner = null;
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE pos_sessions SET status = 'ENDED', ended_at = now(), ended_by = ?,"
+                      + " end_reason = ? WHERE id = ? AND status = 'ACTIVE' RETURNING user_id")) {
+            ps.setObject(1, endedBy);
+            ps.setString(2, reason);
+            ps.setObject(3, id);
+            try (var rs = ps.executeQuery()) {
+              if (rs.next()) owner = rs.getObject("user_id", UUID.class);
+            }
+          }
+          if (owner == null) return false;
+          try (var rev =
+              c.prepareStatement(
+                  "UPDATE refresh_tokens SET revoked = true WHERE user_id = ? AND revoked = false")) {
+            rev.setObject(1, owner);
+            rev.executeUpdate();
+          }
+          return true;
+        },
+        "end pos session by supervisor");
+  }
+
+  /**
    * End all active POS sessions for a tenant and revoke the refresh tokens of the affected cashiers
    * in the same transaction (called when the tenant is suspended/blocked).
    */
@@ -161,6 +197,30 @@ public class PosSessionRepository extends BaseJdbcRepository {
    * @return the active sessions
    */
   public List<PosSession> listActive(UUID tenantId) {
+    return listActive(tenantId, null);
+  }
+
+  /**
+   * Lists open sessions, optionally only at some stores.
+   *
+   * @param tenantId owning tenant; the first condition
+   * @param stores the stores to read, or null for every store of the business
+   * @return the active sessions, newest first
+   */
+  public List<PosSession> listActive(UUID tenantId, java.util.Set<UUID> stores) {
+    if (stores != null) {
+      return query(
+          "SELECT id, tenant_id, user_id, store_id, started_at, last_activity_at,"
+              + " ended_at, idle_timeout_seconds, status"
+              + " FROM pos_sessions WHERE tenant_id = ? AND status = 'ACTIVE'"
+              + " AND store_id = ANY(?) ORDER BY started_at DESC",
+          ps -> {
+            ps.setObject(1, tenantId);
+            ps.setArray(2, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          },
+          this::map,
+          "list active pos sessions at stores");
+    }
     return query(
         "SELECT id, tenant_id, user_id, store_id, started_at, last_activity_at,"
             + " ended_at, idle_timeout_seconds, status"
@@ -168,6 +228,27 @@ public class PosSessionRepository extends BaseJdbcRepository {
         ps -> ps.setObject(1, tenantId),
         this::map,
         "list active pos sessions");
+  }
+
+  /**
+   * The caller's own open sessions.
+   *
+   * @param tenantId owning tenant; the first condition
+   * @param userId the cashier
+   * @return their active sessions, newest first
+   */
+  public List<PosSession> listActiveOf(UUID tenantId, UUID userId) {
+    return query(
+        "SELECT id, tenant_id, user_id, store_id, started_at, last_activity_at,"
+            + " ended_at, idle_timeout_seconds, status"
+            + " FROM pos_sessions WHERE tenant_id = ? AND user_id = ? AND status = 'ACTIVE'"
+            + " ORDER BY started_at DESC",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, userId);
+        },
+        this::map,
+        "list own active pos sessions");
   }
 
   /**

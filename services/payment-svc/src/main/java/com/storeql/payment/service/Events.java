@@ -50,6 +50,51 @@ final class Events {
             com.storeql.ids.Ids.newId()));
   }
 
+  /**
+   * A till session closed: the drawer's figures at the moment a person counted it. Consumers today:
+   * none (reporting-svc's cash report and the exception-alerts page's {@code till.variance} are to
+   * read it). {@code registerId} is absent until registers exist; {@code note} is absent when the
+   * closer gave none. The {@code eventId} goes last.
+   */
+  static OutboxRow tillSessionClosed(
+      UUID tenantId,
+      UUID sessionId,
+      UUID storeId,
+      UUID openedBy,
+      UUID closedBy,
+      java.time.Instant openedAt,
+      java.time.Instant closedAt,
+      java.math.BigDecimal floatAmount,
+      java.math.BigDecimal expectedCash,
+      java.math.BigDecimal countedCash,
+      java.math.BigDecimal overShort,
+      String note) {
+    return new OutboxRow(
+        "TillSessionClosed",
+        "storeql.payment.till-session-closed",
+        tenantId,
+        sessionId,
+        String.format(
+            "{\"eventType\":\"TillSessionClosed\",\"tenantId\":\"%s\",\"sessionId\":\"%s\","
+                + "\"storeId\":\"%s\",\"openedBy\":\"%s\",\"closedBy\":\"%s\","
+                + "\"openedAt\":\"%s\",\"closedAt\":\"%s\",\"floatAmount\":%s,"
+                + "\"expectedCash\":%s,\"countedCash\":%s,\"overShort\":%s%s,"
+                + "\"eventId\":\"%s\"}",
+            tenantId,
+            sessionId,
+            storeId,
+            openedBy,
+            closedBy,
+            openedAt,
+            closedAt,
+            floatAmount.toPlainString(),
+            expectedCash.toPlainString(),
+            countedCash.toPlainString(),
+            overShort.toPlainString(),
+            note == null ? "" : ",\"note\":\"" + clean(note) + "\"",
+            Ids.newId()));
+  }
+
   static OutboxRow paymentFailed(UUID tenantId, UUID paymentId, UUID orderId) {
     return new OutboxRow(
         "PaymentFailed",

@@ -308,32 +308,81 @@ public final class DeferredRevenue {
             .build());
   }
 
+  /** The {@code source} a sale's card carries: value sold on the order's own receipt. */
+  public static final String SOURCE_SALE = "SALE";
+
   /**
-   * A gift card sold or reloaded: Dr the account the money went to — or gift cards given away — and
-   * Cr the gift card liability. Not revenue, and no VAT: that falls due when the card is spent.
-   *
-   * @param kind ISSUE or RELOAD
-   * @param paidBy the tender taken, or {@link #PAID_BY_PROMOTIONAL}
+   * A gift card sold or reloaded, without saying where the value came from: as the events before
+   * order-svc named a source were read. See the long form.
    */
   public static List<NominalLedgerEntry> giftCardLoaded(
       Source src, String kind, String paidBy, BigDecimal amount) {
+    return giftCardLoaded(src, kind, paidBy, amount, null, null, null);
+  }
+
+  /**
+   * A gift card sold or reloaded, three ways:
+   *
+   * <ul>
+   *   <li>sold in a sale ({@code source} SALE naming the order): the tender was taken by the sale's
+   *       own payments, which debit the money account and credit sales clearing for everything
+   *       taken, card value included. The confirmed sale credits sales only for the goods, so the
+   *       card's value is what is left on clearing: Dr sales clearing / Cr the liability, on the
+   *       order, and the order nets to zero. It is never debited to a tender again, and a split
+   *       tender has no single one to debit;
+   *   <li>given by hand ({@code paidBy} PROMOTIONAL): value given away, not sold — Dr gift cards
+   *       given away (expense) / Cr the liability, with the reason and note in the description;
+   *   <li>put on by a return's refund ({@code paidBy} RETURN): nothing, the refund owes the card.
+   * </ul>
+   *
+   * A load with no source and a tender named is read as before: Dr that tender's account.
+   *
+   * @param kind ISSUE or RELOAD
+   * @param paidBy the tender taken, or {@link #PAID_BY_PROMOTIONAL}
+   * @param source SALE, RETURN, or a hand reason (GOODWILL, PROMOTION, COMPENSATION, MIGRATION);
+   *     null when the event does not say
+   * @param orderId the sale a SALE card was sold in
+   * @param note what the manager wrote for a hand load
+   */
+  public static List<NominalLedgerEntry> giftCardLoaded(
+      Source src,
+      String kind,
+      String paidBy,
+      BigDecimal amount,
+      String source,
+      UUID orderId,
+      String note) {
     if (amount == null || amount.signum() <= 0) return List.of();
     String how = paidBy == null ? "" : paidBy.trim().toUpperCase(Locale.ROOT);
     if (PAID_BY_RETURN.equals(how)) return List.of();
+    String why = source == null ? "" : source.trim().toUpperCase(Locale.ROOT);
     boolean given = PAID_BY_PROMOTIONAL.equals(how);
+    boolean inSale = !given && SOURCE_SALE.equals(why) && orderId != null;
+    String verb = "RELOAD".equals(kind) ? "Gift card reloaded" : "Gift card issued";
+    String description;
+    if (given) {
+      description =
+          verb
+              + " free of charge"
+              + (why.isEmpty() ? "" : " (" + why + ")")
+              + (note == null || note.isBlank() ? "" : ": " + note.strip());
+    } else if (inSale) {
+      description = verb + " in sale " + Handle.of(orderId);
+    } else {
+      description = verb + " paid by " + (how.isEmpty() ? "an unrecorded method" : how);
+    }
     LedgerPosting p =
         LedgerPosting.of(
             src.tenantId(),
             src.date(),
-            ("RELOAD".equals(kind) ? "Gift card reloaded" : "Gift card issued")
-                + (given
-                    ? " free of charge"
-                    : " paid by " + (how.isEmpty() ? "an unrecorded method" : how)),
+            description,
             Domain.SOURCE_GIFT_CARD_LOAD,
-            src.ref(),
+            inSale ? orderId : src.ref(),
             src.storeId());
     if (given) {
       p.debit(Domain.CODE_GIFT_CARDS_GIVEN, Domain.NAME_GIFT_CARDS_GIVEN, amount);
+    } else if (inSale) {
+      p.debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, amount);
     } else {
       SalesPosting.Control control = SalesPosting.controlFor(how);
       p.debit(control.code(), control.name(), amount);

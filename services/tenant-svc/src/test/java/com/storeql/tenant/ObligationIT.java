@@ -324,6 +324,44 @@ class ObligationIT {
     }
   }
 
+  @Test
+  @DisplayName(
+      "An obligation row's limit, unit and qualifier reach the sheet; rows without one are unchanged")
+  void anObligationCarriesItsLimit() throws Exception {
+    String code = "T_LIMIT_" + Ids.newId().toString().replace("-", "").substring(20).toUpperCase();
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO tenant.legal_obligations (code, scope_kind, scope, effective_from,"
+                    + " citation, summary, limit_value, limit_unit, qualifier)"
+                    + " VALUES (?, 'COUNTRY', 'NL', DATE '2020-01-01', 'test citation', 'test',"
+                    + " 30, 'DAYS', 'EMAIL')")) {
+      ps.setString(1, code);
+      ps.executeUpdate();
+    }
+    String nl = onboard("NL", "EUR");
+    String row = obligation(sheet(nl, null, null), code);
+    assertThat(row, containsString("\"limitValue\":30"));
+    assertThat(row, containsString("\"limitUnit\":\"DAYS\""));
+    assertThat(row, containsString("\"qualifier\":\"EMAIL\""));
+    String plain = obligation(sheet(nl, null, null), "GDPR");
+    assertThat(plain, not(containsString("limitValue")));
+    assertThat(plain, not(containsString("qualifier")));
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO tenant.legal_obligations (code, scope_kind, scope, effective_from,"
+                    + " citation, summary, limit_value) VALUES ('T_NOUNIT', 'COUNTRY', 'NL',"
+                    + " DATE '2020-01-01', 'c', 's', 5)")) {
+      try {
+        ps.executeUpdate();
+        throw new AssertionError("a number without its unit must be refused by the database");
+      } catch (java.sql.SQLException expected) {
+        assertThat(expected.getMessage(), containsString("chk_obligation_limit_pair"));
+      }
+    }
+  }
+
   @org.junit.jupiter.api.Test
   @org.junit.jupiter.api.DisplayName(
       "The owner's tenant data manifest is complete: every table is exported or left out by name")

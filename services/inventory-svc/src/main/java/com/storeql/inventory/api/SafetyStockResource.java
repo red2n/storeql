@@ -59,8 +59,11 @@ public class SafetyStockResource {
   @POST
   @Path("/safety-stock")
   public Response setSafetyStock(SetSafetyStockRequest req) {
+    // How much to hold back is policy: management's, at a store the caller keeps.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(uuid(req.storeId(), "storeId"));
     var params =
         service.setSafetyStockParams(
             tenantId,
@@ -133,11 +136,13 @@ public class SafetyStockResource {
   @POST
   @Path("/safety-stock/compute")
   public ApiResponse<ComputeSafetyStockResult> computeSafetyStock(ComputeSafetyStockRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
     UUID storeId =
-        req != null && req.storeId() != null && !req.storeId().isBlank()
-            ? uuid(req.storeId(), "storeId")
-            : null;
+        ctx.scopeStore(
+            req != null && req.storeId() != null && !req.storeId().isBlank()
+                ? uuid(req.storeId(), "storeId")
+                : null);
     UUID variantId =
         req != null && req.variantId() != null && !req.variantId().isBlank()
             ? uuid(req.variantId(), "variantId")

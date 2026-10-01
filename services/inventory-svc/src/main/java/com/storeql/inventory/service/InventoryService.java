@@ -1614,6 +1614,8 @@ public class InventoryService {
    * @param toStoreId the to store id
    * @param fromZone the from zone
    * @param toZone the to zone
+   * @param fromZoneId tenant-svc's zone the stock is drawn from, or null for anywhere in the store
+   * @param toZoneId tenant-svc's zone the stock is put down in, or null
    * @param notes free-text notes
    * @param lines the lines to store
    * @return the created move order
@@ -1624,8 +1626,14 @@ public class InventoryService {
       UUID toStoreId,
       String fromZone,
       String toZone,
+      UUID fromZoneId,
+      UUID toZoneId,
       String notes,
       List<MoveOrderLine> lines) {
+    if (fromZoneId != null && fromZoneId.equals(toZoneId) && fromStoreId.equals(toStoreId)) {
+      throw ApiException.badRequest(
+          "MOVE_ORDER_SAME_ZONE", "A move from a zone to the same zone moves nothing");
+    }
     if (lines == null || lines.isEmpty()) {
       throw new ApiException(
           400, "NO_LINES", "Move order must have at least one line", List.of(), null);
@@ -1643,7 +1651,9 @@ public class InventoryService {
             notes,
             MoveOrder.DRAFT,
             now,
-            null);
+            null,
+            fromZoneId,
+            toZoneId);
     List<MoveOrderLine> withIds =
         lines.stream()
             .map(
@@ -3642,6 +3652,23 @@ public class InventoryService {
    */
   public List<PickingRuleAssignment> listPickingRuleAssignments(UUID tenantId, int limit) {
     return pickingRuleRepo.listPickingRuleAssignments(tenantId, limit);
+  }
+
+  /**
+   * One picking rule assignment of the tenant.
+   *
+   * @param tenantId owning tenant
+   * @param id the assignment
+   * @return the assignment
+   * @throws ApiException a 404 when no such assignment exists in this tenant
+   */
+  public PickingRuleAssignment getPickingRuleAssignment(UUID tenantId, UUID id) {
+    return pickingRuleRepo.listPickingRuleAssignments(tenantId, Integer.MAX_VALUE).stream()
+        .filter(a -> a.id().equals(id))
+        .findFirst()
+        .orElseThrow(
+            () ->
+                ApiException.notFound("ASSIGNMENT_NOT_FOUND", "Picking rule assignment not found"));
   }
 
   /**

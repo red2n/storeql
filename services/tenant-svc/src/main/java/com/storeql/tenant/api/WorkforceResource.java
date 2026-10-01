@@ -161,6 +161,9 @@ public class WorkforceResource {
               + " rewritten are hours nobody can be held to. The breaks come with it, or the"
               + " correction would pay for the lunch hour.")
   @APIResponse(responseCode = "400", description = "No reason, or a window that is not one")
+  @APIResponse(
+      responseCode = "403",
+      description = "Another store than the caller is held to, or the caller's own hours")
   @APIResponse(responseCode = "409", description = "That entry has already been corrected")
   @POST
   @Path("/time-entries/{id}/adjust")
@@ -168,6 +171,9 @@ public class WorkforceResource {
       @PathParam("id") UUID id, WorkforceDtos.AdjustRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
+    // The entry must be the business's (404), then at a store the caller is held to (403); only
+    // then is it their own hours (403 WORKFORCE_SELF_ADJUST_REFUSED, judged in the service).
+    ctx.requireStoreAccess(svc.storeOfEntry(ctx.requireTenantId(), id));
     return ApiResponse.ok(
         WorkforceMappers.toDto(
             svc.adjust(
@@ -191,7 +197,8 @@ public class WorkforceResource {
   public Response clockInFor(@QueryParam("user") String user, WorkforceDtos.ClockInRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
-    UUID storeId = TimeClockResource.uuid(req.storeId(), "storeId");
+    UUID storeId =
+        svc.requireStore(ctx.requireTenantId(), TimeClockResource.uuid(req.storeId(), "storeId"));
     ctx.requireStoreAccess(storeId);
     var entry =
         svc.clockIn(

@@ -10,7 +10,8 @@
 // the difference, a cheaper one refunds only the difference, each once), the no-receipt return
 // (off by default, a manager only, store credit or a gift card, capped) and the till's gift-card
 // tender, which is taken by redeeming the card under an Idempotency-Key and recorded by payment-svc
-// from the redemption (a client-posted GIFT_CARD payment is refused).
+// from the redemption (a client-posted GIFT_CARD payment is refused). The card that tender spends
+// is one a return made, topped up by a gift-card line on a paid till sale.
 //
 // The policy is the business's own: the cashier's limit is set tiny here, so the refusal is by
 // ceiling (no currency amount is assumed anywhere).
@@ -29,6 +30,7 @@ import {
   priceVariants,
   receive,
   register,
+  sellGiftCard,
   sellableVariant,
   staffUser,
   truthy,
@@ -343,7 +345,13 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
   expect(noReceipt({ refundMethod: 'GIFT_CARD' }), '[-] a return over the ceiling is refused', 422, 'ORDER_NO_RECEIPT_OVER_CEILING');
 
   // ── 13. the till's gift-card tender: the card is charged first, by its redeem ───────────────────
-  const gc = must(call('POST', `${O}/gift-cards`, { token: owner, body: { storeId: store.id, amount: 200, currency: 'GBP', paidBy: 'CARD' } }), 201, 'a gift card to spend');
+  // The card to spend is the one the no-receipt return made, topped up at the till: value a customer
+  // pays for reaches a card only as a gift-card line on a paid sale, never by a hand issue.
+  const gc = { code: (data(nrCard).giftCard || {}).code };
+  const sold = sellGiftCard(tenant, store.id, 200, { code: gc.code, token: cashier.token, method: 'CARD' });
+  truthy('[+] a cashier sells a top-up as a line of a till sale: the card is the whole total, and nothing is loaded while it is unpaid', close(sold.order.total, 200) && close(sold.unpaid, sold.before), sold);
+  truthy('[+] ...and once the sale is paid the card holds the refund and the top-up', sold.landed >= 0 && close(sold.after, sold.before + 200), sold);
+  const gcFunds = sold.after;
   const gcSale = tillSale(1, null, { pay: false });
   const redeemKey = newKey('gift-redeem');
   const redeemBody = { amount: gcSale.total, orderId: gcSale.id };
@@ -351,13 +359,13 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
   expect(call('POST', redeemUrl, { token: owner, body: redeemBody }), '[-] a redeem with no Idempotency-Key is refused', 400, 'IDEMPOTENCY_KEY_REQUIRED');
   const charged = call('POST', redeemUrl, { token: owner, idem: redeemKey, body: redeemBody });
   expect(charged, '[+] the till charges the gift card for the sale', [200, 201]);
-  truthy('[+] ...the answer names the redemption, the card, the amount and what is left', !!data(charged).redemptionId && !!data(charged).giftCardId && close(data(charged).amount, gcSale.total) && close(data(charged).balance, 200 - num(gcSale.total)), data(charged));
+  truthy('[+] ...the answer names the redemption, the card, the amount and what is left', !!data(charged).redemptionId && !!data(charged).giftCardId && close(data(charged).amount, gcSale.total) && close(data(charged).balance, gcFunds - num(gcSale.total)), data(charged));
   truthy('[+] ...and payment-svc records the GIFT_CARD tender itself, once', poll(90, () => close(sum(tendersOf(gcSale.id), 'GIFT_CARD'), gcSale.total)) >= 0 && count(tendersOf(gcSale.id), 'GIFT_CARD') === 1, tendersOf(gcSale.id));
   truthy('[+] ...and the paid sale is handed over', poll(90, () => (data(call('GET', `${O}/orders/${gcSale.id}`, { token: owner })) || {}).status === 'FULFILLED') >= 0);
   const chargedAgain = call('POST', redeemUrl, { token: owner, idem: redeemKey, body: redeemBody });
   truthy('[+] the same charge sent again with the same key is the first', [200, 201].includes(chargedAgain.status) && data(chargedAgain).redemptionId === data(charged).redemptionId, { first: data(charged).redemptionId, again: data(chargedAgain).redemptionId });
   sleep(3);
-  truthy('[+] ...the card was charged once and the sale has one tender', close(data(call('GET', `${O}/gift-cards/${encodeURIComponent(gc.code)}`, { token: owner })).currentBalance, 200 - num(gcSale.total)) && count(tendersOf(gcSale.id), 'GIFT_CARD') === 1);
+  truthy('[+] ...the card was charged once and the sale has one tender', close(data(call('GET', `${O}/gift-cards/${encodeURIComponent(gc.code)}`, { token: owner })).currentBalance, gcFunds - num(gcSale.total)) && count(tendersOf(gcSale.id), 'GIFT_CARD') === 1);
   expect(call('POST', `${P}/payments`, { token: owner, idem: true, body: { orderId: gcSale.id, amount: gcSale.total, method: 'GIFT_CARD', storeId: store.id, reference: gc.code } }), '[-] a GIFT_CARD tender cannot be posted as a payment', 400, 'PAYMENT_GIFT_CARD_VIA_REDEEM');
 
   const refusedSale = tillSale(1, null, { pay: false });

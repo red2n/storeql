@@ -4,7 +4,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -43,26 +42,6 @@ public final class Workforce {
   public static final String BREAK_MEAL = "MEAL";
   public static final Set<String> BREAK_KINDS = Set.of(BREAK_REST, BREAK_MEAL);
 
-  /**
-   * The daily rest the Working Time Directive asks for: eleven consecutive hours in each 24.
-   *
-   * <p>A roster that breaks it is <b>flagged, not refused</b>. The directive is implemented member
-   * state by member state with its own derogations and collective agreements, and an employer who
-   * has one is entitled to roster against it; a platform that refused would be wrong about the law
-   * and in the way. What it must not do is stay quiet, because nobody reading a rota spots eleven
-   * hours by eye.
-   */
-  public static final Duration DAILY_REST = Duration.ofHours(11);
-
-  /**
-   * How long somebody may work before the directive expects a break: six hours.
-   *
-   * <p>Flagged for the same reason and with the same caveat. Article 4 leaves the length and the
-   * terms to member states; what is not in doubt is that a six-hour stretch with no break is worth
-   * saying.
-   */
-  public static final Duration BREAK_AFTER = Duration.ofHours(6);
-
   /** A rostered shift: what somebody is meant to work. */
   public record Shift(
       UUID id,
@@ -87,7 +66,10 @@ public final class Workforce {
       return Duration.between(startsAt, endsAt);
     }
 
-    /** The day a shift belongs to: the day it starts, in UTC, which is how the roster reads. */
+    /**
+     * The day a shift belongs to in UTC. Only the attendance report still reads days this way; a
+     * roster's concerns read the store's own day ({@link WorkingTime#day}).
+     */
     public LocalDate day() {
       return startsAt.atOffset(ZoneOffset.UTC).toLocalDate();
     }
@@ -182,68 +164,28 @@ public final class Workforce {
     }
   }
 
-  /** Something about a roster worth saying out loud, with the instrument that asks for it. */
-  public record Concern(String code, String detail) {}
-
-  public static final String REST_SHORT = "DAILY_REST_SHORT";
-  public static final String NO_BREAK = "BREAK_EXPECTED";
-  public static final String OVERLAPS = "SHIFTS_OVERLAP";
+  /**
+   * Something about a roster worth saying out loud, with the instrument that asks for it.
+   *
+   * @param severity ADVISORY or UNLAWFUL (what the rule's data says; never refused by this)
+   * @param source LAW when it comes from a rule of law (with its {@code citation}), ROSTER when it
+   *     is a fact of the roster itself
+   * @param citation the instrument, or null for a ROSTER concern
+   */
+  public record Concern(
+      String code, String detail, String severity, String source, String citation) {}
 
   /**
-   * What is worth saying about one person's rostered shifts.
-   *
-   * <p>Shifts must arrive in order of start. Overlaps are reported first because they are a mistake
-   * rather than a judgement: nobody works two places at once, and the rest of the arithmetic would
-   * be nonsense if they did.
+   * Whether a correction would raise the person's paid minutes: the entry's length less unpaid
+   * breaks, after against before. An entry still open has no figure yet, so closing it counts as a
+   * raise from nothing (the forgotten clock-out is exactly the correction a second person should
+   * see); a correction that leaves it open changes no hours.
    */
-  public static List<Concern> concerns(List<Shift> ofOnePerson) {
-    List<Concern> out = new ArrayList<>();
-    Shift previous = null;
-    for (Shift s : ofOnePerson) {
-      if (!s.live()) continue;
-      if (s.length().compareTo(BREAK_AFTER) > 0) {
-        out.add(
-            new Concern(
-                NO_BREAK,
-                "the shift on "
-                    + s.day()
-                    + " runs "
-                    + hours(s.length())
-                    + " hours, and a break is expected after "
-                    + BREAK_AFTER.toHours()
-                    + " (Directive 2003/88/EC art. 4, as the member state implements it)"));
-      }
-      if (previous != null) {
-        if (s.startsAt().isBefore(previous.endsAt())) {
-          out.add(
-              new Concern(
-                  OVERLAPS,
-                  "the shifts on "
-                      + previous.day()
-                      + " and "
-                      + s.day()
-                      + " overlap, and nobody works two places at once"));
-        } else {
-          Duration rest = Duration.between(previous.endsAt(), s.startsAt());
-          if (rest.compareTo(DAILY_REST) < 0) {
-            out.add(
-                new Concern(
-                    REST_SHORT,
-                    "only "
-                        + hours(rest)
-                        + " hours between the shifts on "
-                        + previous.day()
-                        + " and "
-                        + s.day()
-                        + ", where "
-                        + DAILY_REST.toHours()
-                        + " are expected (Directive 2003/88/EC art. 3)"));
-          }
-        }
-      }
-      previous = s;
-    }
-    return out;
+  public static boolean raisesPaidMinutes(Entry before, Entry after) {
+    Duration was = before.worked();
+    Duration now = after.worked();
+    if (now == null) return false;
+    return was == null || now.compareTo(was) > 0;
   }
 
   /** Hours to one decimal place, which is how a rota is read and discussed. */

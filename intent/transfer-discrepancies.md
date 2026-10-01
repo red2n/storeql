@@ -120,4 +120,6 @@ A store receiving a transfer can only say "it all arrived". The receipt copies t
 
 ## Decisions
 
+- (2026-09-30 evening, reconciliation) **Ledger account codes are now single** and identical on every page (the existing chart uses 1xxx assets, 2xxx liabilities, 4xxx income, 5xxx purchases, 6xxx expenses; the free numbers were checked against `Domain.java`): Here: *Stock lost in transit* is `6572`. The full list: `1110` Customer accounts, `1120` Supplier rebates receivable, `1215` Cash in transit to bank, `2340` Unclaimed balances payable, `4040` Supplier promotional funding, `4050` Delivery income, `5040` Purchase rebates, `5050` Purchase price variance, `6420` Gift cards given (existing; goodwill cards), `6530` Cash over and short, `6540` Exchange differences, `6560` Bad debts, `6570` Stock shrinkage, `6571` Stock shrinkage, unexplained, `6572` Stock lost in transit. One seed adds each that is missing (idempotent, by whichever page builds first).
+
 - 2026-09-30: settled by industry standard as above; nothing built yet.

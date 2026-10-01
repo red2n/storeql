@@ -40,7 +40,13 @@ public final class WorkforceMappers {
             (userId, list) -> {
               for (Workforce.Concern c : list) {
                 concerns.add(
-                    new WorkforceDtos.ConcernResponse(userId.toString(), c.code(), c.detail()));
+                    new WorkforceDtos.ConcernResponse(
+                        userId.toString(),
+                        c.code(),
+                        c.detail(),
+                        c.severity(),
+                        c.source(),
+                        c.citation()));
               }
             });
     return new WorkforceDtos.RosterResponse(

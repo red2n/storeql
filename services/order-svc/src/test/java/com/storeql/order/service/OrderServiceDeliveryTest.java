@@ -86,38 +86,28 @@ class OrderServiceDeliveryTest {
       String postalCode,
       String recipientName,
       String recipientPhone) {
-    return new PlaceOrderRequest(
-        STORE.toString(),
-        null,
-        "ONLINE",
-        fulfilmentType,
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null, null, null)),
-        null,
-        null,
-        null,
-        "USD",
-        null,
-        null, // couponCodes
-        null,
-        null,
-        null,
-        line1,
-        null,
-        city,
-        postalCode,
-        recipientName,
-        recipientPhone,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(STORE.toString())
+        .channel("ONLINE")
+        .fulfilmentType(fulfilmentType)
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    BigDecimal.ONE,
+                    BigDecimal.TEN,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .currency("USD")
+        .deliveryLine1(line1)
+        .deliveryCity(city)
+        .deliveryPostalCode(postalCode)
+        .deliveryRecipientName(recipientName)
+        .deliveryRecipientPhone(recipientPhone)
+        .build();
   }
 
   @Test

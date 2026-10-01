@@ -72,6 +72,32 @@ const Map<String, String> _fallbackWords = {
   'STAFF_STORE_AND_BUSINESS_WIDE':
       'Choose a store or the whole business, not both.',
   'STAFF_STORE_REQUIRED': 'Choose a store, or the whole business.',
+  'GIFT_CARD_NEEDS_SALE':
+      'A gift card is sold at the till. An owner or a manager gives or reloads one by hand.',
+  'GIFT_CARD_REASON_REQUIRED': 'Say why the card is given.',
+  'ORDER_GIFT_CARD_INSTORE_ONLY': 'A gift card is sold in store, not online.',
+  'ORDER_PENDING_LIMIT_INVALID':
+      'The unpaid hold is a whole number of hours, at least 1.',
+  'ORDER_PRICE_WAIT_INVALID':
+      'A price wait is at least 1 minute, and the cancel wait is not shorter than the one that tells a manager.',
+  'ZONE_STATUS_INVALID':
+      'A zone is active, out of service or retired.',
+  'ZONE_STATUS_CHANGED':
+      'Someone changed that zone at the same moment. Reload and try again.',
+  'Z_REPORT_SESSIONS_OPEN':
+      'A till is still open at this store that day. Close it before settling the day.',
+  'Z_REPORT_CORRECTION_REASON_REQUIRED': 'Say why the day is being corrected.',
+  'Z_REPORT_NOT_LATEST':
+      'A newer version of that day already exists. Open it and correct that one.',
+  'Z_REPORT_NOT_FOUND': 'There is no report for that day.',
+  'POS_SESSION_REASON_REQUIRED': 'Say why the session is being ended.',
+  'POS_SESSION_NOT_YOURS': 'Only a manager ends another person\'s session.',
+  'POS_SESSION_NOT_FOUND': 'That session is no longer open.',
+  'GIFT_CARD_TOO_MANY': 'A sale can carry at most 20 gift cards.',
+  'GIFT_CARD_AMOUNT_INVALID': 'That gift card amount is not one this currency can pay.',
+  'GIFT_CARD_NOT_FOUND': 'No gift card with that code.',
+  'GIFT_CARD_NOT_ACTIVE': 'That gift card is not active, so it cannot be topped up.',
+  'GIFT_CARD_CURRENCY_MISMATCH': "That gift card is in another currency than this sale.",
 };
 
 const String _genericServerLine = 'An unexpected error occurred.';

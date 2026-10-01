@@ -205,6 +205,7 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     ctx.getHeaders().remove(HttpHeaders.PERMISSIONS);
     ctx.getHeaders().remove(HttpHeaders.AUTH_SCOPE);
     ctx.getHeaders().remove(HttpHeaders.AUTH_METHODS);
+    ctx.getHeaders().remove(HttpHeaders.SESSION_ID);
 
     // Allow public auth paths without a token.
     if (isPublic(path)) {
@@ -371,6 +372,13 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     // sets one up, so the session it ends in records how it began.
     if (amr != null && !amr.isEmpty()) {
       ctx.getHeaders().putSingle(HttpHeaders.AUTH_METHODS, String.join(",", amr));
+    }
+
+    // Which of the person's sessions this token belongs to (sign-in protection): iam-svc marks it
+    // as "this one" in the person's own list. A token minted before sessions had ids names none.
+    String sid = jwt.getClaim("sid").asString();
+    if (sid != null && !sid.isBlank()) {
+      ctx.getHeaders().putSingle(HttpHeaders.SESSION_ID, sid);
     }
 
     // Restore preserved tenant ID for onboarding paths (flow guard: user provides tenant context)

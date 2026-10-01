@@ -1542,6 +1542,40 @@ public class InventoryRepository extends BaseOutboxRepository {
       UUID firstBatch,
       MovementAttribution attribution)
       throws SQLException {
+    return deductBatches(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        moveType,
+        refType,
+        refId,
+        strategy,
+        gradePreference,
+        zonePriorityOrder,
+        firstBatch,
+        null,
+        attribution);
+  }
+
+  /** As above, drawing only from batches sitting in {@code onlyZone} when it is given. */
+  List<Drawn> deductBatches(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String moveType,
+      String refType,
+      UUID refId,
+      String strategy,
+      String gradePreference,
+      List<UUID> zonePriorityOrder,
+      UUID firstBatch,
+      UUID onlyZone,
+      MovementAttribution attribution)
+      throws SQLException {
     String orderBy = pickOrderClause(strategy, gradePreference, zonePriorityOrder);
     BigDecimal toDeduct = qty;
     List<Drawn> batches = new ArrayList<>();
@@ -1555,6 +1589,7 @@ public class InventoryRepository extends BaseOutboxRepository {
                 + " AND material_status='AVAILABLE'"
                 + dutyFilter(moveType)
                 + expiryFilter(tenantId, moveType)
+                + (onlyZone == null ? "" : " AND zone_id = ?")
                 // The named batch first (a cross-dock line's own); with none named every row
                 // compares to null alike and the order is the rule's.
                 + " ORDER BY (id = CAST(? AS uuid)) DESC NULLS LAST, "
@@ -1563,7 +1598,9 @@ public class InventoryRepository extends BaseOutboxRepository {
       ps.setObject(1, tenantId);
       ps.setObject(2, storeId);
       ps.setObject(3, variantId);
-      ps.setObject(4, firstBatch);
+      int next = 4;
+      if (onlyZone != null) ps.setObject(next++, onlyZone);
+      ps.setObject(next, firstBatch);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           batches.add(
@@ -1825,9 +1862,41 @@ public class InventoryRepository extends BaseOutboxRepository {
       Function<Batch, OutboxRow> eventFor,
       ReturnDisposition where)
       throws SQLException {
+    return receiveDrawn(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        drawn,
+        fallbackNo,
+        moveType,
+        refType,
+        refId,
+        eventFor,
+        where,
+        null);
+  }
+
+  /** As above, the arrivals put down in {@code zoneId} when one is named. */
+  private List<Batch> receiveDrawn(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      List<Drawn> drawn,
+      String fallbackNo,
+      String moveType,
+      String refType,
+      UUID refId,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where,
+      UUID zoneId)
+      throws SQLException {
     List<Batch> arrived = new ArrayList<>();
     for (Drawn from : drawn) {
-      Batch child = where.place(Provenance.arrival(tenantId, storeId, variantId, from, fallbackNo));
+      Batch placed =
+          where.place(Provenance.arrival(tenantId, storeId, variantId, from, fallbackNo));
+      Batch child = zoneId == null ? placed : inZone(placed, zoneId);
       insertBatch(c, child);
       announceOffSale(c, child);
       insertMovement(
@@ -1847,6 +1916,28 @@ public class InventoryRepository extends BaseOutboxRepository {
       arrived.add(child);
     }
     return arrived;
+  }
+
+  private static Batch inZone(Batch b, UUID zoneId) {
+    return new Batch(
+        b.id(),
+        b.tenantId(),
+        b.storeId(),
+        b.variantId(),
+        b.batchNo(),
+        b.receivedQty(),
+        b.remainingQty(),
+        b.costPrice(),
+        b.expiryDate(),
+        b.createdAt(),
+        b.status(),
+        b.materialStatus(),
+        b.materialStatusReason(),
+        b.grade(),
+        zoneId,
+        b.ownership(),
+        b.ownerSupplierId(),
+        b.dutyStatus());
   }
 
   /** Receives an anonymous batch: stock arriving with no source to carry anything from. */
@@ -2436,18 +2527,23 @@ public class InventoryRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO move_orders"
-                      + " (id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
-                      + "  notes, status, created_at)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+                      + " (id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id,"
+                      + "  to_zone_id, notes, status, created_at)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, order.id());
             ps.setObject(2, order.tenantId());
             ps.setObject(3, order.fromStoreId());
             ps.setObject(4, order.toStoreId());
             ps.setString(5, order.fromZone());
             ps.setString(6, order.toZone());
-            ps.setString(7, order.notes());
-            ps.setString(8, order.status());
-            ps.setObject(9, order.createdAt().atOffset(ZoneOffset.UTC));
+            // A zone id is bound only when there is one: never a null UUID through setObject.
+            if (order.fromZoneId() == null) ps.setNull(7, java.sql.Types.OTHER);
+            else ps.setObject(7, order.fromZoneId());
+            if (order.toZoneId() == null) ps.setNull(8, java.sql.Types.OTHER);
+            else ps.setObject(8, order.toZoneId());
+            ps.setString(9, order.notes());
+            ps.setString(10, order.status());
+            ps.setObject(11, order.createdAt().atOffset(ZoneOffset.UTC));
             ps.executeUpdate();
           }
           insertLines(c, lines);
@@ -2468,7 +2564,7 @@ public class InventoryRepository extends BaseOutboxRepository {
   public List<MoveOrder> listMoveOrders(UUID tenantId, UUID storeId, String status, int limit) {
     StringBuilder sb =
         new StringBuilder(
-            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                 + " notes, status, created_at, picked_at"
                 + " FROM move_orders WHERE tenant_id = ?");
     if (storeId != null) sb.append(" AND (from_store_id = ? OR to_store_id = ?)");
@@ -2500,7 +2596,7 @@ public class InventoryRepository extends BaseOutboxRepository {
   public Optional<MoveOrder> findMoveOrder(UUID tenantId, UUID id) {
     List<MoveOrder> rows =
         query(
-            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                 + " notes, status, created_at, picked_at"
                 + " FROM move_orders WHERE tenant_id = ? AND id = ?",
             ps -> {
@@ -2542,8 +2638,9 @@ public class InventoryRepository extends BaseOutboxRepository {
           }
           List<MoveOrderLine> lines = listMoveOrderLines(orderId);
           for (MoveOrderLine line : lines) {
+            // A move that names its from-zone draws what sits there and nothing else.
             List<Drawn> drawn =
-                deductFifo(
+                deductBatches(
                     c,
                     tenantId,
                     order.fromStoreId(),
@@ -2552,8 +2649,14 @@ public class InventoryRepository extends BaseOutboxRepository {
                     MoveType.TRANSFER,
                     "MOVE_ORDER",
                     orderId,
+                    null,
+                    null,
+                    null,
+                    null,
+                    order.fromZoneId(),
                     MovementAttribution.system());
-            // What is put down is what was picked: each source batch's lot, date and cost.
+            // What is put down is what was picked: each source batch's lot, date and cost, in the
+            // to-zone when the order names one.
             receiveDrawn(
                 c,
                 tenantId,
@@ -2564,14 +2667,16 @@ public class InventoryRepository extends BaseOutboxRepository {
                 MoveType.TRANSFER,
                 "MOVE_ORDER",
                 orderId,
-                null);
+                null,
+                ReturnDisposition.ON_SALE,
+                order.toZoneId());
           }
           MoveOrder completed;
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE move_orders SET status = 'COMPLETED', picked_at = now()"
                       + " WHERE tenant_id = ? AND id = ?"
-                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                       + " notes, status, created_at, picked_at")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, orderId);
@@ -2614,7 +2719,7 @@ public class InventoryRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "UPDATE move_orders SET status = 'CANCELLED'"
                       + " WHERE tenant_id = ? AND id = ?"
-                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                       + " notes, status, created_at, picked_at")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, orderId);
@@ -2633,7 +2738,7 @@ public class InventoryRepository extends BaseOutboxRepository {
       throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                 + " notes, status, created_at, picked_at"
                 + " FROM move_orders WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
       ps.setObject(1, tenantId);
@@ -2675,7 +2780,9 @@ public class InventoryRepository extends BaseOutboxRepository {
         rs.getString("notes"),
         rs.getString("status"),
         rs.getObject("created_at", OffsetDateTime.class).toInstant(),
-        pickedOdt == null ? null : pickedOdt.toInstant());
+        pickedOdt == null ? null : pickedOdt.toInstant(),
+        rs.getObject("from_zone_id", UUID.class),
+        rs.getObject("to_zone_id", UUID.class));
   }
 
   private static MoveOrderLine mapMoveOrderLine(ResultSet rs) throws SQLException {

@@ -161,6 +161,28 @@ public class WorkforceRepository extends BaseOutboxRepository {
         .isEmpty();
   }
 
+  /** A store's country and zone as roster rules read them. */
+  public record StoreBasis(String country, String timezone) {}
+
+  /**
+   * Where a store is, as far as working-time law is concerned: its own country, else the
+   * business's; and its own zone. Empty when the store is not this tenant's.
+   */
+  public java.util.Optional<StoreBasis> storeBasis(UUID tenantId, UUID storeId) {
+    return query(
+            "SELECT COALESCE(NULLIF(btrim(s.country), ''), t.country) AS country, s.timezone"
+                + " FROM stores s JOIN tenants t ON t.id = s.tenant_id"
+                + " WHERE s.tenant_id = ? AND s.id = ?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, storeId);
+            },
+            rs -> new StoreBasis(rs.getString("country"), rs.getString("timezone")),
+            "a store's country and zone")
+        .stream()
+        .findFirst();
+  }
+
   // ── what an hour costs ──────────────────────────────────────────────────────
 
   private static final String RATE_COLUMNS =

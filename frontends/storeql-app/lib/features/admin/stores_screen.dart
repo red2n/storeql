@@ -16,6 +16,7 @@ import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/page_header.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'fulfilment_windows_screen.dart';
+import 'order_limits_card.dart';
 import 'providers/admin_providers.dart';
 import 'return_policy_card.dart';
 import 'store_instruments_dialog.dart';
@@ -127,10 +128,13 @@ class StoresScreen extends ConsumerWidget {
                     // covers the last store's status and menu.
                     padding: EdgeInsetsDirectional.fromSTEB(
                         gutter, 0, gutter, AppSpacing.fabClearance),
-                    itemCount: stores.length,
+                    // Management's last row is the order time limits: it scrolls with the
+                    // stores, so large text on a phone never squeezes the list out.
+                    itemCount: stores.length + (isManager ? 1 : 0),
                     separatorBuilder: (_, _) =>
                         const SizedBox(height: AppSpacing.xs),
                     itemBuilder: (context, i) {
+                      if (i == stores.length) return const OrderLimitsCard();
                       final s = stores[i];
                       final active = s.status.toUpperCase() == 'ACTIVE';
                       return _StoreCard(
@@ -425,7 +429,33 @@ class _StoreCard extends StatelessWidget {
       );
 }
 
-/// Lists, creates, edits and activates/deactivates the zones (aisles/racks)
+/// A zone's status is one of these three (tenant-svc, 30 Sep 2026); anything
+/// else is refused with `ZONE_STATUS_INVALID`.
+const zoneStatuses = ['ACTIVE', 'OUT_OF_SERVICE', 'RETIRED'];
+
+/// A zone's status in words.
+String zoneStatusLabel(String status) => switch (status.toUpperCase()) {
+      'ACTIVE' => 'Active',
+      'OUT_OF_SERVICE' => 'Out of service',
+      'RETIRED' => 'Retired',
+      _ => humanizeCode(status),
+    };
+
+/// What choosing that status does, for the menu that changes it.
+String zoneStatusAction(String status) => switch (status.toUpperCase()) {
+      'ACTIVE' => 'Mark active',
+      'OUT_OF_SERVICE' => 'Mark out of service',
+      'RETIRED' => 'Retire',
+      _ => humanizeCode(status),
+    };
+
+StatusTone zoneStatusTone(String status) => switch (status.toUpperCase()) {
+      'ACTIVE' => StatusTone.success,
+      'OUT_OF_SERVICE' => StatusTone.warning,
+      _ => StatusTone.neutral,
+    };
+
+/// Lists, creates, edits and sets the status of the zones (aisles/racks)
 /// within a store. Stock batches are pinned to a (store, zone).
 class _ZonesDialog extends ConsumerWidget {
   final StoreInfo store;
@@ -478,7 +508,7 @@ class _ZonesDialog extends ConsumerWidget {
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (_, i) {
                 final z = zones[i];
-                final active = z.status.toUpperCase() == 'ACTIVE';
+                final status = z.status.toUpperCase();
                 return ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: Icon(Icons.shelves, color: cs.primary),
@@ -493,24 +523,26 @@ class _ZonesDialog extends ConsumerWidget {
                       Text('${z.code} · ${humanizeCode(z.type)}'),
                       const SizedBox(height: AppSpacing.xs),
                       StatusBadge(
-                        humanizeCode(z.status),
-                        tone: active ? StatusTone.success : StatusTone.neutral,
+                        zoneStatusLabel(status),
+                        tone: zoneStatusTone(status),
                       ),
                     ],
                   ),
                   trailing: context.isCompact
                       ? PopupMenuButton<String>(
                           key: Key('zone-actions-${z.id}'),
-                          tooltip: 'Edit or ${active ? 'deactivate' : 'activate'}',
+                          tooltip: 'Edit or change status',
                           onSelected: (a) => a == 'edit'
                               ? _showZoneForm(context, ref, z)
-                              : _toggleStatus(context, ref, z, active),
+                              : _setStatus(context, ref, z, a),
                           itemBuilder: (_) => [
                             const PopupMenuItem(value: 'edit', child: Text('Edit')),
-                            PopupMenuItem(
-                              value: 'toggle',
-                              child: Text(active ? 'Deactivate' : 'Activate'),
-                            ),
+                            for (final next in zoneStatuses)
+                              if (next != status)
+                                PopupMenuItem(
+                                  value: next,
+                                  child: Text(zoneStatusAction(next)),
+                                ),
                           ],
                         )
                       : Row(
@@ -521,13 +553,23 @@ class _ZonesDialog extends ConsumerWidget {
                               icon: const Icon(Icons.edit_outlined, size: 18),
                               onPressed: () => _showZoneForm(context, ref, z),
                             ),
-                            IconButton(
-                              tooltip: active ? 'Deactivate' : 'Activate',
+                            PopupMenuButton<String>(
+                              key: Key('zone-status-${z.id}'),
+                              tooltip: 'Change status',
                               icon: Icon(
-                                active ? Icons.toggle_on : Icons.toggle_off_outlined,
-                                color: active ? context.status.success : cs.outline,
+                                Icons.swap_horiz,
+                                size: 20,
+                                color: cs.onSurfaceVariant,
                               ),
-                              onPressed: () => _toggleStatus(context, ref, z, active),
+                              onSelected: (next) => _setStatus(context, ref, z, next),
+                              itemBuilder: (_) => [
+                                for (final next in zoneStatuses)
+                                  if (next != status)
+                                    PopupMenuItem(
+                                      value: next,
+                                      child: Text(zoneStatusAction(next)),
+                                    ),
+                              ],
                             ),
                           ],
                         ),
@@ -557,9 +599,8 @@ class _ZonesDialog extends ConsumerWidget {
     );
   }
 
-  Future<void> _toggleStatus(
-      BuildContext context, WidgetRef ref, ZoneInfo zone, bool active) async {
-    final next = active ? 'INACTIVE' : 'ACTIVE';
+  Future<void> _setStatus(
+      BuildContext context, WidgetRef ref, ZoneInfo zone, String next) async {
     try {
       await ref.read(apiClientProvider).dio.patch(
         '/${ApiConstants.tenant}/admin/stores/${store.id}/zones/${zone.id}/status',
