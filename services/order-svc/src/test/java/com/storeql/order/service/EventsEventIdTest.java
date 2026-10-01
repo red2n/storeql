@@ -199,6 +199,21 @@ class EventsEventIdTest {
     carriesEventId("giftCardLoadedByReturn", Events.giftCardLoadedByReturn(card, tx, RETURN));
     carriesEventId("giftCardRedeemed", Events.giftCardRedeemed(card, tx, order()));
     carriesEventId(
+        "giftCardLoadReversed",
+        Events.giftCardLoadReversed(
+            card,
+            new GiftCardTransaction(
+                Ids.newId(),
+                TENANT,
+                card.id(),
+                GiftCardTransaction.TX_LOAD_REVERSED,
+                BigDecimal.TEN,
+                BigDecimal.TEN,
+                BigDecimal.ZERO,
+                ORDER,
+                ORDER.toString(),
+                Instant.now())));
+    carriesEventId(
         "orderDispatched",
         Events.orderDispatched(TENANT, ORDER, STORE, CUSTOMER, LOGIN, "DHL", "JD01", 2));
     carriesEventId(

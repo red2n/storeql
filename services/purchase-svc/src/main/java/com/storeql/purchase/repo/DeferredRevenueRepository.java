@@ -188,6 +188,30 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
   }
 
   /**
+   * Records the value of a gift card load taken back (the sale was voided or cancelled) and its
+   * journal, once per event: the event is marked processed, the pool lowered and the journal
+   * written together.
+   *
+   * @return {@code false} when the event was already recorded
+   */
+  public boolean recordGiftCardLoadReversed(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      BigDecimal amount,
+      List<NominalLedgerEntry> posting) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, eventId, consumer)) return false;
+          GiftCardPool pool = lockGiftCardPool(c, tenantId);
+          saveGiftCardPool(c, tenantId, DeferredRevenue.loadReversed(pool, amount));
+          LedgerWriter.insert(c, posting);
+          return true;
+        },
+        "record gift card load reversed");
+  }
+
+  /**
    * Records a gift card spent as tender, and the breakage the rule recognises for it, once.
    *
    * @param dedupeId the key the spend is recorded under

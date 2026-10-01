@@ -150,6 +150,28 @@ public final class Events {
         "GiftCardLoaded", TOPIC_GIFT_CARD_LOADED, gc.tenantId(), gc.id(), b.build().toString());
   }
 
+  /**
+   * The value a sale loaded on a gift card was taken back off it because the sale was voided or
+   * cancelled. Built by the shared contract; purchase-svc posts the opposite of the sale-loaded
+   * posting, once per event.
+   */
+  static OutboxRow giftCardLoadReversed(GiftCard gc, GiftCardTransaction tx) {
+    return new OutboxRow(
+        "GiftCardLoadReversed",
+        com.storeql.events.contract.GiftCardLoadReversed.TOPIC,
+        gc.tenantId(),
+        gc.id(),
+        com.storeql.events.contract.GiftCardLoadReversed.payload(
+            gc.tenantId(),
+            gc.id(),
+            tx.orderId(),
+            tx.amount(),
+            gc.currency(),
+            com.storeql.events.contract.GiftCardLoadReversed.SOURCE_SALE,
+            tx.createdAt(),
+            gc.storeId()));
+  }
+
   private static void nullable(JsonObjectBuilder b, String name, String value) {
     if (value == null) {
       b.addNull(name);

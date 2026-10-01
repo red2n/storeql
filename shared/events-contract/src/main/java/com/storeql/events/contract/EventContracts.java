@@ -33,7 +33,8 @@ public final class EventContracts {
           VariantHandlingSet.CONTRACT,
           ZoneStatusChanged.CONTRACT,
           CustomersMerged.CONTRACT,
-          PlatformActionRecorded.CONTRACT);
+          PlatformActionRecorded.CONTRACT,
+          GiftCardLoadReversed.CONTRACT);
 
   public static Optional<EventContract> byType(String type) {
     return ALL.stream().filter(c -> c.type().equals(type)).findFirst();

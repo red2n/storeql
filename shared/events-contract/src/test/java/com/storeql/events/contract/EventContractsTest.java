@@ -262,6 +262,30 @@ class EventContractsTest {
         () ->
             PlatformActionRecorded.payload(
                 AGG, USER, "SUPPORT", "session.revoke", null, null, null, null));
+    FULL.put(
+        GiftCardLoadReversed.TYPE,
+        () ->
+            GiftCardLoadReversed.payload(
+                TENANT,
+                AGG,
+                Ids.newId(),
+                new BigDecimal("25.00"),
+                "EUR",
+                GiftCardLoadReversed.SOURCE_SALE,
+                Instant.parse("2026-10-01T10:15:30Z"),
+                STORE));
+    MINIMAL.put(
+        GiftCardLoadReversed.TYPE,
+        () ->
+            GiftCardLoadReversed.payload(
+                TENANT,
+                AGG,
+                Ids.newId(),
+                new BigDecimal("25.00"),
+                "EUR",
+                GiftCardLoadReversed.SOURCE_SALE,
+                Instant.parse("2026-10-01T10:15:30Z"),
+                null));
   }
 
   @Test

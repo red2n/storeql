@@ -85,6 +85,24 @@ public class DeferredRevenueHandler {
     deferred.giftCardLoaded(load);
   }
 
+  /** {@code GiftCardLoadReversed}: the value a voided or cancelled sale loaded came back off. */
+  public void giftCardLoadReversed(String json) {
+    com.storeql.events.contract.GiftCardLoadReversed.Read r;
+    try {
+      r = com.storeql.events.contract.GiftCardLoadReversed.read(json);
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "GiftCardLoadReversed not posted, malformed: " + e.getMessage());
+      return;
+    }
+    deferred.giftCardLoadReversed(
+        r.envelope().eventId(),
+        r.envelope().requireTenant(),
+        r.orderId(),
+        r.storeId().orElse(null),
+        r.amount(),
+        r.reversedAt());
+  }
+
   private static String optString(JsonObject o, String name) {
     return o.containsKey(name) && !o.isNull(name) ? o.getString(name) : null;
   }

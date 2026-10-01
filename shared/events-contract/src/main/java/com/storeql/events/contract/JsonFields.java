@@ -59,6 +59,10 @@ final class JsonFields {
     return value == null ? this : date(name, value);
   }
 
+  JsonFields instant(String name, Instant value) {
+    return put(name, quote(require(name, value).toString()));
+  }
+
   JsonFields optInstant(String name, Instant value) {
     return value == null ? this : put(name, quote(value.toString()));
   }

@@ -376,4 +376,40 @@ class SalesPostingTest {
         IllegalArgumentException.class,
         () -> SalesPosting.noReceiptReturn(TENANT, ORDER, STORE, "CASH", d("1.00"), null, DAY));
   }
+
+  @Test
+  @DisplayName("A refund beyond what the sale holds (its card's value) debits clearing, not sales")
+  void aRefundBeyondTheSaleGoesToClearing() {
+    // Goods 60.00 with 10.00 VAT confirmed; the void refunds 100.00 (a 40.00 card was in it).
+    var lines =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CASH", d("100.00"))),
+            d("60.00"),
+            d("10.00"),
+            true,
+            DAY);
+    same(balance(lines, "4010"), "50.00");
+    same(balance(lines, "2200"), "10.00");
+    same(balance(lines, "1105"), "40.00");
+    same(balance(lines, "1210"), "-100.00");
+
+    // Part of the goods already went back: only what is left of the sale is revenue.
+    var rest =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CASH", d("80.00"))),
+            d("60.00"),
+            d("10.00"),
+            true,
+            DAY,
+            d("20.00"));
+    same(balance(rest, "4010"), "33.33");
+    same(balance(rest, "2200"), "6.67");
+    same(balance(rest, "1105"), "40.00");
+  }
 }

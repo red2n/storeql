@@ -24,6 +24,13 @@ void main() {
     expect(apiErrorCode(e), 'INVENTORY_INSUFFICIENT_STOCK');
   });
 
+  test('a void refused because a sold gift card was spent says what to do instead', () {
+    final e = _dioWith({
+      'error': {'code': 'ORDER_GIFT_CARD_SPENT', 'message': ''}
+    });
+    expect(friendlyError(e), contains('Take the goods back as a return'));
+  });
+
   test('friendlyError prefers the server message', () {
     final e = _dioWith({
       'error': {'code': 'X', 'message': 'Not enough stock'}

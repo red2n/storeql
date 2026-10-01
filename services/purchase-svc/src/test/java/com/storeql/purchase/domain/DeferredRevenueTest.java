@@ -450,4 +450,34 @@ class DeferredRevenueTest {
         DeferredRevenue.giftCardRedeemed(SRC, SETTINGS, pool, BigDecimal.ZERO).posting(),
         is(empty()));
   }
+
+  @Test
+  @DisplayName("A load reversed is the opposite of the sale-loaded posting, on the order")
+  void aLoadReversedIsTheOppositeOfTheSaleLoad() {
+    UUID order = Ids.newId();
+    BigDecimal amount = new BigDecimal("40.00");
+    List<NominalLedgerEntry> sold =
+        DeferredRevenue.giftCardLoaded(SRC, "ISSUE", "CASH", amount, "SALE", order, null);
+    List<NominalLedgerEntry> reversed = DeferredRevenue.giftCardLoadReversed(SRC, order, amount);
+    assertThat(net(reversed, Domain.CODE_GIFT_CARD_LIABILITY), comparesEqualTo(amount));
+    assertThat(net(reversed, Domain.CODE_SALES_CLEARING), comparesEqualTo(amount.negate()));
+    for (String code : new String[] {Domain.CODE_GIFT_CARD_LIABILITY, Domain.CODE_SALES_CLEARING}) {
+      assertThat(net(sold, code).add(net(reversed, code)), comparesEqualTo(BigDecimal.ZERO));
+    }
+    assertThat(reversed.get(0).sourceRef(), is(order));
+    assertThat(reversed.get(0).entryDate(), is(SRC.date()));
+    assertThat(DeferredRevenue.giftCardLoadReversed(SRC, order, BigDecimal.ZERO), is(empty()));
+  }
+
+  @Test
+  @DisplayName("The pool takes a reversed load off what was loaded, and never goes below nothing")
+  void thePoolTakesAReversedLoadOff() {
+    GiftCardPool pool = DeferredRevenue.loaded(GiftCardPool.EMPTY, new BigDecimal("100.00"));
+    assertThat(
+        DeferredRevenue.loadReversed(pool, new BigDecimal("40.00")).loaded(),
+        comparesEqualTo(new BigDecimal("60.00")));
+    assertThat(
+        DeferredRevenue.loadReversed(pool, new BigDecimal("140.00")).loaded(),
+        comparesEqualTo(BigDecimal.ZERO));
+  }
 }

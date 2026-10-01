@@ -2443,7 +2443,8 @@ public class OrderService {
    *     it; a shopper may cancel only their own unpaid, PENDING online order ({@link
    *     #cancelOwnOrder})
    * @return the cancelled order
-   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
+   * @throws ApiException {@code ORDER_GIFT_CARD_SPENT} (409) when a gift card the sale loaded has
+   *     been spent (nothing moves); {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
    *     STORE_ACCESS_DENIED} (403) for staff held to other stores; {@code PERMISSION_DENIED} (403)
    *     when money was taken and the caller may not void; {@code ORDER_CANNOT_CANCEL} (409) when it
    *     is not PENDING or CONFIRMED
@@ -2477,7 +2478,8 @@ public class OrderService {
         Order.STATUS_CANCELLED,
         reason,
         userId,
-        Events.orderCancelled(tenantId, orderId, reason, order.channel(), order.fulfilmentType()));
+        Events.orderCancelled(tenantId, orderId, reason, order.channel(), order.fulfilmentType()),
+        r -> Events.giftCardLoadReversed(r.card(), r.tx()));
   }
 
   /**
@@ -3644,7 +3646,8 @@ public class OrderService {
               key,
               restock ->
                   Events.orderVoided(
-                      tenantId, orderId, order.storeId(), order.customerId(), restock));
+                      tenantId, orderId, order.storeId(), order.customerId(), restock),
+              r -> Events.giftCardLoadReversed(r.card(), r.tx()));
     } catch (ApiException e) {
       // A retry that raced the first: it lost on the key or found the order already voided.
       var first = repo.findVoidByKey(tenantId, key);

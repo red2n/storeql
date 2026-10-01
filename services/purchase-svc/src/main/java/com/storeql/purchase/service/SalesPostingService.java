@@ -87,7 +87,8 @@ public class SalesPostingService {
             sale.map(SalesOrder::total).orElse(null),
             sale.map(SalesOrder::taxAmount).orElse(null),
             sale.isPresent(),
-            today());
+            today(),
+            sale.isPresent() ? repo.revenueRefunded(tenantId, orderId) : null);
     return repo.recordRefundOnce(eventId, REFUND_CONSUMER, posting);
   }
 

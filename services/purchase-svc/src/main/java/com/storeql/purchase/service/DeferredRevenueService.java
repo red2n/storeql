@@ -31,6 +31,7 @@ import java.util.UUID;
 @ApplicationScoped
 public class DeferredRevenueService {
 
+  static final String GIFT_CARD_REVERSED_CONSUMER = "purchase-svc/gift-card-load-reversed";
   static final String GIFT_CARD_SPENT_CONSUMER = "purchase-svc/gift-card-breakage";
 
   private static final String[] MANAGEMENT = {"PLATFORM_ADMIN", "OWNER", "MANAGER"};
@@ -98,6 +99,28 @@ public class DeferredRevenueService {
             load.orderId(),
             load.note());
     return repo.recordGiftCardLoad(load, posting);
+  }
+
+  /**
+   * Posts the opposite of a sale-loaded card when the sale was voided or cancelled, dated the
+   * reversal. Once per event.
+   */
+  public boolean giftCardLoadReversed(
+      UUID eventId,
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      BigDecimal amount,
+      java.time.Instant reversedAt) {
+    if (amount == null || amount.signum() <= 0) return false;
+    var src =
+        new Source(tenantId, orderId, storeId, reversedAt.atZone(ZoneOffset.UTC).toLocalDate());
+    return repo.recordGiftCardLoadReversed(
+        eventId,
+        GIFT_CARD_REVERSED_CONSUMER,
+        tenantId,
+        amount,
+        DeferredRevenue.giftCardLoadReversed(src, orderId, amount));
   }
 
   /** Recognises the breakage that goes with a gift card spent as tender. Once per payment. */

@@ -115,6 +115,24 @@ public class SalesPostingRepository extends BaseJdbcRepository {
     return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
   }
 
+  /** Sales and VAT earlier refunds of this order took back, for the cap on the next. */
+  public java.math.BigDecimal revenueRefunded(UUID tenantId, UUID orderId) {
+    return query(
+            "SELECT COALESCE(SUM(debit), 0) AS taken FROM nominal_ledger_entries"
+                + " WHERE tenant_id = ? AND source_type = ? AND source_ref = ?"
+                + " AND nominal_code IN (?, ?)",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, com.storeql.purchase.domain.Domain.SOURCE_SALE_REFUND);
+              ps.setObject(3, orderId);
+              ps.setString(4, com.storeql.purchase.domain.Domain.CODE_SALES);
+              ps.setString(5, com.storeql.purchase.domain.Domain.CODE_VAT_OUTPUT);
+            },
+            rs -> rs.getBigDecimal("taken"),
+            "revenue refunded so far")
+        .get(0);
+  }
+
   /** The store an order's tenders were taken at, for a refund of a sale the ledger never saw. */
   public Optional<UUID> findTenderStore(UUID tenantId, UUID orderId) {
     var rows =

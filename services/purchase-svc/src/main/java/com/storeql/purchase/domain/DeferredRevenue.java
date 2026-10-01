@@ -391,6 +391,33 @@ public final class DeferredRevenue {
         .build();
   }
 
+  /**
+   * The value a sale loaded on a gift card taken back because the sale was voided or cancelled: the
+   * opposite of the sale-loaded posting, Dr the liability / Cr sales clearing, on the order. The
+   * refund of the sale is booked from payment-svc's own event, so with it the order nets to zero.
+   */
+  public static List<NominalLedgerEntry> giftCardLoadReversed(
+      Source src, UUID orderId, BigDecimal amount) {
+    if (amount == null || amount.signum() <= 0) return List.of();
+    return LedgerPosting.of(
+            src.tenantId(),
+            src.date(),
+            "Gift card load reversed with sale " + Handle.of(orderId),
+            Domain.SOURCE_GIFT_CARD_LOAD,
+            orderId,
+            src.storeId())
+        .debit(Domain.CODE_GIFT_CARD_LIABILITY, Domain.NAME_GIFT_CARD_LIABILITY, amount)
+        .credit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, amount)
+        .build();
+  }
+
+  /** The pool after a load is taken back; never below nothing. */
+  public static GiftCardPool loadReversed(GiftCardPool pool, BigDecimal amount) {
+    BigDecimal left = pool.loaded().subtract(amount);
+    return new GiftCardPool(
+        left.signum() < 0 ? BigDecimal.ZERO : left, pool.redeemed(), pool.breakage());
+  }
+
   /** The pool after a load. */
   public static GiftCardPool loaded(GiftCardPool pool, BigDecimal amount) {
     return new GiftCardPool(pool.loaded().add(amount), pool.redeemed(), pool.breakage());

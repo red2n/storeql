@@ -336,6 +336,22 @@ export default function ({ tenant, rival, shopper, stranger }) {
   truthy('[+] ...each sale named on its own load', [sold, mixed].every((s) => txs.filter((x) => x.txType === 'RELOAD' && x.orderId === s.order.id).length === 1), txs);
   expect(call('GET', `${giftCards}/NO-SUCH-CARD`, { token: t }), '[-] unknown gift card', 404);
 
+  // A card sold on a sale that is then voided goes back off the card, on the void's own transaction;
+  // a card that was spent refuses the void whole (the rest of the money is a return of the goods).
+  const cardOf = (code) => data(call('GET', `${giftCards}/${encodeURIComponent(code)}`, { token: t })) || {};
+  const gone = sellGiftCard(tenant, storeId, 20, { token: cashierToken });
+  const goneCard = (gone.loads || [])[0] || {};
+  poll(30, () => statusOf(gone.order.id) === 'FULFILLED');
+  expect(call('POST', `/api/order-svc/orders/${gone.order.id}/void`, { token: t, idem: true, body: { reason: 'Rang the card up in error' } }), '[+] void a sale that sold a new gift card', 200);
+  truthy('[+] ...the card is taken back off: balance 0 and CANCELLED', !!goneCard.code && Number(cardOf(goneCard.code).currentBalance) === 0 && cardOf(goneCard.code).status === 'CANCELLED', cardOf(goneCard.code));
+  truthy('[+] ...and the sale is VOIDED', statusOf(gone.order.id) === 'VOIDED', statusOf(gone.order.id));
+  const kept = sellGiftCard(tenant, storeId, 30, { token: cashierToken });
+  const keptCard = (kept.loads || [])[0] || {};
+  poll(30, () => statusOf(kept.order.id) === 'FULFILLED');
+  expect(call('POST', `${giftCards}/${encodeURIComponent(keptCard.code)}/redeem`, { token: t, idem: true, body: { amount: 10, orderId: order.id } }), '[+] part of the card sold on a sale is spent', [200, 201]);
+  expect(call('POST', `/api/order-svc/orders/${kept.order.id}/void`, { token: t, idem: true, body: { reason: 'Changed their mind' } }), '[-] void a sale whose card was spent: refused whole', 409, 'ORDER_GIFT_CARD_SPENT');
+  truthy('[+] ...the sale is still FULFILLED and the card still holds £20', statusOf(kept.order.id) === 'FULFILLED' && Number(cardOf(keptCard.code).currentBalance) === 20 && cardOf(keptCard.code).status === 'ACTIVE', cardOf(keptCard.code));
+
   // ── layaways ────────────────────────────────────────────────────────────────
   const lay = { storeId, items: [{ variantId, qty: 2, unitPrice: 12.5 }], initialDeposit: 5, paymentMethod: 'CASH', dueDate: '2027-01-31T00:00:00Z' };
   expect(call('POST', '/api/order-svc/layaways', { token: t, body: { ...lay, initialDeposit: 0 } }), '[-] layaway: deposit above zero', 400);

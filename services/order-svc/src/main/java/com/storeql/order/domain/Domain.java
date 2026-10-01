@@ -1001,6 +1001,7 @@ public final class Domain {
     public static final String TX_REDEEM = "REDEEM";
     public static final String TX_REFUND = "REFUND";
     public static final String TX_CANCEL = "CANCEL";
+    public static final String TX_LOAD_REVERSED = "LOAD_REVERSED";
   }
 
   // ── Gap #42: Special orders ───────────────────────────────────────────────

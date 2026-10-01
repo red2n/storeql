@@ -1269,8 +1269,36 @@ public class OrderRepository extends BaseOutboxRepository {
       String reason,
       UUID changedBy,
       OutboxRow event) {
+    return transitionOrderStatus(
+        tenantId, orderId, expectedStatus, newStatus, reason, changedBy, event, null);
+  }
+
+  /**
+   * As above, and when {@code reversalEvent} is given, the value the order loaded on gift cards is
+   * taken back off them on this same transaction (refused whole when a card was spent).
+   */
+  public Order transitionOrderStatus(
+      UUID tenantId,
+      UUID orderId,
+      String expectedStatus,
+      String newStatus,
+      String reason,
+      UUID changedBy,
+      OutboxRow event,
+      java.util.function.Function<CardReversal, OutboxRow> reversalEvent) {
     return inTx(
         c -> {
+          if (reversalEvent != null) {
+            // Lock the order first so a payment landing now is applied before or after, whole.
+            try (PreparedStatement ps =
+                c.prepareStatement(
+                    "SELECT status FROM orders WHERE tenant_id=? AND id=? FOR UPDATE")) {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, orderId);
+              ps.executeQuery().close();
+            }
+            reverseGiftCardLoadsTx(c, tenantId, orderId, reversalEvent);
+          }
           int rows;
           try (PreparedStatement ps =
               c.prepareStatement(
@@ -2680,7 +2708,8 @@ public class OrderRepository extends BaseOutboxRepository {
       UUID voidedBy,
       UUID idempotencyKey,
       java.util.function.Function<List<com.storeql.order.domain.Domain.RestockLine>, OutboxRow>
-          eventFor) {
+          eventFor,
+      java.util.function.Function<CardReversal, OutboxRow> reversalEvent) {
     return inTx(
         c -> {
           // Lock first, so what is restocked is decided against the order being voided rather than
@@ -2702,6 +2731,9 @@ public class OrderRepository extends BaseOutboxRepository {
                 "ORDER_CANNOT_VOID", "order not found or already voided/cancelled");
           }
 
+          // The value the sale put on gift cards comes back off them first; a spent card refuses
+          // the whole void, and the transaction leaves nothing behind.
+          reverseGiftCardLoadsTx(c, tenantId, orderId, reversalEvent);
           var restock = restockOnVoidInTx(c, tenantId, orderId);
 
           try (PreparedStatement ps =
@@ -3145,6 +3177,146 @@ public class OrderRepository extends BaseOutboxRepository {
               at == null ? null : at.toInstant());
         },
         "find gift card load views");
+  }
+
+  /** A card line taken back off its card: the card as it now stands and the ledger row. */
+  public record CardReversal(GiftCard card, GiftCardTransaction tx) {}
+
+  /**
+   * Takes back off each card the value an order's lines loaded, on the caller's transaction (void
+   * or cancel of a paid sale). Cards are locked in id order; if any holds less than the lines
+   * loaded on it (it was spent) nothing is written and {@code ORDER_GIFT_CARD_SPENT} (409) names
+   * each such card by the last four characters of its code. Otherwise each line writes one
+   * append-only {@code LOAD_REVERSED} row and lowers the balance; a new card that nothing else ever
+   * moved and is now empty becomes CANCELLED. Lines never loaded (the sale was not paid) are not
+   * touched.
+   */
+  private void reverseGiftCardLoadsTx(
+      Connection c,
+      UUID tenantId,
+      UUID orderId,
+      java.util.function.Function<CardReversal, OutboxRow> event)
+      throws SQLException {
+    record Line(UUID cardId, BigDecimal amount) {}
+    List<Line> lines = new java.util.ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT gift_card_id, amount FROM gift_card_load_lines"
+                + " WHERE tenant_id=? AND order_id=? AND gift_card_id IS NOT NULL"
+                + " ORDER BY gift_card_id, created_at, id")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) lines.add(new Line(rs.getObject(1, UUID.class), rs.getBigDecimal(2)));
+      }
+    }
+    if (lines.isEmpty()) return;
+    Map<UUID, GiftCard> cards = new java.util.LinkedHashMap<>();
+    Map<UUID, BigDecimal> owed = new java.util.LinkedHashMap<>();
+    for (Line l : lines) {
+      if (!cards.containsKey(l.cardId())) {
+        try (PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT id, tenant_id, store_id, code, initial_balance, current_balance,"
+                    + " status, currency, issued_at, updated_at, expires_at"
+                    + " FROM gift_cards WHERE tenant_id=? AND id=? FOR UPDATE")) {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, l.cardId());
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) cards.put(l.cardId(), mapGiftCard(rs));
+          }
+        }
+      }
+      owed.merge(l.cardId(), l.amount(), BigDecimal::add);
+    }
+    List<String> spent = new java.util.ArrayList<>();
+    for (var e : owed.entrySet()) {
+      GiftCard gc = cards.get(e.getKey());
+      if (gc == null || gc.currentBalance().compareTo(e.getValue()) < 0) {
+        String code = gc == null ? "" : gc.code();
+        String tail = code.length() <= 4 ? code : code.substring(code.length() - 4);
+        spent.add(
+            "card ending "
+                + tail
+                + ": loaded "
+                + e.getValue().toPlainString()
+                + ", balance now "
+                + (gc == null ? "0" : gc.currentBalance().toPlainString()));
+      }
+    }
+    if (!spent.isEmpty())
+      throw new ApiException(
+          409,
+          "ORDER_GIFT_CARD_SPENT",
+          "a gift card sold on this order has been spent; refund the goods as a return instead",
+          spent);
+    for (Line l : lines) {
+      GiftCard gc = cards.get(l.cardId());
+      BigDecimal before = gc.currentBalance();
+      BigDecimal after = before.subtract(l.amount());
+      boolean newCard = false;
+      boolean untouched = false;
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "SELECT COALESCE(bool_or(tx_type='ISSUE' AND order_id=?), false),"
+                  + " COUNT(*) FILTER (WHERE NOT (tx_type='ISSUE' AND order_id=?))"
+                  + " FROM gift_card_transactions WHERE tenant_id=? AND gift_card_id=?")) {
+        ps.setObject(1, orderId);
+        ps.setObject(2, orderId);
+        ps.setObject(3, tenantId);
+        ps.setObject(4, gc.id());
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            newCard = rs.getBoolean(1);
+            // Other rows are earlier reversals of this same order's other lines at most.
+            untouched = rs.getLong(2) == 0;
+          }
+        }
+      }
+      // A new card emptied by its own sale's reversal never existed for anyone: CANCELLED. Any
+      // other card left at nothing is DEPLETED, as a redeem to nothing leaves it.
+      String status;
+      if (newCard && untouched && after.signum() == 0) status = GiftCard.STATUS_CANCELLED;
+      else if (after.signum() == 0) status = GiftCard.STATUS_DEPLETED;
+      else status = gc.status();
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "UPDATE gift_cards SET current_balance=?, status=?, updated_at=now()"
+                  + " WHERE tenant_id=? AND id=?")) {
+        ps.setBigDecimal(1, after);
+        ps.setString(2, status);
+        ps.setObject(3, tenantId);
+        ps.setObject(4, gc.id());
+        ps.executeUpdate();
+      }
+      var tx =
+          new GiftCardTransaction(
+              Ids.newId(),
+              tenantId,
+              gc.id(),
+              GiftCardTransaction.TX_LOAD_REVERSED,
+              l.amount(),
+              before,
+              after,
+              orderId,
+              orderId.toString(),
+              Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+      insertGiftCardTx(c, tx, null, "SALE", null, null);
+      GiftCard now =
+          new GiftCard(
+              gc.id(),
+              gc.tenantId(),
+              gc.storeId(),
+              gc.code(),
+              gc.initialBalance(),
+              after,
+              status,
+              gc.currency(),
+              gc.issuedAt(),
+              gc.expiresAt());
+      cards.put(l.cardId(), now);
+      insertOutbox(c, event.apply(new CardReversal(now, tx)));
+    }
   }
 
   /**

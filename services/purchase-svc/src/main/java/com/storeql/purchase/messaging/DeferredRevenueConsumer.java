@@ -48,6 +48,12 @@ class DeferredRevenueConsumer extends BaseKafkaConsumer {
       defaultValue = "storeql.order.gift-card-loaded")
   String giftCardLoaded;
 
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.gift-card-load-reversed",
+      defaultValue = com.storeql.events.contract.GiftCardLoadReversed.TOPIC)
+  String giftCardLoadReversed;
+
   @Override
   protected List<String> topics() {
     return List.of(
@@ -56,7 +62,8 @@ class DeferredRevenueConsumer extends BaseKafkaConsumer {
         loyaltyAdjusted,
         loyaltyExpired,
         loyaltyReversed,
-        giftCardLoaded);
+        giftCardLoaded,
+        giftCardLoadReversed);
   }
 
   @Override
@@ -73,6 +80,8 @@ class DeferredRevenueConsumer extends BaseKafkaConsumer {
   protected void handle(String topic, String value) {
     if (topic.equals(giftCardLoaded)) {
       handler.giftCardLoaded(value);
+    } else if (topic.equals(giftCardLoadReversed)) {
+      handler.giftCardLoadReversed(value);
     } else {
       handler.loyalty(value);
     }

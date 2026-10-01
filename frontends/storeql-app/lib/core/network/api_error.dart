@@ -76,6 +76,8 @@ const Map<String, String> _fallbackWords = {
       'A gift card is sold at the till. An owner or a manager gives or reloads one by hand.',
   'GIFT_CARD_REASON_REQUIRED': 'Say why the card is given.',
   'ORDER_GIFT_CARD_INSTORE_ONLY': 'A gift card is sold in store, not online.',
+  'ORDER_GIFT_CARD_SPENT':
+      'A gift card this sale loaded has been spent since, so the sale cannot be voided or cancelled. Take the goods back as a return instead.',
   'ORDER_PENDING_LIMIT_INVALID':
       'The unpaid hold is a whole number of hours, at least 1.',
   'ORDER_PRICE_WAIT_INVALID':

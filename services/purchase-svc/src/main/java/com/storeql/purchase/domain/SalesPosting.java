@@ -118,6 +118,29 @@ public final class SalesPosting {
       BigDecimal saleTax,
       boolean confirmed,
       LocalDate date) {
+    return refund(
+        tenantId, orderId, storeId, allocations, saleTotal, saleTax, confirmed, date, null);
+  }
+
+  /**
+   * As above, knowing how much of the sale's revenue earlier refunds already took back. A refund
+   * takes back sales and VAT only up to what the confirmed sale still holds; what is refunded
+   * beyond it is not revenue (it is the value of a gift card the sale carried, which the void's
+   * {@code GiftCardLoadReversed} credited to clearing) and is debited to clearing, so a voided sale
+   * of goods and a card nets to nothing on every account.
+   *
+   * @param revenueRefunded sales plus VAT already debited by this order's earlier refunds, or null
+   */
+  public static List<NominalLedgerEntry> refund(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      List<Allocation> allocations,
+      BigDecimal saleTotal,
+      BigDecimal saleTax,
+      boolean confirmed,
+      LocalDate date,
+      BigDecimal revenueRefunded) {
     Map<Control, BigDecimal> byControl = new LinkedHashMap<>();
     BigDecimal refunded = BigDecimal.ZERO;
     for (Allocation a : allocations) {
@@ -136,10 +159,13 @@ public final class SalesPosting {
             storeId);
     if (confirmed && saleTotal != null && saleTotal.signum() > 0) {
       BigDecimal tax = saleTax == null ? BigDecimal.ZERO : saleTax.max(BigDecimal.ZERO);
-      BigDecimal vat =
-          refunded.multiply(tax).divide(saleTotal, 2, RoundingMode.HALF_UP).min(refunded);
-      p.debit(Domain.CODE_SALES, Domain.NAME_SALES, refunded.subtract(vat))
-          .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat);
+      BigDecimal left =
+          saleTotal.subtract(revenueRefunded == null ? BigDecimal.ZERO : revenueRefunded);
+      BigDecimal ofSale = refunded.min(left.max(BigDecimal.ZERO));
+      BigDecimal vat = ofSale.multiply(tax).divide(saleTotal, 2, RoundingMode.HALF_UP).min(ofSale);
+      p.debit(Domain.CODE_SALES, Domain.NAME_SALES, ofSale.subtract(vat))
+          .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat)
+          .debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, refunded.subtract(ofSale));
     } else {
       p.debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, refunded);
     }
