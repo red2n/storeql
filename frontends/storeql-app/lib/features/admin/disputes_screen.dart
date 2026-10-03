@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -556,6 +557,16 @@ class _RecordDisputeDialogState extends ConsumerState<RecordDisputeDialog> {
   String? _error;
   bool _busy = false;
 
+  /// The amount disputed and the acquirer's fee, read the way the app's
+  /// language writes a number within what payment-svc takes (14 whole
+  /// digits, 4 places). One that cannot be read is refused under its field
+  /// and nothing is sent: left out, an amount was recorded as the whole
+  /// payment and a fee as none. Blank is the whole payment, and no fee.
+  static const _sumShape = AmountShape(14, 4);
+  final _marks = AmountMarks.ofApp();
+  String? _says(TextEditingController c) => _sumShape.refusal(c.text.trim(), _marks);
+  bool get _refused => _says(_amount) != null || _says(_fee) != null;
+
   @override
   void dispose() {
     for (final c in [_payment, _amount, _fee, _caseRef, _networkCode]) {
@@ -565,6 +576,7 @@ class _RecordDisputeDialogState extends ConsumerState<RecordDisputeDialog> {
   }
 
   Future<void> _save() async {
+    if (_refused) return;
     if (_payment.text.trim().isEmpty || _caseRef.text.trim().isEmpty || _dueBy == null) {
       setState(() => _error = 'The payment, the acquirer\'s case number and the date to answer by are needed.');
       return;
@@ -578,8 +590,9 @@ class _RecordDisputeDialogState extends ConsumerState<RecordDisputeDialog> {
         _base,
         data: {
           'paymentId': _payment.text.trim(),
-          'amount': ?num.tryParse(_amount.text.trim()),
-          'feeAmount': ?num.tryParse(_fee.text.trim()),
+          // The plain decimals typed: JSON-B reads them exactly.
+          'amount': ?_sumShape.read(_amount.text.trim(), _marks),
+          'feeAmount': ?_sumShape.read(_fee.text.trim(), _marks),
           'reason': _reason,
           'networkReasonCode': ?(_networkCode.text.trim().isEmpty ? null : _networkCode.text.trim()),
           'caseReference': _caseRef.text.trim(),
@@ -633,7 +646,14 @@ class _RecordDisputeDialogState extends ConsumerState<RecordDisputeDialog> {
                       key: const Key('dispute-amount'),
                       controller: _amount,
                       keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      decoration: const InputDecoration(labelText: 'Amount disputed', helperText: 'The whole payment if empty'),
+                      decoration: InputDecoration(
+                        labelText: 'Amount disputed',
+                        helperText: 'The whole payment if empty',
+                        hintText: _marks.hint(2),
+                        errorText: _says(_amount),
+                        errorMaxLines: 4,
+                      ),
+                      onChanged: (_) => setState(() {}),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -642,7 +662,13 @@ class _RecordDisputeDialogState extends ConsumerState<RecordDisputeDialog> {
                       key: const Key('dispute-fee'),
                       controller: _fee,
                       keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      decoration: const InputDecoration(labelText: 'Acquirer\'s fee'),
+                      decoration: InputDecoration(
+                        labelText: 'Acquirer\'s fee',
+                        hintText: _marks.hint(2),
+                        errorText: _says(_fee),
+                        errorMaxLines: 4,
+                      ),
+                      onChanged: (_) => setState(() {}),
                     ),
                   ),
                 ],
@@ -686,7 +712,10 @@ class _RecordDisputeDialogState extends ConsumerState<RecordDisputeDialog> {
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-        FilledButton(key: const Key('dispute-save'), onPressed: _busy ? null : _save, child: Text(_busy ? 'Saving…' : 'Record')),
+        FilledButton(
+            key: const Key('dispute-save'),
+            onPressed: _busy || _refused ? null : _save,
+            child: Text(_busy ? 'Saving…' : 'Record')),
       ],
     );
   }

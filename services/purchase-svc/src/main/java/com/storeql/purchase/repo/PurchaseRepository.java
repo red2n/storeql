@@ -26,6 +26,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /** JDBC persistence for purchase-svc. Every tenant query filters by tenant_id first. */
@@ -147,7 +148,12 @@ public class PurchaseRepository extends BaseOutboxRepository {
                       + " currency=?, payment_terms_days=?, remittance_email=?, bank_account_name=?,"
                       + " bank_sort_code=?, bank_account_number=?, bank_iban=?, bank_bic=?,"
                       + " bank_details_changed_at=?, bank_details_changed_by=?, einvoice_scheme=?,"
-                      + " einvoice_id=?, lead_time_days=?, updated_at=now()"
+                      + " einvoice_id=?, lead_time_days=?, updated_at=now(),"
+                      // The service moves the stamp only on a real change of the details, so a
+                      // stamp that differs from the one held is a change: the version a payment
+                      // run was approved with moves on, whatever either clock says (V35).
+                      + " bank_details_version = bank_details_version"
+                      + " + CASE WHEN bank_details_changed_at IS DISTINCT FROM CAST(? AS timestamptz) THEN 1 ELSE 0 END"
                       + " WHERE tenant_id=? AND id=?")) {
             ps.setString(1, s.name());
             ps.setString(2, s.vatNumber());
@@ -159,8 +165,9 @@ public class PurchaseRepository extends BaseOutboxRepository {
             ps.setString(15, s.einvoiceScheme());
             ps.setString(16, s.einvoiceId());
             bindLeadTime(ps, 17, s);
-            ps.setObject(18, s.tenantId());
-            ps.setObject(19, s.id());
+            ps.setObject(18, toOdt(s.bankDetailsChangedAt()));
+            ps.setObject(19, s.tenantId());
+            ps.setObject(20, s.id());
             return ps.executeUpdate() > 0;
           } catch (java.sql.SQLException sqle) {
             throw supplierConflict(sqle);
@@ -295,22 +302,34 @@ public class PurchaseRepository extends BaseOutboxRepository {
    * Lists a tenant's purchase orders.
    *
    * @param tenantId owning tenant; the first condition of the query
+   * @param stores the stores to read (a caller held to stores reads only theirs), or null for every
+   *     store in the business
    * @param limit maximum rows
    * @return the purchase orders
    */
-  public List<PurchaseOrder> findPurchaseOrders(UUID tenantId, int limit) {
+  public List<PurchaseOrder> findPurchaseOrders(UUID tenantId, Set<UUID> stores, int limit) {
     return query(
         "SELECT id,tenant_id,supplier_id,store_id,status,currency,"
             + "total_net,total_vat,total_gross,expected_delivery,created_at,updated_at,cancelled_at,"
             + "cancelled_reason,closed_at,closed_reason,created_by,approved_by,approved_at,source,"
             + "fx_rate,total_net_home,home_currency,ownership,sales_order_id,ship_to,duty_status"
-            + " FROM purchase_orders WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?",
+            + " FROM purchase_orders WHERE tenant_id=?"
+            + (stores != null ? " AND store_id = ANY(?)" : "")
+            + " ORDER BY created_at DESC LIMIT ?",
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setInt(2, limit);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          if (stores != null) ps.setArray(i++, storeArray(ps, stores));
+          ps.setInt(i, limit);
         },
         this::mapPurchaseOrder,
         "find purchase orders");
+  }
+
+  /** The stores a list is held to, as the {@code uuid[]} an {@code = ANY(?)} condition binds. */
+  static java.sql.Array storeArray(java.sql.PreparedStatement ps, Set<UUID> stores)
+      throws SQLException {
+    return ps.getConnection().createArrayOf("uuid", stores.toArray());
   }
 
   /**
@@ -378,7 +397,16 @@ public class PurchaseRepository extends BaseOutboxRepository {
     if (row.isPresent()) insertOutbox(c, row.get());
   }
 
-  /** As above, announcing the order's cross-dock allocations on the same transaction. */
+  /**
+   * As above, announcing the order's cross-dock allocations on the same transaction.
+   *
+   * <p>The order is locked first and its lines counted under the lock, so that an order with
+   * nothing on it is never sent: the removal of a line locks the same row, so either the line is
+   * gone before the count and the submission is refused, or it cannot be removed after it.
+   *
+   * @throws ApiException 409 {@code PURCHASE_PO_HAS_NO_LINES} for a DRAFT order with no lines;
+   *     nothing is written
+   */
   public boolean submitPurchaseOrder(
       UUID tenantId,
       UUID id,
@@ -387,6 +415,9 @@ public class PurchaseRepository extends BaseOutboxRepository {
       java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>> announce) {
     return inTx(
         c -> {
+          String locked = lockPurchaseOrderStatusTx(c, tenantId, id);
+          if (locked == null || !Domain.PO_DRAFT.equals(locked)) return false;
+          requireLinesTx(c, tenantId, id);
           int rows;
           try (var ps =
               c.prepareStatement(
@@ -427,7 +458,15 @@ public class PurchaseRepository extends BaseOutboxRepository {
     return decidePurchaseOrder(tenantId, id, approve, decision, NO_ANNOUNCEMENT);
   }
 
-  /** As above, announcing the order's cross-dock allocations on the same transaction. */
+  /**
+   * As above, announcing the order's cross-dock allocations on the same transaction.
+   *
+   * <p>An approval, which sends the order to the supplier, is refused for an order with no lines,
+   * on the same footing as a submission is; a rejection, which sends it back to DRAFT, is not.
+   *
+   * @throws ApiException 409 {@code PURCHASE_PO_HAS_NO_LINES} when approving an order with no
+   *     lines; nothing is written
+   */
   public boolean decidePurchaseOrder(
       UUID tenantId,
       UUID id,
@@ -436,6 +475,11 @@ public class PurchaseRepository extends BaseOutboxRepository {
       java.util.function.Function<List<Domain.LineAllocation>, Optional<OutboxRow>> announce) {
     return inTx(
         c -> {
+          if (approve) {
+            String locked = lockPurchaseOrderStatusTx(c, tenantId, id);
+            if (locked == null || !Domain.PO_PENDING_APPROVAL.equals(locked)) return false;
+            requireLinesTx(c, tenantId, id);
+          }
           int rows;
           String sql =
               approve
@@ -457,6 +501,28 @@ public class PurchaseRepository extends BaseOutboxRepository {
           return true;
         },
         approve ? "approve purchase order" : "reject purchase order");
+  }
+
+  /**
+   * Refuses an order with no lines, on the caller's transaction: there is nothing on it to send to
+   * the supplier, and a purchase order that commits the business to nothing is a mistake to be
+   * caught where it is made.
+   *
+   * @throws ApiException 409 {@code PURCHASE_PO_HAS_NO_LINES}
+   */
+  private static void requireLinesTx(Connection c, UUID tenantId, UUID poId) throws SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "SELECT EXISTS (SELECT 1 FROM purchase_order_lines WHERE tenant_id=? AND po_id=?)")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, poId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next() && rs.getBoolean(1)) return;
+      }
+    }
+    throw ApiException.conflict(
+        "PURCHASE_PO_HAS_NO_LINES",
+        "a purchase order with no lines has nothing to send to the supplier: add a line first");
   }
 
   private void insertApproval(Connection c, Domain.PurchaseOrderApproval a) throws SQLException {
@@ -687,6 +753,146 @@ public class PurchaseRepository extends BaseOutboxRepository {
           return line;
         },
         "add po line");
+  }
+
+  /**
+   * Changes a draft order's line (quantity, price, optionally the VAT code) and restates the
+   * order's totals, atomically. The order is locked first, so a submit racing an amendment cannot
+   * both win: the amendment sees the order no longer DRAFT and is refused.
+   *
+   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND}, {@code PURCHASE_LINE_NOT_FOUND}; 400
+   *     {@code PURCHASE_PO_NOT_DRAFT}; 409 {@code PURCHASE_LINE_BELOW_ALLOCATIONS} when the new
+   *     quantity is less than what is already allocated to shops
+   */
+  public PurchaseOrderLine amendPurchaseOrderLine(
+      UUID tenantId,
+      UUID poId,
+      UUID lineId,
+      BigDecimal qty,
+      BigDecimal unitPrice,
+      String vatCode,
+      String currency,
+      java.util.Map<String, BigDecimal> vatRates) {
+    return inTx(
+        c -> {
+          requireDraftTx(c, tenantId, poId);
+          BigDecimal allocated = allocatedTx(c, tenantId, lineId);
+          if (allocated.compareTo(qty) > 0) {
+            throw ApiException.conflict(
+                "PURCHASE_LINE_BELOW_ALLOCATIONS",
+                "the line has "
+                    + allocated.stripTrailingZeros().toPlainString()
+                    + " allocated to shops; reduce its allocations before ordering less");
+          }
+          int rows;
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE purchase_order_lines SET qty=?, unit_price=?,"
+                      + " vat_code=COALESCE(?, vat_code) WHERE tenant_id=? AND po_id=? AND id=?")) {
+            ps.setBigDecimal(1, qty);
+            ps.setBigDecimal(2, unitPrice);
+            ps.setString(3, vatCode);
+            ps.setObject(4, tenantId);
+            ps.setObject(5, poId);
+            ps.setObject(6, lineId);
+            rows = ps.executeUpdate();
+          }
+          if (rows == 0) throw lineNotFound(poId, lineId);
+          restateTotals(c, tenantId, poId, currency, vatRates);
+          try (var ps =
+              c.prepareStatement(
+                  "SELECT id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,created_at,"
+                      + "proposal_reason FROM purchase_order_lines"
+                      + " WHERE tenant_id=? AND po_id=? AND id=?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, poId);
+            ps.setObject(3, lineId);
+            try (var rs = ps.executeQuery()) {
+              if (!rs.next()) throw lineNotFound(poId, lineId);
+              return new PurchaseOrderLine(
+                  rs.getObject("id", UUID.class),
+                  rs.getObject("tenant_id", UUID.class),
+                  rs.getObject("po_id", UUID.class),
+                  rs.getObject("variant_id", UUID.class),
+                  rs.getBigDecimal("qty"),
+                  rs.getBigDecimal("unit_price"),
+                  rs.getString("vat_code"),
+                  rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                  rs.getString("proposal_reason"));
+            }
+          }
+        },
+        "amend po line");
+  }
+
+  /**
+   * Removes a line from a draft order and restates its totals, atomically.
+   *
+   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND}, {@code PURCHASE_LINE_NOT_FOUND}; 400
+   *     {@code PURCHASE_PO_NOT_DRAFT}; 409 {@code PURCHASE_LINE_HAS_ALLOCATIONS} while shops have
+   *     part of the line allocated
+   */
+  public void removePurchaseOrderLine(
+      UUID tenantId,
+      UUID poId,
+      UUID lineId,
+      String currency,
+      java.util.Map<String, BigDecimal> vatRates) {
+    inTx(
+        c -> {
+          requireDraftTx(c, tenantId, poId);
+          if (allocatedTx(c, tenantId, lineId).signum() > 0) {
+            throw ApiException.conflict(
+                "PURCHASE_LINE_HAS_ALLOCATIONS",
+                "the line is allocated to shops; clear its allocations before removing it");
+          }
+          int rows;
+          try (var ps =
+              c.prepareStatement(
+                  "DELETE FROM purchase_order_lines WHERE tenant_id=? AND po_id=? AND id=?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, poId);
+            ps.setObject(3, lineId);
+            rows = ps.executeUpdate();
+          }
+          if (rows == 0) throw lineNotFound(poId, lineId);
+          restateTotals(c, tenantId, poId, currency, vatRates);
+          return null;
+        },
+        "remove po line");
+  }
+
+  private static ApiException lineNotFound(UUID poId, UUID lineId) {
+    return ApiException.notFound(
+        "PURCHASE_LINE_NOT_FOUND", "no line " + lineId + " on order " + poId);
+  }
+
+  /** Locks the order and refuses unless it is a DRAFT. */
+  private static void requireDraftTx(Connection c, UUID tenantId, UUID poId) throws SQLException {
+    String status = lockPurchaseOrderStatusTx(c, tenantId, poId);
+    if (status == null) {
+      throw ApiException.notFound("PURCHASE_PO_NOT_FOUND", "Purchase order not found: " + poId);
+    }
+    if (!Domain.PO_DRAFT.equals(status)) {
+      throw ApiException.badRequest(
+          "PURCHASE_PO_NOT_DRAFT",
+          "Lines can only be changed on DRAFT purchase orders; this one is " + status);
+    }
+  }
+
+  /** What is allocated to shops from a line, on the caller's transaction. */
+  private static BigDecimal allocatedTx(Connection c, UUID tenantId, UUID lineId)
+      throws SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "SELECT COALESCE(SUM(qty), 0) AS qty FROM purchase_order_line_allocations"
+                + " WHERE tenant_id=? AND po_line_id=?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, lineId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getBigDecimal("qty") : BigDecimal.ZERO;
+      }
+    }
   }
 
   /**
@@ -1194,19 +1400,27 @@ public class PurchaseRepository extends BaseOutboxRepository {
   /**
    * Lists supplier invoices, newest first.
    *
+   * <p>An invoice has no store of its own: it is its order's, so a list held to stores keeps the
+   * invoices on orders raised for them.
+   *
    * @param tenantId owning tenant; the first condition of the query
    * @param poId restrict to one purchase order, or {@code null} for the whole tenant
+   * @param stores the stores to read, or null for every store in the business
    * @param limit maximum rows
    * @return the supplier invoices, newest first
    */
   public List<Domain.SupplierInvoice> findSupplierInvoices(
-      UUID tenantId, UUID poId, String status, int limit) {
+      UUID tenantId, UUID poId, String status, Set<UUID> stores, int limit) {
     String sql =
         "SELECT "
             + SI_COLUMNS
             + " FROM supplier_invoices WHERE tenant_id=?"
             + (poId != null ? " AND po_id=?" : "")
             + (status != null ? " AND status=?" : "")
+            + (stores != null
+                ? " AND po_id IN (SELECT po.id FROM purchase_orders po"
+                    + " WHERE po.tenant_id=? AND po.store_id = ANY(?))"
+                : "")
             + " ORDER BY created_at DESC LIMIT ?";
     return query(
         sql,
@@ -1215,6 +1429,10 @@ public class PurchaseRepository extends BaseOutboxRepository {
           ps.setObject(i++, tenantId);
           if (poId != null) ps.setObject(i++, poId);
           if (status != null) ps.setString(i++, status);
+          if (stores != null) {
+            ps.setObject(i++, tenantId);
+            ps.setArray(i++, storeArray(ps, stores));
+          }
           ps.setInt(i, limit);
         },
         PurchaseRepository::mapSupplierInvoice,
@@ -1583,21 +1801,21 @@ public class PurchaseRepository extends BaseOutboxRepository {
    * @return one row per code, in code order
    */
   public List<Domain.TrialBalanceRow> findTrialBalance(
-      UUID tenantId, LocalDate from, LocalDate to, UUID storeId) {
+      UUID tenantId, LocalDate from, LocalDate to, Set<UUID> stores) {
     return query(
         "SELECT nominal_code, MIN(nominal_name) AS nominal_name,"
             + " COALESCE(SUM(debit),0) AS debit, COALESCE(SUM(credit),0) AS credit"
             + " FROM nominal_ledger_entries WHERE tenant_id=?"
             + (from != null ? " AND entry_date >= ?" : "")
             + (to != null ? " AND entry_date <= ?" : "")
-            + (storeId != null ? " AND store_id = ?" : "")
+            + (stores != null ? " AND store_id = ANY(?)" : "")
             + " GROUP BY nominal_code ORDER BY nominal_code",
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
           if (from != null) ps.setObject(i++, from);
           if (to != null) ps.setObject(i++, to);
-          if (storeId != null) ps.setObject(i, storeId);
+          if (stores != null) ps.setArray(i, storeArray(ps, stores));
         },
         rs ->
             new Domain.TrialBalanceRow(
@@ -1615,15 +1833,24 @@ public class PurchaseRepository extends BaseOutboxRepository {
    * @param limit maximum rows
    * @return the invoices
    */
-  public List<IntercompanyInvoice> findIntercompanyInvoices(UUID tenantId, int limit) {
+  public List<IntercompanyInvoice> findIntercompanyInvoices(
+      UUID tenantId, Set<UUID> stores, int limit) {
     return query(
         "SELECT id,tenant_id,invoice_type,from_store_id,to_store_id,transfer_ref,"
             + "net_amount,vat_amount,gross_amount,vat_code,vat_disregarded,"
             + "status,invoice_date,payment_due_date,currency,created_at"
-            + " FROM intercompany_invoices WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?",
+            + " FROM intercompany_invoices WHERE tenant_id=?"
+            // Either end of the transfer: the sender's and the receiver's keeper each read it.
+            + (stores != null ? " AND (from_store_id = ANY(?) OR to_store_id = ANY(?))" : "")
+            + " ORDER BY created_at DESC LIMIT ?",
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setInt(2, limit);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          if (stores != null) {
+            ps.setArray(i++, storeArray(ps, stores));
+            ps.setArray(i++, storeArray(ps, stores));
+          }
+          ps.setInt(i, limit);
         },
         this::mapInvoice,
         "find intercompany invoices");
@@ -1690,6 +1917,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
       LocalDate afterEntryDate,
       Instant afterCreatedAt,
       UUID afterId,
+      Set<UUID> stores,
       int limit) {
     boolean hasCursor = afterEntryDate != null && afterCreatedAt != null && afterId != null;
     return query(
@@ -1700,6 +1928,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
             + (nominalCode != null ? " AND nominal_code=?" : "")
             + (from != null ? " AND entry_date >= ?" : "")
             + (to != null ? " AND entry_date <= ?" : "")
+            + (stores != null ? " AND store_id = ANY(?)" : "")
             + (hasCursor ? " AND (entry_date, created_at, id) > (?, ?, ?)" : "")
             + " ORDER BY entry_date, created_at, id LIMIT ?",
         ps -> {
@@ -1708,6 +1937,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
           if (nominalCode != null) ps.setString(i++, nominalCode);
           if (from != null) ps.setObject(i++, from);
           if (to != null) ps.setObject(i++, to);
+          if (stores != null) ps.setArray(i++, storeArray(ps, stores));
           if (hasCursor) {
             ps.setObject(i++, afterEntryDate);
             ps.setObject(i++, afterCreatedAt.atOffset(ZoneOffset.UTC));
@@ -1947,13 +2177,26 @@ public class PurchaseRepository extends BaseOutboxRepository {
    * @return the returns, newest first
    */
   public List<Domain.VendorReturn> findVendorReturns(UUID tenantId, UUID poId) {
+    return findVendorReturns(tenantId, poId, null);
+  }
+
+  /**
+   * As {@link #findVendorReturns(UUID, UUID)}, every return in the tenant held to the stores named.
+   *
+   * @param stores the stores to read when no order is named, or null for every store
+   */
+  public List<Domain.VendorReturn> findVendorReturns(UUID tenantId, UUID poId, Set<UUID> stores) {
     if (poId == null) {
       return query(
           "SELECT "
               + VR_COLUMNS
               + " FROM vendor_returns WHERE tenant_id = ?"
+              + (stores != null ? " AND store_id = ANY(?)" : "")
               + " ORDER BY raised_at DESC LIMIT 200",
-          ps -> ps.setObject(1, tenantId),
+          ps -> {
+            ps.setObject(1, tenantId);
+            if (stores != null) ps.setArray(2, storeArray(ps, stores));
+          },
           PurchaseRepository::mapVendorReturn,
           "list vendor returns");
     }
@@ -1968,6 +2211,39 @@ public class PurchaseRepository extends BaseOutboxRepository {
         },
         PurchaseRepository::mapVendorReturn,
         "list vendor returns by po");
+  }
+
+  /** The lines of several returns in one query, grouped by return, each in creation order. */
+  public java.util.Map<UUID, List<Domain.VendorReturnLine>> findVendorReturnLinesFor(
+      UUID tenantId, java.util.Collection<UUID> returnIds) {
+    java.util.Map<UUID, List<Domain.VendorReturnLine>> out = new java.util.HashMap<>();
+    if (returnIds.isEmpty()) return out;
+    UUID[] ids = returnIds.toArray(new UUID[0]);
+    List<Domain.VendorReturnLine> rows =
+        query(
+            "SELECT id, tenant_id, return_id, variant_id, qty, unit_price, vat_code, line_net,"
+                + " created_at FROM vendor_return_lines WHERE tenant_id = ? AND return_id = ANY(?)"
+                + " ORDER BY created_at",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids));
+            },
+            rs ->
+                new Domain.VendorReturnLine(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("tenant_id", UUID.class),
+                    rs.getObject("return_id", UUID.class),
+                    rs.getObject("variant_id", UUID.class),
+                    rs.getBigDecimal("qty"),
+                    rs.getBigDecimal("unit_price"),
+                    rs.getString("vat_code"),
+                    rs.getBigDecimal("line_net"),
+                    rs.getObject("created_at", OffsetDateTime.class).toInstant()),
+            "list vendor return lines for several returns");
+    for (Domain.VendorReturnLine l : rows) {
+      out.computeIfAbsent(l.returnId(), k -> new java.util.ArrayList<>()).add(l);
+    }
+    return out;
   }
 
   /** The lines of one return, in the order they were raised. */

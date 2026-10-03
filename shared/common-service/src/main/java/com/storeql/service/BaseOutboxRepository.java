@@ -1,10 +1,13 @@
 package com.storeql.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.web.ApiException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -89,5 +92,71 @@ public abstract class BaseOutboxRepository extends BaseJdbcRepository implements
           return published;
         },
         "drain and publish outbox");
+  }
+
+  /** Which timestamp column this schema's {@code processed_events} uses; null until detected. */
+  private volatile String processedAtColumn;
+
+  /** Set once the schema turns out to have no {@code processed_events} table at all. */
+  private volatile boolean noProcessedEvents;
+
+  @Override
+  public int purgePublished(Instant cutoff, int batch) {
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox"
+                      + " WHERE published_at IS NOT NULL AND published_at < ?"
+                      + " ORDER BY published_at ASC LIMIT ? FOR UPDATE SKIP LOCKED)")) {
+            ps.setObject(1, cutoff.atOffset(ZoneOffset.UTC));
+            ps.setInt(2, batch);
+            return ps.executeUpdate();
+          }
+        },
+        "purge published outbox");
+  }
+
+  @Override
+  public int purgeProcessedEvents(Instant cutoff, int batch) {
+    if (noProcessedEvents) return 0;
+    String col = processedAtColumn;
+    if (col != null) return deleteProcessed(col, cutoff, batch);
+    // Most schemas call it processed_at, order-svc created_at: try one, fall back to the other.
+    for (String candidate : new String[] {"processed_at", "created_at"}) {
+      try {
+        int n = deleteProcessed(candidate, cutoff, batch);
+        processedAtColumn = candidate;
+        return n;
+      } catch (ApiException e) {
+        String state = e.getCause() instanceof SQLException se ? se.getSQLState() : null;
+        if ("42P01".equals(state)) {
+          noProcessedEvents = true;
+          return 0;
+        }
+        if (!"42703".equals(state)) throw e;
+      }
+    }
+    return 0;
+  }
+
+  private int deleteProcessed(String column, Instant cutoff, int batch) {
+    // column is one of two literals above, never caller input
+    String sql =
+        "DELETE FROM processed_events WHERE event_id IN (SELECT event_id FROM processed_events"
+            + " WHERE "
+            + column
+            + " < ? ORDER BY "
+            + column
+            + " ASC LIMIT ? FOR UPDATE SKIP LOCKED)";
+    return inTx(
+        c -> {
+          try (PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setObject(1, cutoff.atOffset(ZoneOffset.UTC));
+            ps.setInt(2, batch);
+            return ps.executeUpdate();
+          }
+        },
+        "purge processed events");
   }
 }

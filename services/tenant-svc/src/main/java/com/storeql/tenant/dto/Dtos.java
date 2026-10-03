@@ -1,5 +1,8 @@
 package com.storeql.tenant.dto;
 
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -63,8 +66,22 @@ public final class Dtos {
       String state,
       String country,
       String pincode,
-      @Schema(description = "Store latitude, for geo/delivery-area features.") BigDecimal geoLat,
-      @Schema(description = "Store longitude, for geo/delivery-area features.") BigDecimal geoLng,
+      // Degrees as the store keeps them (NUMERIC(9,6), a tenth of a metre): within the globe, and
+      // no finer, so a point past it is refused rather than a 500, and none is moved unasked.
+      @Schema(
+              description =
+                  "Store latitude, for geo/delivery-area features: -90 to 90, six places.")
+          @DecimalMin("-90")
+          @DecimalMax("90")
+          @Fits(integer = 2, fraction = 6)
+          BigDecimal geoLat,
+      @Schema(
+              description =
+                  "Store longitude, for geo/delivery-area features: -180 to 180, six places.")
+          @DecimalMin("-180")
+          @DecimalMax("180")
+          @Fits(integer = 3, fraction = 6)
+          BigDecimal geoLng,
       @Schema(
               description =
                   "Required: the IANA zone the store trades in, such as Europe/London. Never"
@@ -93,8 +110,22 @@ public final class Dtos {
       String state,
       String country,
       String pincode,
-      @Schema(description = "Store latitude, for geo/delivery-area features.") BigDecimal geoLat,
-      @Schema(description = "Store longitude, for geo/delivery-area features.") BigDecimal geoLng,
+      // Degrees as the store keeps them (NUMERIC(9,6), a tenth of a metre): within the globe, and
+      // no finer, so a point past it is refused rather than a 500, and none is moved unasked.
+      @Schema(
+              description =
+                  "Store latitude, for geo/delivery-area features: -90 to 90, six places.")
+          @DecimalMin("-90")
+          @DecimalMax("90")
+          @Fits(integer = 2, fraction = 6)
+          BigDecimal geoLat,
+      @Schema(
+              description =
+                  "Store longitude, for geo/delivery-area features: -180 to 180, six places.")
+          @DecimalMin("-180")
+          @DecimalMax("180")
+          @Fits(integer = 3, fraction = 6)
+          BigDecimal geoLng,
       @Schema(description = "IANA zone; null keeps the store's current zone.") String timezone,
       String businessHours,
       Boolean showPrices,
@@ -113,6 +144,18 @@ public final class Dtos {
   public record PatchStatusRequest(
       @Schema(description = "New status, e.g. ACTIVE or INACTIVE.") @NotBlank String status) {}
 
+  @Schema(
+      name = "TenantStatusRequest",
+      description = "Suspend or reactivate a business, with the administrator's reason.")
+  public record TenantStatusRequest(
+      @Schema(description = "ACTIVE or INACTIVE.") @NotBlank String status,
+      @Schema(
+              description =
+                  "Why, in the administrator's words. Required to suspend (INACTIVE); kept with who"
+                      + " and when and shown when the business is read. Optional for ACTIVE.")
+          @Size(max = 500)
+          String reason) {}
+
   @Schema(name = "CreateZoneRequest", description = "Create a zone (aisle/rack/etc.) in a store.")
   public record CreateZoneRequest(
       @NotBlank String name,
@@ -122,11 +165,24 @@ public final class Dtos {
   @Schema(name = "UpdateZoneRequest")
   public record UpdateZoneRequest(@NotBlank String name, @NotBlank String code, String type) {}
 
-  @Schema(name = "AssignStaffRequest", description = "Assign a staff user a role at a store.")
+  @Schema(
+      name = "AssignStaffRequest",
+      description =
+          "Assign a staff user a role at a store, or (businessWide) across the whole business.")
   public record AssignStaffRequest(
       @Schema(description = "UUID of the user to assign (must already exist in iam-svc).") @NotBlank
           String userId,
-      @Schema(description = "UUID of the store the role applies to.") @NotBlank String storeId,
+      @Schema(
+              description =
+                  "UUID of the store the role applies to. Required unless businessWide is true,"
+                      + " and then it must be absent.")
+          String storeId,
+      @Schema(
+              description =
+                  "true: a business-wide assignment, held to no store (head office). MANAGER tier"
+                      + " only (the built-in MANAGER or a custom role standing on it); only an"
+                      + " owner grants it. Absent means false.")
+          Boolean businessWide,
       @Schema(
               description =
                   "A built-in role (OWNER, MANAGER, STOREKEEPER, CASHIER) or the code of one of"
@@ -202,7 +258,16 @@ public final class Dtos {
                       + " real — no message leaves it, no money moves, nothing is billed.")
           String mode,
       @Schema(description = "For a SANDBOX, the live business it stands in for; null otherwise.")
-          String sandboxOf) {}
+          String sandboxOf,
+      @Schema(
+              description =
+                  "What the administrator said when switching it off; null while it is trading, and"
+                      + " for a suspension dunning made.")
+          String deactivatedNote,
+      @Schema(description = "The login that switched it off; null while it is trading.")
+          String deactivatedBy,
+      @Schema(description = "When it was switched off; null while it is trading.")
+          String deactivatedAt) {}
 
   @Schema(name = "StoreResponse")
   public record StoreResponse(
@@ -287,7 +352,9 @@ public final class Dtos {
       String storeId,
       @Schema(description = "The role as assigned: a tier or a custom role code.") String role,
       @Schema(description = "The tier the assignment stands on.") String baseTier,
-      String assignedAt) {}
+      String assignedAt,
+      @Schema(description = "True for a business-wide assignment (storeId is then null).")
+          boolean businessWide) {}
 
   @Schema(name = "OnboardingStatus", description = "Setup-checklist state for the tenant.")
   public record OnboardingStatus(
@@ -370,6 +437,7 @@ public final class Dtos {
   public record CreateDeliveryAreaRequest(
       @NotBlank @Size(max = 32) String pincode,
       @Schema(description = "Lower number = higher priority when multiple stores cover a pincode.")
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer priority) {}
 
   @Schema(name = "DeliveryAreaResponse")
@@ -406,9 +474,16 @@ public final class Dtos {
       String make,
       String model,
       @Schema(description = "COUNTER (default), LABELLING, PLATFORM or HANGING.") String kind,
-      @Schema(description = "Max capacity as marked on the plate.") BigDecimal maxCapacity,
+      // As the plate marks them and the instrument keeps them (NUMERIC(18,4)): above nothing, as
+      // the table requires, fourteen whole digits and four places.
+      @Schema(description = "Max capacity as marked on the plate.")
+          @DecimalMin(value = "0", inclusive = false)
+          @Fits(integer = 14, fraction = 4)
+          BigDecimal maxCapacity,
       @Schema(description = "UOM for maxCapacity, e.g. KG.") String capacityUom,
       @Schema(description = "The verification scale interval e, as marked.")
+          @DecimalMin(value = "0", inclusive = false)
+          @Fits(integer = 14, fraction = 4)
           BigDecimal scaleInterval,
       @Schema(description = "Type-approval / conformity certificate reference.") String approvalRef,
       @Schema(description = "The zone it stands in, if any.") String zoneId,
@@ -426,9 +501,11 @@ public final class Dtos {
       String make,
       String model,
       String kind,
-      BigDecimal maxCapacity,
+      @DecimalMin(value = "0", inclusive = false) @Fits(integer = 14, fraction = 4)
+          BigDecimal maxCapacity,
       String capacityUom,
-      BigDecimal scaleInterval,
+      @DecimalMin(value = "0", inclusive = false) @Fits(integer = 14, fraction = 4)
+          BigDecimal scaleInterval,
       String approvalRef,
       String zoneId,
       String labelScheme) {}
@@ -509,7 +586,18 @@ public final class Dtos {
       String summary,
       @org.eclipse.microprofile.openapi.annotations.media.Schema(
               description = "IN_FORCE on the day asked about, or UPCOMING.")
-          String status) {}
+          String status,
+      @org.eclipse.microprofile.openapi.annotations.media.Schema(
+              description =
+                  "The number the law sets (a period, a minimum, a share); null when it"
+                      + " sets none. Comes with limitUnit.")
+          java.math.BigDecimal limitValue,
+      @org.eclipse.microprofile.openapi.annotations.media.Schema(
+              description = "What limitValue counts, such as DAYS or MONTHS; null with no limit.")
+          String limitUnit,
+      @org.eclipse.microprofile.openapi.annotations.media.Schema(
+              description = "The case the row is for, such as a channel; null when it is for all.")
+          String qualifier) {}
 
   @org.eclipse.microprofile.openapi.annotations.media.Schema(name = "ObligationsResponse")
   public record ObligationsResponse(

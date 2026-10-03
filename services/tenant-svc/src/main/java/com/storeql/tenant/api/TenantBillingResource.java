@@ -6,9 +6,9 @@ import com.storeql.tenant.service.BillingService;
 import com.storeql.tenant.service.SubscriptionService;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -65,9 +65,10 @@ public class TenantBillingResource {
               + " already issued keep the address they were issued with.")
   @PUT
   @Path("/details")
-  public ApiResponse<BillingDtos.SubscriptionFileResponse> details(
-      @Valid BillingDtos.BuyerRequest req) {
+  public ApiResponse<BillingDtos.SubscriptionFileResponse> details(BillingDtos.BuyerRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
+    Validations.validate(req);
     return ApiResponse.ok(
         BillingMappers.toDto(
             subscriptions.setDetails(ctx.requireTenantId(), req, ctx.requireUserId())));
@@ -110,8 +111,10 @@ public class TenantBillingResource {
   @POST
   @Path("/plan")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> changePlan(
-      @Valid BillingDtos.PlanChangeRequest req) {
+      BillingDtos.PlanChangeRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
+    Validations.validate(req);
     return ApiResponse.ok(
         BillingMappers.toDto(
             subscriptions.changePlan(ctx.requireTenantId(), req, ctx.requireUserId())));
@@ -124,9 +127,11 @@ public class TenantBillingResource {
               + " be keeping money for a service withdrawn.")
   @POST
   @Path("/cancel")
-  public ApiResponse<BillingDtos.SubscriptionFileResponse> cancel(
-      @Valid BillingDtos.CancelRequest req) {
+  public ApiResponse<BillingDtos.SubscriptionFileResponse> cancel(BillingDtos.CancelRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
+    // The body is optional (a reason need not be given); one that is sent is checked.
+    if (req != null) Validations.validate(req);
     return ApiResponse.ok(
         BillingMappers.toDto(
             subscriptions.cancelAtPeriodEnd(
@@ -137,6 +142,7 @@ public class TenantBillingResource {
   @POST
   @Path("/resume")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> resume() {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         BillingMappers.toDto(subscriptions.keepGoing(ctx.requireTenantId(), ctx.requireUserId())));
@@ -146,6 +152,7 @@ public class TenantBillingResource {
   @POST
   @Path("/plan/cancel-pending")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> dropPending() {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
         BillingMappers.toDto(

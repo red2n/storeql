@@ -11,6 +11,7 @@ import com.storeql.einvoice.ElectronicAddress;
 import com.storeql.einvoice.Invoice;
 import com.storeql.einvoice.Violation;
 import com.storeql.ids.Ids;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.PurchaseOrderLine;
 import com.storeql.purchase.domain.EInvoiceIntake;
@@ -37,7 +38,6 @@ import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -109,8 +109,32 @@ public class SupplierEInvoiceService {
   @Inject PurchaseService purchasing;
   @Inject TenantProfiles tenants;
 
-  /** A document as it now stands, and whether these bytes had been received before. */
-  public record Receipt(Document document, List<Line> lines, boolean alreadyReceived) {}
+  /**
+   * A document as it now stands, and whether these bytes had been received before.
+   *
+   * @param notRemembered on a match asked to remember: what was not kept and why, in words; null
+   *     when everything asked was kept, or nothing was asked
+   */
+  public record Receipt(
+      Document document, List<Line> lines, boolean alreadyReceived, String notRemembered) {
+
+    public Receipt(Document document, List<Line> lines, boolean alreadyReceived) {
+      this(document, lines, alreadyReceived, null);
+    }
+  }
+
+  /**
+   * Why a document waits when it bills an order at a store its sender may not act at — stored, so
+   * read by everyone who may see it, and naming nothing of the order.
+   */
+  static final String BILLS_ANOTHER_STORE =
+      "it bills an order at a store its sender is not held to; a person who may act at that store"
+          + " decides it";
+
+  /** What a caller held to stores is told when a match asked to keep the supplier's address. */
+  static final String ADDRESS_NOT_REMEMBERED =
+      "the supplier's electronic address was not kept: a supplier's record is the whole"
+          + " business's, so only a caller who is not held to stores sets it";
 
   /** Where the document waits and why, or everything its capture needs when status is null. */
   private record Decision(
@@ -170,7 +194,7 @@ public class SupplierEInvoiceService {
     requireDocument(body);
     String sha = sha256(body);
     Optional<UUID> seen = repo.findIdBySha(tenantId, sha);
-    if (seen.isPresent()) return receipt(tenantId, seen.get(), true);
+    if (seen.isPresent()) return visibleReceipt(ctx, seen.get(), true);
     // The plan's cap on what the business keeps in documents (21.11): asked after the dedupe, since
     // a document already held costs nothing more, and before the document is read, since one there
     // is no room for is not worth parsing. A plan with no cap holds nothing back.
@@ -183,7 +207,7 @@ public class SupplierEInvoiceService {
     EInvoices.Received received = already != null ? already : read(body);
     Invoice inv = received.invoice();
     List<Violation> violations = EInvoices.validate(received);
-    Decision d = decide(ctx, inv, violations, Choices.NONE);
+    Decision d = decide(ctx, inv, violations, Choices.NONE, false);
     UUID id = Ids.newId();
     Instant now = Instant.now();
     Invoice.Totals totals = inv.totals();
@@ -235,23 +259,36 @@ public class SupplierEInvoiceService {
                       ApiException.conflict(
                           "PURCHASE_EINVOICE_BUSY",
                           "the same document is being received; try again"));
-      return receipt(tenantId, first, true);
+      return visibleReceipt(ctx, first, true);
     }
     if (d.ready()) complete(ctx, id, inv, d);
-    return receipt(tenantId, id, false);
+    // The sender learns what it became only where they may act: a document that bills an order at
+    // another store is answered without that order (its id, its lines) — it waits there.
+    return asSeenBy(ctx, receipt(tenantId, id, false));
   }
 
   /**
    * Matches a waiting document with what a person chose, and captures it when that is enough.
    *
-   * @throws ApiException {@code 404 PURCHASE_EINVOICE_NOT_FOUND}; {@code 409
+   * <p>The order the document bills is the order's store's: a caller held to other stores is
+   * refused when the document already bills one, and when the order chosen or named by the document
+   * is found — before anything about that order is decided, the document claimed, a rule learnt or
+   * the ledger touched.
+   *
+   * <p>{@code remember} keeps the item codes of the lines the person matched; the supplier's
+   * electronic address is kept only for a caller held to no store, since it is the supplier's
+   * record, which is the whole business's — a caller held to stores is answered {@link
+   * Receipt#notRemembered} instead, and the supplier is left as it was.
+   *
+   * @throws ApiException {@code 404 PURCHASE_EINVOICE_NOT_FOUND}; {@code 403 STORE_ACCESS_DENIED}
+   *     when the order it bills, or is matched to, is another store's than the caller's; {@code 409
    *     PURCHASE_EINVOICE_SETTLED}, {@code PURCHASE_EINVOICE_NOT_COMPLIANT}, {@code
    *     PURCHASE_EINVOICE_MISDIRECTED} or {@code PURCHASE_EINVOICE_BUSY}; {@code 400} for a choice
    *     that does not fit the document
    */
   public Receipt match(TenantContext ctx, UUID id, MatchSupplierEInvoiceRequest req) {
     UUID tenantId = ctx.requireTenantId();
-    Document doc = document(tenantId, id);
+    Document doc = visible(ctx, document(tenantId, id));
     requireOpen(doc);
     if (EInvoiceIntake.STATUS_NOT_COMPLIANT.equals(doc.status())) {
       throw ApiException.conflict(
@@ -278,10 +315,16 @@ public class SupplierEInvoiceService {
         }
       }
     }
+    // A person matching it acts on the order it bills: an order at another store than the caller's
+    // is refused as soon as it is found (in decide), before anything about it is read or kept.
     Decision d =
         decide(
-            ctx, inv, List.of(), new Choices(req.supplierId(), req.poId(), req.returnId(), lines));
-    if (req.remember()) remember(ctx, id, inv, d);
+            ctx,
+            inv,
+            List.of(),
+            new Choices(req.supplierId(), req.poId(), req.returnId(), lines),
+            true);
+    String notRemembered = req.remember() ? remember(ctx, id, inv, d) : null;
     if (d.ready()) {
       complete(ctx, id, inv, d);
     } else {
@@ -301,19 +344,21 @@ public class SupplierEInvoiceService {
           null,
           null);
     }
-    return receipt(tenantId, id, false);
+    Receipt r = receipt(tenantId, id, false);
+    return new Receipt(r.document(), r.lines(), false, notRemembered);
   }
 
   /**
    * Refuses a waiting document, with the reason the supplier is to be given.
    *
-   * @throws ApiException {@code 403} without purchasing.invoices.decide; {@code 404}; {@code 409
+   * @throws ApiException {@code 403} without purchasing.invoices.decide; {@code 404}; {@code 403
+   *     STORE_ACCESS_DENIED} when it bills an order at another store than the caller's; {@code 409
    *     PURCHASE_EINVOICE_SETTLED} or {@code PURCHASE_EINVOICE_BUSY}
    */
   public Receipt refuse(TenantContext ctx, UUID id, RefuseSupplierEInvoiceRequest req) {
     ctx.requirePermission(Permissions.PURCHASING_INVOICES_DECIDE);
     UUID tenantId = ctx.requireTenantId();
-    Document doc = document(tenantId, id);
+    Document doc = visible(ctx, document(tenantId, id));
     requireOpen(doc);
     UUID token = claim(tenantId, id);
     repo.settle(
@@ -333,7 +378,10 @@ public class SupplierEInvoiceService {
     return receipt(tenantId, id, false);
   }
 
-  /** Received documents, newest first. */
+  /**
+   * Received documents, newest first: for a caller held to stores, those that name no order yet and
+   * those billing an order at one of their stores.
+   */
   public List<Document> list(TenantContext ctx, String status, int limit) {
     String wanted = null;
     if (status != null && !status.isBlank()) {
@@ -344,23 +392,49 @@ public class SupplierEInvoiceService {
             "status must be one of " + String.join(", ", STATUSES.stream().sorted().toList()));
       }
     }
-    return repo.list(ctx.requireTenantId(), wanted, limit);
+    return repo.list(ctx.requireTenantId(), wanted, ctx.reportStores(null), limit);
   }
 
+  /**
+   * One document, with its lines.
+   *
+   * @throws ApiException {@code 404 PURCHASE_EINVOICE_NOT_FOUND}; {@code 403 STORE_ACCESS_DENIED}
+   *     when it bills an order at another store than the caller's
+   */
   public Receipt get(TenantContext ctx, UUID id) {
-    return receipt(ctx.requireTenantId(), id, false);
+    return visibleReceipt(ctx, id, false);
   }
 
-  /** The document exactly as it arrived. */
+  /**
+   * The document exactly as it arrived.
+   *
+   * @throws ApiException {@code 404 PURCHASE_EINVOICE_NOT_FOUND}; {@code 403 STORE_ACCESS_DENIED}
+   *     when it bills an order at another store than the caller's, before its bytes are read
+   */
   public Original original(TenantContext ctx, UUID id) {
-    return repo.original(ctx.requireTenantId(), id)
+    UUID tenantId = ctx.requireTenantId();
+    visible(ctx, document(tenantId, id));
+    return repo.original(tenantId, id)
         .orElseThrow(
             () -> ApiException.notFound("PURCHASE_EINVOICE_NOT_FOUND", "no such e-invoice"));
   }
 
   // ── deciding ─────────────────────────────────────────────────────────────────
 
-  private Decision decide(TenantContext ctx, Invoice inv, List<Violation> violations, Choices ch) {
+  /**
+   * Where a document stands: what it breaks, whom it comes from, the order it bills and its lines.
+   *
+   * @param atCallersStore true when a person is matching it: the order, once found, must be at a
+   *     store the caller may act at ({@code 403 STORE_ACCESS_DENIED}), and is refused before
+   *     anything about it is read. False on arrival, where an order at another store leaves the
+   *     document waiting for a person who may act there, rather than refusing the document.
+   */
+  private Decision decide(
+      TenantContext ctx,
+      Invoice inv,
+      List<Violation> violations,
+      Choices ch,
+      boolean atCallersStore) {
     UUID tenantId = ctx.requireTenantId();
     List<String> fatal =
         violations.stream().filter(Violation::isFatal).map(Violation::rule).distinct().toList();
@@ -420,6 +494,7 @@ public class SupplierEInvoiceService {
           null);
     }
     Domain.PurchaseOrder po = purchases.findPurchaseOrder(tenantId, poId).orElse(null);
+    if (po != null && atCallersStore) ctx.requireStoreAccess(po.storeId());
     if (po == null || !po.supplierId().equals(supplier.id())) {
       if (ch.poId() != null) {
         throw ApiException.badRequest(
@@ -431,6 +506,13 @@ public class SupplierEInvoiceService {
           "the order it names is not one of " + supplier.name() + "'s; choose the order it bills",
           supplier.id(),
           null);
+    }
+    if (!ctx.hasStoreAccess(po.storeId())) {
+      // On arrival, from a sender held to other stores: it waits for a person who may act at the
+      // order's store, before anything about the order (its status, currency, lines or returns) is
+      // read — and is never captured on the sender's word.
+      return Decision.waiting(
+          EInvoiceIntake.STATUS_NEEDS_DECISION, BILLS_ANOTHER_STORE, supplier.id(), po.id());
     }
     if (NOT_BILLABLE.contains(po.status())) {
       return Decision.waiting(
@@ -610,19 +692,28 @@ public class SupplierEInvoiceService {
 
   /**
    * Keeps what a person decided for the supplier: the electronic address it sent from, when the
-   * supplier has none and no other supplier holds it, and what its item codes are.
+   * supplier has none, no other supplier holds it and the caller is held to no store (the
+   * supplier's record is the whole business's, as {@code PUT /suppliers/{id}} is), and what its
+   * item codes are.
+   *
+   * @return what was not kept and why, or null
    */
-  private void remember(TenantContext ctx, UUID einvoiceId, Invoice inv, Decision d) {
+  private String remember(TenantContext ctx, UUID einvoiceId, Invoice inv, Decision d) {
     UUID tenantId = ctx.requireTenantId();
-    if (d.supplierId() == null) return;
+    if (d.supplierId() == null) return null;
+    String notKept = null;
     ElectronicAddress from =
         inv.seller() == null ? null : ElectronicAddress.of(inv.seller().electronicAddress());
     Domain.Supplier s = purchases.findSupplier(tenantId, d.supplierId()).orElse(null);
     if (from != null && s != null && s.einvoiceId() == null) {
-      try {
-        purchases.updateSupplier(s.withEinvoiceAddress(from.scheme(), from.id(), Instant.now()));
-      } catch (ApiException e) {
-        if (!"PURCHASE_SUPPLIER_EINVOICE_ADDRESS_TAKEN".equals(e.code())) throw e;
+      if (!BusinessWide.heldToNone(ctx)) {
+        notKept = ADDRESS_NOT_REMEMBERED;
+      } else {
+        try {
+          purchases.updateSupplier(s.withEinvoiceAddress(from.scheme(), from.id(), Instant.now()));
+        } catch (ApiException e) {
+          if (!"PURCHASE_SUPPLIER_EINVOICE_ADDRESS_TAKEN".equals(e.code())) throw e;
+        }
       }
     }
     for (LineMatch m : d.matches()) {
@@ -653,6 +744,7 @@ public class SupplierEInvoiceService {
           einvoiceId,
           ctx.userId());
     }
+    return notKept;
   }
 
   // ── helpers ─────────────────────────────────────────────────────────────────
@@ -669,6 +761,47 @@ public class SupplierEInvoiceService {
 
   private Receipt receipt(UUID tenantId, UUID id, boolean alreadyReceived) {
     return new Receipt(document(tenantId, id), repo.lines(tenantId, id), alreadyReceived);
+  }
+
+  /**
+   * A document just received, as its sender may see it: whole when they may act at the store of the
+   * order it bills (or it bills none), else without that order — its id, its lines' order lines,
+   * what it became — so a caller held to one store learns nothing of another store's order by
+   * sending a document that names it.
+   */
+  private Receipt asSeenBy(TenantContext ctx, Receipt r) {
+    Document doc = r.document();
+    if (doc.poId() == null || BusinessWide.heldToNone(ctx)) return r;
+    boolean theirs =
+        purchases
+            .findPurchaseOrder(doc.tenantId(), doc.poId())
+            .map(po -> ctx.hasStoreAccess(po.storeId()))
+            .orElse(false);
+    if (theirs) return r;
+    return new Receipt(
+        doc.withoutOrder(BILLS_ANOTHER_STORE),
+        r.lines().stream().map(Line::withoutOrderLine).toList(),
+        r.alreadyReceived());
+  }
+
+  /** A document the caller may see, with its lines: see {@link #visible}. */
+  private Receipt visibleReceipt(TenantContext ctx, UUID id, boolean alreadyReceived) {
+    UUID tenantId = ctx.requireTenantId();
+    Document doc = visible(ctx, document(tenantId, id));
+    return new Receipt(doc, repo.lines(tenantId, id), alreadyReceived);
+  }
+
+  /**
+   * A document is the business's inbox until it names an order, and the order's store's from then
+   * on — as the invoice it is captured as is: one that bills an order is read and decided through
+   * {@link PurchaseService#getPurchaseOrder}, so a caller held to other stores is refused.
+   *
+   * @throws ApiException {@code 403 STORE_ACCESS_DENIED} when the order it bills is at a store the
+   *     caller is not held to
+   */
+  private Document visible(TenantContext ctx, Document doc) {
+    if (doc.poId() != null) purchasing.getPurchaseOrder(ctx, doc.poId());
+    return doc;
   }
 
   private Document document(UUID tenantId, UUID id) {
@@ -762,10 +895,11 @@ public class SupplierEInvoiceService {
   }
 
   private static String violationsJson(List<Violation> violations) {
-    JsonArrayBuilder array = Json.createArrayBuilder();
+    JsonArrayBuilder array = Jsons.PROVIDER.createArrayBuilder();
     for (Violation v : violations) {
       array.add(
-          Json.createObjectBuilder()
+          Jsons.PROVIDER
+              .createObjectBuilder()
               .add("rule", v.rule())
               .add("severity", v.severity().name())
               .add("message", v.message()));

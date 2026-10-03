@@ -152,13 +152,16 @@ public class BondRepository extends BaseJdbcRepository {
         "list bond releases");
   }
 
-  /** What sits in bond per store and variant, with the duty it would crystallise. */
-  public List<BondStock> stockInBond(UUID tenantId, UUID storeId) {
+  /**
+   * What sits in bond per store and variant, with the duty it would crystallise, rounded half up to
+   * the business currency's minor units ({@code minorUnits}) — never cast to two places.
+   */
+  public List<BondStock> stockInBond(UUID tenantId, UUID storeId, int minorUnits) {
     StringBuilder sql =
         new StringBuilder(
             "SELECT b.store_id, b.variant_id, SUM(b.remaining_qty)::numeric(18,3) AS qty,"
                 + " MAX(edr.duty_per_unit) AS duty_per_unit,"
-                + " (SUM(b.remaining_qty) * COALESCE(MAX(edr.duty_per_unit), 0))::numeric(18,2)"
+                + " (SUM(b.remaining_qty) * COALESCE(MAX(edr.duty_per_unit), 0))"
                 + " AS duty_potential"
                 + " FROM inventory_batches b LEFT JOIN excise_duty_rates edr"
                 + " ON edr.tenant_id = b.tenant_id AND edr.variant_id = b.variant_id"
@@ -178,7 +181,8 @@ public class BondRepository extends BaseJdbcRepository {
                 rs.getObject("variant_id", UUID.class),
                 rs.getBigDecimal("qty"),
                 rs.getBigDecimal("duty_per_unit"),
-                rs.getBigDecimal("duty_potential")),
+                rs.getBigDecimal("duty_potential")
+                    .setScale(minorUnits, java.math.RoundingMode.HALF_UP)),
         "stock in bond");
   }
 

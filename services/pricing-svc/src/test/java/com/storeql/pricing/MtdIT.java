@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
+import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -33,8 +34,19 @@ class MtdIT {
 
   private static final PostgresSupport PG;
 
+  /**
+   * Both businesses are pound businesses, as tenant-svc would describe them: a tax line is kept to
+   * its business currency's minor units, so the currency is read (the currency minor-units sweep).
+   */
+  @SuppressWarnings("unused")
+  private static final com.storeql.test.TenantSvcStub TENANTS;
+
   static {
     PG = PostgresSupport.start();
+    TENANTS =
+        com.storeql.test.TenantSvcStub.start()
+            .with(MtdIT.T, "GBP", "GB")
+            .with(MtdIT.OTHER_T, "GBP", "GB");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -63,6 +75,24 @@ class MtdIT {
       st.execute(
           "TRUNCATE TABLE pricing.vat_return_submissions, pricing.vat_registrations,"
               + " pricing.tax_transactions, pricing.input_tax_transactions CASCADE");
+    }
+  }
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return json(body).getString("code");
+  }
+
+  /** A business that files through HMRC itself, with no grant yet. */
+  private static void registerWithHmrc(String tenant) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute(
+          "INSERT INTO pricing.vat_registrations (tenant_id, vrn, provider) VALUES ('"
+              + tenant
+              + "', '123456782', 'HMRC')");
     }
   }
 
@@ -263,8 +293,8 @@ class MtdIT {
     assertThat(r.getStatus(), is(400));
     assertThat(r.readEntity(String.class), containsString("PRICING_INVALID_PERIOD"));
     assertThat(
-        get("/vat-return/mtd/obligations", T, "OWNER", "from", "2024-01-01T00:00:00Z").getStatus(),
-        is(400));
+        codeOf(get("/vat-return/mtd/obligations", T, "OWNER", "from", "2024-01-01T00:00:00Z"), 400),
+        is("PRICING_MISSING_TO"));
   }
 
   @Test
@@ -338,7 +368,12 @@ class MtdIT {
             .getJsonArray("data");
     assertThat(list.size(), is(1));
     assertThat(get("/vat-return/mtd/submissions/" + id, T, "OWNER").getStatus(), is(200));
-    assertThat(get("/vat-return/mtd/submissions/" + id, OTHER_T, "OWNER").getStatus(), is(404));
+    Response foreign = get("/vat-return/mtd/submissions/" + id, OTHER_T, "OWNER");
+    assertThat(codeOf(foreign, 404), is("MTD_SUBMISSION_NOT_FOUND"));
+    assertThat(
+        "an id nobody issued",
+        codeOf(get("/vat-return/mtd/submissions/" + Ids.newId(), T, "OWNER"), 404),
+        is("MTD_SUBMISSION_NOT_FOUND"));
     assertThat(
         json(get("/vat-return/mtd/submissions", OTHER_T, "OWNER").readEntity(String.class))
             .getJsonArray("data")
@@ -398,5 +433,71 @@ class MtdIT {
             .getJsonObject("data")
             .getBoolean("registered"),
         is(false));
+  }
+
+  @Test
+  @DisplayName("A grant code of only spaces is refused, and nothing is stored")
+  void aGrantCodeOfOnlySpacesIsRefused() throws Exception {
+    registerWithHmrc(T);
+    Response r =
+        call(
+            "POST",
+            "/vat-return/mtd/hmrc/connect",
+            "{\"code\":\"\\u2003\",\"redirectUri\":\"https://shop.example/cb\"}",
+            T,
+            "OWNER");
+    assertThat(codeOf(r, 400), is("MTD_CODE_REQUIRED"));
+    JsonObject after =
+        json(get("/vat-return/mtd/registration", T, "OWNER").readEntity(String.class))
+            .getJsonObject("data");
+    assertThat("no grant was stored", after.getBoolean("connected"), is(false));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(
+          role,
+          call(
+                  "POST",
+                  "/vat-return/mtd/hmrc/connect",
+                  "{\"code\":\"abc\",\"redirectUri\":\"https://shop.example/cb\"}",
+                  T,
+                  role)
+              .getStatus(),
+          is(403));
+    }
+    Response unregistered =
+        call(
+            "POST",
+            "/vat-return/mtd/hmrc/connect",
+            "{\"code\":\"abc\",\"redirectUri\":\"https://shop.example/cb\"}",
+            OTHER_T,
+            "OWNER");
+    assertThat(codeOf(unregistered, 404), is("MTD_NOT_REGISTERED"));
+  }
+
+  @Test
+  @DisplayName("An authorise redirect that is not an http(s) address, or is missing, is refused")
+  void anAuthoriseRedirectThatIsNotHttpIsRefused() throws Exception {
+    registerWithHmrc(T);
+    assertThat(
+        codeOf(
+            get(
+                "/vat-return/mtd/hmrc/authorize-url",
+                T,
+                "OWNER",
+                "redirectUri",
+                "javascript:alert(1)"),
+            400),
+        is("MTD_REDIRECT_INVALID"));
+    assertThat(
+        codeOf(get("/vat-return/mtd/hmrc/authorize-url", T, "OWNER"), 400),
+        is("MTD_REDIRECT_INVALID"));
+    assertThat(
+        get(
+                "/vat-return/mtd/hmrc/authorize-url",
+                T,
+                "CASHIER",
+                "redirectUri",
+                "https://shop.example/cb")
+            .getStatus(),
+        is(403));
   }
 }

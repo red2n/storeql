@@ -250,8 +250,28 @@ public final class Dtos {
   public record AddPurchaseOrderLineRequest(
       @NotNull UUID variantId,
       @NotNull @DecimalMin("0.001") BigDecimal qty,
-      @NotNull @DecimalMin("0.01") BigDecimal unitPrice,
+      @Schema(
+              description =
+                  "Price per unit, above zero. May carry more precision than the order's currency"
+                      + " (1,000 screws at 0.0125 each); the line's value is rounded to the"
+                      + " currency's own minor units.")
+          @NotNull
+          @DecimalMin(value = "0", inclusive = false)
+          BigDecimal unitPrice,
       @Schema(description = "UK VAT code, e.g. T1. Defaults to T1.") String vatCode) {}
+
+  @Schema(
+      name = "AmendPurchaseOrderLineRequest",
+      description = "A draft order's line as it should now read.")
+  public record AmendPurchaseOrderLineRequest(
+      @NotNull @DecimalMin("0.001") BigDecimal qty,
+      @Schema(
+              description =
+                  "Price per unit, above zero; may carry more precision than the order's currency.")
+          @NotNull
+          @DecimalMin(value = "0", inclusive = false)
+          BigDecimal unitPrice,
+      @Schema(description = "VAT code; the line's own when omitted.") String vatCode) {}
 
   @Schema(
       name = "CancelPurchaseOrderRequest",
@@ -325,7 +345,14 @@ public final class Dtos {
       @Schema(description = "For a DROPSHIP order, the customer the supplier ships to.")
           String shipTo,
       @Schema(description = "DUTY_PAID, or DUTY_SUSPENDED when the goods arrive into bond.")
-          String dutyStatus) {}
+          String dutyStatus,
+      @Schema(
+              description =
+                  "Things worth knowing before acting on the order, never a refusal: SUPPLIER_GRADE_D"
+                      + " when it is open and the supplier's scorecard over the last 90 days is"
+                      + " D. Filled on a single read and on submit, for owner, manager and"
+                      + " storekeeper; empty elsewhere.")
+          List<String> warnings) {}
 
   @Schema(
       name = "PurchaseOrderLineProgressResponse",
@@ -461,12 +488,16 @@ public final class Dtos {
       @Schema(description = "UUID of the receiving store.") @NotNull String toStoreId,
       @Schema(description = "Optional UUID linking this invoice pair to a transfer order.")
           String transferRef,
-      @Schema(description = "Net amount, per HMRC INTM arm's-length transfer pricing.")
+      @Schema(
+              description =
+                  "Net amount, per HMRC INTM arm's-length transfer pricing. Above zero, in the"
+                      + " currency's own minor units (PURCHASE_AMOUNT_TOO_PRECISE otherwise), as"
+                      + " are the VAT and the gross.")
           @NotNull
-          @DecimalMin("0.01")
+          @DecimalMin(value = "0", inclusive = false)
           BigDecimal netAmount,
       @NotNull @DecimalMin("0") BigDecimal vatAmount,
-      @NotNull @DecimalMin("0.01") BigDecimal grossAmount,
+      @NotNull @DecimalMin(value = "0", inclusive = false) BigDecimal grossAmount,
       @Schema(description = "UK VAT code, e.g. T1. Defaults to T1.") String vatCode,
       @Schema(
               description =
@@ -978,7 +1009,13 @@ public final class Dtos {
                   "BY_VALUE spreads by each line's value at the order's prices; BY_QUANTITY by units.")
           @NotBlank
           String basis,
-      @NotNull @DecimalMin("0.01") BigDecimal amount,
+      @Schema(
+              description =
+                  "Above zero, in the order's currency's own minor units — whole yen, cents of a"
+                      + " pound, thousandths of a dinar (PURCHASE_AMOUNT_TOO_PRECISE otherwise).")
+          @NotNull
+          @DecimalMin(value = "0", inclusive = false)
+          BigDecimal amount,
       @Schema(description = "ISO 4217. Must be the order's currency; defaults to it.")
           @Size(max = 3)
           String currency,

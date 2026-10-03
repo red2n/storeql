@@ -146,7 +146,7 @@ export default function ({ admin }) {
 
   // ── the check this whole row rests on ───────────────────────────────────────────────────────────
   // An administrator's decision is not an argument money can win.
-  expect(call('PATCH', `${PLATFORM}/tenants/${shop.tenantId}/status`, { token: root, body: { status: 'INACTIVE' } }), '[+] an administrator switches the business off', 200);
+  expect(call('PATCH', `${PLATFORM}/tenants/${shop.tenantId}/status`, { token: root, body: { status: 'INACTIVE', reason: 'k6: switched off by an administrator' } }), '[+] an administrator switches the business off', 200);
   const byAdmin = data(call('GET', `${PLATFORM}/tenants/${shop.tenantId}`, { token: root }));
   truthy('[+] recorded as the administrator\'s doing, not the platform\'s', byAdmin.deactivatedReason === 'ADMINISTRATOR', byAdmin);
 

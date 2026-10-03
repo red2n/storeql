@@ -6,13 +6,13 @@ import com.storeql.notification.domain.Webhooks.Attempt;
 import com.storeql.notification.domain.Webhooks.Delivery;
 import com.storeql.notification.domain.Webhooks.Endpoint;
 import com.storeql.notification.dto.WebhookDtos;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.repo.WebhookRepository;
 import com.storeql.service.Egress;
 import com.storeql.web.ApiException;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -41,6 +41,7 @@ public class WebhookService {
   private static final SecureRandom RANDOM = new SecureRandom();
 
   @Inject WebhookRepository repo;
+  @Inject FanoutInterest interest;
   @Inject WebhookSecrets secrets;
 
   @Inject
@@ -66,7 +67,11 @@ public class WebhookService {
   /** An endpoint as made, with the one showing of its secret. */
   public record Made(Endpoint endpoint, String secret) {}
 
-  public Made register(UUID tenantId, UUID by, WebhookDtos.CreateRequest req) {
+  /**
+   * @throws ApiException 503 {@code WEBHOOKS_NOT_CONFIGURED} when the deployment has no key to seal
+   *     a secret under: no secret can be minted for a new endpoint or a rotation
+   */
+  private void requireSealingKey() {
     if (!secrets.isConfigured()) {
       throw new ApiException(
           503,
@@ -74,6 +79,10 @@ public class WebhookService {
           "Webhooks are not switched on for this deployment: no sealing key",
           List.of());
     }
+  }
+
+  public Made register(UUID tenantId, UUID by, WebhookDtos.CreateRequest req) {
+    requireSealingKey();
     String url = checkedUrl(req.url());
     String description = checkedDescription(req.description());
     List<String> events = checkedEvents(req.events());
@@ -95,6 +104,7 @@ public class WebhookService {
             now,
             now);
     repo.insertEndpoint(e);
+    interest.invalidate(tenantId);
     return new Made(e, secret);
   }
 
@@ -134,6 +144,7 @@ public class WebhookService {
     if (!repo.updateEndpoint(changed)) {
       throw ApiException.notFound("WEBHOOK_ENDPOINT_NOT_FOUND", "No such endpoint");
     }
+    interest.invalidate(tenantId);
     return changed;
   }
 
@@ -146,6 +157,7 @@ public class WebhookService {
   /** A new secret, sealed for the database and returned once; the old one signs nothing more. */
   public String rotateSecret(UUID tenantId, UUID id) {
     get(tenantId, id);
+    requireSealingKey();
     String secret = newSecret();
     if (!repo.rotateSecret(tenantId, id, secrets.seal(secret), Instant.now())) {
       throw ApiException.notFound("WEBHOOK_ENDPOINT_NOT_FOUND", "No such endpoint");
@@ -159,7 +171,7 @@ public class WebhookService {
     Instant now = Instant.now();
     UUID eventId = Ids.newId();
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", eventId.toString())
             .add("eventType", Webhooks.PING)
             .add("tenantId", tenantId.toString())

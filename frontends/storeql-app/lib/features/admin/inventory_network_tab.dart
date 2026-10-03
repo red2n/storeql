@@ -3,17 +3,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
 import '../../core/ids.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/spacing.dart';
 import '../../shared/util/short_ref.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_names.dart';
 import 'widgets/variant_picker.dart';
 
@@ -346,6 +349,14 @@ class _ServeShopDialogState extends ConsumerState<ServeShopDialog> {
   String? _warehouse;
   final _lead = TextEditingController(text: '1');
   bool _busy = false;
+  String? _error;
+
+  /// The lead time is a whole number of days, read with the shared reader:
+  /// text it cannot read is refused under the field and nothing is saved.
+  /// Read as a number literal, `0x10` was saved as sixteen days, and text
+  /// that was no number was refused without a word.
+  final _marks = AmountMarks.ofApp();
+  bool get _refused => figureRefused(_marks, [(_lead, wholeNumber)]);
 
   @override
   void dispose() {
@@ -354,9 +365,16 @@ class _ServeShopDialogState extends ConsumerState<ServeShopDialog> {
   }
 
   Future<void> _save() async {
-    final lead = int.tryParse(_lead.text.trim());
-    if (_shop == null || _warehouse == null || lead == null) return;
-    setState(() => _busy = true);
+    if (_refused) return;
+    final lead = wholeOf(_lead, _marks);
+    if (_shop == null || _warehouse == null || lead == null) {
+      setState(() => _error = 'Choose the shop and its warehouse, and enter the days between them.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
     try {
       await ref.read(apiClientProvider).dio.put(
         '$_inv/network/serving',
@@ -404,18 +422,31 @@ class _ServeShopDialogState extends ConsumerState<ServeShopDialog> {
               items: [for (final w in warehouses) DropdownMenuItem(value: w.id, child: Text(w.name))],
               onChanged: (v) => setState(() => _warehouse = v),
             ),
-            TextField(
-              key: const Key('serve-lead'),
+            FigureField(
+              fieldKey: const Key('serve-lead'),
               controller: _lead,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Days from the warehouse to the shop'),
+              shape: wholeNumber,
+              marks: _marks,
+              label: 'Days from the warehouse to the shop',
+              hint: '',
+              onChanged: (_) => setState(() {}),
             ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.sm),
+                child: Text(
+                  _error!,
+                  key: const Key('serve-error'),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
           ],
         ),
       ),
       actions: [
         TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('serve-save'), onPressed: _busy ? null : _save, child: const Text('Save')),
+        FilledButton(
+            key: const Key('serve-save'), onPressed: _busy || _refused ? null : _save, child: const Text('Save')),
       ],
     );
   }

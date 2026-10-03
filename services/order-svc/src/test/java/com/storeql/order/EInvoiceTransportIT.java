@@ -134,7 +134,7 @@ class EInvoiceTransportIT {
             .withLegalName(T_RDY, "Readiness Ltd")
             .withStore(T_RDY, S_RDY, "GB", "9 Dock Road", "Hull", "HU1 2AA")
             .with(T_PL, "PLN", "PL")
-            .withIdentity(T_PL, "PL5260250991", null, null)
+            .withIdentity(T_PL, "PL5260250274", null, null)
             .withLegalName(T_PL, "Sklep Portowy sp. z o.o.")
             .withStore(T_PL, S_PL, "PL", "ul. Portowa 1", "Gdańsk", "80-001")
             // As if the mandate were in force: what the settings suggest.
@@ -178,7 +178,7 @@ class EInvoiceTransportIT {
         SERVICES,
         C_PL,
         "Kawiarnia Molo sp. z o.o.",
-        "PL7010001455",
+        "PL7740001454",
         "PL",
         null,
         null,
@@ -186,7 +186,7 @@ class EInvoiceTransportIT {
     // India's portal, doing its own cryptography; France's platform, answering by the buyer;
     // Poland's system, opening what the client sealed.
     PORTAL = IrpPortalStub.on(SERVICES, "user1", "pass1");
-    KSEF = KsefStub.on(SERVICES, "5260250991", "ksef-token-1");
+    KSEF = KsefStub.on(SERVICES, "5260250274", "ksef-token-1");
     System.setProperty("storeql.einvoice.ksef.base-url", SERVICES.baseUrl() + KsefStub.PREFIX);
     SERVICES.on("POST", "/pdp/invoices", EInvoiceTransportIT::platformDeposit);
     SERVICES.on(
@@ -304,7 +304,8 @@ class EInvoiceTransportIT {
     if (call.body().contains("REFUSE")) {
       return new JsonStub.Answer(
           201,
-          "{\"id\":\"F-2\",\"status\":{\"code\":210,\"label\":\"Refusée\",\"reason\":\"bon de commande inconnu\"}}");
+          "{\"id\":\"F-2\",\"status\":{\"code\":210,\"label\":\"Refusée\",\"reason\":\"bon de"
+              + " commande inconnu\"}}");
     }
     return new JsonStub.Answer(
         201, "{\"id\":\"F-1\",\"status\":{\"code\":200,\"label\":\"Déposée\"}}");
@@ -511,6 +512,9 @@ class EInvoiceTransportIT {
                 + "x".repeat(121)
                 + "\"}");
     assertThat(longAccount.getStatus(), is(400));
+    // The request's own limit (120) answers first; the service's check after stripping is its
+    // second line and cannot be reached by a longer value.
+    assertThat(code(longAccount), is("VALIDATION_FAILED"));
 
     // KSeF with the simulated provider needs no address: the network takes the sender's own.
     Response ksef = setTransport(T_NOADDR, transport("KSEF", "SIMULATED"));
@@ -696,12 +700,23 @@ class EInvoiceTransportIT {
     assertThat(code(unknown), is("EINVOICE_TRANSMISSION_STATUS_UNKNOWN"));
 
     assertThat(dataArray(till().get("/admin/einvoicing/transmissions", T_OTHER)), hasSize(0));
-    assertThat(
-        till()
-            .get("/admin/sales-invoices/" + inv.getString("id") + "/transmissions", T_OTHER)
-            .getStatus(),
-        is(404));
-    assertThat(send(inv.getString("id"), T_OTHER).getStatus(), is(404));
+    int attempts = transmissions(inv.getString("id")).size();
+    Response theirs =
+        till().get("/admin/sales-invoices/" + inv.getString("id") + "/transmissions", T_OTHER);
+    assertThat(theirs.getStatus(), is(404));
+    assertThat(code(theirs), is("ORDER_INVOICE_NOT_FOUND"));
+    Response theirSend = send(inv.getString("id"), T_OTHER);
+    assertThat(theirSend.getStatus(), is(404));
+    assertThat(code(theirSend), is("ORDER_INVOICE_NOT_FOUND"));
+    // An invoice nobody issued has no transmissions to read or send, in our own business too.
+    Response unissued = till().get("/admin/sales-invoices/" + Ids.newId() + "/transmissions", T);
+    assertThat(unissued.getStatus(), is(404));
+    assertThat(code(unissued), is("ORDER_INVOICE_NOT_FOUND"));
+    Response unissuedSend = send(Ids.newId().toString(), T);
+    assertThat(unissuedSend.getStatus(), is(404));
+    assertThat(code(unissuedSend), is("ORDER_INVOICE_NOT_FOUND"));
+    // Nothing was queued by the refused sends.
+    assertThat(transmissions(inv.getString("id")).size(), is(attempts));
   }
 
   @Test
@@ -722,7 +737,8 @@ class EInvoiceTransportIT {
 
   @Test
   @DisplayName(
-      "An Indian business signs in to the portal with its own credential, kept sealed, and registers its invoices")
+      "An Indian business signs in to the portal with its own credential, kept sealed, and"
+          + " registers its invoices")
   void irp() {
     JsonObject offered = data(till().get("/admin/einvoicing/transport", T_IN));
     assertThat(offered.getString("suggestedNetwork", null), nullValue());
@@ -887,11 +903,11 @@ class EInvoiceTransportIT {
     JsonObject numbered =
         transmissionIn(T_PL, inv.getString("id"), "ACCEPTED", "REJECTED", "FAILED");
     assertThat(numbered.toString(), numbered.getString("status"), is("ACCEPTED"));
-    assertThat(numbered.getString("providerRef"), is("5260250991-20260916-010203ABCDEF-01"));
+    assertThat(numbered.getString("providerRef"), is("5260250274-20260916-010203ABCDEF-01"));
     assertThat(numbered.getString("detail"), startsWith("KSeF number "));
     assertThat("taken, then asked after", numbered.getInt("attempts"), greaterThanOrEqualTo(2));
-    assertThat(KSEF.lastInvoice(), containsString("<NIP>5260250991</NIP>"));
-    assertThat(KSEF.lastInvoice(), containsString("<NIP>7010001455</NIP>"));
+    assertThat(KSEF.lastInvoice(), containsString("<NIP>5260250274</NIP>"));
+    assertThat(KSEF.lastInvoice(), containsString("<NIP>7740001454</NIP>"));
     assertThat(
         KSEF.lastInvoice(), containsString("<P_2>" + inv.getString("fullNumber") + "</P_2>"));
 

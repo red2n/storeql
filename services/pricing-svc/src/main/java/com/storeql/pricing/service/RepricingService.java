@@ -333,13 +333,45 @@ public class RepricingService {
           "REPRICING_PROPOSAL_DECIDED",
           "proposal " + id + " was already " + p.status().toLowerCase(Locale.ROOT));
     }
+    // The rival's price was seen some days ago and the rule only trusts a price that fresh; a
+    // proposal that has outlived it is not applied, whatever the rival charges now. Dismissing
+    // it, or running the rule again against what is seen today, are still open.
+    RepricingRule rule =
+        repo.findRule(ctx.tenantId(), p.ruleId())
+            .orElseThrow(
+                () ->
+                    ApiException.conflict(
+                        "REPRICING_RULE_NOT_FOUND", "the proposal's rule no longer exists"));
+    if (Repricing.isStale(
+        p.observedOn(), LocalDate.now(ZoneOffset.UTC), rule.rule().maxAgeDays())) {
+      throw ApiException.conflict(
+          "PRICING_PROPOSAL_STALE",
+          "the rival price behind proposal "
+              + id
+              + " was seen on "
+              + p.observedOn()
+              + ", more than "
+              + rule.rule().maxAgeDays()
+              + " days ago; run the rule again or dismiss the proposal");
+    }
+    // The list's own currency sets the price's scale, as every other list-price write is held to
+    // it (priceIn): the proposal column keeps four places, and V16 left the price column
+    // unconstrained, so 7.9900 written as it was read would be the price the till and the basket
+    // quote say back.
+    PriceList list =
+        pricing
+            .findPriceList(ctx.tenantId(), p.priceListId())
+            .orElseThrow(
+                () ->
+                    ApiException.conflict(
+                        "REPRICING_NO_PRICE_LIST", "the proposal's price list no longer exists"));
     PriceListItem item =
         new PriceListItem(
             Ids.newId(),
             ctx.tenantId(),
             p.priceListId(),
             p.variantId(),
-            p.proposedPrice(),
+            appliedPrice(p.proposedPrice(), list.currency()),
             BigDecimal.ONE,
             Instant.now(),
             Instant.now());
@@ -352,6 +384,23 @@ public class RepricingService {
             Events.priceChanged(ctx.tenantId(), p.priceListId()));
     appliedPrices.catchUp(ctx.tenantId());
     return decided;
+  }
+
+  /**
+   * A proposed price as the list keeps it: at the list currency's own minor units (ISO 4217,
+   * through {@link Fx#minorUnits}) — {@code 7.99} pounds, {@code 1234} yen, {@code 8.990} dinars —
+   * however many places the proposal column read it back with.
+   *
+   * @throws IllegalStateException for a price finer than the currency, which no run proposes (a run
+   *     proposes at the list currency's units, and a list's currency never changes)
+   */
+  static BigDecimal appliedPrice(BigDecimal proposed, String currency) {
+    int units = Fx.minorUnits(currency);
+    if (proposed.stripTrailingZeros().scale() > units) {
+      throw new IllegalStateException(
+          "proposed price " + proposed.toPlainString() + " is finer than " + currency + " has");
+    }
+    return proposed.setScale(units, java.math.RoundingMode.UNNECESSARY);
   }
 
   public RepricingProposal dismiss(TenantContext ctx, UUID id) {

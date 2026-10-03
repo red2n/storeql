@@ -19,6 +19,7 @@ import jakarta.ws.rs.core.Response;
 import java.sql.DriverManager;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -386,5 +387,40 @@ class PutawayIT {
                 "STOREKEEPER"));
     assertThat(done.getString("batchNo"), is("LOT-ODD-7"));
     assertThat(batchZone(oddBatch), is(AISLE_3));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A putaway rule that is not there, or not ours, is not removed")
+  void aRuleThatIsNotThereIsNotRemoved() {
+    String ruleId = rule(null, BACK_STORE).getString("id");
+    String rules = "SELECT count(*) FROM inventory.putaway_rules WHERE tenant_id = '" + T + "'";
+    String path = "/admin/inventory/putaway/rules/";
+
+    // The shop floor removes nothing.
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(role, code(call("DELETE", path + ruleId, null, T, role), 403), is("FORBIDDEN"));
+    }
+    // Another business's management, naming the rule's id, find nothing and remove nothing.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          code(call("DELETE", path + ruleId, null, T2, role, STORE), 404),
+          is("INVENTORY_PUTAWAY_RULE_NOT_FOUND"));
+    }
+    assertThat(Envelopes.scalar(PG, rules), is("1"));
+
+    // One that never was.
+    assertThat(
+        code(call("DELETE", path + Ids.newId(), null, T, "MANAGER"), 404),
+        is("INVENTORY_PUTAWAY_RULE_NOT_FOUND"));
+
+    // Removed once, it is not there to remove again.
+    assertThat(call("DELETE", path + ruleId, null, T, "MANAGER").getStatus(), is(204));
+    assertThat(
+        code(call("DELETE", path + ruleId, null, T, "MANAGER"), 404),
+        is("INVENTORY_PUTAWAY_RULE_NOT_FOUND"));
+    assertThat(Envelopes.scalar(PG, rules), is("0"));
   }
 }

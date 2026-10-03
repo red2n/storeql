@@ -81,6 +81,7 @@ public class AdminResource {
   @PUT
   @Path("/tenant")
   public ApiResponse<TenantResponse> updateTenant(UpdateTenantRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     return ApiResponse.ok(Mappers.toTenant(service.updateTenant(ctx.requireTenantId(), req)));
   }
@@ -124,8 +125,9 @@ public class AdminResource {
   @POST
   @Path("/stores")
   public Response addStore(CreateStoreRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
-    var result = service.addStore(ctx.requireTenantId(), req);
+    var result = service.addStore(ctx.requireTenantId(), req, ctx.userId());
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toStore(result.store())))
         .build();
@@ -169,8 +171,9 @@ public class AdminResource {
   public ApiResponse<StoreResponse> updateStore(
       @PathParam("storeId") UUID storeId, UpdateStoreRequest req) {
     Validations.validate(req);
+    requireStoreHeld(storeId);
     return ApiResponse.ok(
-        Mappers.toStore(service.updateStore(ctx.requireTenantId(), storeId, req)));
+        Mappers.toStore(service.updateStore(ctx.requireTenantId(), storeId, req, ctx.userId())));
   }
 
   /**
@@ -194,8 +197,10 @@ public class AdminResource {
   public ApiResponse<StoreResponse> patchStoreStatus(
       @PathParam("storeId") UUID storeId, PatchStatusRequest req) {
     Validations.validate(req);
+    requireStoreHeld(storeId);
     return ApiResponse.ok(
-        Mappers.toStore(service.patchStoreStatus(ctx.requireTenantId(), storeId, req)));
+        Mappers.toStore(
+            service.patchStoreStatus(ctx.requireTenantId(), storeId, req, ctx.userId())));
   }
 
   // ── zones ────────────────────────────────────────────────────────────────
@@ -243,6 +248,7 @@ public class AdminResource {
   @Path("/stores/{storeId}/zones")
   public Response addZone(@PathParam("storeId") UUID storeId, CreateZoneRequest req) {
     Validations.validate(req);
+    requireStoreHeld(storeId);
     var zone = service.addZone(ctx.requireTenantId(), storeId, req);
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toZone(zone)))
@@ -284,13 +290,15 @@ public class AdminResource {
   public ApiResponse<ZoneResponse> updateZone(
       @PathParam("storeId") UUID storeId, @PathParam("zoneId") UUID zoneId, UpdateZoneRequest req) {
     Validations.validate(req);
+    requireZoneHeld(storeId, zoneId);
     return ApiResponse.ok(Mappers.toZone(service.updateZone(ctx.requireTenantId(), zoneId, req)));
   }
 
   /**
    * Changes a zone's status.
    *
-   * <p>Publishes nothing: no other service projects zone status.
+   * <p>The vocabulary is ACTIVE, OUT_OF_SERVICE and RETIRED (400 {@code ZONE_STATUS_INVALID}
+   * otherwise). A change publishes {@code ZoneStatusChanged}, which inventory-svc reads.
    *
    * @param storeId the store in the path; the lookup is tenant-scoped and does not match on it
    * @param zoneId the zone whose status to change
@@ -300,6 +308,7 @@ public class AdminResource {
    *     tenant
    */
   @Operation(summary = "Change a zone's status", description = "Updates a zone's status.")
+  @APIResponse(responseCode = "400", description = "Not ACTIVE, OUT_OF_SERVICE or RETIRED")
   @APIResponse(responseCode = "404", description = "No such zone")
   @PATCH
   @Path("/stores/{storeId}/zones/{zoneId}/status")
@@ -308,8 +317,9 @@ public class AdminResource {
       @PathParam("zoneId") UUID zoneId,
       PatchStatusRequest req) {
     Validations.validate(req);
+    requireZoneHeld(storeId, zoneId);
     return ApiResponse.ok(
-        Mappers.toZone(service.patchZoneStatus(ctx.requireTenantId(), zoneId, req)));
+        Mappers.toZone(service.patchZoneStatus(ctx.requireTenantId(), zoneId, req, ctx.userId())));
   }
 
   // ── staff ────────────────────────────────────────────────────────────────
@@ -389,18 +399,47 @@ public class AdminResource {
   @Operation(
       summary = "Remove a staff assignment",
       description =
-          "Removes a user's role assignment at the given store (?store=<storeId>) and tells"
-              + " iam-svc, which takes the role off the login (SJ-D51). Needs staff.manage.")
+          "Removes a user's role assignment at the given store (?store=<storeId>) or their"
+              + " business-wide one (?businessWide=true, an owner only) and tells iam-svc, which"
+              + " takes the role off the login (SJ-D51). Needs staff.manage.")
   @APIResponse(responseCode = "400", description = "?store=<storeId> query parameter is missing")
   @DELETE
   @Path("/staff/{userId}")
   public ApiResponse<String> removeStaff(
-      @PathParam("userId") UUID userId, @QueryParam("store") String storeParam) {
+      @PathParam("userId") UUID userId,
+      @QueryParam("store") String storeParam,
+      @QueryParam("businessWide") Boolean businessWide) {
+    if (Boolean.TRUE.equals(businessWide)) {
+      if (storeParam != null && !storeParam.isBlank()) {
+        throw ApiException.badRequest(
+            "STAFF_STORE_AND_BUSINESS_WIDE", "name a store or businessWide=true, not both");
+      }
+      service.removeStaff(ctx, userId, null);
+      return ApiResponse.ok("removed");
+    }
     if (storeParam == null || storeParam.isBlank()) {
-      throw ApiException.badRequest("MISSING_STORE", "?store=<storeId> is required");
+      throw ApiException.badRequest(
+          "MISSING_STORE", "?store=<storeId> (or ?businessWide=true) is required");
     }
     UUID storeId = com.storeql.web.Parsing.uuid(storeParam, "store");
     service.removeStaff(ctx, userId, storeId);
     return ApiResponse.ok("removed");
+  }
+
+  /**
+   * A write at a store: the store must be the business's (404 otherwise, as ever) and then one the
+   * caller is held to (403 {@code STORE_ACCESS_DENIED}). Existence first, so a store of another
+   * business is a 404 even to a caller held to stores.
+   */
+  private void requireStoreHeld(UUID storeId) {
+    service.getStore(ctx.requireTenantId(), storeId);
+    ctx.requireStoreAccess(storeId);
+  }
+
+  /** A write on a zone: judged by the store the zone really sits in, whatever the path says. */
+  private void requireZoneHeld(UUID pathStoreId, UUID zoneId) {
+    var zone = service.getZone(ctx.requireTenantId(), zoneId);
+    ctx.requireStoreAccess(zone.storeId());
+    ctx.requireStoreAccess(pathStoreId);
   }
 }

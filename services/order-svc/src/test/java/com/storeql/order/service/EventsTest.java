@@ -10,6 +10,7 @@ import com.storeql.order.domain.Domain.OrderItem;
 import com.storeql.order.domain.Domain.ReturnItem;
 import jakarta.json.Json;
 import jakarta.json.JsonObject;
+import jakarta.json.JsonValue;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -148,6 +149,116 @@ class EventsTest {
     // payment-svc reverses the captured payment from these fields for ORIGINAL-tender returns.
     assertEquals("ORIGINAL", json.getString("refundMethod"));
     assertEquals(0, BigDecimal.TEN.compareTo(json.getJsonNumber("refundAmount").bigDecimalValue()));
+  }
+
+  @Test
+  void orderReturnedCarriesTheConditionTheCustomerTheCardAndTheApprover() {
+    UUID customer = Ids.newId();
+    UUID card = Ids.newId();
+    UUID manager = Ids.newId();
+    var sealed =
+        new ReturnItem(
+            Ids.newId(), TENANT, RETURN, VARIANT, BigDecimal.ONE, BigDecimal.TEN, "SEALED");
+    var legacy =
+        new ReturnItem(
+            Ids.newId(), TENANT, RETURN, Ids.newId(), BigDecimal.ONE, BigDecimal.TEN, null);
+    var row =
+        Events.orderReturned(
+            TENANT,
+            ORDER,
+            RETURN,
+            STORE,
+            List.of(sealed, legacy),
+            BigDecimal.TEN,
+            "GIFT_CARD",
+            "GBP",
+            customer,
+            card,
+            true,
+            manager);
+
+    JsonObject json = Json.createReader(new StringReader(row.payload())).readObject();
+    assertEquals(customer.toString(), json.getString("customerId"));
+    assertEquals(card.toString(), json.getString("giftCardId"));
+    assertEquals(manager.toString(), json.getString("approvedBy"));
+    assertEquals(true, json.getBoolean("recall"));
+    assertEquals("SEALED", json.getJsonArray("items").getJsonObject(0).getString("condition"));
+    // A line from before conditions existed says nothing, and the consumer reads that as sellable.
+    assertFalse(json.getJsonArray("items").getJsonObject(1).containsKey("condition"));
+
+    // Every field a consumer already reads is still there.
+    var plain =
+        Events.orderReturned(
+            TENANT, ORDER, RETURN, STORE, List.of(sealed), BigDecimal.TEN, "ORIGINAL", "GBP");
+    JsonObject old = Json.createReader(new StringReader(plain.payload())).readObject();
+    assertEquals("ORIGINAL", old.getString("refundMethod"));
+    assertEquals(RETURN.toString(), old.getString("returnId"));
+    assertEquals(false, old.getBoolean("recall"));
+    assertEquals(JsonValue.ValueType.NULL, old.get("customerId").getValueType());
+    assertEquals(JsonValue.ValueType.NULL, old.get("giftCardId").getValueType());
+    assertEquals(JsonValue.ValueType.NULL, old.get("approvedBy").getValueType());
+  }
+
+  @Test
+  void orderVoidedNamesTheCustomerSoTheirPointsCanBeTakenBack() {
+    UUID customer = Ids.newId();
+    var line = new com.storeql.order.domain.Domain.RestockLine(VARIANT, BigDecimal.ONE);
+    JsonObject json =
+        Json.createReader(
+                new StringReader(
+                    Events.orderVoided(TENANT, ORDER, STORE, customer, List.of(line)).payload()))
+            .readObject();
+    assertEquals(customer.toString(), json.getString("customerId"));
+    assertEquals(1, json.getJsonArray("items").size());
+    JsonObject walkIn =
+        Json.createReader(
+                new StringReader(
+                    Events.orderVoided(TENANT, ORDER, STORE, null, List.of()).payload()))
+            .readObject();
+    assertEquals(JsonValue.ValueType.NULL, walkIn.get("customerId").getValueType());
+  }
+
+  @Test
+  void aReturnsGiftCardLoadIsPaidByReturnAndNamesTheReturn() {
+    var card =
+        new com.storeql.order.domain.Domain.GiftCard(
+            Ids.newId(),
+            TENANT,
+            STORE,
+            "ABCD-EFGH-JKLM-NPQR",
+            BigDecimal.TEN,
+            BigDecimal.TEN,
+            "ACTIVE",
+            "GBP",
+            Instant.now(),
+            null);
+    var tx =
+        new com.storeql.order.domain.Domain.GiftCardTransaction(
+            Ids.newId(),
+            TENANT,
+            card.id(),
+            "ISSUE",
+            BigDecimal.TEN,
+            BigDecimal.ZERO,
+            BigDecimal.TEN,
+            ORDER,
+            RETURN.toString(),
+            Instant.now());
+    JsonObject json =
+        Json.createReader(
+                new StringReader(Events.giftCardLoadedByReturn(card, tx, RETURN).payload()))
+            .readObject();
+    assertEquals("RETURN", json.getString("paidBy"));
+    assertEquals(RETURN.toString(), json.getString("returnId"));
+    assertEquals("ISSUE", json.getString("kind"));
+    assertEquals(card.id().toString(), json.getString("giftCardId"));
+    assertEquals(tx.id().toString(), json.getString("transactionId"));
+    assertEquals("GBP", json.getString("currency"));
+    // A load paid for with a tender carries no return.
+    JsonObject sold =
+        Json.createReader(new StringReader(Events.giftCardLoaded(card, tx, "CASH").payload()))
+            .readObject();
+    assertFalse(sold.containsKey("returnId"));
   }
 
   /**

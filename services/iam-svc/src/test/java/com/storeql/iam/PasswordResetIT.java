@@ -9,6 +9,7 @@ import static org.hamcrest.Matchers.nullValue;
 import com.auth0.jwt.JWT;
 import com.storeql.iam.mfa.Totp;
 import com.storeql.iam.repo.UserRepository;
+import com.storeql.iam.service.AuthService;
 import com.storeql.ids.Ids;
 import com.storeql.test.JsonStub;
 import com.storeql.test.PostgresSupport;
@@ -72,6 +73,7 @@ class PasswordResetIT {
 
   @Inject WebTarget target;
   @Inject UserRepository users;
+  @Inject AuthService auth;
 
   @AfterAll
   static void stopDb() {
@@ -144,11 +146,11 @@ class PasswordResetIT {
   }
 
   /**
-   * As {@link #register}, then bound to a tenant as staff at a store — the login leaves the global
-   * scope, freeing the email for a fresh {@link #register} of the same address.
+   * A staff login made in the business the one way there is — staff provisioning — then bound at a
+   * store. It sits beside a shopper's login with the same address, and beside another business's.
    */
   private UUID staff(String email, String password, UUID tenantId, String tier, UUID storeId) {
-    UUID id = register(email, password);
+    UUID id = Ids.parse(auth.provisionStaff(tenantId, email, password).userId());
     assertThat(users.bindStaffOnce(Ids.newId(), CONSUMER, id, tenantId, tier, storeId), is(true));
     return id;
   }

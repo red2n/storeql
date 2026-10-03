@@ -8,9 +8,9 @@ import com.storeql.tenant.service.BillingService;
 import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.UUID;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.openapi.annotations.Operation;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
 /**
@@ -70,11 +71,17 @@ public class PlatformBillingResource {
   }
 
   @Operation(summary = "Sets what the platform bills as")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED: paymentTermsDays outside 0 to 180, a taxRate not below one or finer"
+              + " than four places, a required field missing; BODY_REQUIRED")
+  @APIResponse(responseCode = "403", description = "FORBIDDEN: not the platform administrator")
   @PUT
   @Path("/profile")
-  public ApiResponse<BillingDtos.ProfileResponse> saveProfile(
-      @Valid BillingDtos.ProfileRequest req) {
+  public ApiResponse<BillingDtos.ProfileResponse> saveProfile(BillingDtos.ProfileRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    Validations.validate(req);
     return ApiResponse.ok(BillingMappers.toDto(svc.saveProfile(req, ctx.requireUserId())));
   }
 
@@ -94,10 +101,17 @@ public class PlatformBillingResource {
   }
 
   @Operation(summary = "Sets a country's rate from a date")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED: a rate not below one, below nothing or finer than four places;"
+              + " BODY_REQUIRED; BILLING_DATE_INVALID")
+  @APIResponse(responseCode = "403", description = "FORBIDDEN: not the platform administrator")
   @PUT
   @Path("/vat-rates")
-  public ApiResponse<List<BillingDtos.RateResponse>> saveRate(@Valid BillingDtos.RateRequest req) {
+  public ApiResponse<List<BillingDtos.RateResponse>> saveRate(BillingDtos.RateRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    Validations.validate(req);
     return ApiResponse.ok(BillingMappers.rates(svc.saveRate(req, ctx.requireUserId())));
   }
 
@@ -115,8 +129,9 @@ public class PlatformBillingResource {
   @POST
   @Path("/tenants/{tenantId}/vat-check")
   public ApiResponse<BillingDtos.SubscriptionFileResponse> recordVatCheck(
-      @PathParam("tenantId") UUID tenantId, @Valid BillingDtos.VatCheckRequest req) {
+      @PathParam("tenantId") UUID tenantId, BillingDtos.VatCheckRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    Validations.validate(req);
     return ApiResponse.ok(
         BillingMappers.toDto(
             subscriptions.recordVatCheck(
@@ -190,12 +205,24 @@ public class PlatformBillingResource {
       summary = "Records money received against an invoice",
       description =
           "Append-only, and it settles the invoice when what has been paid reaches the total. An"
-              + " invoice already withdrawn takes no payment.")
+              + " invoice already withdrawn takes no payment. The amount is in the invoice's"
+              + " currency, to no more places than its minor units.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED or BODY_REQUIRED; PAYMENT_METHOD_UNKNOWN; BILLING_AMOUNT_INVALID: finer"
+              + " than the invoice currency's minor units (100.50 on a JPY invoice)")
+  @APIResponse(responseCode = "403", description = "FORBIDDEN: not the platform administrator")
+  @APIResponse(responseCode = "404", description = "INVOICE_NOT_FOUND")
+  @APIResponse(
+      responseCode = "409",
+      description = "INVOICE_NOT_OPEN: withdrawn, given up on, or already paid")
   @POST
   @Path("/invoices/{invoiceId}/payments")
   public ApiResponse<BillingDtos.InvoiceFileResponse> recordPayment(
-      @PathParam("invoiceId") UUID invoiceId, @Valid BillingDtos.RecordPaymentRequest req) {
+      @PathParam("invoiceId") UUID invoiceId, BillingDtos.RecordPaymentRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    Validations.validate(req);
     return ApiResponse.ok(
         BillingMappers.toDto(svc.recordPayment(invoiceId, req, ctx.requireUserId())));
   }
@@ -208,8 +235,9 @@ public class PlatformBillingResource {
   @POST
   @Path("/invoices/{invoiceId}/void")
   public ApiResponse<BillingDtos.InvoiceFileResponse> voidInvoice(
-      @PathParam("invoiceId") UUID invoiceId, @Valid BillingDtos.VoidRequest req) {
+      @PathParam("invoiceId") UUID invoiceId, BillingDtos.VoidRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    Validations.validate(req);
     return ApiResponse.ok(BillingMappers.toDto(svc.voidInvoice(invoiceId, req.reason())));
   }
 
@@ -259,8 +287,9 @@ public class PlatformBillingResource {
   @PUT
   @Path("/dunning/policy")
   public ApiResponse<BillingDtos.DunningPolicyResponse> setDunningPolicy(
-      @Valid BillingDtos.DunningPolicyRequest req) {
+      BillingDtos.DunningPolicyRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    Validations.validate(req);
     return ApiResponse.ok(
         BillingMappers.toDto(dunning.setPolicy(BillingMappers.policy(req), ctx.requireUserId())));
   }
@@ -325,11 +354,28 @@ public class PlatformBillingResource {
   @PUT
   @Path("/invoices/{invoiceId}/due-date")
   public ApiResponse<BillingDtos.InvoiceResponse> extendDueDate(
-      @PathParam("invoiceId") UUID invoiceId, @Valid BillingDtos.ExtendDueDateRequest req) {
+      @PathParam("invoiceId") UUID invoiceId, BillingDtos.ExtendDueDateRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    Validations.validate(req);
     return ApiResponse.ok(
         BillingMappers.toDto(
             dunning.extendDueDate(
-                invoiceId, day(req.dueDate()), req.reason(), ctx.requireUserId())));
+                invoiceId, date(req.dueDate(), "dueDate"), req.reason(), ctx.requireUserId())));
+  }
+
+  /**
+   * A date the request names as data, such as an invoice's new due date: read as written, whatever
+   * the test clock says. The test clock governs only the day a run is for ({@link #day}); a due
+   * date read through it was refused in every deployment that bills for today only.
+   *
+   * @throws ApiException 400 {@code BILLING_DATE_INVALID} when it is not a date
+   */
+  private static LocalDate date(String value, String field) {
+    try {
+      return LocalDate.parse(value.strip());
+    } catch (java.time.format.DateTimeParseException e) {
+      throw new ApiException(
+          400, "BILLING_DATE_INVALID", field + " is a date, as 2026-09-18", List.of(), e);
+    }
   }
 }

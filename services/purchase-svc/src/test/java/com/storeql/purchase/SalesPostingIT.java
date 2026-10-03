@@ -44,6 +44,7 @@ class SalesPostingIT {
 
   @Inject WebTarget target;
   @Inject SalesEventHandler handler;
+  @Inject com.storeql.purchase.messaging.DeferredRevenueHandler cards;
 
   @AfterAll
   static void stopDb() {
@@ -141,6 +142,131 @@ class SalesPostingIT {
     assertThat(lines("SALE_TENDER").size(), is(4));
   }
 
+  // ── a gift card sold in a sale ──────────────────────────────────────────────
+
+  /** The event order-svc writes for a card issued by the capture that completes a sale. */
+  private static String cardSold(String tenant, String order, String amount, String paidBy) {
+    return "{\"eventId\":\""
+        + Ids.newId()
+        + "\",\"eventType\":\"GiftCardLoaded\",\"tenantId\":\""
+        + tenant
+        + "\",\"giftCardId\":\""
+        + Ids.newId()
+        + "\",\"transactionId\":\""
+        + Ids.newId()
+        + "\",\"kind\":\"ISSUE\",\"amount\":"
+        + amount
+        + ",\"currency\":\"GBP\",\"paidBy\":\""
+        + paidBy
+        + "\",\"storeId\":\""
+        + STORE_A
+        + "\",\"orderId\":\""
+        + order
+        + "\",\"source\":\"SALE\"}";
+  }
+
+  @Test
+  @DisplayName(
+      "Goods plus a card paid in cash: the card's value credits the liability once, against"
+          + " clearing, and the order nets to zero")
+  void goodsPlusACardNetsClearingAndPostsTheLiabilityOnce() {
+    String order = Ids.newId().toString();
+    String tender = captured(T, Ids.newId().toString(), order, "100.00", "CASH");
+    // OrderConfirmed is net of the 40.00 card: 60.00 of goods, 10.00 of VAT inside it.
+    String sale = confirmed(T, order, "60.00", "10.00");
+    String card = cardSold(T, order, "40.00", "CASH");
+    handler.paymentCaptured(tender);
+    handler.orderConfirmed(sale);
+    cards.giftCardLoaded(card);
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "1210"), "100.00");
+    same(row(tb, "4010"), "-50.00");
+    same(row(tb, "2200"), "-10.00");
+    same(row(tb, "2310"), "-40.00");
+    same(row(tb, "1105"), "0");
+    assertThat(clearing("").size(), is(0));
+    assertThat(lines("GIFT_CARD_LOAD").size(), is(2));
+    assertThat(lines("GIFT_CARD_LOAD").get(0).asJsonObject().getString("sourceRef"), is(order));
+
+    // Replayed: the same event, and the tender and sale again, move nothing.
+    cards.giftCardLoaded(card);
+    handler.paymentCaptured(tender);
+    handler.orderConfirmed(sale);
+    same(row(trialBalance(), "2310"), "-40.00");
+    same(row(trialBalance(), "1210"), "100.00");
+    assertThat(lines("GIFT_CARD_LOAD").size(), is(2));
+    assertThat(clearing("").size(), is(0));
+  }
+
+  @Test
+  @DisplayName("A split tender pays for goods and a card; the card is not debited to either tender")
+  void aSplitTenderSaleWithACardNetsClearing() {
+    String order = Ids.newId().toString();
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "70.00", "CASH"));
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "50.00", "CARD"));
+    // 120.00 taken: 80.00 of goods (VAT 10.00) and a 40.00 card. The capture that completed the
+    // sale was the card tender, and that is the paidBy the event carries.
+    handler.orderConfirmed(confirmed(T, order, "80.00", "10.00"));
+    cards.giftCardLoaded(cardSold(T, order, "40.00", "CARD"));
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "1210"), "70.00");
+    same(row(tb, "1250"), "50.00");
+    same(row(tb, "2310"), "-40.00");
+    same(row(tb, "4010"), "-70.00");
+    same(row(tb, "1105"), "0");
+    assertThat(clearing("").size(), is(0));
+  }
+
+  @Test
+  @DisplayName("A sale of a card alone (a confirmation of nothing) posts the liability and nets")
+  void aCardOnlySaleNetsClearing() {
+    String order = Ids.newId().toString();
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "25.00", "CARD"));
+    handler.orderConfirmed(confirmed(T, order, "0", "0"));
+    // The order has no goods lines: a confirmation without any is read as it always was.
+    handler.orderConfirmed(
+        confirmed(T, order, "0", "0").replace("\"currency\"", "\"lines\":[],\"currency\""));
+    cards.giftCardLoaded(cardSold(T, order, "25.00", "CARD"));
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "1250"), "25.00");
+    same(row(tb, "2310"), "-25.00");
+    same(row(tb, "4010"), "0");
+    same(row(tb, "1105"), "0");
+    assertThat(lines("SALE").size(), is(0));
+    assertThat(clearing("").size(), is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "A card loaded by hand is value given away: the goodwill expense against the liability, with"
+          + " the reason on the journal, once; it never touches clearing")
+  void aHandLoadedCardIsAnExpense() {
+    String order = Ids.newId().toString();
+    String hand =
+        cardSold(T, order, "15.00", "PROMOTIONAL")
+            .replace(",\"orderId\":\"" + order + "\"", "")
+            .replace("\"source\":\"SALE\"", "\"source\":\"GOODWILL\",\"note\":\"late delivery\"");
+    cards.giftCardLoaded(hand);
+    cards.giftCardLoaded(hand);
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "6420"), "15.00");
+    same(row(tb, "2310"), "-15.00");
+    same(row(tb, "1105"), "0");
+    JsonArray posted = lines("GIFT_CARD_LOAD");
+    assertThat(posted.size(), is(2));
+    assertThat(
+        posted.get(0).asJsonObject().getString("description"),
+        containsString("free of charge (GOODWILL): late delivery"));
+    assertThat(clearing("").size(), is(0));
+  }
+
   @Test
   @DisplayName("A refund takes back revenue and VAT in the sale's ratio and credits the tender")
   void aRefundReversesRevenueVatAndTheTender() {
@@ -182,6 +308,124 @@ class SalesPostingIT {
     // A refund from before payment-svc sent shares goes to unallocated receipts, not a guess.
     handler.paymentRefunded(refunded(T, order, "2.00", null));
     same(row(trialBalance(), "1299"), "4.00");
+  }
+
+  @Test
+  @DisplayName(
+      "A return refunded to store credit or a gift card credits that liability, not the tender")
+  void aReturnToStoreCreditOrGiftCardCreditsItsLiability() {
+    String order = Ids.newId().toString();
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), order, "120.00", "CARD"));
+    handler.orderConfirmed(confirmed(T, order, "120.00", "20.00"));
+
+    String credit =
+        refunded(
+                T,
+                order,
+                "30.00",
+                "{\"paymentId\":\""
+                    + Ids.newId()
+                    + "\",\"method\":\"STORE_CREDIT\",\"amount\":30.00}")
+            .replace(
+                "\"amount\":30.00}]",
+                "\"amount\":30.00}],\"refundMethod\":\"STORE_CREDIT\",\"returnId\":\""
+                    + Ids.newId()
+                    + "\",\"customerId\":\""
+                    + Ids.newId()
+                    + "\"");
+    handler.paymentRefunded(credit);
+    handler.paymentRefunded(credit);
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "4010"), "-75.00");
+    same(row(tb, "2200"), "-15.00");
+    same(row(tb, "2320"), "-30.00");
+    same(row(tb, "1250"), "120.00");
+    same(row(tb, "1105"), "0");
+
+    handler.paymentRefunded(
+        refunded(
+            T,
+            order,
+            "12.00",
+            "{\"paymentId\":\"" + Ids.newId() + "\",\"method\":\"GIFT_CARD\",\"amount\":12.00}"));
+    tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "2310"), "-12.00");
+    same(row(tb, "2320"), "-30.00");
+    same(row(tb, "4010"), "-65.00");
+    same(row(tb, "2200"), "-13.00");
+  }
+
+  private static String noReceipt(String tenant, String returnId, String method, String amount) {
+    return "{\"eventId\":\""
+        + Ids.newId()
+        + "\",\"eventType\":\"NoReceiptReturnRecorded\",\"tenantId\":\""
+        + tenant
+        + "\",\"returnId\":\""
+        + returnId
+        + "\",\"storeId\":\""
+        + STORE_A
+        + "\",\"currency\":\"GBP\",\"amount\":"
+        + amount
+        + ",\"taxAmount\":2.00,\"refundMethod\":\""
+        + method
+        + "\",\"approvedBy\":\""
+        + USER
+        + "\",\"items\":[]}";
+  }
+
+  @Test
+  @DisplayName("An exchange refund and the new sale's EXCHANGE tender net to zero on 1260")
+  void anExchangeNetsToZero() {
+    String oldOrder = Ids.newId().toString();
+    String newOrder = Ids.newId().toString();
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), oldOrder, "120.00", "CARD"));
+    handler.orderConfirmed(confirmed(T, oldOrder, "120.00", "20.00"));
+    handler.paymentRefunded(
+        refunded(
+            T,
+            oldOrder,
+            "30.00",
+            "{\"paymentId\":\"" + Ids.newId() + "\",\"method\":\"EXCHANGE\",\"amount\":30.00}"));
+    handler.paymentCaptured(captured(T, Ids.newId().toString(), newOrder, "30.00", "EXCHANGE"));
+    handler.orderConfirmed(confirmed(T, newOrder, "30.00", "5.00"));
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "1260"), "0");
+    same(row(tb, "2310"), "0");
+    same(row(tb, "4030"), "0");
+    same(row(tb, "1105"), "0");
+    assertThat(clearing("").size(), is(0));
+  }
+
+  @Test
+  @DisplayName("A no-receipt return posts sales and VAT against the liability once, per business")
+  void aNoReceiptReturnIsPostedOnce() {
+    String ret = Ids.newId().toString();
+    String credit = noReceipt(T, ret, "STORE_CREDIT", "12.00");
+    handler.noReceiptReturn(credit);
+    handler.noReceiptReturn(credit);
+    handler.noReceiptReturn(noReceipt(T, Ids.newId().toString(), "GIFT_CARD", "6.00"));
+
+    JsonObject tb = trialBalance();
+    assertThat(tb.getBoolean("balanced"), is(true));
+    same(row(tb, "2320"), "-12.00");
+    same(row(tb, "2310"), "-6.00");
+    // Each return carries 2.00 of VAT: 18.00 credited, 4.00 of it VAT, 14.00 off sales.
+    same(row(tb, "4010"), "14.00");
+    same(row(tb, "2200"), "4.00");
+    JsonArray posted = lines("NO_RECEIPT_RETURN");
+    assertThat(posted.size(), is(6));
+    assertThat(posted.getJsonObject(0).getString("storeId"), is(STORE_A));
+    // Another business sees nothing.
+    assertThat(dataArray(get("/nominal-ledger?limit=100", T2, "OWNER")).size(), is(0));
+    // Malformed and unknown methods post nothing.
+    handler.noReceiptReturn(noReceipt(T, Ids.newId().toString(), "CASH", "5.00"));
+    handler.noReceiptReturn("{\"eventType\":\"NoReceiptReturnRecorded\"}");
+    assertThat(lines("NO_RECEIPT_RETURN").size(), is(6));
   }
 
   // ── the clearing report: what did not net ───────────────────────────────────

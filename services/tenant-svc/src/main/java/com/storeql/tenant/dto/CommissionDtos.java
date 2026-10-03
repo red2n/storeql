@@ -47,8 +47,22 @@ public final class CommissionDtos {
 
   @Schema(name = "CommissionBandRequest")
   public record BandRequest(
-      @NotNull @DecimalMin("0") BigDecimal thresholdFrom,
-      @NotNull @DecimalMin("0") BigDecimal rate) {}
+      @Schema(
+              description =
+                  "Where the band starts: an amount of the business's currency for PERCENT_OF_NET,"
+                      + " held to that currency's minor units (none for JPY, three for KWD); a"
+                      + " whole number of units for PER_UNIT.")
+          @NotNull
+          @DecimalMin("0")
+          @Fits(integer = 16, fraction = 4)
+          BigDecimal thresholdFrom,
+      @Schema(
+              description =
+                  "A percentage, or an amount per unit: a rate, kept to four decimal places.")
+          @NotNull
+          @DecimalMin("0")
+          @Fits(integer = 8, fraction = 4)
+          BigDecimal rate) {}
 
   @Schema(
       name = "CommissionSchemeRequest",
@@ -86,8 +100,16 @@ public final class CommissionDtos {
   @Schema(name = "CommissionDayRequest", description = "What one person sold on one day.")
   public record DayRequest(
       @NotBlank @Size(max = 10) String day,
-      @Schema(description = "Net of VAT and after discounts.") @NotNull BigDecimal net,
-      @Schema(description = "Units sold, for a per-unit arrangement.") BigDecimal units) {}
+      // A day's figures as the selling service sends them: its net at its currency's minor units
+      // (never more than four), its units at a quantity's three places. Either may be below
+      // zero, where returns outweigh sales.
+      @Schema(description = "Net of VAT and after discounts.")
+          @NotNull
+          @Fits(integer = 16, fraction = 4)
+          BigDecimal net,
+      @Schema(description = "Units sold, for a per-unit arrangement.")
+          @Fits(integer = 16, fraction = 3)
+          BigDecimal units) {}
 
   @Schema(name = "CommissionSellerRequest")
   public record SellerRequest(

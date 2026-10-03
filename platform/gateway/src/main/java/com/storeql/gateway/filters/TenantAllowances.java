@@ -1,6 +1,7 @@
 package com.storeql.gateway.filters;
 
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.gateway.ControlPlane;
 import com.storeql.web.HttpHeaders;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.WebClient;
@@ -12,9 +13,7 @@ import jakarta.json.JsonValue;
 import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.util.Map;
 import java.util.OptionalLong;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * What a business's plan allows it a minute (21.11), as tenant-svc states it, cached here for a
@@ -44,35 +43,24 @@ public class TenantAllowances {
   private static final String READER_ROLE = "STOREKEEPER";
 
   @Inject ServiceRegistry registry;
-  @Inject WebClient webClient;
+  @Inject @ControlPlane WebClient webClient;
 
-  private record Cached(OptionalLong perMinute, long expiresAt) {}
+  private final LookupCache<OptionalLong> cache =
+      new LookupCache<>(MAX_ENTRIES, TTL_MILLIS, true, System::currentTimeMillis);
 
-  private final Map<String, Cached> cache = new ConcurrentHashMap<>();
-
-  /** The plan's requests a minute for a business, or empty when nothing limits it. */
+  /**
+   * The plan's requests a minute for a business, or empty when nothing limits it. One lookup
+   * however many requests arrive at once; the last answer is used while it is refreshed.
+   */
   public OptionalLong requestsPerMinute(String tenantId) {
-    long now = System.currentTimeMillis();
-    Cached c = cache.get(tenantId);
-    if (c != null && c.expiresAt() > now) {
-      return c.perMinute();
-    }
-    OptionalLong read = lookup(tenantId);
-    if (cache.size() >= MAX_ENTRIES && !cache.containsKey(tenantId)) {
-      cache.values().removeIf(v -> v.expiresAt() <= now);
-      if (cache.size() >= MAX_ENTRIES) {
-        var it = cache.keySet().iterator();
-        if (it.hasNext()) {
-          it.next();
-          it.remove();
-        }
-      }
-    }
-    cache.put(tenantId, new Cached(read, now + TTL_MILLIS));
-    return read;
+    return cache.get(tenantId, this::lookup, v -> true);
   }
 
-  private OptionalLong lookup(String tenantId) {
+  int cacheSize() {
+    return cache.size();
+  }
+
+  OptionalLong lookup(String tenantId) {
     var instance = registry.resolve("tenant-svc");
     if (instance.isEmpty()) {
       return OptionalLong.empty(); // cannot resolve tenant-svc → unlimited

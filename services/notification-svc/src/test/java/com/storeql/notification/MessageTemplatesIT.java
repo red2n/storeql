@@ -4,8 +4,9 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.in;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.isIn;
+import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.notification.service.Messages;
@@ -268,6 +269,64 @@ class MessageTemplatesIT {
         call("PUT", ORDER_PL, tenant, "CUSTOMER", words("a", "{{order}}")).status(), is(403));
   }
 
+  /** Flow catalogue MKT-23: a cashier or storekeeper reads, writes, retires or previews nothing. */
+  @Test
+  @DisplayName("Cashiers and storekeepers can neither read nor write templates or their settings")
+  void staffBelowManagerTouchNoTemplate() {
+    UUID tenant = Ids.newId();
+    assertThat(
+        call("PUT", ORDER_PL, tenant, "OWNER", words("Zamówienie {{order}}", "Razem {{total}}"))
+            .status(),
+        is(200));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, call("GET", "/templates", tenant, role, null).status(), is(403));
+      assertThat(role, call("GET", ORDER_PL, tenant, role, null).status(), is(403));
+      assertThat(
+          role, call("PUT", ORDER_PL, tenant, role, words("x", "{{order}}")).status(), is(403));
+      assertThat(role, call("DELETE", ORDER_PL, tenant, role, null).status(), is(403));
+      assertThat(
+          role,
+          call("POST", ORDER_PL + "/preview", tenant, role, words("x", "{{order}}")).status(),
+          is(403));
+      assertThat(role, call("GET", "/template-settings", tenant, role, null).status(), is(403));
+    }
+    // Nothing moved: the owner's wording is still version 1.
+    assertThat(call("GET", ORDER_PL, tenant, "OWNER", null).data().getInt("version"), is(1));
+  }
+
+  /**
+   * Flow catalogue MKT-24: one business's wording is never another's, read, retired or replaced.
+   */
+  @Test
+  @DisplayName("Another business, owner or manager, sees only the platform's words, never ours")
+  void aBusinessesTemplatesAreItsOwn() {
+    UUID ours = Ids.newId();
+    UUID theirs = Ids.newId();
+    assertThat(
+        call("PUT", ORDER_PL, ours, "OWNER", words("Nasze {{order}}", "Nasze {{total}}")).status(),
+        is(200));
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer read = call("GET", ORDER_PL, theirs, role, null);
+      assertThat(role, read.data().getString("source"), is("DEFAULT"));
+      assertThat(role, read.body().toString(), not(containsString("Nasze")));
+      assertThat(
+          role,
+          call("GET", "/templates", theirs, role, null).body().toString(),
+          not(containsString("\"language\":\"pl\",\"version\":1")));
+      Answer retire = call("DELETE", ORDER_PL, theirs, role, null);
+      assertThat(role, retire.status(), is(404));
+      assertThat(role, retire.code(), is("TEMPLATE_NOT_WRITTEN"));
+    }
+    // Their own write lands beside ours as their version 1, and ours is untouched.
+    Answer theirWords =
+        call("PUT", ORDER_PL, theirs, "OWNER", words("Ich {{order}}", "Ich {{total}}"));
+    assertThat(theirWords.data().getInt("version"), is(1));
+    Answer ourRead = call("GET", ORDER_PL, ours, "OWNER", null);
+    assertThat(ourRead.data().getInt("version"), is(1));
+    assertThat(ourRead.body().toString(), containsString("Nasze"));
+    assertThat(ourRead.body().toString(), not(containsString("Ich")));
+  }
+
   @Test
   @DisplayName("Five saves at once: one live version, every version numbered once")
   void savesRacingEachOther() throws Exception {
@@ -284,7 +343,7 @@ class MessageTemplatesIT {
     List<Integer> statuses = new ArrayList<>();
     for (Future<Integer> f : pool.invokeAll(saves)) statuses.add(f.get());
     pool.shutdown();
-    assertThat(statuses, everyItem(isIn(List.of(200, 409))));
+    assertThat(statuses, everyItem(is(in(List.of(200, 409)))));
     assertThat(statuses, hasItem(200));
     try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
       c.setSchema("notification");

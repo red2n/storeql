@@ -184,4 +184,21 @@ class DropshipIT {
     assertThat(lists(after, DROP_V), is(false));
     assertThat(reserve(DROP_V, 1).getStatus(), is(422));
   }
+
+  @Test
+  void aSourcingEventNamingNeitherStockNorDropshipIsRefusedAndRemembersNothing() {
+    var refused =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.storeql.web.ApiException.class,
+            () -> sourcing.handle(sourced(Ids.newId().toString(), DROP_V, "WAREHOUSE")));
+    assertThat(refused.status(), is(400));
+    assertThat(refused.code(), is("INVENTORY_SOURCING_INVALID"));
+
+    // Nothing written: the variant is still sourced from the shelf, and the event is not marked
+    // processed, so purchase-svc's corrected word is not mistaken for a replay.
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.variant_sourcing"), is("0"));
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.processed_events"), is("0"));
+    assertThat(
+        lists(Envelopes.okArray(get("/inventory/availability?store=" + S)), DROP_V), is(false));
+  }
 }

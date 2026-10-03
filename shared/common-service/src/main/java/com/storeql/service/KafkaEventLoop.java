@@ -47,6 +47,9 @@ public final class KafkaEventLoop implements AutoCloseable {
    */
   private static final int MAX_ATTEMPTS = 5;
 
+  /** Pause after a poll in which a record failed, before it is redelivered. */
+  private static final long RETRY_BACKOFF_MS = 2000;
+
   private final String name;
   private final String bootstrap;
   private final Handler handler;
@@ -107,6 +110,10 @@ public final class KafkaEventLoop implements AutoCloseable {
     props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, offsetReset);
     // Manual commit: auto-commit would ack records whose handler failed (lost events).
     props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+    // A poll's batch must finish well inside max.poll.interval.ms: bounded, configurable.
+    props.put(
+        ConsumerConfig.MAX_POLL_RECORDS_CONFIG,
+        String.valueOf(Cfg.getLong("storeql.kafka.max-poll-records", 100L)));
     this.consumer = new KafkaConsumer<>(props);
     this.consumer.subscribe(topics);
     this.scheduler =
@@ -119,17 +126,26 @@ public final class KafkaEventLoop implements AutoCloseable {
   }
 
   /**
-   * Starts polling on a dedicated daemon thread, ticking every 2 seconds. Idempotent to call only
-   * once per instance — call {@link #close()} and construct a new loop to restart.
+   * Starts polling on a dedicated daemon thread, ticking every {@code storeql.kafka.poll-delay-ms}
+   * (default 50) milliseconds after the previous poll finished. Idempotent to call only once per
+   * instance — call {@link #close()} and construct a new loop to restart.
    */
   /** Where this loop's group starts with no committed offset: what it was built with. */
   String offsetReset() {
     return offsetReset;
   }
 
+  private static long pollDelayMillis() {
+    return Math.max(1, Cfg.getLong("storeql.kafka.poll-delay-ms", 50L));
+  }
+
   public void start() {
     running = true;
-    scheduler.scheduleWithFixedDelay(this::pollQuietly, 2, 2, TimeUnit.SECONDS);
+    // poll() already waits up to 500 ms for records, so the pause between ticks can be tiny: a
+    // backlog is drained back to back instead of one batch per 2 s. A failed record is the one
+    // case that must wait (see RETRY_BACKOFF_MS) so its 5 attempts are not burnt in a blink.
+    long delayMs = pollDelayMillis();
+    scheduler.scheduleWithFixedDelay(this::pollQuietly, 2000, delayMs, TimeUnit.MILLISECONDS);
     LOG.log(Level.INFO, "{0} started", name);
   }
 
@@ -190,6 +206,11 @@ public final class KafkaEventLoop implements AutoCloseable {
       // Seek resets the position, so commitSync() acks exactly up to (not including) failures.
       rewind.forEach(consumer::seek);
       consumer.commitSync();
+      if (!rewind.isEmpty()) {
+        Thread.sleep(RETRY_BACKOFF_MS);
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     } catch (WakeupException e) {
       LOG.log(Level.DEBUG, "{0} woken for shutdown", name);
     } catch (Exception e) {

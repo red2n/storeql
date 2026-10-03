@@ -158,8 +158,107 @@ void main() {
     final body = put.data is String ? jsonDecode(put.data as String) : put.data;
     expect(body['currency'], 'GBP');
     expect(body['leadTimeDays'], 4);
+    // The price goes as the decimal typed: a double could not carry every
+    // price a batch's cost can.
     expect(body['lines'], [
-      {'variantId': _va, 'unitPrice': 9.5},
+      {'variantId': _va, 'unitPrice': '9.5'},
+    ]);
+  });
+
+  // A price is read the way the app's language writes it, and one it cannot
+  // read is refused where it was typed — never recorded at 0.00, where the
+  // comparison ranked it lowest and an award raised an order at nothing.
+  Future<void> openQuote(WidgetTester tester) async {
+    await _openDetail(tester);
+    await tester.tap(find.byKey(const Key('rfq-quote-$_s1')));
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> save(WidgetTester tester) async {
+    await tester.tap(find.byKey(const Key('quote-save')));
+    await tester.pumpAndSettle();
+  }
+
+  String? priceSays(WidgetTester tester, String variantId) => tester
+      .widget<TextField>(find.byKey(Key('quote-price-$variantId')))
+      .decoration
+      ?.errorText;
+
+  List<RequestOptions> puts(_Server s) => s.requests.where((r) => r.method == 'PUT').toList();
+
+  testWidgets('in Romanian, a quoted 12,50 is twelve fifty, and the prices already quoted read as Romanian writes them',
+      (tester) async {
+    Intl.defaultLocale = 'ro';
+    final server = await _pump(tester);
+    await openQuote(tester);
+    expect(tester.widget<TextField>(find.byKey(const Key('quote-price-$_vb'))).controller!.text, '4,00');
+    await tester.enterText(find.byKey(const Key('quote-price-$_va')), '12,50');
+    await tester.pump();
+    expect(priceSays(tester, _va), isNull);
+    await save(tester);
+    final put = puts(server).single;
+    final body = put.data is String ? jsonDecode(put.data as String) : put.data;
+    expect(body['lines'], [
+      {'variantId': _va, 'unitPrice': '12.5'},
+      {'variantId': _vb, 'unitPrice': '4'},
+    ]);
+  });
+
+  for (final (locale, typed, why) in [
+    ('ro', '12.50', 'Type the amount without thousands separators. Decimals go after a comma.'),
+    ('en_GB', '12,50', 'Type the amount without thousands separators. Decimals go after a point.'),
+    ('en_GB', 'twelve', 'Only digits and a decimal point.'),
+    ('en_GB', '-12', 'Type the amount without a sign.'),
+  ]) {
+    testWidgets('in $locale, a quoted $typed is refused where it was typed and nothing is recorded',
+        (tester) async {
+      Intl.defaultLocale = locale;
+      final server = await _pump(tester);
+      await openQuote(tester);
+      await tester.enterText(find.byKey(const Key('quote-price-$_va')), typed);
+      await tester.pump();
+      expect(priceSays(tester, _va), why);
+      await save(tester);
+      expect(puts(server), isEmpty, reason: 'never recorded at 0');
+      expect(find.byKey(const Key('quote-refusal')), findsOneWidget);
+      expect(find.byType(RecordQuoteDialog), findsOneWidget, reason: 'the dialog stays open to correct it');
+    });
+  }
+
+  // The quoted lead time is whole days. Text that is not a number of days
+  // was recorded as a quote with no lead time, and is now refused under its
+  // field with nothing recorded.
+  for (final (typed, why) in [
+    ('1,000', 'Type the amount without thousands separators.'),
+    ('15.', 'Whole amounts only.'),
+    ('.', 'Whole amounts only.'),
+    ('-', 'Type the amount without a sign.'),
+    ('+5', 'Type the amount without a sign.'),
+    ('0x10', 'Only digits.'),
+  ]) {
+    testWidgets('a lead time of "$typed" is refused where it was typed and nothing is recorded',
+        (tester) async {
+      final server = await _pump(tester);
+      await openQuote(tester);
+      await tester.enterText(find.byKey(const Key('quote-lead')), typed);
+      await tester.pump();
+      expect(tester.widget<TextField>(find.byKey(const Key('quote-lead'))).decoration?.errorText, why);
+      await save(tester);
+      expect(puts(server), isEmpty, reason: 'never recorded with no lead time');
+      expect(find.byKey(const Key('quote-refusal')), findsOneWidget);
+    });
+  }
+
+  testWidgets('a free line is quoted at nought', (tester) async {
+    final server = await _pump(tester);
+    await openQuote(tester);
+    await tester.enterText(find.byKey(const Key('quote-price-$_va')), '0');
+    await tester.enterText(find.byKey(const Key('quote-price-$_vb')), '');
+    await save(tester);
+    final put = puts(server).single;
+    final body = put.data is String ? jsonDecode(put.data as String) : put.data;
+    expect(body['lines'], [
+      {'variantId': _va, 'unitPrice': '0'},
     ]);
   });
 

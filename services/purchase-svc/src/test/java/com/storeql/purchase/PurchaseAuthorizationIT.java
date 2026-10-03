@@ -124,6 +124,12 @@ class PurchaseAuthorizationIT {
     // invent inside a spend-limit feature. The test is here so the decision is visible rather than
     // implied, and so that changing it breaks something.
     String po = draftOrder("CASHIER");
+    // An order has something on it before it goes anywhere (the owner adds the line; what is being
+    // pinned is who may send it).
+    assertThat(
+        post("/purchase-orders/" + po + "/lines", PurchaseFixtures.lineJson(1, "10.00"), "OWNER")
+            .getStatus(),
+        is(201));
     Response submit = post("/purchase-orders/" + po + "/submit", "{}", "CASHIER");
     assertThat(submit.getStatus(), is(200));
     assertThat(submit.readEntity(String.class).contains("\"status\":\"SUBMITTED\""), is(true));
@@ -132,7 +138,8 @@ class PurchaseAuthorizationIT {
   // ── helpers ─────────────────────────────────────────────────────────────────
 
   private String draftOrder(String role) {
-    Response sup = post("/suppliers", "{\"name\":\"auth-" + Ids.newId() + "\"}", role);
+    // Adding a supplier is warehouse and management work; the role under test raises the order.
+    Response sup = post("/suppliers", "{\"name\":\"auth-" + Ids.newId() + "\"}", "OWNER");
     assertThat(sup.getStatus(), is(201));
     String supId = id(sup.readEntity(String.class));
     Response po =

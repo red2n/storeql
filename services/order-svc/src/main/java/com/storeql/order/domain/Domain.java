@@ -2,6 +2,7 @@ package com.storeql.order.domain;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /** Domain records for order-svc. Money is BigDecimal; times are UTC Instant. */
@@ -789,13 +790,75 @@ public final class Domain {
       String status,
       Instant createdAt,
       Instant completedAt,
-      UUID createdBy) {
+      UUID createdBy,
+      UUID idempotencyKey,
+      UUID approvedBy,
+      List<String> outsidePolicy,
+      UUID giftCardId,
+      /** The sale a direct exchange bought, when this return is one; null otherwise. */
+      UUID exchangeOrderId,
+      /** True for a return with no receipt: {@code orderId} is then null. */
+      boolean noReceipt,
+      /** The customer a no-receipt refund goes to (store credit); null when none is named. */
+      UUID customerId,
+      /** The phone or email a no-receipt customer gave; null for a return against a sale. */
+      String customerContact) {
+
+    /** A return against a sale that is no exchange and no no-receipt return. */
+    public Return(
+        UUID id,
+        UUID tenantId,
+        UUID orderId,
+        UUID storeId,
+        String reason,
+        BigDecimal refundAmount,
+        String refundMethod,
+        String status,
+        Instant createdAt,
+        Instant completedAt,
+        UUID createdBy,
+        UUID idempotencyKey,
+        UUID approvedBy,
+        List<String> outsidePolicy,
+        UUID giftCardId) {
+      this(
+          id,
+          tenantId,
+          orderId,
+          storeId,
+          reason,
+          refundAmount,
+          refundMethod,
+          status,
+          createdAt,
+          completedAt,
+          createdBy,
+          idempotencyKey,
+          approvedBy,
+          outsidePolicy,
+          giftCardId,
+          null,
+          false,
+          null,
+          null);
+    }
+
     public static final String STATUS_PENDING = "PENDING";
     public static final String STATUS_COMPLETED = "COMPLETED";
     public static final String STATUS_REJECTED = "REJECTED";
     public static final String METHOD_ORIGINAL = "ORIGINAL";
     public static final String METHOD_STORE_CREDIT = "STORE_CREDIT";
     public static final String METHOD_GIFT_CARD = "GIFT_CARD";
+
+    /** A direct exchange: the returned value pays the new basket. Not a choice a caller makes. */
+    public static final String METHOD_EXCHANGE = "EXCHANGE";
+
+    /** The reason a no-receipt return needs a manager, beside the policy's own reasons. */
+    public static final String NO_RECEIPT = "NO_RECEIPT";
+
+    /** What a caller may choose on a return against a sale. */
+    public static final List<String> METHODS =
+        List.of(METHOD_ORIGINAL, METHOD_STORE_CREDIT, METHOD_GIFT_CARD);
   }
 
   public record ReturnItem(
@@ -805,7 +868,31 @@ public final class Domain {
       UUID variantId,
       BigDecimal qty,
       BigDecimal refundAmount,
-      String condition) {}
+      String condition,
+      /** A no-receipt line's unit price, VAT included; null on a return against a sale. */
+      BigDecimal unitPrice,
+      /** The VAT in a no-receipt line; null on a return against a sale. */
+      BigDecimal taxAmount) {
+
+    /** A line of a return against a sale, whose price is the sale's. */
+    public ReturnItem(
+        UUID id,
+        UUID tenantId,
+        UUID returnId,
+        UUID variantId,
+        BigDecimal qty,
+        BigDecimal refundAmount,
+        String condition) {
+      this(id, tenantId, returnId, variantId, qty, refundAmount, condition, null, null);
+    }
+
+    public static final String CONDITION_SEALED = "SEALED";
+    public static final String CONDITION_OPENED = "OPENED";
+    public static final String CONDITION_DAMAGED = "DAMAGED";
+    public static final String CONDITION_FAULTY = "FAULTY";
+    public static final List<String> CONDITIONS =
+        List.of(CONDITION_SEALED, CONDITION_OPENED, CONDITION_DAMAGED, CONDITION_FAULTY);
+  }
 
   // ── Post-void (Gap #14) ───────────────────────────────────────────────────
 
@@ -817,7 +904,8 @@ public final class Domain {
       UUID storeId,
       String reason,
       UUID voidedBy,
-      Instant voidedAt) {}
+      Instant voidedAt,
+      UUID idempotencyKey) {}
 
   // ── Layaway (Gap #14) ─────────────────────────────────────────────────────
 
@@ -876,6 +964,26 @@ public final class Domain {
     public static final String STATUS_CANCELLED = "CANCELLED";
   }
 
+  /**
+   * A gift card sold as a line of an order. The card is issued (or topped up, when {@code
+   * targetCode} names one) when the order is paid, for {@code amount}; {@code giftCardId} is null
+   * until then and written once.
+   */
+  public record GiftCardLoadLine(
+      UUID id,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal amount,
+      String targetCode,
+      UUID giftCardId) {}
+
+  /**
+   * A gift-card line of an order as staff read it: pending (no card) until the sale is paid, then
+   * the card's id and code, whether it was a new card or a top-up, and when it was loaded.
+   */
+  public record GiftCardLoadView(
+      UUID id, BigDecimal amount, UUID giftCardId, String code, String kind, Instant loadedAt) {}
+
   /** Append-only debit/credit ledger for a gift card. */
   public record GiftCardTransaction(
       UUID id,
@@ -893,6 +1001,7 @@ public final class Domain {
     public static final String TX_REDEEM = "REDEEM";
     public static final String TX_REFUND = "REFUND";
     public static final String TX_CANCEL = "CANCEL";
+    public static final String TX_LOAD_REVERSED = "LOAD_REVERSED";
   }
 
   // ── Gap #42: Special orders ───────────────────────────────────────────────
@@ -1058,7 +1167,10 @@ public final class Domain {
    * One sensitive action read back from the append-only log that recorded it: who did what, when,
    * at which store, to which order, with what money and reason. {@code detail} is the log's own
    * qualifier — the role that authorised a discount, the status a cancel came from, the refund
-   * method of a return, the supervisor who authorised a no-sale.
+   * method of a return, the supervisor who authorised a no-sale, the recall an offline sale sold
+   * under, the standing of the scale one was weighed on. {@code variantId} is the product line an
+   * offline sale's entry is about, and null for every other log; {@code replayedBy} is who sent
+   * that sale from the till's queue, and {@code actorId} on it who rang it up, null when unknown.
    */
   public record AuditEvent(
       UUID id,
@@ -1069,14 +1181,87 @@ public final class Domain {
       UUID orderId,
       BigDecimal amount,
       String reason,
-      String detail) {
+      String detail,
+      UUID variantId,
+      UUID replayedBy,
+      UUID approvedBy,
+      List<String> outsidePolicy,
+      List<AuditReturnLine> lines) {
     public static final String TYPE_DISCOUNT = "DISCOUNT";
     public static final String TYPE_VOID = "VOID";
     public static final String TYPE_NO_SALE = "NO_SALE";
     public static final String TYPE_CANCEL = "CANCEL";
     public static final String TYPE_RETURN = "RETURN";
+    public static final String TYPE_PRICED = "PRICED";
+    public static final String TYPE_OFFLINE_SALE_OF_RECALLED_ITEM =
+        OfflineSaleFlag.KIND_RECALLED_ITEM;
+    public static final String TYPE_OFFLINE_SALE_ON_UNFIT_SCALE = OfflineSaleFlag.KIND_UNFIT_SCALE;
     public static final java.util.List<String> TYPES =
-        java.util.List.of(TYPE_DISCOUNT, TYPE_VOID, TYPE_NO_SALE, TYPE_CANCEL, TYPE_RETURN);
+        java.util.List.of(
+            TYPE_DISCOUNT,
+            TYPE_VOID,
+            TYPE_NO_SALE,
+            TYPE_CANCEL,
+            TYPE_RETURN,
+            TYPE_PRICED,
+            TYPE_OFFLINE_SALE_OF_RECALLED_ITEM,
+            TYPE_OFFLINE_SALE_ON_UNFIT_SCALE);
+  }
+
+  /** One line of a return, as the audit trail shows it: what came back, how much, in what state. */
+  public record AuditReturnLine(UUID variantId, BigDecimal qty, String condition) {}
+
+  /**
+   * A till sale replayed from the offline queue within the grace, and recorded, although when it
+   * was rung up one of its lines was stock an open recall covered ({@link #KIND_RECALLED_ITEM}) or
+   * was weighed on a scale not fit for trade at the store ({@link #KIND_UNFIT_SCALE}). The sale had
+   * happened — the goods had gone, the money was taken — so it stands, and this entry puts it on
+   * the audit trail for a manager. One per line and kind; append-only, written on the order's own
+   * transaction, so a retried replay that finds its order standing writes none.
+   *
+   * @param lineNo the order line, counted from one as the receipt and the words count it
+   * @param batchNo the lot the pack declared, or null; a recall's entry only
+   * @param expiry the best-before the pack declared, or null; a recall's entry only
+   * @param recallId the recall that covered the line; null for a scale's entry
+   * @param recallReference that recall's reference, as inventory-svc gave it
+   * @param instrumentId the scale the line was weighed on; null for a recall's entry
+   * @param instrumentStanding the register's word for that scale, or {@link #NOT_REGISTERED} when
+   *     the store's register does not hold it
+   * @param rungUpAt when the cashier completed the sale, as the till said and the grace allowed
+   * @param reason the entry in words, as the trail shows it
+   * @param cashierId who rang it up, as the till recorded at the sale, when that is a login of the
+   *     business allowed at the store; null for an unknown member of staff
+   * @param replayedBy who sent it from the till's queue, which may be somebody else
+   */
+  public record OfflineSaleFlag(
+      UUID id,
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String kind,
+      int lineNo,
+      UUID variantId,
+      String batchNo,
+      java.time.LocalDate expiry,
+      UUID recallId,
+      String recallReference,
+      UUID instrumentId,
+      String instrumentStanding,
+      Instant rungUpAt,
+      String reason,
+      UUID cashierId,
+      UUID replayedBy) {
+    public static final String KIND_RECALLED_ITEM = "OFFLINE_SALE_OF_RECALLED_ITEM";
+    public static final String KIND_UNFIT_SCALE = "OFFLINE_SALE_ON_UNFIT_SCALE";
+
+    /** The standing kept for a scale the store's register does not hold. */
+    public static final String NOT_REGISTERED = "NOT_REGISTERED";
+
+    /**
+     * The standing kept for a scale the register cannot show was fit for trade when the sale was
+     * rung up; the entry's words say what it is now and why that moment cannot be shown.
+     */
+    public static final String UNKNOWN_AT_SALE = "UNKNOWN_AT_SALE";
   }
 
   // ── Deposit return (09.16) ────────────────────────────

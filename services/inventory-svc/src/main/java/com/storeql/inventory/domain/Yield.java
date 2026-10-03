@@ -22,9 +22,6 @@ public final class Yield {
   /** Quantities to three decimals, the store's own precision. */
   public static final int QTY_SCALE = 3;
 
-  /** A cost per unit to two decimals, as batches keep it. */
-  public static final int COST_SCALE = 2;
-
   private static final BigDecimal HUNDRED = new BigDecimal("100");
 
   /** What came out of a cut, and the share of the primal's cost it carries. */
@@ -58,9 +55,12 @@ public final class Yield {
    * <p>A cut that came to nothing carries no cost and its share goes to the cuts that did; an
    * unvalued primal (null) makes unvalued cuts, never cuts at nothing.
    *
+   * @param minorUnits the business currency's minor units ({@code Fx.minorUnits}): each unit cost
+   *     is rounded half up to them — pence, whole yen, three-decimal dinars
    * @return one unit cost per share, in order; null where there is none
    */
-  public static List<BigDecimal> apportion(BigDecimal inputCost, List<Share> shares) {
+  public static List<BigDecimal> apportion(
+      BigDecimal inputCost, List<Share> shares, int minorUnits) {
     List<BigDecimal> unit = new ArrayList<>(shares.size());
     BigDecimal totalShare = BigDecimal.ZERO;
     for (Share s : shares) {
@@ -75,8 +75,23 @@ public final class Yield {
           inputCost
               .multiply(s.costShare())
               .divide(totalShare, 8, RoundingMode.HALF_UP)
-              .divide(s.qty(), COST_SCALE, RoundingMode.HALF_UP));
+              .divide(s.qty(), minorUnits, RoundingMode.HALF_UP));
     }
     return unit;
+  }
+
+  /** A cost, rounded half up to the currency's minor units; null when there is none. */
+  public static BigDecimal amount(BigDecimal cost, int minorUnits) {
+    return cost == null ? null : cost.setScale(minorUnits, RoundingMode.HALF_UP);
+  }
+
+  /**
+   * What the loss cost: the primal's cost spread over what went in, times what was lost, in the
+   * currency's minor units; null for an unvalued primal.
+   */
+  public static BigDecimal lossAtCost(
+      BigDecimal inputCost, BigDecimal lossQty, BigDecimal inputQty, int minorUnits) {
+    if (inputCost == null) return null;
+    return inputCost.multiply(lossQty).divide(inputQty, minorUnits, RoundingMode.HALF_UP);
   }
 }

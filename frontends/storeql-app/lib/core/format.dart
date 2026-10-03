@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:intl/intl.dart';
 
 import 'l10n/app_locales.dart';
+import 'reference/iso_reference.dart' show isoMinorUnits;
 
 /// Locale-aware formatting for money, counts and dates. Every number and date
 /// the app shows goes through here (test/core/format_guard_test.dart): a
@@ -48,6 +49,9 @@ class AppFormat {
         : NumberFormat.simpleCurrency(
             locale: locale ?? AppFormat.locale,
             name: code,
+            // ISO's minor units, the ones the sale is charged in, never CLDR's
+            // display digits ([minorUnits]): RSD 129.99 reads 129.99, not 130.
+            decimalDigits: minorUnits(code),
           );
     final minor = format.decimalDigits ?? 2;
     if (maxDecimals != null &&
@@ -65,6 +69,29 @@ class AppFormat {
   static bool _fitsPlaces(num amount, int places) {
     final scaled = amount * math.pow(10, places);
     return (scaled - scaled.round()).abs() < 1e-9;
+  }
+
+  /// How many decimal places [currencyCode] is paid in: 2 for the pound and
+  /// the Serbian dinar, 0 for the yen, 3 for the Kuwaiti and Iraqi dinars. Two
+  /// without a currency, as [money] writes an amount that has none, and for a
+  /// code ISO gives no minor unit or never issued.
+  ///
+  /// ISO 4217's figure ([isoMinorUnits]), the one every service rounds and
+  /// stores money at — never intl's CLDR display digits, which say 0 for RSD,
+  /// HUF, IDR, PKR and others where ISO says 2, so a till reading them could not
+  /// take a sale priced at 129.99.
+  static int minorUnits(String? currencyCode) {
+    final code = currencyCode?.trim().toUpperCase() ?? '';
+    return isoMinorUnits[code] ?? 2;
+  }
+
+  /// The marks [locale] writes a number with: the decimal mark and the
+  /// thousands separator — `.` and `,` in English, `,` and a no-break space in
+  /// Polish and South African English, `,` and `.` in Romanian. A field that
+  /// takes an amount reads it with these, the way [money] writes it back.
+  static ({String decimal, String group}) numberMarks({String? locale}) {
+    final s = NumberFormat.decimalPattern(locale ?? AppFormat.locale).symbols;
+    return (decimal: s.DECIMAL_SEP, group: s.GROUP_SEP);
   }
 
   /// The symbol a currency is written with in [locale] (`£`, `¥`, `₹`), or the

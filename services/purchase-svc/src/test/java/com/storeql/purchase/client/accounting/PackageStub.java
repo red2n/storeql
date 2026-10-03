@@ -48,7 +48,9 @@ final class PackageStub implements AutoCloseable {
             Request r =
                 new Request(
                     exchange.getRequestMethod(),
-                    exchange.getRequestURI().getPath()
+                    // Raw, as it crossed the wire: a decoded path would hide a query sent
+                    // escaped into it.
+                    exchange.getRequestURI().getRawPath()
                         + (exchange.getRequestURI().getRawQuery() == null
                             ? ""
                             : "?" + exchange.getRequestURI().getRawQuery()),

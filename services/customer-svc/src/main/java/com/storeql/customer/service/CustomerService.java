@@ -12,6 +12,7 @@ import com.storeql.customer.domain.Domain.MarketingPreference;
 import com.storeql.customer.domain.Domain.StoreCreditAccount;
 import com.storeql.customer.domain.Domain.TierChange;
 import com.storeql.customer.domain.LoyaltyProgramme;
+import com.storeql.customer.domain.ManualGrant;
 import com.storeql.customer.dto.Dtos.AddAddressRequest;
 import com.storeql.customer.dto.Dtos.AddressResponse;
 import com.storeql.customer.dto.Dtos.AdjustPointsRequest;
@@ -29,6 +30,7 @@ import com.storeql.customer.dto.Dtos.SetMarketingPreferencesRequest;
 import com.storeql.customer.dto.Dtos.StoreCreditAccountResponse;
 import com.storeql.customer.dto.Dtos.StoreCreditLedgerEntryResponse;
 import com.storeql.customer.dto.Dtos.UpdateCustomerRequest;
+import com.storeql.customer.json.Jsons;
 import com.storeql.customer.mapper.Mappers;
 import com.storeql.customer.repo.CustomerRepository;
 import com.storeql.customer.repo.LoyaltyProgrammeRepository;
@@ -39,7 +41,6 @@ import com.storeql.web.ErrorCodes;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
@@ -47,6 +48,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.function.Supplier;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -112,7 +114,7 @@ public class CustomerService {
             phoneResult.e164(),
             phoneResult.checkedAt());
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", id.toString())
             .add("tenantId", tenantId.toString())
             .add("email", req.email())
@@ -173,7 +175,7 @@ public class CustomerService {
     String normalized = email.trim().toLowerCase(Locale.ROOT);
     UUID newId = Ids.newId();
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", newId.toString())
             .add("tenantId", tenantId.toString())
             .add("email", normalized)
@@ -489,7 +491,7 @@ public class CustomerService {
     // the shopper's login, so an erasure that named only the customer id could not reach the
     // delivery name, phone and address on exactly the orders that carry them (SJ-D44).
     var builder =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "CustomerErased")
             .add("tenantId", tenantId.toString())
@@ -777,8 +779,17 @@ public class CustomerService {
     return programmes.programme(tenantId);
   }
 
-  public LoyaltyAccount earnPoints(UUID tenantId, UUID customerId, EarnPointsRequest req) {
-    get(tenantId, customerId);
+  /**
+   * Awards points by hand, once per Idempotency-Key.
+   *
+   * @param actorId the signed-in user, kept with the award
+   * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for an
+   *     erased customer, nothing written
+   */
+  public LoyaltyAccount earnPoints(
+      UUID tenantId, UUID customerId, EarnPointsRequest req, UUID actorId, String idempotencyKey) {
+    requireNotErased(get(tenantId, customerId), CustomerRepository::erasedForManualPoints);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     var event =
         loyaltyEvent(
@@ -791,7 +802,30 @@ public class CustomerService {
         req.reason(),
         programmeOf(tenantId),
         event,
-        CustomerService::tierChangedEvent);
+        CustomerService::tierChangedEvent,
+        new ManualGrant(
+            ManualGrant.KIND_LOYALTY_EARN,
+            customerId,
+            req.points(),
+            null,
+            req.reason(),
+            actorId,
+            idempotencyKey));
+  }
+
+  /**
+   * Value handed out by hand — points awarded or corrected, store credit issued — goes to a person;
+   * an erased customer is no longer one, so management's grant is refused with the code every write
+   * to an erased record answers. The repository checks again on its own transaction, holding the
+   * row against an erasure that lands in between.
+   *
+   * @param refusal what an erased customer is answered with
+   * @throws ApiException {@code 409 CUSTOMER_ANONYMIZED} for an erased customer
+   */
+  private static void requireNotErased(Customer customer, Supplier<ApiException> refusal) {
+    if (Customer.STATUS_ANONYMIZED.equals(customer.status())) {
+      throw refusal.get();
+    }
   }
 
   public void accrueLoyaltyFromOrder(
@@ -811,6 +845,7 @@ public class CustomerService {
         tenantId,
         customerId,
         orderId,
+        total,
         points,
         programmeOf(tenantId),
         awarded ->
@@ -824,6 +859,105 @@ public class CustomerService {
                 total,
                 taxAmount),
         CustomerService::tierChangedEvent);
+  }
+
+  static final String ORDER_RETURNED_CONSUMER = "customer-svc/order-returned";
+  static final String ORDER_VOIDED_CONSUMER = "customer-svc/order-voided";
+  static final String PAYMENT_REFUNDED_CONSUMER = "customer-svc/payment-refunded";
+  private static final String TOPIC_REVERSED = "storeql.customer.loyalty-reversed";
+
+  /**
+   * A return took part of a sale back: takes back that share of the points the sale earned, once
+   * per event. Nothing when the sale earned nothing here (a guest, or no customer of this
+   * business).
+   */
+  public void reverseLoyaltyForReturn(
+      UUID eventId, UUID tenantId, UUID orderId, BigDecimal refundAmount) {
+    if (refundAmount == null || refundAmount.signum() <= 0) {
+      return;
+    }
+    reverseLoyalty(
+        eventId, ORDER_RETURNED_CONSUMER, tenantId, orderId, refundAmount, "Return of order ");
+  }
+
+  /** A sale was voided: takes back every point it earned that is still held, once per event. */
+  public void reverseLoyaltyForVoid(UUID eventId, UUID tenantId, UUID orderId) {
+    reverseLoyalty(eventId, ORDER_VOIDED_CONSUMER, tenantId, orderId, null, "Void of order ");
+  }
+
+  private void reverseLoyalty(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal refundAmount,
+      String reasonPrefix) {
+    repo.reversePointsForOrderOnce(
+        eventId,
+        consumer,
+        tenantId,
+        orderId,
+        refundAmount,
+        pointsPerUnit(),
+        reasonPrefix + orderId,
+        programmeOf(tenantId),
+        (customerId, points) ->
+            loyaltyEvent(
+                "LoyaltyReversed",
+                TOPIC_REVERSED,
+                tenantId,
+                customerId,
+                points,
+                orderId,
+                null,
+                null));
+  }
+
+  /**
+   * A refund the shopper chose to take as store credit: credits the customer's account in the
+   * refund's currency once per event. The currency is the refund's own when the event names it,
+   * else the business's.
+   */
+  public void creditStoreCreditFromRefund(
+      UUID eventId,
+      UUID tenantId,
+      UUID customerId,
+      UUID orderId,
+      UUID refundId,
+      UUID returnId,
+      BigDecimal amount,
+      String currency) {
+    if (amount == null || amount.signum() <= 0) {
+      return;
+    }
+    String cur = storeCreditCurrency(tenantId, currency);
+    String payload =
+        Jsons.object()
+            .add("customerId", customerId.toString())
+            .add("tenantId", tenantId.toString())
+            .add("amount", amount)
+            .add("currency", cur)
+            .build()
+            .toString();
+    var event =
+        new OutboxRow(
+            "StoreCreditIssued",
+            "storeql.customer.store-credit-issued",
+            tenantId,
+            customerId,
+            payload);
+    repo.issueStoreCreditFromRefundOnce(
+        eventId,
+        PAYMENT_REFUNDED_CONSUMER,
+        tenantId,
+        customerId,
+        amount,
+        cur,
+        orderId,
+        "Refund to store credit"
+            + (returnId == null ? "" : " · return " + returnId)
+            + (refundId == null ? "" : " · refund " + refundId),
+        event);
   }
 
   private static final String LOYALTY_EARNED = "LoyaltyEarned";
@@ -845,7 +979,7 @@ public class CustomerService {
       BigDecimal orderTotal,
       BigDecimal orderTax) {
     var b =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", eventType)
             .add("customerId", customerId.toString())
@@ -864,7 +998,7 @@ public class CustomerService {
    */
   static OutboxRow tierChangedEvent(TierChange change) {
     var b =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "LoyaltyTierChanged")
             .add("tenantId", change.tenantId().toString())
@@ -883,7 +1017,7 @@ public class CustomerService {
   /** {@code LoyaltyExpired}: points that died, for the deferred revenue they carried (17.11). */
   static OutboxRow expiredEvent(Expired expired) {
     var b =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "LoyaltyExpired")
             .add("tenantId", expired.tenantId().toString())
@@ -906,7 +1040,29 @@ public class CustomerService {
     }
   }
 
-  public LoyaltyAccount redeemPoints(UUID tenantId, UUID customerId, RedeemPointsRequest req) {
+  /**
+   * Spends points, once per order: with an {@code orderId} the redemption is keyed by (customer,
+   * order), so a retried tender takes nothing more and the same order with other points is refused
+   * ({@code 409 IDEMPOTENCY_KEY_REUSED}). Without one, an optional Idempotency-Key gives the same
+   * replay rule; with neither, every call spends.
+   *
+   * <p>An erased customer spends nothing new ({@code 409 CUSTOMER_ANONYMIZED}): nobody can show any
+   * longer that the balance is theirs. That is judged on the repository's transaction, not here,
+   * because a redemption recorded before the erasure must still answer its retry as it stands — the
+   * till applies the discount from that answer — with nothing more taken.
+   *
+   * @param actorId the signed-in user, kept with the redemption
+   * @param idempotencyKey the request's key in canonical form, or null
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for a new
+   *     spend by an erased customer; {@code 409 IDEMPOTENCY_KEY_REUSED}; {@code 422
+   *     LOYALTY_INSUFFICIENT_POINTS}
+   */
+  public LoyaltyAccount redeemPoints(
+      UUID tenantId,
+      UUID customerId,
+      RedeemPointsRequest req,
+      UUID actorId,
+      String idempotencyKey) {
     get(tenantId, customerId);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     var event =
@@ -919,30 +1075,78 @@ public class CustomerService {
             orderId,
             null,
             null);
+    String key =
+        orderId != null
+            ? Ids.derived(orderId, "loyalty-redeem/" + customerId).toString()
+            : idempotencyKey;
     return repo.redeemPoints(
-        tenantId, customerId, req.points(), orderId, req.reason(), programmeOf(tenantId), event);
-  }
-
-  public LoyaltyAccount adjustPoints(UUID tenantId, UUID customerId, AdjustPointsRequest req) {
-    get(tenantId, customerId);
-    var event =
-        loyaltyEvent(
-            "LoyaltyAdjusted",
-            "storeql.customer.loyalty-adjusted",
-            tenantId,
+        tenantId,
+        customerId,
+        req.points(),
+        orderId,
+        req.reason(),
+        programmeOf(tenantId),
+        event,
+        new ManualGrant(
+            ManualGrant.KIND_LOYALTY_REDEEM,
             customerId,
             req.points(),
             null,
-            null,
-            null);
+            req.reason(),
+            actorId,
+            key));
+  }
+
+  /**
+   * A manual correction, once per Idempotency-Key. The event is built for the points that actually
+   * moved, which is less than was asked when a deduction would take the balance below zero.
+   *
+   * @param actorId the signed-in manager, kept with the correction
+   * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
+   * @throws ApiException {@code 400 VALIDATION_FAILED} for a correction of no points; {@code 404}
+   *     for a customer this business does not hold; {@code 409 CUSTOMER_ANONYMIZED} for an erased
+   *     customer, up or down, nothing written; {@code 422 LOYALTY_INSUFFICIENT_POINTS} for a
+   *     deduction when there are no points to take
+   */
+  public LoyaltyAccount adjustPoints(
+      UUID tenantId,
+      UUID customerId,
+      AdjustPointsRequest req,
+      UUID actorId,
+      String idempotencyKey) {
+    if (req.points().signum() == 0) {
+      throw new ApiException(
+          400,
+          ErrorCodes.VALIDATION_FAILED,
+          "Request validation failed",
+          List.of("points: must not be zero"));
+    }
+    requireNotErased(get(tenantId, customerId), CustomerRepository::erasedForManualPoints);
     return repo.adjustPoints(
         tenantId,
         customerId,
         req.points(),
         req.reason(),
         programmeOf(tenantId),
-        event,
-        CustomerService::tierChangedEvent);
+        moved ->
+            loyaltyEvent(
+                "LoyaltyAdjusted",
+                "storeql.customer.loyalty-adjusted",
+                tenantId,
+                customerId,
+                moved,
+                null,
+                null,
+                null),
+        CustomerService::tierChangedEvent,
+        new ManualGrant(
+            ManualGrant.KIND_LOYALTY_ADJUST,
+            customerId,
+            req.points(),
+            null,
+            req.reason(),
+            actorId,
+            idempotencyKey));
   }
 
   public List<LoyaltyLedgerEntry> getLedger(UUID tenantId, UUID customerId, int limit) {
@@ -979,6 +1183,27 @@ public class CustomerService {
    */
   private String storeCreditCurrency(UUID tenantId, String requested) {
     return profiles.currencyOr(tenantId, requested);
+  }
+
+  /**
+   * Store credit is money in its account's currency, so an amount is no finer than that currency's
+   * minor unit (ISO 4217, through common-service {@code Fx}): whole yen, a dinar's three places, a
+   * pound's two. Judged here because a request body cannot know its currency; refused, never
+   * rounded, since the balance is somebody's money.
+   *
+   * @throws ApiException 400 {@code STORE_CREDIT_AMOUNT_INVALID}
+   */
+  private static void requireStoreCreditAmount(BigDecimal amount, String currency) {
+    BigDecimal plain = amount.stripTrailingZeros();
+    if (plain.scale() > com.storeql.service.Fx.minorUnits(currency)) {
+      throw ApiException.badRequest(
+          "STORE_CREDIT_AMOUNT_INVALID",
+          "An amount has no more decimal places than "
+              + currency
+              + " has ("
+              + com.storeql.service.Fx.minorUnits(currency)
+              + ")");
+    }
   }
 
   /**
@@ -1031,23 +1256,33 @@ public class CustomerService {
   /**
    * Issues store credit and publishes {@code StoreCreditIssued}.
    *
-   * <p>Used for refunds-to-credit and goodwill. Not idempotent — calling it twice issues twice.
+   * <p>Goodwill by hand, management's (credit for a return arrives from the refund events instead).
+   * Once per Idempotency-Key; never to an erased customer.
    *
    * @param tenantId owning tenant
    * @param customerId the customer to credit
+   * @param actorId the signed-in manager, kept with the issue
+   * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
    * @param req the amount, optional currency (the tenant's own when omitted), originating order and
    *     reason
    * @return the account with its new balance
    * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists in this
-   *     tenant
+   *     tenant; {@code CUSTOMER_ANONYMIZED} (409) for an erased customer, judged before the amount
+   *     and with nothing written, a retry under an earlier key included; {@code
+   *     STORE_CREDIT_AMOUNT_INVALID} (400) for an amount finer than the currency's minor unit
    */
   public StoreCreditAccount issueStoreCredit(
-      UUID tenantId, UUID customerId, IssueStoreCreditRequest req) {
-    get(tenantId, customerId);
+      UUID tenantId,
+      UUID customerId,
+      IssueStoreCreditRequest req,
+      UUID actorId,
+      String idempotencyKey) {
+    requireNotErased(get(tenantId, customerId), CustomerRepository::erasedForStoreCredit);
     String cur = storeCreditCurrency(tenantId, req.currency());
+    requireStoreCreditAmount(req.amount(), cur);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", customerId.toString())
             .add("tenantId", tenantId.toString())
             .add("amount", req.amount())
@@ -1062,7 +1297,21 @@ public class CustomerService {
             customerId,
             payload);
     return repo.issueStoreCredit(
-        tenantId, customerId, req.amount(), cur, orderId, req.reason(), event);
+        tenantId,
+        customerId,
+        req.amount(),
+        cur,
+        orderId,
+        req.reason(),
+        event,
+        new ManualGrant(
+            ManualGrant.KIND_STORE_CREDIT_ISSUE,
+            customerId,
+            req.amount(),
+            cur,
+            req.reason(),
+            actorId,
+            idempotencyKey));
   }
 
   /**
@@ -1076,16 +1325,23 @@ public class CustomerService {
    * @param req the amount, optional currency (the tenant's own when omitted), order being paid and
    *     reason
    * @return the account with its new balance
-   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists; a 422 when
-   *     the balance is insufficient
+   *     <p>An erased customer spends nothing new: nobody can show any longer that the balance is
+   *     theirs. That is judged on the repository's transaction, not here, because a redemption
+   *     already recorded for the order must still answer payment-svc's retry as it stands — it
+   *     records the tender from that answer — with nothing more taken.
+   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists; {@code
+   *     STORE_CREDIT_AMOUNT_INVALID} (400) for an amount finer than the currency's minor unit;
+   *     {@code CUSTOMER_ANONYMIZED} (409) for a new spend by an erased customer, nothing written; a
+   *     422 when the balance is insufficient
    */
   public StoreCreditAccount redeemStoreCredit(
       UUID tenantId, UUID customerId, RedeemStoreCreditRequest req) {
     get(tenantId, customerId);
     String cur = storeCreditCurrency(tenantId, req.currency());
+    requireStoreCreditAmount(req.amount(), cur);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     String payload =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("customerId", customerId.toString())
             .add("tenantId", tenantId.toString())
             .add("amount", req.amount())

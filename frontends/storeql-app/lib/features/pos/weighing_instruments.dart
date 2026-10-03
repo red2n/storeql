@@ -13,6 +13,14 @@ import 'variable_measure_barcode.dart';
 // are none — selling by weight on an instrument that has not been passed as
 // fit for trade is an offence, and so is doing it on one whose stamp a repair
 // has broken.
+//
+// The till is not the only check: order-svc asks the same register about every
+// instrument an order names and refuses one this store does not hold, or holds
+// uncertified (409 ORDER_SCALE_NOT_CERTIFIED). It lets the sale through when
+// tenant-svc cannot answer, so the till's picker still comes first. A sale this
+// till weighed while offline is recorded when the queue replays it within
+// order-svc's grace, and a scale that was not fit then is flagged for a manager
+// on the audit trail instead of refused.
 
 class WeighingInstrument {
   final String id;

@@ -10,6 +10,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /** Releases from bond as inventory-svc announced them, each owed to the revenue once. */
@@ -54,16 +55,25 @@ public class DutyRepository extends BaseJdbcRepository {
         "record duty release");
   }
 
-  public List<DutyRelease> findReleases(UUID tenantId, LocalDate from, LocalDate to) {
+  /**
+   * @param stores the stores released from, or null for every store (a release that names no store
+   *     is read only then)
+   */
+  public List<DutyRelease> findReleases(
+      UUID tenantId, LocalDate from, LocalDate to, Set<UUID> stores) {
     return query(
         "SELECT id, tenant_id, event_id, release_id, store_id, variant_id, qty, duty_per_unit,"
             + " duty_amount, currency, reference, released_on, recorded_at FROM duty_releases"
             + " WHERE tenant_id = ? AND released_on >= ? AND released_on <= ?"
+            + (stores != null ? " AND store_id = ANY(?)" : "")
             + " ORDER BY released_on DESC, recorded_at DESC, id DESC",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, from);
           ps.setObject(3, to);
+          if (stores != null) {
+            ps.setArray(4, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
         },
         DutyRepository::map,
         "list duty releases");

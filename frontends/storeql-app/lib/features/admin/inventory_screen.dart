@@ -31,6 +31,8 @@ import 'procurement_providers.dart';
 import 'widgets/variant_search.dart';
 import '../../shared/util/short_ref.dart';
 import 'package:storeql_app/core/ids.dart';
+import '../../core/amount_entry.dart';
+import 'widgets/figure_field.dart';
 
 /// Reads a barcode with the camera and answers it, or null when the person
 /// closes the scanner; a provider so tests hand one in.
@@ -816,6 +818,15 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
 
   final _formKey = GlobalKey<FormState>();
 
+  // The quantity (three places) and the cost (money in the business's
+  // currency, to its places) are read the way the app's language writes a
+  // number ([AmountMarks]) and sent as the decimals typed. One that cannot be
+  // read is refused under its field and nothing is received: parsed with a
+  // point, Romanian's 1,5 kg was refused and its cost of 2,40 never sent.
+  final _marks = AmountMarks.ofApp();
+  AmountShape get _costShape =>
+      AmountShape.money(ref.read(tenantInfoProvider).value?.currency);
+
   /// The product being received, found by name or SKU or scanned; the
   /// request carries its variant id. [_variantCtrl] shows it in words.
   VariantChoice? _variant;
@@ -952,11 +963,11 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
             data: {
               'storeId': _storeId,
               'variantId': variant.variantId,
-              'qty': double.parse(_qtyCtrl.text.trim()),
+              // The plain decimals typed: JSON-B reads them exactly.
+              'qty': figureOf(_qtyCtrl, AmountShape.quantity, _marks),
               if (_batchCtrl.text.trim().isNotEmpty)
                 'batchNo': _batchCtrl.text.trim(),
-              if (_costCtrl.text.trim().isNotEmpty)
-                'costPrice': double.parse(_costCtrl.text.trim()),
+              'costPrice': ?figureOf(_costCtrl, _costShape, _marks),
               'expiryDate': ?_expiry,
               if (_zoneId != null) 'zoneId': _zoneId,
               if (_ownership != 'OWNED') 'ownership': _ownership,
@@ -1119,15 +1130,17 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
-                        decoration: const InputDecoration(
+                        autovalidateMode: AutovalidateMode.onUserInteraction,
+                        decoration: InputDecoration(
                           labelText: 'Quantity *',
+                          hintText: _marks.hint(AmountShape.quantity.decimals),
+                          errorMaxLines: 4,
                         ),
-                        validator: (v) {
-                          if (v == null || v.trim().isEmpty) return 'Required';
-                          final n = double.tryParse(v.trim());
-                          if (n == null || n <= 0) return '> 0';
-                          return null;
-                        },
+                        validator: (v) =>
+                            figureValidator(AmountShape.quantity, _marks, blank: 'Required')(v) ??
+                            (figureOf(_qtyCtrl, AmountShape.quantity, _marks) == '0'
+                                ? 'More than 0.'
+                                : null),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1137,10 +1150,15 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
+                        autovalidateMode: AutovalidateMode.onUserInteraction,
                         decoration: InputDecoration(
                           labelText: 'Cost price',
                           prefixText: _costPrefix(),
+                          errorMaxLines: 4,
                         ),
+                        validator: (v) => figureValidator(
+                            AmountShape.money(ref.read(tenantInfoProvider).value?.currency),
+                            _marks)(v),
                       ),
                     ),
                   ],
@@ -1342,7 +1360,7 @@ void _showAdjustDialog(
 ) {
   showDialog(
     context: context,
-    builder: (_) => _AdjustStockDialog(level: level, onDone: onChanged),
+    builder: (_) => AdjustStockDialog(level: level, onDone: onChanged),
   );
 }
 
@@ -1353,7 +1371,7 @@ void _showSetThresholdDialog(
 ) {
   showDialog(
     context: context,
-    builder: (_) => _SetThresholdDialog(
+    builder: (_) => SetThresholdDialog(
       storeId: level.storeId,
       variantId: level.variantId,
       onDone: onChanged,
@@ -1436,7 +1454,24 @@ class _WideTable extends StatelessWidget {
                     ),
                   ),
                   DataCell(Text(_storeNameOf(l.storeId, storeNames))),
-                  DataCell(Text(l.onHand.toStringAsFixed(0))),
+                  DataCell(
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(l.onHand.toStringAsFixed(0)),
+                        if (l.expiredLabel != null)
+                          Text(
+                            l.expiredLabel!,
+                            key: const Key('level-expired'),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: context.status.warning,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                   DataCell(Text(l.reserved.toStringAsFixed(0))),
                   DataCell(
                     Text(
@@ -1597,6 +1632,17 @@ class _NarrowList extends StatelessWidget {
                       ],
                     ),
                   ),
+                  // Its own line, so the figures keep a phone's width.
+                  if (l.expiredLabel != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: AppSpacing.xs),
+                      child: Text(
+                        '${l.expiredLabel!} (past last day of sale)',
+                        key: const Key('level-expired'),
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: context.status.warning),
+                      ),
+                    ),
                 ],
               ),
               trailing: PopupMenuButton<String>(
@@ -1899,24 +1945,79 @@ class _SummaryChip extends StatelessWidget {
 
 // ── Adjust stock ─────────────────────────────────────────────────────────────
 
-/// A fresh key per attempt at an adjustment: a UUIDv7, which every service requires.
-String _newIdempotencyKey() => newId();
+/// One of the business's transaction reason codes, as inventory-svc lists them
+/// (`GET /admin/inventory/reason-codes`).
+class StockReasonCode {
+  final String code;
+  final String description;
+  final bool active;
+  const StockReasonCode(
+      {required this.code, required this.description, required this.active});
 
-class _AdjustStockDialog extends ConsumerStatefulWidget {
-  final InventoryLevel level;
-  final VoidCallback onDone;
-  const _AdjustStockDialog({required this.level, required this.onDone});
+  factory StockReasonCode.fromJson(Map<String, dynamic> j) => StockReasonCode(
+        code: j['code'] as String? ?? '',
+        description: j['description'] as String? ?? '',
+        active: j['active'] as bool? ?? true,
+      );
 
-  @override
-  ConsumerState<_AdjustStockDialog> createState() => _AdjustStockDialogState();
+  /// What the person reads: the description the business wrote, else the code
+  /// in words.
+  String get label => description.trim().isNotEmpty
+      ? description.trim()
+      : humanizeCode(code);
 }
 
-class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
+/// The business's active reason codes for a stock adjustment. An unreadable
+/// list is an empty one: the dialog then takes only the free-text note, as it
+/// did before the catalogue was offered.
+final stockReasonCodesProvider =
+    FutureProvider.autoDispose<List<StockReasonCode>>((ref) async {
+  try {
+    final resp = await ref
+        .watch(apiClientProvider)
+        .dio
+        .get('/${ApiConstants.inventory}/admin/inventory/reason-codes');
+    final data = (resp.data['data'] as List?) ?? const [];
+    return [
+      for (final e in data)
+        StockReasonCode.fromJson(e as Map<String, dynamic>),
+    ].where((c) => c.active && c.code.isNotEmpty).toList();
+  } catch (_) {
+    return const [];
+  }
+});
+
+class AdjustStockDialog extends ConsumerStatefulWidget {
+  final InventoryLevel level;
+  final VoidCallback onDone;
+  const AdjustStockDialog({super.key, required this.level, required this.onDone});
+
+  @override
+  ConsumerState<AdjustStockDialog> createState() => AdjustStockDialogState();
+}
+
+class AdjustStockDialogState extends ConsumerState<AdjustStockDialog> {
   final _formKey = GlobalKey<FormState>();
+
+  /// The change, either way: a quantity to three places with one sign before
+  /// it, read the way the app's language writes a number ([AmountMarks]) and
+  /// sent as the decimal typed. One that cannot be read is refused under the
+  /// field and nothing moves.
+  static const _deltaShape = AmountShape(15, 3, signed: true);
+  final _marks = AmountMarks.ofApp();
   final _deltaCtrl = TextEditingController();
   final _reasonCtrl = TextEditingController();
+
+  /// The reason code picked from the business's catalogue; null for none.
+  String? _reasonCode;
   bool _loading = false;
   String? _error;
+
+  /// The Idempotency-Key of the adjustment being sent, and what it was made
+  /// for: a retry of the same adjustment sends the same key (so a lost answer
+  /// cannot move the stock twice), a changed one a new key.
+  String? _key;
+  String? _keyFor;
 
   @override
   void dispose() {
@@ -1931,6 +2032,13 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
       _loading = true;
       _error = null;
     });
+    final delta = figureOf(_deltaCtrl, _deltaShape, _marks)!;
+    final note = _reasonCtrl.text.trim();
+    final signature = '$delta|${_reasonCode ?? ''}|$note';
+    if (_key == null || _keyFor != signature) {
+      _key = newId();
+      _keyFor = signature;
+    }
     try {
       await ref
           .read(apiClientProvider)
@@ -1940,13 +2048,13 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
             data: {
               'storeId': widget.level.storeId,
               'variantId': widget.level.variantId,
-              'delta': double.parse(_deltaCtrl.text.trim()),
-              if (_reasonCtrl.text.trim().isNotEmpty)
-                'reason': _reasonCtrl.text.trim(),
+              // The plain decimal typed, its sign kept: JSON-B reads it exactly.
+              'delta': delta,
+              // The code groups the shrinkage report; the note stays free text.
+              if (_reasonCode != null) 'reasonCode': _reasonCode,
+              if (note.isNotEmpty) 'reason': note,
             },
-            options: Options(
-              headers: {'Idempotency-Key': _newIdempotencyKey()},
-            ),
+            options: Options(headers: {'Idempotency-Key': _key}),
           );
       if (!mounted) return;
       widget.onDone();
@@ -1991,7 +2099,8 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
                 const SizedBox(height: 12),
               ],
               Text(
-                'Available: ${l.available.toStringAsFixed(0)}  ·  On-hand: ${l.onHand.toStringAsFixed(0)}',
+                'Available: ${l.available.toStringAsFixed(0)}  ·  On-hand: ${l.onHand.toStringAsFixed(0)}'
+                '${l.expiredLabel == null ? '' : '  ·  ${l.expiredLabel}'}',
                 style: TextStyle(color: cs.outline, fontSize: 13),
               ),
               const SizedBox(height: 12),
@@ -2001,24 +2110,54 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
                   decimal: true,
                   signed: true,
                 ),
+                autovalidateMode: AutovalidateMode.onUserInteraction,
                 decoration: const InputDecoration(
                   labelText: 'Delta *',
                   helperText: 'Positive adds stock, negative removes',
                   prefixIcon: Icon(Icons.exposure_outlined),
+                  errorMaxLines: 4,
                 ),
-                validator: (v) {
-                  if (v == null || v.trim().isEmpty) return 'Required';
-                  final n = double.tryParse(v.trim());
-                  if (n == null || n == 0) return 'Non-zero number';
-                  return null;
-                },
+                validator: (v) =>
+                    figureValidator(_deltaShape, _marks, blank: 'Required')(v) ??
+                    (figureOf(_deltaCtrl, _deltaShape, _marks) == '0' ? 'Non-zero number' : null),
               ),
               const SizedBox(height: 12),
+              // The business's own reason codes, when it has any: shrinkage
+              // is reported by code, so a code beats wording made up per person.
+              ...(() {
+                final codes =
+                    ref.watch(stockReasonCodesProvider).value ?? const [];
+                if (codes.isEmpty) return const <Widget>[];
+                return <Widget>[
+                  DropdownButtonFormField<String?>(
+                    key: const Key('adjust-reason-code'),
+                    initialValue: _reasonCode,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason code',
+                      prefixIcon: Icon(Icons.rule_outlined),
+                    ),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                          value: null, child: Text('No code')),
+                      for (final c in codes)
+                        DropdownMenuItem<String?>(
+                            value: c.code,
+                            child: Text(c.label,
+                                overflow: TextOverflow.ellipsis)),
+                    ],
+                    onChanged: _loading
+                        ? null
+                        : (v) => setState(() => _reasonCode = v),
+                  ),
+                  const SizedBox(height: 12),
+                ];
+              })(),
               TextFormField(
                 controller: _reasonCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Reason',
-                  hintText: 'e.g. shrinkage, damage, found stock',
+                  labelText: 'Note',
+                  hintText: 'e.g. dropped in the aisle, found on a shelf',
                   prefixIcon: Icon(Icons.notes_outlined),
                 ),
               ),
@@ -2051,23 +2190,31 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
 
 // ── Set reorder level ────────────────────────────────────────────────────────
 
-class _SetThresholdDialog extends ConsumerStatefulWidget {
+class SetThresholdDialog extends ConsumerStatefulWidget {
   final String storeId;
   final String variantId;
   final VoidCallback onDone;
-  const _SetThresholdDialog({
+  const SetThresholdDialog({
+    super.key,
     required this.storeId,
     required this.variantId,
     required this.onDone,
   });
 
   @override
-  ConsumerState<_SetThresholdDialog> createState() =>
+  ConsumerState<SetThresholdDialog> createState() =>
       _SetThresholdDialogState();
 }
 
-class _SetThresholdDialogState extends ConsumerState<_SetThresholdDialog> {
+class _SetThresholdDialogState extends ConsumerState<SetThresholdDialog> {
   final _formKey = GlobalKey<FormState>();
+
+  // The level and its cap are quantities to three places (the cap within
+  // NUMERIC(14,4)), read the way the app's language writes a number
+  // ([AmountMarks]) and sent as the decimals typed. One that cannot be read
+  // is refused under its field and nothing is saved.
+  static const _capShape = AmountShape(10, 3);
+  final _marks = AmountMarks.ofApp();
   final _thresholdCtrl = TextEditingController();
   final _maxQtyCtrl = TextEditingController();
 
@@ -2131,9 +2278,9 @@ class _SetThresholdDialogState extends ConsumerState<_SetThresholdDialog> {
             data: {
               'storeId': storeId,
               'variantId': variantId,
-              'threshold': double.parse(_thresholdCtrl.text.trim()),
-              if (_maxQtyCtrl.text.trim().isNotEmpty)
-                'maxQty': double.parse(_maxQtyCtrl.text.trim()),
+              // The plain decimals typed: JSON-B reads them exactly.
+              'threshold': figureOf(_thresholdCtrl, AmountShape.quantity, _marks),
+              'maxQty': ?figureOf(_maxQtyCtrl, _capShape, _marks),
             },
           );
       if (!mounted) return;
@@ -2228,16 +2375,17 @@ class _SetThresholdDialogState extends ConsumerState<_SetThresholdDialog> {
                   keyboardType: const TextInputType.numberWithOptions(
                     decimal: true,
                   ),
+                  autovalidateMode: AutovalidateMode.onUserInteraction,
                   decoration: const InputDecoration(
                     labelText: 'Threshold *',
                     prefixIcon: Icon(Icons.vertical_align_bottom),
+                    errorMaxLines: 4,
                   ),
-                  validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Required';
-                    final n = double.tryParse(v.trim());
-                    if (n == null || n <= 0) return '> 0';
-                    return null;
-                  },
+                  validator: (v) =>
+                      figureValidator(AmountShape.quantity, _marks, blank: 'Required')(v) ??
+                      (figureOf(_thresholdCtrl, AmountShape.quantity, _marks) == '0'
+                          ? 'More than 0.'
+                          : null),
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
@@ -2245,11 +2393,14 @@ class _SetThresholdDialogState extends ConsumerState<_SetThresholdDialog> {
                   keyboardType: const TextInputType.numberWithOptions(
                     decimal: true,
                   ),
+                  autovalidateMode: AutovalidateMode.onUserInteraction,
                   decoration: const InputDecoration(
                     labelText: 'Max qty (optional)',
                     helperText: 'Cap on suggested replenishment qty',
                     prefixIcon: Icon(Icons.vertical_align_top),
+                    errorMaxLines: 4,
                   ),
+                  validator: figureValidator(_capShape, _marks),
                 ),
               ],
             ),
@@ -2362,7 +2513,7 @@ class _ThresholdsTabState extends ConsumerState<_ThresholdsTab> {
               FilledButton.icon(
                 onPressed: () => showDialog(
                   context: context,
-                  builder: (_) => _SetThresholdDialog(
+                  builder: (_) => SetThresholdDialog(
                     storeId: _storeId ?? '',
                     variantId: '',
                     onDone: () {
@@ -2445,7 +2596,7 @@ class _ThresholdsTabState extends ConsumerState<_ThresholdsTab> {
                       ),
                       onTap: () => showDialog(
                         context: context,
-                        builder: (_) => _SetThresholdDialog(
+                        builder: (_) => SetThresholdDialog(
                           storeId: t.storeId,
                           variantId: t.variantId,
                           onDone: () {
@@ -2500,6 +2651,12 @@ class _StorefrontStockSignalDialogState
   bool _saving = false;
   String? _error;
 
+  /// The threshold is a whole number of units, read with the shared reader:
+  /// text it cannot read is refused under the field and nothing is saved.
+  /// Read as a number literal, `0x10` was saved as 16.
+  final _marks = AmountMarks.ofApp();
+  bool get _refused => _on && figureRefused(_marks, [(_thresholdCtrl, wholeNumber)]);
+
   void _applyLoaded(int? threshold) {
     if (_loaded) return;
     _loaded = true;
@@ -2514,9 +2671,10 @@ class _StorefrontStockSignalDialogState
   }
 
   Future<void> _save() async {
+    if (_refused) return;
     int? threshold;
     if (_on) {
-      threshold = int.tryParse(_thresholdCtrl.text.trim());
+      threshold = wholeOf(_thresholdCtrl, _marks);
       if (threshold == null || threshold < 1 || threshold > 1000) {
         setState(() => _error = 'Enter a number from 1 to 1000, or switch it off.');
         return;
@@ -2582,11 +2740,14 @@ class _StorefrontStockSignalDialogState
                     onChanged: (v) => setState(() => _on = v),
                   ),
                   if (_on)
-                    TextField(
-                      key: const Key('stock-signal-threshold'),
+                    FigureField(
+                      fieldKey: const Key('stock-signal-threshold'),
                       controller: _thresholdCtrl,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'Units (1–1000)'),
+                      shape: wholeNumber,
+                      marks: _marks,
+                      label: 'Units (1–1000)',
+                      hint: '',
+                      onChanged: (_) => setState(() {}),
                     )
                   else
                     Text('Off', style: TextStyle(color: cs.onSurfaceVariant)),
@@ -2602,7 +2763,7 @@ class _StorefrontStockSignalDialogState
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         FilledButton(
           key: const Key('stock-signal-save'),
-          onPressed: _saving ? null : _save,
+          onPressed: _saving || _refused ? null : _save,
           child: _saving
               ? const SizedBox(
                   height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))

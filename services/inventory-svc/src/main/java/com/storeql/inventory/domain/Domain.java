@@ -147,7 +147,23 @@ public final class Domain {
       BigDecimal reserved,
       BigDecimal available,
       /** How much of onHand sits in bond with its duty suspended: on hand, never available. */
-      BigDecimal inBond) {}
+      BigDecimal inBond,
+      /**
+       * How much of onHand is past its date ({@link Expiry}): on hand and valued, never available.
+       */
+      BigDecimal expired) {
+
+    /** A level with nothing past its date. */
+    public Level(
+        UUID storeId,
+        UUID variantId,
+        BigDecimal onHand,
+        BigDecimal reserved,
+        BigDecimal available,
+        BigDecimal inBond) {
+      this(storeId, variantId, onHand, reserved, available, inBond, BigDecimal.ZERO);
+    }
+  }
 
   /**
    * Aggregate counts over levels: total distinct SKUs and how many are at/below the low threshold.
@@ -250,6 +266,9 @@ public final class Domain {
      * transaction_reason_codes} because it is not operator-chosen -- the engine assigns it.
      */
     public static final String CYCLE_COUNT_VARIANCE = "CYCLE_COUNT_VARIANCE";
+
+    /** Reason code for a physical-inventory variance, assigned by the engine like the above. */
+    public static final String PHYSICAL_INVENTORY_VARIANCE = "PHYSICAL_INVENTORY_VARIANCE";
 
     private static final MovementAttribution SYSTEM = new MovementAttribution(null, null);
 
@@ -783,7 +802,11 @@ public final class Domain {
       String notes,
       String status,
       Instant createdAt,
-      Instant pickedAt) {
+      Instant pickedAt,
+      /** tenant-svc's zone the stock is drawn from, or null for anywhere in the store. */
+      UUID fromZoneId,
+      /** tenant-svc's zone the drawn stock is put down in, or null for none named. */
+      UUID toZoneId) {
     public static final String DRAFT = "DRAFT";
     public static final String OPEN = "OPEN";
     public static final String COMPLETED = "COMPLETED";

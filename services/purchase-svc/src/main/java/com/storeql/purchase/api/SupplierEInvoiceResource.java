@@ -60,12 +60,21 @@ public class SupplierEInvoiceResource {
               + " credits. When something is not, it waits with the reason — NEEDS_SUPPLIER,"
               + " NEEDS_ORDER, NEEDS_LINES, NEEDS_RETURN, NEEDS_DECISION — and a document that breaks"
               + " a fatal rule, or is addressed to another business, is kept and not captured."
+              + " A document that bills an order at a store the sender is not held to is kept"
+              + " NEEDS_DECISION for a person who may act there, never captured on the sender's"
+              + " word, and the sender is answered without that order (its id, its lines' order"
+              + " lines, what it became)."
               + " Sending the same bytes again answers 200 with the document already received.")
   @APIResponse(responseCode = "201", description = "Received, and captured or waiting")
   @APIResponse(responseCode = "200", description = "These exact bytes were received before")
   @APIResponse(responseCode = "400", description = "Empty, or not an e-invoice that can be read")
   @APIResponse(responseCode = "413", description = "Larger than an e-invoice may be")
   @APIResponse(responseCode = "415", description = "Not XML or PDF")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "STORE_ACCESS_DENIED: these bytes were received before and now bill an order at a store"
+              + " the caller is not held to")
   @POST
   @Consumes({"application/xml", "text/xml", "application/pdf", "application/octet-stream"})
   public Response receive(
@@ -120,7 +129,8 @@ public class SupplierEInvoiceResource {
       summary = "List received supplier e-invoices",
       description =
           "Newest first; ?status= narrows to one status — NEEDS_LINES is the queue waiting for a"
-              + " person to match lines.")
+              + " person to match lines. A caller held to stores sees the documents that name no"
+              + " order yet and those billing an order at one of their stores.")
   @APIResponse(responseCode = "200", description = "The e-invoices")
   @APIResponse(responseCode = "400", description = "A status that does not exist")
   @GET
@@ -137,6 +147,9 @@ public class SupplierEInvoiceResource {
   @Operation(summary = "One received supplier e-invoice, with its lines and the rules it broke")
   @APIResponse(responseCode = "200", description = "The e-invoice")
   @APIResponse(responseCode = "404", description = "No such e-invoice")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: it bills an order at a store the caller is not held to")
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") UUID id) {
@@ -150,6 +163,9 @@ public class SupplierEInvoiceResource {
               + " and it is kept unaltered.")
   @APIResponse(responseCode = "200", description = "The original document")
   @APIResponse(responseCode = "404", description = "No such e-invoice")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: it bills an order at a store the caller is not held to")
   @GET
   @Path("/{id}/document")
   @Produces({"application/xml", "text/xml", "application/pdf", "application/octet-stream"})
@@ -172,8 +188,10 @@ public class SupplierEInvoiceResource {
           "Gives what intake could not find: the supplier that sent it, the order it bills, the return"
               + " a credit note closes, the order line of any unmatched line. Anything left out is"
               + " found again as on arrival, and when that is enough the invoice is captured."
-              + " remember keeps the choices — the supplier's electronic address, what its item codes"
-              + " are — so its next invoice matches by itself.")
+              + " remember keeps the choices — what the supplier's item codes are and, for a caller"
+              + " held to no store, its electronic address — so its next invoice matches by itself;"
+              + " a caller held to stores is told the address was not kept (notRemembered), the"
+              + " supplier's record being the whole business's.")
   @APIResponse(responseCode = "200", description = "Captured, or still waiting with the reason")
   @APIResponse(responseCode = "400", description = "A choice that does not fit the invoice")
   @APIResponse(responseCode = "404", description = "No such e-invoice, supplier or order")
@@ -182,6 +200,11 @@ public class SupplierEInvoiceResource {
       description =
           "Already settled (PURCHASE_EINVOICE_SETTLED), not compliant, addressed elsewhere, or being"
               + " matched by another request (PURCHASE_EINVOICE_BUSY)")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "STORE_ACCESS_DENIED: the order it bills, or the order chosen or named for it, is at a"
+              + " store the caller is not held to; refused before anything is decided or kept")
   @POST
   @Path("/{id}/match")
   @Consumes(MediaType.APPLICATION_JSON)
@@ -196,7 +219,12 @@ public class SupplierEInvoiceResource {
           "Needs purchasing.invoices.decide; the reason is what the supplier is to be told.")
   @APIResponse(responseCode = "200", description = "Refused")
   @APIResponse(responseCode = "400", description = "No reason")
-  @APIResponse(responseCode = "403", description = "Without purchasing.invoices.decide")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Without purchasing.invoices.decide, or STORE_ACCESS_DENIED: it bills an order at a"
+              + " store the caller is not held to")
+  @APIResponse(responseCode = "404", description = "PURCHASE_EINVOICE_NOT_FOUND")
   @APIResponse(responseCode = "409", description = "Already settled, or busy")
   @POST
   @Path("/{id}/refuse")
@@ -207,6 +235,6 @@ public class SupplierEInvoiceResource {
   }
 
   private static Object dto(Receipt r) {
-    return EInvoiceMappers.toDto(r.document(), r.lines(), r.alreadyReceived());
+    return EInvoiceMappers.toDto(r.document(), r.lines(), r.alreadyReceived(), r.notRemembered());
   }
 }

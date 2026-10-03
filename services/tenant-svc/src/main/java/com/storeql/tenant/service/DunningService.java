@@ -78,7 +78,7 @@ public class DunningService {
   public record Step(UUID tenantId, String invoiceNumber, String step) {}
 
   /** An invoice the run could not act on, named so somebody can. */
-  public record Skipped(UUID tenantId, String invoiceNumber, String reason) {}
+  public record Skipped(UUID tenantId, String invoiceNumber, String code, String reason) {}
 
   /** The platform's policy, or the defaults standing in for one. */
   public Policy policy() {
@@ -134,7 +134,7 @@ public class DunningService {
             taken.add(new Step(overdue.tenantId(), overdue.number(), step));
           }
         } catch (ApiException e) {
-          skipped.add(new Skipped(overdue.tenantId(), overdue.number(), e.getMessage()));
+          skipped.add(new Skipped(overdue.tenantId(), overdue.number(), e.code(), e.getMessage()));
           LOG.log(
               System.Logger.Level.WARNING,
               "dunning passed over {0} on {1}: {2}",

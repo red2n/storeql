@@ -134,7 +134,7 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   expect(identity({ vatNumber: '12' }), '[-] a VAT number without its country prefix is refused', 400, 'TENANT_VAT_NUMBER_INVALID');
   expect(identity({ einvoiceScheme: '0088' }), '[-] half an e-invoicing address is refused', 400, 'TENANT_EINVOICE_ADDRESS_INVALID');
   expect(identity({ einvoiceScheme: '0088', einvoiceId: '5790000435976' }), '[-] a GLN whose check digit fails is refused', 400, 'TENANT_EINVOICE_ADDRESS_INVALID');
-  expect(identity({ vatNumber: OUR_VAT }, storekeeper.token), '[-] a storekeeper cannot change how e-invoices name the business', 403);
+  expect(identity({ vatNumber: OUR_VAT }, storekeeper.token), '[-] a storekeeper cannot change how e-invoices name the business', 403, 'FORBIDDEN');
   const named = identity({ vatNumber: OUR_VAT, einvoiceScheme: '9932', einvoiceId: OUR_VAT });
   expect(named, '[+] the owner records the business VAT number and e-invoicing address', 200);
   truthy('[+] ...they read back, and the name is untouched', data(named).vatNumber === OUR_VAT && data(named).einvoiceScheme === '9932' && data(named).einvoiceId === OUR_VAT && data(named).name === profile.name, data(named));
@@ -176,7 +176,7 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   expect(match(e2.id, { poId: po2.id, lines: [{ position: 1, poLineId: po1.lineId }] }), '[-] an order line from another order is refused', 400, 'PURCHASE_EINVOICE_LINE_NOT_ON_ORDER');
   expect(match(e2.id, { poId: po2.id, lines: [{ position: 3, poLineId: po2.lineId }] }), '[-] a line the invoice does not have is refused', 400, 'PURCHASE_EINVOICE_LINE_UNKNOWN');
   expect(match(e2.id, { poId: po2.id, lines: [{ position: 1, poLineId: po2.lineId }, { position: 1, poLineId: po2.lineId }] }), '[-] a line chosen twice is refused', 400, 'PURCHASE_EINVOICE_LINE_CHOSEN_TWICE');
-  expect(match(e2.id, { poId: po2.id }, rival.owner.token), '[-] another tenant cannot match it', 404);
+  expect(match(e2.id, { poId: po2.id }, rival.owner.token), '[-] another tenant cannot match it', 404, 'PURCHASE_EINVOICE_NOT_FOUND');
   truthy('[-] ...nor did any refusal change it', data(einvoice(e2.id)).status === 'NEEDS_ORDER', data(einvoice(e2.id)));
   const m2 = match(e2.id, { poId: po2.id, lines: [{ position: 1, poLineId: po2.lineId }], remember: true });
   expect(m2, '[+] a person picks its order and line, remembering them', 200);
@@ -189,8 +189,8 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   truthy('[+] a line carrying the item code a person matched before is matched on its own and captured', taught.status === 'CAPTURED' && (taught.lines || [])[0]?.matchedBy === 'ITEM_CODE' && (taught.lines || [])[0]?.poLineId === po3.lineId, taught);
 
   // ── refusing ──────────────────────────────────────────────────────────────────
-  expect(refuse(untaught.id, 'Not our order', storekeeper.token), '[-] a storekeeper cannot refuse an e-invoice', 403);
-  expect(refuse(untaught.id, ''), '[-] a refusal needs a reason', 400);
+  expect(refuse(untaught.id, 'Not our order', storekeeper.token), '[-] a storekeeper cannot refuse an e-invoice', 403, 'PERMISSION_DENIED');
+  expect(refuse(untaught.id, ''), '[-] a refusal needs a reason', 400, 'VALIDATION_FAILED');
   const refused = refuse(untaught.id, 'Not our order');
   expect(refused, '[+] a manager refuses it with the reason', 200);
   truthy('[+] ...it is kept, refused, and never captured', data(refused).status === 'REFUSED' && data(refused).decisionReason === 'Not our order' && !data(refused).supplierInvoiceId, data(refused));
@@ -260,7 +260,7 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
 
   // ── another tenant, and reading the inbox ────────────────────────────────────
   expect(einvoice(e1.id, rival.owner.token), '[-] another tenant cannot read an e-invoice', 404, 'PURCHASE_EINVOICE_NOT_FOUND');
-  expect(original(e1.id, rival.owner.token), '[-] nor download its original', 404);
+  expect(original(e1.id, rival.owner.token), '[-] nor download its original', 404, 'PURCHASE_EINVOICE_NOT_FOUND');
   const rivalList = data(call('GET', EINV, { token: rival.owner.token }));
   truthy('[-] ...and lists none', Array.isArray(rivalList) && rivalList.length === 0, rivalList);
   expect(call('GET', `${EINV}?status=PAID`, { token: owner }), '[-] a status that does not exist is refused', 400, 'PURCHASE_EINVOICE_STATUS_INVALID');
@@ -286,7 +286,7 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   const INBOX = `${P}/admin/e-invoices/inbox`;
   const inboxSettings = (body, token = owner) => call('PUT', `${INBOX}/settings`, { token, body });
   const inboxReadiness = (token = owner) => call('GET', `${INBOX}/readiness`, { token });
-  const NIP = '5260250991';
+  const NIP = '5260250274';
 
   const unset = inboxReadiness();
   expect(unset, '[+] a business that never chose where to fetch from is told what to do', 200);
@@ -296,8 +296,8 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   expect(inboxSettings({ network: 'KSEF', provider: 'ACCESS_POINT', providerAccount: NIP }), '[-] as is a provider that does not serve it', 400, 'PURCHASE_INBOX_PROVIDER_UNKNOWN');
   expect(inboxSettings({ network: 'KSEF', provider: 'KSEF', providerAccount: '123' }), '[-] KSeF knows a business by its NIP, and that is not one', 400, 'PURCHASE_INBOX_ACCOUNT_INVALID');
   expect(inboxSettings({ network: 'KSEF', provider: 'KSEF', providerAccount: NIP, secret: 'a-token' }), '[-] the ministry cannot be chosen on a deployment that holds no endpoint for it', 409, 'PURCHASE_INBOX_NOT_DEPLOYED');
-  expect(inboxSettings({ network: 'KSEF', provider: 'SIMULATED', providerAccount: NIP }, storekeeper.token), '[-] a storekeeper does not choose where invoices are fetched from', 403);
-  expect(inboxReadiness(storekeeper.token), '[-] nor asks whether any could arrive', 403);
+  expect(inboxSettings({ network: 'KSEF', provider: 'SIMULATED', providerAccount: NIP }, storekeeper.token), '[-] a storekeeper does not choose where invoices are fetched from', 403, 'FORBIDDEN');
+  expect(inboxReadiness(storekeeper.token), '[-] nor asks whether any could arrive', 403, 'FORBIDDEN');
 
   const standIn = inboxSettings({ network: 'KSEF', provider: 'SIMULATED', providerAccount: NIP });
   expect(standIn, '[+] the platform can stand in for the ministry, so the flow can be walked', 200);

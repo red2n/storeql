@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * The keys access tokens are signed with (20.15). One key signs at a time; when it is rotated — by
@@ -51,6 +52,10 @@ public class SigningKeys {
   private volatile Signer signer;
   private volatile Instant signerExpiresAt = Instant.EPOCH;
   private volatile Instant maintainedAt = Instant.EPOCH;
+
+  /** A lock, not a monitor: the reload does JDBC, and a virtual thread must not pin on it. */
+  private final ReentrantLock reloadLock = new ReentrantLock();
+
   private final Map<String, RSAPublicKey> verifying = new ConcurrentHashMap<>();
   private volatile Instant verifyingLoadedAt = Instant.EPOCH;
 
@@ -71,13 +76,24 @@ public class SigningKeys {
   /** The key to sign with, created on first use and rotated by age. */
   public Signer signer() {
     Instant now = Instant.now();
-    if (Duration.between(maintainedAt, now).compareTo(MAINTENANCE) > 0) {
-      maintainedAt = now;
-      maintain(now);
+    if (Duration.between(maintainedAt, now).compareTo(MAINTENANCE) > 0 && reloadLock.tryLock()) {
+      // One caller maintains; the others carry on with the signer they have.
+      try {
+        if (Duration.between(maintainedAt, now).compareTo(MAINTENANCE) > 0) {
+          maintainedAt = now;
+          maintain(now);
+        }
+      } finally {
+        reloadLock.unlock();
+      }
     }
     Signer s = signer;
     if (s != null && now.isBefore(signerExpiresAt)) return s;
-    synchronized (this) {
+    reloadLock.lock();
+    try {
+      // Re-checked under the lock: whoever got here first has already reloaded.
+      s = signer;
+      if (s != null && now.isBefore(signerExpiresAt)) return s;
       SigningKey active = repo.active().orElseGet(() -> create(now));
       Instant signsFrom = active.createdAt().plusSeconds(config.jwtPublishLeadSeconds());
       SigningKey signing = active;
@@ -99,6 +115,8 @@ public class SigningKeys {
       signer = s;
       signerExpiresAt = expires;
       return s;
+    } finally {
+      reloadLock.unlock();
     }
   }
 

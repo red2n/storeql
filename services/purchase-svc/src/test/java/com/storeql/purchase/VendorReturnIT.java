@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
 import com.storeql.ids.Ids;
+import com.storeql.test.JsonStub;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -35,8 +36,26 @@ class VendorReturnIT {
 
   private static final PostgresSupport PG;
 
+  /**
+   * What inventory-svc says is on hand, or null for "no answer" (the stub answers 404, which the
+   * purchase side reads as "not checked", as when inventory-svc is not there). Only the test that
+   * is about sold stock sets it.
+   */
+  private static volatile String onHandAtTheStore;
+
+  private static final JsonStub INVENTORY;
+
   static {
     PG = PostgresSupport.start();
+    INVENTORY =
+        JsonStub.start("inventory-svc")
+            .on(
+                "GET",
+                "/admin/inventory/batches",
+                call ->
+                    onHandAtTheStore == null
+                        ? new JsonStub.Answer(404, "{}")
+                        : JsonStub.Answer.ok("[{\"remainingQty\":" + onHandAtTheStore + "}]"));
     // The tenants this suite acts for, as tenant-svc would describe them (SJ-D53).
     TenantSvcStub.start()
         .with(VendorReturnIT.T, "GBP", "GB")
@@ -61,6 +80,7 @@ class VendorReturnIT {
 
   @AfterAll
   static void stopDb() {
+    INVENTORY.close();
     PG.stop();
   }
 
@@ -88,6 +108,12 @@ class VendorReturnIT {
 
   private Response post(String path, String json) {
     return call("POST", path, json, T, "OWNER");
+  }
+
+  private static void assertRefused(Response r, int status, String code) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    assertThat(body, com.storeql.test.Envelopes.parse(body).getString("code", null), is(code));
   }
 
   private static JsonObject data(Response r) {
@@ -325,7 +351,14 @@ class VendorReturnIT {
     assertThat(ok.getStatus(), is(201));
     String id = data(ok).getString("id");
     assertThat(call("GET", "/vendor-returns/" + id, null, T, "CASHIER").getStatus(), is(200));
-    assertThat(call("GET", "/vendor-returns/" + id, null, OTHER_T, "OWNER").getStatus(), is(404));
+    assertRefused(
+        call("GET", "/vendor-returns/" + id, null, OTHER_T, "OWNER"),
+        404,
+        "PURCHASE_RTV_NOT_FOUND");
+    assertRefused(
+        call("GET", "/vendor-returns/" + Ids.newId(), null, T, "OWNER"),
+        404,
+        "PURCHASE_RTV_NOT_FOUND");
     assertThat(call("GET", "/vendor-returns/" + id, null, T, "CUSTOMER").getStatus(), is(403));
     var mine =
         Json.createReader(
@@ -337,6 +370,78 @@ class VendorReturnIT {
     assertThat(mine.size(), is(1));
     assertThat(
         call("GET", "/vendor-returns?poId=" + po, null, OTHER_T, "OWNER").getStatus(), is(404));
+  }
+
+  @Test
+  @DisplayName("The list gives every return its own lines, read in one go")
+  void theListCarriesEachReturnsOwnLines() {
+    String po = receivedOrder("10", "10");
+    assertThat(
+        call("POST", "/vendor-returns", rtv(po, "DAMAGED", "2"), T, "OWNER").getStatus(), is(201));
+    assertThat(
+        call("POST", "/vendor-returns", rtv(po, "DAMAGED", "3"), T, "OWNER").getStatus(), is(201));
+    var mine =
+        Json.createReader(
+                new StringReader(
+                    call("GET", "/vendor-returns?poId=" + po, null, T, "OWNER")
+                        .readEntity(String.class)))
+            .readObject()
+            .getJsonArray("data");
+    assertThat(mine.size(), is(2));
+    java.util.Set<Integer> quantities = new java.util.TreeSet<>();
+    for (var r : mine.getValuesAs(jakarta.json.JsonObject.class)) {
+      assertThat(r.getJsonArray("lines").size(), is(1));
+      quantities.add(r.getJsonArray("lines").getJsonObject(0).getJsonNumber("qty").intValue());
+    }
+    assertThat(quantities, is(java.util.Set.of(2, 3)));
+  }
+
+  @Test
+  @DisplayName("Goods already sold cannot go back: inventory-svc's on-hand is the ceiling")
+  void goodsAlreadySoldCannotGoBack() {
+    String po = receivedOrder("10", "10");
+    onHandAtTheStore = "2";
+    try {
+      Response r = call("POST", "/vendor-returns", rtv(po, "DAMAGED", "5"), T, "OWNER");
+      assertRefused(r, 422, "PURCHASE_RTV_INSUFFICIENT_STOCK");
+      var mine =
+          Json.createReader(
+                  new StringReader(
+                      call("GET", "/vendor-returns?poId=" + po, null, T, "OWNER")
+                          .readEntity(String.class)))
+              .readObject()
+              .getJsonArray("data");
+      assertThat("nothing was raised", mine.size(), is(0));
+      // What the shelf does hold can still go back.
+      assertThat(
+          call("POST", "/vendor-returns", rtv(po, "DAMAGED", "2"), T, "OWNER").getStatus(),
+          is(201));
+    } finally {
+      onHandAtTheStore = null;
+    }
+  }
+
+  @Test
+  @DisplayName("A return offsets the invoice; it does not reopen or move the order")
+  void aReturnLeavesTheOrdersOwnStatusAlone() {
+    String po = receivedOrder("10", "10");
+    assertThat(
+        data(call("GET", "/purchase-orders/" + po, null, T, "OWNER")).getString("status"),
+        is("RECEIVED"));
+    assertThat(
+        call("POST", "/vendor-returns", rtv(po, "DAMAGED", "4"), T, "OWNER").getStatus(), is(201));
+    assertThat(
+        data(call("GET", "/purchase-orders/" + po, null, T, "OWNER")).getString("status"),
+        is("RECEIVED"));
+    // A partly received order stays as it was too, and its return needs no answer from
+    // inventory-svc (none is running here): the order's own ceiling decides.
+    String part = receivedOrder("10", "6");
+    assertThat(
+        call("POST", "/vendor-returns", rtv(part, "DAMAGED", "2"), T, "STOREKEEPER").getStatus(),
+        is(201));
+    assertThat(
+        data(call("GET", "/purchase-orders/" + part, null, T, "OWNER")).getString("status"),
+        is("PARTIALLY_RECEIVED"));
   }
 
   @Test
@@ -352,9 +457,14 @@ class VendorReturnIT {
     assertThat(
         call("POST", "/vendor-returns/" + id + "/credit", credit, T, "CASHIER").getStatus(),
         is(403));
+    assertRefused(
+        call("POST", "/vendor-returns/" + id + "/credit", credit, OTHER_T, "OWNER"),
+        404,
+        "PURCHASE_RTV_NOT_FOUND");
     assertThat(
-        call("POST", "/vendor-returns/" + id + "/credit", credit, OTHER_T, "OWNER").getStatus(),
-        is(404));
+        "the rival's attempt moved nothing",
+        data(call("GET", "/vendor-returns/" + id, null, T, "OWNER")).getString("status"),
+        is("RAISED"));
     Response bad =
         call(
             "POST",
@@ -396,6 +506,42 @@ class VendorReturnIT {
     assertThat(
         data(call("GET", "/vendor-returns/" + id, null, T, "OWNER")).getString("creditNoteNumber"),
         is("CN-77"));
+  }
+
+  @Test
+  @DisplayName(
+      "A credit note's amount finer than the return's currency is refused"
+          + " PURCHASE_AMOUNT_TOO_PRECISE, never rounded; the return stays open, and to the penny it"
+          + " is credited at exactly what was keyed")
+  void aCreditFinerThanItsCurrencyIsRefused() {
+    String po = receivedOrder("10", "10");
+    String id =
+        data(call("POST", "/vendor-returns", rtv(po, "DAMAGED", "4"), T, "OWNER")).getString("id");
+    assertRefused(
+        call(
+            "POST",
+            "/vendor-returns/" + id + "/credit",
+            "{\"creditNoteNumber\":\"CN-90\",\"creditNoteDate\":\"2026-09-20\","
+                + "\"amount\":9.995}",
+            T,
+            "MANAGER"),
+        400,
+        "PURCHASE_AMOUNT_TOO_PRECISE");
+    assertThat(
+        data(call("GET", "/vendor-returns/" + id, null, T, "OWNER")).getString("status"),
+        is("RAISED"));
+
+    Response ok =
+        call(
+            "POST",
+            "/vendor-returns/" + id + "/credit",
+            "{\"creditNoteNumber\":\"CN-90\",\"creditNoteDate\":\"2026-09-20\","
+                + "\"amount\":9.99}",
+            T,
+            "MANAGER");
+    assertThat(ok.getStatus(), is(200));
+    assertThat(
+        data(ok).getJsonNumber("creditAmount").bigDecimalValue().toPlainString(), is("9.99"));
   }
 
   @org.junit.jupiter.api.Test

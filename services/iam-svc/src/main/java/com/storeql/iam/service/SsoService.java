@@ -395,8 +395,9 @@ public class SsoService {
     if (linked.isPresent()) {
       Sso.Identity link = linked.get();
       Optional<User> user = users.findById(link.userId());
-      if (user.isEmpty() || !tenant.equals(user.get().tenantId())) {
-        // Taken off this business's staff since: the link has nothing left to point at.
+      if (user.isEmpty() || !tenant.equals(user.get().tenantId()) || !isStaff(user.get())) {
+        // Taken off this business's staff since: the link has nothing left to point at. A login
+        // made in the business stays in it when let go of its last store, holding no staff role.
         sso.unlink(tenant, link.id());
         throw new SsoRefused("SSO_NO_ACCOUNT", "the linked login is no longer this business's");
       }
@@ -413,9 +414,12 @@ public class SsoService {
     if (c.requireVerifiedEmail() && !proved.emailVerified()) {
       throw new SsoRefused("SSO_EMAIL_UNVERIFIED", "the provider has not verified the address");
     }
+    // A login the business holds no staff role on — provisioned and not yet assigned, or let go of
+    // its last store — is nobody's staff yet, as it was when such a login belonged to no business.
     User user =
         users
             .findByEmail(tenant, email)
+            .filter(this::isStaff)
             .orElseThrow(() -> new SsoRefused("SSO_NO_ACCOUNT", "no login of this business"));
     if (!User.STATUS_ACTIVE.equals(user.status())) {
       throw new SsoRefused("SSO_ACCOUNT_UNAVAILABLE", "the login is not active");
@@ -439,6 +443,14 @@ public class SsoService {
   }
 
   // ── helpers ─────────────────────────────────────────────────────────────────
+
+  /** Whether the login holds a staff role: any role but a shopper's or the platform's. */
+  private boolean isStaff(User user) {
+    for (String role : users.rolesOf(user.id())) {
+      if (!"CUSTOMER".equals(role) && !"PLATFORM_ADMIN".equals(role)) return true;
+    }
+    return false;
+  }
 
   private SsoDtos.ConnectionView view(Sso.Connection c) {
     return new SsoDtos.ConnectionView(

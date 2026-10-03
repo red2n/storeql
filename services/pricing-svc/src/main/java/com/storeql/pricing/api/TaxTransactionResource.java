@@ -49,6 +49,11 @@ public class TaxTransactionResource {
           "Appends a POSLog-compatible tax transaction journal entry (net/VAT/gross per order"
               + " line) per HMRC VAT Notice 700.")
   @APIResponse(responseCode = "201", description = "Tax transaction recorded")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the amounts are kept to the business currency's minor"
+              + " units, and the currency could not be read")
   @POST
   public Response record(RecordTaxTransactionRequest req) {
     Validations.validate(req);

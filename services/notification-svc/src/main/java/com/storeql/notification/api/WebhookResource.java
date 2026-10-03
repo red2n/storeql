@@ -7,6 +7,7 @@ import com.storeql.notification.service.WebhookService;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.Parsing;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -61,11 +62,17 @@ public class WebhookResource {
   @APIResponse(
       responseCode = "400",
       description =
-          "WEBHOOK_URL_INVALID, WEBHOOK_DESCRIPTION_INVALID, WEBHOOK_EVENTS_EMPTY, WEBHOOK_EVENT_UNKNOWN")
+          "WEBHOOK_URL_INVALID, WEBHOOK_DESCRIPTION_INVALID, WEBHOOK_EVENTS_EMPTY,"
+              + " WEBHOOK_EVENT_UNKNOWN; BODY_REQUIRED or REQUEST_BODY_INVALID for no body or one"
+              + " that is not JSON of this shape")
+  @APIResponse(
+      responseCode = "503",
+      description = "WEBHOOKS_NOT_CONFIGURED: this deployment has no sealing key for the secret")
   @POST
   @Path("/endpoints")
   public Response register(WebhookDtos.CreateRequest req) {
     ctx.requireAnyRole("OWNER");
+    Validations.validate(req);
     WebhookService.Made made = service.register(ctx.requireTenantId(), ctx.requireUserId(), req);
     return Response.status(Response.Status.CREATED)
         .entity(
@@ -103,6 +110,7 @@ public class WebhookResource {
   public ApiResponse<WebhookDtos.EndpointResponse> update(
       @PathParam("id") UUID id, WebhookDtos.UpdateRequest req) {
     ctx.requireAnyRole("OWNER");
+    Validations.validate(req);
     return ApiResponse.ok(WebhookMappers.toDto(service.update(ctx.requireTenantId(), id, req)));
   }
 

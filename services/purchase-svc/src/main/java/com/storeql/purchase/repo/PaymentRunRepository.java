@@ -243,7 +243,11 @@ public class PaymentRunRepository extends BaseOutboxRepository {
         "list payment run items");
   }
 
-  /** PROPOSED to APPROVED. {@code false} when the run was not PROPOSED. */
+  /**
+   * PROPOSED to APPROVED, keeping each payee's bank-details version on the same transaction: the
+   * run is approved for the accounts as they stand now, and {@link #payeesChangedSinceApproval}
+   * finds any that move on later. {@code false} when the run was not PROPOSED.
+   */
   public boolean approve(UUID tenantId, UUID id, UUID approvedBy) {
     return inTx(
         c -> {
@@ -256,10 +260,43 @@ public class PaymentRunRepository extends BaseOutboxRepository {
             ps.setObject(3, tenantId);
             ps.setObject(4, id);
             ps.setString(5, PaymentRuns.PROPOSED);
-            return ps.executeUpdate() == 1;
+            if (ps.executeUpdate() != 1) return false;
           }
+          try (var ps =
+              c.prepareStatement(
+                  "INSERT INTO payment_run_payees"
+                      + " (tenant_id, run_id, supplier_id, bank_details_version)"
+                      + " SELECT DISTINCT s.tenant_id, i.run_id, s.id, s.bank_details_version"
+                      + " FROM payment_run_items i"
+                      + " JOIN suppliers s ON s.tenant_id = i.tenant_id AND s.id = i.supplier_id"
+                      + " WHERE i.tenant_id = ? AND i.run_id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, id);
+            ps.executeUpdate();
+          }
+          return true;
         },
         "approve payment run");
+  }
+
+  /**
+   * The payees of an approved run whose bank details changed after it was approved: their version
+   * has moved on from the one the approval kept. Judged by counting changes, never by comparing the
+   * service's clock with the database's.
+   */
+  public java.util.Set<UUID> payeesChangedSinceApproval(UUID tenantId, UUID runId) {
+    return new java.util.HashSet<>(
+        query(
+            "SELECT p.supplier_id FROM payment_run_payees p"
+                + " JOIN suppliers s ON s.tenant_id = p.tenant_id AND s.id = p.supplier_id"
+                + " WHERE p.tenant_id = ? AND p.run_id = ?"
+                + " AND s.bank_details_version <> p.bank_details_version",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, runId);
+            },
+            rs -> rs.getObject("supplier_id", UUID.class),
+            "payees changed since approval"));
   }
 
   /**

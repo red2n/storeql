@@ -18,9 +18,9 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Map;
@@ -159,13 +159,19 @@ public class BruteForceFilter implements ContainerRequestFilter, ContainerRespon
    * {@code username} is kept for compatibility with other auth shapes. The stream is restored for
    * the proxy regardless.
    */
-  private String extractUserKey(ContainerRequestContext requestContext) throws IOException {
-    byte[] body;
-    try (InputStream in = requestContext.getEntityStream()) {
-      body = toByteArray(in);
+  @SuppressWarnings("PMD.CloseResource") // handed on to the proxy when the body is oversized
+  String extractUserKey(ContainerRequestContext requestContext) throws IOException {
+    InputStream in = requestContext.getEntityStream();
+    // At most one byte past the cap is read: a login body never needs more, and an oversized one
+    // is handed on unread (head + the rest of the stream) rather than copied whole into heap.
+    byte[] body = in == null ? new byte[0] : in.readNBytes(MAX_PARSEABLE_BODY_BYTES + 1);
+    if (body.length > MAX_PARSEABLE_BODY_BYTES) {
+      requestContext.setEntityStream(new SequenceInputStream(new ByteArrayInputStream(body), in));
+      return null;
     }
     requestContext.setEntityStream(new ByteArrayInputStream(body));
-    if (body.length == 0 || body.length > MAX_PARSEABLE_BODY_BYTES) {
+    if (in != null) in.close();
+    if (body.length == 0) {
       return null;
     }
     try {
@@ -200,19 +206,5 @@ public class BruteForceFilter implements ContainerRequestFilter, ContainerRespon
     return normalizedPath.endsWith(loginPath)
         || normalizedPath.endsWith("/login")
         || normalizedPath.endsWith("/authenticate");
-  }
-
-  private static byte[] toByteArray(InputStream in) throws IOException {
-    if (in == null) {
-      return new byte[0];
-    }
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
-    byte[] buf = new byte[4096];
-    int read = in.read(buf);
-    while (read != -1) {
-      out.write(buf, 0, read);
-      read = in.read(buf);
-    }
-    return out.toByteArray();
   }
 }

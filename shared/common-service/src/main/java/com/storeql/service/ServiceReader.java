@@ -60,6 +60,15 @@ public final class ServiceReader {
   private final String role;
   private final int attempts;
   private final Optional<String> configuredBase;
+  private final ReadBreaker breaker =
+      new ReadBreaker(
+          (int) configLong("storeql.clients.breaker.failures", 5L),
+          Duration.ofSeconds(configLong("storeql.clients.breaker.open-seconds", 5L)),
+          System::nanoTime);
+
+  private static long configLong(String key, long fallback) {
+    return Cfg.getLong(key, fallback);
+  }
 
   /**
    * @param service the service name, as Consul and the override property know it
@@ -118,8 +127,14 @@ public final class ServiceReader {
       LOG.log(Level.WARNING, "{0} could not be located for {1} of {2}", service, path, tenantId);
       return new Reply(0, null);
     }
+    if (breaker.isOpen()) {
+      // The service has just failed several reads in a row: answer "unreachable" without waiting
+      // out the retries again; one read is let through when the open period ends.
+      return new Reply(0, null);
+    }
     Reply last = new Reply(0, null);
     for (int attempt = 1; attempt <= attempts; attempt++) {
+      if (attempt > 1 && !backoff(attempt)) break;
       HttpClientRequest request =
           web.get(base + path).header(HeaderNames.create(HttpHeaders.ROLES), role);
       if (tenantId != null) {
@@ -131,6 +146,7 @@ public final class ServiceReader {
       try (HttpClientResponse res = request.request()) {
         last = new Reply(res.status().code(), res.as(String.class));
         if (!last.unreachable()) {
+          breaker.success();
           // A refusal is not a blip. Callers here treat an unreadable answer as "no opinion" and
           // carry on — which is right for an outage and wrong for a 401/403, where the platform is
           // misconfigured and will go on being misconfigured silently. SJ-D65 hid behind exactly
@@ -154,7 +170,25 @@ public final class ServiceReader {
         last = new Reply(0, null);
       }
     }
+    breaker.failure();
     return last;
+  }
+
+  /**
+   * Jittered backoff before retry number {@code attempt}: 100 ms per attempt plus up to 100 ms of
+   * jitter, so a service coming back is not hit by every caller in the same instant.
+   *
+   * @return false if the wait was interrupted (stop retrying)
+   */
+  private static boolean backoff(int attempt) {
+    try {
+      Thread.sleep(
+          100L * (attempt - 1) + java.util.concurrent.ThreadLocalRandom.current().nextLong(100L));
+      return true;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
   }
 
   /** The body of a 200; empty when the service cannot be located, refuses, or keeps failing. */

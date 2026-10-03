@@ -71,6 +71,8 @@ public class PromotionEngine {
    * @param presentedCoupons coupon codes the customer offered, matched case-insensitively
    * @param exhausted promotions whose usage caps are already spent, so they can be reported as
    *     rejected rather than silently skipped
+   * @param scale the basket currency's minor units ({@code Fx.minorUnits}): every amount taken off
+   *     is rounded half up to it — whole yen, pence, three-decimal dinars
    * @return what applies, what it takes off, and which coupons did not work and why
    */
   public PromotionOutcome apply(
@@ -78,7 +80,8 @@ public class PromotionEngine {
       List<Promotion> candidates,
       Map<UUID, Set<UUID>> scopedVariants,
       List<String> presentedCoupons,
-      Map<UUID, String> exhausted) {
+      Map<UUID, String> exhausted,
+      int scale) {
 
     Set<String> offered =
         presentedCoupons == null
@@ -104,7 +107,8 @@ public class PromotionEngine {
     // Remaining value per line, so the clamp and the basket subtotal both stay honest as
     // discounts accumulate.
     Map<UUID, BigDecimal> lineTotals = new LinkedHashMap<>();
-    for (BasketLine l : lines) lineTotals.merge(l.variantId(), lineTotal(l), BigDecimal::add);
+    for (BasketLine l : lines)
+      lineTotals.merge(l.variantId(), lineTotal(l, scale), BigDecimal::add);
     Map<UUID, BigDecimal> remaining = new LinkedHashMap<>(lineTotals);
 
     boolean stopped = false;
@@ -113,7 +117,7 @@ public class PromotionEngine {
       if (p.isBasketLevel()) continue; // second pass
       if (!admissible(p, offered, exhausted, rejected)) continue;
 
-      List<LineDiscount> got = applyLineLevel(p, lines, scopedVariants, remaining);
+      List<LineDiscount> got = applyLineLevel(p, lines, scopedVariants, remaining, scale);
       if (got.isEmpty()) continue;
 
       lineDiscounts.addAll(got);
@@ -130,7 +134,7 @@ public class PromotionEngine {
       if (!admissible(p, offered, exhausted, rejected)) continue;
       if (subtotal.signum() <= 0) continue;
 
-      BigDecimal amount = basketAmount(p, subtotal);
+      BigDecimal amount = basketAmount(p, subtotal, scale);
       if (amount.signum() <= 0) continue;
 
       basketDiscounts.add(new LineDiscount(null, p.id(), p.name(), amount));
@@ -170,7 +174,8 @@ public class PromotionEngine {
       Promotion p,
       List<BasketLine> lines,
       Map<UUID, Set<UUID>> scopedVariants,
-      Map<UUID, BigDecimal> remaining) {
+      Map<UUID, BigDecimal> remaining,
+      int scale) {
 
     Set<UUID> scope = scopedVariants == null ? null : scopedVariants.get(p.id());
     List<LineDiscount> out = new ArrayList<>();
@@ -206,7 +211,7 @@ public class PromotionEngine {
             l.unitPrice()
                 .multiply(take)
                 .multiply(p.getDiscountPct())
-                .divide(HUNDRED, 2, RoundingMode.HALF_UP);
+                .divide(HUNDRED, scale, RoundingMode.HALF_UP);
         amount = clamp(amount, remaining, l.variantId());
         if (amount.signum() > 0) out.add(new LineDiscount(l.variantId(), p.id(), p.name(), amount));
         left = left.subtract(take);
@@ -215,7 +220,7 @@ public class PromotionEngine {
     }
 
     if (Promotion.TYPE_MIX_MATCH.equals(p.type())) {
-      return applyMixMatch(p, lines, scope, remaining);
+      return applyMixMatch(p, lines, scope, remaining, scale);
     }
 
     for (BasketLine l : lines) {
@@ -223,10 +228,12 @@ public class PromotionEngine {
       BigDecimal amount =
           switch (p.type()) {
             case Promotion.TYPE_PERCENT ->
-                lineTotal(l).multiply(p.value()).divide(HUNDRED, 2, RoundingMode.HALF_UP);
+                lineTotal(l, scale)
+                    .multiply(p.value())
+                    .divide(HUNDRED, scale, RoundingMode.HALF_UP);
             // FLAT is per unit, matching the old engine, which subtracted it from a unit price.
             case Promotion.TYPE_FLAT ->
-                p.value().multiply(l.qty()).setScale(2, RoundingMode.HALF_UP);
+                p.value().multiply(l.qty()).setScale(scale, RoundingMode.HALF_UP);
             default -> BigDecimal.ZERO;
           };
       amount = clamp(amount, remaining, l.variantId());
@@ -236,7 +243,7 @@ public class PromotionEngine {
   }
 
   /** What a basket-level promotion takes off a subtotal, or zero if its threshold is not met. */
-  private static BigDecimal basketAmount(Promotion p, BigDecimal subtotal) {
+  private static BigDecimal basketAmount(Promotion p, BigDecimal subtotal, int scale) {
     // The threshold is checked for every basket-level type, not only SPEND_THRESHOLD: a
     // minOrderAmount set on a basket percentage means the same thing and was previously ignored
     // on all of them alike.
@@ -246,9 +253,9 @@ public class PromotionEngine {
     BigDecimal amount =
         switch (p.type()) {
           case Promotion.TYPE_BASKET_PERCENT ->
-              subtotal.multiply(p.value()).divide(HUNDRED, 2, RoundingMode.HALF_UP);
+              subtotal.multiply(p.value()).divide(HUNDRED, scale, RoundingMode.HALF_UP);
           case Promotion.TYPE_BASKET_FLAT, Promotion.TYPE_SPEND_THRESHOLD ->
-              p.value().setScale(2, RoundingMode.HALF_UP);
+              p.value().setScale(scale, RoundingMode.HALF_UP);
           default -> BigDecimal.ZERO;
         };
     // Never more than is left to discount.
@@ -278,7 +285,11 @@ public class PromotionEngine {
    * price, so the lines still add up to the total.
    */
   private static List<LineDiscount> applyMixMatch(
-      Promotion p, List<BasketLine> lines, Set<UUID> scope, Map<UUID, BigDecimal> remaining) {
+      Promotion p,
+      List<BasketLine> lines,
+      Set<UUID> scope,
+      Map<UUID, BigDecimal> remaining,
+      int scale) {
     List<LineDiscount> out = new ArrayList<>();
     if (p.buyQty() == null || p.buyQty().compareTo(BigDecimal.ONE) <= 0) return out;
     int bundle = p.buyQty().intValue();
@@ -302,7 +313,7 @@ public class PromotionEngine {
       List<BasketLine> inBundle = units.subList(b * bundle, (b + 1) * bundle);
       BigDecimal full =
           inBundle.stream().map(BasketLine::unitPrice).reduce(BigDecimal.ZERO, BigDecimal::add);
-      BigDecimal saving = full.subtract(p.value()).setScale(2, RoundingMode.HALF_UP);
+      BigDecimal saving = full.subtract(p.value()).setScale(scale, RoundingMode.HALF_UP);
       if (saving.signum() <= 0) continue;
       // Split by price; the rounding remainder lands on the last unit so the bundle adds up.
       BigDecimal allocated = BigDecimal.ZERO;
@@ -311,7 +322,7 @@ public class PromotionEngine {
         BigDecimal share =
             i == inBundle.size() - 1
                 ? saving.subtract(allocated)
-                : saving.multiply(u.unitPrice()).divide(full, 2, RoundingMode.HALF_UP);
+                : saving.multiply(u.unitPrice()).divide(full, scale, RoundingMode.HALF_UP);
         allocated = allocated.add(share);
         perVariant.merge(u.variantId(), share, BigDecimal::add);
       }
@@ -333,7 +344,7 @@ public class PromotionEngine {
     return scope == null || scope.contains(l.variantId());
   }
 
-  private static BigDecimal lineTotal(BasketLine l) {
-    return l.unitPrice().multiply(l.qty()).setScale(2, RoundingMode.HALF_UP);
+  private static BigDecimal lineTotal(BasketLine l, int scale) {
+    return l.unitPrice().multiply(l.qty()).setScale(scale, RoundingMode.HALF_UP);
   }
 }

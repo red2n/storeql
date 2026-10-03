@@ -1,5 +1,7 @@
+import 'widgets/business_wide_note.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -189,6 +191,14 @@ Widget _emptyInList(ColorScheme cs, IconData icon, String text) => Center(
   ),
 );
 
+/// When a price list or a VAT rate takes effect: the start of the chosen day,
+/// in UTC, whole seconds. A bare '2026-01-01' is refused with INVALID_DATE —
+/// the column is TIMESTAMPTZ — so the day is sent as an instant, converted
+/// here at the UI edge (golden rule 14).
+String effectiveFromInstant(DateTime day) => DateTime.utc(day.year, day.month, day.day)
+    .toIso8601String()
+    .replaceFirst(RegExp(r'\.\d+Z$'), 'Z');
+
 /// The day an ISO date names, as a date (`1 Apr 2026`), read as it is written
 /// — a period's `2026-04-01T00:00:00Z` stays 1 April in any time zone.
 String _isoDay(String iso) {
@@ -244,7 +254,7 @@ class _PriceListsTab extends ConsumerWidget {
     final header = <Widget>[
         // The business's exchange rates (03.x): what a price is shown in, what a foreign order is
         // measured in.
-        FxRatesCard(management: management),
+        FxRatesCard(management: management && !heldToStores(auth), heldToStores: heldToStores(auth)),
         _addBar(
           context,
           'New price list',
@@ -389,14 +399,7 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
               'channel': _channel,
               if (_currency != null) 'currency': _currency,
               if (_zoneId != null) 'zoneId': _zoneId,
-              // A bare '2026-01-01' is rejected with INVALID_DATE — the column is
-              // TIMESTAMPTZ. Sent as a UTC instant, which is also what golden rule
-              // 14 asks for: convert at the UI edge, store UTC.
-              'effectiveFrom': DateTime.utc(
-                _from.year,
-                _from.month,
-                _from.day,
-              ).toIso8601String().replaceFirst(RegExp(r'\.\d+Z$'), 'Z'),
+              'effectiveFrom': effectiveFromInstant(_from),
             },
           );
       if (!mounted) return;
@@ -589,6 +592,15 @@ class _PriceListItemDialogState extends ConsumerState<_PriceListItemDialog> {
   bool _loading = false;
   String? _error;
 
+  // The price and the quantity it applies from are read the way the app's
+  // language writes a number ([AmountMarks]) and sent as the decimals they
+  // are. One that cannot be read is refused under its field and nothing is
+  // sent: read with a point, 1.250 lei was set as 1,25 on every till; a
+  // minimum the dialog could not read went as 1.
+  static const _shape = AmountShape(14, 4);
+  final _marks = AmountMarks.ofApp();
+  String? _says(TextEditingController c) => _shape.refusal(c.text.trim(), _marks);
+
   @override
   void dispose() {
     _priceCtrl.dispose();
@@ -597,10 +609,19 @@ class _PriceListItemDialogState extends ConsumerState<_PriceListItemDialog> {
   }
 
   Future<void> _submit() async {
-    final price = double.tryParse(_priceCtrl.text.trim());
-    final minQty = double.tryParse(_minQtyCtrl.text.trim()) ?? 1;
-    if (_variantId == null || price == null || price <= 0) {
+    if (_says(_priceCtrl) != null || _says(_minQtyCtrl) != null) {
+      setState(() => _error = 'A figure cannot be read. Correct the one marked.');
+      return;
+    }
+    final price = _shape.read(_priceCtrl.text.trim(), _marks);
+    // Blank: from one, pricing-svc's own default.
+    final minQty = _shape.read(_minQtyCtrl.text.trim(), _marks) ?? '1';
+    if (_variantId == null || price == null || price == '0') {
       setState(() => _error = 'Pick a variant and enter a price.');
+      return;
+    }
+    if (minQty == '0') {
+      setState(() => _error = 'The quantity it applies from is more than 0.');
       return;
     }
     setState(() {
@@ -613,6 +634,7 @@ class _PriceListItemDialogState extends ConsumerState<_PriceListItemDialog> {
           .dio
           .post(
             '/${ApiConstants.pricing}/admin/price-lists/${widget.priceListId}/items',
+            // The plain decimals typed: JSON-B reads them exactly.
             data: {'variantId': _variantId, 'price': price, 'minQty': minQty},
           );
       if (!mounted) return;
@@ -655,15 +677,28 @@ class _PriceListItemDialogState extends ConsumerState<_PriceListItemDialog> {
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
-                    decoration: const InputDecoration(labelText: 'Price'),
+                    decoration: InputDecoration(
+                      labelText: 'Price',
+                      hintText: _marks.hint(2),
+                      errorText: _says(_priceCtrl),
+                      errorMaxLines: 4,
+                    ),
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: TextField(
                     controller: _minQtyCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(labelText: 'Min qty'),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: 'Min qty',
+                      errorText: _says(_minQtyCtrl),
+                      errorMaxLines: 4,
+                    ),
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
               ],
@@ -995,6 +1030,56 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
   bool get _isMixMatch => _type == 'MIX_MATCH';
   bool get _isThreshold => _type == 'SPEND_THRESHOLD';
 
+  // Every figure is read the way the app's language writes a number
+  // ([AmountMarks]), within what pricing-svc keeps, and sent as the decimal it
+  // is. One it cannot read is refused under its field and nothing is sent:
+  // read as null, a minimum order of 12,50 (Romanian) went as no minimum and
+  // 1,000 uses (English) as no cap; read with a point, 1.250 lei off as 1,25.
+  final _marks = AmountMarks.ofApp();
+
+  /// The value and the minimum order: NUMERIC(18,4).
+  static const _moneyShape = AmountShape(14, 4);
+
+  /// A buy-X-get-Y's quantities, NUMERIC(18,3), and its discount, NUMERIC(5,2).
+  static const _qtyShape = AmountShape(15, 3);
+  static const _pctShape = AmountShape(3, 2);
+
+  /// Uses, uses per customer and a bundle's size: whole numbers.
+  static const _countShape = AmountShape(9, 0);
+
+  /// The priority: any whole number, lower first.
+  static const _orderShape = AmountShape(9, 0, signed: true);
+
+  /// The figure fields the chosen type shows, each with the shape it is read in.
+  List<(TextEditingController, AmountShape)> get _figures => [
+        if (!_isBogo) (_valueCtrl, _moneyShape),
+        if (_isMixMatch) (_buyQtyCtrl, _countShape),
+        if (_isBogo) ...[
+          (_buyQtyCtrl, _qtyShape),
+          (_getQtyCtrl, _qtyShape),
+          (_getPctCtrl, _pctShape),
+        ],
+        (_minCtrl, _moneyShape),
+        (_priorityCtrl, _orderShape),
+        (_maxRedemptionsCtrl, _countShape),
+        (_maxPerCustomerCtrl, _countShape),
+      ];
+
+  /// Why [c] cannot be read as [shape], in words, or null.
+  String? _says(TextEditingController c, AmountShape shape) =>
+      shape.refusal(c.text.trim(), _marks);
+
+  /// [c] as the plain decimal typed, or null when blank or refused.
+  String? _read(TextEditingController c, AmountShape shape) =>
+      shape.read(c.text.trim(), _marks);
+
+  /// [c] as a whole number, or null when blank or refused.
+  int? _whole(TextEditingController c, AmountShape shape) =>
+      switch (_read(c, shape)) { final w? => int.parse(w), null => null };
+
+  /// A positive figure: not blank, refused or nought.
+  bool _positive(String? plain) => plain != null && plain != '0';
+
   // Where the promotion applies (03.8): the whole shop, one category — a parent
   // reaches its children's products — or one variant. It used to be sent as
   // ALL silently, which is the one scope a "10% off drinks" is never meant to be.
@@ -1019,7 +1104,11 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
   }
 
   Future<void> _submit() async {
-    if (_isMixMatch && (int.tryParse(_buyQtyCtrl.text.trim()) ?? 0) < 2) {
+    if (_figures.any((f) => _says(f.$1, f.$2) != null)) {
+      setState(() => _error = 'A figure cannot be read. Correct the one marked.');
+      return;
+    }
+    if (_isMixMatch && (_whole(_buyQtyCtrl, _countShape) ?? 0) < 2) {
       setState(() => _error = 'A bundle is at least two units.');
       return;
     }
@@ -1035,22 +1124,19 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
     // a placeholder 1 there. Validating client-side as well as server-side is
     // deliberate: a half-configured BOGO would apply to every basket and
     // discount nothing, which is the exact failure this rebuild removed.
-    final value = _isBogo ? 1.0 : double.tryParse(_valueCtrl.text.trim());
-    if (_nameCtrl.text.trim().isEmpty || value == null || value <= 0) {
+    final value = _isBogo ? '1' : _read(_valueCtrl, _moneyShape);
+    if (_nameCtrl.text.trim().isEmpty || !_positive(value)) {
       setState(() => _error = 'Enter a name and a positive value.');
       return;
     }
+    final buy = _read(_buyQtyCtrl, _qtyShape);
+    final get = _read(_getQtyCtrl, _qtyShape);
+    final pct = _read(_getPctCtrl, _pctShape);
     if (_isBogo) {
-      final buy = double.tryParse(_buyQtyCtrl.text.trim());
-      final get = double.tryParse(_getQtyCtrl.text.trim());
-      final pct = double.tryParse(_getPctCtrl.text.trim());
-      if (buy == null ||
-          buy <= 0 ||
-          get == null ||
-          get <= 0 ||
-          pct == null ||
-          pct <= 0 ||
-          pct > 100) {
+      if (!_positive(buy) ||
+          !_positive(get) ||
+          !_positive(pct) ||
+          double.parse(pct!) > 100) {
         setState(
           () => _error =
               'A buy-one-get-one needs a buy quantity, a get quantity, and a '
@@ -1059,7 +1145,8 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
         return;
       }
     }
-    if (_isThreshold && double.tryParse(_minCtrl.text.trim()) == null) {
+    final minOrder = _read(_minCtrl, _moneyShape);
+    if (_isThreshold && minOrder == null) {
       setState(
         () => _error =
             'A spend threshold needs a minimum order amount — without one it '
@@ -1078,25 +1165,24 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
         data: {
           'name': _nameCtrl.text.trim(),
           'type': _type,
+          // Decimals as the plain figures typed: JSON-B reads them exactly.
+          // A blank optional figure is left out, for pricing-svc's own
+          // default; one that cannot be read never gets here.
           'value': value,
-          if (_minCtrl.text.trim().isNotEmpty)
-            'minOrderAmount': double.tryParse(_minCtrl.text.trim()),
+          'minOrderAmount': ?minOrder,
           'channel': _channel,
           'startsAt': _starts.toIso8601String(),
           if (_ends != null) 'endsAt': _ends!.toIso8601String(),
-          'priority': int.tryParse(_priorityCtrl.text.trim()) ?? 100,
+          'priority': _whole(_priorityCtrl, _orderShape) ?? 100,
           'exclusive': _exclusive,
           if (_couponCtrl.text.trim().isNotEmpty)
             'couponCode': _couponCtrl.text.trim(),
-          if (_maxRedemptionsCtrl.text.trim().isNotEmpty)
-            'maxRedemptions': int.tryParse(_maxRedemptionsCtrl.text.trim()),
-          if (_maxPerCustomerCtrl.text.trim().isNotEmpty)
-            'maxPerCustomer': int.tryParse(_maxPerCustomerCtrl.text.trim()),
-          if (_isBogo) 'buyQty': double.tryParse(_buyQtyCtrl.text.trim()),
-          if (_isBogo) 'getQty': double.tryParse(_getQtyCtrl.text.trim()),
-          if (_isBogo)
-            'getDiscountPct': double.tryParse(_getPctCtrl.text.trim()),
-          if (_isMixMatch) 'buyQty': int.tryParse(_buyQtyCtrl.text.trim()),
+          'maxRedemptions': ?_whole(_maxRedemptionsCtrl, _countShape),
+          'maxPerCustomer': ?_whole(_maxPerCustomerCtrl, _countShape),
+          if (_isBogo) 'buyQty': buy,
+          if (_isBogo) 'getQty': get,
+          if (_isBogo) 'getDiscountPct': pct,
+          if (_isMixMatch) 'buyQty': _whole(_buyQtyCtrl, _countShape),
         },
       );
       // Then where it applies. A promotion with no scope row applies nowhere,
@@ -1200,7 +1286,10 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                                   : _type.contains('PERCENT')
                                       ? 'Percent'
                                       : 'Amount',
+                              errorText: _says(_valueCtrl, _moneyShape),
+                              errorMaxLines: 4,
                             ),
+                            onChanged: (_) => setState(() {}),
                           ),
                   ),
                 ],
@@ -1211,11 +1300,14 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                   key: const Key('promo-bundle-size'),
                   controller: _buyQtyCtrl,
                   keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Bundle size *',
                     helperText:
                         'Any this many units from the scope for the bundle price. Whole bundles only; the dearest units make up the bundles.',
+                    errorText: _says(_buyQtyCtrl, _countShape),
+                    errorMaxLines: 3,
                   ),
+                  onChanged: (_) => setState(() {}),
                 ),
               ],
               const SizedBox(height: 12),
@@ -1277,7 +1369,12 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
-                        decoration: const InputDecoration(labelText: 'Buy *'),
+                        decoration: InputDecoration(
+                          labelText: 'Buy *',
+                          errorText: _says(_buyQtyCtrl, _qtyShape),
+                          errorMaxLines: 4,
+                        ),
+                        onChanged: (_) => setState(() {}),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1287,7 +1384,12 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
-                        decoration: const InputDecoration(labelText: 'Get *'),
+                        decoration: InputDecoration(
+                          labelText: 'Get *',
+                          errorText: _says(_getQtyCtrl, _qtyShape),
+                          errorMaxLines: 4,
+                        ),
+                        onChanged: (_) => setState(() {}),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1297,9 +1399,12 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: '% off (100 = free)',
+                          errorText: _says(_getPctCtrl, _pctShape),
+                          errorMaxLines: 4,
                         ),
+                        onChanged: (_) => setState(() {}),
                       ),
                     ),
                   ],
@@ -1347,7 +1452,11 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                         labelText: _isThreshold
                             ? 'Spend at least *'
                             : 'Min order (opt)',
+                        hintText: _marks.hint(2),
+                        errorText: _says(_minCtrl, _moneyShape),
+                        errorMaxLines: 4,
                       ),
+                      onChanged: (_) => setState(() {}),
                     ),
                   ),
                 ],
@@ -1369,11 +1478,14 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                   Expanded(
                     child: TextField(
                       controller: _priorityCtrl,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
+                      keyboardType: const TextInputType.numberWithOptions(signed: true),
+                      decoration: InputDecoration(
                         labelText: 'Priority',
                         helperText: 'Lower runs first',
+                        errorText: _says(_priorityCtrl, _orderShape),
+                        errorMaxLines: 3,
                       ),
+                      onChanged: (_) => setState(() {}),
                     ),
                   ),
                 ],
@@ -1385,9 +1497,12 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                     child: TextField(
                       controller: _maxRedemptionsCtrl,
                       keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Max uses (opt)',
+                        errorText: _says(_maxRedemptionsCtrl, _countShape),
+                        errorMaxLines: 3,
                       ),
+                      onChanged: (_) => setState(() {}),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -1395,10 +1510,13 @@ class _PromotionDialogState extends ConsumerState<_PromotionDialog> {
                     child: TextField(
                       controller: _maxPerCustomerCtrl,
                       keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Max per customer (opt)',
                         helperText: 'Guests are uncapped',
+                        errorText: _says(_maxPerCustomerCtrl, _countShape),
+                        errorMaxLines: 3,
                       ),
+                      onChanged: (_) => setState(() {}),
                     ),
                   ),
                 ],
@@ -1565,7 +1683,7 @@ class _VatRateDialogState extends ConsumerState<_VatRateDialog> {
       'description': _descCtrl.text.trim().isEmpty
           ? null
           : _descCtrl.text.trim(),
-      'effectiveFrom': _from.toIso8601String().split('T').first,
+      'effectiveFrom': effectiveFromInstant(_from),
     };
     try {
       if (_isEdit) {

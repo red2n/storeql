@@ -12,6 +12,16 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Types;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -44,6 +54,9 @@ class ReportingIT {
   // Kafka is disabled in-test, so drive the sales projection directly (as SalesEventDispatcher
   // would).
   @Inject ReportingService reporting;
+
+  /** Every service has one: the outbox store the scheduled purge runs through. */
+  @Inject com.storeql.service.TenantDataRepository purge;
 
   @AfterAll
   static void stopDb() {
@@ -85,6 +98,47 @@ class ReportingIT {
     assertThat(r.getStatus(), is(200));
     String body = r.readEntity(String.class);
     assertThat(body.contains("\"data\""), is(true));
+  }
+
+  private Response movementStats(String tenant, String... params) {
+    WebTarget t = target.path("/admin/reports/inventory/movement-stats");
+    for (int i = 0; i < params.length; i += 2) t = t.queryParam(params[i], params[i + 1]);
+    return t.request().header("X-Tenant-Id", tenant).header("X-Roles", "OWNER").get();
+  }
+
+  /** Movement stats read a bounded window: recent by default, never the whole history. */
+  @Test
+  void movementStatsAreBoundedToAWindow() {
+    UUID tenant = Ids.newId();
+    UUID variant = Ids.newId();
+    reporting.applyStockDeltaOnce(
+        Ids.newId(), "test", tenant, Ids.newId(), variant, new BigDecimal("5"), "StockReceived");
+    String t = tenant.toString();
+
+    // Default window (the last 90 days) holds the movement just made.
+    assertThat(movementStats(t).readEntity(String.class), containsString(variant.toString()));
+
+    // A window wholly in the past holds none of it.
+    Response past = movementStats(t, "from", "2000-01-01", "to", "2000-01-31");
+    assertThat(past.getStatus(), is(200));
+    assertThat(past.readEntity(String.class).contains(variant.toString()), is(false));
+
+    // Another business's window never shows it.
+    assertThat(
+        movementStats(OTHER).readEntity(String.class).contains(variant.toString()), is(false));
+  }
+
+  @Test
+  void movementStatsRefuseABackwardsOrOverlongPeriod() {
+    Response backwards = movementStats(T, "from", "2026-02-01", "to", "2026-01-01");
+    assertThat(backwards.getStatus(), is(400));
+    assertThat(backwards.readEntity(String.class), containsString("REPORT_PERIOD_INVALID"));
+
+    Response tooLong = movementStats(T, "from", "2000-01-01", "to", "2010-01-01");
+    assertThat(tooLong.getStatus(), is(400));
+    assertThat(tooLong.readEntity(String.class), containsString("REPORT_PERIOD_TOO_LONG"));
+
+    assertThat(movementStats(T, "from", "01/02/2026").getStatus(), is(400));
   }
 
   /** Tenant isolation: different tenants see independent data. */
@@ -137,5 +191,119 @@ class ReportingIT {
   void tenantDataIsExportable() {
     com.storeql.test.TenantDataChecks.assertExportable(
         target, "01a090ae-611e-702c-a97b-d1b8025478e1");
+  }
+
+  /**
+   * The scheduled purge (V8) takes published outbox rows and consumer dedupe rows once they are
+   * old, a batch at a time, and each batch has to find its rows by age: both statements are planned
+   * here with a table scan and a sort ruled out, so they show whether an index can serve them.
+   */
+  @Test
+  void thePurgeTakesOnlyOldRowsAndCanFindThemThroughItsIndexes() throws Exception {
+    Instant now = Instant.now();
+    UUID tenant = Ids.newId();
+    UUID oldPublished = Ids.newId();
+    UUID recentPublished = Ids.newId();
+    UUID neverPublished = Ids.newId();
+    outboxRow(oldPublished, tenant, now.minus(Duration.ofDays(30)), now.minus(Duration.ofDays(29)));
+    outboxRow(
+        recentPublished, tenant, now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)));
+    outboxRow(neverPublished, tenant, now.minus(Duration.ofDays(30)), null);
+    UUID oldEvent = Ids.newId();
+    UUID recentEvent = Ids.newId();
+    processedEvent(oldEvent, now.minus(Duration.ofDays(60)));
+    processedEvent(recentEvent, now.minus(Duration.ofDays(1)));
+
+    assertThat(
+        "only the old published row went",
+        purge.purgePublished(now.minus(Duration.ofDays(7)), 1000),
+        is(1));
+    assertThat(rows("outbox", "id", oldPublished), is(0));
+    assertThat("a recently published one stays", rows("outbox", "id", recentPublished), is(1));
+    assertThat("one never published is never purged", rows("outbox", "id", neverPublished), is(1));
+
+    assertThat(
+        "only the old dedupe row went",
+        purge.purgeProcessedEvents(now.minus(Duration.ofDays(30)), 1000),
+        is(1));
+    assertThat(rows("processed_events", "event_id", oldEvent), is(0));
+    assertThat("a recent one stays", rows("processed_events", "event_id", recentEvent), is(1));
+
+    assertThat(
+        planOf(
+            "SELECT id FROM reporting.outbox WHERE published_at IS NOT NULL"
+                + " AND published_at < now() - interval '7 days'"
+                + " ORDER BY published_at ASC LIMIT 1000 FOR UPDATE SKIP LOCKED"),
+        containsString("idx_outbox_published"));
+    assertThat(
+        planOf(
+            "SELECT event_id FROM reporting.processed_events"
+                + " WHERE processed_at < now() - interval '30 days'"
+                + " ORDER BY processed_at ASC LIMIT 1000 FOR UPDATE SKIP LOCKED"),
+        containsString("idx_processed_events_processed_at"));
+  }
+
+  private static void outboxRow(UUID id, UUID tenant, Instant createdAt, Instant publishedAt)
+      throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "INSERT INTO reporting.outbox (id, event_type, topic, tenant_id, aggregate_id,"
+                    + " payload, created_at, published_at)"
+                    + " VALUES (?, 'PurgeTest', 'storeql.test.purge', ?, ?, '{}', ?, ?)")) {
+      ps.setObject(1, id);
+      ps.setObject(2, tenant);
+      ps.setObject(3, Ids.newId());
+      ps.setObject(4, createdAt.atOffset(ZoneOffset.UTC));
+      if (publishedAt == null) {
+        ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
+      } else {
+        ps.setObject(5, publishedAt.atOffset(ZoneOffset.UTC));
+      }
+      ps.executeUpdate();
+    }
+  }
+
+  private static void processedEvent(UUID eventId, Instant processedAt) throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "INSERT INTO reporting.processed_events (event_id, consumer, processed_at)"
+                    + " VALUES (?, 'purge-test', ?)")) {
+      ps.setObject(1, eventId);
+      ps.setObject(2, processedAt.atOffset(ZoneOffset.UTC));
+      ps.executeUpdate();
+    }
+  }
+
+  /** Rows of a reporting table with this id, counted behind the app. Names are this test's own. */
+  private static int rows(String table, String column, UUID id) throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT count(*) FROM reporting." + table + " WHERE " + column + " = ?")) {
+      ps.setObject(1, id);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    }
+  }
+
+  /** How Postgres would run a statement when a table scan and a sort are not on offer. */
+  private static String planOf(String sql) throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        Statement st = c.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      st.execute("SET enable_bitmapscan = off");
+      st.execute("SET enable_sort = off");
+      StringBuilder plan = new StringBuilder();
+      try (ResultSet rs = st.executeQuery("EXPLAIN " + sql)) {
+        while (rs.next()) {
+          plan.append(rs.getString(1)).append('\n');
+        }
+      }
+      return plan.toString();
+    }
   }
 }

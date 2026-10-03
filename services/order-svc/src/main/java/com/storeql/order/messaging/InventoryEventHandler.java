@@ -1,11 +1,12 @@
 package com.storeql.order.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.order.repo.OrderRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
+import jakarta.json.JsonReader;
 import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -41,7 +42,10 @@ class InventoryEventHandler {
     UUID variantId;
     BigDecimal delta;
     try {
-      JsonObject obj = Json.createReader(new StringReader(json)).readObject();
+      JsonObject obj;
+      try (JsonReader reader = Json.createReader(new StringReader(json))) {
+        obj = reader.readObject();
+      }
       String eventType = stringOrNull(obj, "eventType");
       String eventIdStr = stringOrNull(obj, "eventId");
       String tenantIdStr = stringOrNull(obj, "tenantId");

@@ -132,10 +132,27 @@ public class ProductRepository extends BaseOutboxRepository {
    */
   public Product createProductWithOutbox(
       Product p, List<OutboxRow> events, com.storeql.product.domain.Domain.ProductSafety safety) {
+    return createProductWithOutbox(p, events, safety, List.of());
+  }
+
+  /**
+   * Inserts a product, its safety statement, the stores it is sold at and its events, in one
+   * transaction: a product is never left sold everywhere because its stores failed to go in after
+   * it.
+   *
+   * @param safety the statement, or null
+   * @param storeIds the stores it is sold at, each once; empty for every store
+   */
+  public Product createProductWithOutbox(
+      Product p,
+      List<OutboxRow> events,
+      com.storeql.product.domain.Domain.ProductSafety safety,
+      List<UUID> storeIds) {
     return inTx(
         c -> {
           insertProduct(c, p);
           if (safety != null) ProductSafetyRepository.upsert(c, safety);
+          insertStoresTx(c, p.tenantId(), p.id(), storeIds);
           for (OutboxRow e : events) insertOutbox(c, e);
           return p;
         },
@@ -244,12 +261,33 @@ public class ProductRepository extends BaseOutboxRepository {
       Product p,
       List<OutboxRow> events,
       java.util.function.Consumer<com.storeql.product.domain.Domain.ProductSafety> guard) {
+    return updateProductWithOutbox(p, events, guard, range -> {});
+  }
+
+  /**
+   * As {@link #updateProductWithOutbox(Product, List, java.util.function.Consumer)}, and {@code
+   * rangeGuard} also sees the stores the product is sold at now (empty for every store), read in
+   * the transaction with the product row locked, so a caller held to stores is judged on the range
+   * as it stands and not one another change has since replaced.
+   *
+   * @param rangeGuard throws to refuse the update, which then writes nothing
+   */
+  public Product updateProductWithOutbox(
+      Product p,
+      List<OutboxRow> events,
+      java.util.function.Consumer<com.storeql.product.domain.Domain.ProductSafety> guard,
+      java.util.function.Consumer<List<UUID>> rangeGuard) {
     Product updated =
         inTx(
             c -> {
+              // FOR NO KEY UPDATE, as a range change locks the row (lockedStoresTx): it conflicts
+              // with itself and with a safety statement being saved, so the guard still sees the
+              // statement as it stands, but not with the FOR KEY SHARE a foreign-key check takes,
+              // so a variant (or any row referencing the product) is not held up behind an edit.
+              // The update below changes no key column, so it takes no stronger lock either.
               try (PreparedStatement lock =
                   c.prepareStatement(
-                      "SELECT id FROM products WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
+                      "SELECT id FROM products WHERE tenant_id = ? AND id = ? FOR NO KEY UPDATE")) {
                 lock.setObject(1, p.tenantId());
                 lock.setObject(2, p.id());
                 try (ResultSet rs = lock.executeQuery()) {
@@ -258,6 +296,7 @@ public class ProductRepository extends BaseOutboxRepository {
                         "PRODUCT_NOT_FOUND", "No such product in this tenant");
                 }
               }
+              rangeGuard.accept(lockedStoresTx(c, p.tenantId(), p.id()));
               guard.accept(ProductSafetyRepository.find(c, p.tenantId(), p.id()).orElse(null));
               try (PreparedStatement ps =
                   c.prepareStatement(
@@ -417,8 +456,10 @@ public class ProductRepository extends BaseOutboxRepository {
   public Optional<Product> findProductByNameAndCategory(
       UUID tenantId, String name, UUID categoryId) {
     String sql =
+        // Every column mapProduct reads: without launch_on and discontinued_at the read failed and
+        // a REPLACE import refused every row that named a product already there.
         "SELECT id, tenant_id, name, description, brand_id, category_id, status,"
-            + " sellable_online, sellable_pos, created_at, updated_at"
+            + " sellable_online, sellable_pos, created_at, updated_at, launch_on, discontinued_at"
             + " FROM products WHERE tenant_id = ? AND name = ? AND status = 'ACTIVE' AND "
             + (categoryId == null ? "category_id IS NULL" : "category_id = ?");
     return query(
@@ -434,7 +475,35 @@ public class ProductRepository extends BaseOutboxRepository {
         .findFirst();
   }
 
-  /** Delete a variant by its (tenant, SKU) — used by bulk-import REPLACE to upsert by SKU. */
+  /**
+   * Which of these SKUs the business already holds a variant under, on sale or delisted: the
+   * variants {@link #deleteVariantBySku} would drop for them, matched as it matches (the SKU as
+   * written). Asked before a {@code REPLACE} import of a caller who may not drop one.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param skus the SKUs a row names; empty asks nothing
+   * @return those of them already held
+   */
+  public java.util.Set<String> skusHeld(UUID tenantId, java.util.Collection<String> skus) {
+    if (skus.isEmpty()) {
+      return java.util.Set.of();
+    }
+    return java.util.Set.copyOf(
+        query(
+            "SELECT DISTINCT sku FROM product_variants WHERE tenant_id = ? AND sku = ANY(?)",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setArray(2, ps.getConnection().createArrayOf("text", skus.toArray()));
+            },
+            rs -> rs.getString("sku"),
+            "find held skus"));
+  }
+
+  /**
+   * Delete a variant by its (tenant, SKU) — used by bulk-import REPLACE to upsert by SKU. The
+   * variant goes at every store its line is sold at, so only a caller held to no store reaches
+   * this: see {@code ProductService.importCatalogue}.
+   */
   public void deleteVariantBySku(UUID tenantId, String sku) {
     exec(
         "DELETE FROM product_variants WHERE tenant_id = ? AND sku = ?",
@@ -606,10 +675,29 @@ public class ProductRepository extends BaseOutboxRepository {
         "stores for product");
   }
 
-  /** Replace a product's store assortment. Empty list = sold at all stores (no rows). */
-  public void setStoresForProduct(UUID tenantId, UUID productId, List<UUID> storeIds) {
+  /**
+   * Replaces a product's store assortment, deciding on it from the range as it stands inside the
+   * same transaction.
+   *
+   * <p>The product row is locked ({@code FOR NO KEY UPDATE}) before the range is read, so two
+   * changes to one product's range are made one after the other, and each is judged against the
+   * range the other left — never against one read before it, which another change has since
+   * replaced.
+   *
+   * @param storeIds the stores it is to be sold at, each once; empty for every store
+   * @param guard sees the stores it is sold at now (empty for every store) and throws to refuse the
+   *     change, which then writes nothing
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND} when the product is not the tenant's; what
+   *     the guard throws
+   */
+  public void setStoresForProduct(
+      UUID tenantId,
+      UUID productId,
+      List<UUID> storeIds,
+      java.util.function.Consumer<List<UUID>> guard) {
     inTx(
         c -> {
+          guard.accept(lockedStoresTx(c, tenantId, productId));
           try (var del =
               c.prepareStatement(
                   "DELETE FROM product_stores WHERE tenant_id = ? AND product_id = ?")) {
@@ -617,47 +705,92 @@ public class ProductRepository extends BaseOutboxRepository {
             del.setObject(2, productId);
             del.executeUpdate();
           }
-          if (!storeIds.isEmpty()) {
-            try (var ins =
-                c.prepareStatement(
-                    "INSERT INTO product_stores (id, tenant_id, product_id, store_id)"
-                        + " VALUES (?, ?, ?, ?)")) {
-              for (UUID sid : storeIds) {
-                ins.setObject(1, Ids.newId());
-                ins.setObject(2, tenantId);
-                ins.setObject(3, productId);
-                ins.setObject(4, sid);
-                ins.addBatch();
-              }
-              ins.executeBatch();
-            }
-          }
+          insertStoresTx(c, tenantId, productId, storeIds);
           return null;
         },
         "set product stores");
   }
 
-  /** Adds store assignments without removing existing ones (idempotent — skips duplicates). */
-  public void addStoreAssignments(UUID tenantId, UUID productId, java.util.List<UUID> storeIds) {
+  /**
+   * Adds stores to a product's assortment without removing any (a store already there is left as it
+   * is), deciding on it from the range as it stands inside the same transaction, with the product
+   * row locked as {@link #setStoresForProduct} locks it.
+   *
+   * @param storeIds the stores to add
+   * @param guard sees the stores it is sold at now (empty for every store) and throws to refuse the
+   *     addition, which then writes nothing
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND} when the product is not the tenant's; what
+   *     the guard throws
+   */
+  public void addStoreAssignments(
+      UUID tenantId,
+      UUID productId,
+      List<UUID> storeIds,
+      java.util.function.Consumer<List<UUID>> guard) {
     if (storeIds == null || storeIds.isEmpty()) return;
     inTx(
         c -> {
-          try (var ps =
-              c.prepareStatement(
-                  "INSERT INTO product_stores (id, tenant_id, product_id, store_id)"
-                      + " VALUES (?, ?, ?, ?) ON CONFLICT (tenant_id, product_id, store_id) DO NOTHING")) {
-            for (UUID sid : storeIds) {
-              ps.setObject(1, Ids.newId());
-              ps.setObject(2, tenantId);
-              ps.setObject(3, productId);
-              ps.setObject(4, sid);
-              ps.addBatch();
-            }
-            ps.executeBatch();
-          }
+          guard.accept(lockedStoresTx(c, tenantId, productId));
+          insertStoresTx(c, tenantId, productId, storeIds);
           return null;
         },
         "add store assignments");
+  }
+
+  /**
+   * Locks the product row and reads its stores, through the transaction's own connection.
+   *
+   * @return the stores it is sold at; empty for every store
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND}
+   */
+  private static List<UUID> lockedStoresTx(java.sql.Connection c, UUID tenantId, UUID productId)
+      throws java.sql.SQLException {
+    // FOR NO KEY UPDATE, not FOR UPDATE: it conflicts with itself, so two range changes to one
+    // product still go one after the other, but not with the FOR KEY SHARE a foreign-key check
+    // takes, so a variant or a store row being added to the product meanwhile is not held up.
+    try (PreparedStatement lock =
+        c.prepareStatement(
+            "SELECT id FROM products WHERE tenant_id = ? AND id = ? FOR NO KEY UPDATE")) {
+      lock.setObject(1, tenantId);
+      lock.setObject(2, productId);
+      try (ResultSet rs = lock.executeQuery()) {
+        if (!rs.next()) {
+          throw ApiException.notFound("PRODUCT_NOT_FOUND", "No such product");
+        }
+      }
+    }
+    var stores = new java.util.ArrayList<UUID>();
+    try (PreparedStatement read =
+        c.prepareStatement(
+            "SELECT store_id FROM product_stores WHERE tenant_id = ? AND product_id = ?"
+                + " ORDER BY id")) {
+      read.setObject(1, tenantId);
+      read.setObject(2, productId);
+      try (ResultSet rs = read.executeQuery()) {
+        while (rs.next()) stores.add(rs.getObject("store_id", UUID.class));
+      }
+    }
+    return stores;
+  }
+
+  /** Adds store rows on the transaction's connection; a store already there is left as it is. */
+  private static void insertStoresTx(
+      java.sql.Connection c, UUID tenantId, UUID productId, List<UUID> storeIds)
+      throws java.sql.SQLException {
+    if (storeIds.isEmpty()) return;
+    try (var ins =
+        c.prepareStatement(
+            "INSERT INTO product_stores (id, tenant_id, product_id, store_id) VALUES (?, ?, ?, ?)"
+                + " ON CONFLICT (tenant_id, product_id, store_id) DO NOTHING")) {
+      for (UUID sid : storeIds) {
+        ins.setObject(1, Ids.newId());
+        ins.setObject(2, tenantId);
+        ins.setObject(3, productId);
+        ins.setObject(4, sid);
+        ins.addBatch();
+      }
+      ins.executeBatch();
+    }
   }
 
   /**
@@ -668,17 +801,51 @@ public class ProductRepository extends BaseOutboxRepository {
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
   }
 
+  /** A variant with its product, as the scan and resolve lookups read it; add the WHERE. */
+  private static final String VARIANT_WITH_PRODUCT =
+      "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
+          + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
+          + " v.created_at AS v_cat, v.updated_at AS v_uat,"
+          + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
+          + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
+          + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
+          + " FROM product_variants v"
+          + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id";
+
+  /**
+   * Looks a variant up by the SKU a cashier typed because its label would not scan: exactly as
+   * written, else in any case when only one variant answers to it. The unique index is on the SKU
+   * as written, so two that differ only in case can both exist, and neither is guessed at.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param sku what was typed, trimmed
+   * @return the variant, or empty when none or more than one answers to it
+   */
+  public Optional<VariantWithProduct> findVariantBySku(UUID tenantId, String sku) {
+    List<VariantWithProduct> rows =
+        query(
+            VARIANT_WITH_PRODUCT
+                + " WHERE v.tenant_id = ? AND upper(v.sku) = upper(?)"
+                + " AND v.status = 'ACTIVE' AND p.status <> 'DELISTED'"
+                + " ORDER BY (v.sku = ?) DESC LIMIT 2",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, sku);
+              ps.setString(3, sku);
+            },
+            ProductRepository::mapVariantWithProduct,
+            "find variant by sku");
+    if (rows.isEmpty()) return Optional.empty();
+    if (rows.size() == 1 || sku.equals(rows.get(0).variant().sku())) {
+      return Optional.of(rows.get(0));
+    }
+    return Optional.empty();
+  }
+
   /** Looks up a variant by barcode and returns it together with its parent product in one query. */
   public Optional<VariantWithProduct> findVariantByBarcode(UUID tenantId, String barcode) {
     return query(
-            "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
-                + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
-                + " v.created_at AS v_cat, v.updated_at AS v_uat,"
-                + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
-                + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
-                + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
-                + " FROM product_variants v"
-                + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id"
+            VARIANT_WITH_PRODUCT
                 + " WHERE v.tenant_id = ? AND v.barcode = ?"
                 + " AND v.status = 'ACTIVE' AND p.status <> 'DELISTED'",
             ps -> {
@@ -707,14 +874,7 @@ public class ProductRepository extends BaseOutboxRepository {
    */
   public Optional<VariantWithProduct> findVariantByGtin(UUID tenantId, String gtin14) {
     return query(
-            "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
-                + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
-                + " v.created_at AS v_cat, v.updated_at AS v_uat,"
-                + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
-                + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
-                + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
-                + " FROM product_variants v"
-                + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id"
+            VARIANT_WITH_PRODUCT
                 + " WHERE v.tenant_id = ? AND v.gtin14 = ?"
                 + " AND v.status = 'ACTIVE' AND p.status <> 'DELISTED'"
                 + " ORDER BY v.created_at, v.id LIMIT 1",
@@ -739,15 +899,7 @@ public class ProductRepository extends BaseOutboxRepository {
       return List.of();
     }
     return query(
-        "SELECT v.id AS v_id, v.tenant_id AS v_tid, v.product_id, v.sku, v.barcode,"
-            + " v.manufacturer_pn, v.attributes, v.unit, v.status AS v_status,"
-            + " v.created_at AS v_cat, v.updated_at AS v_uat,"
-            + " p.id AS p_id, p.name, p.description, p.brand_id, p.category_id,"
-            + " p.status AS p_status, p.sellable_online, p.sellable_pos,"
-            + " p.created_at AS p_cat, p.updated_at AS p_uat, p.launch_on, p.discontinued_at"
-            + " FROM product_variants v"
-            + " JOIN products p ON p.id = v.product_id AND p.tenant_id = v.tenant_id"
-            + " WHERE v.tenant_id = ? AND v.id = ANY(?)",
+        VARIANT_WITH_PRODUCT + " WHERE v.tenant_id = ? AND v.id = ANY(?)",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setArray(2, ps.getConnection().createArrayOf("uuid", ids.toArray()));
@@ -819,16 +971,28 @@ public class ProductRepository extends BaseOutboxRepository {
    * @return the variant as stored
    */
   public Variant createVariantWithOutbox(Variant v, OutboxRow event) {
+    return createVariantWithOutbox(v, event, null);
+  }
+
+  /**
+   * As {@link #createVariantWithOutbox(Variant, OutboxRow)}, with the product row locked (FOR NO
+   * KEY UPDATE) and {@code rangeGuard} judging the stores it is sold at, read in this transaction,
+   * before the variant (and so its SKU and barcode) is written: a caller held to stores is judged
+   * on the range as it stands, not on one an owner has since widened.
+   *
+   * <p>A caller held to no store has nothing to be judged on, so passes no guard and the row is not
+   * locked: an owner's new variant never waits behind a range change under way (2 Oct 2026 — the
+   * range lock is FOR NO KEY UPDATE for exactly that).
+   *
+   * @param rangeGuard throws to refuse the write, which then writes nothing; null for a caller held
+   *     to no store
+   */
+  public Variant createVariantWithOutbox(
+      Variant v, OutboxRow event, java.util.function.Consumer<List<UUID>> rangeGuard) {
     return inTx(
         c -> {
-          try (PreparedStatement ps =
-              c.prepareStatement("SELECT 1 FROM products WHERE tenant_id=? AND id=?")) {
-            ps.setObject(1, v.tenantId());
-            ps.setObject(2, v.productId());
-            try (ResultSet rs = ps.executeQuery()) {
-              if (!rs.next())
-                throw ApiException.notFound("PRODUCT_NOT_FOUND", "Parent product not found");
-            }
+          if (rangeGuard != null) {
+            rangeGuard.accept(lockedStoresTx(c, v.tenantId(), v.productId()));
           }
           insertVariant(c, v);
           insertOutbox(c, event);
@@ -882,51 +1046,80 @@ public class ProductRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Writes a variant back with its new values.
+   * Writes a variant back with its new values, in one transaction that locks the variant's product
+   * row (FOR NO KEY UPDATE) and has {@code rangeGuard} judge the stores that product is sold at,
+   * read there, before the SKU and barcode are written. An owner widening the range at the same
+   * moment is then either before the lock (the guard sees the wider range and refuses) or after the
+   * write.
    *
-   * @param tenantId owning tenant; the first condition of the query
-   * @param variantId the product variant concerned
-   * @param sku the stock-keeping unit code
-   * @param barcode the barcode, or {@code null} when the variant has none
-   * @param manufacturerPn the manufacturer pn
-   * @param attributes the variant attributes as JSON
-   * @param unit the unit of measure the variant is sold in
-   * @return the variant as stored
+   * @param productId the product the path names; a variant that is not its own is not found
+   * @param rangeGuard throws to refuse the write, which then writes nothing
    */
   public Variant updateVariant(
+      UUID tenantId,
+      UUID productId,
+      UUID variantId,
+      String sku,
+      String barcode,
+      String manufacturerPn,
+      String attributes,
+      String unit,
+      java.util.function.Consumer<List<UUID>> rangeGuard) {
+    Instant now = Instant.now();
+    return inTx(
+        c -> {
+          // As in createVariantWithOutbox: no guard (a caller held to no store), no lock.
+          if (rangeGuard != null) {
+            rangeGuard.accept(lockedStoresTx(c, tenantId, productId));
+          }
+          try (PreparedStatement ps =
+              c.prepareStatement(UPDATE_VARIANT_SQL + " AND product_id = ?" + VARIANT_RETURNING)) {
+            bindUpdateVariant(
+                ps, tenantId, variantId, sku, barcode, manufacturerPn, attributes, unit, now);
+            ps.setObject(9, productId);
+            try (ResultSet rs = ps.executeQuery()) {
+              if (!rs.next()) throw variantNotActive();
+              return mapVariant(rs);
+            }
+          }
+        },
+        "update variant");
+  }
+
+  private static final String UPDATE_VARIANT_SQL =
+      "UPDATE product_variants SET sku=?, barcode=?, manufacturer_pn=?, attributes=?, unit=?,"
+          + " updated_at=? WHERE tenant_id=? AND id=? AND status='ACTIVE'";
+
+  private static final String VARIANT_RETURNING =
+      " RETURNING id, tenant_id, product_id, sku, barcode, manufacturer_pn, attributes,"
+          + " unit, status, created_at, updated_at";
+
+  private static void bindUpdateVariant(
+      PreparedStatement ps,
       UUID tenantId,
       UUID variantId,
       String sku,
       String barcode,
       String manufacturerPn,
       String attributes,
-      String unit) {
-    Instant now = Instant.now();
-    // RETURNING, not a second SELECT: a re-read could hand this caller a concurrent writer's row,
-    // and could not tell "updated" from "matched nothing because the variant is delisted".
-    return query(
-            "UPDATE product_variants SET sku=?, barcode=?, manufacturer_pn=?, attributes=?, unit=?,"
-                + " updated_at=? WHERE tenant_id=? AND id=? AND status='ACTIVE'"
-                + " RETURNING id, tenant_id, product_id, sku, barcode, manufacturer_pn, attributes,"
-                + " unit, status, created_at, updated_at",
-            ps -> {
-              ps.setString(1, sku);
-              ps.setString(2, barcode);
-              ps.setString(3, manufacturerPn);
-              ps.setString(4, attributes);
-              ps.setString(5, unit);
-              ps.setObject(6, now.atOffset(ZoneOffset.UTC));
-              ps.setObject(7, tenantId);
-              ps.setObject(8, variantId);
-            },
-            ProductRepository::mapVariant,
-            "update variant")
-        .stream()
-        .findFirst()
-        .orElseThrow(
-            () ->
-                ApiException.conflict(
-                    "VARIANT_NOT_ACTIVE", "A delisted variant cannot be edited; relist it first"));
+      String unit,
+      Instant now)
+      throws SQLException {
+    ps.setString(1, sku);
+    ps.setString(2, barcode);
+    ps.setString(3, manufacturerPn);
+    ps.setString(4, attributes);
+    ps.setString(5, unit);
+    ps.setObject(6, now.atOffset(ZoneOffset.UTC));
+    ps.setObject(7, tenantId);
+    ps.setObject(8, variantId);
+  }
+
+  private static ApiException variantNotActive() {
+    return ApiException.conflict(
+        "VARIANT_NOT_ACTIVE",
+        "A delisted variant cannot be edited; relist it first (POST"
+            + " /admin/products/{id}/variants/{variantId}/relist)");
   }
 
   /**
@@ -953,12 +1146,71 @@ public class ProductRepository extends BaseOutboxRepository {
         .orElseThrow(() -> ApiException.notFound("VARIANT_NOT_FOUND", "Variant not found"));
   }
 
+  /**
+   * Puts a delisted variant back on sale, once: the update matches only a variant that is delisted.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param variantId the variant to relist
+   * @return the variant as it now stands, or empty when it is not delisted (or not the tenant's)
+   */
+  public Optional<Variant> relistVariant(UUID tenantId, UUID variantId) {
+    Instant now = Instant.now();
+    return query(
+            "UPDATE product_variants SET status='ACTIVE', updated_at=?"
+                + " WHERE tenant_id=? AND id=? AND status='INACTIVE'"
+                + " RETURNING id, tenant_id, product_id, sku, barcode, manufacturer_pn, attributes,"
+                + " unit, status, created_at, updated_at",
+            ps -> {
+              ps.setObject(1, now.atOffset(ZoneOffset.UTC));
+              ps.setObject(2, tenantId);
+              ps.setObject(3, variantId);
+            },
+            ProductRepository::mapVariant,
+            "relist variant")
+        .stream()
+        .findFirst();
+  }
+
   @Override
   protected RuntimeException handleTxSqlException(String what, SQLException e) {
-    if (UNIQUE_VIOLATION.equals(e.getSQLState()))
-      return new ApiException(
-          409, "DUPLICATE", "A record with that unique value already exists", List.of(), e);
+    if (UNIQUE_VIOLATION.equals(e.getSQLState())) return duplicate(e);
     return dbError(what, e);
+  }
+
+  /**
+   * The refusal for a unique-constraint violation: a variant's SKU or barcode has its own stable
+   * code so a form can point at the field; any other unique value stays the generic {@code
+   * DUPLICATE}.
+   *
+   * @param e the violation
+   * @return the 409 to throw
+   */
+  static ApiException duplicate(SQLException e) {
+    String code = duplicateCode(e.getMessage());
+    return switch (code) {
+      case "PRODUCT_SKU_DUPLICATE" ->
+          new ApiException(
+              409, code, "Another variant in this business already has that SKU", List.of(), e);
+      case "PRODUCT_BARCODE_DUPLICATE" ->
+          new ApiException(
+              409, code, "Another variant in this business already has that barcode", List.of(), e);
+      default ->
+          new ApiException(
+              409, "DUPLICATE", "A record with that unique value already exists", List.of(), e);
+    };
+  }
+
+  /**
+   * Names the constraint a Postgres unique-violation message points at.
+   *
+   * @param message the driver's message, which quotes the constraint or index name
+   * @return {@code PRODUCT_SKU_DUPLICATE}, {@code PRODUCT_BARCODE_DUPLICATE} or {@code DUPLICATE}
+   */
+  static String duplicateCode(String message) {
+    if (message == null) return "DUPLICATE";
+    if (message.contains("uq_variants_tenant_barcode")) return "PRODUCT_BARCODE_DUPLICATE";
+    if (message.contains("product_variants_tenant_id_sku_key")) return "PRODUCT_SKU_DUPLICATE";
+    return "DUPLICATE";
   }
 
   // ─────────────────────────────────────────────────────── inserts / mappers

@@ -67,8 +67,18 @@ public class CommissionResource {
   @APIResponse(responseCode = "400", description = "COMMISSION_PERIOD_INVALID")
   @APIResponse(
       responseCode = "409",
-      description = "COMMISSION_STATEMENT_STANDS or COMMISSION_STATEMENT_NOT_STANDING")
-  @APIResponse(responseCode = "503", description = "COMMISSION_RATES_UNAVAILABLE")
+      description =
+          "COMMISSION_STATEMENT_STANDS or COMMISSION_STATEMENT_NOT_STANDING;"
+              + " COMMISSION_FX_RATE_MISSING when a per-unit arrangement pays in a currency other"
+              + " than the statement's and the business keeps no rate to translate it (the"
+              + " seller in details) — translated at the business's own rate otherwise, never"
+              + " counted as if it were the statement's")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "COMMISSION_RATES_UNAVAILABLE (the arrangements could not be read);"
+              + " COMMISSION_FX_UNAVAILABLE (a translation was needed and the business's exchange"
+              + " rates could not be read)")
   @POST
   @Path("/statements")
   public Response draft(CommissionDtos.StatementRequest req) {
@@ -215,7 +225,9 @@ public class CommissionResource {
         plain(l.thresholdFrom()),
         plain(l.rate()),
         plain(l.amount()),
-        plain(l.commission()));
+        plain(l.commission()),
+        l.rateCurrency() == null ? null : l.rateCurrency().strip(),
+        plain(l.ratedCommission()));
   }
 
   private static CommissionDtos.SellerChangeResponse toDto(SellerChange c) {

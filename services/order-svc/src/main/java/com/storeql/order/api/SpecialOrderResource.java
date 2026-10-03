@@ -49,22 +49,31 @@ public class SpecialOrderResource {
    * @param idempotencyKey the {@code Idempotency-Key} header (a UUIDv7), or {@code null} to use the
    *     body's
    * @param req the store, customer, items and optional currency
-   * @return {@code 201} with the special order and its lines
+   * @return {@code 201} with the special order and its lines, which on a retry under the same key
+   *     are the first order's
    * @throws com.storeql.web.ApiException {@code 400} when no items are supplied or the key is not a
-   *     UUIDv7
+   *     UUIDv7; {@code 409 IDEMPOTENCY_KEY_REUSED} when the key made a different special order
    */
   @Operation(
       summary = "Create a special order",
       description =
           "Places a customer order for future delivery at a store, without immediate inventory"
-              + " deduction.")
-  @APIResponse(responseCode = "201", description = "Special order created")
+              + " deduction. A retry with the same Idempotency-Key and the same request answers the"
+              + " first order, with the same status and body, and writes nothing.")
+  @APIResponse(
+      responseCode = "201",
+      description = "Special order created, or the first one made under this Idempotency-Key")
   @APIResponse(
       responseCode = "400",
-      description = "No items in the special order, or an Idempotency-Key that is not a UUIDv7")
+      description =
+          "No items in the special order, or an Idempotency-Key that is not a UUIDv7;"
+              + " VALIDATION_FAILED for a unitPrice with more decimals than the business's"
+              + " currency has")
   @APIResponse(
       responseCode = "409",
-      description = "A special order already exists under this Idempotency-Key")
+      description =
+          "IDEMPOTENCY_KEY_REUSED: this Idempotency-Key made a different special order, which"
+              + " stands")
   @POST
   public Response create(
       @HeaderParam(HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
@@ -136,19 +145,22 @@ public class SpecialOrderResource {
    *
    * @param id the special order to confirm
    * @return the confirmed special order with its lines
-   * @throws com.storeql.web.ApiException {@code 404} when it does not exist; a conflict when its
-   *     status does not allow confirmation
+   * @throws com.storeql.web.ApiException {@code 404} when it does not exist; {@code 403
+   *     STORE_ACCESS_DENIED} for staff not assigned to its store; a conflict when its status does
+   *     not allow confirmation
    */
   @Operation(
       summary = "Confirm a special order",
-      description = "Transitions a PENDING special order to CONFIRMED.")
+      description =
+          "Transitions a PENDING special order to CONFIRMED, by staff who may act at its store.")
   @APIResponse(responseCode = "200", description = "Special order confirmed")
+  @APIResponse(responseCode = "403", description = "The caller is not assigned to its store")
   @APIResponse(responseCode = "404", description = "Special order not found")
   @POST
   @Path("/{id}/confirm")
   public Response confirm(@PathParam("id") UUID id) {
     UUID tenantId = ctx.requireTenantId();
-    var so = svc.confirmSpecialOrder(tenantId, id, ctx.userId());
+    var so = svc.confirmSpecialOrder(tenantId, id, ctx);
     return Response.ok(ApiResponse.ok(Mappers.toDto(so, svc.getSpecialOrderItems(tenantId, id))))
         .build();
   }
@@ -158,19 +170,22 @@ public class SpecialOrderResource {
    *
    * @param id the special order to fulfil
    * @return the fulfilled special order with its lines
-   * @throws com.storeql.web.ApiException {@code 404} when it does not exist; a conflict when its
-   *     status does not allow fulfilment
+   * @throws com.storeql.web.ApiException {@code 404} when it does not exist; {@code 403
+   *     STORE_ACCESS_DENIED} for staff not assigned to its store; a conflict when its status does
+   *     not allow fulfilment
    */
   @Operation(
       summary = "Fulfil a special order",
-      description = "Transitions a CONFIRMED special order to FULFILLED.")
+      description =
+          "Transitions a CONFIRMED special order to FULFILLED, by staff who may act at its store.")
   @APIResponse(responseCode = "200", description = "Special order fulfilled")
+  @APIResponse(responseCode = "403", description = "The caller is not assigned to its store")
   @APIResponse(responseCode = "404", description = "Special order not found")
   @POST
   @Path("/{id}/fulfil")
   public Response fulfil(@PathParam("id") UUID id) {
     UUID tenantId = ctx.requireTenantId();
-    var so = svc.fulfilSpecialOrder(tenantId, id, ctx.userId());
+    var so = svc.fulfilSpecialOrder(tenantId, id, ctx);
     return Response.ok(ApiResponse.ok(Mappers.toDto(so, svc.getSpecialOrderItems(tenantId, id))))
         .build();
   }
@@ -180,20 +195,24 @@ public class SpecialOrderResource {
    *
    * @param id the special order to cancel
    * @return the cancelled special order with its lines
-   * @throws com.storeql.web.ApiException {@code 404} when it does not exist; {@code 409} when it
-   *     has already been fulfilled
+   * @throws com.storeql.web.ApiException {@code 404} when it does not exist; {@code 403
+   *     STORE_ACCESS_DENIED} for staff not assigned to its store; {@code 409} when it has already
+   *     been fulfilled
    */
   @Operation(
       summary = "Cancel a special order",
-      description = "Cancels a special order. A fulfilled special order cannot be cancelled.")
+      description =
+          "Cancels a special order, by staff who may act at its store. A fulfilled special order"
+              + " cannot be cancelled.")
   @APIResponse(responseCode = "200", description = "Special order cancelled")
+  @APIResponse(responseCode = "403", description = "The caller is not assigned to its store")
   @APIResponse(responseCode = "404", description = "Special order not found")
   @APIResponse(responseCode = "409", description = "Special order is already fulfilled")
   @POST
   @Path("/{id}/cancel")
   public Response cancel(@PathParam("id") UUID id) {
     UUID tenantId = ctx.requireTenantId();
-    var so = svc.cancelSpecialOrder(tenantId, id, ctx.userId());
+    var so = svc.cancelSpecialOrder(tenantId, id, ctx);
     return Response.ok(ApiResponse.ok(Mappers.toDto(so, svc.getSpecialOrderItems(tenantId, id))))
         .build();
   }

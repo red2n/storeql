@@ -174,4 +174,29 @@ class PricingClientQuoteParseTest {
     assertThat(basket.lines().get(0).lineNet(), comparesEqualTo(new BigDecimal("40.00")));
     assertThat(basket.basketDiscount(), comparesEqualTo(new BigDecimal("5.00")));
   }
+
+  /** A yen quote's unit price is whole yen: ¥1,000 over three is ¥333, never ¥333.33. */
+  @Test
+  void aYenQuotesUnitPriceIsWholeYen() {
+    var basket =
+        PricingClient.parseQuote(
+            json(
+                "{\"lines\":[{\"qty\":3,\"lineTotal\":1000,\"discount\":0,"
+                    + "\"vatAmount\":100}],\"currency\":\"JPY\"}"));
+    assertEquals(new BigDecimal("333"), basket.lines().get(0).unitPrice());
+  }
+
+  /**
+   * A dinar quote keeps its third decimal: KWD 10 over three is 3.333 — the currency decides the
+   * precision, not how the line total happened to be written.
+   */
+  @Test
+  void aDinarQuotesUnitPriceKeepsItsThirdDecimal() {
+    var basket =
+        PricingClient.parseQuote(
+            json(
+                "{\"lines\":[{\"qty\":3,\"lineTotal\":10,\"discount\":0,"
+                    + "\"vatAmount\":0.500}],\"currency\":\"KWD\"}"));
+    assertEquals(new BigDecimal("3.333"), basket.lines().get(0).unitPrice());
+  }
 }

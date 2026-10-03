@@ -125,6 +125,16 @@ class AuthAuthenticated extends AuthState {
   /// Alias for [canAccessAdmin] — used by the router and existing shells.
   bool get isAdmin => canAccessAdmin;
 
+  /// Held to particular stores: a manager (or other staff) whose token names
+  /// stores. An owner, a platform administrator and a head-office (business-wide)
+  /// manager carry none. The server refuses such a login the business-wide
+  /// settings (`BUSINESS_WIDE_ONLY`) and any store not theirs; the app only
+  /// hides the controls it would refuse.
+  bool get heldToStores =>
+      storeIds.isNotEmpty &&
+      !roles.contains(UserRoles.owner) &&
+      !roles.contains(UserRoles.platformAdmin);
+
   bool get isCashier => roles.contains(UserRoles.cashier);
   bool get isCustomer => roles.contains(UserRoles.customer);
 

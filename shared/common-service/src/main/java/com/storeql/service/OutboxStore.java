@@ -26,6 +26,32 @@ public interface OutboxStore {
   List<UUID> drainAndPublish(int limit, Function<List<PendingOutbox>, List<UUID>> publish);
 
   /**
+   * Deletes outbox rows that were PUBLISHED before {@code cutoff}, at most {@code batch} rows. Rows
+   * not yet published are never touched. Operational data, not business history: the event already
+   * reached Kafka.
+   *
+   * @param cutoff rows with {@code published_at} before this instant are eligible
+   * @param batch the most rows to delete in this call (bounded so no purge holds a long lock)
+   * @return how many rows were deleted; callers repeat while it equals {@code batch}
+   */
+  default int purgePublished(java.time.Instant cutoff, int batch) {
+    return 0;
+  }
+
+  /**
+   * Deletes consumer dedupe rows ({@code processed_events}) recorded before {@code cutoff}, at most
+   * {@code batch} rows. The cutoff must be older than the longest Kafka retention plus consumer
+   * lag: dedupe only has to outlive possible redelivery.
+   *
+   * @param cutoff rows processed before this instant are eligible
+   * @param batch the most rows to delete in this call
+   * @return how many rows were deleted; callers repeat while it equals {@code batch}
+   */
+  default int purgeProcessedEvents(java.time.Instant cutoff, int batch) {
+    return 0;
+  }
+
+  /**
    * A pending outbox row: where to publish and what.
    *
    * @param id the outbox row's primary key

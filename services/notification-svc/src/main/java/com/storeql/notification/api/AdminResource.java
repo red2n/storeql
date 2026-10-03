@@ -14,6 +14,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
+import java.util.Set;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
@@ -36,19 +37,27 @@ public class AdminResource {
   /**
    * List shortage alerts for the tenant, newest first.
    *
-   * @param storeId restrict to one store, or {@code null} for every store; ignored when {@code
-   *     variantId} is given
-   * @param variantId restrict to one variant across all stores, or {@code null}
+   * <p>A caller held to stores reads those stores' alerts and no others: a store they name must be
+   * one of theirs, and with none named (or a variant named) they read exactly their own stores
+   * together, never the whole business's.
+   *
+   * @param storeId restrict to one store, or {@code null} for every store the caller reads; ignored
+   *     when {@code variantId} is given
+   * @param variantId restrict to one variant across the stores the caller reads, or {@code null}
    * @param limit page size; values outside 1..100 fall back to 20 rather than being rejected
    * @return the matching alerts as DTOs
+   * @throws com.storeql.web.ApiException {@code 403 STORE_ACCESS_DENIED} for a store the caller is
+   *     not held to
    */
   @Operation(
       summary = "List shortage alerts",
       description =
           "Paginated shortage alerts for the caller's tenant, optionally filtered by store or"
-              + " variant. Recorded from consumed StockBelowThreshold events, newest first.")
+              + " variant. Recorded from consumed StockBelowThreshold events, newest first. A"
+              + " manager held to stores reads only those stores' alerts.")
   @APIResponse(responseCode = "200", description = "Shortage alerts")
   @APIResponse(responseCode = "400", description = "storeId or variantId is not a valid UUID")
+  @APIResponse(responseCode = "403", description = "STORE_ACCESS_DENIED: a store not the caller's")
   @GET
   @Path("/shortage-alerts")
   public ApiResponse<Object> listShortageAlerts(
@@ -57,12 +66,15 @@ public class AdminResource {
       @QueryParam("limit") @DefaultValue("20") int limit) {
     UUID tenantId = ctx.requireTenantId();
     int effectiveLimit = (limit < 1 || limit > 100) ? 20 : limit;
+    UUID named = storeId != null ? Ids.parse(storeId) : null;
+    // A named store must be one the caller keeps; with none named, a caller held to stores reads
+    // exactly those together and one held to none reads every store (null).
+    Set<UUID> stores = ctx.reportStores(variantId != null ? null : named);
 
     var alerts =
         variantId != null
-            ? service.listAlertsByVariant(tenantId, Ids.parse(variantId), effectiveLimit)
-            : service.listAlerts(
-                tenantId, storeId != null ? Ids.parse(storeId) : null, effectiveLimit);
+            ? service.listAlertsByVariant(tenantId, Ids.parse(variantId), stores, effectiveLimit)
+            : service.listAlerts(tenantId, stores, effectiveLimit);
 
     var dtos = alerts.stream().map(Mappers::toDto).toList();
     return ApiResponse.ok(dtos);

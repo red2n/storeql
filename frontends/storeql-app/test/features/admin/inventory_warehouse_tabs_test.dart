@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,27 +24,35 @@ const _leeds = '01a0c100-0000-7000-8000-00000000aa01';
 const _gone = '01a0c100-0000-7000-8000-00000000ff99';
 const _mug = '01a090ae-611e-7011-ae7d-1bd68c966ff6';
 
+const _york = '01a0c100-0000-7000-8000-00000000aa02';
+
 class _Resolve implements HttpClientAdapter {
+  final List<RequestOptions> requests = [];
+
   @override
   void close({bool force = false}) {}
 
   @override
-  Future<ResponseBody> fetch(RequestOptions o, Stream<List<int>>? s, Future<void>? c) async =>
-      o.path.endsWith('/variants/resolve')
-          ? jsonResponse('{"data":[{"variantId":"$_mug","productName":"Blue mug","sku":"MUG-BLU"}]}')
-          : jsonResponse('{"data":[]}');
+  Future<ResponseBody> fetch(RequestOptions o, Stream<List<int>>? s, Future<void>? c) async {
+    requests.add(o);
+    return o.path.endsWith('/variants/resolve')
+        ? jsonResponse('{"data":[{"variantId":"$_mug","productName":"Blue mug","sku":"MUG-BLU"}]}')
+        : jsonResponse('{"data":[]}');
+  }
 }
 
-Future<void> _pump(WidgetTester tester, Widget tab, {Size size = const Size(1200, 900)}) async {
+Future<_Resolve> _pump(WidgetTester tester, Widget tab, {Size size = const Size(1200, 900)}) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = _Resolve();
+  final server = _Resolve();
+  final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
   await tester.pumpWidget(ProviderScope(
     overrides: <Override>[
       apiClientProvider.overrideWithValue(FakeApiClient(dio)),
       storesProvider.overrideWith((ref) async => const [
             StoreInfo(id: _leeds, name: 'Leeds', code: 'LDS', type: 'STORE', status: 'ACTIVE'),
+            StoreInfo(id: _york, name: 'York', code: 'YRK', type: 'STORE', status: 'ACTIVE'),
           ]),
       transferOrdersProvider('').overrideWith((ref) async => const [
             TransferOrder(
@@ -69,7 +79,28 @@ Future<void> _pump(WidgetTester tester, Widget tab, {Size size = const Size(1200
   await tester.pumpAndSettle();
   await tester.pump(const Duration(milliseconds: 50));
   await tester.pumpAndSettle();
+  return server;
 }
+
+/// New transfer, Leeds to York, of the mug.
+Future<void> _openTransfer(WidgetTester tester) async {
+  await tester.tap(find.text('New transfer'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('From store'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Leeds').last);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('To store'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('York').last);
+  await tester.pumpAndSettle();
+  await tester.enterText(find.widgetWithText(TextField, 'Variant ID (UUID)'), _mug);
+}
+
+String? _qtySays(WidgetTester tester) =>
+    tester.widget<TextField>(find.byKey(const Key('transfer-qty'))).decoration?.errorText;
+
+Iterable<RequestOptions> _posts(_Resolve server) => server.requests.where((r) => r.method == 'POST');
 
 void main() {
   // This file's UI dates (e.g. day-before-month, "Sept") are about
@@ -104,5 +135,61 @@ void main() {
     expect(find.textContaining('Leeds · Blue mug · 25 Sept 2026'), findsOneWidget);
     expect(find.textContaining('SALE'), findsNothing);
     expect(find.textContaining('2026-09-25'), findsNothing);
+  });
+  // What a transfer moves is a quantity to three places: read the way the
+  // app's language writes a number and sent as the decimal typed, or refused
+  // under its field with no transfer raised. Parsed with a point, Romanian's
+  // 1.250 moved a kilo and a quarter, and its 2,5 was called not positive.
+  group('a transfer quantity is read as typed, or refused', () {
+    for (final (locale, typed, sent) in [
+      ('ro', '2,5', '2.5'),
+      ('en_GB', '2.5', '2.5'),
+      ('en', '1.125', '1.125'),
+      ('pl', '1,125', '1.125'),
+      ('ar', '2\u066B5', '2.5'),
+    ]) {
+      testWidgets('in $locale, $typed is requested as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester, const InventoryTransfersTab());
+        await _openTransfer(tester);
+        for (var i = 1; i <= typed.length; i++) {
+          await tester.enterText(find.byKey(const Key('transfer-qty')), typed.substring(0, i));
+          await tester.pump();
+        }
+        expect(_qtySays(tester), isNull);
+        await tester.tap(find.text('Create'));
+        await tester.pumpAndSettle();
+        final post = _posts(server).single;
+        final body = post.data is String ? jsonDecode(post.data as String) : post.data;
+        expect(body['lines'], [
+          {'variantId': _mug, 'requestedQty': sent},
+        ]);
+      });
+    }
+
+    for (final (locale, typed, says) in [
+      ('ro', '1.250', 'Type the amount without thousands separators. Decimals go after a comma.'),
+      ('en_GB', '2,5', 'Type the amount without thousands separators. Decimals go after a point.'),
+      ('en', '2,5', 'Type the amount without thousands separators. Decimals go after a point.'),
+      ('pl', '1.250',
+          'A point may group thousands here. Type the figure without grouping, with any decimals after a comma.'),
+      ('ar', '-2', 'Type the amount without a sign.'),
+      ('en_GB', '.', 'Type the amount in digits.'),
+      ('en', '1e3', 'Only digits and a decimal point.'),
+    ]) {
+      testWidgets('in $locale, "$typed" is refused under the field and no transfer is raised',
+          (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester, const InventoryTransfersTab());
+        await _openTransfer(tester);
+        await tester.enterText(find.byKey(const Key('transfer-qty')), typed);
+        await tester.pump();
+        expect(_qtySays(tester), says);
+        await tester.tap(find.text('Create'));
+        await tester.pumpAndSettle();
+        expect(_posts(server), isEmpty);
+        expect(find.text('A figure cannot be read. Correct the one marked.'), findsOneWidget);
+      });
+    }
   });
 }

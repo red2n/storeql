@@ -100,9 +100,13 @@ public class PasswordResetService {
 
     for (User user : users.findAllByEmail(email)) {
       Set<String> roles = users.rolesOf(user.id());
-      boolean staff = user.tenantId() != null;
-      boolean businessActive = !staff || tenantStatus.isActive(user.tenantId());
-      boolean ssoRequired = staff && ssoRequired(user.tenantId(), roles);
+      UUID business = user.tenantId();
+      // A business account even before it has a business: a sign-up not yet onboarded sits beside
+      // the same person's shopper account on one address (separate identities, 29 Sep 2026), and
+      // an email offering two "shopper account" links would not say which is which.
+      boolean staff = business != null || !User.TYPE_CUSTOMER.equals(user.type());
+      boolean businessActive = business == null || tenantStatus.isActive(business);
+      boolean ssoRequired = business != null && ssoRequired(business, roles);
       PasswordReset.Kind kind =
           PasswordReset.kindOf(
               User.STATUS_ACTIVE.equals(user.status()),
@@ -115,7 +119,7 @@ public class PasswordResetService {
       }
       anyEntry = true;
       String businessName =
-          staff ? tenantProfiles.businessName(user.tenantId()).orElse(null) : null;
+          business != null ? tenantProfiles.businessName(business).orElse(null) : null;
       // The login's own id on every entry (SHOPPER, STAFF, STAFF_SSO alike): notification-svc
       // records its log row against it (AccountDeleted carries only the id, by design), so an
       // erased account's log erases too.
@@ -164,7 +168,7 @@ public class PasswordResetService {
    * @throws ApiException {@code 400 PASSWORD_RESET_TOKEN_INVALID} for an unknown, used, expired or
    *     replaced token, or a login no longer eligible; the policy's own code for a refused password
    */
-  public void reset(String rawToken, String newPassword) {
+  public void reset(String rawToken, String newPassword, String rawLanguage) {
     String tokenHash = CapabilityTokens.hash(rawToken);
     TokenOwner owner = resetRepo.find(tokenHash).orElseThrow(PasswordResetService::invalidToken);
     User user = users.findById(owner.userId()).orElseThrow(PasswordResetService::invalidToken);
@@ -175,7 +179,23 @@ public class PasswordResetService {
     // exactly as it was, so the person can try again with a better one.
     policy.check(newPassword, user.email());
     String hash = passwords.hash(newPassword);
-    resetRepo.reset(tokenHash, hash).orElseThrow(PasswordResetService::invalidToken);
+    // The notice ("your password was changed") is written on the reset's own transaction; a
+    // reset link is never issued to the platform administrator, so there is no exclusion to make.
+    boolean staff = user.tenantId() != null || !User.TYPE_CUSTOMER.equals(user.type());
+    String businessName =
+        user.tenantId() != null ? tenantProfiles.businessName(user.tenantId()).orElse(null) : null;
+    OutboxRow changed =
+        PasswordChangedEvent.announces(user.email(), false)
+            ? PasswordChangedEvent.row(
+                user.id(),
+                user.email(),
+                staff,
+                businessName,
+                PasswordChangedEvent.VIA_RESET,
+                PasswordReset.language(rawLanguage),
+                Instant.now())
+            : null;
+    resetRepo.reset(tokenHash, hash, changed).orElseThrow(PasswordResetService::invalidToken);
   }
 
   /** Re-checked at reset time, not only when the link was minted: minutes may have passed. */

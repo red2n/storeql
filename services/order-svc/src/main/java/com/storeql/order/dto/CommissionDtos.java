@@ -22,10 +22,27 @@ public final class CommissionDtos {
       String schemeName,
       String segmentFrom,
       String segmentTo,
-      String thresholdFrom,
-      String rate,
+      @Schema(
+              description =
+                  "Where the band starts, as the arrangement rated it: an amount of the sales"
+                      + " under a percentage, a count of units under a per-unit arrangement —"
+                      + " never rounded to the statement currency's minor units.")
+          String thresholdFrom,
+      @Schema(description = "A percentage, or an amount per unit in rateCurrency.") String rate,
       @Schema(description = "Net sales, or units under a per-unit arrangement.") String amount,
-      String commission) {}
+      @Schema(description = "In the statement's currency, at its own minor units.")
+          String commission,
+      @Schema(
+              description =
+                  "The currency a per-unit rate, and what it earned, is in. Absent for a"
+                      + " percentage and for sales under no arrangement.")
+          String rateCurrency,
+      @Schema(
+              description =
+                  "What the band earned in rateCurrency, when that is not the statement's"
+                      + " currency and commission is its translation at the business's own rate."
+                      + " Absent when nothing was translated.")
+          String ratedCommission) {}
 
   @Schema(name = "CommissionStatement")
   public record StatementResponse(

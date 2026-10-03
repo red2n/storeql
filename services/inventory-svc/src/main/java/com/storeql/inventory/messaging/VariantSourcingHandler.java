@@ -1,10 +1,10 @@
 package com.storeql.inventory.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.inventory.service.InventoryService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
@@ -30,7 +30,7 @@ public class VariantSourcingHandler {
     UUID variantId;
     String fulfilment;
     UUID supplierId;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       if (!"VariantSourcingChanged".equals(obj.getString("eventType", ""))) return;
       eventId = Ids.parse(obj.getString("eventId"));

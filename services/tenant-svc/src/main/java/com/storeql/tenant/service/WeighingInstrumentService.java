@@ -13,6 +13,7 @@ import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.json.Json;
+import jakarta.json.JsonNumber;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonString;
 import java.io.StringReader;
@@ -364,7 +365,7 @@ public class WeighingInstrumentService {
             "INSTRUMENT_SCHEME_INVALID", "each prefix is two digits, e.g. \"20\"");
       }
     }
-    int itemDigits = o.getInt("itemDigits", 0);
+    int itemDigits = wholeOr(o, "itemDigits", 0);
     if (itemDigits != 4 && itemDigits != 5) {
       throw ApiException.badRequest("INSTRUMENT_SCHEME_INVALID", "itemDigits is 4 or 5");
     }
@@ -372,11 +373,29 @@ public class WeighingInstrumentService {
     if (!"PRICE".equals(valueKind) && !"WEIGHT".equals(valueKind)) {
       throw ApiException.badRequest("INSTRUMENT_SCHEME_INVALID", "valueKind is PRICE or WEIGHT");
     }
-    int decimals = o.getInt("valueDecimals", -1);
+    int decimals = wholeOr(o, "valueDecimals", -1);
     if (decimals < 0 || decimals > 3) {
       throw ApiException.badRequest("INSTRUMENT_SCHEME_INVALID", "valueDecimals is 0..3");
     }
     return o.toString();
+  }
+
+  /**
+   * A scheme's number as it was written, or {@code otherwise} when it is absent or not a whole
+   * number as written. The scheme is kept as sent and a till reads it back, so it is judged as
+   * sent: JSON-P's {@code getInt} cuts a number down ({@code 4294967300} and {@code 4.9} are both
+   * 4), and {@code 5.0} would be kept and read as a fraction. Judged by its scale before any
+   * arithmetic, so {@code 1E+80000000} is never expanded.
+   */
+  private static int wholeOr(JsonObject o, String name, int otherwise) {
+    if (!(o.get(name) instanceof JsonNumber n) || !n.isIntegral()) {
+      return otherwise;
+    }
+    try {
+      return n.bigDecimalValue().intValueExact();
+    } catch (ArithmeticException e) {
+      return otherwise;
+    }
   }
 
   private static LocalDate dateOf(String raw, String field) {

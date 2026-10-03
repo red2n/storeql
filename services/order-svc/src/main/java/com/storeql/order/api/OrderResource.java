@@ -48,8 +48,12 @@ public class OrderResource {
     UUID tenantId = ctx.requireTenantId();
     var groups = svc.groupIdsOf(tenantId, orders);
     var handovers = svc.handoversOf(tenantId, orders);
+    var expiries = svc.expiriesOf(tenantId, orders);
     return orders.stream()
-        .map(o -> Mappers.toSummary(o, groups.get(o.id()), handovers.get(o.id())))
+        .map(
+            o ->
+                Mappers.toSummary(
+                    o, groups.get(o.id()), handovers.get(o.id()), expiries.get(o.id())))
         .toList();
   }
 
@@ -238,7 +242,8 @@ public class OrderResource {
    * @return {@code 201} with the placed order
    * @throws com.storeql.web.ApiException {@code 400} when the order has no lines or the request is
    *     malformed; {@code 403} when a POS order is placed without a cashier/manager/owner role;
-   *     {@code 409} when the tenant or store is not trading
+   *     {@code 409} when the tenant or store is not trading, a line is stock an open recall says
+   *     must not be sold, or a line was weighed on a scale not certified at the store
    */
   @Operation(
       summary = "Place an order",
@@ -253,14 +258,34 @@ public class OrderResource {
       responseCode = "400",
       description =
           "No items, missing delivery address for DELIVERY orders, invalid paymentMethod, missing"
-              + " Idempotency-Key, missing price in non-enforced mode, or discount exceeds subtotal")
-  @APIResponse(responseCode = "403", description = "Non-staff caller attempted to apply a discount")
+              + " Idempotency-Key, missing price in non-enforced mode;"
+              + " ORDER_DISCOUNT_NEGATIVE, ORDER_DISCOUNT_REASON_REQUIRED;"
+              + " ORDER_DISCOUNT_EXCEEDS_SUBTOTAL for a discount above the subtotal — on a POS sale,"
+              + " only one above the goods as the till rang them up (each line's qty × the"
+              + " unitPrice it sent, added, then rounded half up once): one within them is the"
+              + " whole basket and is capped at the subtotal, which rounds each line first;"
+              + " VALIDATION_FAILED for a discountAmount off the till (or, with pricing not"
+              + " enforced, a unitPrice or taxAmount) with more decimals than the business's"
+              + " currency has — whole yen, three places for a dinar; a POS sale's discountAmount"
+              + " is the till's own floating-point figure and is rounded half up to the"
+              + " currency's units instead; GIFT_CARD_AMOUNT_INVALID likewise for a gift-card"
+              + " line")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "ORDER_DISCOUNT_NOT_ALLOWED: a caller with no discount authority applied one;"
+              + " ORDER_DISCOUNT_EXCEEDS_AUTHORITY: the discount (on a POS sale, as capped) is"
+              + " above the caller role's percentage ceiling")
   @APIResponse(
       responseCode = "409",
       description =
-          "Tenant or store is suspended/closed, insufficient stock to reserve, or"
+          "Tenant or store is suspended/closed, insufficient stock to reserve,"
               + " ORDER_UNFULFILLABLE: no combination of the business's shops holds a delivery"
-              + " order")
+              + " order, ORDER_LINE_RECALLED: a line is stock an open recall says must not be"
+              + " sold, or ORDER_SCALE_NOT_CERTIFIED: a line was weighed on a scale the store's"
+              + " register does not hold or that is not certified today. A till sale replayed"
+              + " from the offline queue within the grace is never refused for either: it is"
+              + " placed and flagged on the audit trail")
   @POST
   public Response place(
       @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
@@ -281,10 +306,11 @@ public class OrderResource {
         .entity(
             ApiResponse.ok(
                 Mappers.toDto(
-                    order,
-                    items,
-                    svc.depositsOf(order.tenantId(), order.id()),
-                    svc.groupOf(order.tenantId(), order.id()).orElse(null))))
+                        order,
+                        items,
+                        svc.depositsOf(order.tenantId(), order.id()),
+                        svc.groupOf(order.tenantId(), order.id()).orElse(null))
+                    .withExpiresAt(svc.expiresAtOf(order))))
         .build();
   }
 
@@ -313,12 +339,36 @@ public class OrderResource {
     return Response.ok(
             ApiResponse.ok(
                 Mappers.toDto(
-                    order,
-                    items,
-                    svc.depositsOf(order.tenantId(), order.id()),
-                    svc.groupOf(order.tenantId(), order.id()).orElse(null),
-                    svc.handoverOf(order.tenantId(), order.id()).orElse(null))))
+                        order,
+                        items,
+                        svc.depositsOf(order.tenantId(), order.id()),
+                        svc.groupOf(order.tenantId(), order.id()).orElse(null),
+                        svc.handoverOf(order.tenantId(), order.id()).orElse(null))
+                    .withExpiresAt(svc.expiresAtOf(order))))
         .build();
+  }
+
+  /**
+   * The gift cards this order sold, for the till to show and print once the sale is paid.
+   *
+   * @param id the order
+   * @return each card line: PENDING without a code before payment, LOADED with the card's id, code,
+   *     NEW or TOP_UP and when, after
+   * @throws com.storeql.web.ApiException {@code 404} another business's order; {@code 403} a
+   *     shopper, or staff held to other stores
+   */
+  @Operation(
+      summary = "The gift cards an order sold",
+      description =
+          "Staff at the order's store read the cards a paid sale issued, with their codes."
+              + " A shopper is refused: a code is bearer value and the till hands it over.")
+  @APIResponse(responseCode = "200", description = "The order's gift-card lines")
+  @GET
+  @Path("/{id}/gift-card-loads")
+  public Response giftCardLoads(@PathParam("id") String id) {
+    ctx.requireAnyRole("OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
+    var loads = svc.giftCardLoadsOf(ctx.requireTenantId(), Parsing.uuid(id, "id"), ctx);
+    return Response.ok(ApiResponse.ok(loads.stream().map(Mappers::toDto).toList())).build();
   }
 
   /**
@@ -326,19 +376,23 @@ public class OrderResource {
    *
    * @param id the order to confirm
    * @return the confirmed order with its lines
-   * @throws com.storeql.web.ApiException {@code 404} when the order does not exist; {@code 409}
-   *     when it is not PENDING
+   * @throws com.storeql.web.ApiException {@code 403} a shopper, or staff held to other stores
+   *     ({@code STORE_ACCESS_DENIED}); {@code 404} when the order does not exist in this business
+   *     ({@code ORDER_NOT_FOUND}) or is no longer PENDING ({@code ORDER_NOT_FOUND_OR_WRONG_STATUS})
    */
   @Operation(
       summary = "Confirm an order",
-      description = "Transitions a PENDING order to CONFIRMED and emits OrderConfirmed.")
+      description =
+          "Staff at the order's store transition a PENDING order to CONFIRMED and emit"
+              + " OrderConfirmed; a till sale is handed over at the same time.")
   @APIResponse(responseCode = "200", description = "Order confirmed")
-  @APIResponse(responseCode = "404", description = "Order not found")
-  @APIResponse(responseCode = "409", description = "Order is not in PENDING status")
+  @APIResponse(responseCode = "403", description = "Not staff, or not staff at the order's store")
+  @APIResponse(responseCode = "404", description = "Order not found, or not in PENDING status")
   @POST
   @Path("/{id}/confirm")
   public Response confirm(@PathParam("id") String id) {
-    var order = svc.confirmOrder(ctx.tenantId(), Parsing.uuid(id, "id"), ctx.userId());
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
+    var order = svc.confirmOrder(ctx.tenantId(), Parsing.uuid(id, "id"), ctx.userId(), ctx);
     var items = svc.getOrderItems(ctx.tenantId(), order.id());
     return Response.ok(
             ApiResponse.ok(
@@ -349,11 +403,16 @@ public class OrderResource {
   /**
    * Cancels a PENDING or CONFIRMED order, releasing its stock holds via {@code OrderCancelled}.
    *
+   * <p>Staff cancel any order at their stores (and need the void permission once money was taken).
+   * A shopper may cancel only their own online order that is still PENDING with nothing paid; their
+   * own order that is paid, picked or a part of a split checkout is {@code 409}, and another
+   * shopper's or business's order is {@code 404}.
+   *
    * <p>A cancel with no body at all is allowed; a body that <em>is</em> sent must carry a reason
    * rather than silently passing an empty one through.
    *
    * @param id the order to cancel
-   * @param req the reason, or {@code null} to cancel without one
+   * @param raw the JSON body {@code {"reason": "..."}}, or nothing to cancel without a reason
    * @return the cancelled order with its lines
    * @throws com.storeql.web.ApiException {@code 404} when the order does not exist; {@code 409}
    *     when it is neither PENDING nor CONFIRMED
@@ -364,24 +423,38 @@ public class OrderResource {
           "Cancels a PENDING or CONFIRMED order and releases any stock holds via OrderCancelled."
               + " An optional reason may be given; if a body is sent it must include one.")
   @APIResponse(responseCode = "200", description = "Order cancelled")
-  @APIResponse(responseCode = "404", description = "Order not found")
+  @APIResponse(responseCode = "404", description = "Order not found (or not the shopper's own)")
   @APIResponse(
       responseCode = "409",
-      description = "Order is not PENDING or CONFIRMED, so it cannot be cancelled")
+      description =
+          "Order is not PENDING or CONFIRMED, so it cannot be cancelled; for a shopper:"
+              + " ORDER_CANNOT_CANCEL (not an unpaid PENDING online order of their own) or"
+              + " ORDER_CANCEL_PAID_NEEDS_STAFF")
   @POST
   @Path("/{id}/cancel")
-  public Response cancel(@PathParam("id") String id, VoidRequest req) {
-    // A cancel with no body at all is allowed (no reason given); a body that IS sent must satisfy
-    // VoidRequest's @NotBlank reason rather than silently passing an empty one through.
+  public Response cancel(@PathParam("id") String id, String raw) {
+    // A cancel with no body at all is allowed (no reason given), as a till, a script or the
+    // shopper's app sends nothing; a body that IS sent must satisfy VoidRequest's @NotBlank reason
+    // rather than silently passing an empty one through. Read as text so an absent body is legal.
+    VoidRequest req = null;
+    if (raw != null && !raw.isBlank()) {
+      try {
+        req = FULFIL_JSON.fromJson(raw, VoidRequest.class);
+      } catch (jakarta.json.bind.JsonbException e) {
+        throw new ApiException(
+            400, "VALIDATION_FAILED", "cancel body is not valid JSON", java.util.List.of(), e);
+      }
+    }
     if (req != null) {
       Validations.validate(req);
     }
     var order =
         svc.cancelOrder(
-            ctx.tenantId(),
+            ctx.requireTenantId(),
             Parsing.uuid(id, "id"),
             req != null ? req.reason() : null,
-            ctx.userId());
+            ctx.userId(),
+            ctx);
     var items = svc.getOrderItems(ctx.tenantId(), order.id());
     return Response.ok(
             ApiResponse.ok(
@@ -403,7 +476,12 @@ public class OrderResource {
               + " the order gets its unit price here; the totals are recomputed and the order"
               + " becomes PENDING, payable like any other. Management-only (SJ-D41).")
   @APIResponse(responseCode = "200", description = "Order priced, now PENDING")
-  @APIResponse(responseCode = "400", description = "A line unpriced, unknown, or priced below zero")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "ORDER_PRICE_LINE_MISSING, ORDER_PRICE_LINE_UNKNOWN; ORDER_PRICE_INVALID for a line"
+              + " priced below zero, or a unit price or taxAmount with more decimals than the"
+              + " order's currency has")
   @APIResponse(responseCode = "409", description = "Order is not AWAITING_PRICE")
   @POST
   @Path("/{id}/price")
@@ -772,19 +850,34 @@ public class OrderResource {
    */
   @Operation(
       summary = "Void a POS order",
-      description = "Voids a POS-channel order after the fact and emits OrderVoided.")
+      description =
+          "Voids a POS-channel order after the fact and emits OrderVoided. Requires an"
+              + " Idempotency-Key: a retry answers with the first void and writes nothing.")
   @APIResponse(responseCode = "200", description = "Order voided")
+  @APIResponse(responseCode = "400", description = "Missing or malformed Idempotency-Key")
   @APIResponse(responseCode = "404", description = "Order not found")
   @APIResponse(responseCode = "409", description = "Void is only allowed on POS-channel orders")
   @POST
   @Path("/{id}/void")
-  public Response voidOrder(@PathParam("id") String id, VoidRequest req) {
+  public Response voidOrder(
+      @PathParam("id") String id,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      VoidRequest req) {
     // Management by path (the shared filter); by permission here (20.10): a shift lead who is a
     // manager in every other way can be a manager who cannot void a sale.
     ctx.requirePermission(com.storeql.web.Permissions.SALES_VOID);
     Validations.validate(req);
-    var vl = svc.voidOrder(ctx.tenantId(), Parsing.uuid(id, "id"), req, ctx);
+    var vl = svc.voidOrder(ctx.tenantId(), Parsing.uuid(id, "id"), req, requiredKey(key), ctx);
     return Response.ok(ApiResponse.ok(Mappers.toDto(vl))).build();
+  }
+
+  /** The caller's key, canonical; a write that must be retryable is refused without one. */
+  private static String requiredKey(String header) {
+    if (header == null || header.isBlank()) {
+      throw ApiException.badRequest(
+          "IDEMPOTENCY_KEY_REQUIRED", "the Idempotency-Key header is required");
+    }
+    return IdempotencyKeys.require(header.trim());
   }
 
   // ── Returns (Gap #14) ─────────────────────────────────────────────────────
@@ -804,20 +897,162 @@ public class OrderResource {
   @Operation(
       summary = "Create a return for an order",
       description =
-          "Refunds one or more line items of the order. Cannot be used on a voided or cancelled"
-              + " order.")
-  @APIResponse(responseCode = "201", description = "Return created")
+          "Refunds one or more line items of the order, each with its condition (SEALED, OPENED,"
+              + " DAMAGED, FAULTY). Checked against the business's return policy first: outside it"
+              + " (past the window, over the cashier's ceiling) needs sales.refund, and the caller"
+              + " is named as approver. Requires an Idempotency-Key: a retry answers with the"
+              + " first return and writes nothing. Cannot be used on a voided or cancelled order.")
+  @APIResponse(responseCode = "201", description = "Return created (or the first one, on a retry)")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED, ORDER_RETURN_CONDITION_REQUIRED,"
+              + " ORDER_RETURN_CONDITION_INVALID, ORDER_RETURN_METHOD_INVALID")
+  @APIResponse(
+      responseCode = "403",
+      description = "ORDER_RETURN_NEEDS_MANAGER, with the reasons in details")
   @APIResponse(
       responseCode = "404",
-      description = "Order not found, or a returned variant is not on the order")
-  @APIResponse(responseCode = "409", description = "Order is voided or cancelled")
+      description =
+          "Order not found, a returned variant is not on the order, or GIFT_CARD_NOT_FOUND")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Order is voided or cancelled, or ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER, or the card"
+              + " is not usable")
   @POST
   @Path("/{id}/returns")
-  public Response createReturn(@PathParam("id") String id, CreateReturnRequest req) {
+  public Response createReturn(
+      @PathParam("id") String id,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      CreateReturnRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
     Validations.validate(req);
-    var ret = svc.createReturn(ctx.tenantId(), Parsing.uuid(id, "id"), req, ctx);
+    var ret = svc.createReturn(ctx.tenantId(), Parsing.uuid(id, "id"), req, requiredKey(key), ctx);
     var retItems = svc.getReturnItems(ctx.tenantId(), ret.id());
-    return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(ret, retItems))).build();
+    var card = svc.giftCardOf(ret).orElse(null);
+    return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(ret, retItems, card))).build();
+  }
+
+  /**
+   * Takes goods back and sells others in one act, at the till.
+   *
+   * @param id the sale the goods came from
+   * @param req the reason, the goods coming back with their conditions, and the goods bought
+   * @return {@code 201} with the return, the new sale (PENDING until paid) and how they settle
+   */
+  @Operation(
+      summary = "Exchange goods from a sale",
+      description =
+          "Returns items from the sale and places a new till sale at the same store in one"
+              + " transaction. The return is judged like any return (policy, conditions,"
+              + " sales.refund outside it) and the new sale is priced as any till sale. The"
+              + " returned value pays the new basket directly: exchangeAmount is the lesser of"
+              + " the two, dueFromCustomer is collected with normal tenders on the new sale, and"
+              + " refundToCustomer goes back to how the customer paid. Each new item carries what"
+              + " its pack said as a till sale's line does (batchNo, expiry, markdownId,"
+              + " weighingInstrumentId), so the new basket is checked against open recalls,"
+              + " priced at a sticker and its scale judged exactly as a sale's. Requires an"
+              + " Idempotency-Key: a retry answers with the first exchange. Refusals come in one"
+              + " order: the request (400), the sale (404), the caller's store (403), then the"
+              + " key's first answer, the return and the new sale.")
+  @APIResponse(responseCode = "201", description = "Exchange recorded (or the first, on a retry)")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED, IDEMPOTENCY_KEY_INVALID, VALIDATION_FAILED (a field of the"
+              + " body, e.g. newItems[i].qty finer than a till's reading or under 0.001),"
+              + " INVALID_UUID (newItems[i].variantId / markdownId / weighingInstrumentId,"
+              + " returnItems[i].variantId, customerId), ORDER_LINE_EXPIRY_INVALID"
+              + " (newItems[i].expiry), ORDER_RETURN_NO_ITEMS, ORDER_EXCHANGE_NO_NEW_ITEMS,"
+              + " ORDER_RETURN_CONDITION_REQUIRED, ORDER_RETURN_CONDITION_INVALID")
+  @APIResponse(
+      responseCode = "403",
+      description = "FORBIDDEN (not a till role), STORE_ACCESS_DENIED, ORDER_RETURN_NEEDS_MANAGER")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "ORDER_NOT_FOUND (not a sale of this business), ITEM_NOT_IN_ORDER, a sticker"
+              + " pricing-svc does not know (PRICING_MARKDOWN_*)")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "ORDER_CANNOT_RETURN, IDEMPOTENCY_KEY_REUSED, ORDER_EXCHANGE_CURRENCY_MISMATCH,"
+              + " ORDER_EXCHANGE_INCOMPLETE, ORDER_LINE_RECALLED (a new item of a recalled lot),"
+              + " ORDER_SCALE_NOT_CERTIFIED, or another refusal of the new sale")
+  @POST
+  @Path("/{id}/exchange")
+  public Response exchange(
+      @PathParam("id") String id,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      com.storeql.order.dto.Dtos.ExchangeRequest req) {
+    // The new sale is a till sale, so the roles are the till's own.
+    ctx.requireAnyRole("CASHIER", "MANAGER", "OWNER");
+    Validations.validate(req);
+    var x = svc.exchange(ctx.tenantId(), Parsing.uuid(id, "id"), req, requiredKey(key), ctx);
+    var bought = x.order();
+    var answer = new java.util.LinkedHashMap<String, Object>();
+    // "return" is a Java keyword, so the answer is a map rather than a record.
+    answer.put("return", Mappers.toDto(x.ret(), x.items()));
+    answer.put(
+        "order",
+        Mappers.toDto(
+            bought,
+            svc.getOrderItems(bought.tenantId(), bought.id()),
+            svc.depositsOf(bought.tenantId(), bought.id()),
+            svc.groupOf(bought.tenantId(), bought.id()).orElse(null)));
+    answer.put("exchangeAmount", x.settlement().exchangeAmount());
+    answer.put("dueFromCustomer", x.settlement().dueFromCustomer());
+    answer.put("refundToCustomer", x.settlement().refundToCustomer());
+    return Response.status(201).entity(ApiResponse.ok(answer)).build();
+  }
+
+  /**
+   * Finds a sale by the number on its receipt, for a return at the till.
+   *
+   * @param number the fiscal receipt number, or the short order reference the receipt prints
+   * @return the sale with its lines, and per line how much can still come back
+   */
+  @Operation(
+      summary = "Find a sale by its receipt",
+      description =
+          "Matches the business's fiscal receipt number (trimmed, case-insensitive) or the short"
+              + " order reference the receipt prints, at the stores the caller may act at. Answers"
+              + " the order with, per line, how much can still come back. Staff only.")
+  @APIResponse(responseCode = "200", description = "The sale and its returnable lines")
+  @APIResponse(
+      responseCode = "404",
+      description = "ORDER_RECEIPT_NOT_FOUND: nothing at the caller's stores matches")
+  @APIResponse(
+      responseCode = "409",
+      description = "ORDER_RECEIPT_AMBIGUOUS: more than one sale shares that short reference")
+  @GET
+  @Path("/by-receipt")
+  public Response byReceipt(@QueryParam("number") String number) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    var m = svc.findByReceipt(ctx.requireTenantId(), number, ctx);
+    var order = m.order();
+    var items = svc.getOrderItems(order.tenantId(), order.id());
+    var answer =
+        new com.storeql.order.dto.Dtos.ReceiptLookupResponse(
+            Mappers.toDto(
+                order,
+                items,
+                svc.depositsOf(order.tenantId(), order.id()),
+                svc.groupOf(order.tenantId(), order.id()).orElse(null),
+                svc.handoverOf(order.tenantId(), order.id()).orElse(null)),
+            m.receiptNumber(),
+            m.lines().stream()
+                .map(
+                    l ->
+                        new com.storeql.order.dto.Dtos.ReturnableLineResponse(
+                            l.variantId().toString(),
+                            l.soldQty(),
+                            l.returnedQty(),
+                            l.returnableQty(),
+                            l.unitPrice()))
+                .toList());
+    return Response.ok(ApiResponse.ok(answer)).build();
   }
 
   // ─────────────────────────────────────────────────────────────────── utils

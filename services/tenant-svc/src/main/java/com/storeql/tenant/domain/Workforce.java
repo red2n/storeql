@@ -4,10 +4,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * The roster and the time clock (store operations & workforce).
@@ -43,26 +46,6 @@ public final class Workforce {
   public static final String BREAK_MEAL = "MEAL";
   public static final Set<String> BREAK_KINDS = Set.of(BREAK_REST, BREAK_MEAL);
 
-  /**
-   * The daily rest the Working Time Directive asks for: eleven consecutive hours in each 24.
-   *
-   * <p>A roster that breaks it is <b>flagged, not refused</b>. The directive is implemented member
-   * state by member state with its own derogations and collective agreements, and an employer who
-   * has one is entitled to roster against it; a platform that refused would be wrong about the law
-   * and in the way. What it must not do is stay quiet, because nobody reading a rota spots eleven
-   * hours by eye.
-   */
-  public static final Duration DAILY_REST = Duration.ofHours(11);
-
-  /**
-   * How long somebody may work before the directive expects a break: six hours.
-   *
-   * <p>Flagged for the same reason and with the same caveat. Article 4 leaves the length and the
-   * terms to member states; what is not in doubt is that a six-hour stretch with no break is worth
-   * saying.
-   */
-  public static final Duration BREAK_AFTER = Duration.ofHours(6);
-
   /** A rostered shift: what somebody is meant to work. */
   public record Shift(
       UUID id,
@@ -87,7 +70,10 @@ public final class Workforce {
       return Duration.between(startsAt, endsAt);
     }
 
-    /** The day a shift belongs to: the day it starts, in UTC, which is how the roster reads. */
+    /**
+     * The day a shift belongs to in UTC. Only the attendance report still reads days this way; a
+     * roster's concerns read the store's own day ({@link WorkingTime#day}).
+     */
     public LocalDate day() {
       return startsAt.atOffset(ZoneOffset.UTC).toLocalDate();
     }
@@ -182,68 +168,50 @@ public final class Workforce {
     }
   }
 
-  /** Something about a roster worth saying out loud, with the instrument that asks for it. */
-  public record Concern(String code, String detail) {}
-
-  public static final String REST_SHORT = "DAILY_REST_SHORT";
-  public static final String NO_BREAK = "BREAK_EXPECTED";
-  public static final String OVERLAPS = "SHIFTS_OVERLAP";
+  /**
+   * Something about a roster worth saying out loud, with the instrument that asks for it.
+   *
+   * @param severity ADVISORY or UNLAWFUL (what the rule's data says; never refused by this)
+   * @param source LAW when it comes from a rule of law (with its {@code citation}), ROSTER when it
+   *     is a fact of the roster itself
+   * @param citation the instrument, or null for a ROSTER concern
+   */
+  public record Concern(
+      String code, String detail, String severity, String source, String citation) {}
 
   /**
-   * What is worth saying about one person's rostered shifts.
-   *
-   * <p>Shifts must arrive in order of start. Overlaps are reported first because they are a mistake
-   * rather than a judgement: nobody works two places at once, and the rest of the arithmetic would
-   * be nonsense if they did.
+   * Whether a correction would raise the person's paid minutes: the entry's length less unpaid
+   * breaks, after against before. An entry still open has no figure yet, so closing it counts as a
+   * raise from nothing (the forgotten clock-out is exactly the correction a second person should
+   * see); a correction that leaves it open changes no hours.
    */
-  public static List<Concern> concerns(List<Shift> ofOnePerson) {
-    List<Concern> out = new ArrayList<>();
-    Shift previous = null;
-    for (Shift s : ofOnePerson) {
-      if (!s.live()) continue;
-      if (s.length().compareTo(BREAK_AFTER) > 0) {
-        out.add(
-            new Concern(
-                NO_BREAK,
-                "the shift on "
-                    + s.day()
-                    + " runs "
-                    + hours(s.length())
-                    + " hours, and a break is expected after "
-                    + BREAK_AFTER.toHours()
-                    + " (Directive 2003/88/EC art. 4, as the member state implements it)"));
-      }
-      if (previous != null) {
-        if (s.startsAt().isBefore(previous.endsAt())) {
-          out.add(
-              new Concern(
-                  OVERLAPS,
-                  "the shifts on "
-                      + previous.day()
-                      + " and "
-                      + s.day()
-                      + " overlap, and nobody works two places at once"));
-        } else {
-          Duration rest = Duration.between(previous.endsAt(), s.startsAt());
-          if (rest.compareTo(DAILY_REST) < 0) {
-            out.add(
-                new Concern(
-                    REST_SHORT,
-                    "only "
-                        + hours(rest)
-                        + " hours between the shifts on "
-                        + previous.day()
-                        + " and "
-                        + s.day()
-                        + ", where "
-                        + DAILY_REST.toHours()
-                        + " are expected (Directive 2003/88/EC art. 3)"));
-          }
-        }
-      }
-      previous = s;
-    }
-    return out;
+  public static boolean raisesPaidMinutes(Entry before, Entry after) {
+    Duration was = before.worked();
+    Duration now = after.worked();
+    if (now == null) return false;
+    return was == null || now.compareTo(was) > 0;
+  }
+
+  /**
+   * Whether a correction asked for again is the one already made under the same Idempotency-Key:
+   * the same entry corrected, to the same clock times, for the same reason. Times are compared to
+   * the microsecond, which is what the record keeps, so a request naming nanoseconds is still the
+   * request that was made. Anything else under that key is another request, and is refused rather
+   * than answered with a correction it did not ask for.
+   *
+   * @param first the correction the key made, as it was recorded
+   * @param wanted the correction this request would make, built as it would be written
+   */
+  public static boolean sameCorrection(Entry first, Entry wanted) {
+    return Objects.equals(first.supersedes(), wanted.supersedes())
+        && sameMoment(first.clockedInAt(), wanted.clockedInAt())
+        && sameMoment(first.clockedOutAt(), wanted.clockedOutAt())
+        && Objects.equals(first.adjustedReason(), wanted.adjustedReason());
+  }
+
+  private static boolean sameMoment(Instant a, Instant b) {
+    if (a == null || b == null) return a == null && b == null;
+    return a.truncatedTo(ChronoUnit.MICROS).equals(b.truncatedTo(ChronoUnit.MICROS));
   }
 
   /** Hours to one decimal place, which is how a rota is read and discussed. */
@@ -287,6 +255,69 @@ public final class Workforce {
     }
   }
 
+  /** The places an hourly rate is kept to ({@code pay_rates.hourly_rate NUMERIC(12,4)}). */
+  public static final int RATE_PLACES = 4;
+
+  /** The whole digits an hourly rate may have in the same column. */
+  public static final int RATE_WHOLE_DIGITS = 8;
+
+  /**
+   * The longest rate read as text. Twice what the column can hold written plainly (a sign, eight
+   * digits, a point, four places): room for leading and trailing zeros, and a bound on the work
+   * whatever is sent.
+   */
+  static final int RATE_TEXT_MAX = 32;
+
+  /** A figure written out: a sign, digits, at most one point; ASCII digits only, no exponent. */
+  private static final Pattern WRITTEN_OUT =
+      Pattern.compile("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)");
+
+  /** Above this an unscaled value has more than 77 digits: refused without being stripped. */
+  private static final int MOST_UNSCALED_BITS = 256;
+
+  /**
+   * An hourly rate as it was sent, when it is written out as a figure.
+   *
+   * <p>Only a sign, digits and one point are read: an exponent ({@code 1E+2147483647} is thirteen
+   * characters and a figure with more than two thousand million whole digits), a word ({@code NaN},
+   * {@code Infinity}), a digit of another script and a grouping mark are no rate, and nothing is
+   * built from them. Common-web's guard judges the numbers a body carries; a rate sent as text
+   * never meets it, so it is judged here. The text is bounded ({@link #RATE_TEXT_MAX}) before it is
+   * read, so the work is the same whatever is sent. Less than nothing is read as sent: that is the
+   * service's refusal to give, not the reader's.
+   *
+   * @param text the rate as sent; surrounding blanks are ignored
+   * @return the figure, or empty when the text is not one written out
+   */
+  public static Optional<java.math.BigDecimal> writtenRate(String text) {
+    if (text == null) return Optional.empty();
+    String written = text.strip();
+    if (written.length() > RATE_TEXT_MAX || !WRITTEN_OUT.matcher(written).matches()) {
+      return Optional.empty();
+    }
+    return Optional.of(new java.math.BigDecimal(written));
+  }
+
+  /**
+   * Whether an hourly rate fits where it is kept: at most {@link #RATE_WHOLE_DIGITS} whole digits
+   * and {@link #RATE_PLACES} places once trailing zeros are dropped, as the column keeps {@code
+   * 12.50000000} unchanged and would round {@code 12.34567}.
+   *
+   * <p>Judged at a bounded cost whatever the figure: the whole digits are worked in a {@code long},
+   * where an {@code int} subtraction of the scale from the precision wraps round on {@code
+   * 1E+2147483647} and lets it through to the insert, and a figure written in more than {@link
+   * #MOST_UNSCALED_BITS} bits is refused without being stripped, since stripping costs time with
+   * the square of its length.
+   *
+   * @param rate the rate; its sign is not judged here
+   * @return whether the column holds it exactly
+   */
+  public static boolean rateFits(java.math.BigDecimal rate) {
+    if (rate.unscaledValue().bitLength() > MOST_UNSCALED_BITS) return false;
+    if ((long) rate.precision() - rate.scale() > RATE_WHOLE_DIGITS) return false;
+    return rate.scale() <= RATE_PLACES || rate.stripTrailingZeros().scale() <= RATE_PLACES;
+  }
+
   /**
    * What an hour of somebody's time costs, from a date.
    *
@@ -312,11 +343,16 @@ public final class Workforce {
    * figure that moved when somebody got a pay rise would make last quarter's report disagree with
    * itself.
    *
+   * <p><b>Rounded once, to the rate's own currency.</b> A yen figure is whole yen and a dinar keeps
+   * its third decimal: the minor units are the currency's (ISO 4217), never an assumed two.
+   *
    * @param rates the person's rates, newest first
+   * @param minorUnits the minor units of a currency, as {@code Fx.minorUnits} gives them
    * @return the cost, or null when no rate was in force then — which is reported as unknown rather
    *     than as zero, because zero is a real rate somebody may be on
    */
-  public static java.math.BigDecimal cost(Entry entry, List<PayRate> rates) {
+  public static java.math.BigDecimal cost(
+      Entry entry, List<PayRate> rates, java.util.function.ToIntFunction<String> minorUnits) {
     Duration worked = entry.worked();
     if (worked == null) return null;
     LocalDate day = entry.day();
@@ -324,7 +360,10 @@ public final class Workforce {
       if (!r.effectiveFrom().isAfter(day)) {
         return r.hourlyRate()
             .multiply(java.math.BigDecimal.valueOf(worked.toMinutes()))
-            .divide(java.math.BigDecimal.valueOf(60), 2, java.math.RoundingMode.HALF_UP);
+            .divide(
+                java.math.BigDecimal.valueOf(60),
+                minorUnits.applyAsInt(r.currency()),
+                java.math.RoundingMode.HALF_UP);
       }
     }
     return null;

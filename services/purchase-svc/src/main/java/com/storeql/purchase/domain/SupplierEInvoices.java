@@ -75,7 +75,57 @@ public final class SupplierEInvoices {
       Instant decidedAt,
       UUID decidedBy,
       String decisionReason,
-      Instant updatedAt) {}
+      Instant updatedAt) {
+
+    /**
+     * The document as a caller who may not act at the store of the order it bills sees it: what the
+     * document itself says, with the order it was found to bill, and anything that order became,
+     * left out — the problem said in words that name nothing of that order.
+     *
+     * @param problem what the caller is told the document waits for
+     */
+    public Document withoutOrder(String problem) {
+      return new Document(
+          id,
+          tenantId,
+          receivedAt,
+          receivedBy,
+          channel,
+          deliveryRef,
+          contentType,
+          container,
+          syntax,
+          embeddedFilename,
+          sha256,
+          customizationId,
+          typeCode,
+          invoiceNumber,
+          issueDate,
+          currency,
+          sellerName,
+          sellerVatId,
+          sellerEndpoint,
+          buyerVatId,
+          buyerEndpoint,
+          orderReference,
+          precedingInvoice,
+          netAmount,
+          vatAmount,
+          grossAmount,
+          payableAmount,
+          violationsJson,
+          status,
+          problem,
+          supplierId,
+          null,
+          null,
+          null,
+          decidedAt,
+          decidedBy,
+          decisionReason,
+          updatedAt);
+    }
+  }
 
   /** One line as the supplier sent it, and the order line it was matched to. */
   public record Line(
@@ -97,7 +147,32 @@ public final class SupplierEInvoices {
       BigDecimal vatRate,
       UUID poLineId,
       UUID variantId,
-      String matchedBy) {}
+      String matchedBy) {
+
+    /** The line as the supplier sent it, without the order line it was matched to. */
+    public Line withoutOrderLine() {
+      return new Line(
+          id,
+          tenantId,
+          einvoiceId,
+          position,
+          lineId,
+          itemName,
+          sellersItemId,
+          buyersItemId,
+          standardItemId,
+          orderLineReference,
+          quantity,
+          unitCode,
+          netAmount,
+          netPrice,
+          vatCategory,
+          vatRate,
+          null,
+          null,
+          null);
+    }
+  }
 
   /** The document exactly as it arrived. */
   public record Original(

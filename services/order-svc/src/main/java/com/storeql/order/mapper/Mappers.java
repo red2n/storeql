@@ -258,7 +258,8 @@ public final class Mappers {
         handover == null ? null : toDto(handover),
         o.allowSubstitutions(),
         slotOf(o.slotStartsAt(), o.slotEndsAt(), o.slotTimeZone()),
-        o.contactPhoneE164());
+        o.contactPhoneE164(),
+        null);
   }
 
   /**
@@ -409,6 +410,20 @@ public final class Mappers {
    */
   public static OrderSummaryResponse toSummary(
       Order o, java.util.UUID groupId, com.storeql.order.domain.Handover handover) {
+    return toSummary(o, groupId, handover, null);
+  }
+
+  /**
+   * Converts an order to its list form with its handover and, while it waits for payment, when it
+   * lapses.
+   *
+   * @param expiresAt when a PENDING order lapses, as an ISO instant; null for any other
+   */
+  public static OrderSummaryResponse toSummary(
+      Order o,
+      java.util.UUID groupId,
+      com.storeql.order.domain.Handover handover,
+      String expiresAt) {
     return new OrderSummaryResponse(
         str(o.id()),
         str(o.storeId()),
@@ -427,7 +442,8 @@ public final class Mappers {
         str(groupId),
         handover == null ? null : toDto(handover),
         o.allowSubstitutions(),
-        slotOf(o.slotStartsAt(), o.slotEndsAt(), o.slotTimeZone()));
+        slotOf(o.slotStartsAt(), o.slotEndsAt(), o.slotTimeZone()),
+        expiresAt);
   }
 
   /**
@@ -455,7 +471,13 @@ public final class Mappers {
    */
   public static ReturnItemResponse toDto(ReturnItem ri) {
     return new ReturnItemResponse(
-        str(ri.id()), str(ri.variantId()), ri.qty(), ri.refundAmount(), ri.condition());
+        str(ri.id()),
+        str(ri.variantId()),
+        ri.qty(),
+        ri.refundAmount(),
+        ri.condition(),
+        ri.unitPrice(),
+        ri.taxAmount());
   }
 
   /**
@@ -466,6 +488,20 @@ public final class Mappers {
    * @return its API representation, header and lines together
    */
   public static ReturnResponse toDto(Return r, List<ReturnItem> items) {
+    return toDto(r, items, null);
+  }
+
+  /**
+   * Converts a return, its lines and, for a GIFT_CARD refund, the card it went on.
+   *
+   * @param r the return header
+   * @param items the returned lines
+   * @param giftCard the card the refund went on, or null; shown only on the response to the return
+   *     itself, since it carries the card's code
+   * @return its API representation
+   */
+  public static ReturnResponse toDto(
+      Return r, List<ReturnItem> items, com.storeql.order.domain.Domain.GiftCard giftCard) {
     return new ReturnResponse(
         str(r.id()),
         str(r.orderId()),
@@ -477,7 +513,16 @@ public final class Mappers {
         str(r.createdBy()),
         ts(r.createdAt()),
         ts(r.completedAt()),
-        items.stream().map(Mappers::toDto).toList());
+        items.stream().map(Mappers::toDto).toList(),
+        str(r.approvedBy()),
+        r.outsidePolicy() == null ? List.of() : r.outsidePolicy(),
+        giftCard == null
+            ? null
+            : new Dtos.ReturnGiftCardResponse(
+                str(giftCard.id()), giftCard.code(), giftCard.currentBalance()),
+        str(r.exchangeOrderId()),
+        r.noReceipt(),
+        str(r.customerId()));
   }
 
   /**
@@ -496,7 +541,21 @@ public final class Mappers {
         str(e.orderId()),
         e.amount(),
         e.reason(),
-        e.detail());
+        e.detail(),
+        str(e.variantId()),
+        str(e.replayedBy()),
+        str(e.approvedBy()),
+        e.outsidePolicy() == null ? List.of() : e.outsidePolicy(),
+        e.lines() == null
+            ? List.of()
+            : e.lines().stream()
+                .map(
+                    l ->
+                        new Dtos.AuditReturnLineResponse(
+                            str(l.variantId()), l.qty(), l.condition()))
+                .toList(),
+        e.outsidePolicy() != null
+            && e.outsidePolicy().contains(com.storeql.order.domain.Domain.Return.NO_RECEIPT));
   }
 
   /**
@@ -680,13 +739,36 @@ public final class Mappers {
    * @return its API representation
    */
   public static OrderReceiptResponse toDto(OrderReceipt r) {
+    return toDto(r, false);
+  }
+
+  /**
+   * Converts a receipt-log row, showing the address it was emailed to only when the reader is
+   * management at the sale's store; everyone else reads it masked.
+   *
+   * @param showAddress whether the reader may see the whole address
+   */
+  public static OrderReceiptResponse toDto(OrderReceipt r, boolean showAddress) {
     return new OrderReceiptResponse(
         str(r.id()),
         str(r.orderId()),
         r.receiptType(),
-        r.emailedTo(),
+        showAddress ? r.emailedTo() : com.storeql.order.domain.Masking.email(r.emailedTo()),
         r.printCount(),
         ts(r.generatedAt()));
+  }
+
+  /** A gift-card line of an order, pending until its card exists. */
+  public static Dtos.GiftCardLoadResponse toDto(Domain.GiftCardLoadView v) {
+    boolean loaded = v.giftCardId() != null;
+    return new Dtos.GiftCardLoadResponse(
+        str(v.id()),
+        v.amount(),
+        loaded ? "LOADED" : "PENDING",
+        str(v.giftCardId()),
+        v.code(),
+        v.kind(),
+        ts(v.loadedAt()));
   }
 
   private static String str(Object o) {

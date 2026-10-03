@@ -1,6 +1,7 @@
 package com.storeql.order.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.order.dto.Dtos.FulfilLine;
 import com.storeql.order.dto.Dtos.FulfilRequest;
 import com.storeql.order.repo.OrderRepository;
@@ -8,7 +9,6 @@ import com.storeql.order.service.OrderService;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import java.io.StringReader;

@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 
+import '../network/api_error.dart';
+
 /// A POS sale captured at the till but not yet accepted by the server.
 ///
 /// A till that stops selling when the network drops is not a POS. When the
@@ -13,7 +15,11 @@ import 'package:dio/dio.dart';
 ///                      the original order for a duplicate key.
 ///   * `POST /payments` replays on `payment_tenders.idempotency_key` — the
 ///                      original tender is returned rather than charging again.
-///   * gift-card redeem replays on (card, order) — see V13, added for this.
+///   * gift-card redeem replays on its Idempotency-Key (derived from this
+///                      sale's id and the tender's position). The redeem IS
+///                      the gift-card tender: payment-svc records the GIFT_CARD
+///                      tender itself from the redemption, and refuses a
+///                      client-posted one (400 PAYMENT_GIFT_CARD_VIA_REDEEM).
 /// So a step whose response was lost (the ambiguous case, and the common one
 /// when a network drops) can simply be sent again.
 class OfflineSale {
@@ -21,7 +27,20 @@ class OfflineSale {
   /// Generated once at capture and persisted, so every replay presents the same
   /// keys — this is the whole reason replay is safe.
   final String id;
-  final DateTime capturedAt;
+
+  /// When the cashier completed the sale. Stored in UTC, so a till whose zone
+  /// or clock setting changes while the sale waits still says the same moment.
+  /// Null only for a sale read back from storage whose time could not be read:
+  /// it is never replaced with the time of reading, which would put an
+  /// invented moment on the audit trail as the till's word.
+  final DateTime? capturedAt;
+
+  /// Who was signed in at the till when the sale was made. The queue outlives
+  /// a sign-out and anybody may press Sync now, so the server is told who rang
+  /// the sale up rather than taking whoever sends it. Null for a sale queued by
+  /// a till that did not record it.
+  final String? rungUpBy;
+
   final String storeId;
   final String currency;
 
@@ -52,6 +71,7 @@ class OfflineSale {
   const OfflineSale({
     required this.id,
     required this.capturedAt,
+    this.rungUpBy,
     required this.storeId,
     required this.currency,
     required this.orderRequest,
@@ -95,6 +115,7 @@ class OfflineSale {
       OfflineSale(
         id: id,
         capturedAt: capturedAt,
+        rungUpBy: rungUpBy,
         storeId: storeId,
         currency: currency,
         orderRequest: orderRequest,
@@ -110,7 +131,8 @@ class OfflineSale {
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'capturedAt': capturedAt.toIso8601String(),
+        'capturedAt': capturedAt?.toUtc().toIso8601String(),
+        'rungUpBy': rungUpBy,
         'storeId': storeId,
         'currency': currency,
         'orderRequest': orderRequest,
@@ -126,8 +148,11 @@ class OfflineSale {
 
   factory OfflineSale.fromJson(Map<String, dynamic> j) => OfflineSale(
         id: j['id'] as String,
-        capturedAt:
-            DateTime.tryParse(j['capturedAt'] as String? ?? '') ?? DateTime.now(),
+        // Written in UTC; a sale queued by an older build kept local time with
+        // no offset, which still reads as the device's own moment. A value that
+        // cannot be read stays unknown rather than becoming now.
+        capturedAt: DateTime.tryParse(j['capturedAt'] as String? ?? ''),
+        rungUpBy: j['rungUpBy'] as String?,
         storeId: j['storeId'] as String? ?? '',
         currency: j['currency'] as String? ?? '',
         orderRequest: Map<String, dynamic>.from(j['orderRequest'] as Map),
@@ -159,14 +184,16 @@ enum OfflineSaleStatus {
   failed,
 }
 
-/// One tender (part-payment) owed to the server, plus any gift-card redemption
-/// that goes with it.
+/// One tender (part-payment) owed to the server. A gift-card tender is owed as
+/// a redemption only: the card is charged first, and payment-svc records the
+/// tender from that charge.
 class OfflineTender {
   /// Body for `POST /payment-svc/payments`, minus `orderId` which is filled in at
-  /// replay once the order exists.
+  /// replay once the order exists. Not sent for a gift-card tender.
   final Map<String, dynamic> body;
 
-  /// Set for a GIFT_CARD tender: the card to redeem after the tender is recorded.
+  /// Set for a GIFT_CARD tender: the card to redeem. Redeeming is the whole
+  /// tender; no payment is posted for it.
   final String? giftCardCode;
   final double amount;
 
@@ -181,7 +208,9 @@ class OfflineTender {
     this.redeemDone = false,
   });
 
-  bool get isComplete => tenderDone && (giftCardCode == null || redeemDone);
+  /// A gift-card tender is complete once the card is redeemed (the server
+  /// records the tender from that); any other once its payment is recorded.
+  bool get isComplete => giftCardCode != null ? redeemDone : tenderDone;
 
   OfflineTender copyWith({bool? tenderDone, bool? redeemDone}) => OfflineTender(
         body: body,
@@ -232,17 +261,83 @@ bool isOfflineError(Object error) {
   }
 }
 
+/// Refusals of a replayed sale that the server will repeat on every attempt: a
+/// line under recall, or one weighed on a scale not fit for trade. The replay
+/// says when the cashier completed the sale (`capturedAt`). A sale made
+/// offline has already happened, so within order-svc's grace (a day unless
+/// configured) it is recorded whatever the recalls or the scales say, and what
+/// was wrong is put in front of a manager on the audit trail — none of these
+/// comes back. Only a replay whose time the server cannot take on the till's
+/// word (older than the grace, or more than a few minutes ahead of its own
+/// clock) — or one whose time the till could not read back and so sends
+/// none — is judged as a sale made now and refused, worded for a manager. A 409 like any conflict, but no
+/// retry changes the answer, and retrying would hold up every sale queued
+/// behind it — so it is parked for a manager, with the server's words, instead.
+///
+/// A gift card the server will not charge is the same: a card that has expired,
+/// is not active, is in another currency, has too little left, or was already
+/// charged a different amount for this sale stays that way however often the
+/// till asks, so the sale is parked with the server's words for a manager to
+/// settle another way.
+///
+/// So is a card tender payment-svc will not link to the payment its card
+/// machine took (`terminalPaymentId`): the sale cancelled or voided since
+/// (PAYMENT_ORDER_GIVEN_UP — nothing is recorded for it, and what the machine
+/// took goes back on the card), the approval put back on the card, not that
+/// amount, not that sale's, not at that store, or not an approval at all. An
+/// approval already recorded on its order is not among the refusals of a
+/// replay: it is that tender, recorded ([cardApprovalAlreadyRecorded]); it is
+/// here only so that no other request can loop on it.
+const _permanentConflicts = {
+  'ORDER_LINE_RECALLED',
+  'ORDER_SCALE_NOT_CERTIFIED',
+  'GIFT_CARD_EXPIRED',
+  'GIFT_CARD_NOT_ACTIVE',
+  'GIFT_CARD_CURRENCY_MISMATCH',
+  'GIFT_CARD_INSUFFICIENT_BALANCE',
+  'GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER',
+  'PAYMENT_ORDER_GIVEN_UP',
+  'TERMINAL_ATTEMPT_ALREADY_RECORDED',
+  'TERMINAL_ATTEMPT_REFUNDED',
+  'TERMINAL_AMOUNT_MISMATCH',
+  'TERMINAL_WRONG_STORE',
+  'TERMINAL_NOT_APPROVED',
+  'TERMINAL_ATTEMPT_OTHER_ORDER',
+  'TERMINAL_NOT_A_SALE',
+};
+
+/// Whether [error] is payment-svc saying that the card machine's approval a
+/// tender [body] names (`terminalPaymentId`) is already recorded on its order
+/// (409 TERMINAL_ATTEMPT_ALREADY_RECORDED).
+///
+/// That is this tender, recorded: payment-svc records an approval once, on its
+/// own order, at exactly what the machine took, and says this only of an
+/// approval of the same order (another order's it refuses first). It was
+/// recorded under another key — the sale finished from the card machine's
+/// refusal, by this till or another on the same machine — so the tender's own
+/// key meets the refusal on every press and every replay: taken for a
+/// refusal, the sale could never finish, and in the offline queue every sale
+/// behind it would wait for ever.
+bool cardApprovalAlreadyRecorded(Object error, Map<String, dynamic> body) =>
+    body['terminalPaymentId'] != null &&
+    apiErrorCode(error) == 'TERMINAL_ATTEMPT_ALREADY_RECORDED';
+
 /// Whether a server *response* to a replay is permanent — retrying will not help,
 /// so the sale is parked for a human instead of looping forever.
 ///
 /// 401 is deliberately retryable: the till's token expires while it is offline,
 /// and the auth interceptor refreshes on the next attempt. 409 is retryable
 /// because payment-svc returns `IDEMPOTENCY_CONFLICT` for a concurrent same-key
-/// request and explicitly asks the caller to retry into the replay path.
+/// request and explicitly asks the caller to retry into the replay path — all
+/// but the refusals of the sale itself, or of a card tender's link to its
+/// card machine payment, in [_permanentConflicts].
 bool isPermanentRejection(Object error) {
   if (error is! DioException) return false;
   final status = error.response?.statusCode;
   if (status == null) return false;
+  if (status == 409 && _permanentConflicts.contains(apiErrorCode(error))) {
+    return true;
+  }
   if (status == 401 || status == 408 || status == 409 || status == 429) return false;
   return status >= 400 && status < 500;
 }

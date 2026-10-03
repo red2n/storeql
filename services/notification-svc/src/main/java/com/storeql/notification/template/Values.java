@@ -1,6 +1,8 @@
 package com.storeql.notification.template;
 
+import com.storeql.service.Fx;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.NumberFormat;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -155,18 +157,51 @@ public final class Values {
     return out;
   }
 
+  // DateTimeFormatters are immutable and thread-safe: built once, and once per locale. A locale
+  // cache that grew past the platform's handful of languages is emptied rather than left to grow.
+  private static final DateTimeFormatter HOURS_MINUTES = DateTimeFormatter.ofPattern("HH:mm");
+  private static final java.util.Map<Locale, DateTimeFormatter> LONG_DATES =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private static final java.util.Map<Locale, DateTimeFormatter> WEEKDAY_DATES =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private static DateTimeFormatter longDate(Locale locale) {
+    return DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale);
+  }
+
+  private static DateTimeFormatter weekdayDate(Locale locale) {
+    return DateTimeFormatter.ofPattern("EEEE d MMMM", locale);
+  }
+
+  private static DateTimeFormatter cached(
+      java.util.Map<Locale, DateTimeFormatter> cache,
+      Locale locale,
+      java.util.function.Function<Locale, DateTimeFormatter> make) {
+    DateTimeFormatter f = cache.get(locale);
+    if (f != null) return f;
+    if (cache.size() > 256) cache.clear();
+    f = make.apply(locale);
+    cache.put(locale, f);
+    return f;
+  }
+
+  /**
+   * Money in the reader's language, at its currency's own minor units (ISO 4217, through
+   * common-service {@code Fx.minorUnits}): whole yen, a dinar's three places, a pound's two. A
+   * figure that arrives finer is rounded half up, as {@code Fx} rounds every figure on the platform
+   * — not the formatter's own half-even, which says £2.34 for 2.345.
+   */
   static String money(BigDecimal amount, String currency, Locale locale) {
-    NumberFormat f = NumberFormat.getCurrencyInstance(locale);
-    try {
-      Currency c = Currency.getInstance(currency);
-      f.setCurrency(c);
-      int digits = Math.max(c.getDefaultFractionDigits(), 0);
-      f.setMinimumFractionDigits(digits);
-      f.setMaximumFractionDigits(digits);
-    } catch (IllegalArgumentException e) {
+    if (!Fx.isCurrency(currency)) {
       // Not an ISO 4217 code: say the amount and the code as they came.
       return amount.toPlainString() + " " + currency;
     }
+    NumberFormat f = NumberFormat.getCurrencyInstance(locale);
+    f.setCurrency(Currency.getInstance(currency.trim().toUpperCase(Locale.ROOT)));
+    int digits = Fx.minorUnits(currency);
+    f.setMinimumFractionDigits(digits);
+    f.setMaximumFractionDigits(digits);
+    f.setRoundingMode(RoundingMode.HALF_UP);
     return f.format(amount);
   }
 
@@ -185,9 +220,9 @@ public final class Values {
    */
   public static String moment(Instant value, Locale locale) {
     var at = value.atOffset(ZoneOffset.UTC);
-    return DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).withLocale(locale).format(at)
+    return cached(LONG_DATES, locale, Values::longDate).format(at)
         + ", "
-        + DateTimeFormatter.ofPattern("HH:mm").format(at)
+        + HOURS_MINUTES.format(at)
         + " UTC";
   }
 
@@ -201,9 +236,9 @@ public final class Values {
     ZonedDateTime start = w.startsAt().atZone(w.zone());
     ZonedDateTime end = w.endsAt().atZone(w.zone());
     String label = w.delivery() ? "Delivery" : "Collection";
-    String date = DateTimeFormatter.ofPattern("EEEE d MMMM", locale).format(start);
-    String from = DateTimeFormatter.ofPattern("HH:mm", locale).format(start);
-    String to = DateTimeFormatter.ofPattern("HH:mm", locale).format(end);
+    String date = cached(WEEKDAY_DATES, locale, Values::weekdayDate).format(start);
+    String from = HOURS_MINUTES.format(start);
+    String to = HOURS_MINUTES.format(end);
     return label + ": " + date + ", " + from + "–" + to;
   }
 }

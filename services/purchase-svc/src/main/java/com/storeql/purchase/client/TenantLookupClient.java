@@ -2,6 +2,7 @@ package com.storeql.purchase.client;
 
 import com.storeql.einvoice.ElectronicAddress;
 import com.storeql.ids.Ids;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.config.ServiceConfig;
 import com.storeql.service.ServiceReader;
 import com.storeql.service.ServiceReader.Reply;
@@ -9,7 +10,6 @@ import com.storeql.web.ApiException;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
 import java.util.ArrayList;
@@ -82,7 +82,7 @@ public class TenantLookupClient {
   private Optional<UUID> lookup(Map<String, String> query, String named) {
     Reply r = tenantSvc.get(null, LOOKUP, query);
     if (r.ok()) {
-      try (JsonReader reader = Json.createReader(new StringReader(r.body()))) {
+      try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(r.body()))) {
         return Optional.of(Ids.parse(reader.readObject().getJsonObject("data").getString("id")));
       }
     }

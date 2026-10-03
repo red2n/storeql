@@ -36,6 +36,23 @@ final class LoyaltyLots {
       Instant earnedAt,
       Instant expiresAt)
       throws SQLException {
+    insertLot(c, tenantId, customerId, ledgerEntryId, points, points, earnedAt, expiresAt);
+  }
+
+  /**
+   * A lot with less left than it was earned with: points earned while the balance stood below zero
+   * first make good the debt, so only the rest can be spent.
+   */
+  static void insertLot(
+      Connection c,
+      UUID tenantId,
+      UUID customerId,
+      UUID ledgerEntryId,
+      BigDecimal points,
+      BigDecimal remaining,
+      Instant earnedAt,
+      Instant expiresAt)
+      throws SQLException {
     if (points.signum() <= 0) {
       return;
     }
@@ -48,7 +65,7 @@ final class LoyaltyLots {
       ps.setObject(3, customerId);
       ps.setObject(4, ledgerEntryId);
       ps.setBigDecimal(5, points);
-      ps.setBigDecimal(6, points);
+      ps.setBigDecimal(6, remaining);
       ps.setObject(7, odt(earnedAt));
       ps.setObject(8, odt(expiresAt));
       ps.executeUpdate();
@@ -173,6 +190,37 @@ final class LoyaltyLots {
         return rs.next() ? rs.getBigDecimal("qualifying") : BigDecimal.ZERO;
       }
     }
+  }
+
+  /**
+   * The qualifying points of many customers in one grouped read (the windowed programme): a
+   * customer with none earned in the window is absent from the map, meaning zero.
+   */
+  static java.util.Map<UUID, BigDecimal> qualifyingPointsFor(
+      Connection c,
+      UUID tenantId,
+      java.util.List<UUID> customerIds,
+      LoyaltyProgramme programme,
+      Instant now)
+      throws SQLException {
+    Instant since =
+        now.atOffset(ZoneOffset.UTC).minusMonths(programme.qualifyingMonths()).toInstant();
+    java.util.Map<UUID, BigDecimal> out = new java.util.HashMap<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT customer_id, SUM(points) AS qualifying FROM loyalty_ledger"
+                + " WHERE tenant_id = ? AND customer_id = ANY (?) AND points > 0"
+                + " AND type IN ('EARN', 'ADJUST') AND created_at >= ? GROUP BY customer_id")) {
+      ps.setObject(1, tenantId);
+      ps.setArray(2, c.createArrayOf("uuid", customerIds.toArray()));
+      ps.setObject(3, odt(since));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.put(rs.getObject("customer_id", UUID.class), rs.getBigDecimal("qualifying"));
+        }
+      }
+    }
+    return out;
   }
 
   static OffsetDateTime odt(Instant at) {

@@ -37,9 +37,62 @@ final class Events {
         tenantId,
         paymentId,
         String.format(
+            // The eventId is what a consumer that keeps no key of its own (the webhook fan-out)
+            // tells one capture from another by; it goes last so older readers are untouched.
             "{\"eventType\":\"PaymentCaptured\",\"tenantId\":\"%s\",\"paymentId\":\"%s\","
-                + "\"orderId\":\"%s\",\"amount\":%s%s%s}",
-            tenantId, paymentId, orderId, amount.toPlainString(), methodField, storeField));
+                + "\"orderId\":\"%s\",\"amount\":%s%s%s,\"eventId\":\"%s\"}",
+            tenantId,
+            paymentId,
+            orderId,
+            amount.toPlainString(),
+            methodField,
+            storeField,
+            com.storeql.ids.Ids.newId()));
+  }
+
+  /**
+   * A till session closed: the drawer's figures at the moment a person counted it. Consumers today:
+   * none (reporting-svc's cash report and the exception-alerts page's {@code till.variance} are to
+   * read it). {@code registerId} is absent until registers exist; {@code note} is absent when the
+   * closer gave none. The {@code eventId} goes last.
+   */
+  static OutboxRow tillSessionClosed(
+      UUID tenantId,
+      UUID sessionId,
+      UUID storeId,
+      UUID openedBy,
+      UUID closedBy,
+      java.time.Instant openedAt,
+      java.time.Instant closedAt,
+      java.math.BigDecimal floatAmount,
+      java.math.BigDecimal expectedCash,
+      java.math.BigDecimal countedCash,
+      java.math.BigDecimal overShort,
+      String note) {
+    return new OutboxRow(
+        "TillSessionClosed",
+        "storeql.payment.till-session-closed",
+        tenantId,
+        sessionId,
+        String.format(
+            "{\"eventType\":\"TillSessionClosed\",\"tenantId\":\"%s\",\"sessionId\":\"%s\","
+                + "\"storeId\":\"%s\",\"openedBy\":\"%s\",\"closedBy\":\"%s\","
+                + "\"openedAt\":\"%s\",\"closedAt\":\"%s\",\"floatAmount\":%s,"
+                + "\"expectedCash\":%s,\"countedCash\":%s,\"overShort\":%s%s,"
+                + "\"eventId\":\"%s\"}",
+            tenantId,
+            sessionId,
+            storeId,
+            openedBy,
+            closedBy,
+            openedAt,
+            closedAt,
+            floatAmount.toPlainString(),
+            expectedCash.toPlainString(),
+            countedCash.toPlainString(),
+            overShort.toPlainString(),
+            note == null ? "" : ",\"note\":\"" + clean(note) + "\"",
+            Ids.newId()));
   }
 
   static OutboxRow paymentFailed(UUID tenantId, UUID paymentId, UUID orderId) {
@@ -49,8 +102,9 @@ final class Events {
         tenantId,
         paymentId,
         String.format(
-            "{\"eventType\":\"PaymentFailed\",\"tenantId\":\"%s\",\"paymentId\":\"%s\",\"orderId\":\"%s\"}",
-            tenantId, paymentId, orderId));
+            "{\"eventType\":\"PaymentFailed\",\"tenantId\":\"%s\",\"paymentId\":\"%s\",\"orderId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, paymentId, orderId, com.storeql.ids.Ids.newId()));
   }
 
   /**
@@ -80,6 +134,27 @@ final class Events {
       java.math.BigDecimal amount,
       java.util.List<com.storeql.payment.domain.Domain.RefundAllocation> tenders,
       String kind) {
+    return paymentRefunded(
+        tenantId, refundId, orderId, amount, tenders, kind, null, null, null, null);
+  }
+
+  /**
+   * A return's refund: also names the {@code refundMethod} the shopper chose (ORIGINAL,
+   * STORE_CREDIT, GIFT_CARD), the {@code returnId}, the {@code customerId} (null for a guest sale)
+   * and the sale's {@code currency}, so customer-svc can credit store credit from it once, in the
+   * currency the customer paid.
+   */
+  static OutboxRow paymentRefunded(
+      UUID tenantId,
+      UUID refundId,
+      UUID orderId,
+      java.math.BigDecimal amount,
+      java.util.List<com.storeql.payment.domain.Domain.RefundAllocation> tenders,
+      String kind,
+      String refundMethod,
+      UUID returnId,
+      UUID customerId,
+      String currency) {
     // Each tender's share, so the ledger credits the control account the money left from (17.7).
     StringBuilder shares = new StringBuilder();
     for (var t : tenders) {
@@ -103,7 +178,11 @@ final class Events {
             orderId,
             amount.toPlainString(),
             shares,
-            kind == null ? "" : ",\"kind\":\"" + clean(kind) + "\""));
+            (kind == null ? "" : ",\"kind\":\"" + clean(kind) + "\"")
+                + (refundMethod == null ? "" : ",\"refundMethod\":\"" + clean(refundMethod) + "\"")
+                + (returnId == null ? "" : ",\"returnId\":\"" + returnId + "\"")
+                + (customerId == null ? "" : ",\"customerId\":\"" + customerId + "\"")
+                + (currency == null ? "" : ",\"currency\":\"" + clean(currency) + "\"")));
   }
 
   /**

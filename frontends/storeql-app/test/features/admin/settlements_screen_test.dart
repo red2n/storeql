@@ -108,7 +108,10 @@ class _Server implements HttpClientAdapter {
 }
 
 Future<_Server> _pump(WidgetTester tester, Widget child,
-    {Map<String, dynamic>? batch, List<Map<String, dynamic>>? lines, Size size = const Size(1400, 2400)}) async {
+    {Map<String, dynamic>? batch,
+    List<Map<String, dynamic>>? lines,
+    Size size = const Size(1400, 2400),
+    String currency = 'GBP'}) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -126,8 +129,8 @@ Future<_Server> _pump(WidgetTester tester, Widget child,
     ProviderScope(
       overrides: [
         apiClientProvider.overrideWithValue(FakeApiClient(dio)),
-        tenantInfoProvider.overrideWith((ref) async => const TenantInfo(
-            id: 't', name: 'Corner Shop', status: 'ACTIVE', currency: 'GBP', country: 'GB')),
+        tenantInfoProvider.overrideWith((ref) async => TenantInfo(
+            id: 't', name: 'Corner Shop', status: 'ACTIVE', currency: currency, country: 'GB')),
       ],
       child: MaterialApp(home: Scaffold(body: child)),
     ),
@@ -315,16 +318,20 @@ void main() {
 
     await tester.enterText(find.byKey(const Key('import-provider')), 'Worldpay');
     await tester.enterText(find.byKey(const Key('import-reference')), 'WP-9');
-    await tester.enterText(find.byKey(const Key('import-declared')), 'ten pounds');
+    await tester.enterText(find.byKey(const Key('import-declared')), 'tenpounds');
+    await tester.pump();
+    expect(tester.widget<TextField>(find.byKey(const Key('import-declared'))).decoration?.errorText,
+        'Only digits and a decimal point.');
     await tester.tap(find.byKey(const Key('import-save')));
     await tester.pumpAndSettle();
-    expect(find.text('The sum paid is a number, like 1234.56.'), findsOneWidget);
+    expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
 
     await tester.enterText(find.byKey(const Key('import-declared')), '10.00');
+    await tester.pump();
     await tester.tap(find.byKey(const Key('import-save')));
     await tester.pumpAndSettle();
     final sent = server.requests.lastWhere((r) => r.method == 'POST');
-    expect(sent.data, {'provider': 'Worldpay', 'format': 'STOREQL', 'reference': 'WP-9', 'declaredNet': 10.0, 'content': 'type,reference,gross\nSALE,A1,10.00\n'});
+    expect(sent.data, {'provider': 'Worldpay', 'format': 'STOREQL', 'reference': 'WP-9', 'declaredNet': '10', 'content': 'type,reference,gross\nSALE,A1,10.00\n'});
     expect(sent.headers['Idempotency-Key'], isNotNull);
   });
 
@@ -347,5 +354,68 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Choose the settlement file.'), findsOneWidget);
     expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+  });
+
+  // The sum on the bank statement is money in the business's currency, to its
+  // places, and may be below nought (chargebacks over sales); it is read the
+  // way the app's language writes a number and sent as the decimal typed, or
+  // refused under the field with nothing imported: parsed with a point,
+  // Romanian's 1234,56 was "not a number" and Polish's 1.250 was 1,25.
+  group('the sum paid is read as typed, or refused', () {
+    Future<_Server> open(WidgetTester tester, String currency) async {
+      final server = await _pump(tester, const ImportSettlementDialog(content: 'type,reference,gross\nSALE,A1,10.00\n'),
+          currency: currency);
+      await tester.enterText(find.byKey(const Key('import-provider')), 'Worldpay');
+      await tester.enterText(find.byKey(const Key('import-reference')), 'WP-9');
+      return server;
+    }
+
+    Future<void> press(WidgetTester tester, String text) async {
+      for (var i = 1; i <= text.length; i++) {
+        await tester.enterText(find.byKey(const Key('import-declared')), text.substring(0, i));
+        await tester.pump();
+      }
+    }
+
+    String? says(WidgetTester tester) =>
+        tester.widget<TextField>(find.byKey(const Key('import-declared'))).decoration?.errorText;
+
+    for (final (locale, currency, typed, sent) in [
+      ('ro', 'RON', '1234,56', '1234.56'),
+      ('en_GB', 'GBP', '-12.50', '-12.5'),
+      ('en', 'USD', '10', '10'),
+      ('pl', 'PLN', '−12,5', '-12.5'),
+      ('ar', 'KWD', '1٫125', '1.125'),
+      ('en_GB', 'JPY', '1500', '1500'),
+    ]) {
+      testWidgets('in $locale, $typed $currency is imported as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await open(tester, currency);
+        await press(tester, typed);
+        expect(says(tester), isNull);
+        await tester.tap(find.byKey(const Key('import-save')));
+        await tester.pumpAndSettle();
+        expect((server.requests.lastWhere((r) => r.method == 'POST').data as Map)['declaredNet'], sent);
+      });
+    }
+
+    for (final (locale, currency, typed) in [
+      ('ro', 'RON', '1.234,56'),
+      ('en', 'EUR', '12,50'),
+      ('pl', 'PLN', '1.250'),
+      ('en_GB', 'JPY', '1500.5'),
+      ('ar', 'KWD', '-'),
+      ('en_GB', 'GBP', '.'),
+    ]) {
+      testWidgets('in $locale, "$typed" $currency is refused and nothing is imported', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await open(tester, currency);
+        await press(tester, typed);
+        expect(says(tester), isNotNull);
+        await tester.tap(find.byKey(const Key('import-save')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+      });
+    }
   });
 }

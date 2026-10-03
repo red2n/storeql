@@ -1,11 +1,11 @@
 package com.storeql.inventory.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.inventory.domain.CrossDock.Expected;
 import com.storeql.inventory.service.CrossDockService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
@@ -35,7 +35,7 @@ class CrossDockAllocationsHandler {
     UUID poId;
     UUID warehouseId;
     List<Expected> rows = new ArrayList<>();
-    try (var reader = Json.createReader(new StringReader(value))) {
+    try (var reader = Jsons.createReader(new StringReader(value))) {
       JsonObject o = reader.readObject();
       eventId = Ids.parse(o.getString("eventId"));
       tenantId = Ids.parse(o.getString("tenantId"));

@@ -173,6 +173,13 @@ public class PaymentService {
           "PAYMENT_INVALID_METHOD",
           "method must be one of CASH, CARD, UPI, WALLET, GIFT_CARD, VOUCHER, STORE_CREDIT — got: "
               + req.method());
+    // The card is charged first, by order-svc's redeem; the tender then follows from its
+    // GiftCardRedeemed event (recordGiftCardRedemption). A client can never record one itself.
+    if (PaymentTender.METHOD_GIFT_CARD.equals(method)) {
+      throw ApiException.badRequest(
+          "PAYMENT_GIFT_CARD_VIA_REDEEM",
+          "charge the card through order-svc's redeem; the tender follows");
+    }
     requireMethodEnabledForStore(tenantId, storeId, method);
     if (PaymentTender.METHOD_CASH.equals(method)) {
       requireUnderCashLimit(tenantId, orderId, storeId, req);
@@ -522,5 +529,184 @@ public class PaymentService {
         reason,
         (amt, shares) ->
             Events.paymentRefunded(tenantId, refundBatchId, orderId, amt, shares, kind));
+  }
+
+  /**
+   * What an {@code OrderReturned} says about where the money goes; {@code customerId} may be null,
+   * and {@code currency} is the sale's, so store credit is credited in it rather than guessed.
+   */
+  public record ReturnRefund(String method, UUID returnId, UUID customerId, String currency) {
+    public ReturnRefund(String method, UUID returnId, UUID customerId) {
+      this(method, returnId, customerId, null);
+    }
+
+    /** The value goes to a liability (store credit, gift card), not back to the card or cash. */
+    public boolean toLiability() {
+      return "STORE_CREDIT".equals(method) || "GIFT_CARD".equals(method);
+    }
+  }
+
+  /**
+   * Refund a return in whatever method the shopper chose. ORIGINAL reverses the captured tenders as
+   * before; STORE_CREDIT and GIFT_CARD record the refund under that method (no provider call, the
+   * value goes to a liability). All three are capped at what was captured less what was refunded,
+   * once per event, and announce {@code PaymentRefunded} with the method, return and customer.
+   */
+  public void refundReturnForOrderEvent(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      ReturnRefund ret) {
+    UUID refundBatchId = Ids.newId();
+    repo.refundOrderOnce(
+        eventId,
+        consumer,
+        tenantId,
+        orderId,
+        requestedAmount,
+        reason,
+        ret.toLiability() ? ret.method() : null,
+        (amt, shares) ->
+            Events.paymentRefunded(
+                tenantId,
+                refundBatchId,
+                orderId,
+                amt,
+                shares,
+                null,
+                ret.method(),
+                ret.returnId(),
+                ret.customerId(),
+                ret.currency()));
+  }
+
+  /** The tender an exchange leaves on the new order: what the returned goods pay towards it. */
+  public static final String METHOD_EXCHANGE = "EXCHANGE";
+
+  private static final System.Logger LOG = System.getLogger(PaymentService.class.getName());
+
+  /**
+   * A gift card was charged by order-svc ({@code GiftCardRedeemed}): record a captured GIFT_CARD
+   * tender for the order and announce {@code PaymentCaptured} as a till tender does. Once per
+   * redemption: the tender's key is derived from {@code redemptionId}, and the event id is marked
+   * processed on the same transaction.
+   *
+   * @return true when a tender was recorded, false on a replay
+   */
+  public boolean recordGiftCardRedemption(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID redemptionId,
+      UUID orderId,
+      UUID storeId,
+      BigDecimal amount) {
+    UUID tenderId = Ids.newId();
+    PaymentTender tender =
+        new PaymentTender(
+            tenderId,
+            tenantId,
+            orderId,
+            amount,
+            PaymentTender.METHOD_GIFT_CARD,
+            redemptionId.toString(),
+            Ids.derived(redemptionId, "gift-card-tender").toString(),
+            PaymentTender.STATUS_CAPTURED,
+            null,
+            Instant.now(),
+            storeId);
+    return repo.captureGiftCardOnce(
+        eventId,
+        consumer,
+        tender,
+        Events.paymentCaptured(
+            tenantId, tenderId, orderId, amount, PaymentTender.METHOD_GIFT_CARD, storeId));
+  }
+
+  /** What an exchange {@code OrderReturned} says: the new order and how the value splits. */
+  public record ExchangeReturn(
+      UUID exchangeOrderId,
+      UUID storeId,
+      BigDecimal exchangeAmount,
+      BigDecimal refundAmount,
+      UUID returnId,
+      UUID customerId,
+      String currency) {}
+
+  /**
+   * An exchange, once per event, on one transaction: the returned value (capped at what the
+   * original order still has captured) is refunded to the original order under method EXCHANGE and
+   * captured as an EXCHANGE tender on the new order; any part of the refund beyond it goes back to
+   * the original tenders. Only what was actually moved is captured; a shortfall is logged.
+   */
+  public void exchangeForOrderEvent(
+      UUID eventId, String consumer, UUID tenantId, UUID orderId, ExchangeReturn ex) {
+    BigDecimal extra = ex.refundAmount().subtract(ex.exchangeAmount());
+    UUID exchangeRefundId = Ids.newId();
+    UUID originalRefundId = Ids.newId();
+    UUID tenderId = Ids.newId();
+    var moved =
+        repo.exchangeOnce(
+            eventId,
+            consumer,
+            tenantId,
+            orderId,
+            ex.exchangeAmount(),
+            extra,
+            "Exchange",
+            ex.storeId(),
+            (amt, shares) ->
+                Events.paymentRefunded(
+                    tenantId,
+                    exchangeRefundId,
+                    orderId,
+                    amt,
+                    shares,
+                    null,
+                    METHOD_EXCHANGE,
+                    ex.returnId(),
+                    ex.customerId(),
+                    ex.currency()),
+            (amt, shares) ->
+                Events.paymentRefunded(
+                    tenantId,
+                    originalRefundId,
+                    orderId,
+                    amt,
+                    shares,
+                    null,
+                    "ORIGINAL",
+                    ex.returnId(),
+                    ex.customerId(),
+                    ex.currency()),
+            amt ->
+                Events.paymentCaptured(
+                    tenantId, tenderId, ex.exchangeOrderId(), amt, METHOD_EXCHANGE, ex.storeId()),
+            amt ->
+                new PaymentTender(
+                    tenderId,
+                    tenantId,
+                    ex.exchangeOrderId(),
+                    amt,
+                    METHOD_EXCHANGE,
+                    ex.returnId() == null ? null : ex.returnId().toString(),
+                    Ids.derived(eventId, "exchange-tender").toString(),
+                    PaymentTender.STATUS_CAPTURED,
+                    null,
+                    Instant.now(),
+                    ex.storeId()));
+    if (moved != null && moved.exchanged().compareTo(ex.exchangeAmount()) < 0) {
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "Exchange {0}: order {1} had only {2} captured of the {3} being exchanged; captured "
+              + "only that on the new order",
+          eventId,
+          orderId,
+          moved.exchanged().toPlainString(),
+          ex.exchangeAmount().toPlainString());
+    }
   }
 }

@@ -5,12 +5,14 @@ import com.storeql.order.client.TenantClient;
 import com.storeql.order.client.TenantClient.RatedBand;
 import com.storeql.order.client.TenantClient.RatedSegment;
 import com.storeql.order.client.TenantClient.RatedSeller;
+import com.storeql.order.client.TenantClient.SchemeTerms;
 import com.storeql.order.client.TenantClient.SellerDay;
 import com.storeql.order.domain.SalesAttribution;
 import com.storeql.order.domain.SalesAttribution.SellerChange;
 import com.storeql.order.domain.SalesAttribution.Statement;
 import com.storeql.order.domain.SalesAttribution.StatementLine;
 import com.storeql.order.repo.CommissionRepository;
+import com.storeql.service.FxRates;
 import com.storeql.service.TenantProfiles;
 import com.storeql.web.ApiException;
 import com.storeql.web.TenantContext;
@@ -51,6 +53,7 @@ public class CommissionStatementService {
   @Inject CommissionRepository repo;
   @Inject TenantClient tenants;
   @Inject TenantProfiles profiles;
+  @Inject FxRates fx;
 
   /**
    * Produces a draft for a period.
@@ -59,8 +62,10 @@ public class CommissionStatementService {
    * @param currency the currency counted; the business's own when omitted
    * @param supersedes the approved statement this one will replace when approved, or null
    * @throws ApiException 400 on a period that is not one or has not finished; 409 when a statement
-   *     already stands for that period and scope and none was named to replace; 503 when the
-   *     arrangements could not be read
+   *     already stands for that period and scope and none was named to replace, and {@code
+   *     COMMISSION_FX_RATE_MISSING} when a per-unit arrangement pays in a currency the business
+   *     keeps no rate for; 503 when the arrangements could not be read, and {@code
+   *     COMMISSION_FX_UNAVAILABLE} when a translation was needed and the rates could not be read
    */
   public Statement draft(
       UUID tenantId,
@@ -105,28 +110,36 @@ public class CommissionStatementService {
             ? List.of()
             : tenants
                 .rateCommission(tenantId, ctx, from, to, figures)
-                .orElseThrow(
-                    () ->
-                        new ApiException(
-                            503,
-                            "COMMISSION_RATES_UNAVAILABLE",
-                            "the commission arrangements could not be read, so nothing was rated; a"
-                                + " statement of zeros would be signed off and paid",
-                            List.of()));
+                .orElseThrow(CommissionStatementService::ratesUnavailable);
 
     UUID id = Ids.newId();
     List<StatementLine> lines = new ArrayList<>();
-    BigDecimal commission = BigDecimal.ZERO.setScale(2);
+    int scale = com.storeql.service.Fx.minorUnits(money);
+    BigDecimal commission = BigDecimal.ZERO.setScale(scale);
+    // A seller's currency is set only when a per-unit arrangement rated some of their days, and
+    // names only the last one, so which stretch pays in what is read from the arrangements
+    // themselves — and only then: a business on percentages alone makes one call, as before.
+    Map<UUID, SchemeTerms> schemes =
+        rated.stream().anyMatch(s -> s.currency() != null)
+            ? tenants
+                .commissionSchemes(tenantId, ctx)
+                .orElseThrow(CommissionStatementService::ratesUnavailable)
+            : Map.of();
+    Translator translator = new Translator(tenantId, money);
     for (RatedSeller seller : rated) {
-      commission = commission.add(seller.commission());
       for (RatedSegment segment : seller.segments()) {
+        String rateCurrency = rateCurrency(segment, schemes);
         if (segment.bands().isEmpty()) {
           // Sales that earned nothing: carried, so the statement's sales add up to the period's.
-          lines.add(line(tenantId, id, seller, segment, null));
+          lines.add(line(tenantId, id, seller, segment, null, zero(scale, rateCurrency)));
           continue;
         }
         for (RatedBand band : segment.bands()) {
-          lines.add(line(tenantId, id, seller, segment, band));
+          CommissionMoney.Stated stated = translator.state(band.commission(), rateCurrency, seller);
+          // Each line at the statement currency's units, and the total their sum, so the lines of
+          // a statement add up to it exactly.
+          commission = commission.add(stated.commission());
+          lines.add(line(tenantId, id, seller, segment, band, stated));
         }
       }
     }
@@ -140,7 +153,7 @@ public class CommissionStatementService {
             to,
             money,
             SalesAttribution.DRAFT,
-            SalesAttribution.netSales(days),
+            SalesAttribution.netSales(days, scale),
             commission,
             blankToNull(note),
             supersedes,
@@ -155,7 +168,12 @@ public class CommissionStatementService {
   }
 
   private static StatementLine line(
-      UUID tenantId, UUID statementId, RatedSeller seller, RatedSegment segment, RatedBand band) {
+      UUID tenantId,
+      UUID statementId,
+      RatedSeller seller,
+      RatedSegment segment,
+      RatedBand band,
+      CommissionMoney.Stated stated) {
     return new StatementLine(
         Ids.newId(),
         tenantId,
@@ -168,7 +186,94 @@ public class CommissionStatementService {
         band == null ? null : band.thresholdFrom(),
         band == null ? null : band.rate(),
         band == null ? segment.amount() : band.amountInBand(),
-        band == null ? BigDecimal.ZERO.setScale(2) : band.commission());
+        stated.commission(),
+        stated.rateCurrency(),
+        stated.ratedCommission());
+  }
+
+  private static CommissionMoney.Stated zero(int scale, String rateCurrency) {
+    return new CommissionMoney.Stated(BigDecimal.ZERO.setScale(scale), rateCurrency, null);
+  }
+
+  /** The per-unit currency a stretch was rated in, or null; unknown arrangements fail closed. */
+  private static String rateCurrency(RatedSegment segment, Map<UUID, SchemeTerms> schemes) {
+    if (schemes.isEmpty()) return null;
+    // Rated under an arrangement tenant-svc's own list does not hold: what it pays in is unknown,
+    // and a statement is not drawn up on a guess.
+    if (segment.schemeId() != null && !schemes.containsKey(segment.schemeId())) {
+      throw ratesUnavailable();
+    }
+    return CommissionMoney.rateCurrency(segment.schemeId(), schemes);
+  }
+
+  private static ApiException ratesUnavailable() {
+    return new ApiException(
+        503,
+        "COMMISSION_RATES_UNAVAILABLE",
+        "the commission arrangements could not be read, so nothing was rated; a statement of"
+            + " zeros would be signed off and paid",
+        List.of());
+  }
+
+  /**
+   * States each band's commission in the statement's currency: as rated when it is in it already,
+   * else translated at the business's own rate, read once per statement.
+   *
+   * <p>The rule decided (intent/workforce-rules.md, 2026-10-02) is the rate in force on the
+   * period's last day, for a draft and for every restatement of the period alike. {@link FxRates}
+   * reads only the sheet as it stands today, so this translates at today's rate: the same figure
+   * whenever the rate in force today took effect on or before the period's last day, and not the
+   * period's when a newer one has taken effect since — until common-service can read a business's
+   * rates as they stood on a day.
+   */
+  private final class Translator {
+    private final UUID tenantId;
+    private final String statementCurrency;
+    private FxRates.Table rates;
+
+    Translator(UUID tenantId, String statementCurrency) {
+      this.tenantId = tenantId;
+      this.statementCurrency = statementCurrency;
+    }
+
+    CommissionMoney.Stated state(BigDecimal rated, String rateCurrency, RatedSeller seller) {
+      int scale = com.storeql.service.Fx.minorUnits(statementCurrency);
+      if (rateCurrency == null || rateCurrency.equals(statementCurrency)) {
+        return new CommissionMoney.Stated(
+            rated.setScale(scale, java.math.RoundingMode.HALF_UP), rateCurrency, null);
+      }
+      if (rates == null) {
+        rates =
+            fx.table(tenantId)
+                .orElseThrow(
+                    () ->
+                        new ApiException(
+                            503,
+                            "COMMISSION_FX_UNAVAILABLE",
+                            "a per-unit arrangement pays in "
+                                + rateCurrency
+                                + " and this business's exchange rates could not be read, so it"
+                                + " cannot be stated in "
+                                + statementCurrency
+                                + "; nothing was drafted",
+                            List.of()));
+      }
+      BigDecimal translated =
+          CommissionMoney.translate(rated, rateCurrency, statementCurrency, rates)
+              .orElseThrow(
+                  () ->
+                      new ApiException(
+                          409,
+                          "COMMISSION_FX_RATE_MISSING",
+                          "a per-unit arrangement pays in "
+                              + rateCurrency
+                              + " and this business keeps no rate to state it in "
+                              + statementCurrency
+                              + "; add the rate (exchange rates, in the business settings) and"
+                              + " draft the statement again",
+                          List.of("sellerUserId: " + seller.userId())));
+      return new CommissionMoney.Stated(translated, rateCurrency, rated);
+    }
   }
 
   /**

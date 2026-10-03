@@ -9,7 +9,6 @@ import com.storeql.pricing.dto.Dtos.UpsertPriceListItemRequest;
 import com.storeql.pricing.mapper.Mappers;
 import com.storeql.pricing.service.PricingService;
 import com.storeql.web.ApiResponse;
-import com.storeql.web.ErrorBody;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
@@ -22,7 +21,6 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import java.util.List;
 import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
@@ -99,8 +97,16 @@ public class AdminPriceListResource {
    */
   @Operation(
       summary = "Upsert a price list item",
-      description = "Sets or updates the price for a single variant on this price list.")
+      description =
+          "Sets or updates the price for a single variant on this price list. The price is in the"
+              + " list's currency and no finer than it: whole yen, at most three decimals for a"
+              + " dinar, two for a pound; it is kept at the currency's own scale.")
   @APIResponse(responseCode = "200", description = "Price list item upserted")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED: a missing or non-positive price, or one with more decimals than"
+              + " the list's currency has")
   @APIResponse(responseCode = "404", description = "Price list not found")
   @POST
   @Path("/{id}/items")
@@ -119,34 +125,37 @@ public class AdminPriceListResource {
    * malformed line in a bulk upload does not discard the whole file. A partial success still
    * returns success — the caller must read {@code errors}.
    *
+   * <p>The request as a whole is checked first: there must be a list of rows, not empty and at most
+   * 500. Past that nothing is written, because a body that large is a different kind of upload —
+   * send it in pieces.
+   *
    * @param id the price list to write to
    * @param req the items to upsert
    * @return how many succeeded, and one message per failure
-   * @throws com.storeql.web.ApiException {@code 404} when the price list does not exist in the
-   *     caller's tenant
+   * @throws com.storeql.web.ApiException {@code 400 VALIDATION_FAILED} when the rows are missing,
+   *     empty or more than 500 (nothing written); {@code 404} when the price list does not exist in
+   *     the caller's tenant
    */
   @Operation(
       summary = "Batch upsert price list items",
       description =
-          "Upserts prices for multiple variants at once. Never returns 4xx on a partial failure —"
-              + " per-item errors are reported in the response body alongside the upserted count.")
+          "Upserts prices for multiple variants at once, at most 500 rows a call. Never returns 4xx"
+              + " on a partial failure — per-item errors are reported in the response body"
+              + " alongside the upserted count, a price with more decimals than the list's"
+              + " currency has among them. A body with no rows, or with more than 500, is"
+              + " refused as a whole and nothing is written.")
   @APIResponse(
       responseCode = "200",
       description = "Batch result with upserted count and any errors")
-  @APIResponse(responseCode = "400", description = "items array missing or empty")
+  @APIResponse(
+      responseCode = "400",
+      description = "VALIDATION_FAILED: items missing, empty or more than 500; nothing written")
   @APIResponse(responseCode = "404", description = "Price list not found")
   @POST
   @Path("/{id}/items/batch")
   public Response batchUpsertItems(@PathParam("id") UUID id, BatchUpsertPriceListItemsRequest req) {
     ctx.requirePermission(com.storeql.web.Permissions.PRICING_WRITE);
-    if (req == null || req.items() == null || req.items().isEmpty()) {
-      return Response.status(400)
-          .entity(
-              ApiResponse.<Void>error(
-                  new ErrorBody(
-                      "INVALID_BODY", "items array required and must not be empty", List.of())))
-          .build();
-    }
+    Validations.validate(req);
     BatchUpsertResult result = svc.batchUpsertPriceListItems(ctx, id, req);
     return Response.ok(ApiResponse.ok(result)).build();
   }
@@ -175,6 +184,9 @@ public class AdminPriceListResource {
   @Path("/{id}/deactivate")
   public Response deactivate(@PathParam("id") UUID id, SetActiveRequest req) {
     ctx.requirePermission(com.storeql.web.Permissions.PRICING_WRITE);
+    // The reason is checked in the service, which names the refusal (PRICING_REASON_REQUIRED, 400)
+    // before anything is read or written: Validations.validate here would answer VALIDATION_FAILED
+    // and lose the code the screens know.
     return Response.ok(
             ApiResponse.ok(
                 Mappers.toDto(svc.setActive(ctx, Domain.StatusChange.PRICE_LIST, id, false, req))))
@@ -200,6 +212,7 @@ public class AdminPriceListResource {
   @Path("/{id}/activate")
   public Response activate(@PathParam("id") UUID id, SetActiveRequest req) {
     ctx.requirePermission(com.storeql.web.Permissions.PRICING_WRITE);
+    // As for deactivate: the service checks the reason and names the refusal.
     return Response.ok(
             ApiResponse.ok(
                 Mappers.toDto(svc.setActive(ctx, Domain.StatusChange.PRICE_LIST, id, true, req))))

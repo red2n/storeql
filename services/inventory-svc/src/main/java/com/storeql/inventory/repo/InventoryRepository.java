@@ -15,12 +15,15 @@ import com.storeql.inventory.domain.Domain.PickingRuleZonePriority;
 import com.storeql.inventory.domain.Domain.Reservation;
 import com.storeql.inventory.domain.Domain.TransferOrder;
 import com.storeql.inventory.domain.Domain.TransferOrderLine;
+import com.storeql.inventory.domain.Expiry;
 import com.storeql.inventory.domain.Provenance;
 import com.storeql.inventory.domain.Provenance.Drawn;
+import com.storeql.inventory.domain.ReturnDisposition;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Connection;
@@ -47,6 +50,9 @@ import java.util.function.Function;
  */
 @ApplicationScoped
 public class InventoryRepository extends BaseOutboxRepository {
+
+  /** Each store's day, for the rule that stock past its date is never sold ({@link Expiry}). */
+  @Inject ExpiryDay expiryDay;
 
   // ---------------------------------------------------------------- receive
   /**
@@ -378,11 +384,14 @@ public class InventoryRepository extends BaseOutboxRepository {
             try {
               Reservation r = reserveTx(c, item.reservation(), item.event(), item.idempotencyKey());
               outcomes.add(ReserveOutcome.success(r));
+              c.releaseSavepoint(sp);
             } catch (ApiException e) {
               c.rollback(sp);
+              c.releaseSavepoint(sp);
               outcomes.add(ReserveOutcome.failure(e));
             } catch (SQLException e) {
               c.rollback(sp);
+              c.releaseSavepoint(sp);
               outcomes.add(
                   ReserveOutcome.failure(handleTxSqlException("reserve stock (batch item)", e)));
             }
@@ -501,12 +510,12 @@ public class InventoryRepository extends BaseOutboxRepository {
       setReservationStatus(c, reservationId, Reservation.CONSUMED);
       return r;
     }
-    Optional<PickingRule> rule = resolvePickingRule(tenantId, r.storeId(), r.variantId());
+    Optional<PickingRule> rule = resolvePickingRuleTx(c, tenantId, r.storeId(), r.variantId());
     List<UUID> zonePriorities =
         rule.filter(rr -> PickingRule.ZONE_PRIORITY.equals(rr.strategy()))
             .map(
                 rr ->
-                    listZonePriorities(tenantId, rr.id()).stream()
+                    listZonePrioritiesTx(c, tenantId, rr.id()).stream()
                         .map(PickingRuleZonePriority::zoneId)
                         .toList())
             .orElse(null);
@@ -919,7 +928,7 @@ public class InventoryRepository extends BaseOutboxRepository {
   public List<ReservationRef> expiredHeldReservationsWithTenant(int limit) {
     return query(
         "SELECT id, tenant_id FROM reservations WHERE status = 'HELD'"
-            + " AND expires_at IS NOT NULL AND expires_at < now() LIMIT ?",
+            + " AND expires_at IS NOT NULL AND expires_at < now() ORDER BY expires_at LIMIT ?",
         ps -> ps.setInt(1, limit),
         rs ->
             new ReservationRef(
@@ -954,11 +963,18 @@ public class InventoryRepository extends BaseOutboxRepository {
    * reservations then {@code tenant_id} for batches. Callers append store/cursor filters + GROUP BY
    * / ORDER BY / LIMIT, or wrap it for aggregate counts.
    */
-  private static final String LEVELS_CORE =
+  private String levelsCore(UUID tenantId) {
+    Expiry x = expiryDay.of(tenantId);
+    return LEVELS_CORE_TEMPLATE.replace("{EXPIRED}", x.expiredSql("b"));
+  }
+
+  private static final String LEVELS_CORE_TEMPLATE =
       """
       SELECT b.store_id, b.variant_id,
              COALESCE(SUM(b.remaining_qty),0) AS on_hand,
              COALESCE(SUM(CASE WHEN b.duty_status = 'DUTY_SUSPENDED' THEN b.remaining_qty ELSE 0 END),0) AS in_bond,
+             COALESCE(SUM(CASE WHEN {EXPIRED} THEN b.remaining_qty ELSE 0 END),0) AS expired,
+             COALESCE(SUM(CASE WHEN {EXPIRED} AND b.duty_status = 'DUTY_PAID' THEN b.remaining_qty ELSE 0 END),0) AS expired_paid,
              COALESCE(MAX(res.reserved),0) AS reserved
       FROM inventory_batches b
       LEFT JOIN (
@@ -991,7 +1007,7 @@ public class InventoryRepository extends BaseOutboxRepository {
    */
   public List<Level> levelsForVariants(UUID tenantId, List<UUID> variantIds) {
     return query(
-        LEVELS_CORE
+        levelsCore(tenantId)
             + " AND b.variant_id = ANY(?) GROUP BY b.store_id, b.variant_id ORDER BY b.store_id,"
             + " b.variant_id LIMIT ?",
         ps -> {
@@ -1014,7 +1030,7 @@ public class InventoryRepository extends BaseOutboxRepository {
     boolean hasStore = storeId != null;
     boolean hasCursor = afterStoreId != null && afterVariantId != null;
     String sql =
-        LEVELS_CORE
+        levelsCore(tenantId)
             + (hasStore ? " AND b.store_id = ?" : "")
             + (hasCursor ? " AND (b.store_id, b.variant_id) > (?, ?)" : "")
             + " GROUP BY b.store_id, b.variant_id"
@@ -1048,8 +1064,9 @@ public class InventoryRepository extends BaseOutboxRepository {
     boolean hasStore = storeId != null;
     String sql =
         "SELECT COUNT(*) AS sku_count,"
-            + " COUNT(*) FILTER (WHERE lv.on_hand - lv.reserved <= ?) AS low_count FROM ("
-            + LEVELS_CORE
+            + " COUNT(*) FILTER (WHERE lv.on_hand - lv.expired_paid - lv.reserved <= ?) AS"
+            + " low_count FROM ("
+            + levelsCore(tenantId)
             + (hasStore ? " AND b.store_id = ?" : "")
             + " GROUP BY b.store_id, b.variant_id) lv";
     List<LevelSummary> rows =
@@ -1073,13 +1090,18 @@ public class InventoryRepository extends BaseOutboxRepository {
     BigDecimal onHand = rs.getBigDecimal("on_hand");
     BigDecimal reserved = rs.getBigDecimal("reserved");
     BigDecimal inBond = rs.getBigDecimal("in_bond");
+    BigDecimal expired = rs.getBigDecimal("expired");
+    // Stock past its date is on hand and reported apart, but never available. Expired stock still
+    // in bond is already left out of available with the rest of what is in bond.
+    BigDecimal expiredPaid = rs.getBigDecimal("expired_paid");
     return new Level(
         rs.getObject("store_id", UUID.class),
         rs.getObject("variant_id", UUID.class),
         onHand,
         reserved,
-        onHand.subtract(inBond).subtract(reserved),
-        inBond);
+        onHand.subtract(inBond).subtract(expiredPaid).subtract(reserved),
+        inBond,
+        expired);
   }
 
   // ---------------------------------------------------------------- batches (read)
@@ -1309,7 +1331,8 @@ public class InventoryRepository extends BaseOutboxRepository {
     return inTx(
         c -> {
           List<CycleCountLine> approved =
-              query(
+              queryTx(
+                  c,
                   "SELECT id, tenant_id, header_id, store_id, variant_id, system_qty,"
                       + " counted_qty, variance, variance_pct, status, counted_at"
                       + " FROM cycle_count_lines"
@@ -1418,7 +1441,9 @@ public class InventoryRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "SELECT remaining_qty FROM inventory_batches"
                 + " WHERE tenant_id=? AND store_id=? AND variant_id=?"
-                + " AND material_status='AVAILABLE' AND duty_status='DUTY_PAID' FOR UPDATE")) {
+                + " AND material_status='AVAILABLE' AND duty_status='DUTY_PAID' AND "
+                + expiryDay.of(tenantId).sellableSql("")
+                + " FOR UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, storeId);
       ps.setObject(3, variantId);
@@ -1521,6 +1546,40 @@ public class InventoryRepository extends BaseOutboxRepository {
       UUID firstBatch,
       MovementAttribution attribution)
       throws SQLException {
+    return deductBatches(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        moveType,
+        refType,
+        refId,
+        strategy,
+        gradePreference,
+        zonePriorityOrder,
+        firstBatch,
+        null,
+        attribution);
+  }
+
+  /** As above, drawing only from batches sitting in {@code onlyZone} when it is given. */
+  List<Drawn> deductBatches(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String moveType,
+      String refType,
+      UUID refId,
+      String strategy,
+      String gradePreference,
+      List<UUID> zonePriorityOrder,
+      UUID firstBatch,
+      UUID onlyZone,
+      MovementAttribution attribution)
+      throws SQLException {
     String orderBy = pickOrderClause(strategy, gradePreference, zonePriorityOrder);
     BigDecimal toDeduct = qty;
     List<Drawn> batches = new ArrayList<>();
@@ -1533,6 +1592,8 @@ public class InventoryRepository extends BaseOutboxRepository {
                 + " WHERE tenant_id=? AND store_id=? AND variant_id=? AND remaining_qty > 0"
                 + " AND material_status='AVAILABLE'"
                 + dutyFilter(moveType)
+                + expiryFilter(tenantId, moveType)
+                + (onlyZone == null ? "" : " AND zone_id = ?")
                 // The named batch first (a cross-dock line's own); with none named every row
                 // compares to null alike and the order is the rule's.
                 + " ORDER BY (id = CAST(? AS uuid)) DESC NULLS LAST, "
@@ -1541,7 +1602,9 @@ public class InventoryRepository extends BaseOutboxRepository {
       ps.setObject(1, tenantId);
       ps.setObject(2, storeId);
       ps.setObject(3, variantId);
-      ps.setObject(4, firstBatch);
+      int next = 4;
+      if (onlyZone != null) ps.setObject(next++, onlyZone);
+      ps.setObject(next, firstBatch);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           batches.add(
@@ -1598,6 +1661,16 @@ public class InventoryRepository extends BaseOutboxRepository {
    * draws it and nothing else does — a sale, a transfer or a return to vendor takes duty-paid stock
    * only (release first), while an adjustment may correct either, since losses in bond are real.
    */
+  /**
+   * Which batches a movement may draw, by date: stock past its date is drawn by nothing that sells,
+   * picks, moves or transforms it, only by a write-off (ADJUST) and a return to the vendor (RTV).
+   * The condition is {@link Expiry}'s, so the rule is written once.
+   */
+  private String expiryFilter(UUID tenantId, String moveType) {
+    if (MoveType.ADJUST.equals(moveType) || MoveType.RTV.equals(moveType)) return "";
+    return " AND " + expiryDay.of(tenantId).sellableSql("");
+  }
+
   private static String dutyFilter(String moveType) {
     if (MoveType.BOND_RELEASE.equals(moveType)) return " AND duty_status='DUTY_SUSPENDED'";
     if (MoveType.ADJUST.equals(moveType)) return "";
@@ -1765,10 +1838,71 @@ public class InventoryRepository extends BaseOutboxRepository {
       UUID refId,
       Function<Batch, OutboxRow> eventFor)
       throws SQLException {
+    return receiveDrawn(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        drawn,
+        fallbackNo,
+        moveType,
+        refType,
+        refId,
+        eventFor,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /** As above, the arrivals placed as {@code where} says: off sale when the goods must not sell. */
+  private List<Batch> receiveDrawn(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      List<Drawn> drawn,
+      String fallbackNo,
+      String moveType,
+      String refType,
+      UUID refId,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where)
+      throws SQLException {
+    return receiveDrawn(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        drawn,
+        fallbackNo,
+        moveType,
+        refType,
+        refId,
+        eventFor,
+        where,
+        null);
+  }
+
+  /** As above, the arrivals put down in {@code zoneId} when one is named. */
+  private List<Batch> receiveDrawn(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      List<Drawn> drawn,
+      String fallbackNo,
+      String moveType,
+      String refType,
+      UUID refId,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where,
+      UUID zoneId)
+      throws SQLException {
     List<Batch> arrived = new ArrayList<>();
     for (Drawn from : drawn) {
-      Batch child = Provenance.arrival(tenantId, storeId, variantId, from, fallbackNo);
+      Batch placed =
+          where.place(Provenance.arrival(tenantId, storeId, variantId, from, fallbackNo));
+      Batch child = zoneId == null ? placed : inZone(placed, zoneId);
       insertBatch(c, child);
+      announceOffSale(c, child);
       insertMovement(
           c,
           tenantId,
@@ -1788,6 +1922,28 @@ public class InventoryRepository extends BaseOutboxRepository {
     return arrived;
   }
 
+  private static Batch inZone(Batch b, UUID zoneId) {
+    return new Batch(
+        b.id(),
+        b.tenantId(),
+        b.storeId(),
+        b.variantId(),
+        b.batchNo(),
+        b.receivedQty(),
+        b.remainingQty(),
+        b.costPrice(),
+        b.expiryDate(),
+        b.createdAt(),
+        b.status(),
+        b.materialStatus(),
+        b.materialStatusReason(),
+        b.grade(),
+        zoneId,
+        b.ownership(),
+        b.ownerSupplierId(),
+        b.dutyStatus());
+  }
+
   /** Receives an anonymous batch: stock arriving with no source to carry anything from. */
   private Batch receiveAnonymous(
       Connection c,
@@ -1801,8 +1957,37 @@ public class InventoryRepository extends BaseOutboxRepository {
       UUID refId,
       Function<Batch, OutboxRow> eventFor)
       throws SQLException {
-    Batch batch = Provenance.anonymous(tenantId, storeId, variantId, qty, fallbackNo);
+    return receiveAnonymous(
+        c,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        fallbackNo,
+        moveType,
+        refType,
+        refId,
+        eventFor,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /** As above, the arrival placed as {@code where} says. */
+  private Batch receiveAnonymous(
+      Connection c,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String fallbackNo,
+      String moveType,
+      String refType,
+      UUID refId,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where)
+      throws SQLException {
+    Batch batch = where.place(Provenance.anonymous(tenantId, storeId, variantId, qty, fallbackNo));
     insertBatch(c, batch);
+    announceOffSale(c, batch);
     insertMovement(
         c,
         tenantId,
@@ -1816,6 +2001,23 @@ public class InventoryRepository extends BaseOutboxRepository {
         MovementAttribution.system());
     if (eventFor != null) insertOutbox(c, eventFor.apply(batch));
     return batch;
+  }
+
+  /**
+   * Announces a batch that arrived off sale, the way every other status change is announced, so
+   * whoever watches material status sees returned stock held for a check or written off sale.
+   */
+  private void announceOffSale(Connection c, Batch b) throws SQLException {
+    if (b.materialStatus() == null || Batch.MATERIAL_AVAILABLE.equals(b.materialStatus())) return;
+    insertOutbox(
+        c,
+        new OutboxRow(
+            "MaterialStatusChanged",
+            "storeql.inventory.material-status-changed",
+            b.tenantId(),
+            b.id(),
+            com.storeql.inventory.service.Events.materialStatusChanged(
+                b.tenantId(), b.id(), b.materialStatus(), b.materialStatusReason())));
   }
 
   /**
@@ -1843,6 +2045,38 @@ public class InventoryRepository extends BaseOutboxRepository {
       String fallbackNo,
       Function<Batch, OutboxRow> eventFor,
       boolean reverseRevenue) {
+    return receiveBackOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        orderId,
+        refType,
+        fallbackNo,
+        eventFor,
+        reverseRevenue,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /**
+   * As above, the goods placed where {@code where} says — back on sale, or held off it with the
+   * same lot, cost and date. Every arrival is a batch of its own, never merged into one on sale.
+   */
+  public boolean receiveBackOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID orderId,
+      String refType,
+      String fallbackNo,
+      Function<Batch, OutboxRow> eventFor,
+      boolean reverseRevenue,
+      ReturnDisposition where) {
     return inTx(
         c -> {
           if (dedupeId != null && !markProcessedIfNewTx(c, dedupeId, consumerName)) {
@@ -1865,7 +2099,8 @@ public class InventoryRepository extends BaseOutboxRepository {
               MoveType.RECEIVE,
               refType,
               orderId,
-              eventFor);
+              eventFor,
+              where);
           BigDecimal rest = Provenance.unplaced(qty, back);
           if (rest.signum() > 0) {
             receiveAnonymous(
@@ -1878,11 +2113,53 @@ public class InventoryRepository extends BaseOutboxRepository {
                 MoveType.RECEIVE,
                 refType,
                 orderId,
-                eventFor);
+                eventFor,
+                where);
           }
           return true;
         },
         "receive back from order");
+  }
+
+  /**
+   * Restocks a no-receipt return: goods with no sale to trace, so an anonymous batch of their own,
+   * placed as {@code where} says, with a RECEIVE movement referencing the return. Deduped on {@code
+   * dedupeId} inside the transaction, so a replay writes nothing.
+   *
+   * @return false when {@code dedupeId} was already processed
+   */
+  public boolean receiveNoReceiptOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID returnId,
+      String refType,
+      String fallbackNo,
+      Function<Batch, OutboxRow> eventFor,
+      ReturnDisposition where) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, dedupeId, consumerName)) {
+            return false;
+          }
+          receiveAnonymous(
+              c,
+              tenantId,
+              storeId,
+              variantId,
+              qty,
+              fallbackNo,
+              MoveType.RECEIVE,
+              refType,
+              returnId,
+              eventFor,
+              where);
+          return true;
+        },
+        "receive no-receipt return");
   }
 
   private Reservation loadReservationForUpdate(Connection c, UUID tenantId, UUID id)
@@ -1939,8 +2216,9 @@ public class InventoryRepository extends BaseOutboxRepository {
             "INSERT INTO inventory_batches"
                 + " (id, tenant_id, store_id, variant_id, batch_no, received_qty,"
                 + " remaining_qty, cost_price, expiry_date, created_at, status, material_status,"
-                + " grade, zone_id, idempotency_key, ownership, owner_supplier_id, duty_status)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + " grade, zone_id, idempotency_key, ownership, owner_supplier_id, duty_status,"
+                + " material_status_reason)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, b.id());
       ps.setObject(2, b.tenantId());
       ps.setObject(3, b.storeId());
@@ -1959,6 +2237,7 @@ public class InventoryRepository extends BaseOutboxRepository {
       ps.setString(16, b.ownership() == null ? Batch.OWNERSHIP_OWNED : b.ownership());
       ps.setObject(17, b.ownerSupplierId());
       ps.setString(18, b.dutyStatus() == null ? Batch.DUTY_PAID : b.dutyStatus());
+      ps.setString(19, b.materialStatusReason());
       ps.executeUpdate();
     }
     // Directed putaway: a batch that arrives with no zone is placed by the store's rule, or waits
@@ -2252,18 +2531,23 @@ public class InventoryRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO move_orders"
-                      + " (id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
-                      + "  notes, status, created_at)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+                      + " (id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id,"
+                      + "  to_zone_id, notes, status, created_at)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, order.id());
             ps.setObject(2, order.tenantId());
             ps.setObject(3, order.fromStoreId());
             ps.setObject(4, order.toStoreId());
             ps.setString(5, order.fromZone());
             ps.setString(6, order.toZone());
-            ps.setString(7, order.notes());
-            ps.setString(8, order.status());
-            ps.setObject(9, order.createdAt().atOffset(ZoneOffset.UTC));
+            // A zone id is bound only when there is one: never a null UUID through setObject.
+            if (order.fromZoneId() == null) ps.setNull(7, java.sql.Types.OTHER);
+            else ps.setObject(7, order.fromZoneId());
+            if (order.toZoneId() == null) ps.setNull(8, java.sql.Types.OTHER);
+            else ps.setObject(8, order.toZoneId());
+            ps.setString(9, order.notes());
+            ps.setString(10, order.status());
+            ps.setObject(11, order.createdAt().atOffset(ZoneOffset.UTC));
             ps.executeUpdate();
           }
           insertLines(c, lines);
@@ -2284,7 +2568,7 @@ public class InventoryRepository extends BaseOutboxRepository {
   public List<MoveOrder> listMoveOrders(UUID tenantId, UUID storeId, String status, int limit) {
     StringBuilder sb =
         new StringBuilder(
-            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                 + " notes, status, created_at, picked_at"
                 + " FROM move_orders WHERE tenant_id = ?");
     if (storeId != null) sb.append(" AND (from_store_id = ? OR to_store_id = ?)");
@@ -2316,7 +2600,7 @@ public class InventoryRepository extends BaseOutboxRepository {
   public Optional<MoveOrder> findMoveOrder(UUID tenantId, UUID id) {
     List<MoveOrder> rows =
         query(
-            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                 + " notes, status, created_at, picked_at"
                 + " FROM move_orders WHERE tenant_id = ? AND id = ?",
             ps -> {
@@ -2335,7 +2619,17 @@ public class InventoryRepository extends BaseOutboxRepository {
    * @return the matching rows
    */
   public List<MoveOrderLine> listMoveOrderLines(UUID moveOrderId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return listMoveOrderLinesTx(c, moveOrderId);
+    } catch (SQLException e) {
+      throw dbError("list move order lines", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection. */
+  List<MoveOrderLine> listMoveOrderLinesTx(Connection c, UUID moveOrderId) {
+    return queryTx(
+        c,
         "SELECT id, tenant_id, move_order_id, variant_id, requested_qty, picked_qty"
             + " FROM move_order_lines WHERE move_order_id = ? ORDER BY id",
         ps -> ps.setObject(1, moveOrderId),
@@ -2356,10 +2650,11 @@ public class InventoryRepository extends BaseOutboxRepository {
             throw ApiException.unprocessable(
                 "MOVE_ORDER_NOT_PICKABLE", "Move order is " + order.status());
           }
-          List<MoveOrderLine> lines = listMoveOrderLines(orderId);
+          List<MoveOrderLine> lines = listMoveOrderLinesTx(c, orderId);
           for (MoveOrderLine line : lines) {
+            // A move that names its from-zone draws what sits there and nothing else.
             List<Drawn> drawn =
-                deductFifo(
+                deductBatches(
                     c,
                     tenantId,
                     order.fromStoreId(),
@@ -2368,8 +2663,14 @@ public class InventoryRepository extends BaseOutboxRepository {
                     MoveType.TRANSFER,
                     "MOVE_ORDER",
                     orderId,
+                    null,
+                    null,
+                    null,
+                    null,
+                    order.fromZoneId(),
                     MovementAttribution.system());
-            // What is put down is what was picked: each source batch's lot, date and cost.
+            // What is put down is what was picked: each source batch's lot, date and cost, in the
+            // to-zone when the order names one.
             receiveDrawn(
                 c,
                 tenantId,
@@ -2380,14 +2681,16 @@ public class InventoryRepository extends BaseOutboxRepository {
                 MoveType.TRANSFER,
                 "MOVE_ORDER",
                 orderId,
-                null);
+                null,
+                ReturnDisposition.ON_SALE,
+                order.toZoneId());
           }
           MoveOrder completed;
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE move_orders SET status = 'COMPLETED', picked_at = now()"
                       + " WHERE tenant_id = ? AND id = ?"
-                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                       + " notes, status, created_at, picked_at")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, orderId);
@@ -2430,7 +2733,7 @@ public class InventoryRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "UPDATE move_orders SET status = 'CANCELLED'"
                       + " WHERE tenant_id = ? AND id = ?"
-                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+                      + " RETURNING id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                       + " notes, status, created_at, picked_at")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, orderId);
@@ -2449,7 +2752,7 @@ public class InventoryRepository extends BaseOutboxRepository {
       throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone,"
+            "SELECT id, tenant_id, from_store_id, to_store_id, from_zone, to_zone, from_zone_id, to_zone_id,"
                 + " notes, status, created_at, picked_at"
                 + " FROM move_orders WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
       ps.setObject(1, tenantId);
@@ -2491,7 +2794,9 @@ public class InventoryRepository extends BaseOutboxRepository {
         rs.getString("notes"),
         rs.getString("status"),
         rs.getObject("created_at", OffsetDateTime.class).toInstant(),
-        pickedOdt == null ? null : pickedOdt.toInstant());
+        pickedOdt == null ? null : pickedOdt.toInstant(),
+        rs.getObject("from_zone_id", UUID.class),
+        rs.getObject("to_zone_id", UUID.class));
   }
 
   private static MoveOrderLine mapMoveOrderLine(ResultSet rs) throws SQLException {
@@ -2617,7 +2922,18 @@ public class InventoryRepository extends BaseOutboxRepository {
    * @return the matching rows
    */
   public List<TransferOrderLine> listTransferOrderLines(UUID tenantId, UUID transferOrderId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return listTransferOrderLinesTx(c, tenantId, transferOrderId);
+    } catch (SQLException e) {
+      throw dbError("list transfer order lines", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection. */
+  List<TransferOrderLine> listTransferOrderLinesTx(
+      Connection c, UUID tenantId, UUID transferOrderId) {
+    return queryTx(
+        c,
         "SELECT id, tenant_id, transfer_order_id, variant_id,"
             + " requested_qty, shipped_qty, received_qty, reason, source_batch_id"
             + " FROM transfer_order_lines WHERE tenant_id = ? AND transfer_order_id = ? ORDER BY id",
@@ -2642,7 +2958,7 @@ public class InventoryRepository extends BaseOutboxRepository {
             throw ApiException.unprocessable(
                 "TRANSFER_ORDER_NOT_SHIPPABLE", "Transfer order is " + order.status());
           }
-          List<TransferOrderLine> lines = listTransferOrderLines(tenantId, orderId);
+          List<TransferOrderLine> lines = listTransferOrderLinesTx(c, tenantId, orderId);
           boolean isDirect = TransferOrder.TYPE_DIRECT.equals(order.transferType());
 
           for (TransferOrderLine line : lines) {
@@ -2735,7 +3051,7 @@ public class InventoryRepository extends BaseOutboxRepository {
                 "TRANSFER_ORDER_DIRECT_AUTO_RECEIVED",
                 "DIRECT transfers are auto-received on ship");
           }
-          List<TransferOrderLine> lines = listTransferOrderLines(tenantId, orderId);
+          List<TransferOrderLine> lines = listTransferOrderLinesTx(c, tenantId, orderId);
           for (TransferOrderLine line : lines) {
             BigDecimal qty = line.shippedQty() == null ? line.requestedQty() : line.shippedQty();
             // What arrives is what left the sending store, read back from the ledger the shipment
@@ -2920,21 +3236,23 @@ public class InventoryRepository extends BaseOutboxRepository {
    * @param tenantId owning tenant; the first condition of the query
    * @param storeId the store id
    * @param withinDays the within days
-   * @return the matching rows
+   * @param maxRows the most rows returned, soonest to expire first
+   * @return the matching rows, only batches that still hold stock
    */
-  public List<Batch> listExpiringBatches(UUID tenantId, UUID storeId, int withinDays) {
+  public List<Batch> listExpiringBatches(UUID tenantId, UUID storeId, int withinDays, int maxRows) {
     return query(
         "SELECT id,tenant_id,store_id,variant_id,batch_no,received_qty,remaining_qty,"
             + "cost_price,expiry_date,created_at,status,material_status,material_status_reason,grade,zone_id,ownership,owner_supplier_id,duty_status"
             + " FROM inventory_batches"
             + " WHERE tenant_id=? AND store_id=? AND status='ACTIVE'"
-            + " AND expiry_date IS NOT NULL"
+            + " AND remaining_qty > 0 AND expiry_date IS NOT NULL"
             + " AND expiry_date <= CURRENT_DATE + make_interval(days => ?)"
-            + " ORDER BY expiry_date ASC",
+            + " ORDER BY expiry_date ASC, id ASC LIMIT ?",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, storeId);
           ps.setInt(3, withinDays);
+          ps.setInt(4, maxRows);
         },
         InventoryRepository::mapBatch,
         "list expiring batches");
@@ -2996,7 +3314,8 @@ public class InventoryRepository extends BaseOutboxRepository {
             + "cost_price,expiry_date,created_at,status,material_status,material_status_reason,grade,zone_id,ownership,owner_supplier_id,duty_status"
             + " FROM inventory_batches"
             + " WHERE tenant_id=? AND store_id=? AND variant_id=? AND remaining_qty>0"
-            + " AND material_status='AVAILABLE'"
+            + " AND material_status='AVAILABLE' AND "
+            + expiryDay.of(tenantId).sellableSql("")
             + " ORDER BY "
             + orderBy,
         ps -> {
@@ -3041,14 +3360,44 @@ public class InventoryRepository extends BaseOutboxRepository {
   }
 
   /**
+   * A SELECT on the caller's own connection. Inside {@code inTx} never use {@code query()}: it
+   * checks out a second pooled connection while the transaction still holds its own, and enough
+   * concurrent transactions then wait on each other for the pool.
+   */
+  private <T> List<T> queryTx(
+      Connection c, String sql, Binder binder, RowMapper<T> mapper, String what) {
+    try (PreparedStatement ps = c.prepareStatement(sql)) {
+      binder.bind(ps);
+      try (ResultSet rs = ps.executeQuery()) {
+        List<T> out = new ArrayList<>();
+        while (rs.next()) out.add(mapper.map(rs));
+        return out;
+      }
+    } catch (SQLException e) {
+      throw dbError(what, e);
+    }
+  }
+
+  /**
    * Internal-only copy of the picking-rule resolution used by {@code consumeTx} so FIFO/FEFO/zone
    * deduction picks the right strategy. The public, service-facing CRUD for picking rules lives in
    * {@link PickingRuleRepository}; this duplicates just the read path rather than injecting that
-   * repo. Matches the original (pre-extraction) behavior exactly: {@code query()} acquires its own
-   * connection, so this was never part of {@code consumeTx}'s transaction even before the split.
+   * repo. {@code consumeTx} reads it through {@link #resolvePickingRuleTx} on its own connection;
+   * this overload opens a connection of its own for callers outside a transaction.
    */
   Optional<PickingRule> resolvePickingRule(UUID tenantId, UUID storeId, UUID variantId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return resolvePickingRuleTx(c, tenantId, storeId, variantId);
+    } catch (SQLException e) {
+      throw dbError("resolve picking rule", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection (no second pool checkout). */
+  Optional<PickingRule> resolvePickingRuleTx(
+      Connection c, UUID tenantId, UUID storeId, UUID variantId) {
+    return queryTx(
+            c,
             "SELECT pr.id,pr.tenant_id,pr.name,pr.strategy,pr.grade_preference,pr.status,"
                 + "pr.created_at,pr.updated_at"
                 + " FROM picking_rule_assignments pra"
@@ -3071,7 +3420,17 @@ public class InventoryRepository extends BaseOutboxRepository {
   }
 
   List<PickingRuleZonePriority> listZonePriorities(UUID tenantId, UUID ruleId) {
-    return query(
+    try (Connection c = dataSource.getConnection()) {
+      return listZonePrioritiesTx(c, tenantId, ruleId);
+    } catch (SQLException e) {
+      throw dbError("list zone priorities", e);
+    }
+  }
+
+  /** The same read on the caller's own transaction connection. */
+  List<PickingRuleZonePriority> listZonePrioritiesTx(Connection c, UUID tenantId, UUID ruleId) {
+    return queryTx(
+        c,
         "SELECT id,tenant_id,rule_id,zone_id,priority FROM picking_rule_zone_priorities"
             + " WHERE tenant_id=? AND rule_id=? ORDER BY priority ASC",
         ps -> {
@@ -3129,7 +3488,8 @@ public class InventoryRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "SELECT COALESCE(SUM(remaining_qty),0) AS q FROM inventory_batches"
                 + " WHERE tenant_id=? AND store_id=? AND variant_id=?"
-                + " AND material_status='AVAILABLE'")) {
+                + " AND material_status='AVAILABLE' AND "
+                + expiryDay.of(tenantId).sellableSql(""))) {
       ps.setObject(1, tenantId);
       ps.setObject(2, storeId);
       ps.setObject(3, variantId);
@@ -3194,8 +3554,13 @@ public class InventoryRepository extends BaseOutboxRepository {
     }
   }
 
-  /** Cost prices are held to {@code inventory_batches.cost_price NUMERIC(18,2)}. */
-  private static final int COST_SCALE = 2;
+  /**
+   * The share of {@code amount} that {@code back} of {@code over} units carries, half up at {@code
+   * scale} — the minor units of the currency the sale was recorded in (whole yen, pence, fils).
+   */
+  static BigDecimal takenBack(BigDecimal amount, BigDecimal back, BigDecimal over, int scale) {
+    return amount.multiply(back).divide(over, scale, RoundingMode.HALF_UP);
+  }
 
   /**
    * Takes back the revenue and the cost of {@code qty} returned units, at the averages the order's
@@ -3230,8 +3595,10 @@ public class InventoryRepository extends BaseOutboxRepository {
     if (soldQty.signum() <= 0 || unreturned.signum() <= 0) return;
     BigDecimal back = qty.min(unreturned);
     // The currency's scale is the one order-svc sent the sale in; this service does not know it.
-    BigDecimal netBack =
-        soldNet.multiply(back).divide(soldQty, soldNet.scale(), RoundingMode.HALF_UP);
+    // The cost taken back is money in the same (home) currency, so it is kept to the same minor
+    // units: whole yen, pence, three-decimal dinars — never two decimals assumed.
+    int moneyScale = Math.max(soldNet.scale(), 0);
+    BigDecimal netBack = takenBack(soldNet, back, soldQty, moneyScale);
     BigDecimal costBack = null;
     try (PreparedStatement ps =
         c.prepareStatement(
@@ -3246,10 +3613,7 @@ public class InventoryRepository extends BaseOutboxRepository {
         if (rs.next()) {
           BigDecimal costedQty = rs.getBigDecimal("q");
           if (costedQty != null && costedQty.signum() > 0) {
-            costBack =
-                rs.getBigDecimal("cost")
-                    .multiply(back)
-                    .divide(costedQty, COST_SCALE, RoundingMode.HALF_UP);
+            costBack = takenBack(rs.getBigDecimal("cost"), back, costedQty, moneyScale);
           }
         }
       }

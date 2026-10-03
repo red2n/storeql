@@ -213,7 +213,15 @@ class LedgerIT {
     assertThat(unknown.getStatus(), is(400));
     assertThat(unknown.readEntity(String.class), containsString("PURCHASE_RESOLUTION_UNKNOWN"));
     assertThat(resolve(id, "APPROVE", "fine", "STOREKEEPER").getStatus(), is(403));
-    assertThat(resolveAs(id, "APPROVE", "fine", T2).getStatus(), is(404));
+    assertRefused(resolveAs(id, "APPROVE", "fine", T2), 404, "PURCHASE_INVOICE_NOT_FOUND");
+    assertRefused(
+        resolve(Ids.newId().toString(), "APPROVE", "fine", "OWNER"),
+        404,
+        "PURCHASE_INVOICE_NOT_FOUND");
+    assertRefused(
+        get("/supplier-invoices/" + Ids.newId(), "OWNER"), 404, "PURCHASE_INVOICE_NOT_FOUND");
+    assertRefused(
+        getAs("/supplier-invoices/" + id, T2, "OWNER"), 404, "PURCHASE_INVOICE_NOT_FOUND");
 
     Response ok = resolve(id, "approve", "Supplier confirmed the balance ships Friday", "MANAGER");
     String body = ok.readEntity(String.class);
@@ -303,23 +311,31 @@ class LedgerIT {
     int n = 20;
     var pool = Executors.newFixedThreadPool(n);
     var go = new CountDownLatch(1);
-    List<Future<Integer>> results = new ArrayList<>();
+    List<Future<String>> results = new ArrayList<>();
     for (int i = 0; i < n; i++) {
       results.add(
           pool.submit(
               () -> {
                 go.await();
-                return resolve(id, "REJECT", "race", "OWNER").getStatus();
+                Response r = resolve(id, "REJECT", "race", "OWNER");
+                int status = r.getStatus();
+                if (status == 200) {
+                  r.close();
+                  return "200";
+                }
+                String body = r.readEntity(String.class);
+                return status + ":" + com.storeql.test.Envelopes.parse(body).getString("code", "");
               }));
     }
     go.countDown();
     int won = 0;
     int lost = 0;
-    for (Future<Integer> f : results) {
-      int s = f.get();
-      if (s == 200) won++;
-      else if (s == 409) lost++;
-      else throw new AssertionError("unexpected status " + s);
+    for (Future<String> f : results) {
+      String s = f.get();
+      if (s.equals("200")) won++;
+      else if (s.equals("409:PURCHASE_INVOICE_ALREADY_RESOLVED")
+          || s.equals("409:PURCHASE_INVOICE_NOT_FLAGGED")) lost++;
+      else throw new AssertionError("unexpected answer " + s);
     }
     pool.shutdown();
     assertThat(won, is(1));
@@ -548,8 +564,10 @@ class LedgerIT {
                 .replace("\"journalId\"", "\"id\""));
     assertThat(get("/nominal-ledger/journals/" + id, "CASHIER").getStatus(), is(403));
     // Another tenant does not see it, and cannot guess it.
-    assertThat(getAs("/nominal-ledger/journals/" + id, T2, "OWNER").getStatus(), is(404));
-    assertThat(get("/nominal-ledger/journals/" + Ids.newId(), "OWNER").getStatus(), is(404));
+    assertRefused(
+        getAs("/nominal-ledger/journals/" + id, T2, "OWNER"), 404, "PURCHASE_JOURNAL_NOT_FOUND");
+    assertRefused(
+        get("/nominal-ledger/journals/" + Ids.newId(), "OWNER"), 404, "PURCHASE_JOURNAL_NOT_FOUND");
     assertThat(
         getAs("/nominal-ledger/trial-balance", T2, "OWNER").readEntity(String.class),
         containsString("\"rows\":[]"));
@@ -661,6 +679,13 @@ class LedgerIT {
         + "\",\"lines\":"
         + lines
         + "}";
+  }
+
+  /** The refusal's status and its stable machine code, read from the problem body. */
+  private static void assertRefused(Response r, int status, String code) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    assertThat(body, com.storeql.test.Envelopes.parse(body).getString("code", null), is(code));
   }
 
   private Response resolve(String id, String action, String reason, String role) {

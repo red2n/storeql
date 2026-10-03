@@ -11,7 +11,7 @@ info:
     API gateway at /api/inventory-svc.
 tags:
   - name: Stock Operations
-    description: Manual receive, adjust, stock levels, batches, movements, and movement purge.
+    description: Manual receive, adjust, stock levels, batches, movements, and the movement purge (old movements are archived, never deleted).
   - name: Reservations
     description: Hold/consume/release stock reservations used by order-svc during checkout.
   - name: Storefront Availability

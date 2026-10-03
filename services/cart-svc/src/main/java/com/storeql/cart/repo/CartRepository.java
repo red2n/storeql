@@ -2,6 +2,7 @@ package com.storeql.cart.repo;
 
 import com.storeql.cart.domain.Domain.Cart;
 import com.storeql.cart.domain.Domain.CartItem;
+import com.storeql.cart.domain.Domain.StaffAction;
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseJdbcRepository;
 import com.storeql.service.RedisCache;
@@ -345,6 +346,14 @@ public class CartRepository extends BaseJdbcRepository {
    * updated if the new value is non-null.
    */
   public CartItem upsertItem(CartItem item) {
+    return upsertItem(item, null);
+  }
+
+  /**
+   * As {@link #upsertItem(CartItem)}, and when {@code audit} is given, the staff trace of it on the
+   * same transaction.
+   */
+  public CartItem upsertItem(CartItem item, StaffAction audit) {
     CartItem result =
         inTx(
             c -> {
@@ -364,7 +373,23 @@ public class CartRepository extends BaseJdbcRepository {
                 ps.setBigDecimal(5, item.qty());
                 ps.setBigDecimal(6, item.unitPrice());
                 try (var rs = ps.executeQuery()) {
-                  if (rs.next()) return mapItem(rs);
+                  if (rs.next()) {
+                    CartItem written = mapItem(rs);
+                    recordStaffAction(
+                        c,
+                        item.tenantId(),
+                        item.cartId(),
+                        audit == null
+                            ? null
+                            : new StaffAction(
+                                audit.action(),
+                                audit.actorId(),
+                                audit.actorRole(),
+                                written.id(),
+                                written.variantId(),
+                                item.qty()));
+                    return written;
+                  }
                 }
               }
               throw ApiException.unprocessable("CART_ITEM_UPSERT_FAILED", "upsert returned no row");
@@ -431,13 +456,28 @@ public class CartRepository extends BaseJdbcRepository {
    * @param qty the new quantity
    */
   public void updateItemQty(UUID tenantId, UUID cartId, UUID itemId, BigDecimal qty) {
-    exec(
-        "UPDATE cart_items SET qty = ? WHERE tenant_id = ? AND cart_id = ? AND id = ?",
-        ps -> {
-          ps.setBigDecimal(1, qty);
-          ps.setObject(2, tenantId);
-          ps.setObject(3, cartId);
-          ps.setObject(4, itemId);
+    updateItemQty(tenantId, cartId, itemId, qty, null);
+  }
+
+  /**
+   * As {@link #updateItemQty(UUID, UUID, UUID, BigDecimal)}, and when {@code audit} is given, the
+   * staff trace of it on the same transaction.
+   */
+  public void updateItemQty(
+      UUID tenantId, UUID cartId, UUID itemId, BigDecimal qty, StaffAction audit) {
+    inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE cart_items SET qty = ? WHERE tenant_id = ? AND cart_id = ? AND id = ?")) {
+            ps.setBigDecimal(1, qty);
+            ps.setObject(2, tenantId);
+            ps.setObject(3, cartId);
+            ps.setObject(4, itemId);
+            ps.executeUpdate();
+          }
+          recordStaffAction(c, tenantId, cartId, audit);
+          return null;
         },
         "update cart item qty");
     evictItems(tenantId, cartId);
@@ -451,15 +491,55 @@ public class CartRepository extends BaseJdbcRepository {
    * @param itemId the cart item to delete
    */
   public void deleteItem(UUID tenantId, UUID cartId, UUID itemId) {
-    exec(
-        "DELETE FROM cart_items WHERE tenant_id = ? AND cart_id = ? AND id = ?",
-        ps -> {
-          ps.setObject(1, tenantId);
-          ps.setObject(2, cartId);
-          ps.setObject(3, itemId);
+    deleteItem(tenantId, cartId, itemId, null);
+  }
+
+  /**
+   * As {@link #deleteItem(UUID, UUID, UUID)}, and when {@code audit} is given, the staff trace of
+   * it on the same transaction.
+   */
+  public void deleteItem(UUID tenantId, UUID cartId, UUID itemId, StaffAction audit) {
+    inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "DELETE FROM cart_items WHERE tenant_id = ? AND cart_id = ? AND id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, cartId);
+            ps.setObject(3, itemId);
+            ps.executeUpdate();
+          }
+          recordStaffAction(c, tenantId, cartId, audit);
+          return null;
         },
         "delete cart item");
     evictItems(tenantId, cartId);
+  }
+
+  /** Writes the staff trace of an assisted change, on the change's own transaction. */
+  private static void recordStaffAction(
+      java.sql.Connection c, UUID tenantId, UUID cartId, StaffAction a) throws SQLException {
+    if (a == null) return;
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO cart_staff_actions (id, tenant_id, cart_id, action, item_id, variant_id,"
+                + " qty, actor_id, actor_role, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, Ids.newId());
+      ps.setObject(2, tenantId);
+      ps.setObject(3, cartId);
+      ps.setString(4, a.action());
+      ps.setObject(5, a.itemId());
+      ps.setObject(6, a.variantId());
+      ps.setBigDecimal(7, a.qty());
+      if (a.actorId() == null) {
+        ps.setNull(8, java.sql.Types.OTHER);
+      } else {
+        ps.setObject(8, a.actorId());
+      }
+      ps.setString(9, a.actorRole());
+      ps.setObject(10, Instant.now().atOffset(java.time.ZoneOffset.UTC));
+      ps.executeUpdate();
+    }
   }
 
   // ── Merge ─────────────────────────────────────────────────────────────────

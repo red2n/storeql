@@ -20,8 +20,8 @@ import org.w3c.dom.NodeList;
 /** Poland's FA(3), written from the model: what KSeF takes, and what it would refuse. */
 class Fa3Test {
 
-  private static final String SELLER_NIP = "5260250991";
-  private static final String BUYER_NIP = "7010001455";
+  private static final String SELLER_NIP = "5260250274";
+  private static final String BUYER_NIP = "7740001454";
 
   private static Invoice.Party party(
       String name, String vatId, String city, String postcode, String country) {
@@ -225,8 +225,8 @@ class Fa3Test {
     assertTrue(rules.contains("FA3-RATE"), rules.toString());
     assertThrows(IllegalArgumentException.class, () -> Fa3.write(foreign, Instant.now(), null));
     assertTrue(Fa3.validNip(SELLER_NIP));
-    assertFalse(Fa3.validNip("5260250992"));
-    assertEquals(SELLER_NIP, Fa3.nipOf("pl 526-025-09-91"));
+    assertFalse(Fa3.validNip("5260250275"));
+    assertEquals(SELLER_NIP, Fa3.nipOf("pl 526-025-02-74"));
     assertEquals(null, Fa3.nipOf("DE123456789"));
     assertEquals("zw", Fa3.bucket("E", BigDecimal.ZERO).p12());
     assertEquals("oo", Fa3.bucket("AE", null).p12());

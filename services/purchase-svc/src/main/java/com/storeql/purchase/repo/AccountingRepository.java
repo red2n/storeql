@@ -1,6 +1,7 @@
 package com.storeql.purchase.repo;
 
 import com.storeql.ids.Ids;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Accounting;
 import com.storeql.purchase.domain.Accounting.Attempt;
 import com.storeql.purchase.domain.Accounting.Connection;
@@ -9,7 +10,6 @@ import com.storeql.purchase.domain.Accounting.Mapping;
 import com.storeql.purchase.domain.Accounting.Sync;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonReader;
@@ -48,9 +48,10 @@ public class AccountingRepository extends BaseJdbcRepository {
       "SELECT "
           + SYNC_CORE
           + ", j.entry_date, j.description, j.source_type, j.total FROM accounting_syncs s"
-          + " JOIN (SELECT journal_id, MIN(entry_date) AS entry_date, MIN(description) AS description,"
+          + " JOIN LATERAL (SELECT MIN(entry_date) AS entry_date, MIN(description) AS description,"
           + " MIN(source_type) AS source_type, SUM(debit) AS total FROM nominal_ledger_entries"
-          + " WHERE tenant_id = ? GROUP BY journal_id) j ON j.journal_id = s.journal_id";
+          + " WHERE tenant_id = s.tenant_id AND journal_id = s.journal_id HAVING COUNT(*) > 0) j"
+          + " ON TRUE";
 
   // ── connections ─────────────────────────────────────────────────────────────
 
@@ -340,7 +341,6 @@ public class AccountingRepository extends BaseJdbcRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
-          ps.setObject(i++, tenantId);
           ps.setObject(i++, connectionId);
           if (status != null) ps.setString(i++, status);
           if (after != null) ps.setObject(i++, after);
@@ -355,8 +355,7 @@ public class AccountingRepository extends BaseJdbcRepository {
             SYNC_WITH_JOURNAL + " WHERE s.tenant_id = ? AND s.id = ?",
             ps -> {
               ps.setObject(1, tenantId);
-              ps.setObject(2, tenantId);
-              ps.setObject(3, id);
+              ps.setObject(2, id);
             },
             rs -> readSync(rs, true),
             "accounting sync")
@@ -389,26 +388,92 @@ public class AccountingRepository extends BaseJdbcRepository {
         "accounting sync attempts");
   }
 
-  /** Queued to go now, whatever it was waiting for; a delivered one is left as it is. */
-  public boolean retry(UUID tenantId, UUID id, Instant now) {
+  /**
+   * Queued to go now, whatever it was waiting for; a delivered one is left as it is. An UNCERTAIN
+   * one queued this way is a person's word that it never landed, and is recorded as such.
+   */
+  public boolean retry(UUID tenantId, UUID id, Instant now, UUID by) {
     return inTx(
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "UPDATE accounting_syncs SET status = ?, next_attempt_at = ?, leased_until = NULL"
+                  "UPDATE accounting_syncs SET"
+                      + " resolution = CASE WHEN status = 'UNCERTAIN' THEN 'NOT_LANDED' ELSE resolution END,"
+                      + " resolved_by = CASE WHEN status = 'UNCERTAIN' THEN ? ELSE resolved_by END,"
+                      + " resolved_at = CASE WHEN status = 'UNCERTAIN' THEN ? ELSE resolved_at END,"
+                      + " status = ?, next_attempt_at = ?, leased_until = NULL"
                       + " WHERE tenant_id = ? AND id = ? AND status IN (?, ?, ?, ?)")) {
-            ps.setString(1, Accounting.PENDING);
+            ps.setObject(1, by);
             ps.setObject(2, at(now));
-            ps.setObject(3, tenantId);
-            ps.setObject(4, id);
-            ps.setString(5, Accounting.PENDING);
-            ps.setString(6, Accounting.FAILED);
-            ps.setString(7, Accounting.UNCERTAIN);
-            ps.setString(8, Accounting.SKIPPED);
+            ps.setString(3, Accounting.PENDING);
+            ps.setObject(4, at(now));
+            ps.setObject(5, tenantId);
+            ps.setObject(6, id);
+            ps.setString(7, Accounting.PENDING);
+            ps.setString(8, Accounting.FAILED);
+            ps.setString(9, Accounting.UNCERTAIN);
+            ps.setString(10, Accounting.SKIPPED);
             return ps.executeUpdate() == 1;
           }
         },
         "retry accounting sync");
+  }
+
+  /**
+   * Settles an UNCERTAIN push by a person's word, once: it landed (DELIVERED under the package's
+   * reference, so never pushed again) or it did not (PENDING, due now). False when the push is not
+   * UNCERTAIN (any more).
+   */
+  public boolean resolveUncertain(
+      UUID tenantId,
+      UUID id,
+      boolean landed,
+      String externalId,
+      UUID by,
+      String note,
+      Instant now) {
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE accounting_syncs SET status = ?, external_id = ?, delivered_at = ?,"
+                      + " next_attempt_at = ?, leased_until = NULL, resolution = ?, resolved_by = ?,"
+                      + " resolved_at = ?, resolution_note = ?"
+                      + " WHERE tenant_id = ? AND id = ? AND status = 'UNCERTAIN'")) {
+            ps.setString(1, landed ? Accounting.DELIVERED : Accounting.PENDING);
+            ps.setString(2, landed ? externalId : null);
+            ps.setObject(3, landed ? at(now) : null);
+            ps.setObject(4, at(now));
+            ps.setString(5, landed ? Accounting.LANDED : Accounting.NOT_LANDED);
+            ps.setObject(6, by);
+            ps.setObject(7, at(now));
+            ps.setString(8, note);
+            ps.setObject(9, tenantId);
+            ps.setObject(10, id);
+            return ps.executeUpdate() == 1;
+          }
+        },
+        "resolve uncertain accounting sync");
+  }
+
+  /** What a person decided about the push, if they did. */
+  public Optional<Accounting.Resolution> resolution(UUID tenantId, UUID syncId) {
+    return query(
+            "SELECT resolution, resolved_by, resolved_at, resolution_note FROM accounting_syncs"
+                + " WHERE tenant_id = ? AND id = ? AND resolution IS NOT NULL",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, syncId);
+            },
+            rs ->
+                new Accounting.Resolution(
+                    rs.getString("resolution"),
+                    rs.getObject("resolved_by", UUID.class),
+                    instant(rs, "resolved_at"),
+                    rs.getString("resolution_note")),
+            "accounting sync resolution")
+        .stream()
+        .findFirst();
   }
 
   public boolean skip(UUID tenantId, UUID id, String reason) {
@@ -497,7 +562,7 @@ public class AccountingRepository extends BaseJdbcRepository {
   }
 
   static String settingsJson(Map<String, String> settings) {
-    JsonObjectBuilder b = Json.createObjectBuilder();
+    JsonObjectBuilder b = Jsons.PROVIDER.createObjectBuilder();
     for (var e : new java.util.TreeMap<>(settings).entrySet()) {
       if (e.getValue() != null) b.add(e.getKey(), e.getValue());
     }
@@ -507,7 +572,7 @@ public class AccountingRepository extends BaseJdbcRepository {
   static Map<String, String> settingsOf(String json) {
     Map<String, String> out = new LinkedHashMap<>();
     if (json == null || json.isBlank()) return out;
-    try (JsonReader reader = Json.createReader(new StringReader(json))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject o = reader.readObject();
       for (var e : o.entrySet()) {
         if (e.getValue().getValueType() == jakarta.json.JsonValue.ValueType.STRING) {

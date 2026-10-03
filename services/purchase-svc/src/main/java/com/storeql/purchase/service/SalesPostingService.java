@@ -32,6 +32,7 @@ public class SalesPostingService {
   static final String SALE_CONSUMER = "purchase-svc/sale-posting";
   static final String TENDER_CONSUMER = "purchase-svc/tender-posting";
   static final String REFUND_CONSUMER = "purchase-svc/refund-posting";
+  static final String NO_RECEIPT_CONSUMER = "purchase-svc/no-receipt-return-posting";
   static final String CHARGEBACK_CONSUMER = "purchase-svc/chargeback-posting";
   static final String SETTLEMENT_CONSUMER = "purchase-svc/card-settlement-posting";
 
@@ -85,9 +86,28 @@ public class SalesPostingService {
             shares,
             sale.map(SalesOrder::total).orElse(null),
             sale.map(SalesOrder::taxAmount).orElse(null),
+            sale.map(SalesOrder::currency).orElse(null),
             sale.isPresent(),
-            today());
+            today(),
+            sale.isPresent() ? repo.revenueRefunded(tenantId, orderId) : null);
     return repo.recordRefundOnce(eventId, REFUND_CONSUMER, posting);
+  }
+
+  /** Posts a return made without a receipt, once per event. */
+  public boolean postNoReceiptReturn(
+      UUID eventId,
+      UUID tenantId,
+      UUID returnId,
+      UUID storeId,
+      String refundMethod,
+      BigDecimal amount,
+      BigDecimal taxAmount) {
+    return repo.recordJournalOnce(
+        eventId,
+        NO_RECEIPT_CONSUMER,
+        SalesPosting.noReceiptReturn(
+            tenantId, returnId, storeId, refundMethod, amount, taxAmount, today()),
+        "post no-receipt return");
   }
 
   /**
@@ -157,8 +177,9 @@ public class SalesPostingService {
   public List<OpenClearing> openClearing(TenantContext ctx, String storeIdStr, int limit) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID storeId = Parsing.optionalUuid(storeIdStr, "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
-    return repo.findOpenClearing(ctx.requireTenantId(), storeId, Math.min(Math.max(limit, 1), 200));
+    // A store named must be the caller's; none named reads the caller's stores, or every store.
+    return repo.findOpenClearing(
+        ctx.requireTenantId(), ctx.reportStores(storeId), Math.min(Math.max(limit, 1), 200));
   }
 
   private static LocalDate today() {

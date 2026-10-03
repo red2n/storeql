@@ -41,6 +41,7 @@ public class ApiKeyIntrospectionResource {
   public ApiResponse<ApiKeyDtos.IntrospectionResponse> introspect(
       ApiKeyDtos.IntrospectRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN");
+    // The request's @NotBlank is judged here, with a code of its own, rather than by Validations.
     if (req == null || req.key() == null || req.key().isBlank()) {
       throw ApiException.badRequest("API_KEY_MISSING", "The key to ask about");
     }

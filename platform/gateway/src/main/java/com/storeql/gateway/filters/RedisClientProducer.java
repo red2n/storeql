@@ -1,8 +1,10 @@
 package com.storeql.gateway.filters;
 
 import com.storeql.gateway.GatewayConfig;
+import io.lettuce.core.ClientOptions;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.TimeoutOptions;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -42,6 +44,15 @@ public class RedisClientProducer {
             .withTimeout(COMMAND_TIMEOUT)
             .build();
     client = RedisClient.create(uri);
+    // While Redis is down a command is refused at once (the filters then let the request through
+    // unmetered), never queued: an unbounded queue behind a dead connection is heap that grows
+    // with the traffic, and every queued command still waits out its timeout.
+    client.setOptions(
+        ClientOptions.builder()
+            .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
+            .requestQueueSize(config.redisRequestQueueSize())
+            .timeoutOptions(TimeoutOptions.enabled(COMMAND_TIMEOUT))
+            .build());
     connection = client.connect();
     return connection.sync();
   }

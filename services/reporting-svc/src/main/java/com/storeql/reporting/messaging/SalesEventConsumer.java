@@ -18,7 +18,8 @@ class SalesEventConsumer extends BaseKafkaConsumer {
       List.of(
           "storeql.order.order-confirmed",
           "storeql.payment.payment-refunded",
-          "storeql.order.order-voided");
+          "storeql.order.order-voided",
+          "storeql.order.no-receipt-return-recorded");
 
   @Inject SalesEventDispatcher dispatcher;
 

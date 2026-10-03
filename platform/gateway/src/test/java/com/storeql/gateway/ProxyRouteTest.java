@@ -1,6 +1,8 @@
 package com.storeql.gateway;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.storeql.gateway.ProxyResource.Route;
 import org.junit.jupiter.api.Test;
@@ -41,5 +43,16 @@ class ProxyRouteTest {
     Route r = Route.of("iam-svc", "auth/login");
     assertEquals("iam-svc", r.service());
     assertEquals("auth/login", r.path());
+  }
+
+  @Test
+  void onlyVAndDigitsIsAVersionSegment() {
+    assertTrue(ApiVersions.isVersionSegment("v1"));
+    assertTrue(ApiVersions.isVersionSegment("v12"));
+    assertFalse(ApiVersions.isVersionSegment("v"));
+    assertFalse(ApiVersions.isVersionSegment("v1x"));
+    assertFalse(ApiVersions.isVersionSegment("x1"));
+    assertFalse(ApiVersions.isVersionSegment(null));
+    assertEquals("v1x", Route.of("v1x", "a/b").service());
   }
 }

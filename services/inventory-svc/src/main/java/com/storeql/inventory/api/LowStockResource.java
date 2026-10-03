@@ -16,6 +16,8 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -49,10 +51,13 @@ public class LowStockResource {
    * Items that have run out entirely are included — they are the most urgent case, and they have no
    * batch rows at all.
    *
-   * @param storeId the store id (query parameter)
+   * @param storeId a named store (query parameter): checked against the caller's stores, else 403;
+   *     unnamed, a caller held to no store reads the whole business and a caller held to some reads
+   *     exactly those, combined
    * @param limit the limit (query parameter)
    * @return rows ordered by shortfall, deepest first
-   * @throws com.storeql.web.ApiException {@code 400} malformed storeId
+   * @throws com.storeql.web.ApiException {@code 400} malformed storeId; {@code 403}
+   *     STORE_ACCESS_DENIED for a named store the caller does not keep
    */
   @Operation(
       summary = "Items below a configured reorder level",
@@ -69,11 +74,10 @@ public class LowStockResource {
   public Response lowStock(
       @QueryParam("storeId") String storeId, @QueryParam("limit") Integer limit) {
     int clamped = limit == null ? DEFAULT_LIMIT : Math.max(1, Math.min(MAX_LIMIT, limit));
+    UUID parsed = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(parsed);
     List<LowStockRowResponse> rows =
-        service
-            .lowStockReport(
-                ctx.requireTenantId(), Parsing.optionalUuid(storeId, "storeId"), clamped)
-            .stream()
+        service.lowStockReport(ctx.requireTenantId(), stores, clamped).stream()
             .map(Mappers::toLowStockRow)
             .toList();
     return Response.ok(ApiResponse.ok(rows, ApiResponse.Meta.of(ctx.requestId()))).build();

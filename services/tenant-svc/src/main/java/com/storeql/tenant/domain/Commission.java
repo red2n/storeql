@@ -9,6 +9,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.ToIntFunction;
 
 /**
  * What a sale earns the person who made it: the arrangement, not the money.
@@ -39,9 +40,6 @@ public final class Commission {
   public static final String ACTIVE = "ACTIVE";
   public static final String WITHDRAWN = "WITHDRAWN";
 
-  /** Commission is money, so it is rounded like money, once, at the end. */
-  private static final int MONEY_SCALE = 2;
-
   /**
    * Units keep the scale every quantity in this platform keeps.
    *
@@ -50,6 +48,19 @@ public final class Commission {
    * cost this codebase two reports already — so what a band holds is scaled here, once.
    */
   private static final int UNIT_SCALE = 3;
+
+  /**
+   * A per-unit band starts at a whole number of units ("the first hundred"), shown at {@link
+   * #UNIT_SCALE} like any count.
+   *
+   * <p>Whole, not a quantity's three places, because the threshold travels: order-svc keeps each
+   * band's threshold on a commission statement line at the statement currency's minor units, and
+   * the fewest ISO 4217 gives is none (yen, won, pesos). A fractional count would be rounded there
+   * (2.125 to 2.13, 0.5 to 1) and the statement would show a band nobody set. Unit tiers are
+   * counted in whole units in practice, weighed goods included (the first 100 kg), so nothing a
+   * shop needs is refused.
+   */
+  private static final int UNIT_THRESHOLD_SCALE = 0;
 
   /**
    * One rate band.
@@ -96,6 +107,48 @@ public final class Commission {
     public boolean current() {
       return supersededBy == null && !withdrawn();
     }
+  }
+
+  /**
+   * A scheme with each band's threshold read back at its own scale: a percentage band's at the
+   * minor units of the business's currency (1000.00 pounds, 1000 yen, 250.125 dinars), a per-unit
+   * band's at a quantity's. Never fewer places than the figure has, so nothing kept is rounded away
+   * on the way out.
+   *
+   * @param salesMinorUnits the minor units of the business's currency
+   */
+  public static Scheme atScale(Scheme scheme, int salesMinorUnits) {
+    if (scheme == null) return null;
+    int places = scheme.perUnit() ? UNIT_SCALE : salesMinorUnits;
+    List<Band> bands =
+        scheme.bands().stream()
+            .map(
+                b ->
+                    new Band(
+                        b.id(),
+                        b.schemeId(),
+                        b.thresholdFrom() == null
+                            ? null
+                            : b.thresholdFrom()
+                                .setScale(
+                                    Math.max(
+                                        places, b.thresholdFrom().stripTrailingZeros().scale()),
+                                    RoundingMode.UNNECESSARY),
+                        b.rate()))
+            .toList();
+    return new Scheme(
+        scheme.id(),
+        scheme.tenantId(),
+        scheme.name(),
+        scheme.basis(),
+        scheme.currency(),
+        scheme.status(),
+        scheme.note(),
+        scheme.supersedes(),
+        scheme.supersededBy(),
+        scheme.createdAt(),
+        scheme.createdBy(),
+        bands);
   }
 
   private static final Comparator<Band> BY_THRESHOLD =
@@ -154,10 +207,17 @@ public final class Commission {
    * that makes sense of "the first hundred cost a pound each": the bands count the same thing the
    * rate is charged on.
    *
+   * <p>Commission is money, so it is rounded like money, once, at the end — to the minor units of
+   * the currency it is paid in (ISO 4217: whole yen, a dinar's third decimal), never an assumed
+   * two. A percentage of net sales is in the sales' currency, whose minor units the net sales are
+   * held to as well; a per-unit amount is in the scheme's own currency, and its units keep the
+   * platform's quantity scale.
+   *
    * @param amount the period's net sales for {@link #PERCENT_OF_NET}, its units for {@link
    *     #PER_UNIT}; negative or zero earns nothing
+   * @param moneyScale the minor units of the currency the commission is paid in
    */
-  public static List<Earned> earn(Scheme scheme, BigDecimal amount) {
+  public static List<Earned> earn(Scheme scheme, BigDecimal amount, int moneyScale) {
     if (scheme == null || amount == null || amount.signum() <= 0 || scheme.bands().isEmpty()) {
       return List.of();
     }
@@ -176,22 +236,36 @@ public final class Commission {
               : inBand
                   .multiply(band.rate())
                   .divide(BigDecimal.valueOf(100), 10, RoundingMode.HALF_UP);
-      int scale = scheme.perUnit() ? UNIT_SCALE : MONEY_SCALE;
+      int scale = scheme.perUnit() ? UNIT_SCALE : moneyScale;
       earned.add(
           new Earned(
               band.thresholdFrom().setScale(scale, RoundingMode.HALF_UP),
               band.rate(),
               inBand.setScale(scale, RoundingMode.HALF_UP),
-              commission.setScale(MONEY_SCALE, RoundingMode.HALF_UP)));
+              commission.setScale(moneyScale, RoundingMode.HALF_UP)));
     }
     return List.copyOf(earned);
   }
 
-  /** The total of what the bands earned, at money's own scale. */
-  public static BigDecimal total(List<Earned> earned) {
-    BigDecimal total = BigDecimal.ZERO.setScale(MONEY_SCALE);
+  /**
+   * The total of what the bands earned, at money's own scale.
+   *
+   * @param moneyScale the minor units of the currency the commission is paid in
+   */
+  public static BigDecimal total(List<Earned> earned, int moneyScale) {
+    BigDecimal total = BigDecimal.ZERO.setScale(moneyScale);
     for (Earned e : earned) total = total.add(e.commission());
     return total;
+  }
+
+  /**
+   * The minor units commission under a scheme is paid in: a per-unit scheme's own currency, else
+   * the sales' (a percentage of them, or no scheme at all).
+   */
+  private static int moneyScale(
+      Scheme scheme, String salesCurrency, ToIntFunction<String> minorUnits) {
+    return minorUnits.applyAsInt(
+        scheme != null && scheme.perUnit() ? scheme.currency() : salesCurrency);
   }
 
   /**
@@ -235,9 +309,15 @@ public final class Commission {
    *
    * @param schemes the schemes the assignments name, by id; one missing is treated as no
    *     arrangement
+   * @param salesCurrency the currency the net sales are in: the business's own
+   * @param minorUnits the minor units of a currency, as {@code Fx.minorUnits} gives them
    */
   public static List<Segment> rate(
-      List<Day> days, List<Assignment> assignments, Map<UUID, Scheme> schemes) {
+      List<Day> days,
+      List<Assignment> assignments,
+      Map<UUID, Scheme> schemes,
+      String salesCurrency,
+      ToIntFunction<String> minorUnits) {
     if (days == null || days.isEmpty()) return List.of();
     List<Day> ordered = days.stream().sorted(Comparator.comparing(Day::day)).toList();
     List<Segment> segments = new ArrayList<>();
@@ -251,7 +331,7 @@ public final class Commission {
       Scheme scheme = schemeId == null ? null : schemes.get(schemeId);
       UUID effective = scheme == null ? null : schemeId;
       if (open && !java.util.Objects.equals(effective, current)) {
-        segments.add(close(current, from, to, amount, schemes));
+        segments.add(close(current, from, to, amount, schemes, salesCurrency, minorUnits));
         open = false;
       }
       if (!open) {
@@ -264,7 +344,9 @@ public final class Commission {
       BigDecimal counted = counted(scheme, d);
       if (counted != null) amount = amount.add(counted);
     }
-    if (open) segments.add(close(current, from, to, amount, schemes));
+    if (open) {
+      segments.add(close(current, from, to, amount, schemes, salesCurrency, minorUnits));
+    }
     return List.copyOf(segments);
   }
 
@@ -275,13 +357,20 @@ public final class Commission {
   }
 
   private static Segment close(
-      UUID schemeId, LocalDate from, LocalDate to, BigDecimal amount, Map<UUID, Scheme> schemes) {
+      UUID schemeId,
+      LocalDate from,
+      LocalDate to,
+      BigDecimal amount,
+      Map<UUID, Scheme> schemes,
+      String salesCurrency,
+      ToIntFunction<String> minorUnits) {
     Scheme scheme = schemeId == null ? null : schemes.get(schemeId);
-    int scale = scheme != null && scheme.perUnit() ? UNIT_SCALE : MONEY_SCALE;
+    int moneyScale = moneyScale(scheme, salesCurrency, minorUnits);
+    int scale = scheme != null && scheme.perUnit() ? UNIT_SCALE : moneyScale;
     BigDecimal counted =
         (amount == null ? BigDecimal.ZERO : amount).setScale(scale, RoundingMode.HALF_UP);
-    List<Earned> earned = earn(scheme, counted);
-    return new Segment(schemeId, from, to, counted, earned, total(earned));
+    List<Earned> earned = earn(scheme, counted, moneyScale);
+    return new Segment(schemeId, from, to, counted, earned, total(earned, moneyScale));
   }
 
   /**
@@ -290,8 +379,16 @@ public final class Commission {
    * <p>The bands are the part worth refusing: a scheme whose first band does not start at zero
    * leaves the first sales of every period earning nothing, silently, and a shop would find out
    * from a statement somebody disputes.
+   *
+   * <p>A band starts where a sale can reach: at an amount of the business's currency, held to that
+   * currency's minor units (a band at 1000.5 yen is one no takings can equal), or at a whole number
+   * of units ({@link #UNIT_THRESHOLD_SCALE}: what every statement currency can hold unchanged).
+   *
+   * @param salesMinorUnits the minor units of the business's currency, as {@code Fx.minorUnits}
+   *     gives them; what a {@link #PERCENT_OF_NET} band's threshold is held to
    */
-  public static String problem(String basis, String currency, List<BigDecimal> thresholds) {
+  public static String problem(
+      String basis, String currency, List<BigDecimal> thresholds, int salesMinorUnits) {
     if (basis == null || !BASES.contains(basis)) {
       return "a commission basis is PERCENT_OF_NET or PER_UNIT";
     }
@@ -303,6 +400,20 @@ public final class Commission {
       return "a percentage is a ratio, not an amount: leave the currency out";
     }
     if (thresholds == null || thresholds.isEmpty()) return "a scheme needs at least one rate band";
+    int places = perUnit ? UNIT_THRESHOLD_SCALE : salesMinorUnits;
+    for (BigDecimal t : thresholds) {
+      if (t != null && t.stripTrailingZeros().scale() > places) {
+        return perUnit
+            ? "a per-unit band starts at a whole number of units: "
+                + t.toPlainString()
+                + " is not one"
+            : "a band starts at an amount of the business's currency, which has "
+                + places
+                + " decimal places: "
+                + t.toPlainString()
+                + " is not one";
+      }
+    }
     List<BigDecimal> sorted = thresholds.stream().sorted().toList();
     if (sorted.get(0).signum() != 0) {
       return "the first band starts at zero, or the first sales of every period earn nothing";

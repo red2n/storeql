@@ -123,8 +123,10 @@ class SagePackageTest {
     assertEquals("la3", chart.get(2).id());
     assertEquals(
         2,
-        stub.all().stream().filter(q -> q.path().startsWith("/v3.1/ledger_accounts")).count(),
-        "both pages read");
+        stub.all().stream()
+            .filter(q -> q.path().startsWith("/v3.1/ledger_accounts?items_per_page=200&page="))
+            .count(),
+        "both pages read, the paging sent as a query");
     assertEquals("biz-1", stub.last().header("X-Business"));
   }
 }

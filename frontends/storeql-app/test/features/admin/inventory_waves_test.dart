@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/inventory_waves_tab.dart';
@@ -33,6 +34,9 @@ class _Server implements HttpClientAdapter {
   final List<RequestOptions> requests = [];
   /// When set, saving the picks is refused, as the server does for more than was directed.
   bool refusePicks = false;
+
+  /// What the wave directs of its first line, as the server writes it.
+  String directed = '2';
 
   @override
   void close({bool force = false}) {}
@@ -63,7 +67,7 @@ class _Server implements HttpClientAdapter {
     }
     if (path.endsWith('/waves/$_wave')) {
       return jsonResponse('{"data":{"id":"$_wave","storeId":"$_store","status":"OPEN","createdAt":"2026-09-25T09:00:00Z","orderCount":1,"lines":['
-          '{"id":"$_line1","walkOrder":1,"zoneId":"$_zoneA","batchId":"b1","batchNo":"A-NEW","variantId":"01a0b400-0000-7000-8000-0000000000v1","directedQty":2,"orders":[{"orderId":"$_order1","qty":2}]},'
+          '{"id":"$_line1","walkOrder":1,"zoneId":"$_zoneA","batchId":"b1","batchNo":"A-NEW","variantId":"01a0b400-0000-7000-8000-0000000000v1","directedQty":$directed,"orders":[{"orderId":"$_order1","qty":$directed}]},'
           '{"id":"$_line2","walkOrder":2,"zoneId":"$_zoneB","batchId":"b2","batchNo":"A-OLD","variantId":"01a0b400-0000-7000-8000-0000000000v1","directedQty":1,"orders":[{"orderId":"$_order1","qty":1}]}]}}');
     }
     if (path.endsWith('/waves') && o.method == 'POST') {
@@ -151,8 +155,8 @@ void main() {
     final picks = server.requests.firstWhere((r) => r.path.endsWith('/waves/$_wave/picks'));
     final body = picks.data is String ? jsonDecode(picks.data as String) : picks.data;
     expect(body['lines'], [
-      {'lineId': _line1, 'pickedQty': 2},
-      {'lineId': _line2, 'pickedQty': 0},
+      {'lineId': _line1, 'pickedQty': '2'},
+      {'lineId': _line2, 'pickedQty': '0'},
     ]);
     expect(server.requests.where((r) => r.path.endsWith('/waves/$_wave/complete')).length, 1);
     // The completion request follows the saved picks, in that order.
@@ -193,5 +197,96 @@ void main() {
     expect(find.byKey(const Key('putaway-place-$_task')), findsNothing);
     expect(find.byKey(const Key('putaway-rule-new')), findsNothing);
     expect(find.byKey(const Key('awaiting-$_order1')), findsOneWidget);
+  });
+
+  // What was picked is a quantity, to three places, read the way the app's
+  // language writes a number and sent as the decimal typed, or refused under
+  // the line with nothing saved: parsed with a point, Romanian's 1,5 kg was
+  // saved as nothing picked, and completing the wave shorted the order.
+  group('picks are read as typed, or refused', () {
+    tearDown(() => Intl.defaultLocale = null);
+
+    for (final (locale, typed, sent) in [
+      ('ro', '1,5', '1.5'),
+      ('en_GB', '1.5', '1.5'),
+      ('en', '2', '2'),
+      ('pl', '1,125', '1.125'),
+      ('ar', '1٫5', '1.5'),
+    ]) {
+      testWidgets('in $locale, $typed picked is saved as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester);
+        await tester.tap(find.byKey(const Key('wave-$_wave')));
+        await tester.pumpAndSettle();
+        for (var i = 1; i <= typed.length; i++) {
+          await tester.enterText(find.byKey(const Key('wave-pick-$_line1')), typed.substring(0, i));
+          await tester.pump();
+        }
+        expect(tester.widget<TextField>(find.byKey(const Key('wave-pick-$_line1'))).decoration?.errorText, isNull);
+        await tester.tap(find.byKey(const Key('wave-save-picks')));
+        await tester.pumpAndSettle();
+        final picks = server.requests.firstWhere((r) => r.path.endsWith('/waves/$_wave/picks'));
+        final body = picks.data is String ? jsonDecode(picks.data as String) : picks.data;
+        expect(body['lines'], [
+          {'lineId': _line1, 'pickedQty': sent},
+          {'lineId': _line2, 'pickedQty': '1'},
+        ]);
+      });
+    }
+
+    // A line starts at what was directed, written the way the language writes
+    // it, so a pick nobody retyped is saved as directed: written with a point,
+    // Romanian's 1,5 kg started as 1.500 — fifteen hundred to its reader.
+    for (final (locale, shown) in [('ro', '1,5'), ('pl', '1,5'), ('en', '1.5'), ('ar', '1.5')]) {
+      testWidgets('in $locale, 1.5 directed starts as $shown and is saved as 1.5 untouched', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester);
+        server.directed = '1.5';
+        await tester.tap(find.byKey(const Key('wave-$_wave')));
+        await tester.pumpAndSettle();
+        final field = tester.widget<TextField>(find.byKey(const Key('wave-pick-$_line1')));
+        expect(field.controller!.text, shown);
+        expect(field.decoration?.errorText, isNull);
+        await tester.tap(find.byKey(const Key('wave-save-picks')));
+        await tester.pumpAndSettle();
+        final picks = server.requests.firstWhere((r) => r.path.endsWith('/waves/$_wave/picks'));
+        final body = picks.data is String ? jsonDecode(picks.data as String) : picks.data;
+        expect(body['lines'], [
+          {'lineId': _line1, 'pickedQty': '1.5'},
+          {'lineId': _line2, 'pickedQty': '1'},
+        ]);
+      });
+    }
+
+    // A line cleared is nothing picked; a line holding only a mark is not.
+    testWidgets('a pick left blank is saved as nothing picked', (tester) async {
+      final server = await _pump(tester);
+      await tester.tap(find.byKey(const Key('wave-$_wave')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('wave-pick-$_line1')), '  ');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('wave-save-picks')));
+      await tester.pumpAndSettle();
+      final picks = server.requests.firstWhere((r) => r.path.endsWith('/waves/$_wave/picks'));
+      final body = picks.data is String ? jsonDecode(picks.data as String) : picks.data;
+      expect(body['lines'][0], {'lineId': _line1, 'pickedQty': '0'});
+    });
+
+    for (final (locale, typed) in [('ro', '1.5'), ('en', '1,5'), ('pl', '1.500'), ('en_GB', '.'), ('ar', '-1')]) {
+      testWidgets('in $locale, "$typed" picked is refused and neither saved nor completed', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester);
+        await tester.tap(find.byKey(const Key('wave-$_wave')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byKey(const Key('wave-pick-$_line1')), typed);
+        await tester.pump();
+        expect(tester.widget<TextField>(find.byKey(const Key('wave-pick-$_line1'))).decoration?.errorText,
+            isNotNull);
+        await tester.tap(find.byKey(const Key('wave-save-picks')));
+        await tester.tap(find.byKey(const Key('wave-complete')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.path.contains('/waves/$_wave/') && r.method == 'POST'), isEmpty);
+      });
+    }
   });
 }

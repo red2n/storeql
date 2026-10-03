@@ -95,6 +95,14 @@ public class RecallRepository extends BaseOutboxRepository {
           + " AND (CAST(? AS date) IS NULL OR m.created_at >= CAST(? AS date))"
           + " ORDER BY m.created_at, m.id";
 
+  /** A recall's scope lines as the till checks an item against them; a WHERE follows. */
+  private static final String ACTIVE_ITEMS =
+      "SELECT r.id AS recall_id, r.reference, r.kind, r.hazard, r.customer_notice,"
+          + " r.opened_at, r.ended_at, r.status, i.id, i.variant_id, i.batch_no, i.expiry_from,"
+          + " i.expiry_to"
+          + " FROM recalls r JOIN recall_items i ON i.tenant_id = r.tenant_id"
+          + " AND i.recall_id = r.id";
+
   /** A held batch nobody has released. Expects the recall_batches row aliased {@code rb}. */
   private static final String NOT_RELEASED =
       " NOT EXISTS (SELECT 1 FROM recall_batch_releases x WHERE x.tenant_id = rb.tenant_id"
@@ -411,22 +419,43 @@ public class RecallRepository extends BaseOutboxRepository {
   /** Every scope line of every open recall: what the till checks each item against. */
   public List<ActiveItem> listActive(UUID tenantId) {
     return query(
-        "SELECT r.id AS recall_id, r.reference, r.kind, r.hazard, r.customer_notice, i.id,"
-            + " i.variant_id, i.batch_no, i.expiry_from, i.expiry_to"
-            + " FROM recalls r JOIN recall_items i ON i.tenant_id = r.tenant_id"
-            + " AND i.recall_id = r.id"
-            + " WHERE r.tenant_id = ? AND r.status = 'OPEN'"
-            + " ORDER BY r.opened_at, i.id",
+        ACTIVE_ITEMS + " WHERE r.tenant_id = ? AND r.status = 'OPEN' ORDER BY r.opened_at, i.id",
         ps -> ps.setObject(1, tenantId),
-        rs ->
-            new ActiveItem(
-                rs.getObject("recall_id", UUID.class),
-                rs.getString("reference"),
-                Kind.valueOf(rs.getString("kind")),
-                Hazard.valueOf(rs.getString("hazard")),
-                rs.getString("customer_notice"),
-                mapScope(rs)),
+        RecallRepository::mapActiveItem,
         "list active recall items");
+  }
+
+  /**
+   * Every scope line of every open recall, and of every recall closed or cancelled at or after
+   * {@code endedSince}: what a till sale rung up offline at that moment is judged against, since a
+   * recall that has ended since still covered it then.
+   *
+   * @param endedSince the earliest end to include; a recall that ended before it is left out
+   */
+  public List<ActiveItem> listOpenOrEndedSince(UUID tenantId, Instant endedSince) {
+    return query(
+        ACTIVE_ITEMS
+            + " WHERE r.tenant_id = ? AND (r.status = 'OPEN' OR r.ended_at >= ?)"
+            + " ORDER BY r.opened_at, i.id",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, utc(endedSince));
+        },
+        RecallRepository::mapActiveItem,
+        "list open or recently ended recall items");
+  }
+
+  private static ActiveItem mapActiveItem(ResultSet rs) throws SQLException {
+    return new ActiveItem(
+        rs.getObject("recall_id", UUID.class),
+        rs.getString("reference"),
+        Kind.valueOf(rs.getString("kind")),
+        Hazard.valueOf(rs.getString("hazard")),
+        rs.getString("customer_notice"),
+        instant(rs, "opened_at"),
+        instant(rs, "ended_at"),
+        Status.valueOf(rs.getString("status")),
+        mapScope(rs));
   }
 
   private List<Scope> listScope(UUID tenantId, UUID recallId) {

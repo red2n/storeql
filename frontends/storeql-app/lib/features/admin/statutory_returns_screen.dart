@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/auth/auth_notifier.dart';
+import 'widgets/business_wide_note.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -229,6 +231,11 @@ class StatutoryReturnsScreen extends ConsumerWidget {
           // The list is already inset by the page padding.
           padding: EdgeInsetsDirectional.only(bottom: AppSpacing.lg),
         ),
+        if (heldToStores(ref.watch(authNotifierProvider).value))
+          const Padding(
+            padding: EdgeInsetsDirectional.only(bottom: AppSpacing.md),
+            child: BusinessWideNote(key: Key('statutory-business-wide-note')),
+          ),
         calendar.when(
           loading: () => const LoadingView(label: 'Working out what is due…'),
           error: (e, _) => ErrorView(
@@ -393,7 +400,10 @@ class _ReturnCard extends ConsumerWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _StateChip(state: o.state),
-                    if (o.state != 'NOT_DUE')
+                    // Filing speaks for the business: refused to a manager held
+                    // to stores (BUSINESS_WIDE_ONLY), so it is not offered.
+                    if (o.state != 'NOT_DUE' &&
+                        !heldToStores(ref.watch(authNotifierProvider).value))
                       IconButton(
                         key: Key('statutory-file-${o.returnCode}-${o.periodStart}'),
                         tooltip: o.filed ? 'Correct this filing' : 'Record filing',

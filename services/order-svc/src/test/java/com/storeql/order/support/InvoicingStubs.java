@@ -52,6 +52,9 @@ public final class InvoicingStubs {
   public static final String V_ODD = Ids.newId().toString();
   public static final String V_PL = Ids.newId().toString();
 
+  /** Priced like V_STD, but product-svc no longer names it: an invoice line would have no name. */
+  public static final String V_NAMELESS = Ids.newId().toString();
+
   public static final Map<String, Item> CATALOGUE =
       Map.of(
           V_STD,
@@ -66,8 +69,8 @@ public final class InvoicingStubs {
           V_ODD, new Item("Odd lot", "ODD", "EA", null, "100.00", "0.20", "STD", "30.00"),
           // Poland's standard rate.
           V_PL,
-              new Item(
-                  "Kawa ziarnista 1 kg", "KAWA-1", "KG", null, "100.00", "0.23", "PL23", null));
+              new Item("Kawa ziarnista 1 kg", "KAWA-1", "KG", null, "100.00", "0.23", "PL23", null),
+          V_NAMELESS, new Item(null, "NONAME", "EA", null, "10.00", "0.20", "STD", null));
 
   /** The services order-svc reads and delivers to, with the catalogue priced and named. */
   public static JsonStub services() {
@@ -152,7 +155,8 @@ public final class InvoicingStubs {
     String ids = call.query() == null ? "" : call.query().replaceFirst("^.*ids=", "");
     for (String id : ids.split("(,|%2C)")) {
       Item item = CATALOGUE.get(id);
-      if (item == null) continue;
+      // An item the catalogue holds no name for is one product-svc does not name: left out.
+      if (item == null || item.name() == null) continue;
       JsonObjectBuilder o =
           Json.createObjectBuilder()
               .add("variantId", id)

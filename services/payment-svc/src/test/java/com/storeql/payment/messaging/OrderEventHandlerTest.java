@@ -11,11 +11,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * OrderEventHandler drives the automatic-refund path. OrderReturned refunds only for
- * ORIGINAL-tender returns; OrderCancelled refunds whatever is still captured (null amount);
- * other/malformed events are skipped without throwing so the consumer loop acks them. payment-svc
- * has no mocking framework on the test classpath, so a capturing subclass stands in for {@link
- * PaymentService}.
+ * OrderEventHandler drives the automatic-refund path. OrderReturned refunds only for ORIGINAL,
+ * STORE_CREDIT and GIFT_CARD returns; OrderCancelled refunds whatever is still captured (null
+ * amount); other/malformed events are skipped without throwing so the consumer loop acks them.
+ * payment-svc has no mocking framework on the test classpath, so a capturing subclass stands in for
+ * {@link PaymentService}.
  */
 class OrderEventHandlerTest {
 
@@ -32,6 +32,45 @@ class OrderEventHandlerTest {
     BigDecimal amount;
     String reason;
     String kind;
+    ReturnRefund ret;
+    ExchangeReturn exchange;
+    UUID redemption;
+    UUID giftCardOrder;
+    BigDecimal giftCardAmount;
+
+    @Override
+    public void exchangeForOrderEvent(
+        UUID eventId, String consumer, UUID tenantId, UUID orderId, ExchangeReturn ex) {
+      this.exchange = ex;
+    }
+
+    @Override
+    public boolean recordGiftCardRedemption(
+        UUID eventId,
+        String consumer,
+        UUID tenantId,
+        UUID redemptionId,
+        UUID orderId,
+        UUID storeId,
+        BigDecimal amount) {
+      this.redemption = redemptionId;
+      this.giftCardOrder = orderId;
+      this.giftCardAmount = amount;
+      return true;
+    }
+
+    @Override
+    public void refundReturnForOrderEvent(
+        UUID eventId,
+        String consumer,
+        UUID tenantId,
+        UUID orderId,
+        BigDecimal requestedAmount,
+        String reason,
+        ReturnRefund ret) {
+      refundForOrderEvent(eventId, consumer, tenantId, orderId, requestedAmount, reason, null);
+      this.ret = ret;
+    }
 
     @Override
     public void refundForOrderEvent(
@@ -95,8 +134,82 @@ class OrderEventHandlerTest {
   }
 
   @Test
-  void storeCreditReturnDoesNotReversePayment() {
+  void storeCreditAndGiftCardReturnsAreRecordedUnderTheirOwnMethod() {
     handler.handle(returned("STORE_CREDIT", "25.00"));
+    assertEquals(1, service.calls);
+    assertEquals("STORE_CREDIT", service.ret.method());
+    assertEquals(new BigDecimal("25.00"), service.amount);
+
+    handler.handle(returned("GIFT_CARD", "5.00"));
+    assertEquals(2, service.calls);
+    assertEquals("GIFT_CARD", service.ret.method());
+  }
+
+  @Test
+  void exchangeReturnGoesToTheExchangePathWithBothAmounts() {
+    UUID newOrder = Ids.newId();
+    handler.handle(
+        returned("EXCHANGE", "25.00")
+            .replace(
+                "\"currency\"",
+                "\"exchangeOrderId\":\"" + newOrder + "\",\"exchangeAmount\":20.00,\"currency\""));
+
+    assertEquals(0, service.calls, "an exchange is not a plain refund");
+    assertEquals(newOrder, service.exchange.exchangeOrderId());
+    assertEquals(new BigDecimal("20.00"), service.exchange.exchangeAmount());
+    assertEquals(new BigDecimal("25.00"), service.exchange.refundAmount());
+  }
+
+  @Test
+  void exchangeWithoutANewOrderIsSkipped() {
+    handler.handle(returned("EXCHANGE", "25.00"));
+
+    assertNull(service.exchange);
+    assertEquals(0, service.calls);
+  }
+
+  @Test
+  void giftCardRedeemedBecomesATender() {
+    UUID redemption = Ids.newId();
+    handler.handle(
+        "{\"eventId\":\""
+            + EVENT
+            + "\",\"eventType\":\"GiftCardRedeemed\",\"tenantId\":\""
+            + TENANT
+            + "\",\"redemptionId\":\""
+            + redemption
+            + "\",\"giftCardId\":\""
+            + Ids.newId()
+            + "\",\"orderId\":\""
+            + ORDER
+            + "\",\"storeId\":\""
+            + Ids.newId()
+            + "\",\"amount\":12.50,\"currency\":\"GBP\"}");
+
+    assertEquals(redemption, service.redemption);
+    assertEquals(ORDER, service.giftCardOrder);
+    assertEquals(new BigDecimal("12.50"), service.giftCardAmount);
+  }
+
+  @Test
+  void aNoReceiptReturnAnnouncementIsIgnored() {
+    handler.handle(
+        "{\"eventId\":\""
+            + EVENT
+            + "\",\"eventType\":\"NoReceiptReturnRecorded\",\"tenantId\":\""
+            + TENANT
+            + "\",\"orderId\":\""
+            + ORDER
+            + "\",\"refundAmount\":5.00}");
+
+    assertEquals(0, service.calls);
+    assertNull(service.exchange);
+    assertNull(service.redemption);
+  }
+
+  @Test
+  void anUnknownRefundMethodIsNotOurs() {
+    handler.handle(returned("CHEQUE", "25.00"));
 
     assertEquals(0, service.calls);
   }

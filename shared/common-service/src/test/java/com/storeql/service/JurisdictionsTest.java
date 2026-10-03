@@ -124,6 +124,29 @@ class JurisdictionsTest {
     assertTrue(j.cashLimit(TENANT, null, "GBP", LocalDate.of(2026, 9, 16)).isEmpty());
   }
 
+  private static final String LIMITED =
+      "{\"data\":{\"country\":\"DE\",\"obligations\":["
+          + "{\"code\":\"X_PERIOD\",\"scope\":\"EU\",\"effectiveFrom\":\"2018-05-25\","
+          + "\"limitValue\":30,\"limitUnit\":\"DAYS\",\"qualifier\":\"EMAIL\"},"
+          + "{\"code\":\"X_PLAIN\",\"scope\":\"DE\",\"effectiveFrom\":\"2018-05-25\"}]}}";
+
+  @Test
+  @DisplayName(
+      "An obligation with a limit reaches a consuming service with its number, unit and case")
+  void anObligationLimitReachesTheConsumer() {
+    var j = Jurisdictions.forTest(profiles("DE"), (t, c) -> Optional.of(LIMITED), new Hands());
+    var rows = j.obligations(TENANT, "DE");
+    var limited = rows.stream().filter(o -> o.code().equals("X_PERIOD")).findFirst().orElseThrow();
+    assertEquals(0, limited.limitValue().compareTo(new java.math.BigDecimal("30")));
+    assertEquals("DAYS", limited.limitUnit());
+    assertEquals("EMAIL", limited.qualifier());
+    assertTrue(limited.hasLimit());
+    var plain = rows.stream().filter(o -> o.code().equals("X_PLAIN")).findFirst().orElseThrow();
+    assertFalse(plain.hasLimit(), "a row with no limit is read as before");
+    assertEquals(null, plain.limitValue());
+    assertEquals(null, plain.qualifier());
+  }
+
   private static TenantProfiles profiles(String country) {
     return TenantProfiles.forTest(
         id -> Optional.of("{\"data\":{\"currency\":\"GBP\",\"country\":\"" + country + "\"}}"),

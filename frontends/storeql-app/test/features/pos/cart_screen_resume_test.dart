@@ -1,7 +1,9 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/pos/cart_screen.dart';
 import 'package:storeql_app/features/pos/pos_providers.dart';
 import 'package:storeql_app/features/pos/pos_session_providers.dart';
@@ -21,8 +23,26 @@ class _NoopPosSessionNotifier extends PosSessionNotifier {
   Future<void> restore() async {}
 }
 
+/// Answers the resume POST with the held sale's basket.
+class _ResumeOk implements HttpClientAdapter {
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions o, Stream<List<int>>? s, Future<void>? c) async =>
+      ResponseBody.fromString(
+          '{"data":{"id":"p1","subtotal":5.0,"items":[{"variantId":"held-1","qty":1,"unitPrice":5.0}]}}', 200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+}
+
+class _Api implements ApiClient {
+  @override
+  Dio dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = _ResumeOk();
+}
+
 Widget _scope(List<Override> overrides) => ProviderScope(
       overrides: [
+        apiClientProvider.overrideWithValue(_Api()),
         // No stores configured — posShowPricesProvider defaults to true and
         // _StoreSelector renders the placeholder without hitting the network.
         posStoresProvider.overrideWith((ref) async => const []),

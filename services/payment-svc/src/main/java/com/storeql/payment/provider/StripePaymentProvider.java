@@ -1,5 +1,6 @@
 package com.storeql.payment.provider;
 
+import com.storeql.payment.config.Jsons;
 import com.storeql.payment.domain.Domain.PaymentIntent;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
@@ -7,7 +8,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -238,7 +238,8 @@ public class StripePaymentProvider implements PaymentProvider {
    */
   static WebhookEvent parseEvent(byte[] rawBody) {
     try (JsonReader reader =
-        Json.createReader(new StringReader(new String(rawBody, StandardCharsets.UTF_8)))) {
+        Jsons.PROVIDER.createReader(
+            new StringReader(new String(rawBody, StandardCharsets.UTF_8)))) {
       JsonObject root = reader.readObject();
       String type = root.getString("type", "");
       JsonObject intent = root.getJsonObject("data").getJsonObject("object");
@@ -517,7 +518,7 @@ public class StripePaymentProvider implements PaymentProvider {
         if (status >= 400) {
           throw new ProviderException("Stripe rejected the request: " + body, false, null);
         }
-        try (JsonReader reader = Json.createReader(new StringReader(body))) {
+        try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
           return reader.readObject();
         }
       }

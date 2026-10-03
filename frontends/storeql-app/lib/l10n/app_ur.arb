@@ -56,5 +56,10 @@
   "resetPasswordDone": "پاس ورڈ بدل دیا گیا — اس سے سائن ان کریں۔",
   "resetPasswordDoneStorefront": "اسٹور فرنٹ سے خریداری کر رہے ہیں؟ آپ دکان سے سائن ان کر سکتے ہیں۔",
   "resetPasswordTokenInvalid": "یہ لنک ختم ہو گیا ہے یا پہلے ہی استعمال ہو چکا ہے — نیا لنک طلب کریں۔",
-  "resetPasswordRequestNew": "نیا لنک طلب کریں"
+  "resetPasswordRequestNew": "نیا لنک طلب کریں",
+  "startBusiness": "کاروبار شروع کریں",
+  "startBusinessTitle": "اپنا کاروبار شروع کریں",
+  "startBusinessIntro": "وہ لاگ ان بنائیں جس سے آپ اپنا کاروبار چلائیں گے۔ اس کے بعد آپ کاروبار اور اس کی پہلی دکان ترتیب دیں گے۔",
+  "fieldPasswordConfirm": "پاس ورڈ کی تصدیق کریں",
+  "fieldPasswordMismatch": "یہ اوپر دیے گئے پاس ورڈ سے میل نہیں کھاتا۔"
 }

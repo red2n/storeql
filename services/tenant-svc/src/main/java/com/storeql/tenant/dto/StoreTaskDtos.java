@@ -1,5 +1,6 @@
 package com.storeql.tenant.dto;
 
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -33,6 +34,7 @@ public final class StoreTaskDtos {
       @Schema(description = "OPENING, CLOSING, DAILY, WEEKLY or AD_HOC.") @NotBlank String kind,
       @Schema(description = "One store, or omit for every store the business has.") String storeId,
       @Schema(description = "ISO day numbers, 1 = Monday; empty means every day.")
+          @JsonbTypeDeserializer(WholeNumbers.ExactIntSet.class)
           Set<Integer> daysOfWeek,
       @Schema(description = "When it falls due, HH:mm, on the store's own clock.")
           @NotBlank
@@ -43,6 +45,7 @@ public final class StoreTaskDtos {
                   "Minutes after it falls due before it counts as missed; 60 when omitted.")
           @Min(0)
           @Max(1440)
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer graceMinutes,
       @Schema(description = "Whose job it is, as staff roles are named; omit for anybody on shift.")
           @Size(max = 40)

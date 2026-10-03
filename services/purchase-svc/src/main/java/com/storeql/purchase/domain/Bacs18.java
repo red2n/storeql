@@ -243,6 +243,8 @@ public final class Bacs18 {
     if (amount == null || amount.signum() <= 0) {
       throw new IllegalArgumentException(who + " is paid nothing");
     }
+    // Two places on purpose, not as an assumption about money: Bacs moves sterling only (the
+    // service writes this file for a GBP run alone), and the scheme counts it in whole pence.
     if (amount.stripTrailingZeros().scale() > 2) {
       throw new IllegalArgumentException(who + " is paid in fractions of a penny");
     }

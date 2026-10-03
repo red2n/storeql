@@ -42,6 +42,8 @@ public final class SalesPosting {
       new Control(Domain.CODE_GIFT_CARD_LIABILITY, Domain.NAME_GIFT_CARD_LIABILITY);
   public static final Control STORE_CREDIT_LIABILITY =
       new Control(Domain.CODE_STORE_CREDIT_LIABILITY, Domain.NAME_STORE_CREDIT_LIABILITY);
+  public static final Control EXCHANGE_CLEARING =
+      new Control(Domain.CODE_EXCHANGE_CLEARING, Domain.NAME_EXCHANGE_CLEARING);
   public static final Control UNALLOCATED_RECEIPTS =
       new Control(Domain.CODE_UNALLOCATED_RECEIPTS, Domain.NAME_UNALLOCATED_RECEIPTS);
 
@@ -59,6 +61,7 @@ public final class SalesPosting {
       case "CARD", "UPI", "WALLET" -> CARD_CLEARING;
       case "GIFT_CARD", "VOUCHER" -> GIFT_CARD_LIABILITY;
       case "STORE_CREDIT" -> STORE_CREDIT_LIABILITY;
+      case "EXCHANGE" -> EXCHANGE_CLEARING;
       default -> UNALLOCATED_RECEIPTS;
     };
   }
@@ -99,11 +102,13 @@ public final class SalesPosting {
 
   /**
    * A refund: Cr each tender's control account with its share; Dr sales and VAT output in the
-   * sale's own ratio of VAT to total, the VAT rounded to the minor unit and sales taking the
+   * sale's own ratio of VAT to total, the VAT rounded to the sale currency's own minor units (ISO
+   * 4217: whole yen, thousandths of a dinar — never a fixed two places) and sales taking the
    * remainder — or Dr clearing when the sale was never confirmed. Shares of nothing are ignored.
    *
    * @param saleTotal the confirmed sale's total, when there is one
    * @param saleTax the VAT inside it
+   * @param currency the confirmed sale's ISO 4217 currency (what the VAT share is rounded in)
    * @param confirmed whether the ledger has the sale
    */
   public static List<NominalLedgerEntry> refund(
@@ -113,8 +118,42 @@ public final class SalesPosting {
       List<Allocation> allocations,
       BigDecimal saleTotal,
       BigDecimal saleTax,
+      String currency,
       boolean confirmed,
       LocalDate date) {
+    return refund(
+        tenantId,
+        orderId,
+        storeId,
+        allocations,
+        saleTotal,
+        saleTax,
+        currency,
+        confirmed,
+        date,
+        null);
+  }
+
+  /**
+   * As above, knowing how much of the sale's revenue earlier refunds already took back. A refund
+   * takes back sales and VAT only up to what the confirmed sale still holds; what is refunded
+   * beyond it is not revenue (it is the value of a gift card the sale carried, which the void's
+   * {@code GiftCardLoadReversed} credited to clearing) and is debited to clearing, so a voided sale
+   * of goods and a card nets to nothing on every account.
+   *
+   * @param revenueRefunded sales plus VAT already debited by this order's earlier refunds, or null
+   */
+  public static List<NominalLedgerEntry> refund(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      List<Allocation> allocations,
+      BigDecimal saleTotal,
+      BigDecimal saleTax,
+      String currency,
+      boolean confirmed,
+      LocalDate date,
+      BigDecimal revenueRefunded) {
     Map<Control, BigDecimal> byControl = new LinkedHashMap<>();
     BigDecimal refunded = BigDecimal.ZERO;
     for (Allocation a : allocations) {
@@ -133,15 +172,59 @@ public final class SalesPosting {
             storeId);
     if (confirmed && saleTotal != null && saleTotal.signum() > 0) {
       BigDecimal tax = saleTax == null ? BigDecimal.ZERO : saleTax.max(BigDecimal.ZERO);
+      BigDecimal left =
+          saleTotal.subtract(revenueRefunded == null ? BigDecimal.ZERO : revenueRefunded);
+      BigDecimal ofSale = refunded.min(left.max(BigDecimal.ZERO));
+      // One rounding, straight to the sale currency's minor units (a working scale first would
+      // round twice).
       BigDecimal vat =
-          refunded.multiply(tax).divide(saleTotal, 2, RoundingMode.HALF_UP).min(refunded);
-      p.debit(Domain.CODE_SALES, Domain.NAME_SALES, refunded.subtract(vat))
-          .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat);
+          ofSale
+              .multiply(tax)
+              .divide(saleTotal, Money.scaleOf(currency), RoundingMode.HALF_UP)
+              .min(ofSale);
+      p.debit(Domain.CODE_SALES, Domain.NAME_SALES, ofSale.subtract(vat))
+          .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat)
+          .debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, refunded.subtract(ofSale));
     } else {
       p.debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, refunded);
     }
     byControl.forEach((control, amount) -> p.credit(control.code(), control.name(), amount));
     return p.build();
+  }
+
+  /**
+   * A return with no receipt (order-svc announces it, there being no sale for payment-svc to
+   * refund): Dr sales net of VAT and Dr VAT output / Cr the store credit or gift card liability the
+   * refund was made to. A refund method that is neither is refused rather than guessed.
+   *
+   * @param returnId the return, the journal's source
+   */
+  public static List<NominalLedgerEntry> noReceiptReturn(
+      UUID tenantId,
+      UUID returnId,
+      UUID storeId,
+      String refundMethod,
+      BigDecimal amount,
+      BigDecimal tax,
+      LocalDate date) {
+    if (amount == null || amount.signum() <= 0) return List.of();
+    Control liability = controlFor(refundMethod);
+    if (liability != STORE_CREDIT_LIABILITY && liability != GIFT_CARD_LIABILITY) {
+      throw new IllegalArgumentException(
+          "a no-receipt return refunds to store credit or a gift card");
+    }
+    BigDecimal vat = tax == null ? BigDecimal.ZERO : tax.max(BigDecimal.ZERO).min(amount);
+    return LedgerPosting.of(
+            tenantId,
+            date,
+            "Return without receipt " + Handle.of(returnId),
+            Domain.SOURCE_NO_RECEIPT_RETURN,
+            returnId,
+            storeId)
+        .debit(Domain.CODE_SALES, Domain.NAME_SALES, amount.subtract(vat))
+        .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat)
+        .credit(liability.code(), liability.name(), amount)
+        .build();
   }
 
   /**

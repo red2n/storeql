@@ -1,6 +1,7 @@
 package com.storeql.payment.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.payment.domain.CashExpectation;
 import com.storeql.payment.domain.Domain.CashDrop;
 import com.storeql.payment.domain.Domain.TillSession;
 import com.storeql.payment.dto.Dtos.CashDropResponse;
@@ -171,24 +172,68 @@ public class CashManagementService {
     if (!TillSession.STATUS_OPEN.equals(session.status())) {
       throw ApiException.badRequest("TILL_CLOSED", "Till session is already closed");
     }
-    TillReportResponse report = buildReport(session, req.countedCash());
-    BigDecimal overShort =
-        req.countedCash()
-            .subtract(
-                report.expectedCashInTill() != null
-                    ? report.expectedCashInTill()
-                    : BigDecimal.ZERO);
-    repo.closeTill(tenantId, sessionId, req.countedCash(), overShort);
-    return report;
+    Instant closedAt = Instant.now();
+    TillReportResponse open = buildReport(session, null, closedAt, null);
+    BigDecimal overShort = cashExpectation(open, session).overShort(req.countedCash());
+    String note = req.note() == null || req.note().isBlank() ? null : req.note().strip();
+    // Hook: the approvals mechanism's action "till.close-variance" (a person other than the closer,
+    // holding till.manage, agrees a close whose |overShort| is above the business's ceiling) is
+    // checked HERE, before the write, once the approvals block exists (intent/approvals.md). The
+    // business's variance tolerance (note required above it) belongs here too.
+    UUID closedBy = ctx.userId();
+    repo.closeTill(
+        tenantId,
+        sessionId,
+        req.countedCash(),
+        overShort,
+        closedAt,
+        closedBy,
+        note,
+        Events.tillSessionClosed(
+            tenantId,
+            sessionId,
+            session.storeId(),
+            session.openedBy(),
+            closedBy,
+            session.openedAt(),
+            closedAt,
+            session.floatAmount(),
+            open.expectedCashInTill(),
+            req.countedCash(),
+            overShort,
+            note));
+    return buildReport(session, req.countedCash(), closedAt, note);
+  }
+
+  private static CashExpectation cashExpectation(TillReportResponse r, TillSession session) {
+    return new CashExpectation(
+        session.floatAmount(),
+        r.cashSales(),
+        r.cashRefunds(),
+        r.payIns(),
+        r.payOuts(),
+        r.cashDropsTotal());
   }
 
   private TillReportResponse buildReport(TillSession session, BigDecimal countedCash) {
-    Instant from = session.openedAt();
     Instant to = session.closedAt() != null ? session.closedAt() : Instant.now();
+    return buildReport(session, countedCash, to, null);
+  }
+
+  /**
+   * The session's figures over {@code [openedAt, to)}: tenders and refunds at the session's own
+   * store only (tenant, then store, then the window), the session's own drops and pay-ins and
+   * pay-outs, and the expectation from the one pure formula. Until registers exist the basis is the
+   * window at the store.
+   */
+  private TillReportResponse buildReport(
+      TillSession session, BigDecimal countedCash, Instant to, String note) {
+    Instant from = session.openedAt();
 
     List<Object[]> salesRows =
         repo.sumTendersByMethod(session.tenantId(), session.storeId(), from, to);
-    List<Object[]> refundRows = repo.sumRefundsByMethod(session.tenantId(), from, to);
+    List<Object[]> refundRows =
+        repo.sumRefundsByMethod(session.tenantId(), session.storeId(), from, to);
 
     Map<String, BigDecimal> sales = new HashMap<>();
     for (Object[] row : salesRows) {
@@ -216,19 +261,22 @@ public class CashManagementService {
     BigDecimal netSales = grossSales.subtract(totalRefunds);
 
     BigDecimal cashDropsTotal = repo.sumCashDrops(session.tenantId(), session.id());
+    BigDecimal payIns = repo.sumMovements(session.tenantId(), session.id(), "PAY_IN");
+    BigDecimal payOuts = repo.sumMovements(session.tenantId(), session.id(), "PAY_OUT");
     BigDecimal cashSales = sales.getOrDefault("CASH", BigDecimal.ZERO);
     BigDecimal cashRefunds = refunds.getOrDefault("CASH", BigDecimal.ZERO);
-    BigDecimal expectedCash =
-        session.floatAmount().add(cashSales).subtract(cashRefunds).subtract(cashDropsTotal);
-
-    BigDecimal overShort = countedCash != null ? countedCash.subtract(expectedCash) : null;
+    CashExpectation expectation =
+        new CashExpectation(
+            session.floatAmount(), cashSales, cashRefunds, payIns, payOuts, cashDropsTotal);
+    BigDecimal expectedCash = expectation.expected();
+    BigDecimal overShort = countedCash != null ? expectation.overShort(countedCash) : null;
 
     return new TillReportResponse(
         session.id(),
         session.storeId(),
         session.openedBy(),
         session.openedAt(),
-        session.closedAt(),
+        session.closedAt() != null ? session.closedAt() : (countedCash != null ? to : null),
         session.floatAmount(),
         Map.copyOf(summary),
         cashDropsTotal,
@@ -237,7 +285,13 @@ public class CashManagementService {
         overShort,
         grossSales,
         totalRefunds,
-        netSales);
+        netSales,
+        cashSales,
+        cashRefunds,
+        payIns,
+        payOuts,
+        "WINDOW",
+        note);
   }
 
   private TillSession requireSession(UUID tenantId, UUID sessionId, TenantContext ctx) {

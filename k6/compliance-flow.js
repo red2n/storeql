@@ -617,7 +617,7 @@ export default function ({ tenant, rival, storeA, storeB, variantId, cigs, cashi
     const theirs = call('GET', `/api/order-svc/admin/fiscal-receipts/export?storeId=${store.id}&series=MAIN&period=${year}&format=dsfinvk`, { token: rival.owner.token });
     truthy("a rival tenant's owner gets no file for our store", theirs.status === 503 || theirs.status === 404, theirs.status);
 
-    expect(call('POST', `/api/order-svc/orders/${cash.orderId}/void`, { token: owner, body: { reason: 'wrong item' } }), 'a stamped sale can be voided', 200);
+    expect(call('POST', `/api/order-svc/orders/${cash.orderId}/void`, { token: owner, idem: true, body: { reason: 'wrong item' } }), 'a stamped sale can be voided', 200);
     const voided = call('GET', `/api/order-svc/admin/orders/${cash.orderId}/fiscal-receipt`, { token: owner });
     truthy('and keeps its number and its stamp', !!data(voided).voidedAt && data(voided).tse && data(voided).tse.signature === stamp.signature, data(voided));
   });

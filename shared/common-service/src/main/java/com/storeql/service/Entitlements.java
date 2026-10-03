@@ -201,6 +201,7 @@ public class Entitlements {
       return Allowance.unrestricted();
     }
     cache.put(tenantId, new Cached(read, now.plus(TTL)));
+    CacheSweep.trim(cache, c -> !c.expiresAt().isAfter(now));
     return read;
   }
 

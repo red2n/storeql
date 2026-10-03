@@ -130,8 +130,8 @@ public record LoyaltyProgramme(
 
   /**
    * Why a programme cannot be honoured, or null when it can: months out of range, no tiers or more
-   * than six, a first tier not at zero, thresholds not ascending, a repeated or ill-formed name, a
-   * multiplier below one or above ten.
+   * than six, a first tier not at zero, thresholds not ascending or that points cannot hold, a
+   * repeated or ill-formed name, a multiplier below one or above ten.
    */
   public static String validate(Integer expiryMonths, Integer qualifyingMonths, List<Tier> tiers) {
     if (expiryMonths != null && (expiryMonths < 1 || expiryMonths > MAX_EXPIRY_MONTHS)) {
@@ -164,6 +164,9 @@ public record LoyaltyProgramme(
       if (t.threshold() == null || t.threshold().signum() < 0) {
         return "a threshold is zero or more";
       }
+      if (!fitsPoints(t.threshold())) {
+        return "a threshold is a number of points with at most two decimal places";
+      }
       if (last != null && t.threshold().compareTo(last) <= 0) {
         return "thresholds must be ascending";
       }
@@ -176,6 +179,16 @@ public record LoyaltyProgramme(
       }
     }
     return null;
+  }
+
+  /**
+   * Whether a figure of points is one the ledger can hold, which is NUMERIC(18,2): two decimal
+   * places at most and sixteen digits before the point. A threshold beyond that would be rounded to
+   * another figure, or refused by the database as an error nobody can read.
+   */
+  private static boolean fitsPoints(BigDecimal points) {
+    BigDecimal plain = points.stripTrailingZeros();
+    return plain.scale() <= 2 && plain.precision() - plain.scale() <= 16;
   }
 
   private static Instant plusMonths(Instant at, int months) {

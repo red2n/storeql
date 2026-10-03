@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -13,6 +14,7 @@ import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_picker.dart';
 
 // ---------------------------------------------------------------------------
@@ -503,7 +505,17 @@ class SetDutyRateDialog extends ConsumerStatefulWidget {
 class _SetDutyRateDialogState extends ConsumerState<SetDutyRateDialog> {
   String? _productId;
   String? _variantId;
+
+  /// The duty one unit crystallises: money per unit in the home currency, to
+  /// six places as a per-unit figure is worked out (70cl at 40% of a rate a
+  /// litre of alcohol), read the way the app's language writes a number
+  /// ([AmountMarks]) and sent as the decimal typed. One that cannot be read
+  /// is refused under the field and nothing is set: read with a point,
+  /// Romanian's 8,86 went as -1.
+  static const _dutyShape = AmountShape(12, 6);
+  final _marks = AmountMarks.ofApp();
   final _duty = TextEditingController();
+  bool get _refused => figureRefused(_marks, [(_duty, _dutyShape)]);
   final _note = TextEditingController();
   bool _busy = false;
   String? _refusal;
@@ -516,8 +528,14 @@ class _SetDutyRateDialogState extends ConsumerState<SetDutyRateDialog> {
   }
 
   Future<void> _save() async {
+    if (_refused) return;
+    final duty = figureOf(_duty, _dutyShape, _marks);
     if (_variantId == null) {
       setState(() => _refusal = 'Pick the product and its variant.');
+      return;
+    }
+    if (duty == null) {
+      setState(() => _refusal = 'Say what duty one unit crystallises.');
       return;
     }
     setState(() {
@@ -528,7 +546,8 @@ class _SetDutyRateDialogState extends ConsumerState<SetDutyRateDialog> {
       await ref.read(apiClientProvider).dio.put(
         '/${ApiConstants.inventory}$_bond/duty-rates/$_variantId',
         data: {
-          'dutyPerUnit': double.tryParse(_duty.text.trim()) ?? -1,
+          // The plain decimal typed: JSON-B reads it exactly.
+          'dutyPerUnit': duty,
           if (_note.text.trim().isNotEmpty) 'note': _note.text.trim(),
         },
       );
@@ -565,14 +584,15 @@ class _SetDutyRateDialogState extends ConsumerState<SetDutyRateDialog> {
                 onVariant: (v) => setState(() => _variantId = v),
               ),
               const SizedBox(height: 8),
-              TextField(
-                key: const Key('duty-per-unit'),
+              FigureField(
+                fieldKey: const Key('duty-per-unit'),
                 controller: _duty,
-                decoration: const InputDecoration(
-                  labelText: 'Duty one unit crystallises *',
-                  helperText: 'In your own currency',
-                ),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                shape: _dutyShape,
+                marks: _marks,
+                label: 'Duty one unit crystallises *',
+                helper: 'In your own currency',
+                hint: _marks.hint(2),
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: 8),
               TextField(
@@ -590,7 +610,10 @@ class _SetDutyRateDialogState extends ConsumerState<SetDutyRateDialog> {
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('duty-save'), onPressed: _busy ? null : _save, child: const Text('Set')),
+        FilledButton(
+            key: const Key('duty-save'),
+            onPressed: _busy || _refused ? null : _save,
+            child: const Text('Set')),
       ],
     );
   }
@@ -609,7 +632,14 @@ class _ReleaseFromBondDialogState extends ConsumerState<ReleaseFromBondDialog> {
   String? _storeId;
   String? _productId;
   String? _variantId;
+
+  /// What leaves bond: a quantity to three places, read the way the app's
+  /// language writes a number ([AmountMarks]) and sent as the decimal typed.
+  /// One that cannot be read is refused under the field and nothing leaves:
+  /// read with a point, Romanian's 2,5 was released as none.
+  final _marks = AmountMarks.ofApp();
   final _qty = TextEditingController();
+  bool get _refused => figureRefused(_marks, [(_qty, AmountShape.quantity)]);
   final _reference = TextEditingController();
   bool _busy = false;
   String? _refusal;
@@ -622,8 +652,14 @@ class _ReleaseFromBondDialogState extends ConsumerState<ReleaseFromBondDialog> {
   }
 
   Future<void> _save() async {
+    if (_refused) return;
+    final qty = figureOf(_qty, AmountShape.quantity, _marks);
     if (_storeId == null || _variantId == null) {
       setState(() => _refusal = 'Pick the bonded store, the product and its variant.');
+      return;
+    }
+    if (qty == null || qty == '0') {
+      setState(() => _refusal = 'Say how much leaves bond.');
       return;
     }
     setState(() {
@@ -636,7 +672,8 @@ class _ReleaseFromBondDialogState extends ConsumerState<ReleaseFromBondDialog> {
         data: {
           'storeId': _storeId,
           'variantId': _variantId,
-          'qty': double.tryParse(_qty.text.trim()) ?? 0,
+          // The plain decimal typed: JSON-B reads it exactly.
+          'qty': qty,
           if (_reference.text.trim().isNotEmpty) 'reference': _reference.text.trim(),
         },
       );
@@ -698,11 +735,13 @@ class _ReleaseFromBondDialogState extends ConsumerState<ReleaseFromBondDialog> {
                 onVariant: (v) => setState(() => _variantId = v),
               ),
               const SizedBox(height: 8),
-              TextField(
-                key: const Key('release-qty'),
+              FigureField(
+                fieldKey: const Key('release-qty'),
                 controller: _qty,
-                decoration: const InputDecoration(labelText: 'Quantity *'),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                shape: AmountShape.quantity,
+                marks: _marks,
+                label: 'Quantity *',
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: 8),
               TextField(
@@ -720,7 +759,10 @@ class _ReleaseFromBondDialogState extends ConsumerState<ReleaseFromBondDialog> {
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('release-save'), onPressed: _busy ? null : _save, child: const Text('Release')),
+        FilledButton(
+            key: const Key('release-save'),
+            onPressed: _busy || _refused ? null : _save,
+            child: const Text('Release')),
       ],
     );
   }

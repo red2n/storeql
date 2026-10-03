@@ -1,7 +1,7 @@
 package com.storeql.order.domain;
 
 import com.storeql.einvoice.Violation;
-import jakarta.json.Json;
+import com.storeql.order.config.Json;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;

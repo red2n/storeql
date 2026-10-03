@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -19,6 +20,7 @@ import 'package:storeql_app/core/ids.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/util/short_ref.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 
 // ---------------------------------------------------------------------------
 // Card settlements (11.10).
@@ -757,7 +759,18 @@ class ImportSettlementDialog extends ConsumerStatefulWidget {
 class _ImportSettlementDialogState extends ConsumerState<ImportSettlementDialog> {
   final _provider = TextEditingController();
   final _reference = TextEditingController();
+
+  /// The sum on the bank statement: money in the business's currency, to its
+  /// places, below nought where chargebacks outweigh sales. Read the way the
+  /// app's language writes a number ([AmountMarks]) and sent as the decimal
+  /// typed; one that cannot be read is refused under the field and nothing
+  /// is imported (parsed with a point, Romanian's 1234,56 was no number).
   final _declared = TextEditingController();
+  final _marks = AmountMarks.ofApp();
+  AmountShape get _declaredShape => AmountShape(
+      14, AppFormat.minorUnits(ref.read(tenantInfoProvider).value?.currency),
+      signed: true);
+  bool get _refused => figureRefused(_marks, [(_declared, _declaredShape)]);
   String _format = 'STOREQL';
   DateTime? _paidOn;
   String? _fileName;
@@ -792,11 +805,8 @@ class _ImportSettlementDialogState extends ConsumerState<ImportSettlementDialog>
       setState(() => _error = 'Choose the settlement file.');
       return;
     }
-    final declared = _declared.text.trim();
-    if (declared.isNotEmpty && num.tryParse(declared) == null) {
-      setState(() => _error = 'The sum paid is a number, like 1234.56.');
-      return;
-    }
+    if (_refused) return;
+    final declared = figureOf(_declared, _declaredShape, _marks);
     setState(() {
       _busy = true;
       _error = null;
@@ -809,7 +819,8 @@ class _ImportSettlementDialogState extends ConsumerState<ImportSettlementDialog>
           'format': _format,
           'reference': ?(_reference.text.trim().isEmpty ? null : _reference.text.trim()),
           'payoutDate': ?_paidOn?.toIso8601String().substring(0, 10),
-          'declaredNet': ?num.tryParse(declared),
+          // The plain decimal typed: JSON-B reads it exactly. Blank is left out.
+          'declaredNet': ?declared,
           'content': _content,
         },
         // The same payout file imported twice is one batch, so the key is derived from it.
@@ -872,11 +883,16 @@ class _ImportSettlementDialogState extends ConsumerState<ImportSettlementDialog>
                 ),
               ),
               const SizedBox(height: 8),
-              TextField(
-                key: const Key('import-declared'),
+              FigureField(
+                fieldKey: const Key('import-declared'),
                 controller: _declared,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                decoration: const InputDecoration(labelText: 'Sum on the bank statement', helperText: 'The file must add up to it'),
+                shape: AmountShape(
+                    14, AppFormat.minorUnits(ref.watch(tenantInfoProvider).value?.currency),
+                    signed: true),
+                marks: _marks,
+                label: 'Sum on the bank statement',
+                helper: 'The file must add up to it',
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: 8),
               ListTile(
@@ -907,7 +923,7 @@ class _ImportSettlementDialogState extends ConsumerState<ImportSettlementDialog>
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('import-save'), onPressed: _busy ? null : _save, child: Text(_busy ? 'Importing…' : 'Import')),
+        FilledButton(key: const Key('import-save'), onPressed: _busy || _refused ? null : _save, child: Text(_busy ? 'Importing…' : 'Import')),
       ],
     );
   }

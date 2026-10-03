@@ -334,6 +334,63 @@ public class FiscalReceiptRepository extends BaseJdbcRepository {
         "list receipt series");
   }
 
+  /**
+   * One page of a series, by number, after a given number (keyset paging): lets a caller walk a
+   * year's register without ever holding more than a page of it.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param storeId the store whose register to read
+   * @param series the numbering series
+   * @param period the fiscal period
+   * @param afterNumber return only receipts numbered above this ({@code 0} for the first page)
+   * @param limit page size
+   * @return the next receipts in number order
+   */
+  public List<FiscalReceipt> listSeriesAfter(
+      UUID tenantId, UUID storeId, String series, String period, long afterNumber, int limit) {
+    return query(
+        "SELECT "
+            + COLUMNS
+            + " FROM fiscal_receipts"
+            + " WHERE tenant_id = ? AND store_id = ? AND series_code = ? AND period = ?"
+            + " AND number > ? ORDER BY number LIMIT ?",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, storeId);
+          ps.setString(3, series);
+          ps.setString(4, period);
+          ps.setLong(5, afterNumber);
+          ps.setInt(6, limit);
+        },
+        FiscalReceiptRepository::map,
+        "list receipt series page");
+  }
+
+  /**
+   * Walks a whole series a page at a time, in number order, handing each receipt to the visitor;
+   * stops early when the visitor returns false. Memory is one page, however long the series.
+   *
+   * @param pageSize receipts read per query ({@code storeql.order.fiscal.page-size})
+   */
+  public void forEachInSeries(
+      UUID tenantId,
+      UUID storeId,
+      String series,
+      String period,
+      int pageSize,
+      java.util.function.Predicate<FiscalReceipt> visitor) {
+    long after = 0;
+    int size = Math.max(1, pageSize);
+    while (true) {
+      List<FiscalReceipt> page = listSeriesAfter(tenantId, storeId, series, period, after, size);
+      for (FiscalReceipt r : page) {
+        if (!visitor.test(r)) return;
+        after = r.number();
+      }
+      if (page.size() < size) return;
+    }
+  }
+
   /** One counter row: the series a store runs, where it has got to, and what it prints in front. */
   public record ReceiptSeries(
       UUID storeId, String seriesCode, String period, long nextNumber, String prefix) {}
@@ -563,25 +620,50 @@ public class FiscalReceiptRepository extends BaseJdbcRepository {
    * @return intact null when nothing in the series is chained yet
    */
   public ChainVerdict verifyChain(UUID tenantId, UUID storeId, String series, String period) {
-    Long from = null;
-    String prev = null;
-    for (FiscalReceipt r : listSeries(tenantId, storeId, series, period, 1_000_000)) {
-      if (r.hash() == null) {
-        if (from != null) {
-          return new ChainVerdict(false, from, r.number());
-        }
-        continue;
-      }
-      boolean linked = prev == null || prev.equals(r.prevHash());
-      if (!linked || r.prevHash() == null || !hashOf(r).equals(r.hash())) {
-        return new ChainVerdict(false, from == null ? Long.valueOf(r.number()) : from, r.number());
-      }
-      if (from == null) {
-        from = r.number();
-      }
-      prev = r.hash();
-    }
-    return new ChainVerdict(from == null ? null : Boolean.TRUE, from, null);
+    // One page of the series in memory at a time, however long the year; the walk stops at the
+    // first break.
+    Long[] from = {null};
+    String[] prev = {null};
+    ChainVerdict[] broken = {null};
+    forEachInSeries(
+        tenantId,
+        storeId,
+        series,
+        period,
+        pageSize(),
+        r -> {
+          if (r.hash() == null) {
+            if (from[0] != null) {
+              broken[0] = new ChainVerdict(false, from[0], r.number());
+              return false;
+            }
+            return true;
+          }
+          boolean linked = prev[0] == null || prev[0].equals(r.prevHash());
+          if (!linked || r.prevHash() == null || !hashOf(r).equals(r.hash())) {
+            broken[0] =
+                new ChainVerdict(
+                    false, from[0] == null ? Long.valueOf(r.number()) : from[0], r.number());
+            return false;
+          }
+          if (from[0] == null) {
+            from[0] = r.number();
+          }
+          prev[0] = r.hash();
+          return true;
+        });
+    if (broken[0] != null) return broken[0];
+    return new ChainVerdict(from[0] == null ? null : Boolean.TRUE, from[0], null);
+  }
+
+  /**
+   * Receipts read per query when a whole series is walked: {@code storeql.order.fiscal.page-size}.
+   */
+  public static int pageSize() {
+    return org.eclipse.microprofile.config.ConfigProvider.getConfig()
+        .getOptionalValue("storeql.order.fiscal.page-size", Integer.class)
+        .filter(n -> n > 0)
+        .orElse(1000);
   }
 
   /** One order line under the document it was sold on, for the register exports. */

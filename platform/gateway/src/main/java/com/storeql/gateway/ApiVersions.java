@@ -28,6 +28,19 @@ public final class ApiVersions {
   private ApiVersions() {}
 
   private static final Pattern VERSION = Pattern.compile("v\\d+");
+
+  /**
+   * Whether a path segment is a version label ({@code v} and digits), without compiling a regex.
+   */
+  static boolean isVersionSegment(String segment) {
+    if (segment == null || segment.length() < 2 || segment.charAt(0) != 'v') return false;
+    for (int i = 1; i < segment.length(); i++) {
+      char c = segment.charAt(i);
+      if (c < '0' || c > '9') return false;
+    }
+    return true;
+  }
+
   private static final DateTimeFormatter IMF_FIXDATE =
       DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ENGLISH)
           .withZone(ZoneOffset.UTC);

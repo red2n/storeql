@@ -165,6 +165,29 @@ class MarketingPurposeGateIT {
   }
 
   @Test
+  @DisplayName("A marketing change naming no channel is refused, by the shopper or by staff")
+  void aChangeNamingNoChannelIsRefused() {
+    String login = Ids.newId().toString();
+    String email = login.substring(login.length() - 12) + "@example.co.uk";
+    claim(GB, login, email);
+    String id = data(shopper(GB, login, email, "/customers/me").get()).getString("id");
+    assertThat(setMarketing(GB, login, email, "EMAIL", true).getStatus(), is(200));
+
+    assertCode(
+        shopper(GB, login, email, "/customers/me/marketing").put(json("{\"channels\":[]}")),
+        400,
+        "MARKETING_NO_CHANNELS");
+    assertCode(
+        staff(GB, "OWNER", "/customers/" + id + "/marketing").put(json("{\"channels\":[]}")),
+        400,
+        "MARKETING_NO_CHANNELS");
+    assertThat(
+        "the consent that stood still stands",
+        granted(myMarketing(GB, login, email), "EMAIL"),
+        is(true));
+  }
+
+  @Test
   @DisplayName("allowance says no once the purpose is withdrawn, even against a stale preference")
   void allowanceSaysNoAfterWithdrawal() {
     String login = Ids.newId().toString();

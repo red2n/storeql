@@ -12,7 +12,8 @@ import 'package:storeql_app/features/onboarding/onboarding_wizard.dart';
 // open on the United Kingdom and pounds, so a business that did not look twice
 // was created in the wrong country and currency. Now neither is preselected,
 // submitting without them is refused before any request, and choosing a
-// country suggests the currency it trades in.
+// country suggests the currency it trades in. What was chosen is sent with the
+// first store, in the one call that creates both (29 Sep 2026).
 // ---------------------------------------------------------------------------
 
 class _FakeApiClient implements ApiClient {
@@ -117,6 +118,29 @@ Future<_Server> _pump(WidgetTester tester, {int plansStatus = 200}) async {
   return server;
 }
 
+/// The first store, then the button that creates the business and the store
+/// together: nothing is sent before it.
+Future<void> _finishWithFirstStore(WidgetTester tester) async {
+  await tester.enterText(
+    find.widgetWithText(TextFormField, 'Store name *'),
+    'Kyoto Market Gion',
+  );
+  await tester.enterText(
+    find.widgetWithText(TextFormField, 'Store code * (e.g. STR-001)'),
+    'KY-1',
+  );
+  await tester.tap(
+    find.widgetWithText(DropdownButtonFormField<String>, 'Timezone *'),
+  );
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Asia/Tokyo').last);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Create store & finish setup'));
+  // A progress indicator spins while the request is out, so settle by time.
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 500));
+}
+
 void main() {
   testWidgets('no country or currency is chosen for the business', (
     tester,
@@ -148,18 +172,24 @@ void main() {
       find.widgetWithText(DropdownButtonFormField<String>, 'Country *'),
     );
     await tester.pumpAndSettle();
+    // Every country is listed, by name: Japan may be below the fold.
+    await tester.scrollUntilVisible(find.text('Japan (JP)'), 400,
+        scrollable: find.byType(Scrollable).last);
     await tester.tap(find.text('Japan (JP)').last);
     await tester.pumpAndSettle();
     expect(find.text('JPY — Japanese Yen'), findsOneWidget);
 
     await tester.tap(find.text('Continue'));
-    // A progress indicator spins while the request is out, so settle by time.
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pumpAndSettle();
+    expect(server.posts, isEmpty, reason: 'nothing is created before the first store');
+    await _finishWithFirstStore(tester);
     final sent = server.posts.single;
-    expect(sent.path, endsWith('/onboarding/tenants'));
+    expect(sent.path, endsWith('/tenant-svc/onboarding'));
     expect((sent.data as Map)['country'], 'JP');
     expect((sent.data as Map)['currency'], 'JPY');
+    // The first store is in the business's own country unless moved.
+    expect((sent.data as Map)['storeCountry'], 'JP');
+    expect((sent.data as Map)['storeTimezone'], 'Asia/Tokyo');
     // Nothing chosen: the platform's default plan goes with the signup.
     expect((sent.data as Map)['planId'], _Server.starter);
   });
@@ -186,12 +216,15 @@ void main() {
       find.widgetWithText(DropdownButtonFormField<String>, 'Country *'),
     );
     await tester.pumpAndSettle();
+    // Every country is listed, by name: Japan may be below the fold.
+    await tester.scrollUntilVisible(find.text('Japan (JP)'), 400,
+        scrollable: find.byType(Scrollable).last);
     await tester.tap(find.text('Japan (JP)').last);
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Continue'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pumpAndSettle();
+    await _finishWithFirstStore(tester);
     final sent = server.posts.single;
     expect((sent.data as Map)['planId'], _Server.growth);
   });
@@ -211,11 +244,14 @@ void main() {
       find.widgetWithText(DropdownButtonFormField<String>, 'Country *'),
     );
     await tester.pumpAndSettle();
+    // Every country is listed, by name: Japan may be below the fold.
+    await tester.scrollUntilVisible(find.text('Japan (JP)'), 400,
+        scrollable: find.byType(Scrollable).last);
     await tester.tap(find.text('Japan (JP)').last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Continue'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pumpAndSettle();
+    await _finishWithFirstStore(tester);
     final sent = server.posts.single;
     expect((sent.data as Map).containsKey('planId'), isFalse);
   });

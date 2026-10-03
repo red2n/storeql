@@ -20,7 +20,7 @@ import org.junit.jupiter.api.Test;
  */
 class BaseJdbcRepositoryTest {
 
-  private static final class TestRepo extends BaseJdbcRepository {
+  private static class TestRepo extends BaseJdbcRepository {
     @Override
     protected RuntimeException handleTxSqlException(String what, SQLException e) {
       return new RuntimeException(e);
@@ -107,5 +107,50 @@ class BaseJdbcRepositoryTest {
         },
         "test");
     assertEquals(1, workCount.get());
+  }
+
+  @Test
+  void aPoolTimeoutIsNotRetried() throws Exception {
+    // Retrying an exhausted pool triples the caller's wait: one attempt, then the failure.
+    AtomicInteger calls = new AtomicInteger();
+    DataSource ds =
+        (DataSource)
+            Proxy.newProxyInstance(
+                Thread.currentThread().getContextClassLoader(),
+                new Class<?>[] {DataSource.class},
+                (proxy, method, args) -> {
+                  calls.incrementAndGet();
+                  throw new java.sql.SQLTransientConnectionException(
+                      "pool - Connection is not available, request timed out after 30000ms.");
+                });
+    var repo = new TestRepo();
+    injectDataSource(repo, ds);
+    assertThrows(Exception.class, () -> repo.inTx(c -> "ok", "test"));
+    assertEquals(1, calls.get());
+  }
+
+  @Test
+  void aSlowFailedAcquireIsNotRetried() throws Exception {
+    AtomicInteger calls = new AtomicInteger();
+    DataSource ds =
+        (DataSource)
+            Proxy.newProxyInstance(
+                Thread.currentThread().getContextClassLoader(),
+                new Class<?>[] {DataSource.class},
+                (proxy, method, args) -> {
+                  calls.incrementAndGet();
+                  Thread.sleep(30);
+                  throw new SQLException("slow failure");
+                });
+    var repo =
+        new TestRepo() {
+          @Override
+          protected long acquireRetryMaxAttemptMillis() {
+            return 10; // an attempt that took longer than this is the pool waiting, not a blip
+          }
+        };
+    injectDataSource(repo, ds);
+    assertThrows(Exception.class, () -> repo.inTx(c -> "ok", "test"));
+    assertEquals(1, calls.get());
   }
 }

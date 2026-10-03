@@ -23,6 +23,7 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -33,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -71,6 +73,13 @@ class RecallIT {
   private static final String MANAGER = "01a090ae-611e-7031-ace6-811d51dcecba";
   private static final String STAFF = "01a090ae-611e-7032-8c9c-1dc9a2769104";
 
+  /** A use-by date this many days ahead, so no fixture goes stale. */
+  private static String in(int days) {
+    return java.time.LocalDate.now().plusDays(days).toString();
+  }
+
+  private static final String SOON = in(30);
+
   @Inject WebTarget target;
   @Inject InventoryService inventoryService;
 
@@ -88,9 +97,9 @@ class RecallIT {
     String storeB = uuid();
     String storeC = uuid();
     String variant = uuid();
-    receive(storeA, variant, "10", "L1", "2026-10-01");
-    receive(storeB, variant, "5", "L2", "2026-10-01");
-    receive(storeC, variant, "4", null, "2026-10-01");
+    receive(storeA, variant, "10", "L1", SOON);
+    receive(storeB, variant, "5", "L2", SOON);
+    receive(storeC, variant, "4", null, SOON);
     String orderA = sell(storeA, variant, "3");
     String orderB = sell(storeB, variant, "2");
     String orderC = sell(storeC, variant, "1");
@@ -148,6 +157,27 @@ class RecallIT {
     JsonArray listed =
         okArray(send("GET", "/admin/inventory/recalls", null, T, "OWNER", MANAGER, null));
     assertThat(find(listed, "id", recall.getString("id")).getInt("ordersAffected"), is(2));
+  }
+
+  /**
+   * Catalogue RCL gap 1: a notice's source is not only a UK regulator. REGULATOR, MANUFACTURER,
+   * SUPPLIER and INTERNAL are accepted (with OTHER and the original FSA and FSS) and come back as
+   * given; a source nobody named is refused whole.
+   */
+  @Test
+  void aRecallNamesItsSourceInAnyCountry() {
+    for (String source :
+        new String[] {"REGULATOR", "MANUFACTURER", "SUPPLIER", "INTERNAL", "OTHER", "FSA", "FSS"}) {
+      String json =
+          openJson("SRC-" + source, "WITHDRAWAL", lotLine(uuid(), "L1"), null)
+              .replace("\"source\":\"FSA\"", "\"source\":\"" + source + "\"");
+      JsonObject made = created(send("POST", "/admin/recalls", json, T, "OWNER", MANAGER, null));
+      assertThat(source, made.getString("source"), is(source));
+    }
+    String unknown =
+        openJson("SRC-NONE", "WITHDRAWAL", lotLine(uuid(), "L1"), null)
+            .replace("\"source\":\"FSA\"", "\"source\":\"THE_MINISTRY\"");
+    refused(T, unknown, "VALIDATION_FAILED");
   }
 
   @Test
@@ -251,7 +281,7 @@ class RecallIT {
   void twentyOpensOfOneNoticeMakeOneRecallAndItsBuyersAreAnnouncedOnce() throws Exception {
     String store = uuid();
     String variant = uuid();
-    receive(store, variant, "10", "L9", "2026-10-01");
+    receive(store, variant, "10", "L9", SOON);
     String order = sell(store, variant, "2");
     ExecutorService pool = Executors.newFixedThreadPool(20);
     try {
@@ -316,10 +346,10 @@ class RecallIT {
     String storeA = uuid();
     String storeB = uuid();
     String variant = uuid();
-    String aL1 = receive(storeA, variant, "10", "L1", "2026-10-01");
-    String aL2 = receive(storeA, variant, "5", "L2", "2026-10-01");
+    String aL1 = receive(storeA, variant, "10", "L1", SOON);
+    String aL2 = receive(storeA, variant, "5", "L2", SOON);
     String bL1 = receive(storeB, variant, "3", "l1", null);
-    String bUnknown = receive(storeB, variant, "4", null, "2026-10-01");
+    String bUnknown = receive(storeB, variant, "4", null, SOON);
 
     JsonObject recall = created(open("FSA-PRIN-01", "RECALL", lotLine(variant, "L1")));
     Map<String, JsonObject> held = heldByBatch(recall);
@@ -347,13 +377,67 @@ class RecallIT {
     assertThat(line.getString("batchNo"), is("L1"));
     assertThat(line.getString("kind"), is("RECALL"));
     assertThat(line.getString("customerNotice"), containsString("Do not eat"));
+    // When it opened: order-svc judges a sale replayed from an offline till by the recalls open
+    // when it was rung up.
+    assertThat(line.getString("openedAt"), is(recall.getString("openedAt")));
+  }
+
+  /**
+   * order-svc judges a till sale replayed from an offline queue against every recall open when it
+   * was rung up, one closed or cancelled since included, so the read it makes carries those too;
+   * the till's own list is the open ones, unchanged. Another business's recalls never appear.
+   */
+  @Test
+  void aReadSinceAMomentAlsoCarriesTheRecallsEndedSinceThen() {
+    Instant before = Instant.now().minusSeconds(1);
+    String variant = uuid();
+    String line = "{\"variantId\":\"" + variant + "\"}";
+    String closed = created(open("ENDED-CLOSED", "WITHDRAWAL", line)).getString("id");
+    assertThat(close(closed).getStatus(), is(200));
+    String cancelled = created(open("ENDED-CANCELLED", "WITHDRAWAL", line)).getString("id");
+    assertThat(cancel(cancelled).getStatus(), is(200));
+    String stillOpen = created(open("STILL-OPEN", "WITHDRAWAL", line)).getString("id");
+
+    JsonArray tills =
+        okArray(send("GET", "/admin/inventory/recalls/active", null, T, "CASHIER", STAFF, null));
+    assertThat("the till's list: open recalls only", ids(tills).contains(closed), is(false));
+    assertThat(ids(tills).contains(cancelled), is(false));
+    JsonObject openLine = find(tills, "recallId", stillOpen);
+    assertThat("and no end on it", openLine.containsKey("endedAt"), is(false));
+    assertThat(openLine.containsKey("endedAs"), is(false));
+
+    JsonArray since = okArray(activeSince(before.toString(), T));
+    JsonObject closedLine = find(since, "recallId", closed);
+    assertThat(closedLine.getString("endedAs"), is("CLOSED"));
+    assertThat(closedLine.getString("endedAt"), is(get(closed).getString("endedAt")));
+    assertThat(closedLine.getString("openedAt"), is(get(closed).getString("openedAt")));
+    assertThat(closedLine.getString("variantId"), is(variant));
+    JsonObject cancelledLine = find(since, "recallId", cancelled);
+    assertThat(cancelledLine.getString("endedAs"), is("CANCELLED"));
+    assertThat(cancelledLine.getString("endedAt"), is(get(cancelled).getString("endedAt")));
+    assertThat(find(since, "recallId", stillOpen).containsKey("endedAt"), is(false));
+
+    Instant afterBoth = Instant.parse(get(cancelled).getString("endedAt")).plusMillis(1);
+    JsonArray later = okArray(activeSince(afterBoth.toString(), T));
+    assertThat("ended before the moment asked about", ids(later).contains(closed), is(false));
+    assertThat(ids(later).contains(cancelled), is(false));
+    assertThat("still open: always there", ids(later).contains(stillOpen), is(true));
+
+    List<String> theirs = ids(okArray(activeSince(before.toString(), OTHER)));
+    assertThat(
+        "another business asking since the same moment sees none of it",
+        theirs.contains(closed) || theirs.contains(cancelled) || theirs.contains(stillOpen),
+        is(false));
+    Response notAnInstant = activeSince("yesterday", T);
+    assertThat(notAnInstant.getStatus(), is(400));
+    assertThat(notAnInstant.readEntity(String.class), containsString("RECALL_ENDED_SINCE_INVALID"));
   }
 
   @Test
   void stockArrivingUnderAnOpenRecallIsHeldAsItArrives() {
     String store = uuid();
     String variant = uuid();
-    receive(store, variant, "2", "L7", "2026-10-15");
+    receive(store, variant, "2", "L7", in(20));
     String recallId =
         created(
                 open(
@@ -361,7 +445,11 @@ class RecallIT {
                     "WITHDRAWAL",
                     "{\"variantId\":\""
                         + variant
-                        + "\",\"expiryFrom\":\"2026-10-01\",\"expiryTo\":\"2026-10-31\"}"))
+                        + "\",\"expiryFrom\":\""
+                        + in(10)
+                        + "\",\"expiryTo\":\""
+                        + in(40)
+                        + "\"}"))
             .getString("id");
 
     JsonObject late =
@@ -369,7 +457,7 @@ class RecallIT {
             send(
                 "POST",
                 "/admin/inventory/receive",
-                receiveJson(store, variant, "6", "L8", "2026-10-20"),
+                receiveJson(store, variant, "6", "L8", in(25)),
                 T,
                 "STOREKEEPER",
                 STAFF,
@@ -381,7 +469,7 @@ class RecallIT {
             send(
                 "POST",
                 "/admin/inventory/receive",
-                receiveJson(store, variant, "6", "L9", "2026-11-20"),
+                receiveJson(store, variant, "6", "L9", in(70)),
                 T,
                 "STOREKEEPER",
                 STAFF,
@@ -581,6 +669,7 @@ class RecallIT {
     Response foreignRead =
         send("GET", "/admin/inventory/recalls/" + recallId, null, OTHER, "OWNER", MANAGER, null);
     assertThat(foreignRead.getStatus(), is(404));
+    assertThat(foreignRead.readEntity(String.class), containsString("RECALL_NOT_FOUND"));
     JsonArray foreignActive =
         okArray(
             send("GET", "/admin/inventory/recalls/active", null, OTHER, "CASHIER", STAFF, null));
@@ -599,6 +688,110 @@ class RecallIT {
             .getString("id");
     assertThat(materialStatus(foreignBatch), is("AVAILABLE"));
     assertThat(materialStatus(batch), is("RECALLED"));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return com.storeql.test.Envelopes.parse(body).getString("code");
+  }
+
+  @Test
+  @DisplayName("A batch the recall does not hold cannot be released, and nothing is recorded")
+  void aBatchTheRecallDoesNotHoldIsNotReleased() {
+    String store = uuid();
+    String variant = uuid();
+    receive(store, variant, "3", "L1", null);
+    String recallId = created(open("HELD-1", "WITHDRAWAL", lotLine(variant, "L1"))).getString("id");
+    String elsewhere = receive(store, uuid(), "2", "L9", null);
+
+    for (String batch : new String[] {elsewhere, uuid()}) {
+      assertThat(
+          codeOf(release(recallId, batch, "STOREKEEPER", null), 404), is("RECALL_BATCH_NOT_HELD"));
+    }
+    assertThat(materialStatus(elsewhere), is("AVAILABLE"));
+    assertThat(
+        scalar(
+            PG,
+            "SELECT count(*) FROM inventory.recall_batch_releases WHERE recall_id = '"
+                + recallId
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName(
+      "A store action with a negative or over-precise quantity, or one past fifteen whole digits"
+          + " (a 500 from qty_found NUMERIC(18,3)), is refused; none is kept")
+  void aStoreActionWithANegativeOrOverPreciseQuantityIsRefused() {
+    String store = uuid();
+    String variant = uuid();
+    receive(store, variant, "3", "L1", null);
+    String recallId = created(open("QTY-1", "WITHDRAWAL", lotLine(variant, "L1"))).getString("id");
+
+    for (String qty : new String[] {"-1", "1.2345", "1000000000000000", "1E+20"}) {
+      assertThat(
+          qty,
+          codeOf(action(recallId, store, qty, "DESTROYED", null), 400),
+          is("RECALL_QTY_INVALID"));
+    }
+    assertThat(
+        scalar(
+            PG,
+            "SELECT count(*) FROM inventory.recall_store_actions WHERE recall_id = '"
+                + recallId
+                + "'"),
+        is("0"));
+    assertThat(onHand(store, variant), is("0"));
+    assertThat(remainingQty(heldBatchOf(store, variant)), is("3.000"));
+  }
+
+  private static String heldBatchOf(String store, String variant) {
+    return scalar(
+        PG,
+        "SELECT id FROM inventory.inventory_batches WHERE store_id = '"
+            + store
+            + "' AND variant_id = '"
+            + variant
+            + "'");
+  }
+
+  @Test
+  @DisplayName("A recall of more than a hundred items is refused, and none is opened")
+  void aRecallOfMoreThanAHundredItemsIsRefused() {
+    StringBuilder items = new StringBuilder();
+    for (int i = 0; i < 101; i++) {
+      items.append(i == 0 ? "" : ",").append("{\"variantId\":\"").append(uuid()).append("\"}");
+    }
+    Response r = open("BIG-1", "WITHDRAWAL", items.toString());
+    assertThat(codeOf(r, 400), is("RECALL_SCOPE_TOO_LARGE"));
+    assertThat(
+        scalar(
+            PG,
+            "SELECT count(*) FROM inventory.recalls WHERE tenant_id = '"
+                + T
+                + "' AND reference = 'BIG-1'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A recall list filtered by a status nobody defined is refused")
+  void aRecallListByAStatusNobodyDefinedIsRefused() {
+    for (String status : new String[] {"PENDING", "open"}) {
+      Response r =
+          target
+              .path("/admin/inventory/recalls")
+              .queryParam("status", status)
+              .request()
+              .header("X-Tenant-Id", T)
+              .header("X-Roles", "OWNER")
+              .header("X-User-Id", MANAGER)
+              .get();
+      assertThat(status, codeOf(r, 400), is("RECALL_STATUS_INVALID"));
+    }
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
@@ -631,6 +824,22 @@ class RecallIT {
 
   private static String lotLine(String variant, String lot) {
     return "{\"variantId\":\"" + variant + "\",\"batchNo\":\"" + lot + "\"}";
+  }
+
+  /** The active read as order-svc makes it for a replayed till sale, as a storekeeper. */
+  private Response activeSince(String endedSince, String tenant) {
+    return target
+        .path("/admin/inventory/recalls/active")
+        .queryParam("endedSince", endedSince)
+        .request()
+        .header("X-Tenant-Id", tenant)
+        .header("X-Roles", "STOREKEEPER")
+        .header("X-User-Id", STAFF)
+        .get();
+  }
+
+  private static List<String> ids(JsonArray lines) {
+    return lines.getValuesAs(JsonObject.class).stream().map(o -> o.getString("recallId")).toList();
   }
 
   private JsonObject get(String recallId) {

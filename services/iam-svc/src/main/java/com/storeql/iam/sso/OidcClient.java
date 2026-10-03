@@ -29,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * Talks to a business's identity provider: reads its discovery document and keys, trades an
@@ -53,6 +54,11 @@ public class OidcClient {
   private static final Duration REFETCH_AFTER = Duration.ofSeconds(30);
 
   @Inject ServiceConfig config;
+
+  /** The most issuers whose discovery document, and key sets, are kept; the oldest go first. */
+  @Inject
+  @ConfigProperty(name = "storeql.iam.oidc.cache-max-entries", defaultValue = "256")
+  int cacheMaxEntries = 256;
 
   private WebClient http;
   private Egress egress;
@@ -79,6 +85,29 @@ public class OidcClient {
             .readTimeout(timeout)
             .followRedirects(false)
             .build();
+  }
+
+  /**
+   * Keeps a cache entry, first dropping what has expired and then the oldest, so the map never
+   * holds more than {@code cacheMaxEntries} however many issuers are typed in over the pod's life.
+   */
+  private <T> void remember(Map<String, Cached<T>> cache, String key, Cached<T> entry) {
+    cache.put(key, entry);
+    int max = Math.max(1, cacheMaxEntries);
+    if (cache.size() <= max) return;
+    Instant now = clock.instant();
+    cache.values().removeIf(c -> !c.at().plus(CACHE_FOR).isAfter(now));
+    while (cache.size() > max) {
+      cache.entrySet().stream()
+          .min(
+              java.util.Comparator.comparing((Map.Entry<String, Cached<T>> e) -> e.getValue().at()))
+          .ifPresent(e -> cache.remove(e.getKey()));
+    }
+  }
+
+  /** The number of cached discovery documents (for tests). */
+  int cachedDiscoveries() {
+    return discoveries.size();
   }
 
   /** An address held to the egress rule, refused in this service's own words. */
@@ -108,14 +137,14 @@ public class OidcClient {
     check(d.tokenEndpoint());
     check(d.jwksUri());
     d.userinfoEndpoint().ifPresent(this::check);
-    discoveries.put(issuer, new Cached<>(d, clock.instant()));
+    remember(discoveries, issuer, new Cached<>(d, clock.instant()));
     return d;
   }
 
   /** The provider's signing keys, read now. */
   public Jwks keysFresh(Discovery d) {
     Jwks keys = Jwks.parse(get(d.jwksUri()));
-    keySets.put(d.jwksUri(), new Cached<>(keys, clock.instant()));
+    remember(keySets, d.jwksUri(), new Cached<>(keys, clock.instant()));
     return keys;
   }
 
@@ -159,7 +188,10 @@ public class OidcClient {
     form.put("redirect_uri", redirectUri);
     form.put("code_verifier", verifier);
     HttpClientRequest request =
-        http.post(check(d.tokenEndpoint()).toString())
+        // URIs, never the String form, here and below: that escapes the "?" of an endpoint that
+        // carries one (a B2C policy, Entra's app-specific keys) into the path.
+        http.post()
+            .uri(check(d.tokenEndpoint()))
             .header(HeaderNames.CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(HeaderNames.ACCEPT, "application/json");
     if (Discovery.BASIC.equals(d.tokenAuthMethod())) {
@@ -206,7 +238,8 @@ public class OidcClient {
 
   private IdToken contact(String userinfo, String accessToken, IdToken proved) {
     try (HttpClientResponse res =
-        http.get(check(userinfo).toString())
+        http.get()
+            .uri(check(userinfo))
             .header(HeaderNames.AUTHORIZATION, "Bearer " + accessToken)
             .header(HeaderNames.ACCEPT, "application/json")
             .request()) {
@@ -237,7 +270,7 @@ public class OidcClient {
   private String get(String url) {
     URI checked = check(url);
     try (HttpClientResponse res =
-        http.get(checked.toString()).header(HeaderNames.ACCEPT, "application/json").request()) {
+        http.get().uri(checked).header(HeaderNames.ACCEPT, "application/json").request()) {
       int status = res.status().code();
       if (status != 200) {
         throw new SsoRefused(

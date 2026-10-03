@@ -41,6 +41,9 @@ public class CrossDockResource {
 
   @Operation(summary = "A warehouse order's allocations", description = "Every line's, by shop.")
   @APIResponse(responseCode = "200", description = "The allocations")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @GET
   @Path("/{id}/allocations")
   public Response allocations(@PathParam("id") String id) {
@@ -60,6 +63,9 @@ public class CrossDockResource {
   @APIResponse(
       responseCode = "409",
       description = "PURCHASE_ALLOCATION_ORDER_NOT_DRAFT, PURCHASE_ALLOCATION_STOCK_NOT_OWNED")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @PUT
   @Path("/{id}/lines/{lineId}/allocations")
   public Response allocate(
@@ -85,6 +91,9 @@ public class CrossDockResource {
       summary = "Allocate a line by the shops' needs",
       description = "The served shops' current needs, shared fairly; the buyer can change it.")
   @APIResponse(responseCode = "200", description = "The order's allocations")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @POST
   @Path("/{id}/lines/{lineId}/allocations/fill")
   public Response fill(@PathParam("id") String id, @PathParam("lineId") String lineId) {

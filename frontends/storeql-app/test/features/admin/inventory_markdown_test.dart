@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/shared/widgets/status_badge.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
@@ -32,6 +33,10 @@ class _Server implements HttpClientAdapter {
   bool cancelled = false;
   int createStatus = 201;
 
+  /// The suggestion's currency and what is left of its batch.
+  String currency = 'GBP';
+  String remaining = '6';
+
   @override
   void close({bool force = false}) {}
 
@@ -52,7 +57,7 @@ class _Server implements HttpClientAdapter {
     if (o.path.endsWith('/markdowns/plan')) {
       body = inventoryReachable
           ? '{"data":{"storeId":"st-1","withinDays":7,"ladderSource":"TENANT","inventoryReachable":true,"suggestions":['
-                '{"batchId":"$_batch","variantId":"$_variant","batchNo":"B-7","expiryDate":"2026-09-14","daysToExpiry":2,"remainingQty":6,"currentPrice":4.00,"currency":"GBP","stepDays":2,"percentOff":40.00,"suggestedPrice":2.40${stickered ? ',"existing":${_markdown(status: 'ACTIVE')}' : ''}},'
+                '{"batchId":"$_batch","variantId":"$_variant","batchNo":"B-7","expiryDate":"2026-09-14","daysToExpiry":2,"remainingQty":$remaining,"currentPrice":4.00,"currency":"$currency","stepDays":2,"percentOff":40.00,"suggestedPrice":2.40${stickered ? ',"existing":${_markdown(status: 'ACTIVE')}' : ''}},'
                 '{"batchId":"b-2222","variantId":"v-ham","batchNo":"B-8","expiryDate":"2026-09-18","daysToExpiry":6,"remainingQty":3,"currentPrice":3.00,"currency":"GBP"}'
                 ']}}'
           : '{"data":{"storeId":"st-1","withinDays":7,"ladderSource":"DEFAULT","inventoryReachable":false,"suggestions":[]}}';
@@ -96,13 +101,17 @@ Future<_Server> _open(
   bool reachable = true,
   bool stickered = false,
   Size size = const Size(1200, 1600),
+  String currency = 'GBP',
+  String remaining = '6',
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   final server = _Server()
     ..inventoryReachable = reachable
-    ..stickered = stickered;
+    ..stickered = stickered
+    ..currency = currency
+    ..remaining = remaining;
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))
     ..httpClientAdapter = server;
   await tester.pumpWidget(
@@ -189,8 +198,8 @@ void main() {
       expect(body['batchId'], _batch);
       expect(body['batchNo'], 'B-7');
       expect(body['expiryDate'], '2026-09-14');
-      expect(body['qty'], 6);
-      expect(body['percentOff'], 40);
+      expect(body['qty'], '6');
+      expect(body['percentOff'], '40');
       expect(body.containsKey('markdownPrice'), isFalse);
       expect(body['reason'], 'SHORT_DATED');
 
@@ -229,9 +238,9 @@ void main() {
         (r) => r.path.endsWith('/markdowns') && r.method == 'POST',
       );
       final body = _json(post);
-      expect(body['markdownPrice'], 5.0);
+      expect(body['markdownPrice'], '5');
       expect(body.containsKey('percentOff'), isFalse);
-      expect(body['qty'], 2);
+      expect(body['qty'], '2');
       expect(
         find.textContaining('not below the current price'),
         findsOneWidget,
@@ -330,5 +339,158 @@ void main() {
     await _open(tester, stickered: true, size: const Size(390, 2400));
     expect(tester.takeException(), isNull);
     expect(find.text('Stickered'), findsOneWidget);
+  });
+
+  // A sticker's packs (a quantity, three places), its percentage off and its
+  // price (money in the batch's currency, to its places) are read the way the
+  // app's language writes a number and sent as typed, or refused under the
+  // field with nothing issued: parsed with a point, Romanian's 2,5 packs and
+  // 1,99 lei were no figures at all.
+  group('a sticker\'s figures are read as typed, or refused', () {
+    tearDown(() => Intl.defaultLocale = null);
+
+    Future<void> press(WidgetTester tester, String key, String text) async {
+      await tester.enterText(find.byKey(Key(key)), '');
+      for (var i = 1; i <= text.length; i++) {
+        await tester.enterText(find.byKey(Key(key)), text.substring(0, i));
+        await tester.pump();
+      }
+    }
+
+    String? says(WidgetTester tester, String key) =>
+        tester.widget<TextField>(find.byKey(Key(key))).decoration?.errorText;
+
+    String fieldText(WidgetTester tester, String key) =>
+        tester.widget<TextField>(find.byKey(Key(key))).controller!.text;
+
+    Future<_Server> openSticker(WidgetTester tester, {String currency = 'GBP', String remaining = '6'}) async {
+      final server = await _open(tester, currency: currency, remaining: remaining);
+      await tester.tap(find.byKey(const Key('markdown-sticker-$_batch')));
+      await tester.pumpAndSettle();
+      return server;
+    }
+
+    Map<String, dynamic> created(_Server server) =>
+        _json(server.requests.singleWhere((r) => r.path.endsWith('/markdowns') && r.method == 'POST'));
+
+    for (final (locale, remaining, written, sent) in [
+      ('ro', '2.5', '2,5', '2.5'),
+      ('en_GB', '2.5', '2.5', '2.5'),
+      ('pl', '1.125', '1,125', '1.125'),
+      ('ar', '6', '6', '6'),
+      ('en', '0.75', '0.75', '0.75'),
+    ]) {
+      testWidgets('in $locale, $remaining left starts as $written and is sent unchanged', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await openSticker(tester, remaining: remaining);
+        expect(fieldText(tester, 'markdown-qty'), written);
+        expect(says(tester, 'markdown-qty'), isNull);
+        await tester.tap(find.byKey(const Key('markdown-confirm')));
+        await tester.pumpAndSettle();
+        expect(created(server)['qty'], sent);
+      });
+    }
+
+    for (final (locale, currency, qty, price, sent) in [
+      ('ro', 'RON', '2,5', '1,99', ('2.5', '1.99')),
+      ('en_GB', 'GBP', '2', '1.99', ('2', '1.99')),
+      ('en', 'USD', '1.5', '2', ('1.5', '2')),
+      ('pl', 'PLN', '2,125', '3,5', ('2.125', '3.5')),
+      ('ar', 'KWD', '2٫5', '1٫125', ('2.5', '1.125')),
+      ('en_GB', 'JPY', '3', '250', ('3', '250')),
+    ]) {
+      testWidgets('in $locale, $qty packs at $price $currency are stickered as typed', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await openSticker(tester, currency: currency);
+        await tester.enterText(find.byKey(const Key('markdown-percent')), '');
+        await press(tester, 'markdown-qty', qty);
+        await press(tester, 'markdown-price', price);
+        expect(says(tester, 'markdown-qty'), isNull);
+        expect(says(tester, 'markdown-price'), isNull);
+        await tester.tap(find.byKey(const Key('markdown-confirm')));
+        await tester.pumpAndSettle();
+        final body = created(server);
+        expect(body['qty'], sent.$1);
+        expect(body['markdownPrice'], sent.$2);
+        expect(body.containsKey('percentOff'), isFalse);
+      });
+    }
+
+    for (final (locale, currency, key, typed) in [
+      ('ro', 'RON', 'markdown-qty', '2.5'),
+      ('pl', 'PLN', 'markdown-qty', '1.500'),
+      ('en', 'EUR', 'markdown-percent', '12,5'),
+      ('en_GB', 'JPY', 'markdown-price', '250.5'),
+      ('ar', 'KWD', 'markdown-percent', '٫'),
+      ('en_GB', 'GBP', 'markdown-price', '-2'),
+    ]) {
+      testWidgets('in $locale, $typed in $key is refused and no sticker is issued', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await openSticker(tester, currency: currency);
+        if (key == 'markdown-price') await tester.enterText(find.byKey(const Key('markdown-percent')), '');
+        await press(tester, key, typed);
+        expect(says(tester, key), isNotNull);
+        await tester.tap(find.byKey(const Key('markdown-confirm')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+      });
+    }
+
+    for (final (locale, typed, sent) in [
+      ('ro', '12,5', 12.5),
+      ('en_GB', '12.5', 12.5),
+      ('en', '30', 30.0),
+      ('pl', '33,33', 33.33),
+      ('ar', '12٫5', 12.5),
+    ]) {
+      testWidgets('in $locale, a ladder step of $typed % off is saved as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _open(tester);
+        await tester.tap(find.byKey(const Key('markdown-ladder')));
+        await tester.pumpAndSettle();
+        await press(tester, 'ladder-percent-1', typed);
+        expect(says(tester, 'ladder-percent-1'), isNull);
+        await tester.tap(find.byKey(const Key('ladder-save')));
+        await tester.pumpAndSettle();
+        final body = _json(server.requests.singleWhere((r) => r.method == 'PUT'));
+        expect(body['steps'][1]['percentOff'], sent);
+      });
+    }
+
+    // A step's days are the whole number typed, or refused under the field
+    // with nothing saved. Read as a number literal, 0x05 was saved as five.
+    for (final (locale, typed) in const [
+      ('en_GB', '0x05'),
+      ('ro', '+0x1F'),
+      ('pl', '0X05'),
+      ('ar', '0x1e'),
+      ('en', '5.'),
+    ]) {
+      testWidgets('in $locale, a ladder step at "$typed" days is refused and nothing is saved', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _open(tester);
+        await tester.tap(find.byKey(const Key('markdown-ladder')));
+        await tester.pumpAndSettle();
+        await press(tester, 'ladder-days-1', typed);
+        await tester.tap(find.byKey(const Key('ladder-save')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+        expect(says(tester, 'ladder-days-1'), isNotNull);
+      });
+    }
+
+    for (final (locale, typed) in [('ro', '12.5'), ('en', '12,5'), ('pl', '12.500'), ('en_GB', '.'), ('ar', '-5')]) {
+      testWidgets('in $locale, a ladder step of $typed % off is refused and nothing is saved', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _open(tester);
+        await tester.tap(find.byKey(const Key('markdown-ladder')));
+        await tester.pumpAndSettle();
+        await press(tester, 'ladder-percent-1', typed);
+        expect(says(tester, 'ladder-percent-1'), isNotNull);
+        await tester.tap(find.byKey(const Key('ladder-save')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+      });
+    }
   });
 }

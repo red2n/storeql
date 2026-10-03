@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -38,14 +39,14 @@ public class ShrinkageRepository extends BaseJdbcRepository {
    * netting them to zero would hide exactly the pattern an investigation looks for.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param from inclusive lower bound on movement time, or null for no lower bound
    * @param to exclusive upper bound on movement time, or null for no upper bound
    * @param grouping which column to group by — an enum, never caller-supplied SQL
    * @return one row per group, heaviest write-off first
    */
   public List<ShrinkageRow> aggregate(
-      UUID tenantId, UUID storeId, Instant from, Instant to, ShrinkageGrouping grouping) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, ShrinkageGrouping grouping) {
     // The grouped expression comes from the enum, never from request text, so it cannot carry
     // caller input into the statement; every value below is still bound as a parameter.
     String groupExpr =
@@ -69,7 +70,7 @@ public class ShrinkageRepository extends BaseJdbcRepository {
                 + " COUNT(*) AS movements"
                 + " FROM stock_movements"
                 + " WHERE tenant_id = ? AND type = 'ADJUST'");
-    if (storeId != null) sql.append(" AND store_id = ?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND created_at >= ?");
     if (to != null) sql.append(" AND created_at < ?");
     sql.append(" GROUP BY 1 ORDER BY qty_written_off DESC, group_key ASC");
@@ -79,7 +80,9 @@ public class ShrinkageRepository extends BaseJdbcRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           if (from != null) ps.setObject(i++, from.atOffset(ZoneOffset.UTC));
           if (to != null) ps.setObject(i, to.atOffset(ZoneOffset.UTC));
         },
@@ -97,7 +100,7 @@ public class ShrinkageRepository extends BaseJdbcRepository {
    */
   public List<ShrinkageRow> topVariants(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       String reasonCode,
@@ -115,16 +118,18 @@ public class ShrinkageRepository extends BaseJdbcRepository {
                 + " COUNT(*) AS movements"
                 + " FROM stock_movements"
                 + " WHERE tenant_id = ? AND type = 'ADJUST'");
-    if (storeId != null) sql.append(" AND store_id = ?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND created_at >= ?");
     if (to != null) sql.append(" AND created_at < ?");
     if (reasonCode != null) sql.append(" AND reason_code = ?");
     if (actorId != null) sql.append(" AND actor_id = ?");
     sql.append(" GROUP BY 1 ORDER BY qty_written_off DESC, group_key ASC LIMIT ?");
 
+    // A UUID[] marks the stores filter so the bind loop below knows to bind it as a SQL array
+    // rather than a scalar parameter -- every other bind here is a plain scalar.
     List<Object> binds = new ArrayList<>();
     binds.add(tenantId);
-    if (storeId != null) binds.add(storeId);
+    if (stores != null) binds.add(stores.toArray(new UUID[0]));
     if (from != null) binds.add(from.atOffset(ZoneOffset.UTC));
     if (to != null) binds.add(to.atOffset(ZoneOffset.UTC));
     if (reasonCode != null) binds.add(reasonCode);
@@ -134,7 +139,14 @@ public class ShrinkageRepository extends BaseJdbcRepository {
     return query(
         sql.toString(),
         ps -> {
-          for (int i = 0; i < binds.size(); i++) ps.setObject(i + 1, binds.get(i));
+          for (int i = 0; i < binds.size(); i++) {
+            Object bind = binds.get(i);
+            if (bind instanceof UUID[] ids) {
+              ps.setArray(i + 1, ps.getConnection().createArrayOf("uuid", ids));
+            } else {
+              ps.setObject(i + 1, bind);
+            }
+          }
         },
         ShrinkageRepository::mapRow,
         "list shrinkage by variant");

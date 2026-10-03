@@ -21,7 +21,7 @@ The buyer raises one request for the lines wanted and the suppliers to ask, reco
 
 - **Personas** ([PRD §2](../PRD.md)): the store owner and the buyer (manager or storekeeper) in the back office.
 - **Channels:** back-office only.
-- **Scope:** tenant-wide; a request names the store the goods are for, which becomes the orders' store.
+- **Scope:** tenant-wide; a request names the store the goods are for, which becomes the orders' store. A caller held to stores works only on requests for their stores (2 Oct 2026, see Decisions).
 - **Roles that can write:** OWNER, MANAGER, STOREKEEPER (buying is warehouse and management work, not the till); any staff read.
 - **Sandbox tenant:** behaves the same.
 
@@ -74,8 +74,12 @@ Database-per-service (rule 1): the store and the FX rates are read, never joined
 
 ## Decisions
 
+- **A late quote is kept and marked, never refused** (2026-09-30, from the flow catalogue's "no response deadline" finding). `closesOn` stays advisory, as Scope says: a quote recorded after that day, judged in the store's own day (and never early where the zone cannot be read), is accepted and carries `receivedLate: true` on the bid and in the comparison. It does not change the ranking. A refusal was built first and taken out again, because a late quote is still a quote the buyer may want.
+- **Awarding away from the lowest bid needs a reason** (2026-09-30, same source). The buyer still decides, and the platform still only marks the lowest and shows the grade; but a line given to a supplier who was not the lowest comparable bid must say why (`400 PURCHASE_RFQ_AWARD_REASON_REQUIRED`), and the reason is kept on the award. A bid that cannot be ranked (no rate at home, or partial) never counts as lower.
 - **The buyer records the quote.** No supplier writes to the platform; a portal is its own row. The quote is `PUT` and replaces the earlier one as a set, so a corrected quote never leaves a stale price on a line.
 - **Orders first, award last.** The award's transaction records the status and the award rows after the draft orders exist; a lost race leaves drafts a person can cancel, never an award pointing at orders that were never raised.
 - **Untranslatable is shown, not guessed.** A price with no rate at home appears in the comparison with no home figure, is never the lowest and keeps its bid out of the ranking; the platform fetches no rates and guesses none (the Exchange rates convention).
 - **The grade travels with the bid.** Each bid carries the supplier's scorecard grade over the last 90 days, from the row built just before this one, so price is read against the record without a second screen.
+- **A request is its store's** (2026-10-02, store scoping of purchase-svc). Reading, issuing, quoting, declining, awarding and cancelling a request are held to its store: another business's is `404 PURCHASE_RFQ_NOT_FOUND`, then a caller held to other stores is `403 STORE_ACCESS_DENIED` before anything past the request is read or written; the list gives a caller held to stores the requests for those stores. An award raises that store's orders, so a branch buyer cannot raise another branch's. A store id in the create body that is not the business's is not yet answered `404` (it needs a tenant-svc look-up on the write).
 - **Fill of the orders raised is the orders' own.** An RFQ order is an ordinary draft: a person submits it, spend authority applies, and its receipt measures the supplier's delivery like any other.
+- (2026-10-02) **A bid's line totals are in its own currency's minor units** (whole yen, three decimals of a dinar), rounded half up through `Money.round`, before they are translated at home; never two places.

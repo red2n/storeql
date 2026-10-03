@@ -88,6 +88,9 @@ public class DutyService {
   }
 
   /**
+   * The releases the caller may read: a caller held to stores reads those from their stores' bonds,
+   * held to none the whole business's.
+   *
    * @throws ApiException 400 {@code PURCHASE_DUTY_PERIOD_INVALID} when the period ends before it
    *     starts
    */
@@ -100,7 +103,7 @@ public class DutyService {
           "PURCHASE_DUTY_PERIOD_INVALID",
           "the period ends (" + t + ") before it starts (" + f + ")");
     }
-    return repo.findReleases(ctx.requireTenantId(), f, t);
+    return repo.findReleases(ctx.requireTenantId(), f, t, ctx.reportStores(null));
   }
 
   public String currency(TenantContext ctx) {

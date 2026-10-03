@@ -8,6 +8,7 @@ import com.storeql.order.domain.Domain.GiftCardTransaction;
 import com.storeql.order.domain.Domain.Layaway;
 import com.storeql.order.domain.Domain.LayawayDeposit;
 import com.storeql.order.domain.Domain.LayawayItem;
+import com.storeql.order.domain.Domain.OfflineSaleFlag;
 import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderDiscount;
 import com.storeql.order.domain.Domain.OrderItem;
@@ -89,6 +90,49 @@ public class OrderRepository extends BaseOutboxRepository {
       OrderDiscount discount,
       List<com.storeql.order.client.PricingClient.AppliedPromotion> appliedPromotions,
       List<com.storeql.order.domain.Domain.OrderDeposit> deposits) {
+    return createOrder(order, items, event, discount, appliedPromotions, deposits, List.of());
+  }
+
+  /**
+   * @param offlineFlags what a till sale replayed from the offline queue sold that a recall
+   *     covered, or weighed on a scale not fit for trade, when it was rung up: written with the
+   *     order, so the audit trail names every such sale that stands and never one that does not,
+   *     and a retried replay whose order already stands writes none
+   */
+  public Order createOrder(
+      Order order,
+      List<OrderItem> items,
+      OutboxRow event,
+      OrderDiscount discount,
+      List<com.storeql.order.client.PricingClient.AppliedPromotion> appliedPromotions,
+      List<com.storeql.order.domain.Domain.OrderDeposit> deposits,
+      List<OfflineSaleFlag> offlineFlags) {
+    return createOrder(
+        order, items, event, discount, appliedPromotions, deposits, offlineFlags, null);
+  }
+
+  /** A step that runs inside the order's transaction, once the order is written. */
+  @FunctionalInterface
+  public interface PlacedStep {
+    void run(Connection c, Order placed) throws SQLException;
+  }
+
+  /**
+   * As above, with a step that commits with the order or not at all — the return a direct exchange
+   * writes beside the sale it pays for.
+   *
+   * @param afterPlaced the step, or null for none; not run when the placement is a replay (the
+   *     insert then fails on the key before it is reached)
+   */
+  public Order createOrder(
+      Order order,
+      List<OrderItem> items,
+      OutboxRow event,
+      OrderDiscount discount,
+      List<com.storeql.order.client.PricingClient.AppliedPromotion> appliedPromotions,
+      List<com.storeql.order.domain.Domain.OrderDeposit> deposits,
+      List<OfflineSaleFlag> offlineFlags,
+      PlacedStep afterPlaced) {
     return inTx(
         c -> {
           // Delivery and collection slots: the place is taken once, before the insert that would
@@ -106,11 +150,15 @@ public class OrderRepository extends BaseOutboxRepository {
                 order.slotStartsAt(),
                 java.time.ZoneId.of(order.slotTimeZone()));
           }
-          return createOrderTx(
-              c,
-              new NewOrder(order, items, event, discount, appliedPromotions, deposits),
-              null,
-              null);
+          Order placed =
+              createOrderTx(
+                  c,
+                  new NewOrder(
+                      order, items, event, discount, appliedPromotions, deposits, offlineFlags),
+                  null,
+                  null);
+          if (afterPlaced != null) afterPlaced.run(c, placed);
+          return placed;
         },
         "create order");
   }
@@ -131,7 +179,8 @@ public class OrderRepository extends BaseOutboxRepository {
 
   /**
    * One order as a checkout writes it: the order, its lines, the discount audit, the promotions and
-   * deposits it carries, and its OrderPlaced.
+   * deposits it carries, the offline-sale entries a replayed till sale leaves on the audit trail,
+   * and its OrderPlaced.
    */
   public record NewOrder(
       Order order,
@@ -139,11 +188,13 @@ public class OrderRepository extends BaseOutboxRepository {
       OutboxRow event,
       OrderDiscount discount,
       List<com.storeql.order.client.PricingClient.AppliedPromotion> appliedPromotions,
-      List<com.storeql.order.domain.Domain.OrderDeposit> deposits) {
+      List<com.storeql.order.domain.Domain.OrderDeposit> deposits,
+      List<OfflineSaleFlag> offlineFlags) {
     public NewOrder {
       items = List.copyOf(items);
       appliedPromotions = List.copyOf(appliedPromotions);
       deposits = List.copyOf(deposits);
+      offlineFlags = List.copyOf(offlineFlags);
     }
   }
 
@@ -279,6 +330,9 @@ public class OrderRepository extends BaseOutboxRepository {
   private Order createOrderTx(Connection c, NewOrder n, UUID groupId, Integer groupPart)
       throws java.sql.SQLException {
     Order order = n.order();
+    // Every amount at the order currency's own minor units, half up — what the NUMERIC(18,2)
+    // columns used to do for the pound, and right for the yen and the dinar (SJ-D25, V49).
+    int scale = com.storeql.service.Fx.minorUnits(order.currency());
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO orders"
@@ -299,10 +353,10 @@ public class OrderRepository extends BaseOutboxRepository {
       ps.setString(6, order.channel());
       ps.setString(7, order.fulfilmentType());
       ps.setString(8, order.status());
-      ps.setBigDecimal(9, order.subtotal());
-      ps.setBigDecimal(10, order.taxAmount());
-      ps.setBigDecimal(11, order.discountAmount());
-      ps.setBigDecimal(12, order.total());
+      ps.setBigDecimal(9, money(order.subtotal(), scale));
+      ps.setBigDecimal(10, money(order.taxAmount(), scale));
+      ps.setBigDecimal(11, money(order.discountAmount(), scale));
+      ps.setBigDecimal(12, money(order.total(), scale));
       ps.setString(13, order.currency());
       ps.setString(14, order.notes());
       ps.setString(15, order.idempotencyKey());
@@ -320,7 +374,7 @@ public class OrderRepository extends BaseOutboxRepository {
           26,
           order.promotionDiscount() == null
               ? java.math.BigDecimal.ZERO
-              : order.promotionDiscount());
+              : money(order.promotionDiscount(), scale));
       ps.setObject(27, order.sellerUserId());
       ps.setObject(28, groupId);
       if (groupPart == null) ps.setNull(29, java.sql.Types.SMALLINT);
@@ -340,17 +394,26 @@ public class OrderRepository extends BaseOutboxRepository {
             409, "ORDER_DUPLICATE_KEY", "duplicate idempotency key", java.util.List.of(), sqle);
       throw sqle;
     }
-    for (OrderItem item : n.items()) insertOrderItem(c, item);
+    insertOrderItems(c, n.items(), scale);
     for (var deposit : n.deposits()) DepositRepository.insertDeposit(c, deposit);
     appendStatusHistory(c, order.tenantId(), order.id(), null, order.status(), "created", null);
-    if (n.discount() != null) insertOrderDiscount(c, n.discount());
-    insertOrderPromotionsTx(c, order.tenantId(), order.id(), n.appliedPromotions());
+    if (n.discount() != null) insertOrderDiscount(c, n.discount(), scale);
+    for (OfflineSaleFlag flag : n.offlineFlags()) insertOfflineSaleFlag(c, flag);
+    insertOrderPromotionsTx(c, order.tenantId(), order.id(), n.appliedPromotions(), scale);
     insertOutbox(c, n.event());
     return order;
   }
 
+  /**
+   * An amount at a currency's own minor units ({@code scale}, from {@code Fx.minorUnits}), half up:
+   * what a NUMERIC(18,2) column did for the pound before V49, and right for the yen and the dinar.
+   */
+  static BigDecimal money(BigDecimal amount, int scale) {
+    return amount == null ? null : amount.setScale(scale, java.math.RoundingMode.HALF_UP);
+  }
+
   /** Append-only (golden rule #8): inserted with the order, never updated or deleted. */
-  private static void insertOrderDiscount(java.sql.Connection c, OrderDiscount d)
+  private static void insertOrderDiscount(java.sql.Connection c, OrderDiscount d, int scale)
       throws java.sql.SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
@@ -362,12 +425,46 @@ public class OrderRepository extends BaseOutboxRepository {
       ps.setObject(2, d.tenantId());
       ps.setObject(3, d.orderId());
       ps.setObject(4, d.storeId());
-      ps.setBigDecimal(5, d.subtotal());
-      ps.setBigDecimal(6, d.discountAmount());
+      ps.setBigDecimal(5, money(d.subtotal(), scale));
+      ps.setBigDecimal(6, money(d.discountAmount(), scale));
       ps.setBigDecimal(7, d.discountPct());
       ps.setString(8, d.reason());
       ps.setObject(9, d.grantedBy());
       ps.setString(10, d.grantedRole());
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Append-only (golden rule #8): inserted with the order it flags, never updated or deleted. The
+   * order's own insert comes first, so a replay whose key already stands fails there and rolls this
+   * back with it.
+   */
+  private static void insertOfflineSaleFlag(Connection c, OfflineSaleFlag f) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO offline_sale_flags"
+                + " (id,tenant_id,order_id,store_id,kind,line_no,variant_id,batch_no,expiry,"
+                + "  recall_id,recall_reference,instrument_id,instrument_standing,rung_up_at,"
+                + "  reason,cashier_id,replayed_by)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, f.id());
+      ps.setObject(2, f.tenantId());
+      ps.setObject(3, f.orderId());
+      ps.setObject(4, f.storeId());
+      ps.setString(5, f.kind());
+      ps.setInt(6, f.lineNo());
+      ps.setObject(7, f.variantId());
+      ps.setString(8, f.batchNo());
+      ps.setObject(9, f.expiry());
+      ps.setObject(10, f.recallId());
+      ps.setString(11, f.recallReference());
+      ps.setObject(12, f.instrumentId());
+      ps.setString(13, f.instrumentStanding());
+      ps.setObject(14, java.sql.Timestamp.from(f.rungUpAt()));
+      ps.setString(15, f.reason());
+      ps.setObject(16, f.cashierId());
+      ps.setObject(17, f.replayedBy());
       ps.executeUpdate();
     }
   }
@@ -664,6 +761,8 @@ public class OrderRepository extends BaseOutboxRepository {
           // deposit shrinking to what stands of it.
           BigDecimal left = qty;
           UUID firstItem = null;
+          // What stands of a line is kept to the order currency's own minor units.
+          int scale = com.storeql.service.Fx.minorUnits(before.currency());
           for (OrderItem i : ofVariant) {
             if (left.signum() <= 0) break;
             if (i.remainingQty().signum() <= 0) continue;
@@ -673,10 +772,10 @@ public class OrderRepository extends BaseOutboxRepository {
             BigDecimal standingAfter = standingBefore.subtract(take);
             BigDecimal lineTotal =
                 com.storeql.order.domain.SubstitutePrice.share(
-                    i.lineTotal(), standingAfter, standingBefore, 2);
+                    i.lineTotal(), standingAfter, standingBefore, scale);
             BigDecimal vat =
                 com.storeql.order.domain.SubstitutePrice.share(
-                    i.vatAmount(), standingAfter, standingBefore, 2);
+                    i.vatAmount(), standingAfter, standingBefore, scale);
             try (PreparedStatement ps =
                 c.prepareStatement(
                     "UPDATE order_items SET short_qty = short_qty + ?, line_total = ?,"
@@ -693,7 +792,8 @@ public class OrderRepository extends BaseOutboxRepository {
                     "ORDER_LINE_QTY_EXCEEDS_OUTSTANDING", "line changed under this request");
               }
             }
-            DepositRepository.shrinkDepositTx(c, tenantId, i.id(), standingAfter, standingBefore);
+            DepositRepository.shrinkDepositTx(
+                c, tenantId, i.id(), standingAfter, standingBefore, scale);
             left = left.subtract(take);
           }
           OrderItem subItem = null;
@@ -716,7 +816,7 @@ public class OrderRepository extends BaseOutboxRepository {
                     substitute.vatRate(),
                     BigDecimal.ZERO,
                     firstItem);
-            insertOrderItem(c, subItem);
+            insertOrderItem(c, subItem, scale);
           }
           // The totals, as the checkout computed them: lines, their VAT (pro rata to the subtotal
           // when a line carries none), less the discounts as they were, plus the deposits.
@@ -812,11 +912,13 @@ public class OrderRepository extends BaseOutboxRepository {
         }
       }
     }
+    // The order's own currency decides the precision: whole yen, three-decimal dinars.
+    int scale = com.storeql.service.Fx.minorUnits(before.currency());
     BigDecimal tax =
         everyLineTaxed
-            ? vat.setScale(2, java.math.RoundingMode.HALF_UP)
+            ? vat.setScale(scale, java.math.RoundingMode.HALF_UP)
             : com.storeql.order.domain.SubstitutePrice.share(
-                before.taxAmount(), subtotal, before.subtotal(), 2);
+                before.taxAmount(), subtotal, before.subtotal(), scale);
     BigDecimal deposits = DepositRepository.depositTotalTx(c, tenantId, orderId);
     BigDecimal total =
         subtotal
@@ -1138,6 +1240,26 @@ public class OrderRepository extends BaseOutboxRepository {
   }
 
   /**
+   * What the order's captured tenders add up to — split tenders on a still-PENDING order included.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param orderId the order
+   * @return the amount paid, zero when nothing was taken or there is no such order
+   */
+  public BigDecimal paidAmount(UUID tenantId, UUID orderId) {
+    var list =
+        query(
+            "SELECT paid_amount FROM orders WHERE tenant_id=? AND id=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, orderId);
+            },
+            rs -> rs.getBigDecimal("paid_amount"),
+            "order paid amount");
+    return list.isEmpty() || list.get(0) == null ? BigDecimal.ZERO : list.get(0);
+  }
+
+  /**
    * Moves an order between statuses, appends the history row and writes the event — atomically.
    *
    * <p>The update is conditional on {@code fromStatus}, which is what makes the transition safe
@@ -1163,8 +1285,36 @@ public class OrderRepository extends BaseOutboxRepository {
       String reason,
       UUID changedBy,
       OutboxRow event) {
+    return transitionOrderStatus(
+        tenantId, orderId, expectedStatus, newStatus, reason, changedBy, event, null);
+  }
+
+  /**
+   * As above, and when {@code reversalEvent} is given, the value the order loaded on gift cards is
+   * taken back off them on this same transaction (refused whole when a card was spent).
+   */
+  public Order transitionOrderStatus(
+      UUID tenantId,
+      UUID orderId,
+      String expectedStatus,
+      String newStatus,
+      String reason,
+      UUID changedBy,
+      OutboxRow event,
+      java.util.function.Function<CardReversal, OutboxRow> reversalEvent) {
     return inTx(
         c -> {
+          if (reversalEvent != null) {
+            // Lock the order first so a payment landing now is applied before or after, whole.
+            try (PreparedStatement ps =
+                c.prepareStatement(
+                    "SELECT status FROM orders WHERE tenant_id=? AND id=? FOR UPDATE")) {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, orderId);
+              ps.executeQuery().close();
+            }
+            reverseGiftCardLoadsTx(c, tenantId, orderId, reversalEvent);
+          }
           int rows;
           try (PreparedStatement ps =
               c.prepareStatement(
@@ -1298,6 +1448,16 @@ public class OrderRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "UPDATE layaways l SET notes = NULL WHERE l.tenant_id = ? AND l.customer_id = ? AND"
                 + LAYAWAY_SETTLED_WITH_NOTES)) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, customerId);
+      ps.executeUpdate();
+    }
+    // The phone or email a no-receipt return recorded is the customer's own detail: erased at
+    // once. Nothing else on a return changes; the record of what came back and what was paid stays.
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE returns SET customer_contact = NULL"
+                + " WHERE tenant_id = ? AND customer_id = ? AND customer_contact IS NOT NULL")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, customerId);
       ps.executeUpdate();
@@ -1481,19 +1641,92 @@ public class OrderRepository extends BaseOutboxRepository {
    * never paid (a paid one would have confirmed). Cross-tenant scan for the background sweeper
    * (each row carries its tenant), mirroring inventory-svc's reservation sweeper.
    */
-  public List<PendingOrderRef> findExpiredPendingOrders(int ttlHours, int limit) {
+  public List<PendingOrderRef> findExpiredPendingOrders(int defaultTtlHours, int limit) {
+    // Each business's own limit (order_settings, same database) where it set one, the platform's
+    // default where it did not; counted from the order's last change (updated_at), as it always
+    // was, so an order priced by a manager is held from the pricing, not from the day it was
+    // placed. The shopper is shown the same instant as expiresAt.
     return query(
-        "SELECT tenant_id, id FROM orders"
-            + " WHERE status = 'PENDING' AND updated_at < now() - make_interval(hours => ?)"
-            + " ORDER BY created_at ASC LIMIT ?",
+        "SELECT o.tenant_id, o.id FROM orders o"
+            + " LEFT JOIN order_settings s ON s.tenant_id = o.tenant_id"
+            + " WHERE o.status = 'PENDING'"
+            + " AND o.updated_at < now() - make_interval(hours => COALESCE(s.pending_limit_hours, ?))"
+            + " ORDER BY o.updated_at ASC LIMIT ?",
         ps -> {
-          ps.setInt(1, ttlHours);
+          ps.setInt(1, defaultTtlHours);
           ps.setInt(2, limit);
         },
         rs ->
             new PendingOrderRef(
                 rs.getObject("tenant_id", UUID.class), rs.getObject("id", UUID.class)),
         "find expired pending orders");
+  }
+
+  /** An order waiting for a price that has passed one of its business's limits. */
+  public record AwaitingPriceRef(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String channel,
+      String fulfilmentType,
+      BigDecimal total,
+      Instant awaitingSince,
+      boolean cancelDue) {}
+
+  /**
+   * AWAITING_PRICE orders past a limit their business set, oldest first: those past the cancel
+   * limit, and those past the flag limit not yet flagged. A business with no limit set is never
+   * returned. Cross-tenant scan for the background sweeper; each row carries its tenant.
+   */
+  public List<AwaitingPriceRef> findAwaitingPriceDue(int limit) {
+    return query(
+        "SELECT o.tenant_id, o.id, o.store_id, o.channel, o.fulfilment_type, o.total, o.created_at,"
+            + " (s.price_wait_cancel_minutes IS NOT NULL AND o.created_at <"
+            + "   now() - make_interval(mins => s.price_wait_cancel_minutes)) AS cancel_due"
+            + " FROM orders o JOIN order_settings s ON s.tenant_id = o.tenant_id"
+            + " WHERE o.status = 'AWAITING_PRICE' AND ("
+            + "   (s.price_wait_cancel_minutes IS NOT NULL AND o.created_at <"
+            + "     now() - make_interval(mins => s.price_wait_cancel_minutes))"
+            + "   OR (s.price_wait_flag_minutes IS NOT NULL AND o.price_overdue_at IS NULL"
+            + "     AND o.created_at < now() - make_interval(mins => s.price_wait_flag_minutes)))"
+            + " ORDER BY o.created_at ASC LIMIT ?",
+        ps -> ps.setInt(1, limit),
+        rs ->
+            new AwaitingPriceRef(
+                rs.getObject("tenant_id", UUID.class),
+                rs.getObject("id", UUID.class),
+                rs.getObject("store_id", UUID.class),
+                rs.getString("channel"),
+                rs.getString("fulfilment_type"),
+                rs.getBigDecimal("total"),
+                rs.getTimestamp("created_at").toInstant(),
+                rs.getBoolean("cancel_due")),
+        "find awaiting-price orders due");
+  }
+
+  /**
+   * Stamps an order that has waited too long for a price, once, and writes the event on the same
+   * transaction. Conditional on the order still waiting and not yet flagged, so a manager pricing
+   * it at the same moment, or a second sweep, leaves it alone.
+   *
+   * @return true when this call flagged it
+   */
+  public boolean flagPriceOverdue(UUID tenantId, UUID orderId, OutboxRow event) {
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE orders SET price_overdue_at = now()"
+                      + " WHERE tenant_id=? AND id=? AND status='AWAITING_PRICE'"
+                      + " AND price_overdue_at IS NULL")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, orderId);
+            if (ps.executeUpdate() == 0) return false;
+          }
+          insertOutbox(c, event);
+          return true;
+        },
+        "flag price overdue " + orderId);
   }
 
   /**
@@ -1512,6 +1745,31 @@ public class OrderRepository extends BaseOutboxRepository {
       String method,
       OutboxRow confirmEvent,
       OutboxRow fulfilEvent) {
+    return applyPaymentCaptured(
+        tenantId, orderId, paymentId, amount, method, confirmEvent, fulfilEvent, null);
+  }
+
+  /** A step that runs on the transaction that completes a sale's payment. */
+  @FunctionalInterface
+  public interface PaidStep {
+    void run(Connection c) throws SQLException;
+  }
+
+  /**
+   * As above, with a step that commits with the confirmation or not at all: the gift cards a sale
+   * carried are issued here, once, when the payment that completes the sale lands.
+   *
+   * @param whenPaid the step, or null for none; run only by the capture that completes the sale
+   */
+  public boolean applyPaymentCaptured(
+      UUID tenantId,
+      UUID orderId,
+      UUID paymentId,
+      BigDecimal amount,
+      String method,
+      OutboxRow confirmEvent,
+      OutboxRow fulfilEvent,
+      PaidStep whenPaid) {
     // Returns true only when THIS capture completed the sale, so the caller numbers the receipt
     // exactly once. A redelivery, a partial tender and an order already past PENDING all return
     // false.
@@ -1576,6 +1834,7 @@ public class OrderRepository extends BaseOutboxRepository {
               "payment captured",
               null);
           insertOutbox(c, confirmEvent);
+          if (whenPaid != null) whenPaid.run(c);
 
           // SJ-D40. A till sale is handed over at the counter the moment it is paid for, so the
           // capture that completes it also fulfils it — here, in the same transaction, so "paid for
@@ -1678,9 +1937,11 @@ public class OrderRepository extends BaseOutboxRepository {
         c -> {
           String status;
           BigDecimal discount;
+          int scale;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "SELECT status, discount_amount FROM orders WHERE tenant_id=? AND id=? FOR UPDATE")) {
+                  "SELECT status, discount_amount, currency FROM orders"
+                      + " WHERE tenant_id=? AND id=? FOR UPDATE")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, orderId);
             try (ResultSet rs = ps.executeQuery()) {
@@ -1689,6 +1950,8 @@ public class OrderRepository extends BaseOutboxRepository {
               }
               status = rs.getString(1);
               discount = rs.getBigDecimal(2) == null ? BigDecimal.ZERO : rs.getBigDecimal(2);
+              // Line totals and the tax are kept to the order currency's own minor units.
+              scale = com.storeql.service.Fx.minorUnits(rs.getString(3));
             }
           }
           if (!Order.STATUS_AWAITING_PRICE.equals(status)) {
@@ -1726,7 +1989,7 @@ public class OrderRepository extends BaseOutboxRepository {
                   "ORDER_PRICE_LINE_MISSING", "no price given for variant " + i.variantId());
             }
             BigDecimal lineTotal =
-                price.multiply(i.qty()).setScale(2, java.math.RoundingMode.HALF_UP);
+                price.multiply(i.qty()).setScale(scale, java.math.RoundingMode.HALF_UP);
             try (PreparedStatement ps =
                 c.prepareStatement(
                     "UPDATE order_items SET unit_price=?, line_total=? WHERE tenant_id=? AND id=?")) {
@@ -1738,13 +2001,15 @@ public class OrderRepository extends BaseOutboxRepository {
             }
             subtotal = subtotal.add(lineTotal);
           }
-          BigDecimal total = subtotal.add(tax).subtract(discount).max(BigDecimal.ZERO);
+          // The manager's VAT figure, to the currency's minor unit as every other total is.
+          BigDecimal taxAtScale = tax.setScale(scale, java.math.RoundingMode.HALF_UP);
+          BigDecimal total = subtotal.add(taxAtScale).subtract(discount).max(BigDecimal.ZERO);
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE orders SET subtotal=?, tax_amount=?, total=?, status=?, updated_at=now()"
                       + " WHERE tenant_id=? AND id=?")) {
             ps.setBigDecimal(1, subtotal);
-            ps.setBigDecimal(2, tax);
+            ps.setBigDecimal(2, taxAtScale);
             ps.setBigDecimal(3, total);
             ps.setString(4, Order.STATUS_PENDING);
             ps.setObject(5, tenantId);
@@ -2150,62 +2415,156 @@ public class OrderRepository extends BaseOutboxRepository {
    */
   public Return createReturn(
       Return ret, List<ReturnItem> items, OutboxRow event, ReturnStep afterReturn) {
-    return inTx(
-        c -> {
-          // Lock each purchased line and re-check the cumulative returned quantity inside this
-          // transaction so two concurrent returns on the same order can't jointly over-refund.
-          for (ReturnItem item : items) {
-            // What was handed over, not what was ordered: on a part-fulfilled order the rest never
-            // left the store, and a refund for it is a refund for goods the customer never had.
-            BigDecimal handedOverQty =
-                lockOrderItemQty(c, ret.tenantId(), ret.orderId(), item.variantId());
-            BigDecimal alreadyReturned =
-                sumReturnedQty(c, ret.tenantId(), ret.orderId(), item.variantId());
-            if (item.qty().add(alreadyReturned).compareTo(handedOverQty) > 0)
-              throw ApiException.conflict(
-                  "RETURN_QTY_EXCEEDS_PURCHASED",
-                  "cannot return more than was handed over (and not yet returned) for variant "
-                      + item.variantId());
-          }
-          try (PreparedStatement ps =
-              c.prepareStatement(
-                  "INSERT INTO returns"
-                      + " (id,tenant_id,order_id,store_id,reason,refund_amount,refund_method,"
-                      + "status,created_by) VALUES (?,?,?,?,?,?,?,?,?)")) {
-            ps.setObject(1, ret.id());
-            ps.setObject(2, ret.tenantId());
-            ps.setObject(3, ret.orderId());
-            ps.setObject(4, ret.storeId());
-            ps.setString(5, ret.reason());
-            ps.setBigDecimal(6, ret.refundAmount());
-            ps.setString(7, ret.refundMethod());
-            ps.setString(8, ret.status());
-            ps.setObject(9, ret.createdBy());
-            ps.executeUpdate();
-          }
-          for (ReturnItem item : items) {
-            try (PreparedStatement ps =
-                c.prepareStatement(
-                    "INSERT INTO return_items"
-                        + " (id,tenant_id,return_id,variant_id,qty,refund_amount,condition)"
-                        + " VALUES (?,?,?,?,?,?,?)")) {
-              ps.setObject(1, item.id());
-              ps.setObject(2, item.tenantId());
-              ps.setObject(3, item.returnId());
-              ps.setObject(4, item.variantId());
-              ps.setBigDecimal(5, item.qty());
-              ps.setBigDecimal(6, item.refundAmount());
-              ps.setString(7, item.condition());
-              ps.executeUpdate();
-            }
-          }
-          if (afterReturn != null) {
-            afterReturn.run(c);
-          }
-          insertOutbox(c, event);
-          return ret;
-        },
-        "create return");
+    return inTx(c -> createReturnTx(c, ret, items, event, afterReturn), "create return");
+  }
+
+  /**
+   * Writes a return on a transaction the caller owns: the same rules as {@link
+   * #createReturn(Return, List, OutboxRow, ReturnStep)}, so an exchange can write its return on the
+   * transaction that places the new sale. A return with no order (no receipt) has no quantity to
+   * check against a sale.
+   */
+  public Return createReturnTx(
+      Connection c, Return ret, List<ReturnItem> items, OutboxRow event, ReturnStep afterReturn)
+      throws SQLException {
+    // Lock each purchased line and re-check the cumulative returned quantity inside this
+    // transaction so two concurrent returns on the same order can't jointly over-refund. A return
+    // with no receipt names no order and has nothing to be checked against.
+    if (ret.orderId() != null) {
+      for (ReturnItem item : items) {
+        // What was handed over, not what was ordered: on a part-fulfilled order the rest never
+        // left the store, and a refund for it is a refund for goods the customer never had.
+        BigDecimal handedOverQty =
+            lockOrderItemQty(c, ret.tenantId(), ret.orderId(), item.variantId());
+        BigDecimal alreadyReturned =
+            sumReturnedQty(c, ret.tenantId(), ret.orderId(), item.variantId());
+        if (item.qty().add(alreadyReturned).compareTo(handedOverQty) > 0)
+          throw ApiException.conflict(
+              "RETURN_QTY_EXCEEDS_PURCHASED",
+              "cannot return more than was handed over (and not yet returned) for variant "
+                  + item.variantId());
+      }
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO returns"
+                + " (id,tenant_id,order_id,store_id,reason,refund_amount,refund_method,"
+                + "status,created_by,idempotency_key,approved_by,outside_policy,gift_card_id,"
+                + "created_at,completed_at,exchange_order_id,no_receipt,customer_id,"
+                + "customer_contact)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, ret.id());
+      ps.setObject(2, ret.tenantId());
+      // A UUID column is never bound null through setObject(i, null): each optional id
+      // takes its own branch with a typed null.
+      if (ret.orderId() != null) ps.setObject(3, ret.orderId());
+      else ps.setNull(3, java.sql.Types.OTHER);
+      ps.setObject(4, ret.storeId());
+      ps.setString(5, ret.reason());
+      ps.setBigDecimal(6, ret.refundAmount());
+      ps.setString(7, ret.refundMethod());
+      ps.setString(8, ret.status());
+      ps.setObject(9, ret.createdBy());
+      if (ret.idempotencyKey() != null) ps.setObject(10, ret.idempotencyKey());
+      else ps.setNull(10, java.sql.Types.OTHER);
+      if (ret.approvedBy() != null) ps.setObject(11, ret.approvedBy());
+      else ps.setNull(11, java.sql.Types.OTHER);
+      ps.setArray(
+          12,
+          c.createArrayOf(
+              "text",
+              (ret.outsidePolicy() == null ? List.<String>of() : ret.outsidePolicy())
+                  .toArray(String[]::new)));
+      if (ret.giftCardId() != null) ps.setObject(13, ret.giftCardId());
+      else ps.setNull(13, java.sql.Types.OTHER);
+      // The times the answer carries, so a replay reads back exactly what the first said.
+      ps.setObject(
+          14, java.time.OffsetDateTime.ofInstant(ret.createdAt(), java.time.ZoneOffset.UTC));
+      ps.setObject(
+          15,
+          ret.completedAt() == null
+              ? null
+              : java.time.OffsetDateTime.ofInstant(ret.completedAt(), java.time.ZoneOffset.UTC));
+      if (ret.exchangeOrderId() != null) ps.setObject(16, ret.exchangeOrderId());
+      else ps.setNull(16, java.sql.Types.OTHER);
+      ps.setBoolean(17, ret.noReceipt());
+      if (ret.customerId() != null) ps.setObject(18, ret.customerId());
+      else ps.setNull(18, java.sql.Types.OTHER);
+      ps.setString(19, ret.customerContact());
+      ps.executeUpdate();
+    } catch (SQLException sqle) {
+      // Two attempts with one key racing: the later one lost. The caller reads the first.
+      if (UNIQUE_VIOLATION.equals(sqle.getSQLState()) && ret.idempotencyKey() != null)
+        throw new ApiException(
+            409, "RETURN_DUPLICATE_KEY", "duplicate idempotency key", List.of(), sqle);
+      throw sqle;
+    }
+    for (ReturnItem item : items) {
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "INSERT INTO return_items"
+                  + " (id,tenant_id,return_id,variant_id,qty,refund_amount,condition,"
+                  + "unit_price,tax_amount)"
+                  + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+        ps.setObject(1, item.id());
+        ps.setObject(2, item.tenantId());
+        ps.setObject(3, item.returnId());
+        ps.setObject(4, item.variantId());
+        ps.setBigDecimal(5, item.qty());
+        ps.setBigDecimal(6, item.refundAmount());
+        ps.setString(7, item.condition());
+        ps.setBigDecimal(8, item.unitPrice());
+        ps.setBigDecimal(9, item.taxAmount());
+        ps.executeUpdate();
+      }
+    }
+    if (afterReturn != null) {
+      afterReturn.run(c);
+    }
+    insertOutbox(c, event);
+    return ret;
+  }
+
+  /**
+   * Links the sale an exchange bought to the return that paid for it, on the transaction that
+   * placed the sale.
+   */
+  public void linkExchangeTx(Connection c, UUID tenantId, UUID orderId, UUID returnId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE orders SET exchanged_from_return_id=? WHERE tenant_id=? AND id=?")) {
+      ps.setObject(1, returnId);
+      ps.setObject(2, tenantId);
+      ps.setObject(3, orderId);
+      ps.executeUpdate();
+    }
+  }
+
+  private static final String RETURN_COLUMNS =
+      "SELECT id, tenant_id, order_id, store_id, reason, refund_amount, refund_method,"
+          + " status, created_at, completed_at, created_by, idempotency_key, approved_by,"
+          + " outside_policy, gift_card_id, exchange_order_id, no_receipt, customer_id,"
+          + " customer_contact";
+
+  /**
+   * The return with this id.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param returnId the return
+   * @return the return, or empty when this business has none by that id
+   */
+  public Optional<Return> findReturnById(UUID tenantId, UUID returnId) {
+    return query(
+            RETURN_COLUMNS + " FROM returns WHERE tenant_id=? AND id=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, returnId);
+            },
+            rs -> mapReturn(rs),
+            "find return by id")
+        .stream()
+        .findFirst();
   }
 
   /**
@@ -2217,15 +2576,117 @@ public class OrderRepository extends BaseOutboxRepository {
    */
   public List<Return> findReturns(UUID tenantId, UUID orderId) {
     return query(
-        "SELECT id, tenant_id, order_id, store_id, reason, refund_amount, refund_method,"
-            + " status, created_at, completed_at, created_by"
-            + " FROM returns WHERE tenant_id=? AND order_id=? ORDER BY created_at",
+        RETURN_COLUMNS + " FROM returns WHERE tenant_id=? AND order_id=? ORDER BY created_at",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, orderId);
         },
         rs -> mapReturn(rs),
         "find returns");
+  }
+
+  /**
+   * The return a retried request already made: the first one written under this key.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param idempotencyKey the caller's key
+   * @return the return, or empty when the key has not been used
+   */
+  public Optional<Return> findReturnByKey(UUID tenantId, UUID idempotencyKey) {
+    return query(
+            RETURN_COLUMNS + " FROM returns WHERE tenant_id=? AND idempotency_key=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, idempotencyKey);
+            },
+            rs -> mapReturn(rs),
+            "find return by idempotency key")
+        .stream()
+        .findFirst();
+  }
+
+  /**
+   * How much of each variant has already come back on an order, across every return.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param orderId the order
+   * @return the returned quantity per variant; a variant never returned is absent
+   */
+  public java.util.Map<UUID, BigDecimal> returnedQtyByVariant(UUID tenantId, UUID orderId) {
+    var out = new java.util.HashMap<UUID, BigDecimal>();
+    query(
+        "SELECT ri.variant_id, SUM(ri.qty) AS qty FROM return_items ri"
+            + " JOIN returns r ON r.tenant_id = ri.tenant_id AND r.id = ri.return_id"
+            + " WHERE r.tenant_id=? AND r.order_id=? GROUP BY ri.variant_id",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, orderId);
+        },
+        rs -> {
+          out.put(rs.getObject("variant_id", UUID.class), rs.getBigDecimal("qty"));
+          return Boolean.TRUE;
+        },
+        "returned quantities");
+    return out;
+  }
+
+  /**
+   * When the goods left the store: the first time the order was fulfilled or part-fulfilled, read
+   * from the append-only status history.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param orderId the order
+   * @return that moment, or empty when the order never was
+   */
+  public Optional<Instant> findFirstFulfilledAt(UUID tenantId, UUID orderId) {
+    return query(
+            "SELECT MIN(changed_at) AS at FROM order_status_history"
+                + " WHERE tenant_id=? AND order_id=?"
+                + " AND to_status IN ('FULFILLED','PARTIALLY_FULFILLED')",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, orderId);
+            },
+            rs -> toInstant(rs.getObject("at", OffsetDateTime.class)),
+            "find first fulfilled")
+        .stream()
+        .filter(java.util.Objects::nonNull)
+        .findFirst();
+  }
+
+  /**
+   * The orders a receipt number could name: this business's fiscal receipts with that printed
+   * number (case-insensitive), and, when given, the orders whose short reference — the last eight
+   * characters of the id, as the receipt prints it — is that.
+   *
+   * @param tenantId owning tenant; the first condition of both queries
+   * @param number the printed fiscal number, trimmed
+   * @param shortRef the short order reference, lower case, or null when the text cannot be one
+   * @return the distinct order ids
+   */
+  public List<UUID> findOrderIdsByReceipt(UUID tenantId, String number, String shortRef) {
+    List<UUID> ids = new ArrayList<>();
+    String sql =
+        "SELECT order_id AS id FROM fiscal_receipts WHERE tenant_id=? AND lower(full_number)=?"
+            + (shortRef == null
+                ? ""
+                : " UNION SELECT id FROM orders WHERE tenant_id=? AND right(id::text, 8)=?");
+    query(
+        sql,
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setString(2, number.toLowerCase(java.util.Locale.ROOT));
+          if (shortRef != null) {
+            ps.setObject(3, tenantId);
+            ps.setString(4, shortRef);
+          }
+        },
+        rs -> {
+          ids.add(rs.getObject("id", UUID.class));
+          return Boolean.TRUE;
+        },
+        "find orders by receipt");
+    return ids;
   }
 
   /**
@@ -2237,8 +2698,8 @@ public class OrderRepository extends BaseOutboxRepository {
    */
   public List<ReturnItem> findReturnItems(UUID tenantId, UUID returnId) {
     return query(
-        "SELECT id, tenant_id, return_id, variant_id, qty, refund_amount, condition"
-            + " FROM return_items WHERE tenant_id=? AND return_id=?",
+        "SELECT id, tenant_id, return_id, variant_id, qty, refund_amount, condition,"
+            + " unit_price, tax_amount FROM return_items WHERE tenant_id=? AND return_id=?",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, returnId);
@@ -2267,8 +2728,10 @@ public class OrderRepository extends BaseOutboxRepository {
       UUID storeId,
       String reason,
       UUID voidedBy,
+      UUID idempotencyKey,
       java.util.function.Function<List<com.storeql.order.domain.Domain.RestockLine>, OutboxRow>
-          eventFor) {
+          eventFor,
+      java.util.function.Function<CardReversal, OutboxRow> reversalEvent) {
     return inTx(
         c -> {
           // Lock first, so what is restocked is decided against the order being voided rather than
@@ -2290,6 +2753,9 @@ public class OrderRepository extends BaseOutboxRepository {
                 "ORDER_CANNOT_VOID", "order not found or already voided/cancelled");
           }
 
+          // The value the sale put on gift cards comes back off them first; a spent card refuses
+          // the whole void, and the transaction leaves nothing behind.
+          reverseGiftCardLoadsTx(c, tenantId, orderId, reversalEvent);
           var restock = restockOnVoidInTx(c, tenantId, orderId);
 
           try (PreparedStatement ps =
@@ -2303,17 +2769,32 @@ public class OrderRepository extends BaseOutboxRepository {
           PosVoidLog vl;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "INSERT INTO pos_void_log (id,tenant_id,order_id,store_id,reason,voided_by)"
-                      + " VALUES (?,?,?,?,?,?)")) {
+                  "INSERT INTO pos_void_log"
+                      + " (id,tenant_id,order_id,store_id,reason,voided_by,idempotency_key,voided_at)"
+                      + " VALUES (?,?,?,?,?,?,?,?)")) {
             UUID vid = Ids.newId();
+            // One clock for the row and the answer, at Postgres's precision, so a replay under the
+            // same key answers with exactly the time the first did.
+            Instant voidedAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             ps.setObject(1, vid);
             ps.setObject(2, tenantId);
             ps.setObject(3, orderId);
             ps.setObject(4, storeId);
             ps.setString(5, reason);
             ps.setObject(6, voidedBy);
+            if (idempotencyKey != null) ps.setObject(7, idempotencyKey);
+            else ps.setNull(7, java.sql.Types.OTHER);
+            ps.setObject(8, java.time.OffsetDateTime.ofInstant(voidedAt, java.time.ZoneOffset.UTC));
             ps.executeUpdate();
-            vl = new PosVoidLog(vid, tenantId, orderId, storeId, reason, voidedBy, Instant.now());
+            vl =
+                new PosVoidLog(
+                    vid, tenantId, orderId, storeId, reason, voidedBy, voidedAt, idempotencyKey);
+          } catch (SQLException sqle) {
+            // A racing retry with the same key lost; the caller reads the first void.
+            if (UNIQUE_VIOLATION.equals(sqle.getSQLState()) && idempotencyKey != null)
+              throw new ApiException(
+                  409, "VOID_DUPLICATE_KEY", "duplicate idempotency key", List.of(), sqle);
+            throw sqle;
           }
           // With the prior status in hand the history row says what was voided; it used to record
           // null here.
@@ -2323,6 +2804,36 @@ public class OrderRepository extends BaseOutboxRepository {
           return vl;
         },
         "void order");
+  }
+
+  /**
+   * The void a retried request already made: the first one written under this key.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param idempotencyKey the caller's key
+   * @return the void, or empty when the key has not been used
+   */
+  public Optional<PosVoidLog> findVoidByKey(UUID tenantId, UUID idempotencyKey) {
+    return query(
+            "SELECT id, tenant_id, order_id, store_id, reason, voided_by, voided_at,"
+                + " idempotency_key FROM pos_void_log WHERE tenant_id=? AND idempotency_key=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, idempotencyKey);
+            },
+            rs ->
+                new PosVoidLog(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("tenant_id", UUID.class),
+                    rs.getObject("order_id", UUID.class),
+                    rs.getObject("store_id", UUID.class),
+                    rs.getString("reason"),
+                    rs.getObject("voided_by", UUID.class),
+                    toInstant(rs.getObject("voided_at", OffsetDateTime.class)),
+                    rs.getObject("idempotency_key", UUID.class)),
+            "find void by idempotency key")
+        .stream()
+        .findFirst();
   }
 
   /**
@@ -2597,6 +3108,316 @@ public class OrderRepository extends BaseOutboxRepository {
 
   // ── Gift cards ────────────────────────────────────────────────────────────
 
+  // ── Gift cards sold on an order ───────────────────────────────────────────
+
+  /** Writes an order's gift-card lines, on the order's own transaction. */
+  public static void insertGiftCardLoadLinesTx(
+      Connection c, List<com.storeql.order.domain.Domain.GiftCardLoadLine> lines)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO gift_card_load_lines"
+                + " (id, tenant_id, order_id, amount, target_code, created_at)"
+                + " VALUES (?,?,?,?,?,now())")) {
+      for (var l : lines) {
+        ps.setObject(1, l.id());
+        ps.setObject(2, l.tenantId());
+        ps.setObject(3, l.orderId());
+        ps.setBigDecimal(4, l.amount());
+        ps.setString(5, l.targetCode());
+        ps.addBatch();
+      }
+      ps.executeBatch();
+    }
+  }
+
+  /**
+   * What an order's gift-card lines add up to, loaded or not: the part of its total that is stored
+   * value and not a sale.
+   */
+  public BigDecimal giftCardLoadTotal(UUID tenantId, UUID orderId) {
+    return query(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM gift_card_load_lines"
+                + " WHERE tenant_id=? AND order_id=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, orderId);
+            },
+            rs -> rs.getBigDecimal("total"),
+            "gift card load total")
+        .get(0);
+  }
+
+  /** An order's gift-card lines. */
+  public List<com.storeql.order.domain.Domain.GiftCardLoadLine> findGiftCardLoadLines(
+      UUID tenantId, UUID orderId) {
+    return query(
+        "SELECT id, tenant_id, order_id, amount, target_code, gift_card_id"
+            + " FROM gift_card_load_lines WHERE tenant_id=? AND order_id=? ORDER BY created_at, id",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, orderId);
+        },
+        rs ->
+            new com.storeql.order.domain.Domain.GiftCardLoadLine(
+                rs.getObject("id", UUID.class),
+                rs.getObject("tenant_id", UUID.class),
+                rs.getObject("order_id", UUID.class),
+                rs.getBigDecimal("amount"),
+                rs.getString("target_code"),
+                rs.getObject("gift_card_id", UUID.class)),
+        "find gift card load lines");
+  }
+
+  /**
+   * An order's gift-card lines with the card each became, oldest first; tenant is the first
+   * condition.
+   */
+  public List<com.storeql.order.domain.Domain.GiftCardLoadView> findGiftCardLoadViews(
+      UUID tenantId, UUID orderId) {
+    return query(
+        "SELECT l.id, l.amount, l.gift_card_id, c.code, t.tx_type, l.loaded_at"
+            + " FROM gift_card_load_lines l"
+            + " LEFT JOIN gift_cards c ON c.tenant_id = l.tenant_id AND c.id = l.gift_card_id"
+            + " LEFT JOIN gift_card_transactions t ON t.tenant_id = l.tenant_id"
+            + "  AND t.gift_card_id = l.gift_card_id AND t.order_id = l.order_id"
+            + "  AND t.tx_type IN ('ISSUE','RELOAD')"
+            + " WHERE l.tenant_id=? AND l.order_id=? ORDER BY l.created_at, l.id",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, orderId);
+        },
+        rs -> {
+          OffsetDateTime at = rs.getObject("loaded_at", OffsetDateTime.class);
+          String type = rs.getString("tx_type");
+          return new com.storeql.order.domain.Domain.GiftCardLoadView(
+              rs.getObject("id", UUID.class),
+              rs.getBigDecimal("amount"),
+              rs.getObject("gift_card_id", UUID.class),
+              rs.getString("code"),
+              type == null ? null : "ISSUE".equals(type) ? "NEW" : "TOP_UP",
+              at == null ? null : at.toInstant());
+        },
+        "find gift card load views");
+  }
+
+  /** A card line taken back off its card: the card as it now stands and the ledger row. */
+  public record CardReversal(GiftCard card, GiftCardTransaction tx) {}
+
+  /**
+   * Takes back off each card the value an order's lines loaded, on the caller's transaction (void
+   * or cancel of a paid sale). Cards are locked in id order; if any holds less than the lines
+   * loaded on it (it was spent) nothing is written and {@code ORDER_GIFT_CARD_SPENT} (409) names
+   * each such card by the last four characters of its code. Otherwise each line writes one
+   * append-only {@code LOAD_REVERSED} row and lowers the balance; a new card that nothing else ever
+   * moved and is now empty becomes CANCELLED. Lines never loaded (the sale was not paid) are not
+   * touched.
+   */
+  private void reverseGiftCardLoadsTx(
+      Connection c,
+      UUID tenantId,
+      UUID orderId,
+      java.util.function.Function<CardReversal, OutboxRow> event)
+      throws SQLException {
+    record Line(UUID cardId, BigDecimal amount) {}
+    List<Line> lines = new java.util.ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT gift_card_id, amount FROM gift_card_load_lines"
+                + " WHERE tenant_id=? AND order_id=? AND gift_card_id IS NOT NULL"
+                + " ORDER BY gift_card_id, created_at, id")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) lines.add(new Line(rs.getObject(1, UUID.class), rs.getBigDecimal(2)));
+      }
+    }
+    if (lines.isEmpty()) return;
+    Map<UUID, GiftCard> cards = new java.util.LinkedHashMap<>();
+    Map<UUID, BigDecimal> owed = new java.util.LinkedHashMap<>();
+    for (Line l : lines) {
+      if (!cards.containsKey(l.cardId())) {
+        try (PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT id, tenant_id, store_id, code, initial_balance, current_balance,"
+                    + " status, currency, issued_at, updated_at, expires_at"
+                    + " FROM gift_cards WHERE tenant_id=? AND id=? FOR UPDATE")) {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, l.cardId());
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) cards.put(l.cardId(), mapGiftCard(rs));
+          }
+        }
+      }
+      owed.merge(l.cardId(), l.amount(), BigDecimal::add);
+    }
+    List<String> spent = new java.util.ArrayList<>();
+    for (var e : owed.entrySet()) {
+      GiftCard gc = cards.get(e.getKey());
+      if (gc == null || gc.currentBalance().compareTo(e.getValue()) < 0) {
+        String code = gc == null ? "" : gc.code();
+        String tail = code.length() <= 4 ? code : code.substring(code.length() - 4);
+        spent.add(
+            "card ending "
+                + tail
+                + ": loaded "
+                + e.getValue().toPlainString()
+                + ", balance now "
+                + (gc == null ? "0" : gc.currentBalance().toPlainString()));
+      }
+    }
+    if (!spent.isEmpty())
+      throw new ApiException(
+          409,
+          "ORDER_GIFT_CARD_SPENT",
+          "a gift card sold on this order has been spent; refund the goods as a return instead",
+          spent);
+    for (Line l : lines) {
+      GiftCard gc = cards.get(l.cardId());
+      BigDecimal before = gc.currentBalance();
+      BigDecimal after = before.subtract(l.amount());
+      boolean newCard = false;
+      boolean untouched = false;
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "SELECT COALESCE(bool_or(tx_type='ISSUE' AND order_id=?), false),"
+                  + " COUNT(*) FILTER (WHERE NOT (tx_type='ISSUE' AND order_id=?))"
+                  + " FROM gift_card_transactions WHERE tenant_id=? AND gift_card_id=?")) {
+        ps.setObject(1, orderId);
+        ps.setObject(2, orderId);
+        ps.setObject(3, tenantId);
+        ps.setObject(4, gc.id());
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            newCard = rs.getBoolean(1);
+            // Other rows are earlier reversals of this same order's other lines at most.
+            untouched = rs.getLong(2) == 0;
+          }
+        }
+      }
+      // A new card emptied by its own sale's reversal never existed for anyone: CANCELLED. Any
+      // other card left at nothing is DEPLETED, as a redeem to nothing leaves it.
+      String status;
+      if (newCard && untouched && after.signum() == 0) status = GiftCard.STATUS_CANCELLED;
+      else if (after.signum() == 0) status = GiftCard.STATUS_DEPLETED;
+      else status = gc.status();
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "UPDATE gift_cards SET current_balance=?, status=?, updated_at=now()"
+                  + " WHERE tenant_id=? AND id=?")) {
+        ps.setBigDecimal(1, after);
+        ps.setString(2, status);
+        ps.setObject(3, tenantId);
+        ps.setObject(4, gc.id());
+        ps.executeUpdate();
+      }
+      var tx =
+          new GiftCardTransaction(
+              Ids.newId(),
+              tenantId,
+              gc.id(),
+              GiftCardTransaction.TX_LOAD_REVERSED,
+              l.amount(),
+              before,
+              after,
+              orderId,
+              orderId.toString(),
+              Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+      insertGiftCardTx(c, tx, null, "SALE", null, null);
+      GiftCard now =
+          new GiftCard(
+              gc.id(),
+              gc.tenantId(),
+              gc.storeId(),
+              gc.code(),
+              gc.initialBalance(),
+              after,
+              status,
+              gc.currency(),
+              gc.issuedAt(),
+              gc.expiresAt());
+      cards.put(l.cardId(), now);
+      insertOutbox(c, event.apply(new CardReversal(now, tx)));
+    }
+  }
+
+  /**
+   * Issues, or tops up, the cards an order sold, on the transaction that completes its payment:
+   * each line not yet loaded puts its amount on its card and is marked loaded, once. A line that
+   * named a card that has since gone or is no longer active gets a new card instead, because the
+   * money is already taken and the customer is owed the value.
+   *
+   * @param newCode mints a fresh card code
+   * @param loaded builds the {@code GiftCardLoaded} event from a card and its ledger row
+   */
+  public void issuePaidGiftCardLinesTx(
+      Connection c,
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String currency,
+      java.util.function.Supplier<String> newCode,
+      java.util.function.BiFunction<GiftCard, GiftCardTransaction, OutboxRow> loaded)
+      throws SQLException {
+    record Due(UUID id, BigDecimal amount, String code) {}
+    List<Due> due = new java.util.ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT id, amount, target_code FROM gift_card_load_lines"
+                + " WHERE tenant_id=? AND order_id=? AND gift_card_id IS NULL"
+                + " ORDER BY created_at, id FOR UPDATE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next())
+          due.add(
+              new Due(
+                  rs.getObject("id", UUID.class),
+                  rs.getBigDecimal("amount"),
+                  rs.getString("target_code")));
+      }
+    }
+    for (Due d : due) {
+      GiftCard target = d.code() == null ? null : findGiftCardByCodeInTx(c, tenantId, d.code());
+      boolean topUp =
+          target != null
+              && GiftCard.STATUS_ACTIVE.equals(target.status())
+              && target.currency().equalsIgnoreCase(currency);
+      GiftCard fresh =
+          topUp
+              ? null
+              : new GiftCard(
+                  Ids.newId(),
+                  tenantId,
+                  storeId,
+                  newCode.get(),
+                  d.amount(),
+                  d.amount(),
+                  GiftCard.STATUS_ACTIVE,
+                  currency,
+                  Instant.now(),
+                  null);
+      GiftCardTransaction tx =
+          giftCardForSaleTx(
+              c, fresh, topUp ? d.code() : null, tenantId, d.amount(), orderId, loaded);
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "UPDATE gift_card_load_lines SET gift_card_id=?, loaded_at=now()"
+                  + " WHERE tenant_id=? AND id=? AND gift_card_id IS NULL")) {
+        ps.setObject(1, tx.giftCardId());
+        ps.setObject(2, tenantId);
+        ps.setObject(3, d.id());
+        ps.executeUpdate();
+      }
+    }
+  }
+
+  /**
+   * A manager's hand load of a gift card, with no sale behind it: the caller's key, why (GOODWILL,
+   * PROMOTION, COMPENSATION or MIGRATION), the note they gave and who they are.
+   */
+  public record HandLoad(UUID key, String source, String note, UUID actedBy) {}
+
   /**
    * Issues a gift card and records its opening transaction — atomically.
    *
@@ -2605,15 +3426,25 @@ public class OrderRepository extends BaseOutboxRepository {
    * @param loaded the {@code GiftCardLoaded} event, written in the same transaction (17.11)
    * @return the card as stored
    */
-  public GiftCard issueGiftCard(GiftCard gc, GiftCardTransaction tx, OutboxRow loaded) {
+  public GiftCard issueGiftCard(
+      GiftCard gc, GiftCardTransaction tx, OutboxRow loaded, HandLoad hand) {
     return inTx(
         c -> {
+          // A retry under the same key answers with the first issue and issues nothing more.
+          var earlier = redemptionByKeyTx(c, gc.tenantId(), hand.key());
+          if (earlier != null) {
+            if (!GiftCardTransaction.TX_ISSUE.equals(earlier.txType())
+                || earlier.amount().compareTo(tx.amount()) != 0)
+              throw ApiException.conflict(
+                  "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
+            return findGiftCardByIdTx(c, gc.tenantId(), earlier.giftCardId());
+          }
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO gift_cards"
                       + " (id,tenant_id,store_id,code,initial_balance,current_balance,"
-                      + "  status,currency,expires_at)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+                      + "  status,currency,expires_at,source,reason)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, gc.id());
             ps.setObject(2, gc.tenantId());
             ps.setObject(3, gc.storeId());
@@ -2624,6 +3455,8 @@ public class OrderRepository extends BaseOutboxRepository {
             ps.setString(8, gc.currency());
             ps.setObject(
                 9, gc.expiresAt() != null ? java.sql.Timestamp.from(gc.expiresAt()) : null);
+            ps.setString(10, hand.source());
+            ps.setString(11, hand.note());
             ps.executeUpdate();
           } catch (java.sql.SQLException sqle) {
             if (UNIQUE_VIOLATION.equals(sqle.getSQLState()))
@@ -2635,7 +3468,7 @@ public class OrderRepository extends BaseOutboxRepository {
                   sqle);
             throw sqle;
           }
-          insertGiftCardTx(c, tx);
+          insertGiftCardTx(c, tx, hand.key(), hand.source(), hand.note(), hand.actedBy());
           insertOutbox(c, loaded);
           return gc;
         },
@@ -2665,6 +3498,156 @@ public class OrderRepository extends BaseOutboxRepository {
   }
 
   /**
+   * Looks a gift card up by its id.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param id the card's id
+   * @return the card, or empty when no such card exists in this tenant
+   */
+  public Optional<GiftCard> findGiftCardById(UUID tenantId, UUID id) {
+    return query(
+            "SELECT id, tenant_id, store_id, code, initial_balance, current_balance,"
+                + " status, currency, issued_at, updated_at, expires_at"
+                + " FROM gift_cards WHERE tenant_id=? AND id=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, id);
+            },
+            rs -> mapGiftCard(rs),
+            "find gift card by id")
+        .stream()
+        .findFirst();
+  }
+
+  /**
+   * Puts a return's refund on a gift card, on the return's own transaction: a new card is written
+   * with the refund as its opening balance, or the named card is topped up. Either way a ledger row
+   * names the order and the return, and a {@code GiftCardLoaded} is written with it (paid by
+   * RETURN, naming the return) so purchase-svc counts the value in its gift-card pool without
+   * posting it a second time: the refund itself is booked from payment-svc's announcement.
+   *
+   * @param c the return's connection
+   * @param fresh the new card to write, or null to top up {@code code}
+   * @param code the card to top up, when {@code fresh} is null
+   * @param tenantId owning tenant; the first condition of every query
+   * @param amount the refund
+   * @param orderId the order the return is against
+   * @param returnId the return
+   * @param loaded builds the {@code GiftCardLoaded} event from the card and its transaction
+   * @throws ApiException 404 {@code GIFT_CARD_NOT_FOUND}; 409 {@code GIFT_CARD_NOT_ACTIVE}
+   */
+  public void giftCardForReturnTx(
+      Connection c,
+      GiftCard fresh,
+      String code,
+      UUID tenantId,
+      BigDecimal amount,
+      UUID orderId,
+      UUID returnId,
+      java.util.function.BiFunction<GiftCard, GiftCardTransaction, OutboxRow> loaded)
+      throws SQLException {
+    putValueOnCardTx(
+        c, fresh, code, tenantId, amount, orderId, returnId.toString(), "RETURN", loaded);
+  }
+
+  /**
+   * Puts the value of a paid gift-card line on a card, on the caller's transaction: a new card is
+   * written with the amount as its opening balance, or the named card is topped up, with a ledger
+   * row naming the order and a {@code GiftCardLoaded} in the outbox.
+   *
+   * @param source SALE for a card sold, RETURN for a refund put on a card
+   */
+  public GiftCardTransaction giftCardForSaleTx(
+      Connection c,
+      GiftCard fresh,
+      String code,
+      UUID tenantId,
+      BigDecimal amount,
+      UUID orderId,
+      java.util.function.BiFunction<GiftCard, GiftCardTransaction, OutboxRow> loaded)
+      throws SQLException {
+    return putValueOnCardTx(
+        c, fresh, code, tenantId, amount, orderId, orderId.toString(), "SALE", loaded);
+  }
+
+  private GiftCardTransaction putValueOnCardTx(
+      Connection c,
+      GiftCard fresh,
+      String code,
+      UUID tenantId,
+      BigDecimal amount,
+      UUID orderId,
+      String reference,
+      String source,
+      java.util.function.BiFunction<GiftCard, GiftCardTransaction, OutboxRow> loaded)
+      throws SQLException {
+    if (fresh != null) {
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "INSERT INTO gift_cards"
+                  + " (id,tenant_id,store_id,code,initial_balance,current_balance,"
+                  + "  status,currency,expires_at,source)"
+                  + " VALUES (?,?,?,?,?,?,?,?,?,?)")) {
+        ps.setObject(1, fresh.id());
+        ps.setObject(2, fresh.tenantId());
+        ps.setObject(3, fresh.storeId());
+        ps.setString(4, fresh.code());
+        ps.setBigDecimal(5, fresh.initialBalance());
+        ps.setBigDecimal(6, fresh.currentBalance());
+        ps.setString(7, fresh.status());
+        ps.setString(8, fresh.currency());
+        ps.setNull(9, java.sql.Types.TIMESTAMP_WITH_TIMEZONE);
+        ps.setString(10, source);
+        ps.executeUpdate();
+      }
+      var issued =
+          new GiftCardTransaction(
+              Ids.newId(),
+              tenantId,
+              fresh.id(),
+              GiftCardTransaction.TX_ISSUE,
+              amount,
+              BigDecimal.ZERO,
+              amount,
+              orderId,
+              reference,
+              Instant.now());
+      insertGiftCardTx(c, issued, null, source, null, null);
+      insertOutbox(c, loaded.apply(fresh, issued));
+      return issued;
+    }
+    GiftCard gc = findGiftCardByCodeInTx(c, tenantId, code);
+    if (gc == null) throw ApiException.notFound("GIFT_CARD_NOT_FOUND", "gift card not found");
+    if (!GiftCard.STATUS_ACTIVE.equals(gc.status()))
+      throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+    BigDecimal after = gc.currentBalance().add(amount);
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE gift_cards SET current_balance=?, updated_at=now()"
+                + " WHERE tenant_id=? AND id=?")) {
+      ps.setBigDecimal(1, after);
+      ps.setObject(2, tenantId);
+      ps.setObject(3, gc.id());
+      ps.executeUpdate();
+    }
+    var reloaded =
+        new GiftCardTransaction(
+            Ids.newId(),
+            tenantId,
+            gc.id(),
+            GiftCardTransaction.TX_RELOAD,
+            amount,
+            gc.currentBalance(),
+            after,
+            orderId,
+            reference,
+            Instant.now());
+    insertGiftCardTx(c, reloaded, null, source, null, null);
+    insertOutbox(c, loaded.apply(gc, reloaded));
+    return reloaded;
+  }
+
+  /**
    * Adds value to a gift card and records the transaction — atomically.
    *
    * @param tenantId owning tenant; the first condition of the query
@@ -2681,9 +3664,22 @@ public class OrderRepository extends BaseOutboxRepository {
       String code,
       BigDecimal amount,
       String reference,
+      HandLoad hand,
       java.util.function.BiFunction<GiftCard, GiftCardTransaction, OutboxRow> loaded) {
     return inTx(
         c -> {
+          // A retry under the same key answers with the first reload and adds nothing more.
+          var earlier = redemptionByKeyTx(c, tenantId, hand.key());
+          if (earlier != null) {
+            GiftCard first = findGiftCardByIdTx(c, tenantId, earlier.giftCardId());
+            if (!GiftCardTransaction.TX_RELOAD.equals(earlier.txType())
+                || first == null
+                || !first.code().equals(code)
+                || earlier.amount().compareTo(amount) != 0)
+              throw ApiException.conflict(
+                  "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
+            return first;
+          }
           GiftCard gc = findGiftCardByCodeInTx(c, tenantId, code);
           if (gc == null) throw ApiException.notFound("GIFT_CARD_NOT_FOUND", "gift card not found");
           if (!GiftCard.STATUS_ACTIVE.equals(gc.status()))
@@ -2711,30 +3707,84 @@ public class OrderRepository extends BaseOutboxRepository {
                   null,
                   reference,
                   Instant.now());
-          insertGiftCardTx(c, tx);
+          insertGiftCardTx(c, tx, hand.key(), hand.source(), hand.note(), hand.actedBy());
           insertOutbox(c, loaded.apply(gc, tx));
           return findGiftCardByCodeInTx(c, tenantId, code);
         },
         "reload gift card");
   }
 
+  /** A redemption as the till is told of it: the ledger row, and whether it was made just now. */
+  public record Redemption(GiftCardTransaction tx, boolean replayed) {}
+
   /**
-   * Redeem gift-card value toward an order. Idempotent per (card, order): a repeat redemption for
-   * the same order returns the card unchanged rather than deducting again — the balance is money,
-   * and a retried request whose response was lost must not charge the customer twice. This is the
-   * same shape payment-svc uses to make a STORE_CREDIT tender idempotent, and it is what lets a POS
-   * sale captured offline be replayed safely. A redemption with no orderId (a manual back-office
-   * adjustment) has no natural key and is not deduplicated.
+   * Charges a gift card for an order, once. The card is debited, the REDEEM ledger row written
+   * (carrying the caller's key) and {@code GiftCardRedeemed} put in the outbox on one transaction,
+   * so a card is never charged without the payment being announced, nor announced without being
+   * charged.
+   *
+   * <p>Two guards make a retry safe, and both answer with the redemption already made and write
+   * nothing: the caller's key, and the card-and-order pair (the older guarantee: one card pays
+   * towards one order once, which is also what lets a sale replayed from the till's offline queue
+   * under a fresh key charge nothing twice). The pair only answers when the amount is the same; a
+   * different amount for the same card and order is a mistake to be refused, not silently ignored.
+   * The key is judged first, before the card is looked at, since a first redemption may have
+   * depleted it.
+   *
+   * @param tenantId owning tenant; the first condition of every query
+   * @param code the card's code
+   * @param amount what to charge
+   * @param orderId the order the card pays towards
+   * @param orderCurrency the order's currency, which the card must hold
+   * @param reference free text for the ledger, or null
+   * @param key the caller's Idempotency-Key
+   * @param now the moment, for the card's expiry
+   * @param redeemed builds the {@code GiftCardRedeemed} event from the card and the ledger row
+   * @return the redemption, replayed or new
+   * @throws ApiException 404 {@code GIFT_CARD_NOT_FOUND}; 409 {@code GIFT_CARD_NOT_ACTIVE}, {@code
+   *     GIFT_CARD_EXPIRED}, {@code GIFT_CARD_CURRENCY_MISMATCH}, {@code
+   *     GIFT_CARD_INSUFFICIENT_BALANCE}, {@code GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER}, {@code
+   *     IDEMPOTENCY_KEY_REUSED}
    */
-  public GiftCard redeemGiftCard(
-      UUID tenantId, String code, BigDecimal amount, UUID orderId, String reference) {
+  public Redemption redeemGiftCard(
+      UUID tenantId,
+      String code,
+      BigDecimal amount,
+      UUID orderId,
+      String orderCurrency,
+      String reference,
+      UUID key,
+      Instant now,
+      java.util.function.BiFunction<GiftCard, GiftCardTransaction, OutboxRow> redeemed) {
     return inTx(
         c -> {
           GiftCard gc = findGiftCardByCodeInTx(c, tenantId, code);
           if (gc == null) throw ApiException.notFound("GIFT_CARD_NOT_FOUND", "gift card not found");
-          if (orderId != null && hasRedeemedForOrderTx(c, tenantId, gc.id(), orderId)) return gc;
+          var byKey = redemptionByKeyTx(c, tenantId, key);
+          if (byKey != null) {
+            if (!byKey.giftCardId().equals(gc.id())
+                || !orderId.equals(byKey.orderId())
+                || byKey.amount().compareTo(amount) != 0)
+              throw ApiException.conflict(
+                  "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for a different tender");
+            return new Redemption(byKey, true);
+          }
+          var byOrder = redemptionForOrderTx(c, tenantId, gc.id(), orderId);
+          if (byOrder != null) {
+            if (byOrder.amount().compareTo(amount) != 0)
+              throw ApiException.conflict(
+                  "GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER",
+                  "this card already paid " + byOrder.amount() + " towards this order");
+            return new Redemption(byOrder, true);
+          }
           if (!GiftCard.STATUS_ACTIVE.equals(gc.status()))
             throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+          if (gc.expiresAt() != null && !gc.expiresAt().isAfter(now))
+            throw ApiException.conflict("GIFT_CARD_EXPIRED", "gift card has expired");
+          if (!gc.currency().equalsIgnoreCase(orderCurrency))
+            throw ApiException.conflict(
+                "GIFT_CARD_CURRENCY_MISMATCH",
+                "the card holds " + gc.currency() + " and this order is in " + orderCurrency);
           if (gc.currentBalance().compareTo(amount) < 0)
             throw ApiException.conflict(
                 "GIFT_CARD_INSUFFICIENT_BALANCE", "insufficient gift card balance");
@@ -2747,15 +3797,14 @@ public class OrderRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE gift_cards SET current_balance=?, status=?, updated_at=now()"
-                      + " WHERE tenant_id=? AND code=?")) {
+                      + " WHERE tenant_id=? AND id=?")) {
             ps.setBigDecimal(1, after);
             ps.setString(2, newStatus);
             ps.setObject(3, tenantId);
-            ps.setString(4, code);
+            ps.setObject(4, gc.id());
             ps.executeUpdate();
           }
-          insertGiftCardTx(
-              c,
+          var tx =
               new GiftCardTransaction(
                   Ids.newId(),
                   tenantId,
@@ -2766,25 +3815,44 @@ public class OrderRepository extends BaseOutboxRepository {
                   after,
                   orderId,
                   reference,
-                  Instant.now()));
-          return findGiftCardByCodeInTx(c, tenantId, code);
+                  Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+          insertGiftCardTx(c, tx, key);
+          insertOutbox(c, redeemed.apply(gc, tx));
+          return new Redemption(tx, false);
         },
         "redeem gift card");
   }
 
-  /** True when this card has already been redeemed against this order (replay guard). */
-  private static boolean hasRedeemedForOrderTx(
-      java.sql.Connection c, UUID tenantId, UUID giftCardId, UUID orderId) throws SQLException {
+  private static final String GIFT_CARD_TX_COLUMNS =
+      "SELECT id, tenant_id, gift_card_id, tx_type, amount, balance_before, balance_after,"
+          + " order_id, reference, created_at FROM gift_card_transactions";
+
+  /** The redemption made under this key, or null. */
+  private GiftCardTransaction redemptionByKeyTx(Connection c, UUID tenantId, UUID key)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(GIFT_CARD_TX_COLUMNS + " WHERE tenant_id=? AND idempotency_key=?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, key);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? mapGiftCardTx(rs) : null;
+      }
+    }
+  }
+
+  /** The redemption this card already made towards this order, or null. */
+  private GiftCardTransaction redemptionForOrderTx(
+      Connection c, UUID tenantId, UUID giftCardId, UUID orderId) throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT 1 FROM gift_card_transactions"
+            GIFT_CARD_TX_COLUMNS
                 + " WHERE tenant_id=? AND gift_card_id=? AND order_id=? AND tx_type=?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, giftCardId);
       ps.setObject(3, orderId);
       ps.setString(4, GiftCardTransaction.TX_REDEEM);
-      try (var rs = ps.executeQuery()) {
-        return rs.next();
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? mapGiftCardTx(rs) : null;
       }
     }
   }
@@ -2812,7 +3880,18 @@ public class OrderRepository extends BaseOutboxRepository {
 
   // ── private helpers ───────────────────────────────────────────────────────
 
-  private void insertOrderItem(Connection c, OrderItem item) throws SQLException {
+  private void insertOrderItem(Connection c, OrderItem item, int scale) throws SQLException {
+    insertOrderItems(c, List.of(item), scale);
+  }
+
+  /**
+   * The lines of an order in one batch: one round trip however many lines the basket has. The unit
+   * price and line total at the order currency's minor units ({@code scale}); the VAT keeps the
+   * four places its column has.
+   */
+  private void insertOrderItems(Connection c, List<OrderItem> items, int scale)
+      throws SQLException {
+    if (items.isEmpty()) return;
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO order_items"
@@ -2820,24 +3899,27 @@ public class OrderRepository extends BaseOutboxRepository {
                 + "  weighing_instrument_id, vat_amount, markdown_id, vat_code, vat_rate,"
                 + "  fulfilled_qty, short_qty, substitutes_item_id)"
                 + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
-      ps.setObject(1, item.id());
-      ps.setObject(2, item.tenantId());
-      ps.setObject(3, item.orderId());
-      ps.setObject(4, item.variantId());
-      ps.setBigDecimal(5, item.qty());
-      ps.setBigDecimal(6, item.unitPrice());
-      ps.setBigDecimal(7, item.lineTotal());
-      ps.setString(8, item.notes());
-      ps.setObject(9, item.weighingInstrumentId());
-      ps.setBigDecimal(10, item.vatAmount());
-      ps.setObject(11, item.markdownId());
-      ps.setString(12, item.vatCode());
-      ps.setBigDecimal(13, item.vatRate());
-      ps.setBigDecimal(
-          14, item.fulfilledQty() == null ? java.math.BigDecimal.ZERO : item.fulfilledQty());
-      ps.setBigDecimal(15, item.shortQty() == null ? java.math.BigDecimal.ZERO : item.shortQty());
-      ps.setObject(16, item.substitutesItemId());
-      ps.executeUpdate();
+      for (OrderItem item : items) {
+        ps.setObject(1, item.id());
+        ps.setObject(2, item.tenantId());
+        ps.setObject(3, item.orderId());
+        ps.setObject(4, item.variantId());
+        ps.setBigDecimal(5, item.qty());
+        ps.setBigDecimal(6, money(item.unitPrice(), scale));
+        ps.setBigDecimal(7, money(item.lineTotal(), scale));
+        ps.setString(8, item.notes());
+        ps.setObject(9, item.weighingInstrumentId());
+        ps.setBigDecimal(10, item.vatAmount());
+        ps.setObject(11, item.markdownId());
+        ps.setString(12, item.vatCode());
+        ps.setBigDecimal(13, item.vatRate());
+        ps.setBigDecimal(
+            14, item.fulfilledQty() == null ? java.math.BigDecimal.ZERO : item.fulfilledQty());
+        ps.setBigDecimal(15, item.shortQty() == null ? java.math.BigDecimal.ZERO : item.shortQty());
+        ps.setObject(16, item.substitutesItemId());
+        ps.addBatch();
+      }
+      ps.executeBatch();
     }
   }
 
@@ -2879,9 +3961,10 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " FROM orders WHERE tenant_id=? AND id=?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, orderId);
-      ResultSet rs = ps.executeQuery();
-      if (!rs.next()) throw ApiException.notFound("ORDER_NOT_FOUND", "order not found");
-      return mapOrder(rs);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) throw ApiException.notFound("ORDER_NOT_FOUND", "order not found");
+        return mapOrder(rs);
+      }
     }
   }
 
@@ -2927,19 +4010,28 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " FROM layaways WHERE tenant_id=? AND id=?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, layawayId);
-      ResultSet rs = ps.executeQuery();
-      if (!rs.next()) throw ApiException.notFound("LAYAWAY_NOT_FOUND", "layaway not found");
-      return mapLayaway(rs);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) throw ApiException.notFound("LAYAWAY_NOT_FOUND", "layaway not found");
+        return mapLayaway(rs);
+      }
     }
   }
 
-  private void insertGiftCardTx(Connection c, GiftCardTransaction tx) throws SQLException {
+  private void insertGiftCardTx(Connection c, GiftCardTransaction tx, UUID key)
+      throws SQLException {
+    insertGiftCardTx(c, tx, key, null, null, null);
+  }
+
+  private void insertGiftCardTx(
+      Connection c, GiftCardTransaction tx, UUID key, String source, String reason, UUID actedBy)
+      throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO gift_card_transactions"
                 + " (id,tenant_id,gift_card_id,tx_type,amount,balance_before,"
-                + "  balance_after,order_id,reference)"
-                + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+                + "  balance_after,order_id,reference,created_at,idempotency_key,"
+                + "  source,reason,acted_by)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, tx.id());
       ps.setObject(2, tx.tenantId());
       ps.setObject(3, tx.giftCardId());
@@ -2947,9 +4039,36 @@ public class OrderRepository extends BaseOutboxRepository {
       ps.setBigDecimal(5, tx.amount());
       ps.setBigDecimal(6, tx.balanceBefore());
       ps.setBigDecimal(7, tx.balanceAfter());
-      ps.setObject(8, tx.orderId());
+      // A UUID column is never bound null through setObject(i, null).
+      if (tx.orderId() != null) ps.setObject(8, tx.orderId());
+      else ps.setNull(8, java.sql.Types.OTHER);
       ps.setString(9, tx.reference());
+      // The time the answer carries, so a replay reads back what the first said.
+      ps.setObject(
+          10,
+          java.time.OffsetDateTime.ofInstant(
+              tx.createdAt() == null ? Instant.now() : tx.createdAt(), java.time.ZoneOffset.UTC));
+      if (key != null) ps.setObject(11, key);
+      else ps.setNull(11, java.sql.Types.OTHER);
+      ps.setString(12, source);
+      ps.setString(13, reason);
+      if (actedBy != null) ps.setObject(14, actedBy);
+      else ps.setNull(14, java.sql.Types.OTHER);
       ps.executeUpdate();
+    }
+  }
+
+  private GiftCard findGiftCardByIdTx(Connection c, UUID tenantId, UUID id) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT id, tenant_id, store_id, code, initial_balance, current_balance,"
+                + " status, currency, issued_at, updated_at, expires_at"
+                + " FROM gift_cards WHERE tenant_id=? AND id=?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, id);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? mapGiftCard(rs) : null;
+      }
     }
   }
 
@@ -2962,9 +4081,10 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " FROM gift_cards WHERE tenant_id=? AND code=? FOR UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setString(2, code);
-      ResultSet rs = ps.executeQuery();
-      if (!rs.next()) return null;
-      return mapGiftCard(rs);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) return null;
+        return mapGiftCard(rs);
+      }
     }
   }
 
@@ -3055,7 +4175,8 @@ public class OrderRepository extends BaseOutboxRepository {
       java.sql.Connection c,
       UUID tenantId,
       UUID orderId,
-      List<com.storeql.order.client.PricingClient.AppliedPromotion> applied)
+      List<com.storeql.order.client.PricingClient.AppliedPromotion> applied,
+      int scale)
       throws SQLException {
     if (applied.isEmpty()) return;
     try (PreparedStatement ps =
@@ -3070,7 +4191,7 @@ public class OrderRepository extends BaseOutboxRepository {
         ps.setObject(4, a.promotionId());
         ps.setString(5, a.name());
         ps.setObject(6, a.variantId());
-        ps.setBigDecimal(7, a.amount());
+        ps.setBigDecimal(7, money(a.amount(), scale));
         ps.addBatch();
       }
       ps.executeBatch();
@@ -3140,7 +4261,19 @@ public class OrderRepository extends BaseOutboxRepository {
         rs.getString("status"),
         toInstant(rs.getObject("created_at", OffsetDateTime.class)),
         toInstant(rs.getObject("completed_at", OffsetDateTime.class)),
-        rs.getObject("created_by", UUID.class));
+        rs.getObject("created_by", UUID.class),
+        rs.getObject("idempotency_key", UUID.class),
+        rs.getObject("approved_by", UUID.class),
+        textArray(rs.getArray("outside_policy")),
+        rs.getObject("gift_card_id", UUID.class),
+        rs.getObject("exchange_order_id", UUID.class),
+        rs.getBoolean("no_receipt"),
+        rs.getObject("customer_id", UUID.class),
+        rs.getString("customer_contact"));
+  }
+
+  private static List<String> textArray(java.sql.Array a) throws SQLException {
+    return a == null ? List.of() : List.of((String[]) a.getArray());
   }
 
   private ReturnItem mapReturnItem(ResultSet rs) throws SQLException {
@@ -3151,7 +4284,9 @@ public class OrderRepository extends BaseOutboxRepository {
         rs.getObject("variant_id", UUID.class),
         rs.getBigDecimal("qty"),
         rs.getBigDecimal("refund_amount"),
-        rs.getString("condition"));
+        rs.getString("condition"),
+        rs.getBigDecimal("unit_price"),
+        rs.getBigDecimal("tax_amount"));
   }
 
   private Layaway mapLayaway(ResultSet rs) throws SQLException {
@@ -3229,6 +4364,9 @@ public class OrderRepository extends BaseOutboxRepository {
    * @param so the special-order header to persist
    * @param items the lines being ordered in
    * @return the special order as stored
+   * @throws com.storeql.web.ApiException 409 {@code SPECIAL_ORDER_DUPLICATE_KEY} when the key
+   *     already made one: the signal that tells the service a retry (or a lost race) has the first
+   *     order to be answered with; it never reaches a client
    */
   public SpecialOrder createSpecialOrder(SpecialOrder so, List<SpecialOrderItem> items) {
     return inTx(
@@ -3279,7 +4417,10 @@ public class OrderRepository extends BaseOutboxRepository {
             }
           }
           appendSpecialOrderHistory(c, so.tenantId(), so.id(), null, so.status(), "created", null);
-          return so;
+          // The order as the tables keep it (their moment, their decimal places), not as it was
+          // built: a retry under the same key is answered from the table, and its answer must be
+          // the first one's.
+          return findSpecialOrderInTx(c, so.tenantId(), so.id());
         },
         "create special order");
   }
@@ -3345,6 +4486,31 @@ public class OrderRepository extends BaseOutboxRepository {
             },
             this::mapSpecialOrder,
             "find special order");
+    return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
+  }
+
+  /**
+   * Looks a special order up by the Idempotency-Key it was made under, so a retry can be answered
+   * with it.
+   *
+   * @param tenantId owning tenant; the first condition of the query, so another business's order
+   *     made under the same key is never found
+   * @param idempotencyKey the key, in the canonical lowercase form it is stored in
+   * @return the special order, or empty when none was made under this key in this tenant
+   */
+  public Optional<SpecialOrder> findSpecialOrderByKey(UUID tenantId, String idempotencyKey) {
+    var list =
+        query(
+            "SELECT id, tenant_id, store_id, customer_id, customer_name, customer_phone,"
+                + " customer_email, delivery_address, requested_delivery_date, notes, status,"
+                + " subtotal, total, currency, idempotency_key, created_at, updated_at"
+                + " FROM special_orders WHERE tenant_id=? AND idempotency_key=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, idempotencyKey);
+            },
+            this::mapSpecialOrder,
+            "find special order by key");
     return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
   }
 
@@ -3604,7 +4770,7 @@ public class OrderRepository extends BaseOutboxRepository {
 
   /** discounts: count and total value, keyed by actor or store. */
   public List<Object[]> aggregateDiscounts(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "granted_by" : "store_id";
     StringBuilder sql =
         new StringBuilder(
@@ -3612,54 +4778,54 @@ public class OrderRepository extends BaseOutboxRepository {
                 + key
                 + ", COUNT(*), COALESCE(SUM(discount_amount),0)"
                 + " FROM order_discounts WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND created_at >= ?");
     if (to != null) sql.append(" AND created_at < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2), rs.getBigDecimal(3)},
         "aggregate discounts");
   }
 
   /** voids: count only — a void has no money on it, only an order it removed. */
   public List<Object[]> aggregateVoids(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "voided_by" : "store_id";
     StringBuilder sql =
         new StringBuilder("SELECT " + key + ", COUNT(*) FROM pos_void_log WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND voided_at >= ?");
     if (to != null) sql.append(" AND voided_at < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2)},
         "aggregate voids");
   }
 
   /** no-sales: drawer opened with no transaction. */
   public List<Object[]> aggregateNoSales(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "cashier_id" : "store_id";
     StringBuilder sql =
         new StringBuilder("SELECT " + key + ", COUNT(*) FROM pos_no_sale_log WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND logged_at >= ?");
     if (to != null) sql.append(" AND logged_at < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2)},
         "aggregate no-sales");
   }
 
   /** The denominator: journalled sales, so exceptions can be read as a rate. */
   public List<Object[]> aggregateJournalledSales(
-      UUID tenantId, UUID storeId, Instant from, Instant to, boolean byActor) {
+      UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to, boolean byActor) {
     String key = byActor ? "cashier_id" : "store_id";
     StringBuilder sql =
         new StringBuilder(
@@ -3667,24 +4833,32 @@ public class OrderRepository extends BaseOutboxRepository {
                 + key
                 + ", COUNT(*), COALESCE(SUM(total),0)"
                 + " FROM pos_log_entries WHERE tenant_id=?");
-    if (storeId != null) sql.append(" AND store_id=?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND transaction_ts >= ?");
     if (to != null) sql.append(" AND transaction_ts < ?");
     sql.append(" GROUP BY ").append(key);
     return query(
         sql.toString(),
-        ps -> bindPeriod(ps, tenantId, storeId, from, to),
+        ps -> bindPeriod(ps, tenantId, stores, from, to),
         rs -> new Object[] {rs.getObject(1), rs.getLong(2), rs.getBigDecimal(3)},
         "aggregate journalled sales");
   }
 
-  /** tenant_id first (golden rule #3), then the optional store and period, in SQL order. */
+  /**
+   * tenant_id first (golden rule #3), then the optional stores and period, in SQL order.
+   *
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else bound as a {@code uuid[]} for {@code store_id = ANY(?)} — never a
+   *     store the caller has not already been checked against.
+   */
   private static void bindPeriod(
-      PreparedStatement ps, UUID tenantId, UUID storeId, Instant from, Instant to)
+      PreparedStatement ps, UUID tenantId, java.util.Set<UUID> stores, Instant from, Instant to)
       throws java.sql.SQLException {
     int i = 1;
     ps.setObject(i++, tenantId);
-    if (storeId != null) ps.setObject(i++, storeId);
+    if (stores != null) {
+      ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+    }
     if (from != null) ps.setObject(i++, from.atOffset(java.time.ZoneOffset.UTC));
     if (to != null) ps.setObject(i++, to.atOffset(java.time.ZoneOffset.UTC));
   }

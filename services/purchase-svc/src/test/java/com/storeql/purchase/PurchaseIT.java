@@ -103,6 +103,13 @@ class PurchaseIT {
     return req.get();
   }
 
+  /** The refusal's status and its stable machine code, read from the problem body. */
+  private static void assertRefused(Response r, int status, String code) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    assertThat(body, com.storeql.test.Envelopes.parse(body).getString("code", null), is(code));
+  }
+
   // ── Gap #20 Test 1: Supplier CRUD + tenant isolation ─────────────────────────
 
   @Test
@@ -288,6 +295,32 @@ class PurchaseIT {
     assertThat(body, containsString("\"qtyOutstanding\":4.000"));
   }
 
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "Another business's staff and a shopper cannot read an order's progress")
+  void anotherBusinessCannotReadOurOrdersProgress() {
+    String poId = submittedPo("Progress Private Ltd", 10);
+    assertThat(receive(poId, "6").getStatus(), is(201));
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER"}) {
+      Response r = getAs("/purchase-orders/" + poId + "/progress", T2, role);
+      String body = r.readEntity(String.class);
+      assertThat(role + " " + body, r.getStatus(), is(404));
+      assertThat(
+          role,
+          com.storeql.test.Envelopes.parse(body).getString("code", null),
+          is("PURCHASE_PO_NOT_FOUND"));
+      assertThat(role, body, not(containsString("qtyReceived")));
+    }
+    assertThat(getAs("/purchase-orders/" + poId + "/progress", T, "CUSTOMER").getStatus(), is(403));
+    assertThat(
+        getAs("/purchase-orders/" + poId + "/progress", T2, "CUSTOMER").getStatus(), is(403));
+    assertThat(getAs("/purchase-orders/" + poId + "/progress", T, null).getStatus(), is(403));
+    // The owner's own view is untouched.
+    assertThat(
+        get("/purchase-orders/" + poId + "/progress", T).readEntity(String.class),
+        containsString("\"qtyReceived\":6.000"));
+  }
+
   /**
    * Accepting more than was ordered would book stock nobody asked for against an order that cannot
    * account for it, and a mistyped 60 for 6 would do it silently.
@@ -452,11 +485,11 @@ class PurchaseIT {
 
     // Settle again → 409 (already settled)
     Response settle2 = post("/intercompany-invoices/" + arId + "/settle", "{}", T);
-    assertThat(settle2.getStatus(), is(409));
+    assertRefused(settle2, 409, "PURCHASE_INVOICE_NOT_RAISEABLE");
 
     // Tenant isolation — T2 cannot see T's invoices
     Response rIso = get("/intercompany-invoices/" + arId, T2);
-    assertThat(rIso.getStatus(), is(404));
+    assertRefused(rIso, 404, "PURCHASE_INVOICE_NOT_FOUND");
   }
 
   // ── Gap #20 Test 4: Group VAT disregard ──────────────────────────────────────
@@ -503,7 +536,39 @@ class PurchaseIT {
                 + "\"grossAmount\":120.00,"
                 + "\"currency\":\"GBP\"}",
             T);
-    assertThat(rBad.getStatus(), is(400));
+    assertRefused(rBad, 400, "PURCHASE_IC_SAME_STORE");
+  }
+
+  @Test
+  void intercompanyInvoiceMustAddUp() {
+    // Gross is net plus VAT, or nothing is raised and nothing is posted.
+    for (String[] c :
+        new String[][] {
+          {"1000.00", "200.00", "1000.00", "false", "PURCHASE_IC_GROSS_MISMATCH"},
+          {"1000.00", "200.00", "1200.01", "false", "PURCHASE_IC_GROSS_MISMATCH"},
+          {"500.00", "100.00", "600.00", "true", "PURCHASE_IC_VAT_DISREGARDED"}
+        }) {
+      Response r =
+          post(
+              "/intercompany-invoices",
+              "{\"fromStoreId\":\""
+                  + STORE_A
+                  + "\",\"toStoreId\":\""
+                  + STORE_B
+                  + "\",\"netAmount\":"
+                  + c[0]
+                  + ",\"vatAmount\":"
+                  + c[1]
+                  + ",\"grossAmount\":"
+                  + c[2]
+                  + ",\"vatDisregarded\":"
+                  + c[3]
+                  + ",\"currency\":\"GBP\"}",
+              T);
+      assertRefused(r, 400, c[4]);
+    }
+    assertThat(get("/intercompany-invoices", T).readEntity(String.class), containsString("[]"));
+    assertThat(get("/nominal-ledger", T).readEntity(String.class), containsString("[]"));
   }
 
   // ── SJ-D3: CANCELLED was an unreachable state ────────────────────────────────
@@ -1330,7 +1395,7 @@ class PurchaseIT {
                 + po
                 + "\",\"invoiceNumber\":\"INV-VAT-2\",\"invoiceDate\":\"2026-02-01\",\"lines\":[]}",
             T);
-    assertThat(refused.getStatus(), is(400));
+    assertRefused(refused, 400, "PURCHASE_INVOICE_NO_LINES");
     assertThat(outboxPayloads("SupplierInvoiceCaptured").size(), is(1));
   }
 

@@ -37,7 +37,11 @@ class _Auth extends AuthNotifier {
   final List<String> roles;
   final List<String>? permissions;
   final String userId;
-  _Auth(this.roles, this.permissions, this.userId);
+
+  /// The stores the token names; none is a login held to none (an owner, a
+  /// head-office manager).
+  final List<String> storeIds;
+  _Auth(this.roles, this.permissions, this.userId, [this.storeIds = const []]);
   @override
   Future<AuthState> build() async => AuthAuthenticated(
     accessToken: 'a',
@@ -46,6 +50,7 @@ class _Auth extends AuthNotifier {
     tenantId: 't',
     roles: roles,
     permissions: permissions,
+    storeIds: storeIds,
   );
 }
 
@@ -207,6 +212,7 @@ Future<_Server> _pump(
   List<String> roles = const ['MANAGER'],
   List<String>? permissions,
   String userId = 'u-2',
+  List<String> storeIds = const [],
   String status = 'PROPOSED',
   String tab = 'Payments',
   Map<String, dynamic>? musterCheck,
@@ -225,7 +231,7 @@ Future<_Server> _pump(
       overrides: [
         apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
         authNotifierProvider.overrideWith(
-          () => _Auth(roles, permissions, userId),
+          () => _Auth(roles, permissions, userId, storeIds),
         ),
         ...overrides,
       ],
@@ -304,7 +310,7 @@ void main() {
         permissions: const ['purchasing.approve'],
       );
       expect(
-        find.textContaining('need the finance.payments permission'),
+        find.text('Paying suppliers is not part of your role. Ask an owner to allow it.'),
         findsOneWidget,
       );
       expect(find.text('Propose run'), findsNothing);
@@ -312,10 +318,51 @@ void main() {
 
       final storekeeper = await _pump(tester, roles: const ['STOREKEEPER']);
       expect(
-        find.textContaining('need the finance.payments permission'),
+        find.text('Paying suppliers is not part of your role. Ask an owner to allow it.'),
         findsOneWidget,
       );
       expect(storekeeper.called('GET', '/payment-runs'), isFalse);
+    },
+  );
+
+  // Supplier payments are the whole business's: purchase-svc refuses a manager held to stores
+  // (role, then finance.payments, then 403 BUSINESS_WIDE_ONLY) every run and every paying
+  // account, reads included. So such a manager is offered none of it, nothing is asked, and the
+  // tab says who pays; a head-office manager, held to none, is offered the run.
+  testWidgets(
+    'a finance manager held to stores is told who pays suppliers, and nothing is asked',
+    (tester) async {
+      final held = await _pump(tester, storeIds: const ['s-1']);
+      expect(
+        find.text('Only an owner or a head-office manager pays suppliers.'),
+        findsOneWidget,
+      );
+      expect(find.text('Propose run'), findsNothing);
+      expect(find.text('Paying accounts'), findsNothing);
+      expect(held.called('GET', '/payment-runs'), isFalse);
+      expect(held.called('GET', '/payment-runs/paying-accounts'), isFalse);
+
+      final headOffice = await _pump(tester);
+      expect(
+        find.text('Only an owner or a head-office manager pays suppliers.'),
+        findsNothing,
+      );
+      expect(find.text('Propose run'), findsOneWidget);
+      expect(find.text('Paying accounts'), findsOneWidget);
+      expect(headOffice.called('GET', '/payment-runs'), isTrue);
+    },
+  );
+
+  // Adding a supplier is not the whole business's (purchase-svc asks only finance.payments of
+  // its bank details), so a finance manager held to stores, refused the runs, still gives a new
+  // supplier its bank details.
+  testWidgets(
+    'a finance manager held to stores still adds a supplier with its bank details',
+    (tester) async {
+      await _pump(tester, tab: 'Suppliers', storeIds: const ['s-1']);
+      await tester.tap(find.text('Add supplier'));
+      await tester.pumpAndSettle();
+      expect(find.text('Bank details'), findsOneWidget);
     },
   );
 

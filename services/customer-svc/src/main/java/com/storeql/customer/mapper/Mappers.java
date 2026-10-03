@@ -153,8 +153,8 @@ public final class Mappers {
     return new com.storeql.customer.dto.Dtos.StoreCreditLedgerEntryResponse(
         e.id().toString(),
         e.type(),
-        e.amount(),
-        e.balanceAfter(),
+        money(e.amount(), e.currency()),
+        money(e.balanceAfter(), e.currency()),
         e.currency(),
         e.orderId() == null ? null : e.orderId().toString(),
         e.reason(),
@@ -168,7 +168,22 @@ public final class Mappers {
    * @return its API representation: balance and the currency it is held in
    */
   public static StoreCreditAccountResponse toStoreCredit(StoreCreditAccount sc) {
-    return new StoreCreditAccountResponse(sc.customerId().toString(), sc.balance(), sc.currency());
+    return new StoreCreditAccountResponse(
+        sc.customerId().toString(), money(sc.balance(), sc.currency()), sc.currency());
+  }
+
+  /**
+   * Money as it is written: at its currency's own minor units (ISO 4217, common-service {@code Fx})
+   * — {@code 12.50} pounds, {@code 1250} yen, {@code 1.125} dinars — though the column holds four
+   * places for any currency. Never rounds: a figure held finer is shown as held.
+   */
+  public static java.math.BigDecimal money(java.math.BigDecimal amount, String currency) {
+    if (amount == null) return null;
+    int units = com.storeql.service.Fx.minorUnits(currency);
+    java.math.BigDecimal plain = amount.stripTrailingZeros();
+    return plain.scale() <= units
+        ? amount.setScale(units, java.math.RoundingMode.UNNECESSARY)
+        : plain;
   }
 
   /**

@@ -119,6 +119,11 @@ public final class Mappers {
    * @return its API representation, including the stored net/VAT/gross totals
    */
   public static PurchaseOrderResponse toDto(PurchaseOrder po) {
+    return toDto(po, java.util.List.of());
+  }
+
+  /** As above, carrying the warnings a reader should see beside the order. */
+  public static PurchaseOrderResponse toDto(PurchaseOrder po, java.util.List<String> warnings) {
     return new PurchaseOrderResponse(
         po.id(),
         po.tenantId(),
@@ -146,7 +151,8 @@ public final class Mappers {
         po.ownership(),
         po.salesOrderId(),
         po.shipTo(),
-        po.dutyStatus());
+        po.dutyStatus(),
+        warnings);
   }
 
   public static Dtos.DutyReleaseResponse toDto(Domain.DutyRelease r) {

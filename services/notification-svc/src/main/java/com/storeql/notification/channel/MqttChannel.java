@@ -3,7 +3,7 @@ package com.storeql.notification.channel;
 import com.hivemq.client.mqtt.datatypes.MqttQos;
 import com.hivemq.client.mqtt.mqtt5.Mqtt5BlockingClient;
 import com.hivemq.client.mqtt.mqtt5.Mqtt5Client;
-import jakarta.json.Json;
+import com.storeql.notification.json.Jsons;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -26,6 +26,8 @@ public final class MqttChannel implements NotificationChannel {
 
   private final Mqtt5BlockingClient client;
   private volatile boolean connected;
+  private final java.util.concurrent.locks.ReentrantLock connectLock =
+      new java.util.concurrent.locks.ReentrantLock();
 
   /**
    * Builds the client without opening a connection — see the class note on lazy connect.
@@ -93,12 +95,21 @@ public final class MqttChannel implements NotificationChannel {
     }
   }
 
-  private synchronized void ensureConnected() {
+  private void ensureConnected() {
     if (connected) {
       return;
     }
-    client.connect();
-    connected = true;
+    // A ReentrantLock, not synchronized: the connect blocks on the network, and a monitor would pin
+    // the virtual thread's carrier (and every sender queued behind it) until the broker answered.
+    connectLock.lock();
+    try {
+      if (!connected) {
+        client.connect();
+        connected = true;
+      }
+    } finally {
+      connectLock.unlock();
+    }
   }
 
   /**
@@ -111,9 +122,9 @@ public final class MqttChannel implements NotificationChannel {
 
   static byte[] payload(String subject, String body) {
     StringWriter out = new StringWriter();
-    try (var writer = Json.createWriter(out)) {
+    try (var writer = Jsons.writer(out)) {
       writer.writeObject(
-          Json.createObjectBuilder()
+          Jsons.object()
               .add("subject", subject)
               .add("body", body)
               .add("sentAt", Instant.now().toString())

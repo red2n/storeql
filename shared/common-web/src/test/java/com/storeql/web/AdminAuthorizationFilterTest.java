@@ -286,6 +286,36 @@ class AdminAuthorizationFilterTest {
    * payment-svc verifies the order against order-svc rather than trusting the caller.
    */
   @Test
+  void aShopperCanCancelAnOrderByItsIdAndNothingElseUnderItOpens() throws Exception {
+    String id = "01a09509-72ec-72e9-9f08-94a93df26a36";
+    // The owner check is order-svc's: only the shopper the order belongs to gets past it.
+    assertNotAborted(invoke("POST", "/orders/" + id + "/cancel"));
+    assertAborted(invoke("POST", "/orders/" + id + "/void"), 403);
+    assertAborted(invoke("POST", "/orders/" + id + "/returns"), 403);
+    assertAborted(invoke("POST", "/orders/" + id + "/cancel/again"), 403);
+    assertAborted(invoke("POST", "/orders/mine/cancel"), 403);
+    assertAborted(invoke("POST", "/orders/export/cancel"), 403);
+  }
+
+  @Test
+  void signingOutEverywhereIsTheCallersOwn() throws Exception {
+    assertNotAborted(invoke("POST", "/auth/sessions/revoke-all"));
+    assertAborted(invoke("POST", "/auth/sessions/revoke-all/other"), 403);
+  }
+
+  @Test
+  void aPersonsOwnSessionsAreTheirsToListAndEnd() throws Exception {
+    // iam-svc lists and ends only the sessions of the login in the token.
+    assertNotAborted(invoke("GET", "/auth/sessions"));
+    assertNotAborted(invoke("DELETE", "/auth/sessions/01a09509-72ec-72e9-9f08-94a93df26a36"));
+    assertAborted(invoke("DELETE", "/auth/sessions/mine"), 403);
+    assertAborted(
+        invoke("DELETE", "/auth/sessions/01a09509-72ec-72e9-9f08-94a93df26a36/other"), 403);
+    // Who is signed in at which till stays management's.
+    assertAborted(invoke("GET", "/auth/pos/sessions"), 403);
+  }
+
+  @Test
   void aShopperCanOpenAndPollTheirOwnPaymentIntent() throws Exception {
     assertNotAborted(invoke("POST", "/payments/intents"));
     assertNotAborted(invoke("GET", "/payments/intents/abc"));
@@ -456,6 +486,23 @@ class AdminAuthorizationFilterTest {
     assertAborted(invoke("GET", "/auth/password/reset"), 403);
     assertAborted(invoke("POST", "/auth/password-policy"), 403);
     assertAborted(invoke("GET", "/auth/password-policy/x"), 403);
+  }
+
+  // ── business sign-up ("Start a business") ───────────────────────────────────
+
+  @Test
+  void aBusinessSignsUpWithNoRoleAtAll() throws Exception {
+    assertNotAborted(invoke("POST", "/auth/register/business"));
+    // The shopper's sign-up is as open as it was.
+    assertNotAborted(invoke("POST", "/auth/register"));
+  }
+
+  @Test
+  void nothingBesideTheBusinessSignUpIsOpened() throws Exception {
+    assertAborted(invoke("POST", "/auth/register/business/owner"), 403);
+    assertAborted(invoke("POST", "/auth/register/businesses"), 403);
+    assertAborted(invoke("POST", "/auth/register/"), 403);
+    assertAborted(invoke("PUT", "/auth/register/business/x"), 403);
   }
 
   @Test

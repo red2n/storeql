@@ -1,12 +1,12 @@
 package com.storeql.notification.provider;
 
+import com.storeql.notification.json.Jsons;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
 import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -108,7 +108,7 @@ public class TwilioSmsProvider implements SmsProvider {
             .header(HeaderNames.CONTENT_TYPE, "application/x-www-form-urlencoded")
             .submit(form)) {
       int status = res.status().code();
-      String text = res.as(String.class);
+      String text = Bodies.text(res);
       if (status == 201 || status == 200) {
         return field(text, "sid", "unknown");
       }
@@ -128,7 +128,7 @@ public class TwilioSmsProvider implements SmsProvider {
   }
 
   private static String field(String json, String key, String fallback) {
-    try (JsonReader r = Json.createReader(new StringReader(json))) {
+    try (JsonReader r = Jsons.reader(new StringReader(json))) {
       JsonObject o = r.readObject();
       if (!o.containsKey(key) || o.isNull(key)) return fallback;
       return o.get(key).getValueType() == jakarta.json.JsonValue.ValueType.STRING

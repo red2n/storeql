@@ -185,6 +185,17 @@ class StaffUsersIT {
     return Ids.parse(com.auth0.jwt.JWT.decode(access).getSubject());
   }
 
+  /** A shopper's login stamped into the business, as a StaffAssigned did before 29 Sep 2026. */
+  private static void takenOnBeforeSeparateIdentities(UUID userId, UUID tenant) {
+    Envelopes.exec(
+        PG,
+        "UPDATE iam.users SET tenant_id = '"
+            + tenant
+            + "', type = 'STAFF' WHERE id = '"
+            + userId
+            + "' AND tenant_id IS NULL");
+  }
+
   /** Every login row as it stands, to prove a lookup changed nothing. */
   private static String users() {
     return Envelopes.scalar(
@@ -300,7 +311,10 @@ class StaffUsersIT {
     UUID wide = wideStaff(OURS, "wide@ours.test", "MANAGER");
     // A shopper first, then staff at the other store only: the CUSTOMER role from signing up is
     // held at no store, and must not read as business-wide (found by the k6 flow on the stack).
+    // Only a login taken on before 29 Sep 2026 is like this — a StaffAssigned no longer stamps a
+    // shopper in — so it is stamped here as one was then, and the assignment binds it.
     UUID shopperFirst = customer("shopper-first@ours.test");
+    takenOnBeforeSeparateIdentities(shopperFirst, OURS);
     assign(OURS, otherStore, shopperFirst, "STOREKEEPER");
     String ids = csv(atOurStore, atOtherStore, wide, shopperFirst);
 

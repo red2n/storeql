@@ -2,6 +2,7 @@ package com.storeql.inventory.service;
 
 import com.storeql.events.EventPayload;
 import com.storeql.ids.Ids;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.inventory.domain.Domain.BondRelease;
 import com.storeql.inventory.domain.Domain.PickWave;
 import com.storeql.inventory.domain.Domain.YieldRun;
@@ -11,7 +12,6 @@ import com.storeql.inventory.domain.FoodSafety.OverduePoint;
 import com.storeql.inventory.domain.Recall.AffectedOrder;
 import com.storeql.inventory.domain.Recall.AffectedSale;
 import com.storeql.inventory.domain.Recall.Header;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObjectBuilder;
 import java.math.BigDecimal;
@@ -259,7 +259,7 @@ public final class Events {
         + "\"}";
   }
 
-  static String materialStatusChanged(
+  public static String materialStatusChanged(
       UUID tenantId, UUID batchId, String materialStatus, String reason) {
     String r = reason == null ? "null" : "\"" + EventPayload.esc(reason) + "\"";
     return EventPayload.base("MaterialStatusChanged", tenantId, batchId)
@@ -501,12 +501,12 @@ public final class Events {
    * breaks in it, and keyed by the order so a buyer's notices stay in order.
    */
   static String recallSaleAffected(Header h, AffectedOrder order) {
-    JsonArrayBuilder remedies = Json.createArrayBuilder();
+    JsonArrayBuilder remedies = Jsons.createArrayBuilder();
     h.remedies().stream().map(Enum::name).sorted().forEach(remedies::add);
-    JsonArrayBuilder lines = Json.createArrayBuilder();
+    JsonArrayBuilder lines = Jsons.createArrayBuilder();
     for (AffectedSale s : order.lines()) {
       JsonObjectBuilder line =
-          Json.createObjectBuilder()
+          Jsons.createObjectBuilder()
               .add("variantId", s.variantId().toString())
               .add("batchId", s.batchId().toString())
               .add("qty", s.qty())
@@ -516,7 +516,7 @@ public final class Events {
       lines.add(line);
     }
     JsonObjectBuilder b =
-        Json.createObjectBuilder()
+        Jsons.createObjectBuilder()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "RecallSaleAffected")
             .add("tenantId", h.tenantId().toString())

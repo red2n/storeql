@@ -1,6 +1,7 @@
 package com.storeql.tenant.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.service.Fx;
 import com.storeql.service.OutboxRow;
 import com.storeql.service.TenantProfiles;
 import com.storeql.tenant.domain.Workforce;
@@ -10,20 +11,27 @@ import com.storeql.tenant.domain.Workforce.Entry;
 import com.storeql.tenant.domain.Workforce.PayRate;
 import com.storeql.tenant.domain.Workforce.Rest;
 import com.storeql.tenant.domain.Workforce.Shift;
+import com.storeql.tenant.domain.WorkingTime;
+import com.storeql.tenant.repo.TenantRepository;
 import com.storeql.tenant.repo.WorkforceRepository;
+import com.storeql.tenant.repo.WorkingTimeRuleRepository;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -50,7 +58,12 @@ import java.util.UUID;
 @ApplicationScoped
 public class WorkforceService {
 
+  private static final java.util.logging.Logger LOG =
+      java.util.logging.Logger.getLogger(WorkforceService.class.getName());
+
   @Inject WorkforceRepository repo;
+  @Inject WorkingTimeRuleRepository rules;
+  @Inject TenantRepository tenants;
   @Inject TenantProfiles profiles;
 
   /** A roster, with what is worth saying about it. */
@@ -79,13 +92,7 @@ public class WorkforceService {
       String duty,
       String note,
       UUID actorId) {
-    if (startsAt == null || endsAt == null || !endsAt.isAfter(startsAt)) {
-      throw ApiException.badRequest("WORKFORCE_WINDOW_INVALID", "a shift ends after it starts");
-    }
-    if (Duration.between(startsAt, endsAt).compareTo(Duration.ofHours(24)) > 0) {
-      throw ApiException.badRequest(
-          "WORKFORCE_WINDOW_INVALID", "a shift longer than 24 hours is a typo, not a shift");
-    }
+    requireShiftWindow(startsAt, endsAt);
     requireWorksAt(tenantId, userId, storeId);
     Instant now = Instant.now();
     return repo.planShift(
@@ -106,32 +113,123 @@ public class WorkforceService {
   }
 
   /**
+   * A shift's window as the request gives it, judged before anything about the store or the person
+   * is read, so a malformed request is told so (400) whoever sends it.
+   *
+   * @throws ApiException 400 {@code WORKFORCE_WINDOW_INVALID} for a shift that does not end after
+   *     it starts, or runs longer than 24 hours
+   */
+  public static void requireShiftWindow(Instant startsAt, Instant endsAt) {
+    if (startsAt == null || endsAt == null || !endsAt.isAfter(startsAt)) {
+      throw ApiException.badRequest("WORKFORCE_WINDOW_INVALID", "a shift ends after it starts");
+    }
+    if (Duration.between(startsAt, endsAt).compareTo(Duration.ofHours(24)) > 0) {
+      throw ApiException.badRequest(
+          "WORKFORCE_WINDOW_INVALID", "a shift longer than 24 hours is a typo, not a shift");
+    }
+  }
+
+  /**
    * The roster of a window, with the concerns each person's own shifts raise.
    *
    * <p>Concerns are per person and not per store, because the rest between two shifts is a fact
    * about a person: two people's shifts back to back is a shop staying open, not somebody going
    * without sleep.
+   *
+   * <p>What the law says is found through the store the shift is at (its country, else the
+   * business's) and the day is the store's own, in its zone. A store whose country has no rule gets
+   * only the concern that holds anywhere: overlapping shifts.
+   *
+   * @param stores the stores to read (the caller's, as {@code TenantContext.reportStores} resolved
+   *     them), or null for every store of the business
    */
-  public Roster roster(UUID tenantId, UUID storeId, UUID userId, Instant from, Instant to) {
-    List<Shift> shifts = repo.shifts(tenantId, storeId, userId, from, to);
+  public Roster roster(UUID tenantId, Set<UUID> stores, UUID userId, Instant from, Instant to) {
+    List<Shift> shifts = repo.shifts(tenantId, stores, userId, from, to);
     Map<UUID, List<Shift>> byPerson = new LinkedHashMap<>();
     for (Shift s : shifts) byPerson.computeIfAbsent(s.userId(), k -> new ArrayList<>()).add(s);
+    Map<UUID, Judging> judgedBy = new HashMap<>();
+    Map<String, List<WorkingTime.Rule>> byCountry = new HashMap<>();
     Map<UUID, List<Concern>> concerns = new LinkedHashMap<>();
     for (Map.Entry<UUID, List<Shift>> e : byPerson.entrySet()) {
-      List<Concern> found = Workforce.concerns(e.getValue());
+      List<Shift> mine = e.getValue();
+      // Shifts at stores that are judged alike are judged together, so the rest between two of them
+      // counts; stores in another country or zone are judged by their own.
+      Map<String, List<Shift>> groups = new LinkedHashMap<>();
+      Map<String, Judging> basis = new LinkedHashMap<>();
+      for (Shift s : mine) {
+        Judging j = judgedBy.computeIfAbsent(s.storeId(), id -> judging(tenantId, id, byCountry));
+        groups.computeIfAbsent(j.key(), k -> new ArrayList<>()).add(s);
+        basis.putIfAbsent(j.key(), j);
+      }
+      List<Concern> found =
+          new ArrayList<>(WorkingTime.overlaps(mine, basis.values().iterator().next().zone()));
+      for (Map.Entry<String, List<Shift>> g : groups.entrySet()) {
+        Judging j = basis.get(g.getKey());
+        found.addAll(WorkingTime.judge(g.getValue(), j.rules(), j.zone()));
+      }
       if (!found.isEmpty()) concerns.put(e.getKey(), found);
     }
     return new Roster(shifts, concerns);
   }
 
-  /** Publishes a shift: what staff may see and rely on. */
-  public Shift publishShift(UUID tenantId, UUID id, UUID actorId) {
-    if (!repo.moveShift(tenantId, id, Workforce.PLANNED, Workforce.PUBLISHED, null)) {
-      requireShift(tenantId, id);
-      throw ApiException.conflict(
-          "WORKFORCE_SHIFT_NOT_PLANNED", "only a planned shift is published");
+  /**
+   * What judges a store's roster: the rules that reach its country and the zone its days are in.
+   */
+  private record Judging(String key, List<WorkingTime.Rule> rules, ZoneId zone) {}
+
+  private Judging judging(
+      UUID tenantId, UUID storeId, Map<String, List<WorkingTime.Rule>> byCountry) {
+    var basis = repo.storeBasis(tenantId, storeId);
+    String country =
+        basis
+            .map(WorkforceRepository.StoreBasis::country)
+            .map(c -> c.strip().toUpperCase(Locale.ROOT))
+            .orElse("");
+    ZoneId zone = zoneOf(basis.map(WorkforceRepository.StoreBasis::timezone).orElse(null));
+    List<WorkingTime.Rule> found =
+        country.isEmpty() ? List.of() : byCountry.computeIfAbsent(country, rules::forCountry);
+    return new Judging(country + "|" + zone.getId(), found, zone);
+  }
+
+  /** The store's zone; UTC only when it cannot be read, which the stores' own checks prevent. */
+  private static ZoneId zoneOf(String timezone) {
+    try {
+      return timezone == null || timezone.isBlank() ? ZoneOffset.UTC : ZoneId.of(timezone.strip());
+    } catch (java.time.DateTimeException e) {
+      LOG.log(java.util.logging.Level.WARNING, "unreadable store zone {0}", timezone);
+      return ZoneOffset.UTC;
     }
-    return requireShift(tenantId, id);
+  }
+
+  /**
+   * Publishes a shift: what staff may see and rely on.
+   *
+   * <p>A retryable write (workforce-rules, "Retryable writes"), so it runs under the caller's
+   * Idempotency-Key: the move and the record of which key made it are one transaction, and a retry
+   * under the same key answers the shift as the first attempt left it published — not a 409 for a
+   * shift that attempt already published. The key names one attempt at one shift: sent again for
+   * another shift it is refused, and nothing moves.
+   *
+   * @param idempotencyKey the request's key, a UUIDv7 in canonical form
+   * @throws ApiException 404 {@code WORKFORCE_SHIFT_NOT_FOUND}; 409 {@code
+   *     WORKFORCE_SHIFT_NOT_PLANNED} when the shift is not planned and no attempt under this key
+   *     published it; 409 {@code IDEMPOTENCY_KEY_REUSED} when the key published another shift
+   */
+  public Shift publishShift(UUID tenantId, UUID id, String idempotencyKey, UUID actorId) {
+    switch (repo.publishShift(tenantId, id, idempotencyKey, actorId)) {
+      case PUBLISHED, REPLAYED -> {
+        return requireShift(tenantId, id);
+      }
+      case KEY_REUSED ->
+          throw ApiException.conflict(
+              "IDEMPOTENCY_KEY_REUSED",
+              "this Idempotency-Key published another shift; send a new one for each shift");
+      default -> {
+        requireShift(tenantId, id);
+        throw ApiException.conflict(
+            "WORKFORCE_SHIFT_NOT_PLANNED", "only a planned shift is published");
+      }
+    }
   }
 
   /**
@@ -161,16 +259,34 @@ public class WorkforceService {
    * @param userId whose hours these are; the resource makes a member of staff their own
    * @param source {@link Workforce#SOURCE_CLOCK} when the person did it, {@code MANAGER} otherwise
    * @throws ApiException 409 {@code WORKFORCE_ALREADY_CLOCKED_IN} (the index decides, so two taps
-   *     on a slow terminal are one entry), {@code WORKFORCE_NOT_ASSIGNED}
+   *     on a slow terminal are one entry), {@code WORKFORCE_NOT_ASSIGNED}, {@code
+   *     WORKFORCE_SHIFT_CANCELLED}; 403 {@code WORKFORCE_SELF_ADJUST_REFUSED} when a manager writes
+   *     their own hours; 404 {@code WORKFORCE_SHIFT_NOT_FOUND}; 400 {@code
+   *     WORKFORCE_SHIFT_NOT_THEIRS} for somebody else's shift, {@code
+   *     WORKFORCE_SHIFT_AT_ANOTHER_STORE} for a shift at another store than the one clocked in at
    */
   public Entry clockIn(
       UUID tenantId, UUID userId, UUID storeId, UUID shiftId, String source, UUID actorId) {
+    // Nobody writes their own hours by hand: the clock is the person's, a manager's entry is for
+    // somebody else (workforce-rules slice 6 (a)). A fixed control, not a setting.
+    if (Workforce.SOURCE_MANAGER.equals(source) && userId.equals(actorId)) {
+      throw selfAdjust();
+    }
     requireWorksAt(tenantId, userId, storeId);
     if (shiftId != null) {
       Shift shift = requireShift(tenantId, shiftId);
       if (!shift.userId().equals(userId)) {
         throw ApiException.badRequest(
             "WORKFORCE_SHIFT_NOT_THEIRS", "that shift is rostered for somebody else");
+      }
+      // Hours tied to a shift are hours at its store: an entry at one store answering a shift at
+      // another would make attendance report the shift worked where nobody was, and the store
+      // that was worked at short of the hours. A person rostered elsewhere clocks in there, or
+      // here with no shift.
+      if (!shift.storeId().equals(storeId)) {
+        throw ApiException.badRequest(
+            "WORKFORCE_SHIFT_AT_ANOTHER_STORE",
+            "that shift is rostered at another store; clock in there, or here without a shift");
       }
       if (!shift.live()) {
         throw ApiException.conflict("WORKFORCE_SHIFT_CANCELLED", "that shift was called off");
@@ -261,8 +377,19 @@ public class WorkforceService {
    * <p>The most common use is the forgotten clock-out, where the alternative — a manager editing
    * the time — leaves a record nobody can be held to.
    *
-   * @throws ApiException 400 without a reason or on a window that is not one; 409 when the entry
-   *     has already been corrected
+   * <p>A retryable write (workforce-rules, "Retryable writes"), so it runs under the caller's
+   * Idempotency-Key: the correction and the record of which key made it are one transaction, and
+   * the same request sent again under that key is answered with the correction the first attempt
+   * made — not a 409 for an entry that attempt already corrected — with nothing written twice and
+   * no second {@code LabourRecorded}. The key names one correction: sent again for another entry,
+   * other times or another reason it is refused, and nothing moves. A refusal is not kept: a retry
+   * of a refused request is judged again, which is safe because the refusal moved nothing.
+   *
+   * @param idempotencyKey the request's key, a UUIDv7 in canonical form
+   * @throws ApiException 400 without a reason or on a window that is not one; 404 {@code
+   *     WORKFORCE_ENTRY_NOT_FOUND}; 403 {@code WORKFORCE_SELF_ADJUST_REFUSED} for one's own hours;
+   *     409 {@code IDEMPOTENCY_KEY_REUSED} when the key made another correction; 409 {@code
+   *     WORKFORCE_ENTRY_NOT_STANDING} when the entry has already been corrected by another request
    */
   public Entry adjust(
       UUID tenantId,
@@ -270,6 +397,7 @@ public class WorkforceService {
       Instant clockedInAt,
       Instant clockedOutAt,
       String reason,
+      String idempotencyKey,
       UUID actorId) {
     String why =
         require(reason, "WORKFORCE_REASON_REQUIRED", "say why the hours are being changed");
@@ -277,9 +405,8 @@ public class WorkforceService {
         repo.entry(tenantId, entryId)
             .orElseThrow(
                 () -> ApiException.notFound("WORKFORCE_ENTRY_NOT_FOUND", "no such time entry"));
-    if (!original.stands()) {
-      throw ApiException.conflict(
-          "WORKFORCE_ENTRY_NOT_STANDING", "that entry has already been corrected");
+    if (original.userId().equals(actorId)) {
+      throw selfAdjust();
     }
     Instant in = clockedInAt == null ? original.clockedInAt() : clockedInAt;
     Instant out = clockedOutAt == null ? original.clockedOutAt() : clockedOutAt;
@@ -308,12 +435,161 @@ public class WorkforceService {
             now,
             actorId,
             original.breaks());
-    repo.adjust(correction, original.breaks(), labour(correction, original.id()));
+    // Before whether the entry still stands: the attempt that made this key's correction is what
+    // left it standing no longer, and its retry is answered with that correction.
+    var earlier = repo.adjustmentUnder(tenantId, idempotencyKey);
+    if (earlier.isPresent()) return replayed(tenantId, earlier.get(), correction);
+    if (!original.stands()) {
+      throw ApiException.conflict(
+          "WORKFORCE_ENTRY_NOT_STANDING", "that entry has already been corrected");
+    }
+    requireSecondPersonWhenRaised(original, correction);
+    var made =
+        repo.adjust(
+            correction, original.breaks(), labour(correction, original.id()), idempotencyKey);
+    if (!correction.id().equals(made.correctionId())) {
+      // An attempt under the same key committed while this one was judged.
+      return replayed(tenantId, made, correction);
+    }
     return repo.entry(tenantId, correction.id()).orElse(correction);
   }
 
-  public List<Entry> entries(UUID tenantId, UUID storeId, UUID userId, Instant from, Instant to) {
-    return repo.entries(tenantId, storeId, userId, from, to);
+  /**
+   * The correction an earlier attempt made under the key, when this request is the one it made it
+   * from; the entry as it now stands.
+   *
+   * @param wanted the correction this request would make, built as it would be written
+   * @throws ApiException 409 {@code IDEMPOTENCY_KEY_REUSED} when the key made another correction
+   */
+  private Entry replayed(UUID tenantId, WorkforceRepository.Adjustment earlier, Entry wanted) {
+    if (earlier.entryId().equals(wanted.supersedes())) {
+      var first = repo.entry(tenantId, earlier.correctionId());
+      if (first.isPresent() && Workforce.sameCorrection(first.get(), wanted)) return first.get();
+    }
+    throw ApiException.conflict(
+        "IDEMPOTENCY_KEY_REUSED",
+        "this Idempotency-Key corrected other hours; send a new one for each correction");
+  }
+
+  /**
+   * The store an entry belongs to, so the caller can be judged against it before anything is
+   * written: another business's entry is a 404, and a manager held to stores acts only at theirs.
+   *
+   * @throws ApiException 404 {@code WORKFORCE_ENTRY_NOT_FOUND}
+   */
+  public UUID storeOfEntry(UUID tenantId, UUID entryId) {
+    return repo.entry(tenantId, entryId)
+        .map(Entry::storeId)
+        .orElseThrow(
+            () -> ApiException.notFound("WORKFORCE_ENTRY_NOT_FOUND", "no such time entry"));
+  }
+
+  /**
+   * The store a shift is at, so the caller can be judged against it before it is published or
+   * called off: another business's shift is a 404, and a manager held to stores acts only at theirs
+   * (workforce-rules: "a shift or entry is judged by its own store").
+   *
+   * @throws ApiException 404 {@code WORKFORCE_SHIFT_NOT_FOUND}
+   */
+  public UUID storeOfShift(UUID tenantId, UUID shiftId) {
+    return requireShift(tenantId, shiftId).storeId();
+  }
+
+  /**
+   * Holds a read of what is kept about one person — what an hour of theirs costs, the commission
+   * they are on — to the caller's stores: a caller held to stores reads it only for somebody
+   * assigned at one of them.
+   *
+   * <p><b>Narrower than the staff list, on purpose.</b> The staff list shows a branch manager the
+   * business-wide people too (names and assignments, so they know who is above them); this does
+   * not. A business-wide assignment is nobody's store, so a branch manager does not read the pay or
+   * the commission of the managers above them — what somebody is paid is the most sensitive thing
+   * kept about them, and only a caller held to no store sees it for everyone.
+   *
+   * @param heldTo the caller's stores ({@code TenantContext.reportStores(null)}), or null for a
+   *     caller held to none, who reads anybody in the business
+   * @throws ApiException 403 {@code STORE_ACCESS_DENIED} when the person works at none of them —
+   *     the same answer whether they work elsewhere in the business or nowhere in it, so the
+   *     refusal says nothing about who is on the staff of a store the caller cannot see
+   */
+  public void requirePersonAtStores(UUID tenantId, UUID userId, Set<UUID> heldTo) {
+    requirePeopleAtStores(tenantId, List.of(userId), heldTo);
+  }
+
+  /**
+   * {@link #requirePersonAtStores} for several people at once, in one read: what their sales earn
+   * names each one's arrangement and its bands, so a caller held to stores has it worked out only
+   * for people at those stores, and one person elsewhere refuses the whole call.
+   *
+   * @param heldTo the caller's stores ({@code TenantContext.reportStores(null)}), or null for a
+   *     caller held to none — an owner, a business-wide manager, or the service producing a
+   *     statement — who may ask about anybody in the business
+   * @throws ApiException 403 {@code STORE_ACCESS_DENIED}, its details the ids (as the caller sent
+   *     them) of those who work at none of the caller's stores
+   */
+  public void requirePeopleAtStores(UUID tenantId, Collection<UUID> people, Set<UUID> heldTo) {
+    if (heldTo == null || people.isEmpty()) return;
+    Set<UUID> asked = new LinkedHashSet<>(people);
+    asked.removeAll(repo.workingAt(tenantId, asked, heldTo));
+    if (!asked.isEmpty()) {
+      throw new ApiException(
+          403,
+          "STORE_ACCESS_DENIED",
+          asked.size() == 1
+              ? "that person does not work at a store you are assigned to"
+              : asked.size() + " of these people do not work at a store you are assigned to",
+          asked.stream().map(UUID::toString).toList());
+    }
+  }
+
+  /**
+   * The store a manual clock-in is judged at: it must be the business's (404), and the caller then
+   * holds it or not (the resource asks).
+   *
+   * @throws ApiException 404 {@code STORE_NOT_FOUND}
+   */
+  public UUID requireStore(UUID tenantId, UUID storeId) {
+    return tenants
+        .findStore(tenantId, storeId)
+        .map(s -> storeId)
+        .orElseThrow(
+            () -> ApiException.notFound("STORE_NOT_FOUND", "No such store in this tenant"));
+  }
+
+  private static ApiException selfAdjust() {
+    return ApiException.forbidden(
+        "WORKFORCE_SELF_ADJUST_REFUSED",
+        "nobody corrects or clocks in their own hours; ask somebody else to do it");
+  }
+
+  /**
+   * Where the approval of a correction that raises paid hours plugs in (workforce-rules slice 6
+   * (c)). A correction that would raise the person's paid minutes is to become a pending
+   * correction, the approvals action {@code staff.time-correction-up}, applied and announced only
+   * when a second person with {@code staff.manage} approves — so that labour cost never moves on an
+   * unapproved figure. That needs the approvals mechanism (stage 0.5) and the business's switch,
+   * which is off until set; until they exist a raise applies at once, as it always has, and this
+   * says so where it is decided. The switch reads here, and returns the pending answer instead of
+   * falling through to {@code repo.adjust}.
+   */
+  private void requireSecondPersonWhenRaised(Entry original, Entry correction) {
+    if (Workforce.raisesPaidMinutes(original, correction)) {
+      LOG.log(
+          java.util.logging.Level.FINE,
+          "correction {0} raises paid minutes; approval is not switched on for this business",
+          correction.id());
+    }
+  }
+
+  /**
+   * The hours of a window that stand.
+   *
+   * @param stores the stores to read (the caller's, as {@code TenantContext.reportStores} resolved
+   *     them), or null for every store of the business
+   */
+  public List<Entry> entries(
+      UUID tenantId, Set<UUID> stores, UUID userId, Instant from, Instant to) {
+    return repo.entries(tenantId, stores, userId, from, to);
   }
 
   /**
@@ -329,7 +605,7 @@ public class WorkforceService {
     java.time.Duration worked = entry.worked();
     if (worked == null) return null;
     List<PayRate> rates = repo.rates(entry.tenantId(), entry.userId());
-    java.math.BigDecimal cost = Workforce.cost(entry, rates);
+    java.math.BigDecimal cost = Workforce.cost(entry, rates, Fx::minorUnits);
     String currency =
         rates.stream()
             .filter(r -> !r.effectiveFrom().isAfter(entry.day()))
@@ -383,6 +659,27 @@ public class WorkforceService {
   // ── what an hour costs ──────────────────────────────────────────────────────
 
   /**
+   * An hourly rate sent as text, read only when it is written out as a figure ({@link
+   * Workforce#writtenRate}).
+   *
+   * <p>The request takes the rate as text, so common-web's guard on the numbers a body carries
+   * never sees it: an exponent ({@code 1E+2147483647}), a word or a digit of another script is
+   * refused here by name, before any figure is built from it. Whether the figure fits its column,
+   * and is not below nothing, is {@link #addRate}'s to say.
+   *
+   * @throws ApiException 400 {@code WORKFORCE_RATE_INVALID} when it is not a figure written out
+   */
+  public static java.math.BigDecimal readRate(String text) {
+    return Workforce.writtenRate(text)
+        .orElseThrow(
+            () ->
+                ApiException.badRequest(
+                    "WORKFORCE_RATE_INVALID",
+                    "hourlyRate is an amount written out, such as 12.50: digits and one point,"
+                        + " no exponent"));
+  }
+
+  /**
    * Records what an hour of somebody's time costs, from a date.
    *
    * <p>Dated because a rise must not re-cost the past: a labour figure that moved when somebody got
@@ -402,6 +699,20 @@ public class WorkforceService {
     if (hourlyRate == null || hourlyRate.signum() < 0) {
       throw ApiException.badRequest(
           "WORKFORCE_RATE_INVALID", "an hour costs nothing or something, never less than nothing");
+    }
+    // A rate, not an amount: payroll quotes hourly rates finer than the currency's smallest coin
+    // (10.4167 an hour), so it is kept to four places whatever the currency, and what it costs is
+    // rounded to the currency's own minor units (Workforce.cost). Refused rather than
+    // rounded by the column: a rate somebody typed must be the rate that is kept. Judged in a long
+    // (Workforce.rateFits): an int subtraction let 1E+2147483647 through to the insert as a 500.
+    if (!Workforce.rateFits(hourlyRate)) {
+      throw ApiException.badRequest(
+          "WORKFORCE_RATE_INVALID",
+          "an hourly rate has at most "
+              + Workforce.RATE_WHOLE_DIGITS
+              + " digits before the point and "
+              + Workforce.RATE_PLACES
+              + " after it");
     }
     return repo.addRate(
         new PayRate(
@@ -431,7 +742,8 @@ public class WorkforceService {
    * neither.
    */
   public List<AttendanceDay> attendance(
-      UUID tenantId, UUID storeId, UUID userId, LocalDate from, LocalDate to) {
+      UUID tenantId, Set<UUID> stores, UUID userId, LocalDate from, LocalDate to) {
+    // The stores are the caller's own, read together in the query itself (null: every store).
     Instant start = from.atStartOfDay().toInstant(ZoneOffset.UTC);
     Instant end = to.atStartOfDay().toInstant(ZoneOffset.UTC);
     // [planned minutes, worked minutes, entries] per (day, person, store).
@@ -439,14 +751,14 @@ public class WorkforceService {
     Map<String, boolean[]> open = new HashMap<>();
     Map<String, Instant[]> firsts = new HashMap<>();
 
-    for (Shift s : repo.shifts(tenantId, storeId, userId, start, end)) {
+    for (Shift s : repo.shifts(tenantId, stores, userId, start, end)) {
       if (!s.live()) continue;
       String key = key(s.day(), s.userId(), s.storeId());
       minutes.computeIfAbsent(key, k -> new long[3])[0] += s.length().toMinutes();
       Instant[] first = firsts.computeIfAbsent(key, k -> new Instant[2]);
       if (first[0] == null || s.startsAt().isBefore(first[0])) first[0] = s.startsAt();
     }
-    for (Entry e : repo.entries(tenantId, storeId, userId, start, end)) {
+    for (Entry e : repo.entries(tenantId, stores, userId, start, end)) {
       String key = key(e.day(), e.userId(), e.storeId());
       long[] both = minutes.computeIfAbsent(key, k -> new long[3]);
       Duration worked = e.worked();

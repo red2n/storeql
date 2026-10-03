@@ -166,10 +166,11 @@ public class TerminalService {
     Terminal t = requireActive(tenantId, terminalId);
     BigDecimal due = requireMoney(amount);
 
+    UUID attemptId = Ids.newId();
     Attempt claimed =
         repo.claim(
             Terminals.requested(
-                Ids.newId(),
+                attemptId,
                 tenantId,
                 t.storeId(),
                 t.id(),
@@ -182,9 +183,10 @@ public class TerminalService {
                 Instant.now()),
             idempotencyKey);
     // The retry's whole purpose: the same key finds the attempt that already went to the terminal,
-    // and
-    // nothing is asked of the device a second time.
-    if (claimed.settled()) return claimed;
+    // and nothing is asked of the device a second time. That holds for a settled attempt and also
+    // for one still REQUESTED, where the first press is at the device: the replay gets that attempt
+    // back, still pending, and only the call that wrote the row (its id is ours) asks the device.
+    if (!ownsClaim(claimed, attemptId)) return claimed;
 
     return run(tenantId, claimed, t, device -> device.sale(requestFor(claimed, t)));
   }
@@ -222,10 +224,11 @@ public class TerminalService {
     }
     Terminal t = requireActive(tenantId, original.terminalId());
 
+    UUID attemptId = Ids.newId();
     Attempt claimed =
         repo.claim(
             Terminals.requested(
-                Ids.newId(),
+                attemptId,
                 tenantId,
                 t.storeId(),
                 t.id(),
@@ -237,7 +240,7 @@ public class TerminalService {
                 actorId,
                 Instant.now()),
             idempotencyKey);
-    if (claimed.settled()) return claimed;
+    if (!ownsClaim(claimed, attemptId)) return claimed;
 
     return run(
         tenantId,
@@ -320,6 +323,14 @@ public class TerminalService {
     }
     repo.settle(tenantId, claimed.id(), outcome);
     return repo.attempt(tenantId, claimed.id()).orElse(claimed);
+  }
+
+  /**
+   * True only for the call whose own attempt row was written by the claim. A replay gets the
+   * earlier attempt back (another id), settled or still at the device, and must not ask again.
+   */
+  private static boolean ownsClaim(Attempt claimed, UUID attemptId) {
+    return attemptId.equals(claimed.id()) && !claimed.settled();
   }
 
   private static Terminals.Outcome failure(String detail) {

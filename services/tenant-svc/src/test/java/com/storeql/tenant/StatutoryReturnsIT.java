@@ -21,7 +21,11 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -367,6 +371,72 @@ class StatutoryReturnsIT {
             tenantId);
     assertThat(twice.status(), is(409));
     assertThat(twice.code(), is("STATUTORY_FILING_NOT_STANDING"));
+  }
+
+  @Test
+  @DisplayName("Ten corrections of one standing filing at once: one stands, the rest are refused")
+  void twoCorrectionsAtOnceStandOnce() throws Exception {
+    String tenantId = business("PT", "EUR");
+    LocalDate last = monthsBack(1);
+    Answer first =
+        owner(
+            "POST",
+            SR + "/SAFT_PT/filings",
+            "{\"periodStart\":\"" + last + "\",\"provider\":\"MANUAL\",\"reference\":\"AT-1\"}",
+            tenantId);
+    assertThat(first.text(), first.status(), is(200));
+    String standing = first.data().getJsonObject("filing").getString("id");
+
+    int n = 10;
+    var pool = Executors.newFixedThreadPool(n);
+    var go = new CountDownLatch(1);
+    List<Future<Answer>> results = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      String reference = "AT-C" + i;
+      results.add(
+          pool.submit(
+              () -> {
+                go.await();
+                return owner(
+                    "POST",
+                    SR + "/SAFT_PT/filings",
+                    "{\"periodStart\":\""
+                        + last
+                        + "\",\"provider\":\"MANUAL\",\"reference\":\""
+                        + reference
+                        + "\",\"supersedes\":\""
+                        + standing
+                        + "\"}",
+                    tenantId);
+              }));
+    }
+    go.countDown();
+    int accepted = 0;
+    for (Future<Answer> f : results) {
+      Answer a = f.get();
+      if (a.status() == 200) {
+        accepted++;
+      } else {
+        assertThat(a.text(), a.status(), is(409));
+        assertThat(
+            a.text(),
+            a.code(),
+            org.hamcrest.Matchers.either(is("STATUTORY_FILING_ALREADY_CORRECTED"))
+                .or(is("STATUTORY_FILING_NOT_STANDING")));
+      }
+    }
+    pool.shutdown();
+    assertThat("one correction wins", accepted, is(1));
+
+    List<JsonObject> history =
+        owner("GET", SR + "/filings", null, tenantId).list().stream()
+            .filter(f -> last.toString().equals(f.getString("periodStart")))
+            .toList();
+    assertThat("the first and the one correction are on the record", history, hasSize(2));
+    assertThat(
+        "and exactly one of them stands",
+        history.stream().filter(f -> f.getBoolean("stands")).count(),
+        is(1L));
   }
 
   // ── what filing refuses ────────────────────────────────────────────────────

@@ -25,6 +25,8 @@ export 'settlements_screen.dart';
 export 'tenant_data_screen.dart';
 export 'security_notices_screen.dart';
 export 'audit_trail_screen.dart';
+export 'security_events_screen.dart';
+export 'business_changes_screen.dart';
 export 'stores_screen.dart';
 export 'orders_screen.dart';
 export 'fulfilment_screen.dart';

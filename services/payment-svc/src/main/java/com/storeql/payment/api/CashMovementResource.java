@@ -87,7 +87,9 @@ public class CashMovementResource {
       description =
           "Generates (or retrieves an existing) end-of-day Z-report for a store and business date."
               + " Requires MANAGER or OWNER.")
-  @APIResponse(responseCode = "201", description = "Z-report generated")
+  @APIResponse(responseCode = "201", description = "Z-report written")
+  @APIResponse(responseCode = "200", description = "The day was already settled: stored report")
+  @APIResponse(responseCode = "409", description = "Z_REPORT_SESSIONS_OPEN or Z_REPORT_NOT_LATEST")
   @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
   @POST
   @Path("/z-report")
@@ -97,9 +99,11 @@ public class CashMovementResource {
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID generatedBy = ctx.userId();
-    var report = svc.generateZReport(tenantId, generatedBy, req, ctx);
-    return Response.status(201)
-        .entity(ApiResponse.ok(report, ApiResponse.Meta.of(ctx.requestId())))
+    var outcome = svc.generateZReport(tenantId, generatedBy, req, ctx);
+    // 201 when this request wrote the report; 200 when the day was already settled and the stored
+    // report is answered.
+    return Response.status(outcome.written() ? 201 : 200)
+        .entity(ApiResponse.ok(outcome.report(), ApiResponse.Meta.of(ctx.requestId())))
         .build();
   }
 
@@ -113,12 +117,14 @@ public class CashMovementResource {
   @GET
   @Path("/z-report")
   public ApiResponse<?> getZReport(
-      @QueryParam("storeId") String storeId, @QueryParam("businessDate") String businessDate) {
+      @QueryParam("storeId") String storeId,
+      @QueryParam("businessDate") String businessDate,
+      @QueryParam("version") Integer version) {
     ctx.requireAnyRole("MANAGER", "OWNER");
     ctx.requirePermission(com.storeql.web.Permissions.TILL_MANAGE);
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
-        svc.getZReport(tenantId, Ids.parse(storeId), businessDate, ctx),
+        svc.getZReport(tenantId, Ids.parse(storeId), businessDate, version, ctx),
         ApiResponse.Meta.of(ctx.requestId()));
   }
 }

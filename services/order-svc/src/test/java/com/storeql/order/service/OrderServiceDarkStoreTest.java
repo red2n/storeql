@@ -74,6 +74,8 @@ class OrderServiceDarkStoreTest {
     // default null answer is exactly "no slot".
     svc.windows = windows;
     svc.jurisdictions = org.mockito.Mockito.mock(com.storeql.service.Jurisdictions.class);
+    // Stop-sale and certified scales: nothing here is recalled or weighed; a mock refuses nothing.
+    svc.saleChecks = org.mockito.Mockito.mock(SaleChecks.class);
     lenient().when(profiles.requireCurrency(TENANT)).thenReturn("USD");
     when(ctx.requireTenantId()).thenReturn(TENANT);
     when(tenantStatusRepo.isActive(any())).thenReturn(true);
@@ -88,36 +90,29 @@ class OrderServiceDarkStoreTest {
 
   private static PlaceOrderRequest request(String channel, String fulfilmentType) {
     boolean delivery = "DELIVERY".equals(fulfilmentType);
-    return new PlaceOrderRequest(
-        DARK.toString(),
-        null,
-        channel,
-        fulfilmentType,
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null)),
-        null,
-        null,
-        null,
-        "USD",
-        null,
-        null,
-        null,
-        null,
-        null,
-        delivery ? "1 Park Row" : null,
-        null,
-        delivery ? "Leeds" : null,
-        delivery ? "LS1 5AB" : null,
-        delivery ? "Sam Shopper" : null,
-        delivery ? "07700900123" : null,
-        "07700900123",
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(DARK.toString())
+        .channel(channel)
+        .fulfilmentType(fulfilmentType)
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    BigDecimal.ONE,
+                    BigDecimal.TEN,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .currency("USD")
+        .deliveryLine1(delivery ? "1 Park Row" : null)
+        .deliveryCity(delivery ? "Leeds" : null)
+        .deliveryPostalCode(delivery ? "LS1 5AB" : null)
+        .deliveryRecipientName(delivery ? "Sam Shopper" : null)
+        .deliveryRecipientPhone(delivery ? "07700900123" : null)
+        .contactPhone("07700900123")
+        .build();
   }
 
   @Test
@@ -141,18 +136,19 @@ class OrderServiceDarkStoreTest {
 
   @Test
   void aDeliveryIsPlacedAtADarkStoreAsAtAnyShop() {
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
     var order = svc.placeOrder(request("ONLINE", "DELIVERY"), ctx, null);
     assertEquals(DARK, order.storeId());
-    verify(repo, times(1)).createOrder(any(), anyList(), any(), any(), anyList(), anyList());
+    verify(repo, times(1))
+        .createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any());
   }
 
   @Test
   void storeTypesThatCannotBeReadRefuseNothing() {
     when(profiles.stores(TENANT, DARK))
         .thenThrow(new ApiException(503, "TENANT_STORES_UNAVAILABLE", "down", List.of()));
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
     var order = svc.placeOrder(request("ONLINE", "PICKUP"), ctx, null);
     assertEquals("PICKUP", order.fulfilmentType());

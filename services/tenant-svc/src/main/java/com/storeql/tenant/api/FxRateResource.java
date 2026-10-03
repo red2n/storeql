@@ -81,6 +81,7 @@ public class FxRateResource {
   @PUT
   @Path("/{currency}")
   public ApiResponse<RateResponse> set(@PathParam("currency") String currency, SetRateRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     LocalDate from = null;
     if (req.effectiveFrom() != null && !req.effectiveFrom().isBlank()) {

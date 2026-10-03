@@ -48,6 +48,8 @@ class DeferredRevenueIT {
   private static final PostgresSupport PG = PostgresSupport.start().wire("purchase");
 
   static {
+    // Two events to a transaction, so a backlog of more than two is posted across several.
+    System.setProperty("storeql.deferred-revenue.backlog-chunk", "2");
     TenantSvcStub.start()
         .with(PurchaseFixtures.T, "GBP", "GB")
         .with(PurchaseFixtures.T2, "GBP", "GB");
@@ -193,6 +195,20 @@ class DeferredRevenueIT {
   }
 
   @Test
+  @DisplayName("A backlog bigger than a chunk is posted in full, across several transactions")
+  void aBacklogLargerThanAChunkIsPostedInFull() {
+    for (int i = 0; i < 5; i++) handler.loyalty(earnedOnSale("200", "120.00", "20.00"));
+    assertThat(data(get(T, "OWNER")).getJsonNumber("eventsAwaitingEstimates").longValue(), is(5L));
+
+    JsonObject after = data(put(ESTIMATES, T, "OWNER"));
+    assertThat(after.getJsonNumber("eventsAwaitingEstimates").longValue(), is(0L));
+    assertThat(net("LOYALTY_DEFERRAL", "4010").signum(), is(1));
+    assertThat(
+        net("LOYALTY_DEFERRAL", "2330"), comparesEqualTo(net("LOYALTY_DEFERRAL", "4010").negate()));
+    assertThat(trialBalance().getBoolean("balanced"), is(true));
+  }
+
+  @Test
   @DisplayName("A loyalty event delivered twice is posted once")
   void aRedeliveredEventPostsOnce() {
     data(put(ESTIMATES, T, "OWNER"));
@@ -304,6 +320,41 @@ class DeferredRevenueIT {
 
   @Test
   @DisplayName(
+      "Points taken back with a returned sale put their deferral back into sales, once, and a card"
+          + " loaded by a refund is counted but posts nothing of its own")
+  void aReturnTakesPointsBackAndARefundLoadedCardPostsNothing() {
+    data(put(ESTIMATES, T, "OWNER"));
+    handler.loyalty(earnedOnSale("200", "120.00", "20.00"));
+    BigDecimal deferred = data(get(T, "OWNER")).getJsonNumber("deferredIncome").bigDecimalValue();
+    assertThat(deferred.signum(), is(1));
+
+    // The whole sale comes back: its 200 points are taken back, and their deferral with them.
+    String reversed = loyalty("LoyaltyReversed", "200");
+    handler.loyalty(reversed);
+    handler.loyalty(reversed);
+    JsonObject view = data(get(T, "OWNER"));
+    assertThat(
+        view.getJsonNumber("deferredIncome").bigDecimalValue(), comparesEqualTo(BigDecimal.ZERO));
+    assertThat(
+        view.getJsonNumber("pointsOutstanding").bigDecimalValue(),
+        comparesEqualTo(BigDecimal.ZERO));
+    // Sales got back exactly what earning took out of it; nothing became breakage.
+    assertThat(net("LOYALTY_DEFERRAL", "4010"), comparesEqualTo(BigDecimal.ZERO));
+    assertThat(lines("LOYALTY_RELEASE").size(), is(0));
+
+    // A refund taken on a gift card: the pool counts the load, the ledger does not post it twice.
+    String refundLoad = loaded("ISSUE", "RETURN", "15.00");
+    handler.giftCardLoaded(refundLoad);
+    handler.giftCardLoaded(refundLoad);
+    assertThat(lines("GIFT_CARD_LOAD").size(), is(0));
+    assertThat(
+        data(get(T, "OWNER")).getJsonNumber("giftCardsLoaded").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("15.00")));
+    assertThat(trialBalance().getBoolean("balanced"), is(true));
+  }
+
+  @Test
+  @DisplayName(
       "A gift card sold is a liability against the tender; spending it recognises breakage once")
   void giftCardsAreALiabilityWithBreakage() {
     String issue = loaded("ISSUE", "CARD", "100.00");
@@ -339,6 +390,46 @@ class DeferredRevenueIT {
     // A card tender is not a gift card spent.
     sales.paymentCaptured(tender("CARD", "30.00"));
     assertThat(lines("GIFT_CARD_BREAKAGE").size(), is(2));
+    assertThat(trialBalance().getBoolean("balanced"), is(true));
+  }
+
+  @Test
+  @DisplayName(
+      "Cards loaded in a sale, by hand and by a return are all in the pool; the report reconciles"
+          + " and breakage is recognised on what was loaded")
+  void cardsLoadedThreeWaysReconcile() {
+    data(put(ESTIMATES, T, "OWNER"));
+    String order = Ids.newId().toString();
+    handler.giftCardLoaded(
+        loaded("ISSUE", "CASH", "40.00")
+            .replace("}", ",\"orderId\":\"" + order + "\",\"source\":\"SALE\"}"));
+    handler.giftCardLoaded(
+        loaded("ISSUE", "PROMOTIONAL", "20.00")
+            .replace("}", ",\"source\":\"GOODWILL\",\"note\":\"apology\"}"));
+    handler.giftCardLoaded(
+        loaded("ISSUE", "RETURN", "15.00").replace("}", ",\"source\":\"RETURN\"}"));
+
+    // Sale: Dr clearing / Cr 2310; hand: Dr 6420 / Cr 2310; return: nothing (the refund posts it).
+    assertThat(net("GIFT_CARD_LOAD", "1105"), comparesEqualTo(new BigDecimal("40.00")));
+    assertThat(net("GIFT_CARD_LOAD", "6420"), comparesEqualTo(new BigDecimal("20.00")));
+    assertThat(net("GIFT_CARD_LOAD", "2310"), comparesEqualTo(new BigDecimal("-60.00")));
+    assertThat(net("GIFT_CARD_LOAD", "1210"), comparesEqualTo(BigDecimal.ZERO));
+
+    JsonObject view = data(get(T, "OWNER"));
+    assertThat(
+        view.getJsonNumber("giftCardsLoaded").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("75.00")));
+    assertThat(
+        view.getJsonNumber("giftCardLiability").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("75.00")));
+
+    // 27.00 spent: 27 x 10% / 90% = 3.00 breakage, well within a tenth of the 75 loaded.
+    sales.paymentCaptured(tender("GIFT_CARD", "27.00"));
+    assertThat(net("GIFT_CARD_BREAKAGE", "4031"), comparesEqualTo(new BigDecimal("-3.00")));
+    view = data(get(T, "OWNER"));
+    assertThat(
+        view.getJsonNumber("giftCardLiability").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("45.00")));
     assertThat(trialBalance().getBoolean("balanced"), is(true));
   }
 

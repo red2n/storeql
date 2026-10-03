@@ -36,19 +36,13 @@ class RecallNoticeIssuedHandlerTest {
     String phone;
     String language;
 
-    @Override
-    public Optional<String> languageOf(UUID tenantId, UUID customerId) {
-      return Optional.ofNullable(language);
-    }
+    int reads;
 
     @Override
-    public Optional<String> emailOf(UUID tenantId, UUID customerId) {
-      return Optional.ofNullable(CUSTOMER.equals(customerId) ? email : null);
-    }
-
-    @Override
-    public Optional<String> phoneOf(UUID tenantId, UUID customerId) {
-      return Optional.ofNullable(CUSTOMER.equals(customerId) ? phone : null);
+    public Contact contactOf(UUID tenantId, UUID customerId) {
+      reads++;
+      boolean known = CUSTOMER.equals(customerId);
+      return new Contact(language, known ? email : null, known ? phone : null);
     }
 
     @Override
@@ -85,6 +79,15 @@ class RecallNoticeIssuedHandlerTest {
     handler = new RecallNoticeIssuedHandler();
     handler.notifier = NotifierTestSupport.notifierOf(channel, new OnceRepo(), channels);
     handler.customers = customers;
+  }
+
+  @Test
+  void aNoticeReadsTheCustomersRecordOnceNotOncePerField() {
+    customers.email = null;
+    customers.phone = "+447400123456";
+    handler.handle(payload(CUSTOMER, null, null, "REFUND", "REPLACEMENT"));
+
+    assertEquals(1, customers.reads, "language, email and phone come from one read");
   }
 
   @Test

@@ -200,11 +200,12 @@ final priceListsProvider = FutureProvider.autoDispose<List<PriceList>>((
 
 final priceListItemsProvider = FutureProvider.autoDispose
     .family<List<PriceListItem>, String>((ref, priceListId) async {
-      final resp = await ref
-          .read(apiClientProvider)
-          .dio
-          .get('/${ApiConstants.pricing}/price-lists/$priceListId/items');
-      final data = (resp.data['data'] as List?) ?? [];
+      // The server pages a list's items (meta.nextCursor); the screen shows them all.
+      final data = await fetchAllPages(
+        ref.read(apiClientProvider).dio,
+        '/${ApiConstants.pricing}/price-lists/$priceListId/items',
+        pageSize: 500,
+      );
       return data
           .map((e) => PriceListItem.fromJson(e as Map<String, dynamic>))
           .toList();

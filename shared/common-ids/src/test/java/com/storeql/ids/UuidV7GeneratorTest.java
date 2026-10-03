@@ -116,6 +116,22 @@ class UuidV7GeneratorTest {
     }
   }
 
+  /**
+   * One virtual thread per id (a request each): no per-thread state is rebuilt, and with one shared
+   * sequence even ids made by different threads in one millisecond stay in order.
+   */
+  @Test
+  void idsMadeByAFreshVirtualThreadEachStillSortInOrder() throws Exception {
+    UuidV7Generator generator = new UuidV7Generator(() -> NOW, new SplittableRandom(3)::nextLong);
+    List<UUID> ids = new ArrayList<>();
+    for (int i = 0; i < 3000; i++) {
+      UUID[] box = new UUID[1];
+      Thread.ofVirtual().start(() -> box[0] = generator.next()).join();
+      ids.add(box[0]);
+    }
+    assertStrictlyIncreasing(ids);
+  }
+
   private static long millisOf(UUID id) {
     return id.getMostSignificantBits() >>> 16;
   }

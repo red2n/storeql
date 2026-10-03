@@ -70,6 +70,7 @@ import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -78,6 +79,15 @@ import java.util.UUID;
 /** Catalog business logic. Publishes catalog events via the outbox (golden rule #6). */
 @ApplicationScoped
 public class ProductService {
+
+  private static final java.util.regex.Pattern COUNTRY_CODE =
+      java.util.regex.Pattern.compile("[A-Z]{2}");
+  private static final java.util.regex.Pattern HSN_SEPARATORS =
+      java.util.regex.Pattern.compile("[\\s.]");
+  private static final java.util.regex.Pattern HSN_CODE =
+      java.util.regex.Pattern.compile("[0-9]{4}|[0-9]{6}|[0-9]{8}");
+
+  private static final System.Logger LOG = System.getLogger(ProductService.class.getName());
 
   @Inject ProductRepository repo;
   @Inject com.storeql.service.Entitlements entitlements;
@@ -239,20 +249,41 @@ public class ProductService {
   // ──────────────────────────────────────────────────────────────── products
 
   /**
-   * Creates a product.
+   * Creates a product, sold at the stores the request names or, naming none, at every store — or,
+   * for a caller held to stores, at theirs.
    *
-   * @param tenantId owning tenant
+   * <p>Who may range it where is checked before anything is written: every store named is the
+   * business's own and the caller's ({@link CatalogueStores#require}). A product that names no
+   * store is sold at every store, on shelves a manager held to stores does not keep, so theirs is
+   * sold at the stores they keep instead ({@link CatalogueStores#rangeOfNew}); an owner, or a
+   * manager of the whole business, creates one sold everywhere. The product and its stores are
+   * written in one transaction.
+   *
+   * @param ctx the caller
    * @param req the request body carrying the new values
+   * @param storeIds the stores it is to be sold at, read as UUIDv7 ids; empty for every store (for
+   *     a caller held to stores, for theirs)
+   *     <p>Refused in this order, and nothing written by any refusal: what the request says ({@code
+   *     400}: a brand or category id that is not a UUIDv7, the status, {@code launchOn}, the safety
+   *     information and the listing rules); then the stores it names ({@code 404}, then {@code
+   *     403}); then the plan ({@code 409}).
    * @return the created product
+   * @throws ApiException 400 {@code INVALID_UUID}, {@code PRODUCT_STATUS_INVALID}, {@code
+   *     PRODUCT_LAUNCH_ON_NEEDS_NEW_LINE}, {@code PRODUCT_LAUNCH_ON_INVALID}, the safety
+   *     information's and the listing rules' refusals; 404 {@code PRODUCT_STORE_NOT_FOUND} for a
+   *     store that is not the business's; 403 {@code STORE_ACCESS_DENIED} for a store the caller is
+   *     not held to; 503 {@code TENANT_STORES_UNAVAILABLE} when stores are named and tenant-svc
+   *     cannot say which are the business's; and the plan's refusal
    */
-  public Product createProduct(UUID tenantId, CreateProductRequest req) {
-    // What the business is sold decides how many products it may list (21.8). The count is asked
-    // for only when its plan sets a ceiling.
-    entitlements.requireRoom(
-        tenantId,
-        com.storeql.service.Entitlements.PRODUCTS_MAX,
-        "products",
-        () -> repo.countProducts(tenantId));
+  public Product createProduct(
+      com.storeql.web.TenantContext ctx, CreateProductRequest req, List<UUID> storeIds) {
+    UUID tenantId = ctx.requireTenantId();
+    // The request is judged first (400): what it says, read before anyone is asked about the
+    // stores it names, so a wrong request is told what is wrong with it, not whose stores they are.
+    UUID brandId = parseOptionalUuid(req.brandId(), "brandId");
+    UUID categoryId = parseOptionalUuid(req.categoryId(), "categoryId");
+    String status = initialStatus(req.status());
+    java.time.LocalDate launchOn = launchOn(req.status(), req.launchOn());
     UUID id = Ids.newId();
     Instant now = Instant.now();
     var safety =
@@ -262,20 +293,30 @@ public class ProductService {
     if (req.sellableOnline() == null || req.sellableOnline()) {
       requireListable(tenantId, safety);
     }
+    // Then where it is sold: the business's stores (404), then the caller's (403).
+    CatalogueStores.require(profiles, ctx, storeIds);
+    List<UUID> stores = CatalogueStores.rangeOfNew(ctx, storeIds);
+    // Then the plan (409): what the business is sold decides how many products it may list (21.8).
+    // The count is asked for only when its plan sets a ceiling.
+    entitlements.requireRoom(
+        tenantId,
+        com.storeql.service.Entitlements.PRODUCTS_MAX,
+        "products",
+        () -> repo.countProducts(tenantId));
     var product =
         new Product(
             id,
             tenantId,
             req.name().trim(),
             req.description(),
-            parseOptionalUuid(req.brandId(), "brandId"),
-            parseOptionalUuid(req.categoryId(), "categoryId"),
-            initialStatus(req.status()),
+            brandId,
+            categoryId,
+            status,
             req.sellableOnline() == null || req.sellableOnline(),
             req.sellablePos() == null || req.sellablePos(),
             now,
             now,
-            launchOn(req.status(), req.launchOn()),
+            launchOn,
             null);
     var event =
         new OutboxRow(
@@ -287,19 +328,27 @@ public class ProductService {
     return repo.createProductWithOutbox(
         product,
         List.of(event, categorised(tenantId, id, product.categoryId(), List.of())),
-        safety);
+        safety,
+        stores);
   }
 
   /**
    * Updates a product.
    *
-   * @param tenantId owning tenant
+   * <p>A manager held to stores edits only a line ranged solely to stores they hold ({@link
+   * CatalogueStores#requireLineHeldTo}), judged inside the transaction that writes, on the range
+   * read there with the product row locked.
+   *
+   * @param ctx the caller
    * @param productId the product concerned
    * @param req the request body carrying the new values
    * @return the updated product
-   * @throws ApiException a 404 when no such product exists in this tenant
+   * @throws ApiException a 404 when no such product exists in this tenant; 403 {@code
+   *     BUSINESS_WIDE_ONLY} for a caller held to stores when the line is sold beyond their stores
    */
-  public Product updateProduct(UUID tenantId, UUID productId, UpdateProductRequest req) {
+  public Product updateProduct(
+      com.storeql.web.TenantContext ctx, UUID productId, UpdateProductRequest req) {
+    UUID tenantId = ctx.requireTenantId();
     Product existing =
         repo.findProduct(tenantId, productId)
             .orElseThrow(() -> ApiException.notFound("PRODUCT_NOT_FOUND", "No such product"));
@@ -336,7 +385,62 @@ public class ProductService {
           if (updated.sellableOnline() && Product.STATUS_ACTIVE.equals(updated.status())) {
             requireListable(tenantId, stored);
           }
-        });
+        },
+        range -> CatalogueStores.requireLineHeldTo(ctx, range));
+  }
+
+  /**
+   * The line-scoped refusal (3 Oct 2026): a caller held to stores writes to a line only when it is
+   * ranged solely to stores they hold. Asked before the write, in the order {@code 404 product},
+   * then {@code 403}, so another business's line is not found whoever asks. A caller held to no
+   * store is never asked about the range.
+   *
+   * @param ctx the caller
+   * @param productId the product the write is to
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND}; 403 {@code BUSINESS_WIDE_ONLY}
+   */
+  public void requireLineHeld(com.storeql.web.TenantContext ctx, UUID productId) {
+    UUID tenantId = ctx.requireTenantId();
+    getProduct(tenantId, productId);
+    if (!ctx.storeIds().isEmpty()) {
+      CatalogueStores.requireLineHeldTo(ctx, repo.storesForProduct(tenantId, productId));
+    }
+  }
+
+  /**
+   * As {@link #requireLineHeld}, for a write to one of a line's variants, named by its own id: the
+   * variant is the business's ({@code 404 VARIANT_NOT_FOUND}), then its line is held by the caller.
+   *
+   * @param ctx the caller
+   * @param variantId the variant the write is to
+   * @return the variant, as read
+   * @throws ApiException 404 {@code VARIANT_NOT_FOUND}; 403 {@code BUSINESS_WIDE_ONLY}
+   */
+  public Variant requireVariantLineHeld(com.storeql.web.TenantContext ctx, UUID variantId) {
+    UUID tenantId = ctx.requireTenantId();
+    Variant variant = getVariant(tenantId, variantId);
+    if (!ctx.storeIds().isEmpty()) {
+      CatalogueStores.requireLineHeldTo(ctx, repo.storesForProduct(tenantId, variant.productId()));
+    }
+    return variant;
+  }
+
+  /**
+   * What only a caller held to no store may write: the business's catalogue data and policy that is
+   * bound to no one product and no one store (brands, categories, category sets, templates, catalog
+   * groups, container types, age-restriction rules, the own-brand mark). Asked before anything the
+   * request names is read, so the answer is the same whatever the ids name.
+   *
+   * @param ctx the caller
+   * @param what what it is and why a manager of some stores cannot, in a sentence's words
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY} for a caller held to stores
+   */
+  public void requireBusinessWideCatalogue(com.storeql.web.TenantContext ctx, String what) {
+    CatalogueStores.requireBusinessWide(
+        ctx,
+        what
+            + " is for an owner or a manager of the whole business: it changes the catalogue at"
+            + " every store");
   }
 
   // ── the catalogue event (03.8) ─────────────────────────────────────────────
@@ -353,6 +457,30 @@ public class ProductService {
       current = categoryRepo.findCategory(tenantId, current).map(Category::parentId).orElse(null);
     }
     return path;
+  }
+
+  /**
+   * The same walk as {@link #categoryPath(UUID, UUID)}, over a parent map read once, so a catalogue
+   * republish costs one query for the tree rather than one per level per product.
+   */
+  static List<UUID> pathIn(java.util.Map<UUID, UUID> parents, UUID categoryId) {
+    List<UUID> path = new java.util.ArrayList<>();
+    UUID current = categoryId;
+    while (current != null && path.size() < 32 && !path.contains(current)) {
+      path.add(current);
+      current = parents.get(current);
+    }
+    return path;
+  }
+
+  private OutboxRow categorised(
+      UUID tenantId, UUID productId, List<UUID> categoryPath, List<UUID> variantIds) {
+    return new OutboxRow(
+        "ProductCategorised",
+        "storeql.catalog.product-categorised",
+        tenantId,
+        productId,
+        Events.productCategorised(tenantId, productId, categoryPath, variantIds));
   }
 
   private OutboxRow categorised(
@@ -379,12 +507,14 @@ public class ProductService {
     var products = repo.listCatalogueForRepublish(tenantId);
     var variantsByProduct = repo.listVariantIdsByProduct(tenantId);
     List<OutboxRow> events = new java.util.ArrayList<>(products.size());
+    // The tree is read once; each product's path is then worked out in memory.
+    var parents = categoryRepo.parentIds(tenantId);
     for (var p : products) {
       events.add(
           categorised(
               tenantId,
               p.productId(),
-              p.categoryId(),
+              pathIn(parents, p.categoryId()),
               variantsByProduct.getOrDefault(p.productId(), List.of())));
     }
     // Each variant's measure too (03.13), so pricing-svc's unit prices catch up with the catalogue.
@@ -408,8 +538,27 @@ public class ProductService {
     return announced;
   }
 
-  /** Delist a product (soft) — sets status DELISTED, publishes ProductDelisted. */
-  public Product delistProduct(UUID tenantId, UUID productId) {
+  /**
+   * Delists a line (soft): sets status DELISTED and publishes ProductDelisted.
+   *
+   * <p>The line goes from the shop and the till at every store, and inventory-svc takes its
+   * variants out of the low-stock report and the planning run everywhere, so it is the whole
+   * business's to decide, as discontinuing is: a manager held to stores is refused before the line
+   * is read, and nothing changes. That holds whatever the line's range, a local line they made
+   * themselves included: the status is the line's, not the line's at a store (that is its range,
+   * which they keep at their stores), and its range is not read to decide it.
+   *
+   * @param ctx the caller
+   * @param productId the line
+   * @throws ApiException {@code 403 BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404
+   *     PRODUCT_NOT_FOUND}
+   */
+  public Product delistProduct(com.storeql.web.TenantContext ctx, UUID productId) {
+    UUID tenantId = ctx.requireTenantId();
+    CatalogueStores.requireBusinessWide(
+        ctx,
+        "Delisting a line takes it off sale and out of replenishment at every store, which only an"
+            + " owner or a manager of the whole business can do");
     Product existing =
         repo.findProduct(tenantId, productId)
             .orElseThrow(() -> ApiException.notFound("PRODUCT_NOT_FOUND", "No such product"));
@@ -473,9 +622,23 @@ public class ProductService {
   /**
    * Puts a new line on sale.
    *
-   * @throws ApiException {@code 409 PRODUCT_LIFECYCLE_INVALID} unless the product is a NEW_LINE
+   * <p>The line goes on sale at every store it is sold at, on the day the business chose for it, so
+   * it is the whole business's to decide, as the other moves of its lifecycle are: a manager held
+   * to stores is refused before the line is read, whatever its range (a new line of their own
+   * included, as at {@link #delistProduct}), and nothing changes. A line of theirs that is to sell
+   * from today is made ACTIVE outright, which they may.
+   *
+   * @param ctx the caller
+   * @param productId the line
+   * @throws ApiException {@code 403 BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404
+   *     PRODUCT_NOT_FOUND}; {@code 409 PRODUCT_LIFECYCLE_INVALID} unless the product is a NEW_LINE
    */
-  public Product launchProduct(UUID tenantId, UUID productId) {
+  public Product launchProduct(com.storeql.web.TenantContext ctx, UUID productId) {
+    UUID tenantId = ctx.requireTenantId();
+    CatalogueStores.requireBusinessWide(
+        ctx,
+        "Launching a line puts it on sale at every store it is sold at, which only an owner or a"
+            + " manager of the whole business can do");
     return move(
         tenantId, productId, Product.STATUS_NEW_LINE, Product.STATUS_ACTIVE, "ProductLaunched");
   }
@@ -483,9 +646,23 @@ public class ProductService {
   /**
    * Marks a line for run-down: sold while stock lasts, never reordered.
    *
-   * @throws ApiException {@code 409 PRODUCT_LIFECYCLE_INVALID} unless the product is ACTIVE
+   * <p>The line stops being reordered at every store, so it is the whole business's to decide: a
+   * manager held to stores is refused before the line is read, whatever its range (a local line of
+   * their own included, as at {@link #delistProduct}), and nothing changes. It is also what the
+   * range points to for stopping a line being sold anywhere ({@code ASSORTMENT_LAST_STORE}), whose
+   * refusal names who can do it to a manager held to stores.
+   *
+   * @param ctx the caller
+   * @param productId the line
+   * @throws ApiException {@code 403 BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404
+   *     PRODUCT_NOT_FOUND}; {@code 409 PRODUCT_LIFECYCLE_INVALID} unless the product is ACTIVE
    */
-  public Product discontinueProduct(UUID tenantId, UUID productId) {
+  public Product discontinueProduct(com.storeql.web.TenantContext ctx, UUID productId) {
+    UUID tenantId = ctx.requireTenantId();
+    CatalogueStores.requireBusinessWide(
+        ctx,
+        "Discontinuing a line stops it being reordered at every store, which only an owner or a"
+            + " manager of the whole business can do");
     return move(
         tenantId,
         productId,
@@ -497,9 +674,22 @@ public class ProductService {
   /**
    * Brings a discontinued line back on sale and into replenishment.
    *
-   * @throws ApiException {@code 409 PRODUCT_LIFECYCLE_INVALID} unless the product is DISCONTINUED
+   * <p>It undoes a discontinue, which is the whole business's to decide, and puts the line back
+   * into replenishment at every store, so it is the whole business's too: a manager held to stores
+   * is refused before the line is read, whatever its range, and nothing changes.
+   *
+   * @param ctx the caller
+   * @param productId the line
+   * @throws ApiException {@code 403 BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404
+   *     PRODUCT_NOT_FOUND}; {@code 409 PRODUCT_LIFECYCLE_INVALID} unless the product is
+   *     DISCONTINUED
    */
-  public Product reinstateProduct(UUID tenantId, UUID productId) {
+  public Product reinstateProduct(com.storeql.web.TenantContext ctx, UUID productId) {
+    UUID tenantId = ctx.requireTenantId();
+    CatalogueStores.requireBusinessWide(
+        ctx,
+        "Reinstating a line puts it back into replenishment at every store, which only an owner or"
+            + " a manager of the whole business can do");
     return move(
         tenantId,
         productId,
@@ -732,10 +922,43 @@ public class ProductService {
     return repo.storesForProduct(tenantId, productId);
   }
 
-  /** Replace a product's store assortment. Empty list = sold at all stores. */
-  public void setProductStores(UUID tenantId, UUID productId, List<UUID> storeIds) {
+  /**
+   * Replace a product's store assortment. Empty list = sold at all stores.
+   *
+   * <p>Checked before anything is written, in this order: the product is the business's; every
+   * store named is the business's own, as tenant-svc says ({@link CatalogueStores#requireOwn}); and
+   * a caller held to stores changes the range only at theirs ({@link
+   * CatalogueStores#requireChangeHeldTo}) — a store left as it was is no change there, and "every
+   * store" is never theirs to grant or take away. A store named twice is kept once.
+   *
+   * <p>That last judgement is made inside the transaction that replaces the range, against the
+   * range read there with the product row locked: two changes to one product are made one after the
+   * other, and the second is judged against what the first left. Judged against a range read before
+   * the transaction, a held manager's change could be allowed on a range another change had already
+   * replaced — "every store", say — and narrow it.
+   *
+   * @param ctx the caller
+   * @param productId the product
+   * @param storeIds the stores it is to be sold at; empty for every store
+   * @return the stores it is now sold at, each once, in the order first named
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND}; 404 {@code PRODUCT_STORE_NOT_FOUND} for a
+   *     store that is not the business's; 403 {@code STORE_ACCESS_DENIED} for a change at a store
+   *     the caller is not held to; 403 {@code BUSINESS_WIDE_ONLY} for a change to or from "every
+   *     store" by a caller held to any; 503 {@code TENANT_STORES_UNAVAILABLE} when tenant-svc
+   *     cannot say which stores are the business's
+   */
+  public List<UUID> setProductStores(
+      com.storeql.web.TenantContext ctx, UUID productId, List<UUID> storeIds) {
+    UUID tenantId = ctx.requireTenantId();
     getProduct(tenantId, productId); // 404 if not in tenant
-    repo.setStoresForProduct(tenantId, productId, storeIds);
+    List<UUID> wanted = List.copyOf(new java.util.LinkedHashSet<>(storeIds));
+    CatalogueStores.requireOwn(profiles, tenantId, wanted, CatalogueStores.NOT_FOUND);
+    repo.setStoresForProduct(
+        tenantId,
+        productId,
+        wanted,
+        current -> CatalogueStores.requireChangeHeldTo(ctx, current, wanted));
+    return wanted;
   }
 
   /**
@@ -795,12 +1018,14 @@ public class ProductService {
    * then looks up by <b>the GTIN form</b>, which is what lets a packet whose 2D code says {@code
    * 05012345678900} find the variant a shop entered as {@code 5012345678900}.
    *
-   * <p>Two fallbacks, in this order, because the codes a shop scans are not all GS1 codes:
+   * <p>Three lookups, in this order, because the codes a shop scans are not all GS1 codes:
    *
    * <ol>
    *   <li>the GTIN form, when the reading produced one;
    *   <li>the barcode column exactly — which is how an internal code, a PLU and a shelf label have
-   *       always worked, and must go on working.
+   *       always worked, and must go on working;
+   *   <li>the SKU, which a cashier types from under a label the till cannot read — as written, else
+   *       in any case when only one variant answers to it.
    * </ol>
    *
    * <p>The raw string is tried even when the code <em>did</em> read as GS1: a shop is entitled to
@@ -816,7 +1041,11 @@ public class ProductService {
         reading == null || reading.gtin() == null
             ? java.util.Optional.<com.storeql.product.domain.Domain.VariantWithProduct>empty()
             : repo.findVariantByGtin(tenantId, reading.gtin());
-    var found = byGtin.or(() -> repo.findVariantByBarcode(tenantId, scanned.trim()));
+    // Then the barcode as entered, then a SKU a cashier typed because the label would not scan.
+    var found =
+        byGtin
+            .or(() -> repo.findVariantByBarcode(tenantId, scanned.trim()))
+            .or(() -> repo.findVariantBySku(tenantId, scanned.trim()));
     // A code that read as GS1 but matches nothing names the GTIN in the refusal, not the raw
     // string:
     // "no variant carries GTIN 05012345678900" is something a shopkeeper can act on, where the
@@ -829,7 +1058,7 @@ public class ProductService {
                     "VARIANT_NOT_FOUND",
                     reading != null && reading.gtin() != null
                         ? "No active variant carries GTIN " + reading.gtin()
-                        : "No active variant found for barcode: " + scanned.trim()));
+                        : "No active variant found for barcode or SKU: " + scanned.trim()));
     requireOnSale(variant);
     return new ScanResult(variant, reading);
   }
@@ -886,14 +1115,21 @@ public class ProductService {
   // ──────────────────────────────────────────────────────────────── variants
 
   /**
-   * Creates a variant.
+   * Creates a variant for a caller, judging a caller held to stores on the line's range inside the
+   * transaction that writes it, with the product row locked ({@link
+   * CatalogueStores#requireLineHeldTo}): a range widened at the same moment is seen, and the SKU
+   * and barcode are not taken.
    *
-   * @param tenantId owning tenant
+   * @param ctx the caller
    * @param productId the product concerned
    * @param req the request body carrying the new values
    * @return the created variant
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND}; 403 {@code BUSINESS_WIDE_ONLY}
    */
-  public Variant createVariant(UUID tenantId, UUID productId, CreateVariantRequest req) {
+  public Variant createVariant(
+      com.storeql.web.TenantContext ctx, UUID productId, CreateVariantRequest req) {
+    UUID tenantId = ctx.requireTenantId();
+    VariantBarcodes.requireValid(req.barcode());
     UUID id = Ids.newId();
     Instant now = Instant.now();
     var variant =
@@ -916,7 +1152,7 @@ public class ProductService {
             tenantId,
             id,
             Events.variantCreated(tenantId, id, productId, variant.sku()));
-    return repo.createVariantWithOutbox(variant, event);
+    return repo.createVariantWithOutbox(variant, event, lineGuard(ctx));
   }
 
   /**
@@ -944,40 +1180,124 @@ public class ProductService {
   }
 
   /**
-   * Updates a variant.
+   * Updates a variant for a caller: a caller held to stores is judged on the line's range inside
+   * the transaction that writes the SKU and barcode, with the product row locked ({@link
+   * CatalogueStores#requireLineHeldTo}).
    *
-   * @param tenantId owning tenant
-   * @param productId the product concerned
-   * @param variantId the product variant concerned
-   * @param req the request body carrying the new values
-   * @return the updated variant
-   * @throws ApiException a 404 when no such variant exists in this tenant
+   * @param ctx the caller
+   * @throws ApiException 404 {@code VARIANT_NOT_FOUND}; 403 {@code BUSINESS_WIDE_ONLY}
    */
   public Variant updateVariant(
-      UUID tenantId, UUID productId, UUID variantId, UpdateVariantRequest req) {
-    getVariant(tenantId, variantId);
+      com.storeql.web.TenantContext ctx, UUID productId, UUID variantId, UpdateVariantRequest req) {
+    UUID tenantId = ctx.requireTenantId();
+    requireVariantOf(tenantId, productId, variantId);
+    VariantBarcodes.requireValid(req.barcode());
     return repo.updateVariant(
         tenantId,
+        productId,
         variantId,
         req.sku().trim(),
         req.barcode(),
         req.manufacturerPn(),
         req.attributes(),
-        req.unit());
+        req.unit(),
+        lineGuard(ctx));
+  }
+
+  /**
+   * What judges a held manager's right to a line inside the transaction that writes a variant's
+   * identifiers: the range as it stands under the product's lock. Null for a caller held to no
+   * store — there is nothing to judge, so the row is not locked and an owner's variant never waits
+   * behind a range change under way.
+   */
+  private static java.util.function.Consumer<List<UUID>> lineGuard(
+      com.storeql.web.TenantContext ctx) {
+    return ctx.storeIds().isEmpty() ? null : range -> CatalogueStores.requireLineHeldTo(ctx, range);
   }
 
   /**
    * Delists a variant so it stops being sellable, leaving the row and its history in place.
    *
-   * @param tenantId owning tenant
+   * <p>A variant is sold at every store its line is ranged at, so taking it off sale is the whole
+   * business's to decide, as delisting the line is ({@link #delistProduct}): otherwise a manager
+   * held to stores, refused that, takes the line off sale everywhere one variant at a time. They
+   * are refused before the variant is read, whatever its line's range (a line of their own
+   * included), and nothing changes.
+   *
+   * @param ctx the caller
    * @param productId the parent product
    * @param variantId the variant to delist
-   * @return the variant in its delisted state
-   * @throws ApiException a 404 when the variant does not exist in this tenant
+   * @return the variant in its delisted state ({@code INACTIVE})
+   * @throws ApiException {@code 403 BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404
+   *     VARIANT_NOT_FOUND} when the variant does not exist in this tenant
    */
-  public Variant delistVariant(UUID tenantId, UUID productId, UUID variantId) {
-    getVariant(tenantId, variantId);
+  public Variant delistVariant(com.storeql.web.TenantContext ctx, UUID productId, UUID variantId) {
+    UUID tenantId = ctx.requireTenantId();
+    CatalogueStores.requireBusinessWide(
+        ctx,
+        "Delisting a variant takes it off sale at every store its line is sold at, which only an"
+            + " owner or a manager of the whole business can do");
+    requireVariantOf(tenantId, productId, variantId);
     return repo.delistVariant(tenantId, variantId);
+  }
+
+  /**
+   * Puts a delisted variant back on sale. The same door as {@link #delistVariant} and in its order:
+   * who may (a caller held to stores is refused, whatever the line's range), then the variant (404,
+   * and 404 when it is not that product's), then its state.
+   *
+   * <p>No event is published: the catalogue has none that says a variant's own status (see the
+   * intent page's Decisions).
+   *
+   * @param ctx the caller
+   * @param productId the parent product, from the path
+   * @param variantId the variant to relist
+   * @return the variant, {@code ACTIVE} again
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY}; 404 {@code VARIANT_NOT_FOUND}; 409 {@code
+   *     VARIANT_NOT_DELISTED} when it is on sale; 409 {@code VARIANT_PRODUCT_NOT_ON_SALE} when its
+   *     product is delisted
+   */
+  public Variant relistVariant(com.storeql.web.TenantContext ctx, UUID productId, UUID variantId) {
+    UUID tenantId = ctx.requireTenantId();
+    CatalogueStores.requireBusinessWide(
+        ctx,
+        "Relisting a variant puts it back on sale at every store its line is sold at, which only an"
+            + " owner or a manager of the whole business can do");
+    Variant variant = requireVariantOf(tenantId, productId, variantId);
+    if (!Variant.STATUS_INACTIVE.equals(variant.status())) {
+      throw ApiException.conflict("VARIANT_NOT_DELISTED", "The variant is on sale already");
+    }
+    Product product = getProduct(tenantId, productId);
+    if (Product.STATUS_DELISTED.equals(product.status())) {
+      throw ApiException.conflict(
+          "VARIANT_PRODUCT_NOT_ON_SALE",
+          "The variant's product is delisted; reinstate or recreate the line first");
+    }
+    return repo.relistVariant(tenantId, variantId)
+        .orElseThrow(
+            () -> ApiException.conflict("VARIANT_NOT_DELISTED", "The variant is on sale already"));
+  }
+
+  /**
+   * Reads a variant of a product: another product's variant is not found, as an unknown one.
+   *
+   * @param tenantId owning tenant
+   * @param productId the product from the path
+   * @param variantId the variant from the path
+   * @return the variant
+   * @throws ApiException 404 {@code VARIANT_NOT_FOUND}
+   */
+  public Variant getVariantOf(UUID tenantId, UUID productId, UUID variantId) {
+    return requireVariantOf(tenantId, productId, variantId);
+  }
+
+  /** The variant, which must be this product's: another product's is not found. */
+  private Variant requireVariantOf(UUID tenantId, UUID productId, UUID variantId) {
+    Variant variant = getVariant(tenantId, variantId);
+    if (!variant.productId().equals(productId)) {
+      throw ApiException.notFound("VARIANT_NOT_FOUND", "Variant not found");
+    }
+    return variant;
   }
 
   // ── Supplier / Customer Cross-References (Gap #33) ──────────────────────
@@ -1156,7 +1476,7 @@ public class ProductService {
     String origin = null;
     if (req.countryOfOrigin() != null && !req.countryOfOrigin().isBlank()) {
       origin = req.countryOfOrigin().trim().toUpperCase(java.util.Locale.ROOT);
-      if (!origin.matches("[A-Z]{2}")) {
+      if (!COUNTRY_CODE.matcher(origin).matches()) {
         throw ApiException.badRequest(
             "PRODUCT_INVALID_COUNTRY", "countryOfOrigin must be an ISO 3166-1 alpha-2 code");
       }
@@ -1198,8 +1518,8 @@ public class ProductService {
     String hsn =
         req.hsnCode() == null || req.hsnCode().isBlank()
             ? null
-            : req.hsnCode().replaceAll("[\\s.]", "");
-    if (hsn != null && !hsn.matches("[0-9]{4}|[0-9]{6}|[0-9]{8}")) {
+            : HSN_SEPARATORS.matcher(req.hsnCode()).replaceAll("");
+    if (hsn != null && !HSN_CODE.matcher(hsn).matches()) {
       throw ApiException.badRequest(
           "PRODUCT_INVALID_HSN_CODE", "An HSN or SAC code is 4, 6 or 8 digits");
     }
@@ -1406,7 +1726,7 @@ public class ProductService {
       throw ApiException.badRequest("PRODUCT_COUNTRY_REQUIRED", "country is required");
     }
     String cc = country.trim().toUpperCase(java.util.Locale.ROOT);
-    if (!cc.matches("[A-Z]{2}")) {
+    if (!COUNTRY_CODE.matcher(cc).matches()) {
       throw ApiException.badRequest(
           "PRODUCT_INVALID_COUNTRY", "country must be an ISO 3166-1 alpha-2 code");
     }
@@ -1428,8 +1748,8 @@ public class ProductService {
    * @param id the cross reference to act on
    * @throws ApiException a 404 when no such cross reference exists in this tenant
    */
-  public void deleteCrossReference(UUID tenantId, UUID id) {
-    if (!crossReferenceRepo.deleteCrossReference(tenantId, id)) {
+  public void deleteCrossReference(UUID tenantId, UUID variantId, UUID id) {
+    if (!crossReferenceRepo.deleteCrossReference(tenantId, variantId, id)) {
       throw ApiException.notFound("CROSS_REF_NOT_FOUND", "Cross reference not found");
     }
   }
@@ -1482,8 +1802,8 @@ public class ProductService {
    * @param id the relationship to act on
    * @throws ApiException a 404 when no such relationship exists in this tenant
    */
-  public void deleteRelationship(UUID tenantId, UUID id) {
-    if (!itemRelationshipRepo.deleteRelationship(tenantId, id)) {
+  public void deleteRelationship(UUID tenantId, UUID variantId, UUID id) {
+    if (!itemRelationshipRepo.deleteRelationship(tenantId, variantId, id)) {
       throw ApiException.notFound("RELATIONSHIP_NOT_FOUND", "Item relationship not found");
     }
   }
@@ -1537,13 +1857,19 @@ public class ProductService {
   }
 
   /**
-   * Deletes an item conversion.
+   * Deletes an item conversion for a caller, who must hold the line of the variant it belongs to
+   * ({@link #requireVariantLineHeld}); a conversion that is not the business's is not found.
    *
-   * @param tenantId owning tenant
-   * @param id the item conversion to act on
+   * @param ctx the caller
+   * @param id the item conversion
    * @return whether a row was removed
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY}
    */
-  public boolean deleteItemConversion(UUID tenantId, UUID id) {
+  public boolean deleteItemConversion(com.storeql.web.TenantContext ctx, UUID id) {
+    UUID tenantId = ctx.requireTenantId();
+    var variantId = uomRepo.variantOfItemConversion(tenantId, id);
+    if (variantId.isEmpty()) return false;
+    requireVariantLineHeld(ctx, variantId.get());
     return uomRepo.deleteItemConversion(tenantId, id);
   }
 
@@ -1761,12 +2087,53 @@ public class ProductService {
    * the sheet, so one malformed line in a large import does not discard the rest. Callers must read
    * {@code errors} — a partial import still succeeds.
    *
-   * @param tenantId owning tenant
+   * <p>That is also why the request is <em>not</em> validated as a whole: every category, product
+   * and variant is checked here, row by row, and a row that breaks a constraint is that row's
+   * error. Validating the whole request first would answer one blank name with a {@code 400} for
+   * the sheet. What is checked up front is only what no row can be blamed for: the mode, and a hole
+   * in a list ({@code "products":[{…}, null]}), which the platform refuses in every body and which
+   * {@link ImportRows} hands it here. A hole used to reach the row loop and fail its error handler:
+   * a {@code 500}, after the categories and the rows before it had been committed.
+   *
+   * <p>A row is read completely before it writes anything. A product row that named a store that is
+   * not an id used to be created, found wrong afterwards and left behind with no variants, and the
+   * next attempt created it again.
+   *
+   * <p><b>Where a row's product is sold.</b> The stores a row names are checked as the business's
+   * and the caller's by the callers, for the whole sheet, before this runs ({@link
+   * #bulkImport(com.storeql.web.TenantContext, BulkImportRequest)}, {@link #importSupplierCsv}).
+   * What depends on the catalogue as it stands is judged here, row by row, and a row it refuses is
+   * that row's error ({@code BUSINESS_WIDE_ONLY: …}), nothing of it written:
+   *
+   * <ul>
+   *   <li>A new product is sold at the stores its row names; naming none, at every store, or, for a
+   *       caller held to stores, at theirs ({@link CatalogueStores#rangeOfNew}), as {@code POST
+   *       /admin/products} does.
+   *   <li>A product {@code REPLACE} finds is given the row's stores in addition to its own, as the
+   *       range rule for a held caller allows ({@link CatalogueStores#requireAdditionHeldTo}),
+   *       judged inside the transaction that adds them, with the product row locked: a held
+   *       manager's row cannot narrow a product sold at every store to theirs, as {@code PUT
+   *       /admin/products/{id}/stores} cannot.
+   * </ul>
+   *
+   * <p><b>Which variants a row replaces.</b> {@code REPLACE} drops the variant already holding a
+   * row's SKU, on sale or delisted and under whichever product, and writes the row's own in its
+   * place. That takes the variant away at every store its line is sold at, which is the whole
+   * business's to decide, as {@link #delistVariant} is: a caller held to stores never drops one. A
+   * SKU of theirs that is already held is that variant's error ({@code BUSINESS_WIDE_ONLY: …}),
+   * read before anything of the row is written and left exactly as it is; the row's other variants
+   * are imported, and a new product with none left to write is not made.
+   *
+   * @param ctx the caller
    * @param req the rows to import and the mode to import them under
    * @return counts of what was created or skipped, the imported variants, and one entry per failed
    *     row
+   * @throws ApiException 400 {@code IMPORT_MODE_INVALID} for a mode that is neither ADD nor
+   *     REPLACE; 400 {@code VALIDATION_FAILED} naming every null element of a list ({@code
+   *     "products[1]: must not be null"}). Nothing is written for either.
    */
-  public BulkImportResult bulkImport(UUID tenantId, BulkImportRequest req) {
+  BulkImportResult importCatalogue(com.storeql.web.TenantContext ctx, BulkImportRequest req) {
+    UUID tenantId = ctx.requireTenantId();
     int catCreated = 0;
     int catSkipped = 0;
     int prodCreated = 0;
@@ -1774,8 +2141,12 @@ public class ProductService {
     var errors = new java.util.ArrayList<BulkImportError>();
     var importedVariants = new java.util.ArrayList<com.storeql.product.dto.Dtos.ImportedVariant>();
     // REPLACE = upsert by SKU (reuse product by name+category, replace existing variants);
-    // ADD (default) = create new (duplicate SKUs error).
-    final boolean replace = req.mode() != null && "REPLACE".equalsIgnoreCase(req.mode());
+    // ADD (default) = create new (duplicate SKUs error). Any other word is refused before a row is
+    // written: a typo of REPLACE would otherwise create the duplicates it was meant to overwrite.
+    final boolean replace = ImportMode.of(req.mode()) == ImportMode.REPLACE;
+    // A hole in a list of rows is no row's error: it is refused whole, the place named, before a
+    // row is written (see ImportRows).
+    com.storeql.web.Validations.validate(new ImportRows(req.categories(), req.products()));
 
     // A CSV sheet typically has far fewer distinct category/brand names than product rows — cache
     // resolved ids by name within this import so repeated rows for the same category/brand don't
@@ -1833,6 +2204,9 @@ public class ProductService {
             errors.add(new BulkImportError("product:" + p.name(), "at least one variant required"));
             continue;
           }
+          // Read before anything of this row is written (see above): a store that is not an id is
+          // this row's error, and the product is not created.
+          List<UUID> storeIds = storeIdsOf(p);
 
           UUID categoryId = null;
           if (p.categoryName() != null && !p.categoryName().isBlank()) {
@@ -1842,6 +2216,66 @@ public class ProductService {
               var found = categoryRepo.findCategoryByName(tenantId, categoryName);
               categoryId = found.map(cat -> cat.id()).orElse(null);
               if (categoryId != null) categoryIdByName.put(categoryName, categoryId);
+            }
+          }
+
+          Instant now = Instant.now();
+          // REPLACE reuses an existing product (by name + category) instead of duplicating it;
+          // ADD always creates a fresh product.
+          UUID productId;
+          var existing =
+              replace
+                  ? repo.findProductByNameAndCategory(tenantId, p.name().trim(), categoryId)
+                  : java.util.Optional.<com.storeql.product.domain.Domain.Product>empty();
+          // REPLACE drops the variant already holding a row's SKU so that the sheet wins, which
+          // takes it away at every store its line is sold at: never for a caller held to stores.
+          // Read before anything of the row is written. Each is that variant's error, and a new
+          // product with nothing else to write is not made.
+          java.util.Set<String> standing =
+              replace && !ctx.storeIds().isEmpty()
+                  ? repo.skusHeld(tenantId, skusOf(p))
+                  : java.util.Set.<String>of();
+          if (existing.isEmpty() && !standing.isEmpty() && standing.containsAll(skusOf(p))) {
+            for (var v : p.variants()) errors.add(leftStanding(v, p));
+            continue;
+          }
+          if (existing.isEmpty()) {
+            if (p.sellableOnline() == null || p.sellableOnline()) {
+              if (safetyRequired == null) safetyRequired = safetyRequired(tenantId);
+              if (safetyRequired) {
+                errors.add(
+                    new BulkImportError(
+                        "product:" + p.name(),
+                        "PRODUCT_SAFETY_INFORMATION_REQUIRED: import it with sellableOnline false,"
+                            + " then add its safety information before offering it online"));
+                continue;
+              }
+            }
+          } else if (!storeIds.isEmpty() || !ctx.storeIds().isEmpty()) {
+            // A row naming a line that is already there writes to it (its variants are added), so
+            // a caller held to stores may do it only to a line ranged solely to their stores
+            // (requireLineHeldTo). Stores named are added to the ones it has (never removing any),
+            // and both are judged on the range as it stands inside the transaction that adds them:
+            // a held caller's row cannot narrow a product sold at every store to theirs.
+            UUID found = existing.get().id();
+            if (refusedAtStores(
+                errors,
+                p,
+                () -> {
+                  if (storeIds.isEmpty()) {
+                    CatalogueStores.requireLineHeldTo(ctx, repo.storesForProduct(tenantId, found));
+                    return;
+                  }
+                  repo.addStoreAssignments(
+                      tenantId,
+                      found,
+                      storeIds,
+                      current -> {
+                        CatalogueStores.requireLineHeldTo(ctx, current);
+                        CatalogueStores.requireAdditionHeldTo(ctx, current, storeIds);
+                      });
+                })) {
+              continue;
             }
           }
 
@@ -1859,28 +2293,9 @@ public class ProductService {
             }
           }
 
-          Instant now = Instant.now();
-          // REPLACE reuses an existing product (by name + category) instead of duplicating it;
-          // ADD always creates a fresh product.
-          UUID productId;
-          var existing =
-              replace
-                  ? repo.findProductByNameAndCategory(tenantId, p.name().trim(), categoryId)
-                  : java.util.Optional.<com.storeql.product.domain.Domain.Product>empty();
           if (existing.isPresent()) {
             productId = existing.get().id();
           } else {
-            if (p.sellableOnline() == null || p.sellableOnline()) {
-              if (safetyRequired == null) safetyRequired = safetyRequired(tenantId);
-              if (safetyRequired) {
-                errors.add(
-                    new BulkImportError(
-                        "product:" + p.name(),
-                        "PRODUCT_SAFETY_INFORMATION_REQUIRED: import it with sellableOnline false,"
-                            + " then add its safety information before offering it online"));
-                continue;
-              }
-            }
             productId = Ids.newId();
             var product =
                 new com.storeql.product.domain.Domain.Product(
@@ -1904,25 +2319,27 @@ public class ProductService {
                     tenantId,
                     productId,
                     Events.productCreated(tenantId, productId, product.name()));
-            repo.createProductWithOutbox(product, productEvent);
+            // The product and the stores it is sold at in one transaction: a product whose stores
+            // failed to go in after it would be left sold at every store. Naming none, a caller
+            // held to stores sells it at theirs, never at every store.
+            repo.createProductWithOutbox(
+                product, List.of(productEvent), null, CatalogueStores.rangeOfNew(ctx, storeIds));
             prodCreated++;
-          }
-
-          // Assign to specific stores if requested (additive — never removes existing rows).
-          if (p.storeIds() != null && !p.storeIds().isEmpty()) {
-            var uuids =
-                p.storeIds().stream()
-                    .filter(s -> s != null && !s.isBlank())
-                    .map(UUID::fromString)
-                    .toList();
-            repo.addStoreAssignments(tenantId, productId, uuids);
           }
 
           for (var v : p.variants()) {
             try {
               com.storeql.web.Validations.validate(v);
-              // REPLACE: drop any existing variant with this SKU first, so the sheet wins.
-              if (replace) repo.deleteVariantBySku(tenantId, v.sku().trim());
+              if (standing.contains(v.sku().trim())) {
+                errors.add(leftStanding(v, p));
+                continue;
+              }
+              VariantBarcodes.requireValid(v.barcode());
+              // REPLACE: drop any existing variant with this SKU first, so the sheet wins. Only
+              // for a caller held to no store; a held caller's row drops nothing (see standing).
+              if (replace && ctx.storeIds().isEmpty()) {
+                repo.deleteVariantBySku(tenantId, v.sku().trim());
+              }
               UUID variantId = Ids.newId();
               var variant =
                   new com.storeql.product.domain.Domain.Variant(
@@ -1978,6 +2395,146 @@ public class ProductService {
         null,
         null,
         null);
+  }
+
+  /**
+   * A bulk import as the caller makes it: {@link #importCatalogue}, once every store its rows name
+   * has been checked.
+   *
+   * <p>A row's {@code storeIds} assign the product to stores, so each is one of the business's own
+   * and, for a caller held to stores, one of theirs ({@link CatalogueStores#require}), checked for
+   * the whole sheet before its first row is written. A store that is not the business's, or not the
+   * caller's, is refused whole and not as a row's error: it says the sheet was made for another
+   * business or another manager, and importing the rest of it would leave half of it behind, which
+   * the next attempt meets as duplicates. A store that is not an id at all is still that row's
+   * error, as before, and is not asked about.
+   *
+   * @param ctx the caller
+   * @param req the rows to import and the mode to import them under
+   * @return as {@link #importCatalogue}; a row that would range a product where the caller may not
+   *     is that row's error ({@code BUSINESS_WIDE_ONLY: …} or {@code STORE_ACCESS_DENIED: …}), see
+   *     there
+   * @throws ApiException as {@link #importCatalogue}; and 404 {@code PRODUCT_STORE_NOT_FOUND}, 403
+   *     {@code STORE_ACCESS_DENIED}, 503 {@code TENANT_STORES_UNAVAILABLE} for the stores the rows
+   *     name. Nothing is written for any.
+   */
+  public BulkImportResult bulkImport(com.storeql.web.TenantContext ctx, BulkImportRequest req) {
+    ctx.requireTenantId();
+    // What no row can be blamed for comes first, as importCatalogue refuses it: the rows can
+    // only be read for their stores once the lists have no holes in them.
+    ImportMode.of(req.mode());
+    com.storeql.web.Validations.validate(new ImportRows(req.categories(), req.products()));
+    CatalogueStores.require(profiles, ctx, storesNamedIn(req));
+    return importCatalogue(ctx, req);
+  }
+
+  /** The SKUs a row's variants name, each once, as {@code REPLACE} matches them (trimmed). */
+  private static List<String> skusOf(com.storeql.product.dto.Dtos.ImportProductRequest p) {
+    return p.variants().stream()
+        .filter(v -> v != null && v.sku() != null)
+        .map(v -> v.sku().trim())
+        .distinct()
+        .toList();
+  }
+
+  /**
+   * The error for a variant a {@code REPLACE} row of a caller held to stores would have dropped:
+   * the one already holding its SKU was left as it is, and the row's own was not written.
+   */
+  private static BulkImportError leftStanding(
+      com.storeql.product.dto.Dtos.ImportVariantRequest v,
+      com.storeql.product.dto.Dtos.ImportProductRequest p) {
+    return new BulkImportError(
+        "variant:" + v.sku() + " on " + p.name(),
+        CatalogueStores.BUSINESS_WIDE_ONLY
+            + ": a variant with this SKU is already in the catalogue, and replacing it takes the"
+            + " one there away at every store its line is sold at, which only an owner or a manager"
+            + " of the whole business can do; it was left as it is");
+  }
+
+  /**
+   * Runs one row's store judgement; a {@code BUSINESS_WIDE_ONLY} or {@code STORE_ACCESS_DENIED} is
+   * that row's error, with its code, and anything else is thrown on to the row's own handling.
+   *
+   * @return true when the row was refused and is to be skipped
+   */
+  private static boolean refusedAtStores(
+      List<BulkImportError> errors,
+      com.storeql.product.dto.Dtos.ImportProductRequest p,
+      Runnable judgement) {
+    try {
+      judgement.run();
+      return false;
+    } catch (ApiException denied) {
+      if (!CatalogueStores.ACCESS_DENIED.equals(denied.code())
+          && !CatalogueStores.BUSINESS_WIDE_ONLY.equals(denied.code())) {
+        throw denied;
+      }
+      errors.add(
+          new BulkImportError("product:" + p.name(), denied.code() + ": " + denied.getMessage()));
+      return true;
+    }
+  }
+
+  /**
+   * Every store an import's rows name, read as an id; a blank entry, or one that is not an id (the
+   * row's own error, see {@link #storeIdsOf}), is left out.
+   */
+  private static java.util.Set<UUID> storesNamedIn(BulkImportRequest req) {
+    var named = new java.util.LinkedHashSet<UUID>();
+    if (req.products() == null) {
+      return named;
+    }
+    for (var p : req.products()) {
+      if (p == null || p.storeIds() == null) continue;
+      for (String s : p.storeIds()) {
+        if (s == null || s.isBlank()) continue;
+        UUID id;
+        try {
+          id = Ids.parse(s.strip());
+        } catch (IllegalArgumentException notAnId) {
+          // That row's error when it is imported; nothing to ask tenant-svc about.
+          continue;
+        }
+        named.add(id);
+      }
+    }
+    return named;
+  }
+
+  /**
+   * The rows of an import, without their rules: what {@link #bulkImport} hands the platform's
+   * {@code Validations} so that its refusal of a list with holes in it ({@code "products[1]: must
+   * not be null"}) reaches this endpoint too, while the rules each row carries stay that row's own
+   * error. Neither list is marked {@code @Valid}, so nothing cascades into the rows; the walk for
+   * null elements goes through them all the same, so a hole inside a row (a null variant or store)
+   * is named with the others.
+   *
+   * <p>Public because the walk reads the components reflectively from another package: a record it
+   * cannot read is passed over in silence.
+   *
+   * @param categories the category rows as sent
+   * @param products the product rows as sent
+   */
+  public record ImportRows(
+      List<com.storeql.product.dto.Dtos.ImportCategoryRequest> categories,
+      List<com.storeql.product.dto.Dtos.ImportProductRequest> products) {}
+
+  /**
+   * The stores an import row says its product is sold at, each read as an id; a blank entry is left
+   * out.
+   *
+   * @throws ApiException 400 {@code INVALID_UUID} for an entry that is not a UUIDv7 — collected by
+   *     the caller as that row's error
+   */
+  private static List<UUID> storeIdsOf(com.storeql.product.dto.Dtos.ImportProductRequest p) {
+    if (p.storeIds() == null) {
+      return List.of();
+    }
+    return p.storeIds().stream()
+        .filter(s -> s != null && !s.isBlank())
+        .map(s -> com.storeql.web.Parsing.uuid(s.strip(), "storeIds"))
+        .toList();
   }
 
   // ── Catalog Groups (Gap #35) ─────────────────────────────────────────────
@@ -2287,8 +2844,8 @@ public class ProductService {
    * @param id the variant container link to act on
    * @throws ApiException a 404 when no such variant container link exists in this tenant
    */
-  public void deleteVariantContainerLink(UUID tenantId, UUID id) {
-    if (!containerTypeRepo.deleteVariantContainerLink(tenantId, id)) {
+  public void deleteVariantContainerLink(UUID tenantId, UUID variantId, UUID id) {
+    if (!containerTypeRepo.deleteVariantContainerLink(tenantId, variantId, id)) {
       throw ApiException.notFound("CONTAINER_LINK_NOT_FOUND", "Container link not found");
     }
   }
@@ -2617,55 +3174,190 @@ public class ProductService {
    *
    * <p>Rows that are entirely blank are skipped. No other validation is applied — whatever values
    * are present get imported as-is so the customer can correct data inside the system rather than
-   * outside it.
+   * outside it. The case size and trade price are kept in the attributes as the supplier wrote them
+   * ({@link #buildAttributes}). A quantity or price that is not a plain number (digits and a
+   * decimal point: no comma, currency sign or exponent, since none of those can be read without
+   * guessing what the supplier meant) is not received or set, and is named by SKU in {@code
+   * stockErrors} or {@code priceErrors}. So is a quantity inventory-svc would not receive — not
+   * above zero, more than three decimal places or fifteen whole digits ({@link
+   * com.storeql.product.client.InventoryClient#quantityProblem}) — judged row by row before any
+   * stock is sent, because inventory-svc refuses a call whole for one such line; a sheet with no
+   * quantity it would receive asks inventory-svc nothing.
+   *
+   * <p><b>Refused before written, reported after.</b> The catalogue is committed before stock is
+   * received and prices are set, so nothing that can be refused may be refused after it. Everything
+   * the request can be wrong about (the mode, the destination store, the currency a price list
+   * needs, a CSV that cannot be read) and every service the sheet will ask something of
+   * (inventory-svc where the sheet carries quantities for a store, pricing-svc where it carries
+   * prices) is settled first, with a {@code 4xx}/{@code 503} and nothing written. Once the
+   * catalogue is committed a follow-up that fails, or whose service has gone since, is reported in
+   * {@code stockErrors} or {@code priceErrors} beside the result and never thrown: an error for an
+   * import that happened makes the caller send it again, and it meets its own duplicates.
+   *
+   * <p><b>Who may.</b> The caller is held to what they could do at the services themselves, before
+   * anything is written. Every store the request names — the destination, and each store the
+   * sheet's Store column is mapped to through {@code storeNameToId} — is one of the business's own
+   * ({@code 404 PRODUCT_STORE_NOT_FOUND}, asked of tenant-svc; {@code 503
+   * TENANT_STORES_UNAVAILABLE} when it cannot say) and, for a manager held to stores, one of theirs
+   * ({@code 403 STORE_ACCESS_DENIED}, as at inventory-svc's door, whether or not the sheet carries
+   * quantities); see {@link CatalogueStores}. A sheet that carries prices needs {@code
+   * pricing.write} ({@code 403 PERMISSION_DENIED}, as pricing-svc asks for every price it sets).
+   * Receiving stock asks no permission of its own, because inventory-svc asks none of a member of
+   * staff at the store. The follow-ups are then made as the caller ({@link
+   * com.storeql.product.client.Caller}), so the services asked judge the person and not a bare role
+   * tier.
+   *
+   * @param ctx the caller
+   * @param req the sheet, its mode, destination store and currency
+   * @throws ApiException 400 {@code IMPORT_MODE_INVALID}, {@code INVALID_UUID} (the destination
+   *     store), {@code CURRENCY_INVALID}, {@code CSV_EMPTY}, {@code CSV_MISSING_COLUMNS}; 403
+   *     {@code PERMISSION_DENIED} for prices without {@code pricing.write}; 404 {@code
+   *     PRODUCT_STORE_NOT_FOUND} for a store that is not the business's; 403 {@code
+   *     STORE_ACCESS_DENIED} for one the caller does not keep; 503 {@code
+   *     TENANT_STORES_UNAVAILABLE}, {@code INVENTORY_UNAVAILABLE}, {@code PRICING_UNAVAILABLE} or
+   *     {@code TENANT_PROFILE_UNAVAILABLE} when what the sheet needs cannot be reached
    */
   public BulkImportResult importSupplierCsv(
-      UUID tenantId,
-      String rolesHeader,
+      com.storeql.web.TenantContext ctx,
       com.storeql.product.dto.Dtos.SupplierCsvImportRequest req) {
+    UUID tenantId = ctx.requireTenantId();
+    ImportMode mode = ImportMode.of(req.mode());
+    UUID stockStore =
+        req.storeId() == null || req.storeId().isBlank()
+            ? null
+            : com.storeql.web.Parsing.uuid(req.storeId().strip(), "storeId");
     var storeNameToId =
         req.storeNameToId() != null ? req.storeNameToId() : java.util.Map.<String, String>of();
-    var parsed = parseCsvFull(req.csv(), req.mode(), storeNameToId);
-    var catalogResult = bulkImport(tenantId, parsed.request());
+    var parsed = parseCsvFull(req.csv(), mode.name(), storeNameToId);
+
+    // A sheet whose every quantity inventory-svc would refuse receives nothing, so it asks nothing.
+    boolean receivesStock =
+        stockStore != null
+            && parsed.skuQty().values().stream()
+                .anyMatch(
+                    q -> com.storeql.product.client.InventoryClient.quantityProblem(q) == null);
+    boolean setsPrices = !parsed.skuPrice().isEmpty();
+    if (setsPrices) ctx.requirePermission(com.storeql.web.Permissions.PRICING_WRITE);
+    var caller = com.storeql.product.client.Caller.of(ctx);
+    String currency = setsPrices ? profiles.currencyOr(tenantId, req.currency()) : null;
+    // The destination store and every store the sheet's Store column names (through storeNameToId):
+    // the business's own, and the caller's, whether or not the sheet carries quantities. A mapping
+    // the sheet does not use names no store of this import and is not asked about.
+    var stores = new java.util.LinkedHashSet<UUID>();
+    if (stockStore != null) stores.add(stockStore);
+    stores.addAll(storesNamedIn(parsed.request()));
+    CatalogueStores.require(profiles, ctx, stores);
+    if (receivesStock) inventoryClient.requireAvailable();
+    if (setsPrices) pricingClient.requireAvailable();
+
+    var catalogResult = importCatalogue(ctx, parsed.request());
 
     Integer stockReceived = null;
     List<String> stockErrors = null;
-    if (req.storeId() != null
-        && !req.storeId().isBlank()
-        && !catalogResult.importedVariants().isEmpty()) {
+    if (stockStore != null && !catalogResult.importedVariants().isEmpty()) {
+      // A quantity that is not a plain number, or that inventory-svc would refuse, is not received
+      // and is named by SKU. Judged row by row before anything is sent: inventory-svc validates a
+      // call whole, so one quantity it refuses would refuse every line sent with it.
+      var unreceived = new java.util.ArrayList<String>();
       var receiveItems =
-          catalogResult.importedVariants().stream()
-              .filter(v -> parsed.skuQty().containsKey(v.sku()))
-              .map(
-                  v ->
-                      new com.storeql.product.client.InventoryClient.ReceiveItem(
-                          v.variantId(), parsed.skuQty().get(v.sku())))
-              .toList();
+          new java.util.ArrayList<com.storeql.product.client.InventoryClient.ReceiveItem>();
+      for (var v : catalogResult.importedVariants()) {
+        String unread = parsed.unreadQty().get(v.sku());
+        if (unread != null) {
+          unreceived.add(
+              v.sku() + ": quantity " + quoted(unread) + NOT_A_PLAIN_NUMBER + "not received");
+          continue;
+        }
+        BigDecimal qty = parsed.skuQty().get(v.sku());
+        if (qty == null) continue;
+        String wrong = com.storeql.product.client.InventoryClient.quantityProblem(qty);
+        if (wrong != null) {
+          unreceived.add(v.sku() + ": " + wrong + "; not received");
+        } else {
+          receiveItems.add(
+              new com.storeql.product.client.InventoryClient.ReceiveItem(v.variantId(), qty));
+        }
+      }
       if (!receiveItems.isEmpty()) {
-        var r =
-            inventoryClient.batchReceive(
-                tenantId, Ids.parse(req.storeId()), rolesHeader, receiveItems);
+        com.storeql.product.client.InventoryClient.BatchResult r;
+        try {
+          r = inventoryClient.batchReceive(caller, stockStore, receiveItems);
+        } catch (com.storeql.product.client.InventoryClient.Unreachable e) {
+          // inventory-svc stopped answering part of the way: as far as it went, and every line
+          // after it, each with its reason.
+          LOG.log(System.Logger.Level.WARNING, "inventory-svc stopped answering an import", e);
+          r = e.result();
+        } catch (org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException e) {
+          r = com.storeql.product.client.InventoryClient.notAsked(receiveItems.size());
+        } catch (RuntimeException e) {
+          r =
+              new com.storeql.product.client.InventoryClient.BatchResult(
+                  0, List.of(followUpFailure("inventory-svc", e)));
+        }
         stockReceived = r.received();
         stockErrors = r.errors().isEmpty() ? null : r.errors();
+      }
+      if (!unreceived.isEmpty()) {
+        if (stockReceived == null) stockReceived = 0;
+        if (stockErrors != null) unreceived.addAll(stockErrors);
+        stockErrors = List.copyOf(unreceived);
       }
     }
 
     Integer pricesSet = null;
     List<String> priceErrors = null;
     if (!catalogResult.importedVariants().isEmpty()) {
+      // A price is money in the currency the sheet is priced in, so it is held to that currency's
+      // minor units (ISO 4217): a price with more decimal places than the currency has, or below
+      // zero, is not set and is reported by SKU — never rounded into a price nobody wrote.
       var priceItems =
-          catalogResult.importedVariants().stream()
-              .filter(v -> parsed.skuPrice().containsKey(v.sku()))
-              .map(
-                  v ->
-                      new com.storeql.product.client.PricingClient.PriceItem(
-                          v.variantId(), parsed.skuPrice().get(v.sku())))
-              .toList();
+          new java.util.ArrayList<com.storeql.product.client.PricingClient.PriceItem>();
+      var unpriced = new java.util.ArrayList<String>();
+      for (var v : catalogResult.importedVariants()) {
+        BigDecimal price = parsed.skuPrice().get(v.sku());
+        if (price == null) {
+          // Not a plain number: not set, and named by SKU — a dropped price looked like a row
+          // that never had one.
+          String unread = parsed.unreadPrice().get(v.sku());
+          if (unread != null) {
+            unpriced.add(v.sku() + ": price " + quoted(unread) + NOT_A_PLAIN_NUMBER + "not set");
+          }
+          continue;
+        }
+        String wrong = priceProblem(price, currency);
+        if (wrong != null) {
+          unpriced.add(v.sku() + ": " + wrong + "; not set");
+        } else {
+          priceItems.add(
+              new com.storeql.product.client.PricingClient.PriceItem(
+                  v.variantId(),
+                  price.setScale(
+                      com.storeql.service.Fx.minorUnits(currency), RoundingMode.UNNECESSARY)));
+        }
+      }
       if (!priceItems.isEmpty()) {
-        String cur = profiles.currencyOr(tenantId, req.currency());
-        var r = pricingClient.batchSetPrices(tenantId, cur, rolesHeader, priceItems);
+        com.storeql.product.client.PricingClient.BatchResult r;
+        try {
+          r = pricingClient.batchSetPrices(caller, currency, priceItems);
+        } catch (com.storeql.product.client.PricingClient.Unreachable e) {
+          // pricing-svc stopped answering part of the way: as far as it went, and every row after
+          // it, each with its reason.
+          LOG.log(System.Logger.Level.WARNING, "pricing-svc stopped answering an import", e);
+          r = e.result();
+        } catch (org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException e) {
+          r = com.storeql.product.client.PricingClient.notAsked(priceItems.size());
+        } catch (RuntimeException e) {
+          r =
+              new com.storeql.product.client.PricingClient.BatchResult(
+                  0, List.of(followUpFailure("pricing-svc", e)));
+        }
         pricesSet = r.upserted();
         priceErrors = r.errors().isEmpty() ? null : r.errors();
+      }
+      if (!unpriced.isEmpty()) {
+        if (pricesSet == null) pricesSet = 0;
+        if (priceErrors != null) unpriced.addAll(priceErrors);
+        priceErrors = List.copyOf(unpriced);
       }
     }
 
@@ -2682,17 +3374,112 @@ public class ProductService {
         priceErrors);
   }
 
+  /**
+   * What a follow-up of an import that could not be made says of itself, for the result it is
+   * reported in. A refusal the peer's client chose to name keeps its code; anything else is said
+   * plainly, without the exception's own words, and goes to the log with the exception.
+   */
+  private static String followUpFailure(String peer, RuntimeException e) {
+    LOG.log(System.Logger.Level.WARNING, "A follow-up of a supplier import failed: " + peer, e);
+    return e instanceof ApiException api
+        ? api.code() + ": " + api.getMessage()
+        : peer + " could not be asked";
+  }
+
+  /**
+   * Why a sheet's price cannot be set as written, or null when it can.
+   *
+   * <p>Validated at the currency's own minor units (ISO 4217, through {@link
+   * com.storeql.service.Fx#minorUnits}): two for EUR, none for JPY, three for KWD. A price that
+   * carries more is refused rather than rounded, because rounding would set a price nobody wrote.
+   *
+   * @param price as read from the sheet
+   * @param currency the currency the sheet is priced in
+   */
+  static String priceProblem(BigDecimal price, String currency) {
+    if (price.signum() < 0) {
+      return "price " + price.toPlainString() + " is below zero";
+    }
+    int minorUnits = com.storeql.service.Fx.minorUnits(currency);
+    if (Math.max(0, price.stripTrailingZeros().scale()) > minorUnits) {
+      return "price "
+          + price.toPlainString()
+          + " has more decimal places than "
+          + currency
+          + " has ("
+          + minorUnits
+          + ")";
+    }
+    return null;
+  }
+
+  /**
+   * A sheet read: the rows to import, and each SKU's quantity and price where the sheet wrote one
+   * that reads as a plain number; where it wrote one that does not, the text as written.
+   */
   private record CsvParseResult(
       BulkImportRequest request,
       java.util.Map<String, BigDecimal> skuQty,
-      java.util.Map<String, BigDecimal> skuPrice) {}
+      java.util.Map<String, BigDecimal> skuPrice,
+      java.util.Map<String, String> unreadQty,
+      java.util.Map<String, String> unreadPrice) {}
 
   private CsvParseResult parseCsvFull(
       String csv, String mode, java.util.Map<String, String> storeNameToId) {
     var skuQty = new java.util.HashMap<String, BigDecimal>();
     var skuPrice = new java.util.HashMap<String, BigDecimal>();
-    var req = parseSupplierCsvToRequest(csv, mode, storeNameToId, skuQty, skuPrice);
-    return new CsvParseResult(req, skuQty, skuPrice);
+    var unreadQty = new java.util.HashMap<String, String>();
+    var unreadPrice = new java.util.HashMap<String, String>();
+    var req =
+        parseSupplierCsvToRequest(
+            csv, mode, storeNameToId, skuQty, skuPrice, unreadQty, unreadPrice);
+    return new CsvParseResult(req, skuQty, skuPrice, unreadQty, unreadPrice);
+  }
+
+  /**
+   * A number as a supplier sheet may write one: an optional sign, digits, and a point before any
+   * decimals, at most eighteen digits either side. Nothing a locale or a spreadsheet could mean
+   * otherwise — no comma (a decimal comma and a thousands separator look the same), no currency
+   * sign or code, no exponent — and nothing so long that reading it costs more than the row.
+   */
+  private static final java.util.regex.Pattern SHEET_NUMBER =
+      java.util.regex.Pattern.compile("[+-]?(?:[0-9]{1,18}(?:\\.[0-9]{0,18})?|\\.[0-9]{1,18})");
+
+  /** What a figure that is not a plain number is said to be, for the row it came from. */
+  private static final String NOT_A_PLAIN_NUMBER =
+      " is not a plain number (digits and a decimal point only); ";
+
+  /**
+   * A sheet's figure as a number, or null when it is not a plain one ({@link #SHEET_NUMBER}).
+   *
+   * @param text the cell, trimmed
+   */
+  static BigDecimal sheetNumber(String text) {
+    return SHEET_NUMBER.matcher(text).matches() ? new BigDecimal(text) : null;
+  }
+
+  /**
+   * Keeps a row's figure by SKU: as a number where it reads as one, else as the text written. The
+   * last row for a SKU wins, as the import itself takes the last.
+   */
+  private static void sheet(
+      String sku,
+      String text,
+      java.util.Map<String, BigDecimal> read,
+      java.util.Map<String, String> unread) {
+    BigDecimal n = sheetNumber(text);
+    if (n != null) {
+      read.put(sku, n);
+      unread.remove(sku);
+    } else {
+      unread.put(sku, text);
+      read.remove(sku);
+    }
+  }
+
+  /** A sheet's own text, quoted for a message and cut short when it is long. */
+  private static String quoted(String text) {
+    return "'" + (text.length() > 40 ? text.substring(0, 40) + "…" : text) + "'";
   }
 
   private record ProductEntry(
@@ -2705,7 +3492,9 @@ public class ProductService {
       String mode,
       java.util.Map<String, String> storeNameToId,
       java.util.Map<String, BigDecimal> outSkuQty,
-      java.util.Map<String, BigDecimal> outSkuPrice) {
+      java.util.Map<String, BigDecimal> outSkuPrice,
+      java.util.Map<String, String> outUnreadQty,
+      java.util.Map<String, String> outUnreadPrice) {
     var lines =
         java.util.Arrays.asList(csv.split("\\r?\\n")).stream().filter(l -> !l.isBlank()).toList();
     if (lines.size() < 2) {
@@ -2751,21 +3540,17 @@ public class ProductService {
       String qtyStr = idxQty >= 0 ? col(cols, idxQty).trim() : "";
       String priceStr = idxPrice >= 0 ? col(cols, idxPrice).trim() : "";
 
-      // Capture numeric qty / price for stock-receive and pricing steps.
-      if (!qtyStr.isEmpty() && outSkuQty != null) {
-        try {
-          outSkuQty.put(sku, new BigDecimal(qtyStr));
-        } catch (NumberFormatException ignored) {
-        }
+      // Capture numeric qty / price for stock-receive and pricing steps. A figure that is not a
+      // plain number is kept by SKU, to be reported against the row it came from — never dropped,
+      // and never read as some other number (is "12,345" twelve thousand or twelve?).
+      if (!qtyStr.isEmpty()) {
+        sheet(sku, qtyStr, outSkuQty, outUnreadQty);
       }
-      if (!priceStr.isEmpty() && outSkuPrice != null) {
-        try {
-          outSkuPrice.put(sku, new BigDecimal(priceStr));
-        } catch (NumberFormatException ignored) {
-        }
+      if (!priceStr.isEmpty()) {
+        sheet(sku, priceStr, outSkuPrice, outUnreadPrice);
       }
 
-      // Build attributes from whatever is present — no parsing/validation.
+      // The supplier's case size and trade price, kept as written (see buildAttributes).
       String attributes = buildAttributes(qtyStr, priceStr);
 
       var variant =
@@ -2858,17 +3643,33 @@ public class ProductService {
     return result;
   }
 
-  private static String buildAttributes(String caseSizeStr, String priceStr) {
-    var sb = new StringBuilder("{");
+  /**
+   * A supplier row's case size and trade price, as the variant's attributes: the case size a number
+   * where it reads as one ({@link #sheetNumber}) and otherwise the supplier's text, and the trade
+   * price always the supplier's text, as written.
+   *
+   * <p>Nothing is stripped. Picking the digits out of a case size read "12 x 6" as 126 and "-5" as
+   * 5, and a cell with none ("abc") wrote JSON that did not read, which lost the whole variant
+   * under a message about SKU uniqueness; taking the quotes out of a trade price changed what the
+   * supplier wrote, and a backslash broke the JSON the same way.
+   *
+   * @return the attributes as JSON, or null when the row has neither
+   */
+  static String buildAttributes(String caseSizeStr, String priceStr) {
+    var attributes = jakarta.json.Json.createObjectBuilder();
     if (!caseSizeStr.isEmpty()) {
-      sb.append("\"caseSize\":").append(caseSizeStr.replaceAll("[^0-9.]", ""));
+      BigDecimal caseSize = sheetNumber(caseSizeStr);
+      if (caseSize != null) {
+        attributes.add("caseSize", caseSize);
+      } else {
+        attributes.add("caseSize", caseSizeStr);
+      }
     }
     if (!priceStr.isEmpty()) {
-      if (sb.length() > 1) sb.append(",");
-      sb.append("\"tradePrice\":\"").append(priceStr.replace("\"", "")).append("\"");
+      attributes.add("tradePrice", priceStr);
     }
-    sb.append("}");
-    return sb.length() > 2 ? sb.toString() : null;
+    var built = attributes.build();
+    return built.isEmpty() ? null : built.toString();
   }
 
   // ── product safety information (01.12, GPSR art.19) ────────────────────────

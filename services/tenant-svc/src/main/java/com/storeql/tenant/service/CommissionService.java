@@ -1,6 +1,7 @@
 package com.storeql.tenant.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.service.Fx;
 import com.storeql.tenant.domain.Commission;
 import com.storeql.tenant.domain.Commission.Assignment;
 import com.storeql.tenant.domain.Commission.Band;
@@ -8,10 +9,12 @@ import com.storeql.tenant.domain.Commission.Day;
 import com.storeql.tenant.domain.Commission.Scheme;
 import com.storeql.tenant.domain.Commission.Segment;
 import com.storeql.tenant.repo.CommissionRepository;
+import com.storeql.tenant.repo.TenantRepository;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -39,6 +42,7 @@ public class CommissionService {
   static final int MAX_DAY_ROWS = 10_000;
 
   @Inject CommissionRepository repo;
+  @Inject TenantRepository tenants;
 
   /** What one person sold, day by day, as the service holding the sales reports it. */
   public record SellerDays(UUID userId, List<Day> days) {
@@ -121,9 +125,18 @@ public class CommissionService {
     String upperBasis = basis == null ? null : basis.strip().toUpperCase(Locale.ROOT);
     String upperCurrency =
         currency == null || currency.isBlank() ? null : currency.strip().toUpperCase(Locale.ROOT);
+    if (upperCurrency != null && !Fx.isCurrency(upperCurrency)) {
+      throw ApiException.badRequest(
+          "COMMISSION_SCHEME_INVALID",
+          "a per-unit amount is in an ISO 4217 currency such as EUR or JPY: "
+              + upperCurrency
+              + " is not one");
+    }
     List<BigDecimal> thresholds =
         bands == null ? List.of() : bands.stream().map(Band::thresholdFrom).toList();
-    String problem = Commission.problem(upperBasis, upperCurrency, thresholds);
+    String problem =
+        Commission.problem(
+            upperBasis, upperCurrency, thresholds, Fx.minorUnits(homeCurrency(tenantId)));
     if (problem != null) throw ApiException.badRequest("COMMISSION_SCHEME_INVALID", problem);
 
     UUID id = Ids.newId();
@@ -145,7 +158,7 @@ public class CommissionService {
             withIds);
     repo.create(scheme, supersedes);
     if (supersedes != null) moveAssignees(tenantId, supersedes, id, moveFrom, actorId);
-    return repo.scheme(tenantId, id).orElse(scheme);
+    return atScale(tenantId, repo.scheme(tenantId, id).orElse(scheme));
   }
 
   /** Moves everybody currently on the old version onto the new one, from a day. */
@@ -192,15 +205,26 @@ public class CommissionService {
               + " left earning under a scheme the shop thinks it has stopped");
     }
     if (!scheme.withdrawn()) repo.withdraw(tenantId, schemeId);
-    return repo.scheme(tenantId, schemeId).orElse(scheme);
+    return atScale(tenantId, repo.scheme(tenantId, schemeId).orElse(scheme));
   }
 
   public List<Scheme> schemes(UUID tenantId, boolean activeOnly) {
-    return repo.schemes(tenantId, activeOnly);
+    int units = Fx.minorUnits(homeCurrency(tenantId));
+    return repo.schemes(tenantId, activeOnly).stream()
+        .map(s -> Commission.atScale(s, units))
+        .toList();
   }
 
   public Scheme scheme(UUID tenantId, UUID schemeId) {
-    return require(tenantId, schemeId);
+    return atScale(tenantId, require(tenantId, schemeId));
+  }
+
+  /**
+   * A scheme as it is read back: each band's threshold at its own scale ({@link
+   * Commission#atScale}).
+   */
+  private Scheme atScale(UUID tenantId, Scheme scheme) {
+    return Commission.atScale(scheme, Fx.minorUnits(homeCurrency(tenantId)));
   }
 
   /**
@@ -259,17 +283,9 @@ public class CommissionService {
    * @throws ApiException 400 on a period that is not one, or more day-rows than one call will take
    */
   public List<Rated> rate(UUID tenantId, LocalDate from, LocalDate to, List<SellerDays> sellers) {
-    if (from == null || to == null || to.isBefore(from)) {
-      throw ApiException.badRequest(
-          "COMMISSION_PERIOD_INVALID", "a period ends on or after it starts");
-    }
+    requirePeriod(from, to, sellers);
     List<SellerDays> asked = sellers == null ? List.of() : sellers;
-    int rows = asked.stream().mapToInt(s -> s.days().size()).sum();
-    if (rows > MAX_DAY_ROWS) {
-      throw ApiException.badRequest(
-          "COMMISSION_PERIOD_TOO_LARGE",
-          "one rating call takes at most " + MAX_DAY_ROWS + " day-rows; ask for a shorter period");
-    }
+    String home = homeCurrency(tenantId);
     Map<UUID, List<Assignment>> timelines = repo.assignmentsUpTo(tenantId, to);
     Map<UUID, Scheme> schemes = new LinkedHashMap<>();
     for (Scheme s : repo.schemes(tenantId, false)) schemes.put(s.id(), s);
@@ -281,17 +297,57 @@ public class CommissionService {
               .filter(d -> d.day() != null && !d.day().isBefore(from) && !d.day().isAfter(to))
               .toList();
       List<Segment> segments =
-          Commission.rate(within, timelines.getOrDefault(seller.userId(), List.of()), schemes);
-      BigDecimal total = BigDecimal.ZERO.setScale(2);
+          Commission.rate(
+              within,
+              timelines.getOrDefault(seller.userId(), List.of()),
+              schemes,
+              home,
+              Fx::minorUnits);
+      BigDecimal total = BigDecimal.ZERO;
       String currency = null;
       for (Segment s : segments) {
         total = total.add(s.commission());
         Scheme scheme = s.schemeId() == null ? null : schemes.get(s.schemeId());
         if (scheme != null && scheme.currency() != null) currency = scheme.currency();
       }
+      // The total at the minor units of the currency it is named in: a per-unit scheme's, else the
+      // business's own (what a percentage of its sales is paid in) — never an assumed two places.
+      total =
+          total.setScale(Fx.minorUnits(currency == null ? home : currency), RoundingMode.HALF_UP);
       rated.add(new Rated(seller.userId(), segments, total, currency));
     }
     return List.copyOf(rated);
+  }
+
+  /**
+   * What a rating call must be before anything else is asked of it — even whose sales they are: a
+   * period that runs forwards, and no more day-rows than one call takes. The resource judges this
+   * first, so a malformed request is told so (400) rather than which sellers it may not name.
+   *
+   * @throws ApiException 400 {@code COMMISSION_PERIOD_INVALID} for a period missing an end or
+   *     running backwards; 400 {@code COMMISSION_PERIOD_TOO_LARGE} beyond {@value #MAX_DAY_ROWS}
+   *     day-rows
+   */
+  public void requirePeriod(LocalDate from, LocalDate to, List<SellerDays> sellers) {
+    if (from == null || to == null || to.isBefore(from)) {
+      throw ApiException.badRequest(
+          "COMMISSION_PERIOD_INVALID", "a period ends on or after it starts");
+    }
+    int rows = sellers == null ? 0 : sellers.stream().mapToInt(s -> s.days().size()).sum();
+    if (rows > MAX_DAY_ROWS) {
+      throw ApiException.badRequest(
+          "COMMISSION_PERIOD_TOO_LARGE",
+          "one rating call takes at most " + MAX_DAY_ROWS + " day-rows; ask for a shorter period");
+    }
+  }
+
+  /**
+   * The business's own currency, read from tenant-svc's own record of it: what its sales — and so a
+   * percentage of them — are counted in. Null when it has none recorded, which {@link
+   * Fx#minorUnits} reads as two places, its stated fallback.
+   */
+  private String homeCurrency(UUID tenantId) {
+    return tenants.findTenant(tenantId).map(t -> t.currency()).orElse(null);
   }
 
   private Scheme require(UUID tenantId, UUID schemeId) {

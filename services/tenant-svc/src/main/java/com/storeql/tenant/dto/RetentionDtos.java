@@ -1,5 +1,6 @@
 package com.storeql.tenant.dto;
 
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -20,6 +21,7 @@ public final class RetentionDtos {
           @NotNull
           @Min(0)
           @Max(36500)
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer periodDays) {}
 
   @Schema(name = "PlaceRetentionHoldRequest", description = "A matter that stops a purge.")

@@ -2,10 +2,13 @@ package com.storeql.order.api;
 
 import com.storeql.order.dto.Dtos.IssueGiftCardRequest;
 import com.storeql.order.dto.Dtos.RedeemGiftCardRequest;
+import com.storeql.order.dto.Dtos.RedeemGiftCardResponse;
 import com.storeql.order.dto.Dtos.ReloadGiftCardRequest;
 import com.storeql.order.mapper.Mappers;
 import com.storeql.order.service.OrderService;
+import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.IdempotencyKeys;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -43,14 +46,50 @@ public class GiftCardResource {
    * @return {@code 201} with the issued card, including its code
    */
   @Operation(
-      summary = "Issue a gift card",
-      description = "Issues a new gift card for a store with an initial stored-value balance.")
+      summary = "Issue a gift card by hand",
+      description =
+          "A manager or owner issues a gift card with no sale behind it (goodwill, a promotion,"
+              + " compensation, a migration): a reason from that list is required and is kept with"
+              + " who gave it. Requires an Idempotency-Key; a retry answers with the first card."
+              + " A card a customer pays for is a gift-card line on the sale, issued when the sale"
+              + " is paid; a cashier cannot issue one (403 GIFT_CARD_NEEDS_SALE).")
   @APIResponse(responseCode = "201", description = "Gift card issued")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "GIFT_CARD_REASON_REQUIRED, IDEMPOTENCY_KEY_REQUIRED; GIFT_CARD_AMOUNT_INVALID for an"
+              + " amount with more decimals than the currency has (whole yen, fils for dinars)")
+  @APIResponse(responseCode = "403", description = "GIFT_CARD_NEEDS_SALE for a cashier or keeper")
   @POST
-  public Response issue(IssueGiftCardRequest req) {
+  public Response issue(
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      IssueGiftCardRequest req) {
+    requireHandLoadRole();
+    String idem = requireKey(key);
     Validations.validate(req);
-    var gc = svc.issueGiftCard(req, ctx);
+    var gc = svc.issueGiftCard(req, idem, ctx);
     return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(gc))).build();
+  }
+
+  /**
+   * Stored value is money the business owes. Staff only; and a cashier or keeper, who take money at
+   * the till, cannot create value with none: theirs is the gift-card line on a sale.
+   */
+  private void requireHandLoadRole() {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    if (!ctx.hasRole("MANAGER") && !ctx.hasRole("OWNER")) {
+      throw ApiException.forbidden(
+          "GIFT_CARD_NEEDS_SALE",
+          "a gift card is sold as a line on a paid sale; only a manager issues one by hand");
+    }
+  }
+
+  private static String requireKey(String key) {
+    if (key == null || key.isBlank()) {
+      throw ApiException.badRequest(
+          "IDEMPOTENCY_KEY_REQUIRED", "the Idempotency-Key header is required");
+    }
+    return IdempotencyKeys.require(key.trim());
   }
 
   /**
@@ -76,47 +115,100 @@ public class GiftCardResource {
    * @param code the card's code
    * @param req the amount to add and a reference for the transaction log
    * @return the card with its new balance
-   * @throws com.storeql.web.ApiException {@code 404} when no such card exists; a conflict when the
-   *     card is not active
+   * @throws com.storeql.web.ApiException {@code 404} when no such card exists; {@code 403} for a
+   *     caller who is not staff, or who is held to stores and keeps none where the card was issued;
+   *     a conflict when the card is not active
    */
   @Operation(
-      summary = "Reload a gift card",
-      description = "Adds stored value to an existing gift card's balance.")
+      summary = "Reload a gift card by hand",
+      description =
+          "A manager or owner adds stored value with no sale behind it, for a reason from the"
+              + " list, kept with who gave it. Requires an Idempotency-Key. A card a customer tops"
+              + " up is a gift-card line on the sale; a cashier cannot reload one"
+              + " (403 GIFT_CARD_NEEDS_SALE).")
   @APIResponse(responseCode = "200", description = "Gift card reloaded")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "GIFT_CARD_REASON_REQUIRED, IDEMPOTENCY_KEY_REQUIRED; GIFT_CARD_AMOUNT_INVALID for an"
+              + " amount with more decimals than the card's currency has")
+  @APIResponse(responseCode = "403", description = "GIFT_CARD_NEEDS_SALE; STORE_ACCESS_DENIED")
   @APIResponse(responseCode = "404", description = "Gift card not found")
   @POST
   @Path("/{code}/reload")
-  public Response reload(@PathParam("code") String code, ReloadGiftCardRequest req) {
+  public Response reload(
+      @PathParam("code") String code,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      ReloadGiftCardRequest req) {
+    requireHandLoadRole();
+    String idem = requireKey(key);
     Validations.validate(req);
-    var gc = svc.reloadGiftCard(ctx.tenantId(), code, req);
+    var gc = svc.reloadGiftCard(ctx.requireTenantId(), code, req, idem, ctx);
     return Response.ok(ApiResponse.ok(Mappers.toDto(gc))).build();
   }
 
   /**
-   * Spends stored value from a gift card as tender for a purchase.
+   * Charges a gift card for an order, before the payment is recorded.
    *
    * <p>The balance check happens in the same transaction as the write, so two tills cannot together
-   * overspend one card.
+   * overspend one card. payment-svc records the GIFT_CARD tender from the {@code GiftCardRedeemed}
+   * event this publishes, so a payment exists only for value the card really gave up.
    *
    * @param code the card's code
+   * @param key the caller's {@code Idempotency-Key}: a retry answers with the first redemption
    * @param req the amount, the order being paid towards, and a reference
-   * @return the card with its new balance
-   * @throws com.storeql.web.ApiException {@code 404} when no such card exists; a conflict when the
-   *     balance is insufficient or the card is not active
+   * @return the redemption and the card's balance after it
+   * @throws com.storeql.web.ApiException {@code 404} when no such card or order exists in the
+   *     business; a conflict when the card is not active, has expired, holds another currency or
+   *     has too little
    */
   @Operation(
       summary = "Redeem a gift card",
       description =
-          "Deducts stored value from a gift card, optionally against a specific order, as tender"
-              + " for a purchase.")
-  @APIResponse(responseCode = "200", description = "Gift card redeemed")
-  @APIResponse(responseCode = "404", description = "Gift card not found")
+          "Charges stored value from a gift card against an order, as tender for a purchase."
+              + " Staff only. Requires an Idempotency-Key: a retry under the same key answers with"
+              + " the first redemption and debits nothing. One card pays towards one order once,"
+              + " whatever the key: the same amount again answers with the first redemption, a"
+              + " different amount is GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER. The amount is what"
+              + " the till worked out (what is left to pay, or the card's balance), so it is"
+              + " charged at the order currency's own minor units, rounded half up as payment-svc"
+              + " takes the till's tenders: 3.3000000000000003 pounds is 3.30, whole yen, fils"
+              + " for dinars.")
+  @APIResponse(responseCode = "200", description = "Gift card charged (or the first, on a retry)")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED or a bad body; GIFT_CARD_AMOUNT_INVALID for an amount that is"
+              + " nothing once rounded to the order currency's minor units")
+  @APIResponse(responseCode = "403", description = "STORE_ACCESS_DENIED")
+  @APIResponse(responseCode = "404", description = "Gift card or order not found")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "GIFT_CARD_NOT_ACTIVE, GIFT_CARD_EXPIRED, GIFT_CARD_CURRENCY_MISMATCH,"
+              + " GIFT_CARD_INSUFFICIENT_BALANCE, GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER")
   @POST
   @Path("/{code}/redeem")
-  public Response redeem(@PathParam("code") String code, RedeemGiftCardRequest req) {
+  public Response redeem(
+      @PathParam("code") String code,
+      @jakarta.ws.rs.HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String key,
+      RedeemGiftCardRequest req) {
+    ctx.requireAnyRole("CASHIER", "STOREKEEPER", "MANAGER", "OWNER");
+    if (key == null || key.isBlank()) {
+      throw ApiException.badRequest(
+          "IDEMPOTENCY_KEY_REQUIRED", "the Idempotency-Key header is required");
+    }
     Validations.validate(req);
-    var gc = svc.redeemGiftCard(ctx.tenantId(), code, req);
-    return Response.ok(ApiResponse.ok(Mappers.toDto(gc))).build();
+    var tx =
+        svc.redeemGiftCard(ctx.tenantId(), code, req, IdempotencyKeys.require(key.trim()), ctx);
+    return Response.ok(
+            ApiResponse.ok(
+                new RedeemGiftCardResponse(
+                    tx.id().toString(),
+                    tx.giftCardId().toString(),
+                    tx.amount(),
+                    tx.balanceAfter())))
+        .build();
   }
 
   /**

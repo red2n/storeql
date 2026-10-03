@@ -27,7 +27,12 @@ import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -52,6 +57,9 @@ class DpdpIT {
   /** A second Indian business, untouched by the other tests: the notice test starts clean. */
   private static final String T3 = Ids.newId().toString();
 
+  /** A third Indian business, where the race for a first notice is run. */
+  private static final String T4 = Ids.newId().toString();
+
   private static final String OWNER = Ids.newId().toString();
   private static final AtomicBoolean NOTIFY_DOWN = new AtomicBoolean(false);
 
@@ -60,6 +68,7 @@ class DpdpIT {
     TenantSvcStub.start()
         .with(T, "INR", "IN")
         .with(T3, "INR", "IN")
+        .with(T4, "INR", "IN")
         .withObligation("IN", "DPDP", "COUNTRY", "2020-01-01", null)
         .with(T2, "GBP", "GB");
     NOTIFY =
@@ -565,6 +574,166 @@ class DpdpIT {
         "PRIVACY_NOBODY_TO_TELL");
   }
 
+  // ── what is refused ──────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A guardian with no name is refused and none is recorded")
+  void aGuardianWithNoNameIsRefused() {
+    publish(T, "en");
+    String login = Ids.newId().toString();
+    claim(T, login, "nameless-guardian@example.in");
+    String dob = LocalDate.now(ZoneOffset.UTC).minusYears(12).toString();
+    data(
+        shopper(T, login, "/customers/me")
+            .put(json("{\"firstName\":\"Mani\",\"lastName\":\"R\",\"dob\":\"" + dob + "\"}")),
+        200);
+    String customerId = data(shopper(T, login, "/customers/me").get(), 200).getString("id");
+
+    for (String blank : new String[] {"   ", "\\t", ""}) {
+      assertCode(
+          staff(T, "MANAGER", "/customers/" + customerId + "/privacy/guardian")
+              .post(
+                  json("{\"guardianName\":\"" + blank + "\",\"verification\":\"DOCUMENT_SEEN\"}")),
+          400,
+          "PRIVACY_GUARDIAN_NAME_INVALID");
+    }
+    JsonObject view = data(shopper(T, login, "/customers/me/privacy").get(), 200);
+    assertThat("no guardian was recorded", absent(view, "guardian"), is(true));
+    assertThat("the child is still not tracked", view.getBoolean("canTrack"), is(false));
+  }
+
+  @Test
+  @DisplayName("A breach naming more than five hundred customers is refused and nothing is sent")
+  void aBreachNamingMoreThanFiveHundredIsRefused() {
+    String reachable = create(T, "reachable-breach@example.in", "Rani");
+    int before =
+        dataArray(staff(T, "OWNER", "/customers/privacy/breach-intimations").get(), 200).size();
+    NOTIFY.reset();
+    NOTIFY_DOWN.set(false);
+
+    StringBuilder ids = new StringBuilder("\"" + reachable + "\"");
+    for (int i = 0; i < 500; i++) ids.append(",\"").append(Ids.newId()).append('"');
+    assertCode(
+        staff(T, "OWNER", "/customers/privacy/breach-intimations")
+            .post(json("{\"subject\":\"s\",\"body\":\"b\",\"customerIds\":[" + ids + "]}")),
+        400,
+        "PRIVACY_INTIMATION_TOO_MANY_NAMED");
+
+    assertThat(
+        "nothing was sent",
+        NOTIFY.calls().stream().filter(c -> c.path().equals("/notifications/send")).count(),
+        is(0L));
+    assertThat(
+        "no intimation was written",
+        dataArray(staff(T, "OWNER", "/customers/privacy/breach-intimations").get(), 200).size(),
+        is(before));
+  }
+
+  @Test
+  @DisplayName("Eight first notices at once are each published or told to retry, never lost")
+  void twoFirstNoticesAtOnceAreOneVersionOrBusy() throws Exception {
+    int callers = 8;
+    CountDownLatch start = new CountDownLatch(1);
+    var pool = Executors.newFixedThreadPool(callers);
+    List<Integer> statuses = new ArrayList<>();
+    List<String> bodies = new ArrayList<>();
+    try {
+      List<Future<String[]>> results = new ArrayList<>();
+      for (int i = 0; i < callers; i++) {
+        results.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  Response r =
+                      staff(T4, "OWNER", "/customers/privacy/notices")
+                          .post(json("{\"language\":\"ta\",\"title\":\"t\",\"body\":\"b\"}"));
+                  String body = r.readEntity(String.class);
+                  return new String[] {String.valueOf(r.getStatus()), body};
+                }));
+      }
+      start.countDown();
+      for (Future<String[]> f : results) {
+        String[] answer = f.get(60, TimeUnit.SECONDS);
+        statuses.add(Integer.parseInt(answer[0]));
+        bodies.add(answer[1]);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+    long published = 0;
+    for (int i = 0; i < callers; i++) {
+      int status = statuses.get(i);
+      if (status == 201) {
+        published++;
+      } else {
+        assertThat(bodies.get(i), status, is(409));
+        assertThat(bodies.get(i), containsString("PRIVACY_NOTICE_BUSY"));
+      }
+    }
+    assertThat(statuses.toString(), published >= 1, is(true));
+
+    // The list answers only the current version of a language, so the rows are read back.
+    List<Integer> versions = noticeVersions(T4, "ta");
+    List<Integer> expected = new ArrayList<>();
+    for (int v = 1; v <= published; v++) expected.add(v);
+    assertThat("one row per answer of 201, contiguous, no duplicate", versions, is(expected));
+  }
+
+  @Test
+  @DisplayName("Withdrawing every consent needs a record here and a login, and writes nothing")
+  void withdrawingEveryConsentWithoutARecordIsRefused() throws Exception {
+    String login = Ids.newId().toString();
+    claim(T, login, "withdraw-owner@example.in");
+    long loggedT = consentLogRows(T);
+    long loggedT2 = consentLogRows(T2);
+
+    assertCode(
+        shopper(T, Ids.newId().toString(), "/customers/me/privacy/consents").delete(),
+        404,
+        "CUSTOMER_NOT_FOUND");
+    assertCode(
+        shopper(T2, login, "/customers/me/privacy/consents").delete(), 404, "CUSTOMER_NOT_FOUND");
+    assertCode(
+        WebTargets.at(target, "/customers/me/privacy/consents")
+            .request(MediaType.APPLICATION_JSON)
+            .header("X-Tenant-Id", T)
+            .header("X-Roles", "CUSTOMER")
+            .delete(),
+        401,
+        "NO_USER");
+
+    assertThat("nothing was logged in this shop", consentLogRows(T), is(loggedT));
+    assertThat("nothing was logged in the rival shop", consentLogRows(T2), is(loggedT2));
+  }
+
+  private List<Integer> noticeVersions(String tenant, String language) throws Exception {
+    List<Integer> versions = new ArrayList<>();
+    try (var c = PG.dataSource().getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT version FROM customer.privacy_notices"
+                    + " WHERE tenant_id = ? AND language = ? ORDER BY version")) {
+      ps.setObject(1, Ids.parse(tenant));
+      ps.setString(2, language);
+      try (var rs = ps.executeQuery()) {
+        while (rs.next()) versions.add(rs.getInt(1));
+      }
+    }
+    return versions;
+  }
+
+  private long consentLogRows(String tenant) throws Exception {
+    try (var c = PG.dataSource().getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT COUNT(*) FROM customer.purpose_consent_log WHERE tenant_id = ?")) {
+      ps.setObject(1, Ids.parse(tenant));
+      try (var rs = ps.executeQuery()) {
+        return rs.next() ? rs.getLong(1) : 0L;
+      }
+    }
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────────
 
   private void publish(String tenant, String language) {
@@ -673,5 +842,129 @@ class DpdpIT {
 
   private static boolean granted(JsonObject view, String purpose) {
     return consent(view, purpose).getBoolean("granted");
+  }
+
+  // ── the boundary of every privacy write ──────────────────────────────────────
+
+  /** What the privacy tables hold for the Indian business, as one comparable line. */
+  private static String privacyRows() {
+    StringBuilder rows = new StringBuilder();
+    for (String table :
+        new String[] {
+          "privacy_settings",
+          "privacy_notices",
+          "purpose_consents",
+          "purpose_consent_log",
+          "guardian_consents",
+          "privacy_requests",
+          "breach_intimations"
+        }) {
+      rows.append(table)
+          .append('=')
+          .append(
+              com.storeql.test.Envelopes.scalar(
+                  PG, "SELECT count(*) FROM customer." + table + " WHERE tenant_id = '" + T + "'"))
+          .append(' ');
+    }
+    return rows.toString();
+  }
+
+  /** A 400 whose problem names one of the codes. */
+  private static void assertRefusedWithAny(String what, Response r, String... codes) {
+    String body = r.readEntity(String.class);
+    assertThat(what + ": " + body, r.getStatus(), is(400));
+    List<org.hamcrest.Matcher<? super String>> any = new ArrayList<>();
+    for (String code : codes) any.add(containsString("\"code\":\"" + code + "\""));
+    assertThat(what + ": " + body, body, org.hamcrest.Matchers.anyOf(any));
+  }
+
+  @Test
+  @DisplayName(
+      "A missing, unreadable or rule-breaking body is refused 400 by name on every privacy write, and nothing is recorded")
+  void everyPrivacyWriteRefusesABadBodyByNameAndRecordsNothing() {
+    String login = Ids.newId().toString();
+    claim(T, login, "boundary@example.in");
+    String customerId = data(shopper(T, login, "/customers/me").get(), 200).getString("id");
+    String request = Ids.newId().toString();
+
+    record Write(
+        String label,
+        java.util.function.Supplier<Invocation.Builder> who,
+        String method,
+        String violation) {}
+    List<Write> writes =
+        List.of(
+            new Write(
+                "settings",
+                () -> staff(T, "OWNER", "/customers/privacy/settings"),
+                "PUT",
+                "{\"grievanceName\":\"" + "n".repeat(121) + "\"}"),
+            new Write(
+                "notice",
+                () -> staff(T, "OWNER", "/customers/privacy/notices"),
+                "POST",
+                "{\"language\":\"en\",\"body\":\"What we do with your data.\"}"),
+            new Write(
+                "resolve",
+                () -> staff(T, "OWNER", "/customers/privacy/requests/" + request + "/resolve"),
+                "POST",
+                "{\"status\":\"RESOLVED\"}"),
+            new Write(
+                "breach",
+                () -> staff(T, "OWNER", "/customers/privacy/breach-intimations"),
+                "POST",
+                "{\"body\":\"What happened.\"}"),
+            new Write(
+                "my consents",
+                () -> shopper(T, login, "/customers/me/privacy/consents"),
+                "PUT",
+                "{\"choices\":[{\"purpose\":\"MARKETING\"}]}"),
+            new Write(
+                "my request",
+                () -> shopper(T, login, "/customers/me/privacy/requests"),
+                "POST",
+                "{\"detail\":\"no kind\"}"),
+            new Write(
+                "consents at the counter",
+                () -> staff(T, "CASHIER", "/customers/" + customerId + "/privacy/consents"),
+                "PUT",
+                "{\"choices\":[null]}"),
+            new Write(
+                "guardian",
+                () -> staff(T, "OWNER", "/customers/" + customerId + "/privacy/guardian"),
+                "POST",
+                "{\"verification\":\"DOCUMENT_SEEN\"}"));
+
+    String before = privacyRows();
+    for (Write w : writes) {
+      assertRefusedWithAny(
+          w.label() + " breaking its rules",
+          w.who().get().build(w.method(), json(w.violation())).invoke(),
+          "VALIDATION_FAILED");
+      // A literal null reaches the resource as no body at all; it is not read as an empty request.
+      assertRefusedWithAny(
+          w.label() + " with no body",
+          w.who().get().build(w.method(), json("null")).invoke(),
+          "BODY_REQUIRED",
+          "REQUEST_BODY_INVALID");
+      assertRefusedWithAny(
+          w.label() + " that is not JSON",
+          w.who().get().build(w.method(), json("{not json")).invoke(),
+          "REQUEST_BODY_INVALID");
+    }
+    assertThat("nothing was recorded", privacyRows(), is(before));
+
+    // The caller is asked before the body is: a cashier is told no, not what is wrong with it.
+    assertThat(
+        staff(T, "CASHIER", "/customers/privacy/settings")
+            .put(json("{\"grievanceName\":\"" + "n".repeat(121) + "\"}"))
+            .getStatus(),
+        is(403));
+    assertThat(
+        staff(T, "CASHIER", "/customers/privacy/notices")
+            .post(json("{\"language\":\"en\"}"))
+            .getStatus(),
+        is(403));
+    assertThat(privacyRows(), is(before));
   }
 }

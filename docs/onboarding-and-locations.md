@@ -133,10 +133,22 @@ Goal: a new business goes from "sign up" to "ready to receive stock and sell" wi
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1  Owner signs up                                                        │
-│   Client → Gateway → iam-svc  POST /auth/register  {email, phone, password}   │
-│   iam-svc creates a STAFF user (type=STAFF, no tenant yet) → JWT issued        │
-│   publishes UserRegistered                                                     │
+│ STEP 1  Owner signs up ("Start a business")                                   │
+│   Client → Gateway → iam-svc  POST /auth/register/business                  │
+│     {email, password, phone?}   (phone kept as typed, as a shopper's is)    │
+│   iam-svc creates a STAFF user (type=STAFF, no tenant, no role) → JWT issued   │
+│   publishes UserRegistered (type STAFF)                                        │
+│   ── the app reads "no tenant, no role" as "set the business up" → wizard     │
+│   (POST /auth/register stays the shopper's: a CUSTOMER, never the wizard)     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ STEPS 2+3 as one call — what the app's setup wizard sends (29 Sep 2026)       │
+│   Owner → Gateway → tenant-svc  POST /onboarding                              │
+│     {businessName, legalName, country, currency, planId,                      │
+│      storeName, storeCode, storeType, storeLine1…, storeTimezone}             │
+│   the business, its default store and DEFAULT zone; the same events as        │
+│   below. The app refreshes the token only after it, so the router cannot      │
+│   leave the wizard with a business and no store. The two calls below stay     │
+│   for API clients that set a business up step by step.                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ STEP 2  Create the business (tenant)                                          │
 │   Owner → Gateway → tenant-svc  POST /onboarding/tenants                        │
@@ -159,15 +171,27 @@ Goal: a new business goes from "sign up" to "ready to receive stock and sell" wi
 │   Owner/Manager → tenant-svc  POST /admin/stores/{id}/zones  (aisles, racks…)  │
 │   publishes ZoneCreated per zone                                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ STEP 5  (optional, anytime) Invite staff                                      │
-│   Owner → tenant-svc  POST /admin/staff {userEmail, storeId, role}             │
-│   tenant-svc verifies/【invites】user via iam-svc → staff_assignment            │
-│   publishes StaffAssigned                                                       │
+│ STEP 5  (optional, anytime) Add staff                                         │
+│   Owner → iam-svc  POST /auth/admin/staff-users {email, password}             │
+│     → a login made in this business (or its own again) — never anyone else's  │
+│   Owner → tenant-svc  POST /admin/staff {userId, storeId, role}               │
+│   publishes StaffAssigned ── iam-svc binds the role to that login only        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ✔ READY: tenant ACTIVE, ≥1 store with ≥1 zone, owner can add products,         │
 │   receive stock (purchase-svc GRN → inventory batches in a zone), and sell.    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Why the owner has a sign-up of its own (29 Sep 2026).** A shopper's sign-up (`POST /auth/register`) makes a CUSTOMER, and the app sends a CUSTOMER to the shop, never to the setup wizard — so a person starting a business from the sign-in card could not reach the wizard at all. The business sign-up is public like the shopper's (the gateway lets it through without a token; it is not a login, so the failed-login lockout does not count it, and the per-IP rate limit covers it as it covers every path), holds the same password policy (`GET /auth/password-policy`) and its own duplicate refusal (`409 USER_ALREADY_EXISTS` for an address another business sign-up of no business, or the platform administrator, already uses), and names nothing about a business: no tenant or role is ever read from the request. Signing in again or refreshing before the business exists keeps "no tenant, no role", so the login lands in the wizard until it is done. `TenantCreated` then stamps the tenant and grants OWNER — OWNER alone, since the login never held CUSTOMER — and only to a login that has no tenant yet or already has this one: a login another business has since taken on as staff keeps that business and is not made its owner (`OWNER_BIND_REFUSED` in the audit log). `StaffAssigned` goes further: it binds a role only to a login already in the assigning business — one made there by staff provisioning, or its owner — and stamps nobody in. tenant-svc assigns whatever user id its caller names, and a business can read a shopper's login id off its own orders: a stamp let it pull that shopper's account into its staff without their say (after which the storefront refused their token everywhere), or capture a founder's sign-up before they had set their business up. And a role row does not say which business granted it, so a login another business employs must never be bound either — a cashier who started a business of their own could otherwise assign their employed login OWNER at their own store and sign in as their employer's owner. Every such event is refused, marked processed and audited `STAFF_BIND_REFUSED`; the login is unchanged.
+
+**A shopper's account and a business account are separate identities (29 Sep 2026, as at Shopify, Square and Stripe).** One person may shop with an address and run a business with the same one. Outside any business an email is unique once per kind of login — one shopper's account (`CUSTOMER`), one business account (`STAFF`: a sign-up not yet onboarded, the platform administrator) — and inside a business once (iam-svc `V17`: `uq_users_unbound_email` on `(type, lower(email)) WHERE tenant_id IS NULL`, `uq_users_business_email` on `(tenant_id, lower(email)) WHERE tenant_id IS NOT NULL`). A phone follows the same rule since the business sign-up takes one (iam-svc `V18`: `uq_users_unbound_phone` on `(type, phone)`, `uq_users_business_phone` on `(tenant_id, phone)`). So:
+
+- **Sign-up.** A person who already shops with an address or phone can start a business with it (a second, separate login); a second shopper sign-up or a second business sign-up with that address or phone is still `409 USER_ALREADY_EXISTS`. The Platform Console's assisted onboarding makes the owner with the business sign-up too, and signs in with `accountType: STAFF`.
+- **Sign-in.** `POST /auth/login` takes `accountType`: the storefront sends `CUSTOMER`, the admin console and the till send `STAFF`, and nothing sent means `STAFF` (everything that runs a business signs in here; the storefront is the one place that signs a shopper in, and says so). Only the kind asked for is tried while the address holds one of it — a password that happens to open the other kind is refused — and the other kind only when it holds none, so a person with a single account signs in with it anywhere, as before. No signal existed to reuse: the storefront's sign-in goes out without its `X-Storefront-Tenant` header, and the gateway forwards that header to no service.
+- **Adding staff** (`POST /auth/admin/staff-users`) finds only the business's own login with the address, or makes a new login already in the business — never takes over anyone else's. A shopper's account stays the person's own, and an unfinished business sign-up cannot be captured by a business that adds the address as staff first: the founder still completes onboarding and becomes the owner of their own business. This is the only way a login becomes staff — assign the `userId` it answers; a `StaffAssigned` naming any other login takes nobody on (above).
+- **Several businesses.** Another business's login with the address refuses nothing (`409 EMAIL_IN_OTHER_TENANT` is gone): each business that takes the person on has its own login for them, as at Square and Shopify, and the admin console or the till opens whichever the password opens (newest first when two share one). The refusal made sense only while provisioning adopted the login it found; once nothing is adopted it only let whichever business added an address first hold it against every other — a login provisioned and never assigned (a plan's staff limit refusing the assignment, say) stranded the person out of every other job, and a hostile business could squat any address with one call.
+- **Letting go.** A member of staff removed from their last store keeps their login in the business, holding no staff role: it opens nothing (the admin filter refuses it, the storefront refuses a staff token, single sign-on no longer finds it), the business's management no longer sees it among its staff, and provisioning the address again gives the business the same login back. It never becomes a login of no business, which would read as a business sign-up waiting for its setup wizard — with the password the business chose — and hold the address a sign-up of the person's own needs. Only a shopper's account stamped in before 29 Sep 2026 (it still holds `CUSTOMER`) goes back to being that shopper's, unless its email or phone has meanwhile become another shopper's account's (`uq_users_unbound_email` / `uq_users_unbound_phone`); a business sign-up holding either is a separate identity and is never in the way.
+- **A forgotten password** gives each login on the address its own link, the business sign-up's named as a business account (`STAFF`, no business yet), and each link resets only its own login.
 
 **Onboarding completeness check** (tenant-svc exposes `GET /onboarding/status`): tenant ACTIVE ✓, default store exists ✓, default zone exists ✓, (optional) products added, (optional) staff invited. The admin console uses this to drive a setup checklist.
 

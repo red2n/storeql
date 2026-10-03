@@ -333,7 +333,7 @@ class EReportingIT {
                 "/orders/" + sale + "/returns",
                 "{\"reason\":\"CHANGED_MIND\",\"items\":[{\"variantId\":\""
                     + V_STD
-                    + "\",\"qty\":1,\"refundAmount\":12.00}]}",
+                    + "\",\"qty\":1,\"condition\":\"SEALED\",\"refundAmount\":12.00}]}",
                 T);
     assertThat(refunded.readEntity(String.class), refunded.getStatus(), is(201));
     backdate(T, sale, 8);
@@ -466,9 +466,113 @@ class EReportingIT {
     Response theirs =
         till().getAs("/admin/ereporting/submissions/" + sent.getString("id"), T_RIVAL, "OWNER");
     assertThat(theirs.getStatus(), is(404));
+    assertThat(code(theirs), is("EREPORTING_NOT_FOUND"));
     assertThat(
         dataArray(till().getAs("/admin/ereporting/submissions", T_RIVAL, "OWNER")).toString(),
         not(containsString(sent.getString("id"))));
+  }
+
+  private static String submissionsOf(String tenant) {
+    return com.storeql.test.Envelopes.scalar(
+        PG,
+        "SELECT count(*) FROM orders.ereporting_submissions WHERE tenant_id = '" + tenant + "'");
+  }
+
+  @Test
+  @DisplayName("A day not written as a date is refused, on a preview and on a submission")
+  void aDayNotWrittenAsADateIsRefused() {
+    sendsOver(T, "FR_PDP", "SIMULATED");
+    String before = submissionsOf(T);
+    Response submission =
+        asManager(
+            "/admin/ereporting/submissions",
+            T,
+            "{\"returnCode\":\"EREPORTING_TX_FR\",\"periodStart\":\"01/09/2026\","
+                + "\"periodEnd\":\""
+                + today().minusDays(1)
+                + "\"}");
+    assertThat(submission.getStatus(), is(400));
+    assertThat(code(submission), is("EREPORTING_DATE_INVALID"));
+    assertThat(submissionsOf(T), is(before));
+    Response preview =
+        till()
+            .getAs(
+                "/admin/ereporting/preview",
+                T,
+                "OWNER",
+                "return",
+                "EREPORTING_TX_FR",
+                "from",
+                "yesterday",
+                "to",
+                today().minusDays(1).toString());
+    assertThat(preview.getStatus(), is(400));
+    assertThat(code(preview), is("EREPORTING_DATE_INVALID"));
+  }
+
+  @Test
+  @DisplayName("A preview needs both days")
+  void aPreviewNeedsBothDays() {
+    Response noFrom =
+        till()
+            .getAs(
+                "/admin/ereporting/preview",
+                T,
+                "OWNER",
+                "return",
+                "EREPORTING_TX_FR",
+                "to",
+                today().minusDays(1).toString());
+    assertThat(noFrom.getStatus(), is(400));
+    assertThat(code(noFrom), is("EREPORTING_DATE_REQUIRED"));
+    Response noTo =
+        till()
+            .getAs(
+                "/admin/ereporting/preview",
+                T,
+                "OWNER",
+                "return",
+                "EREPORTING_TX_FR",
+                "from",
+                today().minusDays(4).toString());
+    assertThat(noTo.getStatus(), is(400));
+    assertThat(code(noTo), is("EREPORTING_DATE_REQUIRED"));
+  }
+
+  @Test
+  @DisplayName("A correction naming something that is not an id, or no submission, is refused")
+  void aCorrectionNamingNoSubmissionIsRefused() {
+    sendsOver(T, "FR_PDP", "SIMULATED");
+    LocalDate from = today().minusDays(124);
+    LocalDate to = today().minusDays(121);
+    String before = submissionsOf(T);
+    Response notAnId = submit(T, "EREPORTING_TX_FR", from, to, "the-last-one");
+    assertThat(notAnId.getStatus(), is(400));
+    assertThat(code(notAnId), is("EREPORTING_ID_INVALID"));
+    Response unknown = submit(T, "EREPORTING_TX_FR", from, to, Ids.newId().toString());
+    assertThat(unknown.getStatus(), is(404));
+    assertThat(code(unknown), is("EREPORTING_NOT_FOUND"));
+    assertThat(submissionsOf(T), is(before));
+  }
+
+  @Test
+  @DisplayName("A submission is corrected once; correcting the corrected one again is refused")
+  void aSubmissionIsCorrectedOnce() {
+    sendsOver(T, "FR_PDP", "SIMULATED");
+    LocalDate from = today().minusDays(94);
+    LocalDate to = today().minusDays(91);
+    JsonObject sent = data(submit(T, "EREPORTING_TX_FR", from, to));
+    JsonObject corrected = data(submit(T, "EREPORTING_TX_FR", from, to, sent.getString("id")));
+    assertThat(corrected.getString("supersedes"), is(sent.getString("id")));
+    String before = submissionsOf(T);
+
+    Response again = submit(T, "EREPORTING_TX_FR", from, to, sent.getString("id"));
+    assertThat(again.getStatus(), is(409));
+    assertThat(code(again), is("EREPORTING_NOT_STANDING"));
+    assertThat(submissionsOf(T), is(before));
+    JsonObject first =
+        data(till().getAs("/admin/ereporting/submissions/" + sent.getString("id"), T, "OWNER"));
+    assertThat(first.getString("supersededBy"), is(corrected.getString("id")));
   }
 
   @Test

@@ -1,6 +1,7 @@
 package com.storeql.customer.dto;
 
 import jakarta.json.JsonArray;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -63,39 +64,64 @@ public final class Dtos {
 
   @Schema(name = "EarnPointsRequest", description = "Manually award loyalty points.")
   public record EarnPointsRequest(
-      @Schema(description = "Points to award; must be positive.") @NotNull @Positive
+      @Schema(description = "Points to award; positive, to two decimal places.")
+          @NotNull
+          @Positive
+          @Digits(integer = 16, fraction = 2)
           BigDecimal points,
       @Schema(description = "UUID of the order this award relates to, if any.") String orderId,
-      String reason) {}
+      @Schema(description = "Why the points are being awarded; kept with who did it.")
+          @NotBlank
+          @Size(max = 500)
+          String reason) {}
 
   @Schema(name = "RedeemPointsRequest", description = "Redeem loyalty points.")
   public record RedeemPointsRequest(
-      @Schema(description = "Points to redeem; must be positive and not exceed the balance.")
+      @Schema(description = "Points to redeem; positive, within the balance.")
           @NotNull
           @Positive
+          @Digits(integer = 16, fraction = 2)
           BigDecimal points,
       @Schema(description = "UUID of the order this redemption relates to, if any.") String orderId,
       String reason) {}
 
   @Schema(name = "AdjustPointsRequest", description = "Manual correction to a loyalty balance.")
   public record AdjustPointsRequest(
-      @Schema(description = "Signed adjustment amount; may be negative.") @NotNull
+      @Schema(description = "Signed points, two decimal places at most; never zero.")
+          @NotNull
+          @Digits(integer = 16, fraction = 2)
           BigDecimal points,
-      String reason) {}
+      @Schema(description = "Why the balance is being corrected; kept with who did it.")
+          @NotBlank
+          @Size(max = 500)
+          String reason) {}
 
   @Schema(name = "IssueStoreCreditRequest", description = "Issue store credit to a customer.")
   public record IssueStoreCreditRequest(
-      @Schema(description = "Amount to issue; must be positive.") @NotNull @Positive
+      @Schema(
+              description =
+                  "Amount to issue; positive and no finer than the currency's minor unit (whole"
+                      + " yen, a dinar's three places): STORE_CREDIT_AMOUNT_INVALID otherwise.")
+          @NotNull
+          @Positive
+          @Digits(integer = 14, fraction = 4)
           BigDecimal amount,
       @Schema(description = "ISO currency code; the tenant's own when omitted.") String currency,
       @Schema(description = "UUID of the order this issuance relates to, if any.") String orderId,
-      String reason) {}
+      @Schema(description = "Why the credit is being issued; kept with who did it.")
+          @NotBlank
+          @Size(max = 500)
+          String reason) {}
 
   @Schema(name = "RedeemStoreCreditRequest", description = "Redeem a customer's store credit.")
   public record RedeemStoreCreditRequest(
-      @Schema(description = "Amount to redeem; must be positive and not exceed the balance.")
+      @Schema(
+              description =
+                  "Amount to redeem; positive, within the balance, and no finer than the"
+                      + " currency's minor unit: STORE_CREDIT_AMOUNT_INVALID otherwise.")
           @NotNull
           @Positive
+          @Digits(integer = 14, fraction = 4)
           BigDecimal amount,
       @Schema(description = "ISO currency code; the tenant's own when omitted.") String currency,
       @Schema(
@@ -211,7 +237,7 @@ public final class Dtos {
       @Schema(description = "1 to 120; absent for never.") Integer expiryMonths,
       @Schema(description = "1 to 36; absent for a lifetime.") Integer qualifyingMonths,
       @NotNull @Size(min = 1, max = 6) List<TierRequest> tiers,
-      @NotBlank String reason) {}
+      @NotBlank @Size(max = 500) String reason) {}
 
   @Schema(name = "ExpiryRunResponse", description = "What a loyalty sweep did.")
   public record ExpiryRunResponse(

@@ -44,11 +44,12 @@ class HmrcMtdVatProviderTest {
     server.createContext(
         "/",
         ex -> {
+          // Raw, as it crossed the wire: a decoded path would hide a query sent escaped.
           String path =
-              ex.getRequestURI().getPath()
-                  + (ex.getRequestURI().getQuery() == null
+              ex.getRequestURI().getRawPath()
+                  + (ex.getRequestURI().getRawQuery() == null
                       ? ""
-                      : "?" + ex.getRequestURI().getQuery());
+                      : "?" + ex.getRequestURI().getRawQuery());
           requests.add(ex.getRequestMethod() + " " + path);
           headers.add(ex.getRequestHeaders());
           bodies.add(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));

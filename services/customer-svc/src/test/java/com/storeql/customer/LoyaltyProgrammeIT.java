@@ -46,6 +46,8 @@ class LoyaltyProgrammeIT {
 
   static {
     System.setProperty("storeql.customer.loyalty.sweep-seconds", "0");
+    // A small page, so a re-tier of five accounts crosses three transactions.
+    System.setProperty("storeql.customer.loyalty.retier-batch", "2");
   }
 
   private static final TenantSvcStub TENANTS = TenantSvcStub.start();
@@ -133,10 +135,12 @@ class LoyaltyProgrammeIT {
 
   private JsonObject earn(String customerId, String points) {
     return data(
-        post(
-            "/customers/" + customerId + "/loyalty/earn",
-            "OWNER",
-            "{\"points\":" + points + ",\"reason\":\"test\"}"));
+        as("/customers/" + customerId + "/loyalty/earn", "OWNER")
+            .header("Idempotency-Key", Ids.newId().toString())
+            .post(
+                Entity.entity(
+                    "{\"points\":" + points + ",\"reason\":\"test\"}",
+                    MediaType.APPLICATION_JSON)));
   }
 
   private JsonObject loyalty(String customerId) {
@@ -378,6 +382,37 @@ class LoyaltyProgrammeIT {
         is("1"));
   }
 
+  @Test
+  @DisplayName(
+      "A re-tier of more accounts than one page re-tiers every one, once, and announces each")
+  void aReTierCrossesPages() throws SQLException {
+    data(put("/admin/loyalty/programme", "OWNER", programme(null, 12, LADDER)));
+    for (int i = 0; i < 5; i++) {
+      String id = customer("page" + i + "@example.com");
+      earn(id, "40");
+      assertThat(loyalty(id).getString("tier"), is("SILVER"));
+    }
+    sql(
+        "UPDATE customer.loyalty_ledger SET created_at = now() - interval '13 months'"
+            + " WHERE tenant_id = ? AND type = 'EARN'",
+        tenant);
+    JsonObject run = data(post("/admin/loyalty/expiry/run", "OWNER", ""));
+    assertThat(run.getInt("retiered"), is(5));
+    assertThat(
+        sql(
+            "SELECT COUNT(*) FROM customer.loyalty_accounts WHERE tenant_id = ? AND tier = 'BRONZE'",
+            tenant),
+        is("5"));
+    assertThat(
+        sql(
+            "SELECT COUNT(*) FROM customer.outbox WHERE tenant_id = ? AND event_type ="
+                + " 'LoyaltyTierChanged' AND payload LIKE '%\"toTier\":\"BRONZE\"%'",
+            tenant),
+        is("5"));
+    // Nothing moves on a second run.
+    assertThat(data(post("/admin/loyalty/expiry/run", "OWNER", "")).getInt("retiered"), is(0));
+  }
+
   // ── the shopper's own view ──────────────────────────────────────────────────
 
   @Test
@@ -420,5 +455,298 @@ class LoyaltyProgrammeIT {
     assertThat(num(view, "pointsBalance"), closeTo(12.0, 0.001));
     assertThat(view.getJsonObject("nextTier").getString("name"), is("GOLD"));
     assertThat(num(view, "multiplier"), greaterThan(1.0));
+  }
+
+  // ── whose programme it is, and who may touch it ─────────────────────────────
+
+  private Invocation.Builder asIn(UUID business, String path, String role) {
+    return target
+        .path(path)
+        .request(MediaType.APPLICATION_JSON)
+        .header("X-Tenant-Id", business.toString())
+        .header("X-User-Id", OWNER)
+        .header("X-Roles", role);
+  }
+
+  private static String codeOf(String body) {
+    JsonObject problem = Json.createReader(new StringReader(body)).readObject();
+    return problem.containsKey("code")
+        ? problem.getString("code")
+        : problem.getJsonObject("error").getString("code");
+  }
+
+  private static void assertRefused(String what, Response r, int status, String code) {
+    String body = r.readEntity(String.class);
+    assertThat(what + ": " + body, r.getStatus(), is(status));
+    assertThat(what + ": " + body, codeOf(body), is(code));
+  }
+
+  private static Entity<String> json(String body) {
+    return Entity.entity(body, MediaType.APPLICATION_JSON);
+  }
+
+  /** A business with a programme set, a customer holding points, and a lot that died yesterday. */
+  private String customerWithADeadLot(String email) throws SQLException {
+    data(put("/admin/loyalty/programme", "OWNER", programme(12, 12, LADDER)));
+    String id = customer(email);
+    earn(id, "30");
+    sql(
+        "UPDATE customer.loyalty_point_lots SET expires_at = now() - interval '1 day'"
+            + " WHERE tenant_id = ? AND customer_id = ?",
+        tenant,
+        Ids.parse(id));
+    return id;
+  }
+
+  @Test
+  @DisplayName("Another business reads, sets and sweeps only its own programme, whatever ours says")
+  void aProgrammeBelongsToItsBusinessAlone() throws SQLException {
+    UUID other = Ids.newId();
+    TENANTS.with(other.toString(), "GBP", "GB");
+    String id = customerWithADeadLot("iso@example.com");
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      // It starts on the platform's default, not on ours...
+      JsonObject theirs = data(asIn(other, "/admin/loyalty/programme", role).get());
+      assertThat(role, theirs.getBoolean("isDefault"), is(true));
+      assertThat(role, theirs.getJsonArray("tiers").size(), is(4));
+      // ...and its sweep finds nothing, not even the points of ours that have died.
+      JsonObject run = data(asIn(other, "/admin/loyalty/expiry/run", role).post(json("")));
+      assertThat(role, run.getInt("customers"), is(0));
+      assertThat(role, num(run, "points"), closeTo(0.0, 0.001));
+      assertThat(role, run.getInt("retiered"), is(0));
+    }
+    assertThat(num(loyalty(id), "pointsBalance"), closeTo(30.0, 0.001));
+    assertThat(
+        sql(
+            "SELECT COUNT(*) FROM customer.loyalty_ledger WHERE tenant_id = ? AND type = 'EXPIRE'",
+            tenant),
+        is("0"));
+
+    // It sets its own, and ours does not move.
+    JsonObject set =
+        data(
+            asIn(other, "/admin/loyalty/programme", "MANAGER")
+                .put(
+                    json(
+                        programme(
+                            null,
+                            null,
+                            "{\"name\":\"BRONZE\",\"threshold\":0},"
+                                + "{\"name\":\"STAR\",\"threshold\":5}"))));
+    assertThat(set.getJsonArray("tiers").size(), is(2));
+    JsonObject ours = data(as("/admin/loyalty/programme", "OWNER").get());
+    assertThat(ours.getBoolean("isDefault"), is(false));
+    assertThat(ours.getInt("expiryMonths"), is(12));
+    assertThat(ours.getJsonArray("tiers").size(), is(3));
+    assertThat(
+        sql("SELECT COUNT(*) FROM customer.loyalty_tiers WHERE tenant_id = ?", tenant), is("3"));
+    assertThat(
+        sql("SELECT COUNT(*) FROM customer.loyalty_tiers WHERE tenant_id = ?", other), is("2"));
+
+    // Our own sweep still finds what died.
+    JsonObject run = data(post("/admin/loyalty/expiry/run", "OWNER", ""));
+    assertThat(run.getInt("customers"), is(1));
+    assertThat(num(run, "points"), closeTo(30.0, 0.001));
+  }
+
+  @Test
+  @DisplayName(
+      "A till, a warehouse and a shopper, ours or another business's, are refused every programme route by name")
+  void theProgrammeRoutesAreManagementsAlone() throws SQLException {
+    UUID other = Ids.newId();
+    TENANTS.with(other.toString(), "GBP", "GB");
+    customerWithADeadLot("door@example.com");
+
+    for (UUID business : new UUID[] {tenant, other}) {
+      for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+        String who = role + " of " + business;
+        assertRefused(
+            who + " reading",
+            asIn(business, "/admin/loyalty/programme", role).get(),
+            403,
+            "FORBIDDEN");
+        assertRefused(
+            who + " setting",
+            asIn(business, "/admin/loyalty/programme", role).put(json(programme(1, 1, LADDER))),
+            403,
+            "FORBIDDEN");
+        assertRefused(
+            who + " sweeping",
+            asIn(business, "/admin/loyalty/expiry/run", role).post(json("")),
+            403,
+            "FORBIDDEN");
+      }
+    }
+    // Nothing moved: ours is as it was set, theirs was never set, and nothing died.
+    assertThat(
+        sql("SELECT expiry_months FROM customer.loyalty_programmes WHERE tenant_id = ?", tenant),
+        is("12"));
+    assertThat(
+        sql("SELECT COUNT(*) FROM customer.loyalty_programmes WHERE tenant_id = ?", other),
+        is("0"));
+    assertThat(
+        sql(
+            "SELECT COUNT(*) FROM customer.loyalty_ledger WHERE tenant_id = ? AND type = 'EXPIRE'",
+            tenant),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName(
+      "An owner or manager held to stores cannot set the programme; they can still read it")
+  void aCallerHeldToStoresCannotSetTheWholeBusinessProgramme() throws SQLException {
+    String store = Ids.newId().toString();
+    for (String role : new String[] {"MANAGER", "OWNER"}) {
+      assertRefused(
+          role + " held to a store",
+          as("/admin/loyalty/programme", role)
+              .header("X-Store-Ids", store)
+              .put(json(programme(12, 12, LADDER))),
+          403,
+          "BUSINESS_WIDE_ONLY");
+    }
+    assertThat(
+        sql("SELECT COUNT(*) FROM customer.loyalty_programmes WHERE tenant_id = ?", tenant),
+        is("0"));
+    assertThat(
+        sql("SELECT COUNT(*) FROM customer.loyalty_tiers WHERE tenant_id = ?", tenant), is("0"));
+    // The refusal is of the write: they still read it (the hand-run sweep is refused them too:
+    // theHandRunSweepNeedsACallerHeldToNoStore).
+    JsonObject read =
+        data(as("/admin/loyalty/programme", "MANAGER").header("X-Store-Ids", store).get());
+    assertThat(read.getBoolean("isDefault"), is(true));
+    // A caller held to no store sets it.
+    assertThat(
+        data(put("/admin/loyalty/programme", "MANAGER", programme(12, 12, LADDER)))
+            .getBoolean("isDefault"),
+        is(false));
+  }
+
+  private String expiredCount() throws SQLException {
+    return sql(
+        "SELECT COUNT(*) FROM customer.loyalty_ledger WHERE tenant_id = ? AND type = 'EXPIRE'",
+        tenant);
+  }
+
+  @Test
+  @DisplayName(
+      "The sweep run by hand needs a caller held to no store: one held to stores is refused and nothing dies; an owner or a business-wide manager runs it")
+  void theHandRunSweepNeedsACallerHeldToNoStore() throws SQLException {
+    String id = customerWithADeadLot("held@example.com");
+    String store = Ids.newId().toString();
+
+    // An owner or manager held to a store — ours, or another business's naming ours — is refused
+    // by name before anything runs; a cashier held to it is refused as below management.
+    UUID other = Ids.newId();
+    TENANTS.with(other.toString(), "GBP", "GB");
+    for (UUID business : new UUID[] {tenant, other}) {
+      for (String role : new String[] {"MANAGER", "OWNER"}) {
+        assertRefused(
+            role + " of " + business + " held to a store",
+            asIn(business, "/admin/loyalty/expiry/run", role)
+                .header("X-Store-Ids", store)
+                .post(json("")),
+            403,
+            "BUSINESS_WIDE_ONLY");
+      }
+      assertRefused(
+          "CASHIER of " + business + " held to a store",
+          asIn(business, "/admin/loyalty/expiry/run", "CASHIER")
+              .header("X-Store-Ids", store)
+              .post(json("")),
+          403,
+          "FORBIDDEN");
+    }
+    // Nothing ran: the dead lot still holds its points, no EXPIRE entry, nothing announced.
+    assertThat(num(loyalty(id), "pointsBalance"), closeTo(30.0, 0.001));
+    assertThat(expiredCount(), is("0"));
+    assertThat(
+        new BigDecimal(
+                sql(
+                    "SELECT COALESCE(SUM(remaining), 0) FROM customer.loyalty_point_lots"
+                        + " WHERE tenant_id = ? AND customer_id = ?",
+                    tenant,
+                    Ids.parse(id)))
+            .compareTo(new BigDecimal("30")),
+        is(0));
+    assertThat(
+        sql(
+            "SELECT COUNT(*) FROM customer.outbox WHERE tenant_id = ? AND event_type ="
+                + " 'LoyaltyExpired'",
+            tenant),
+        is("0"));
+
+    // The owner, held to no store, runs it: the dead points go.
+    JsonObject byOwner = data(post("/admin/loyalty/expiry/run", "OWNER", ""));
+    assertThat(byOwner.getInt("customers"), is(1));
+    assertThat(num(byOwner, "points"), closeTo(30.0, 0.001));
+    assertThat(num(loyalty(id), "pointsBalance"), closeTo(0.0, 0.001));
+    assertThat(expiredCount(), is("1"));
+
+    // A manager held to no store (business-wide) runs it too.
+    String second = customer("wide@example.com");
+    earn(second, "12");
+    sql(
+        "UPDATE customer.loyalty_point_lots SET expires_at = now() - interval '1 day'"
+            + " WHERE tenant_id = ? AND customer_id = ?",
+        tenant,
+        Ids.parse(second));
+    JsonObject byManager = data(post("/admin/loyalty/expiry/run", "MANAGER", ""));
+    assertThat(byManager.getInt("customers"), is(1));
+    assertThat(num(byManager, "points"), closeTo(12.0, 0.001));
+    assertThat(num(loyalty(second), "pointsBalance"), closeTo(0.0, 0.001));
+    assertThat(expiredCount(), is("2"));
+
+    // Another business's business-wide manager sweeps its own, which has nothing to let die.
+    JsonObject theirs = data(asIn(other, "/admin/loyalty/expiry/run", "MANAGER").post(json("")));
+    assertThat(theirs.getInt("customers"), is(0));
+    assertThat(expiredCount(), is("2"));
+  }
+
+  @Test
+  @DisplayName(
+      "A programme that cannot be honoured is refused by code, and the one in force stands")
+  void aProgrammeThatCannotBeHonouredIsRefusedAndTheOldOneStands() throws SQLException {
+    data(put("/admin/loyalty/programme", "OWNER", programme(12, 12, LADDER)));
+    String bronze = "{\"name\":\"BRONZE\",\"threshold\":0}";
+    String[][] refused = {
+      {"{\"tiers\":[],\"reason\":\"x\"}", "VALIDATION_FAILED"},
+      {"{\"tiers\":null,\"reason\":\"x\"}", "VALIDATION_FAILED"},
+      {"{\"tiers\":[" + bronze + "]}", "VALIDATION_FAILED"},
+      {"{\"tiers\":[" + bronze + "],\"reason\":\"  \"}", "VALIDATION_FAILED"},
+      {"{\"tiers\":[" + bronze + "],\"reason\":\"" + "r".repeat(501) + "\"}", "VALIDATION_FAILED"},
+      // A hole in a list is refused for every body, before the programme's own rules.
+      {"{\"tiers\":[null],\"reason\":\"x\"}", "VALIDATION_FAILED"},
+      {programme(121, 12, LADDER), "LOYALTY_EXPIRY_INVALID"},
+      {programme(12, 0, LADDER), "LOYALTY_EXPIRY_INVALID"},
+      {programme(12, 37, LADDER), "LOYALTY_EXPIRY_INVALID"},
+      {programme(12, 12, "{\"name\":\"BRONZE\",\"threshold\":5}"), "LOYALTY_TIERS_INVALID"},
+      {programme(12, 12, "{\"threshold\":0}"), "LOYALTY_TIERS_INVALID"},
+      {programme(12, 12, "{\"name\":\"bronze tier\",\"threshold\":0}"), "LOYALTY_TIERS_INVALID"},
+      {programme(12, 12, bronze + "," + bronze.replace("0", "5")), "LOYALTY_TIERS_INVALID"},
+      {programme(12, 12, bronze.replace("}", ",\"multiplier\":0.5}")), "LOYALTY_TIERS_INVALID"},
+      {programme(12, 12, bronze.replace("}", ",\"multiplier\":11}")), "LOYALTY_TIERS_INVALID"},
+      {
+        programme(12, 12, bronze + ",{\"name\":\"SILVER\",\"threshold\":10.005}"),
+        "LOYALTY_TIERS_INVALID"
+      },
+      {
+        programme(12, 12, bronze + ",{\"name\":\"SILVER\",\"threshold\":100000000000000000}"),
+        "LOYALTY_TIERS_INVALID"
+      },
+      {"[]", "REQUEST_BODY_INVALID"},
+      {"\"BRONZE\"", "REQUEST_BODY_INVALID"},
+      {"{not json", "REQUEST_BODY_INVALID"},
+    };
+    for (String[] bad : refused) {
+      assertRefused(bad[0], put("/admin/loyalty/programme", "OWNER", bad[0]), 400, bad[1]);
+    }
+    JsonObject still = data(as("/admin/loyalty/programme", "OWNER").get());
+    assertThat(still.getString("reason"), is("the autumn scheme"));
+    assertThat(still.getInt("expiryMonths"), is(12));
+    assertThat(still.getJsonArray("tiers").size(), is(3));
+    assertThat(
+        sql("SELECT COUNT(*) FROM customer.loyalty_tiers WHERE tenant_id = ?", tenant), is("3"));
   }
 }

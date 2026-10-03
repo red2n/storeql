@@ -110,11 +110,21 @@ public class MarkdownResource {
       summary = "Sticker a batch at a lower price",
       description =
           "Records the markdown and issues the sticker's barcode (EAN-13, prefix 21, the reduced"
-              + " price in the code), which the till scans to sell at that price. percentOff or"
-              + " markdownPrice, not both, against the current POS price. Warehouse and"
-              + " management roles, assigned to the store.")
+              + " price in the code in the currency's own minor units, five digits: up to 999.99"
+              + " in pounds or euros, ¥99,999, KWD 99.999), which the till scans to sell at that"
+              + " price. percentOff or markdownPrice, not both, against the current POS price; a"
+              + " reduced price from a percentage is rounded to the currency's minor units, and a"
+              + " typed markdownPrice finer than them is refused. Warehouse and management roles,"
+              + " assigned to the store.")
   @APIResponse(responseCode = "201", description = "The markdown, with its sticker code")
-  @APIResponse(responseCode = "400", description = "A bad reason, amount, date or price")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "PRICING_MARKDOWN_REASON_UNKNOWN, PRICING_MARKDOWN_AMOUNT_REQUIRED,"
+              + " PRICING_MARKDOWN_AMOUNT_AMBIGUOUS, PRICING_MARKDOWN_NOT_A_REDUCTION,"
+              + " PRICING_MARKDOWN_EXPIRED_DATE; PRICING_MARKDOWN_LABEL_RANGE for a price past"
+              + " five digits of the currency's minor units; VALIDATION_FAILED for a markdownPrice"
+              + " with more decimals than the currency has")
   @APIResponse(responseCode = "404", description = "The variant has no POS price")
   @POST
   public Response create(Dtos.CreateMarkdownRequest req) {

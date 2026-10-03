@@ -215,4 +215,29 @@ class GroupPaymentIT {
     assertThat(repo.findRefundsByOrder(T, c.leeds()), hasSize(1));
     assertThat(repo.findRefundsByOrder(T, c.york()), hasSize(0));
   }
+
+  @Test
+  void cashIsNeverTakenOnline() {
+    Checkout c = checkout("PENDING");
+    for (String method : new String[] {"CASH", "cash"}) {
+      Answer order =
+          pay(
+              "{\"orderId\":\"" + c.leeds() + "\",\"amount\":3.37,\"method\":\"" + method + "\"}",
+              SHOPPER,
+              Ids.newId().toString());
+      assertThat(method, order.status(), is(400));
+      assertThat(method, order.code(), is("PAYMENT_ONLINE_CASHLESS"));
+      Answer group =
+          pay(
+              "{\"groupId\":\"" + c.id() + "\",\"amount\":5.05,\"method\":\"" + method + "\"}",
+              SHOPPER,
+              Ids.newId().toString());
+      assertThat(method, group.status(), is(400));
+      assertThat(method, group.code(), is("PAYMENT_ONLINE_CASHLESS"));
+    }
+    assertThat(repo.findTendersByOrder(T, c.leeds()), hasSize(0));
+    assertThat(repo.findTendersByOrder(T, c.york()), hasSize(0));
+    assertThat(captured(c.leeds()), is("0"));
+    assertThat(captured(c.york()), is("0"));
+  }
 }

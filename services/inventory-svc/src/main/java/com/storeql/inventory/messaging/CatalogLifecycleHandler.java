@@ -1,10 +1,10 @@
 package com.storeql.inventory.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.inventory.repo.CatalogLinesOutRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonString;
@@ -37,7 +37,7 @@ public class CatalogLifecycleHandler {
     UUID tenantId;
     UUID productId;
     List<UUID> variantIds = new ArrayList<>();
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventType = obj.getString("eventType", "");
       tenantId = Ids.parse(obj.getString("tenantId"));

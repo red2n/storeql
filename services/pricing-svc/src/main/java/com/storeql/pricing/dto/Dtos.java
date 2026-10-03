@@ -183,9 +183,23 @@ public final class Dtos {
           @Positive
           BigDecimal minQty) {}
 
+  // No @Valid on the list, on purpose: the request is checked as a whole (there is a list, it is
+  // not empty, it holds at most 500 rows, none of them null) and each row is then checked, refused
+  // or kept on its own in the service, because a batch is partial-failure tolerant. A cascade here
+  // would turn one bad row into a 400 for the whole upload. A row that is not there at all (a JSON
+  // null) is not a bad row to be reported against its variant, it is a body that is not a list of
+  // rows, and is refused whole.
   @Schema(name = "BatchUpsertPriceListItemsRequest")
   public record BatchUpsertPriceListItemsRequest(
-      @NotNull @Valid java.util.List<UpsertPriceListItemRequest> items) {}
+      @Schema(
+              description =
+                  "The prices to set: at least one and at most 500 rows. Each row is checked on its"
+                      + " own, and a bad row is reported in the result, not refused as a whole.",
+              minItems = 1,
+              maxItems = 500)
+          @NotEmpty
+          @Size(max = 500)
+          java.util.List<@NotNull UpsertPriceListItemRequest> items) {}
 
   @Schema(
       name = "BatchUpsertResult",
@@ -403,7 +417,8 @@ public final class Dtos {
    * was issuing one synchronous {@code /prices/resolve} call per order line.
    */
   @Schema(name = "ResolvePriceBatchRequest")
-  public record ResolvePriceBatchRequest(@NotEmpty @Valid List<ResolvePriceRequest> lines) {}
+  public record ResolvePriceBatchRequest(
+      @NotEmpty @Size(max = 500) @Valid List<ResolvePriceRequest> lines) {}
 
   /** Results are in the same order as the request's {@code lines}. */
   @Schema(
@@ -526,7 +541,7 @@ public final class Dtos {
               + " line independently and therefore cannot see a spend threshold, a basket"
               + " percentage or a buy-one-get-one.")
   public record QuoteBasketRequest(
-      @NotEmpty @Valid List<QuoteLineRequest> lines,
+      @NotEmpty @Size(max = 500) @Valid List<QuoteLineRequest> lines,
       @Schema(description = "UUID of the store; selects store-scoped prices and promotions.")
           String storeId,
       @Schema(description = "ONLINE or POS. Defaults to ALL.") String channel,
@@ -1100,7 +1115,11 @@ public final class Dtos {
           @DecimalMin("0.01")
           @DecimalMax("100")
           BigDecimal floorPercent,
-      @Schema(description = "NONE (the currency's minor unit) or ENDING_99 (down to a .99).")
+      @Schema(
+              description =
+                  "NONE (the currency's minor unit) or ENDING_99 (down to a .99: x.99 in a"
+                      + " two-decimal currency, x.990 in a three-decimal one, whole units in one"
+                      + " without minor units).")
           String rounding,
       @Schema(description = "An observation older than this many days is stale; 14 by default.")
           Integer maxAgeDays) {}

@@ -373,6 +373,65 @@ class PaymentRunIT {
 
   // ── abuse: payment diversion ────────────────────────────────────────────────
 
+  /**
+   * The change stamp is the service's clock and the approval the database's. Two clocks can
+   * disagree, so a change is never judged by comparing them: a change made after approval but
+   * stamped before it (the service's clock behind) still stops the run.
+   */
+  @Test
+  @DisplayName("A change after approval stops the run even when its stamp reads earlier")
+  void aChangeAfterApprovalIsCaughtWhateverItsStampSays() throws Exception {
+    String sup = supplier("Skewed Ltd", 30, UK_BANK, null);
+    payableInvoice(sup, "INV-S1", 2, "5.00", "0", TODAY.minusDays(40));
+    String runId = proposedAndApproved();
+    Response changed =
+        put(
+            "/suppliers/" + sup,
+            "{\"name\":\"Skewed Ltd\",\"bankAccountName\":\"Skewed Ltd\","
+                + "\"bankSortCode\":\"654321\",\"bankAccountNumber\":\"12345678\"}",
+            "OWNER",
+            USER);
+    assertThat(changed.readEntity(String.class), changed.getStatus(), is(200));
+    dbExec(
+        "UPDATE purchase.suppliers SET bank_details_changed_at = r.approved_at - interval '1 hour'"
+            + " FROM purchase.payment_runs r WHERE r.id = '"
+            + runId
+            + "' AND suppliers.id = '"
+            + sup
+            + "'");
+
+    assertCode(
+        get("/payment-runs/" + runId + "/bank-file", "MANAGER", USER),
+        409,
+        "PURCHASE_PAYMENT_RUN_BANK_DETAILS_CHANGED");
+    Response pay = post("/payment-runs/" + runId + "/pay", "{}", "MANAGER", USER);
+    String payBody = pay.readEntity(String.class);
+    assertThat(payBody, pay.getStatus(), is(409));
+    assertThat(payBody, containsString("PURCHASE_PAYMENT_RUN_BANK_DETAILS_CHANGED"));
+    assertThat(journalOf("SUPPLIER_PAYMENT").size(), is(0));
+  }
+
+  /** And details settled before approval never stop it, however late their stamp reads. */
+  @Test
+  @DisplayName("Details settled before approval never stop the run, whatever their stamp says")
+  void detailsSettledBeforeApprovalNeverStopTheRun() throws Exception {
+    String sup = supplier("Early Ltd", 30, UK_BANK, null);
+    payableInvoice(sup, "INV-E1", 2, "5.00", "0", TODAY.minusDays(40));
+    String runId = proposedAndApproved();
+    dbExec(
+        "UPDATE purchase.suppliers SET bank_details_changed_at = r.approved_at + interval '1 hour'"
+            + " FROM purchase.payment_runs r WHERE r.id = '"
+            + runId
+            + "' AND suppliers.id = '"
+            + sup
+            + "'");
+
+    Response file = get("/payment-runs/" + runId + "/bank-file", "MANAGER", USER);
+    assertThat(file.readEntity(String.class), file.getStatus(), is(200));
+    Response pay = post("/payment-runs/" + runId + "/pay", "{}", "MANAGER", USER);
+    assertThat(pay.readEntity(String.class), pay.getStatus(), is(200));
+  }
+
   @Test
   @DisplayName("Bank details changed after approval stop the payment and the bank file")
   void bankDetailsChangedAfterApprovalAreRefused() throws Exception {
@@ -798,6 +857,13 @@ class PaymentRunIT {
       }
     }
     return out;
+  }
+
+  private static void dbExec(String sql) throws Exception {
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = c.createStatement()) {
+      st.executeUpdate(sql);
+    }
   }
 
   private static long dbCount(String sql) throws Exception {

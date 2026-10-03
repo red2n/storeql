@@ -7,6 +7,8 @@ import '../../shared/widgets/status_badge.dart';
 import '../../shared/util/short_ref.dart';
 import 'markdown_providers.dart';
 import 'providers/admin_providers.dart';
+import '../../core/amount_entry.dart';
+import 'widgets/figure_field.dart';
 
 // ── Reduce to clear (05.4) and the ladder that plans it (03.9) ───────────────
 //
@@ -465,7 +467,17 @@ class _StickerDialog extends ConsumerStatefulWidget {
   ConsumerState<_StickerDialog> createState() => _StickerDialogState();
 }
 
+/// A percentage off: up to three whole digits and two places (NUMERIC(5,2)).
+const _percentShape = AmountShape(3, 2);
+
 class _StickerDialogState extends ConsumerState<_StickerDialog> {
+  // The packs (a quantity, three places), the percentage off and the sticker
+  // price (money in the batch's currency, to its places) are read the way the
+  // app's language writes a number ([AmountMarks]) and sent as the decimals
+  // typed. One that cannot be read is refused under its field and no sticker
+  // is issued: parsed with a point, Romanian's 2,5 packs were none at all.
+  final _marks = AmountMarks.ofApp();
+  late final _priceShape = AmountShape.money(widget.suggestion.currency);
   late final TextEditingController _qty;
   late final TextEditingController _percent;
   final _price = TextEditingController();
@@ -478,9 +490,11 @@ class _StickerDialogState extends ConsumerState<_StickerDialog> {
   void initState() {
     super.initState();
     final s = widget.suggestion;
-    _qty = TextEditingController(text: _qty0(s.remainingQty));
+    // Written the way the app's language writes a number, never rounded, so
+    // they read back unchanged: 2,5 packs left in Romanian stays 2,5.
+    _qty = TextEditingController(text: _marks.writeAt(s.remainingQty, 0));
     _percent = TextEditingController(
-      text: s.percentOff == null ? '' : s.percentOff!.toStringAsFixed(0),
+      text: s.percentOff == null ? '' : _marks.writeAt(s.percentOff!, 0),
     );
   }
 
@@ -495,12 +509,19 @@ class _StickerDialogState extends ConsumerState<_StickerDialog> {
     super.dispose();
   }
 
+  bool get _refused => figureRefused(_marks, [
+        (_qty, AmountShape.quantity),
+        (_percent, _percentShape),
+        (_price, _priceShape),
+      ]);
+
   Future<void> _submit() async {
     final s = widget.suggestion;
-    final qty = double.tryParse(_qty.text.trim());
-    final percent = double.tryParse(_percent.text.trim());
-    final price = double.tryParse(_price.text.trim());
-    if (qty == null || qty <= 0) {
+    if (_refused) return;
+    final qty = figureOf(_qty, AmountShape.quantity, _marks);
+    final percent = figureOf(_percent, _percentShape, _marks);
+    final price = figureOf(_price, _priceShape, _marks);
+    if (qty == null || qty == '0') {
       setState(() => _error = 'How many packs are being stickered?');
       return;
     }
@@ -600,40 +621,39 @@ class _StickerDialogState extends ConsumerState<_StickerDialog> {
                 style: TextStyle(color: cs.primary),
               ),
             const SizedBox(height: 12),
-            TextField(
-              key: const Key('markdown-qty'),
+            FigureField(
+              fieldKey: const Key('markdown-qty'),
               controller: _qty,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              decoration: const InputDecoration(labelText: 'Packs to sticker'),
+              shape: AmountShape.quantity,
+              marks: _marks,
+              label: 'Packs to sticker',
+              onChanged: (_) => setState(() {}),
             ),
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: TextField(
-                    key: const Key('markdown-percent'),
+                  child: FigureField(
+                    fieldKey: const Key('markdown-percent'),
                     controller: _percent,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: const InputDecoration(labelText: '% off'),
+                    shape: _percentShape,
+                    marks: _marks,
+                    label: '% off',
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
                 const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 8),
+                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 16),
                   child: Text('or'),
                 ),
                 Expanded(
-                  child: TextField(
-                    key: const Key('markdown-price'),
+                  child: FigureField(
+                    fieldKey: const Key('markdown-price'),
                     controller: _price,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: const InputDecoration(
-                      labelText: 'Sticker price',
-                    ),
+                    shape: _priceShape,
+                    marks: _marks,
+                    label: 'Sticker price',
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
               ],
@@ -663,7 +683,7 @@ class _StickerDialogState extends ConsumerState<_StickerDialog> {
         ),
         FilledButton(
           key: const Key('markdown-confirm'),
-          onPressed: _busy ? null : _submit,
+          onPressed: _busy || _refused ? null : _submit,
           child: _busy
               ? const SizedBox(
                   width: 16,
@@ -795,17 +815,31 @@ class _LadderDialogState extends ConsumerState<_LadderDialog> {
       for (final s in l.steps)
         (
           TextEditingController(text: s.daysToExpiry.toString()),
-          TextEditingController(text: s.percentOff.toStringAsFixed(0)),
+          TextEditingController(text: _marks.writeAt(s.percentOff, 0)),
         ),
     ];
   }
 
+  /// Each step's days to expiry (a whole number) and percentage off, read
+  /// the way the app's language writes a number ([AmountMarks]); one that
+  /// cannot be read is refused under it. Read as a number literal, `0x05`
+  /// days was saved as five.
+  final _marks = AmountMarks.ofApp();
+  bool get _refused => figureRefused(_marks, [
+        for (final r in _rows ?? const []) ...[
+          (r.$1, wholeNumber),
+          (r.$2, _percentShape),
+        ],
+      ]);
+
   Future<void> _save() async {
+    if (_refused) return;
     final steps = <MarkdownStep>[];
     for (final r in _rows!) {
-      final d = int.tryParse(r.$1.text.trim());
-      final p = double.tryParse(r.$2.text.trim());
-      if (d == null || d < 0 || p == null || p <= 0 || p > 100) {
+      final d = wholeOf(r.$1, _marks);
+      final plain = figureOf(r.$2, _percentShape, _marks);
+      final p = plain == null ? null : double.parse(plain);
+      if (d == null || p == null || p <= 0 || p > 100) {
         setState(
           () => _error =
               'Each step needs days (0 or more) and a percentage off (1–100).',
@@ -871,22 +905,24 @@ class _LadderDialogState extends ConsumerState<_LadderDialog> {
                   Row(
                     children: [
                       Expanded(
-                        child: TextField(
-                          key: Key('ladder-days-$i'),
+                        child: FigureField(
+                          fieldKey: Key('ladder-days-$i'),
                           controller: _rows![i].$1,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            labelText: 'Days to expiry',
-                          ),
+                          shape: wholeNumber,
+                          marks: _marks,
+                          label: 'Days to expiry',
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
-                        child: TextField(
-                          key: Key('ladder-percent-$i'),
+                        child: FigureField(
+                          fieldKey: Key('ladder-percent-$i'),
                           controller: _rows![i].$2,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(labelText: '% off'),
+                          shape: _percentShape,
+                          marks: _marks,
+                          label: '% off',
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                       IconButton(
@@ -934,7 +970,7 @@ class _LadderDialogState extends ConsumerState<_LadderDialog> {
         ),
         FilledButton(
           key: const Key('ladder-save'),
-          onPressed: _busy || _rows == null ? null : _save,
+          onPressed: _busy || _rows == null || _refused ? null : _save,
           child: const Text('Save'),
         ),
       ],

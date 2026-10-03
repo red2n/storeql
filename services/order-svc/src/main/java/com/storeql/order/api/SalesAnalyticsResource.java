@@ -17,6 +17,8 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -53,7 +55,10 @@ public class SalesAnalyticsResource {
    * out in summer and an Indian one half an hour out all year. Only CONFIRMED and FULFILLED orders
    * count, and hours with no trade are absent rather than zero.
    *
-   * @param storeId restrict to one store, or {@code null}
+   * @param storeId a store that is named is checked against the caller's own (SJ-D74's {@code
+   *     reportStores}) and refused with {@code 403 STORE_ACCESS_DENIED} otherwise; with none named,
+   *     a caller held to no store reads the whole business and a caller held to some reads exactly
+   *     those, added together
    * @param channel restrict to {@code ONLINE} or {@code POS}, or {@code null} for both
    * @param from inclusive start as a full ISO-8601 instant, not a bare date
    * @param to exclusive end as a full ISO-8601 instant
@@ -61,7 +66,7 @@ public class SalesAnalyticsResource {
    * @return one row per hour that traded, earliest first
    * @throws com.storeql.web.ApiException {@code 400} for an unknown tz or channel, an unparseable
    *     timestamp, or {@code from} not before {@code to}; {@code 403} when the caller is not OWNER
-   *     or MANAGER
+   *     or MANAGER, or names a store they are not assigned to
    */
   @Operation(
       summary = "Takings by hour of the trading day",
@@ -78,6 +83,11 @@ public class SalesAnalyticsResource {
       responseCode = "400",
       description = "Unknown tz or channel, unparseable timestamp, or from is not before to")
   @APIResponse(responseCode = "403", description = "Caller is not OWNER or MANAGER")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, is neither projected here nor readable from tenant-svc")
   @GET
   @Path("/sales-by-hour")
   public Response salesByHour(
@@ -86,11 +96,13 @@ public class SalesAnalyticsResource {
       @QueryParam("from") String from,
       @QueryParam("to") String to,
       @QueryParam("tz") String tz) {
+    UUID requestedStore = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(requestedStore);
     List<SalesByHourRowResponse> rows =
         svc
             .salesByHour(
                 ctx.requireTenantId(),
-                Parsing.optionalUuid(storeId, "storeId"),
+                stores,
                 channel,
                 Parsing.optionalInstant(from, "from"),
                 Parsing.optionalInstant(to, "to"),
@@ -108,13 +120,17 @@ public class SalesAnalyticsResource {
    * cashier, and these totals will therefore not reconcile against the sales summary. {@code
    * UNATTRIBUTED} buckets journal entries naming nobody rather than dropping them.
    *
-   * @param storeId restrict to one store, or {@code null}
+   * @param storeId a store that is named is checked against the caller's own (SJ-D74's {@code
+   *     reportStores}) and refused with {@code 403 STORE_ACCESS_DENIED} otherwise; with none named,
+   *     a caller held to no store reads the whole business and a caller held to some reads exactly
+   *     those, added together
    * @param from inclusive start as a full ISO-8601 instant
    * @param to exclusive end as a full ISO-8601 instant
    * @param limit maximum rows; clamped to the resource's own bounds
    * @return one row per cashier, biggest taker first
    * @throws com.storeql.web.ApiException {@code 400} for an unparseable timestamp or storeId, or
-   *     {@code from} not before {@code to}; {@code 403} when the caller is not OWNER or MANAGER
+   *     {@code from} not before {@code to}; {@code 403} when the caller is not OWNER or MANAGER, or
+   *     names a store they are not assigned to
    */
   @Operation(
       summary = "Takings by member of staff",
@@ -129,6 +145,11 @@ public class SalesAnalyticsResource {
       responseCode = "400",
       description = "Unparseable timestamp or storeId, or from is not before to")
   @APIResponse(responseCode = "403", description = "Caller is not OWNER or MANAGER")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, is neither projected here nor readable from tenant-svc")
   @GET
   @Path("/sales-by-staff")
   public Response salesByStaff(
@@ -137,11 +158,13 @@ public class SalesAnalyticsResource {
       @QueryParam("to") String to,
       @QueryParam("limit") Integer limit) {
     int clamped = limit == null ? DEFAULT_LIMIT : Math.max(1, Math.min(MAX_LIMIT, limit));
+    UUID requestedStore = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(requestedStore);
     List<SalesByStaffRowResponse> rows =
         svc
             .salesByStaff(
                 ctx.requireTenantId(),
-                Parsing.optionalUuid(storeId, "storeId"),
+                stores,
                 Parsing.optionalInstant(from, "from"),
                 Parsing.optionalInstant(to, "to"),
                 clamped)

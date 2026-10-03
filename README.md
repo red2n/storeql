@@ -105,7 +105,7 @@ A business also defines **roles of its own** on those tiers, each holding fewer 
 Getting a new business onto the platform is deliberately a two-minute job, either self-serve or done for them:
 
 **Self-serve signup:**
-1. Create an account (email + password).
+1. **Start a business** from the sign-in card — email and password (the password rule shown before typing, then confirmed). This is the owner's own sign-up, not a shopper's: the new login holds no business and no role yet, so it goes straight into the setup wizard. (A shopper's *Create account* — on the card or in the shop — never does.)
 2. **Business details** — business name, optional legal/registered name, country (India, US, UK, Singapore, or UAE today), and currency (auto-suggested from the country, editable).
 3. **First store** — store name, a short store code, type (retail store or warehouse), address, city, postal code, country, and timezone.
 4. Done — the new Owner lands straight in their Admin Console, with a working store already in place.

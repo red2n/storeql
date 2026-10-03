@@ -76,6 +76,10 @@ public final class Domain {
 
   public static final String SOURCE_SALE_TENDER = "SALE_TENDER";
   public static final String SOURCE_SALE_REFUND = "SALE_REFUND";
+
+  /** A return with no receipt, refunded to store credit or a gift card by order-svc's own event. */
+  public static final String SOURCE_NO_RECEIPT_RETURN = "NO_RECEIPT_RETURN";
+
   // Chargebacks (11.9): the acquirer taking a card payment back, and how the argument ended.
   public static final String SOURCE_CHARGEBACK = "CHARGEBACK";
   // A payout reconciled against the acquirer's settlement file (11.10): clearing to bank.
@@ -93,6 +97,11 @@ public final class Domain {
   public static final String NAME_CASH_IN_TILLS = "Cash in Tills";
   public static final String CODE_CARD_CLEARING = "1250";
   public static final String NAME_CARD_CLEARING = "Card and Wallet Clearing";
+
+  /** The returned value of an exchange, paying the new basket: refund credits it, tender debits. */
+  public static final String CODE_EXCHANGE_CLEARING = "1260";
+
+  public static final String NAME_EXCHANGE_CLEARING = "Exchange Clearing";
   public static final String CODE_UNALLOCATED_RECEIPTS = "1299";
   public static final String NAME_UNALLOCATED_RECEIPTS = "Unallocated Receipts";
   public static final String CODE_GIFT_CARD_LIABILITY = "2310";
@@ -1007,7 +1016,8 @@ public final class Domain {
       Instant setAt) {
 
     public DeferredRevenue.Settings estimates() {
-      return new DeferredRevenue.Settings(pointValue, pointsBreakagePct, giftCardBreakagePct);
+      return new DeferredRevenue.Settings(
+          pointValue, pointsBreakagePct, giftCardBreakagePct, currency);
     }
   }
 
@@ -1027,6 +1037,9 @@ public final class Domain {
 
     /** Points that died under the programme's expiry rule (13.x): a lapse, announced. */
     public static final String EXPIRED = "EXPIRED";
+
+    /** Points taken back because the sale that earned them was returned or voided. */
+    public static final String REVERSED = "REVERSED";
   }
 
   /** A gift card issued or reloaded, as order-svc announced it (17.11). */
@@ -1038,7 +1051,35 @@ public final class Domain {
       String kind,
       String paidBy,
       BigDecimal amount,
-      String currency) {}
+      String currency,
+      UUID orderId,
+      String source,
+      String note) {
+
+    /** A load whose event named no order, source or note (before order-svc sent them). */
+    public GiftCardLoad(
+        UUID tenantId,
+        UUID transactionId,
+        UUID giftCardId,
+        UUID storeId,
+        String kind,
+        String paidBy,
+        BigDecimal amount,
+        String currency) {
+      this(
+          tenantId,
+          transactionId,
+          giftCardId,
+          storeId,
+          kind,
+          paidBy,
+          amount,
+          currency,
+          null,
+          null,
+          null);
+    }
+  }
 
   /** Where deferred revenue stands for a tenant (17.11). */
   public record DeferredRevenueView(

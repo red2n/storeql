@@ -9,6 +9,7 @@ import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/status_badge.dart';
+import '../auth/my_sessions.dart';
 import 'storefront_providers.dart';
 import 'storefront_shell.dart' show StorefrontAuthDialog;
 
@@ -461,6 +462,12 @@ class _StorefrontAccountScreenState extends ConsumerState<StorefrontAccountScree
                         ),
                       ],
                     ),
+            ),
+            // Where this login is signed in, whether or not the shop holds a record yet.
+            const SizedBox(height: AppSpacing.xl),
+            MySessionsCard(
+              dio: ref.watch(storefrontDioProvider),
+              accessToken: auth.accessToken,
             ),
           ],
         ),

@@ -1,10 +1,10 @@
 package com.storeql.order.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.service.TenantStatusRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;

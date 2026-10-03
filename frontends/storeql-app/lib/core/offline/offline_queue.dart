@@ -172,6 +172,38 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
     }
   }
 
+  /// Replay now the sales waiting for [orderIds], whatever is ahead of them
+  /// in line — and nothing else.
+  ///
+  /// A card machine with an approval nobody has recorded takes no other card
+  /// (payment-svc's 409 TERMINAL_UNSETTLED_APPROVAL), and the sale queued here
+  /// for that order is what records it. Left to its turn it would wait behind
+  /// any sale that cannot be sent yet, and the machine with it. Each sale's
+  /// keys are its own, so sending one out of turn changes nothing for the
+  /// rest. A parked sale is not sent: a person has to say so ([retry]).
+  Future<void> syncOrders(Set<String> orderIds) async {
+    await _ready;
+    if (_syncing || orderIds.isEmpty) return;
+    _syncing = true;
+    try {
+      final ids = [
+        for (final s in state)
+          if (orderIds.contains(s.orderId) &&
+              s.status != OfflineSaleStatus.failed)
+            s.id,
+      ];
+      for (final id in ids) {
+        final sale = state.where((s) => s.id == id).firstOrNull;
+        if (sale == null || sale.status == OfflineSaleStatus.failed) continue;
+        final outcome = await _replay(sale);
+        if (outcome == _Outcome.unreachable) break;
+      }
+    } finally {
+      _syncing = false;
+      _scheduleNext();
+    }
+  }
+
   Future<_Outcome> _replay(OfflineSale sale) async {
     final dio = _ref.read(apiClientProvider).dio;
     var current = sale.copyWith(attempts: sale.attempts + 1);
@@ -180,10 +212,27 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
     try {
       // 1. Place the order. Replays on the stored key: order-svc returns the
       //    original order for a duplicate rather than creating a second one.
+      //    It says when the cashier rang it up, and within order-svc's grace
+      //    the sale is recorded whatever the recalls and scales say — its goods
+      //    have gone — with anything that was wrong then flagged for a manager
+      //    on the audit trail. Only a sale older than the grace comes back
+      //    refused, and is parked (see isPermanentRejection).
       if (current.orderId == null) {
+        final capturedAt = current.capturedAt;
         final resp = await dio.post(
           '/${ApiConstants.order}/orders',
-          data: current.orderRequest,
+          data: {
+            ...current.orderRequest,
+            // A capture time that could not be read back is sent as none,
+            // never as now: the server then judges the sale as made now —
+            // refused over a recall that stands, and parked for a manager —
+            // rather than taking an invented moment on the till's word.
+            if (capturedAt != null)
+              'capturedAt': capturedAt.toUtc().toIso8601String(),
+            // Who rang it up, as the till recorded at the sale: whoever is
+            // signed in now may not be the cashier who made it.
+            if (current.rungUpBy != null) 'rungUpBy': current.rungUpBy,
+          },
           options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'order')}),
         );
         final order = resp.data['data'] as Map<String, dynamic>;
@@ -191,26 +240,39 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
         await _replace(current);
       }
 
-      // 2. Record each tender, then redeem any gift card it drew on. The redeem
-      //    is second so a card is never debited for a tender that did not land.
+      // 2. Take each tender. A gift card is charged through its redeem, on a
+      //    key derived from the sale and the tender's position, and the server
+      //    records the GIFT_CARD tender from that charge: no payment is posted
+      //    for it. Any other tender is a payment on its own key.
       for (var i = 0; i < current.tenders.length; i++) {
         final t = current.tenders[i];
-        if (!t.tenderDone) {
-          await dio.post(
-            '/${ApiConstants.payment}/payments',
-            data: {...t.body, 'orderId': current.orderId},
-            options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'pay:$i')}),
-          );
+        final code = t.giftCardCode;
+        if (code != null) {
+          if (!t.redeemDone) {
+            await dio.post(
+              '/${ApiConstants.order}/gift-cards/$code/redeem',
+              data: {'amount': t.amount, 'orderId': current.orderId},
+              options: Options(
+                  headers: {'Idempotency-Key': derivedId(current.id, 'gift:$i')}),
+            );
+            current = current.markTender(i, tenderDone: true, redeemDone: true);
+            await _replace(current);
+          }
+        } else if (!t.tenderDone) {
+          try {
+            await dio.post(
+              '/${ApiConstants.payment}/payments',
+              data: {...t.body, 'orderId': current.orderId},
+              options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'pay:$i')}),
+            );
+          } catch (e) {
+            // The card machine's approval this tender names is already
+            // recorded on its order, under another key: that is this tender
+            // recorded, so the sale goes on to what it still owes. Anything
+            // else is judged below.
+            if (!cardApprovalAlreadyRecorded(e, t.body)) rethrow;
+          }
           current = current.markTender(i, tenderDone: true);
-          await _replace(current);
-        }
-        final code = current.tenders[i].giftCardCode;
-        if (code != null && !current.tenders[i].redeemDone) {
-          await dio.post(
-            '/${ApiConstants.order}/gift-cards/$code/redeem',
-            data: {'amount': current.tenders[i].amount, 'orderId': current.orderId},
-          );
-          current = current.markTender(i, redeemDone: true);
           await _replace(current);
         }
       }

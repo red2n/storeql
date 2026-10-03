@@ -206,8 +206,8 @@ class CommissionStatementIT {
       if (supply) {
         try (PreparedStatement ps =
             c.prepareStatement(
-                "UPDATE order_status_history SET changed_at = changed_at -"
-                    + " make_interval(days => ?) WHERE tenant_id = ?::uuid AND order_id = ?::uuid")) {
+                "UPDATE order_status_history SET changed_at = changed_at - make_interval(days => ?)"
+                    + " WHERE tenant_id = ?::uuid AND order_id = ?::uuid")) {
           ps.setInt(1, days);
           ps.setString(2, tenant);
           ps.setString(3, orderId);
@@ -322,7 +322,7 @@ class CommissionStatementIT {
                 "/orders/" + order + "/returns",
                 "{\"reason\":\"Changed their mind\",\"items\":[{\"variantId\":\""
                     + V_STD
-                    + "\",\"qty\":1}]}",
+                    + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
                 T);
     assertThat(refunded.readEntity(String.class), refunded.getStatus(), is(201));
     refunded(T, order, 303);
@@ -423,13 +423,18 @@ class CommissionStatementIT {
   @DisplayName("Nothing is produced when the arrangements cannot be read")
   void failsClosed() {
     sold(T, S, ALICE, 609);
+    // Every test here trades in the same business and leaves its drafts, so "none" is judged
+    // against what stood before, not against zero.
+    int before = statements(T, "status", "DRAFT").size();
     TENANTS.ratingDown(true);
     try {
       Response refused = draft(T, day(612), day(608), null);
       assertThat(refused.getStatus(), is(503));
       assertThat(code(refused), is("COMMISSION_RATES_UNAVAILABLE"));
       assertThat(
-          "no half-made statement is left behind", statements(T, "status", "DRAFT").size(), is(0));
+          "no half-made statement is left behind",
+          statements(T, "status", "DRAFT").size(),
+          is(before));
     } finally {
       TENANTS.ratingDown(false);
     }
@@ -462,9 +467,17 @@ class CommissionStatementIT {
     // Another business's statements are not there at all.
     sold(T, S, ALICE, 711);
     String id = drafted(T, day(713), day(710), null).getString("id");
-    assertThat(
-        till(MANAGER).get("/admin/commission/statements/" + id, T_OTHER).getStatus(), is(404));
+    Response unseen = till(MANAGER).get("/admin/commission/statements/" + id, T_OTHER);
+    assertThat(unseen.getStatus(), is(404));
+    assertThat(code(unseen), is("COMMISSION_STATEMENT_NOT_FOUND"));
     assertThat(statements(T_OTHER).size(), is(0));
+
+    // A restatement naming a statement nobody drafted finds none, and drafts nothing.
+    int standing = statements(T).size();
+    Response unknown = draft(T, day(1105), day(1100), "\"supersedes\":\"" + Ids.newId() + "\"");
+    assertThat(unknown.getStatus(), is(404));
+    assertThat(code(unknown), is("COMMISSION_STATEMENT_NOT_FOUND"));
+    assertThat(statements(T).size(), is(standing));
     // Nor can another business re-credit this one's sale.
     String order = sold(T, S, ALICE, 712);
     Response theirs =
@@ -475,6 +488,62 @@ class CommissionStatementIT {
                 T_OTHER,
                 "OWNER");
     assertThat(theirs.getStatus(), is(404));
+  }
+
+  @Test
+  @DisplayName("Only an approved statement can be restated; a draft cannot be named as replaced")
+  void onlyAnApprovedStatementCanBeRestated() {
+    sold(T, S, ALICE, 1000);
+    String draftId = drafted(T, day(1005), day(995), null).getString("id");
+    int before = statements(T).size();
+    Response restate = draft(T, day(1005), day(995), "\"supersedes\":\"" + draftId + "\"");
+    assertThat(restate.getStatus(), is(409));
+    assertThat(code(restate), is("COMMISSION_STATEMENT_NOT_STANDING"));
+    assertThat(statements(T).size(), is(before));
+    assertThat(statement(T, draftId).getString("status"), is("DRAFT"));
+  }
+
+  @Test
+  @DisplayName("A store, a statement or a seller that is not an id is refused and nothing changes")
+  void anIdThatIsNotAnIdIsRefused() {
+    String order = sold(T, S, ALICE, 1010);
+    int before = statements(T).size();
+
+    Response storeInBody = draft(T, day(1015), day(1005), "\"storeId\":\"not-an-id\"");
+    assertThat(storeInBody.getStatus(), is(400));
+    assertThat(code(storeInBody), is("COMMISSION_ID_INVALID"));
+    Response supersedes = draft(T, day(1015), day(1005), "\"supersedes\":\"not-an-id\"");
+    assertThat(supersedes.getStatus(), is(400));
+    assertThat(code(supersedes), is("COMMISSION_ID_INVALID"));
+    Response storeInQuery =
+        till(MANAGER).get("/admin/commission/statements", T, "storeId", "not-an-id");
+    assertThat(storeInQuery.getStatus(), is(400));
+    assertThat(code(storeInQuery), is("COMMISSION_ID_INVALID"));
+    assertThat(statements(T).size(), is(before));
+
+    Response seller =
+        till(MANAGER)
+            .put(
+                "/admin/commission/sales/" + order + "/seller",
+                "{\"sellerUserId\":\"nope\",\"reason\":\"typo\"}",
+                T,
+                "OWNER");
+    assertThat(seller.getStatus(), is(400));
+    assertThat(code(seller), is("COMMISSION_ID_INVALID"));
+    assertThat(order(T, order).getString("sellerUserId"), is(ALICE));
+  }
+
+  @Test
+  @DisplayName("A till sale naming a seller that is not an id is refused and nothing is placed")
+  void aSellerThatIsNotAnIdIsRefused() {
+    String body = basket(S, null, "GBP", V_STD, "1");
+    body = body.substring(0, body.length() - 1) + ",\"sellerUserId\":\"alice\"}";
+    String count = "SELECT count(*) FROM \"order\".orders WHERE tenant_id = '" + T + "'";
+    String before = com.storeql.test.Envelopes.scalar(PG, count);
+    Response refused = till(MANAGER).post("/orders", body, T);
+    assertThat(refused.getStatus(), is(400));
+    assertThat(code(refused), is("ORDER_SELLER_INVALID"));
+    assertThat(com.storeql.test.Envelopes.scalar(PG, count), is(before));
   }
 
   @Test
@@ -533,5 +602,95 @@ class CommissionStatementIT {
   void tillCreditsItsOperator() {
     String order = sold(T, S, null, 908);
     assertThat(order(T, order).getString("sellerUserId"), is(MANAGER));
+  }
+
+  @Inject com.storeql.order.repo.CommissionRepository commissions;
+
+  /**
+   * A per-unit band's threshold is a count of units and is kept as rated — a fractional one from
+   * before whole units were required (2.125) is not rounded to whole yen, and 100.000 units are not
+   * money — and a line translated from the arrangement's currency says so, with what it earned
+   * there. Written through the repository, as the service writes a rated draft; read back over
+   * HTTP, as a manager reads it.
+   */
+  @Test
+  @DisplayName("A per-unit threshold is kept as rated, and a translated line names its currency")
+  void aPerUnitThresholdIsKeptAsRatedAndATranslatedLineNamesItsCurrency() {
+    java.util.UUID tenant = Ids.parse(T);
+    java.util.UUID statementId = Ids.newId();
+    java.util.UUID scheme = Ids.newId();
+    LocalDate from = LocalDate.of(2020, 1, 1);
+    LocalDate to = LocalDate.of(2020, 1, 31);
+    java.util.function.Function<String[], com.storeql.order.domain.SalesAttribution.StatementLine>
+        line =
+            f ->
+                new com.storeql.order.domain.SalesAttribution.StatementLine(
+                    Ids.newId(),
+                    tenant,
+                    statementId,
+                    Ids.parse(ALICE),
+                    scheme,
+                    "per tin",
+                    from,
+                    to,
+                    new java.math.BigDecimal(f[0]),
+                    new java.math.BigDecimal("0.10"),
+                    new java.math.BigDecimal(f[1]),
+                    new java.math.BigDecimal(f[2]),
+                    "EUR",
+                    new java.math.BigDecimal(f[3]));
+    commissions.record(
+        new com.storeql.order.domain.SalesAttribution.Statement(
+            statementId,
+            tenant,
+            null,
+            from,
+            to,
+            "JPY",
+            com.storeql.order.domain.SalesAttribution.DRAFT,
+            new java.math.BigDecimal("15000"),
+            new java.math.BigDecimal("2421"),
+            null,
+            null,
+            null,
+            java.time.Instant.now(),
+            Ids.parse(MANAGER),
+            null,
+            null,
+            List.of(
+                line.apply(new String[] {"0.000", "2.125", "34", "0.21"}),
+                line.apply(new String[] {"2.125", "97.875", "1580", "9.79"}),
+                line.apply(new String[] {"100.000", "50.000", "807", "5.00"}))));
+
+    JsonObject read = statement(T, statementId.toString());
+    assertThat(read.getString("currency"), is("JPY"));
+    List<JsonObject> lines = read.getJsonArray("lines").getValuesAs(JsonObject.class);
+    assertThat(lines, hasSize(3));
+    assertThat(lines.get(0).getString("thresholdFrom"), is("0.000"));
+    assertThat("never whole yen", lines.get(1).getString("thresholdFrom"), is("2.125"));
+    assertThat(lines.get(2).getString("thresholdFrom"), is("100.000"));
+    assertThat(lines.get(1).getString("commission"), is("1580"));
+    assertThat(lines.get(1).getString("rateCurrency"), is("EUR"));
+    assertThat(lines.get(1).getString("ratedCommission"), is("9.79"));
+    // The columns hold it as written: no scale of the statement's currency imposed.
+    try (Connection c = PG.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                // The table alias keeps ORDER BY on the numeric column: a bare name would resolve
+                // to the ::text output column of the same name and sort "100.000" before "2.125".
+                "SELECT l.threshold_from::text, l.rate_currency, l.rated_commission::text FROM"
+                    + " \"order\".commission_statement_lines l WHERE l.statement_id = ?"
+                    + " ORDER BY l.threshold_from")) {
+      ps.setObject(1, statementId);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        rs.next();
+        assertThat(rs.getString(1), is("2.125"));
+        assertThat(rs.getString(2), is("EUR"));
+        assertThat(rs.getString(3), is("9.79"));
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException(e);
+    }
   }
 }

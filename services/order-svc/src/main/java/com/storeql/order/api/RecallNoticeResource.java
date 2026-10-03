@@ -104,19 +104,28 @@ public class RecallNoticeResource {
   }
 
   /**
-   * A recall's notices, newest first, cursor-paginated. Staff only.
+   * A recall's notices, or one order's, newest first, cursor-paginated. Staff only.
    *
-   * @param recallId the recall (query parameter, required)
+   * @param recallId the recall (query parameter); required unless {@code orderId} is given
+   * @param orderId the order (query parameter): its notices, so a return dialog can offer to settle
+   *     one; only notices at stores the caller keeps are returned
    * @param status restrict to one status (query parameter)
    */
   @Operation(
-      summary = "List a recall's notices to buyers",
-      description = "Every order the recall reached and how far each buyer has got. Staff only.")
+      summary = "List recall notices, by recall or by order",
+      description =
+          "Every order a recall reached and how far each buyer has got (recallId), or the notices"
+              + " issued against one order (orderId), across recalls; either or both. Asked by"
+              + " order, only notices at the caller's stores are returned: another business's"
+              + " order, or one at a store the caller is not held to, gives an empty list. Staff"
+              + " only.")
   @APIResponse(responseCode = "200", description = "The notices")
+  @APIResponse(responseCode = "400", description = "Neither recallId nor orderId was given")
   @APIResponse(responseCode = "403", description = "Not a member of staff")
   @GET
   public ApiResponse<List<NoticeResponse>> list(
       @QueryParam("recallId") String recallId,
+      @QueryParam("orderId") String orderId,
       @QueryParam("status") String status,
       @QueryParam("after") String after,
       @QueryParam("limit") Integer limit) {
@@ -124,7 +133,9 @@ public class RecallNoticeResource {
     var page =
         service.list(
             ctx.requireTenantId(),
-            Parsing.uuid(recallId, "recallId"),
+            recallId == null || recallId.isBlank() ? null : Parsing.uuid(recallId, "recallId"),
+            orderId == null || orderId.isBlank() ? null : Parsing.uuid(orderId, "orderId"),
+            ctx.storeIds(),
             parseStatus(status),
             after,
             limit);
@@ -160,8 +171,9 @@ public class RecallNoticeResource {
    *
    * @param id the notice
    * @param req the resolution and notes
-   * @throws com.storeql.web.ApiException {@code 400} REFUNDED here; {@code 404} no such notice;
-   *     {@code 409} already settled
+   * @throws com.storeql.web.ApiException {@code 400} REFUNDED here; {@code 403} staff held to other
+   *     stores than the notice's ({@code STORE_ACCESS_DENIED}); {@code 404} no such notice; {@code
+   *     409} already settled
    */
   @Operation(
       summary = "Settle a notice",
@@ -170,6 +182,7 @@ public class RecallNoticeResource {
               + " recorded through POST /orders/{id}/returns naming the notice. Staff only.")
   @APIResponse(responseCode = "200", description = "The settled notice")
   @APIResponse(responseCode = "400", description = "A refund belongs on a return")
+  @APIResponse(responseCode = "403", description = "Staff not held to the notice's store")
   @APIResponse(responseCode = "404", description = "No such notice")
   @APIResponse(responseCode = "409", description = "Already settled")
   @POST
@@ -183,7 +196,8 @@ public class RecallNoticeResource {
             Parsing.uuid(id, "id"),
             ctx.requireUserId(),
             Resolution.valueOf(req.resolution()),
-            req.notes());
+            req.notes(),
+            ctx);
     return ApiResponse.ok(
         RecallNoticeMappers.toNotice(detail), ApiResponse.Meta.of(ctx.requestId()));
   }

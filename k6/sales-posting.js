@@ -91,9 +91,9 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   truthy('[+] ...and the order leaves the clearing report', poll(60, () => !(open() || []).some((o) => o.orderId === partial.id)) >= 0);
 
   // ── refusals ─────────────────────────────────────────────────────────────────
-  expect(call('GET', `${LEDGER}/sales-clearing`, { token: storekeeper.token }), '[-] a storekeeper cannot read the clearing report', 403);
-  expect(call('GET', `${LEDGER}/sales-clearing`, { token: cashier.token }), '[-] nor a cashier', 403);
-  expect(call('GET', `${LEDGER}/sales-clearing?storeId=not-a-store`, { token: owner }), '[-] a store that is not an id is refused', 400);
+  expect(call('GET', `${LEDGER}/sales-clearing`, { token: storekeeper.token }), '[-] a storekeeper cannot read the clearing report', 403, 'FORBIDDEN');
+  expect(call('GET', `${LEDGER}/sales-clearing`, { token: cashier.token }), '[-] nor a cashier', 403, 'FORBIDDEN');
+  expect(call('GET', `${LEDGER}/sales-clearing?storeId=not-a-store`, { token: owner }), '[-] a store that is not an id is refused', 400, 'INVALID_UUID');
   truthy('[-] a rival tenant\'s ledger has none of this sale', linesFor(sale.id, rival.owner.token).length === 0);
   truthy('[-] ...nor its clearing report', (open(rival.owner.token) || []).length === 0);
 

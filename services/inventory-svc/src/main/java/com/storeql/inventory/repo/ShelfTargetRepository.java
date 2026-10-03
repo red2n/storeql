@@ -2,6 +2,7 @@ package com.storeql.inventory.repo;
 
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.time.Instant;
@@ -19,6 +20,8 @@ import java.util.UUID;
  */
 @ApplicationScoped
 public class ShelfTargetRepository extends BaseJdbcRepository {
+
+  @Inject ExpiryDay expiryDay;
 
   /** One fixture's worth of targets, as the event delivered them. */
   public record Target(UUID variantId, int capacity, int minPresentation) {}
@@ -173,7 +176,7 @@ public class ShelfTargetRepository extends BaseJdbcRepository {
    * stock at all still appears: an empty bay is the case the report exists for, and it has no batch
    * rows.
    */
-  private static final String GAP_REPORT =
+  private static final String GAP_REPORT_TEMPLATE =
       """
       SELECT t.store_id, t.variant_id,
              SUM(t.capacity)::int AS capacity,
@@ -182,7 +185,8 @@ public class ShelfTargetRepository extends BaseJdbcRepository {
       FROM shelf_targets t
       LEFT JOIN (
           SELECT b.store_id, b.variant_id,
-                 COALESCE(SUM(b.remaining_qty),0) - COALESCE(MAX(res.reserved),0) AS available
+                 COALESCE(SUM(b.remaining_qty) FILTER (WHERE {SELLABLE}),0)
+                   - COALESCE(MAX(res.reserved),0) AS available
           FROM inventory_batches b
           LEFT JOIN (
               SELECT store_id, variant_id, SUM(qty) AS reserved
@@ -200,7 +204,7 @@ public class ShelfTargetRepository extends BaseJdbcRepository {
   /** The shelf-gap report for one store, deepest gap first. */
   public List<ShelfGap> gaps(UUID tenantId, UUID storeId, int limit) {
     return query(
-        GAP_REPORT,
+        GAP_REPORT_TEMPLATE.replace("{SELLABLE}", expiryDay.of(tenantId).sellableSql("b")),
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, tenantId);

@@ -16,8 +16,11 @@
 //
 // Refused: an unknown priority, an expiry that is not an instant, one before publication, a store nobody
 // holds, a blank title, withdrawing without a reason or twice, acknowledging twice, acknowledging what
-// is withdrawn or not addressed to you, a cashier publishing or reading the reach, somebody not on the
-// store's staff acknowledging, another business seeing or acknowledging any of it, and nobody at all.
+// is withdrawn or not addressed to you, a cashier publishing or reading the reach, a login held to one
+// store acknowledging at another, another business seeing or acknowledging any of it, and nobody at all.
+// An owner (held to no store) reads and acknowledges at any store without an assignment there, as they
+// work any store's task list; staff below management are held to where they are assigned (409
+// WORKFORCE_NOT_ASSIGNED, proved by BroadcastIT, since every k6 staff login names its stores).
 //
 //   k6/run.sh broadcast-flow
 import { Counter } from 'k6/metrics';
@@ -96,12 +99,25 @@ export default function ({ shop, second, cashierB, rival }) {
   expect(post(ADMIN, { title: '', body: 'y', priority: 'INFO' }), '[-] a blank title is refused', 400);
   expect(post(ADMIN, { title: 'Sneak', body: 'y', priority: 'URGENT' }, cashier.token), '[-] a cashier does not publish', 403);
   expect(get(`${ADMIN}/${notice.id}/reach`, cashier.token), '[-] nor reads the reach', 403);
-  // A store-scoped token is refused at the door before the service looks; a management token with
-  // no store scope gets as far as the staff list, and is refused there.
+  // A store-scoped token is refused at the store it is not held to. An owner is held to no store and
+  // acts at any store of the business, as on the task list (intent/workforce-rules.md, "Notices are
+  // worked as the task list is"): the every-store notice reaches them at the second store too.
   expect(ack(shop.storekeeper, notice.id, second.id), '[-] a store-scoped login does not acknowledge at another store', 403, 'STORE_ACCESS_DENIED');
-  expect(ack({ token: owner }, notice.id, second.id), '[-] somebody not on that store\'s staff does not acknowledge its notices', 409, 'WORKFORCE_NOT_ASSIGNED');
-  expect(get(`${ADMIN}/${notice.id}`, rival.owner.token), '[abuse] another business does not see the notice', 404);
-  expect(call('POST', `${READ}/${notice.id}/acknowledgement`, { token: rival.owner.token, body: { storeId: rival.stores[0].id } }), '[abuse] nor acknowledges it', 404);
+  truthy('[+] the owner, assigned nowhere, reads the second store\'s notices', mine({ token: owner }, second.id).some((n) => n.id === notice.id), 'owner reads');
+  expect(ack({ token: owner }, notice.id, second.id), '[+] ...and acknowledges the every-store notice there without an assignment', 201);
+  const atBAfter = data(get(`${ADMIN}/${notice.id}/reach`)).find((r) => r.storeId === second.id);
+  truthy(
+    "[+] ...but the second store's reach still counts only its own staff: head office reading it is not the branch reading it",
+    atBAfter && atBAfter.addressed === 1 && atBAfter.acknowledged === 0 && atBAfter.outstanding.join() === cashierB.userId,
+    atBAfter,
+  );
+  expect(ack({ token: owner }, keepers.id, storeA), '[-] the owner is addressed by their own tier, never taken for the storekeepers', 409, 'BROADCAST_NOT_ADDRESSED');
+  expect(get(`${ADMIN}/${notice.id}`, rival.owner.token), '[abuse] another business does not see the notice', 404, 'BROADCAST_NOT_FOUND');
+  expect(call('POST', `${READ}/${notice.id}/acknowledgement`, { token: rival.owner.token, body: { storeId: rival.stores[0].id } }), '[abuse] nor acknowledges it', 404, 'BROADCAST_NOT_FOUND');
+  // The store is judged before the caller: another business naming our store is told it does not
+  // exist, never that it is not theirs (intent/workforce-rules.md, "A store is judged in one order").
+  expect(get(`${READ}?storeId=${storeA}`, rival.owner.token), "[abuse] nor reads our store's notices, which is no store of theirs", 404, 'STORE_NOT_FOUND');
+  expect(post(ADMIN, { title: 'x', body: 'y', priority: 'INFO', storeId: storeA }, rival.owner.token), '[abuse] nor publishes to our store', 404, 'STORE_NOT_FOUND');
   expect(call('GET', `${READ}?storeId=${storeA}`, {}), '[abuse] nobody at all is refused at the door', 401);
 
   completed.add(1);

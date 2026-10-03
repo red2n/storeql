@@ -5,6 +5,7 @@ import com.storeql.iam.auth.Passwords;
 import com.storeql.iam.auth.Tokens;
 import com.storeql.iam.client.MqttSessionRevoker;
 import com.storeql.iam.config.ServiceConfig;
+import com.storeql.iam.domain.PasswordReset;
 import com.storeql.iam.domain.TokenIdentity;
 import com.storeql.iam.domain.User;
 import com.storeql.iam.dto.Dtos.ProvisionStaffResponse;
@@ -14,6 +15,7 @@ import com.storeql.iam.repo.SsoRepository;
 import com.storeql.iam.repo.UserRepository;
 import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
+import com.storeql.service.TenantProfiles;
 import com.storeql.service.TenantStatusRepository;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -42,9 +44,11 @@ public class AuthService {
   @Inject UserRepository users;
   @Inject RefreshTokenRepository refreshTokens;
   @Inject MqttSessionRevoker mqttSessions;
+  @Inject com.storeql.iam.config.ClientInfo clientInfo;
   @Inject TenantStatusRepository tenantStatus;
   @Inject MfaService mfa;
   @Inject SsoRepository sso;
+  @Inject TenantProfiles tenantProfiles;
 
   /** RFC 8176's name for a password. */
   public static final String AMR_PASSWORD = "pwd";
@@ -59,7 +63,11 @@ public class AuthService {
   /** RFC 8176's multiple-factor authentication: what a provider says when it asked for two. */
   public static final String AMR_MFA = "mfa";
 
-  /** Customer self-signup → creates a CUSTOMER (global, tenantId null) and returns a token pair. */
+  /**
+   * Customer self-signup → creates a CUSTOMER (global, tenantId null) and returns a token pair. An
+   * address or phone is refused only when another shopper's login holds it (uq_users_unbound_email,
+   * uq_users_unbound_phone): the same person's business account is a separate identity.
+   */
   public TokenResponse register(String email, String password, String phone) {
     policy.check(password, email);
     String hash = passwords.hash(password);
@@ -69,88 +77,132 @@ public class AuthService {
         new User(
             userId, null, User.TYPE_CUSTOMER, email, phone, hash, User.STATUS_ACTIVE, now, now);
 
-    String payload =
-        Json.createObjectBuilder()
-            .add("eventId", Ids.newId().toString())
-            .add("eventType", "UserRegistered")
-            .addNull("tenantId")
-            .add("aggregateId", userId.toString())
-            .add("occurredAt", Instant.now().toString())
-            .add("email", email)
-            .add("type", "CUSTOMER")
-            .build()
-            .toString();
-    var outbox =
-        new OutboxRow("UserRegistered", "storeql.iam.user-registered", null, userId, payload);
-
-    users.createUserWithOutbox(user, "CUSTOMER", outbox);
+    users.createUserWithOutbox(user, "CUSTOMER", userRegistered(user));
     users.audit(null, userId, "USER_REGISTERED", email);
 
     return issueTokens(user, PASSWORD_ONLY, Instant.now());
   }
 
   /**
-   * Admin-driven staff provisioning: find an existing account by email or create one, returning the
-   * userId the caller (tenant-svc) then assigns a store role to. The actual tenant + role binding
-   * happens asynchronously when tenant-svc publishes {@code StaffAssigned}; here we only ensure an
-   * account exists so the admin never has to know a UUID.
+   * Business sign-up ("Start a business"): a STAFF login that belongs to no business yet and holds
+   * no role, with its first token pair.
+   *
+   * <p>The business is created next, by tenant-svc's onboarding, whose {@code TenantCreated} makes
+   * this login its OWNER here. Until then the token names no tenant and no role — which is what the
+   * app reads as "set the business up" and opens its wizard for — and every business's data is
+   * closed to it. A shopper's sign-up ({@link #register}) is untouched: it stays a CUSTOMER.
+   *
+   * <p>The same password policy as a shopper's sign-up, and its own duplicate refusal: a shopper's
+   * account and a business account are separate identities (29 Sep 2026), so an address or phone a
+   * person already shops with is free here, while one another business sign-up of no business
+   * already holds — or the platform administrator — is {@code 409 USER_ALREADY_EXISTS}
+   * (uq_users_unbound_email, uq_users_unbound_phone). It is written with its {@code UserRegistered}
+   * (type STAFF) on one transaction, as {@link #register} is.
+   *
+   * @param phone optional, kept exactly as {@link #register} keeps a shopper's: the platform
+   *     console's assisted onboarding records the owner's with it, and the two sign-ups must not
+   *     read one number two ways
+   */
+  public TokenResponse registerBusiness(String email, String password, String phone) {
+    User user = newStaffLogin(null, email, phone, password);
+    // No role row: a login that is to own a business holds nothing until the business exists, and
+    // OWNER is granted by the TenantCreated handler (bindOwnerOnce), never by this request.
+    users.createUserWithOutbox(user, null, userRegistered(user));
+    users.audit(null, user.id(), "BUSINESS_SIGNED_UP", email);
+    return issueTokens(user, PASSWORD_ONLY, Instant.now());
+  }
+
+  /**
+   * Admin-driven staff provisioning: find this business's login by email or make one, returning the
+   * userId the caller (tenant-svc) then assigns a store role to. The role is bound asynchronously
+   * when tenant-svc publishes {@code StaffAssigned}; here we only ensure the login exists so the
+   * admin never has to know a UUID. This is the only way a login becomes a business's staff: {@code
+   * StaffAssigned} binds a role only to a login already in the business, and stamps nobody.
    *
    * <ul>
-   *   <li>Email already in this tenant (or still global / unbound) → reuse that account.
-   *   <li>Email bound to a different tenant → 409 (can't poach another business's user).
-   *   <li>No such email → create an ACTIVE account with the given or a generated temp password.
+   *   <li>Email already this business's → reuse that login (one provisioned before and never
+   *       assigned, or let go of its last store, comes back the same).
+   *   <li>Otherwise → a new STAFF login, made already in this business, with the given password.
    * </ul>
+   *
+   * <p>Only this business's logins are ever read (tenant first), and nobody else's is ever touched
+   * (29 Sep 2026). A shopper's account is the person's own and a separate identity from any job; a
+   * business sign-up not yet onboarded is someone's own business to be, which a stranger adding the
+   * address as staff first must not be able to capture; and another business's login is that
+   * business's. All are left exactly as they were, beside the new login.
+   *
+   * <p>Nor does another business's login with the address refuse the request, as {@code 409
+   * EMAIL_IN_OTHER_TENANT} once did, when provisioning adopted the login it found and had to stop
+   * short of poaching one. Now it poaches nothing, and the refusal only let whichever business
+   * added an address first hold it against every other: a login provisioned and never assigned —
+   * refused by a plan's staff limit, say — stranded the person out of every other job, and a
+   * hostile business could squat any address with one call. A person may work for several
+   * businesses, each with its own login, as at Square and Shopify.
    */
   public ProvisionStaffResponse provisionStaff(UUID tenantId, String email, String rawPassword) {
-    var candidates = users.findAllByEmail(email);
-    for (User u : candidates) {
-      if (u.tenantId() == null || u.tenantId().equals(tenantId)) {
-        users.audit(tenantId, u.id(), "STAFF_PROVISIONED_REUSE", email);
-        return new ProvisionStaffResponse(u.id().toString(), email, false);
-      }
+    var ours = users.findByEmail(tenantId, email);
+    if (ours.isPresent()) {
+      return provisionedBefore(tenantId, ours.get(), email);
     }
-    if (!candidates.isEmpty()) {
-      throw new ApiException(
-          409,
-          "EMAIL_IN_OTHER_TENANT",
-          "That email already belongs to another business",
-          java.util.List.of());
-    }
-
-    User user = newStaffLogin(email, rawPassword);
+    User user = newStaffLogin(tenantId, email, null, rawPassword);
     UUID userId = user.id();
-    Instant now = user.createdAt();
-    String payload =
-        Json.createObjectBuilder()
-            .add("eventId", Ids.newId().toString())
-            .add("eventType", "UserRegistered")
-            .addNull("tenantId")
-            .add("aggregateId", userId.toString())
-            .add("occurredAt", now.toString())
-            .add("email", email)
-            .add("type", "STAFF")
-            .build()
-            .toString();
-    var outbox =
-        new OutboxRow("UserRegistered", "storeql.iam.user-registered", null, userId, payload);
     // No role yet — "STAFF" is a user `type`, not a row in `roles`; the real store-scoped role
     // (MANAGER/CASHIER/...) is granted when tenant-svc publishes StaffAssigned (see bindStaffOnce).
-    users.createUserWithOutbox(user, null, outbox);
+    try {
+      users.createUserWithOutbox(user, null, userRegistered(user));
+    } catch (ApiException e) {
+      // Two requests adding one address at once — a button pressed twice: the business holds one
+      // login per address (uq_users_business_email), and the one that won is the answer to both.
+      if (e.status() != 409) throw e;
+      return users
+          .findByEmail(tenantId, email)
+          .map(won -> provisionedBefore(tenantId, won, email))
+          .orElseThrow(() -> e);
+    }
     users.audit(tenantId, userId, "STAFF_PROVISIONED", email);
     return new ProvisionStaffResponse(userId.toString(), email, true);
   }
 
+  /** The business's own login for the address, found again: nothing about it changes. */
+  private ProvisionStaffResponse provisionedBefore(UUID tenantId, User login, String email) {
+    users.audit(tenantId, login.id(), "STAFF_PROVISIONED_REUSE", email);
+    return new ProvisionStaffResponse(login.id().toString(), email, false);
+  }
+
   /**
-   * Login with email + password for tenant staff, POS, and customers. Email is unique only per
-   * tenant scope (a user's row moves out of the NULL scope once a TenantCreated/StaffAssigned event
-   * stamps their tenant), so we search all scopes and let the password disambiguate.
+   * Login with email + password for tenant staff, POS, and customers. An address may name several
+   * logins — one per business it works for, and outside any business one shopper's account and one
+   * business account — so the kind is chosen first and the password then says which of that kind.
+   *
+   * <p>The kind is where the person is signing in ({@code accountType}): a storefront asks for the
+   * shopper's account (CUSTOMER), the admin console and the till for the business's (STAFF). No
+   * value means STAFF: every caller that runs a business — the app's admin and POS shells, API
+   * clients, scripts — signs in here without needing to say, while the storefront is the one place
+   * that signs a shopper in and says so; and a storefront that forgot would get a business token
+   * its app refuses to use, never a shopper's session silently standing in for the business. A
+   * sign-in that names a kind opens only that kind ({@link User#ofKind}); one that names none tries
+   * STAFF first and the other kind only when the address holds no staff login ({@link
+   * User#signInCandidates}), as before.
    *
    * <p>PLATFORM_ADMIN accounts are deliberately excluded here — the platform admin is a separate
    * identity from any store/tenant, so it must not be a valid credential on a store-scoped login
-   * screen (admin console, POS). It authenticates only via {@link #platformLogin}.
+   * screen (admin console, POS). It authenticates only via {@link #platformLogin}. Its password
+   * opening it here is refused and audited, and the address's other logins are still tried, since
+   * the same person may also work for a business under their own login.
+   *
+   * @param accountType {@code CUSTOMER} or {@code STAFF}; null means STAFF
    */
-  public TokenResponse login(String email, String password) {
-    var candidates = users.findAllByEmail(email);
+  public TokenResponse login(String email, String password, String accountType) {
+    // A sign-in that says what it is (CUSTOMER or STAFF) opens only that kind: a shopper's sign-in
+    // never returns a staff token nor a staff sign-in a shopper's, and an address holding only the
+    // other kind is answered as an unknown one (below: same Argon2 work, same 401). One that
+    // says nothing keeps the older behaviour: STAFF first, the other kind only when none exists.
+    var logins = users.findAllByEmail(email);
+    var candidates =
+        accountType == null
+            ? User.signInCandidates(logins, User.TYPE_STAFF)
+            : User.ofKind(logins, accountType);
+    boolean audited = false;
     for (User user : candidates) {
       if (!User.STATUS_ACTIVE.equals(user.status())) {
         // Burn the same Argon2 cost a real verify would pay, so a non-ACTIVE (e.g. SUSPENDED)
@@ -162,7 +214,8 @@ public class AuthService {
       if (passwords.verify(user.passwordHash(), password)) {
         if (users.rolesOf(user.id()).contains("PLATFORM_ADMIN")) {
           users.audit(user.tenantId(), user.id(), "LOGIN_FAILED", email);
-          throw ApiException.unauthorized("INVALID_CREDENTIALS", "Invalid email or password");
+          audited = true;
+          continue;
         }
         // A staff user whose tenant has been deactivated must not be able to log in, even with the
         // right password and an ACTIVE user row. (Customers carry tenantId=null and are
@@ -185,7 +238,7 @@ public class AuthService {
       // Equalize timing with the verify above so response time doesn't reveal whether the
       // email exists (account-enumeration oracle).
       passwords.burn(password);
-    } else {
+    } else if (!audited) {
       User first = candidates.get(0);
       users.audit(first.tenantId(), first.id(), "LOGIN_FAILED", email);
     }
@@ -285,7 +338,7 @@ public class AuthService {
       throw ApiException.unauthorized(
           "SSO_REQUIRED", "This business now signs its staff in through its identity provider");
     }
-    return issueTokens(user, amr, session.authenticatedAt());
+    return issueTokens(user, amr, session.authenticatedAt(), session);
   }
 
   /**
@@ -396,6 +449,54 @@ public class AuthService {
   }
 
   /**
+   * The caller's own live sign-ins, most recently used first.
+   *
+   * @param userId the caller's login, from the token
+   * @param currentSessionId the session making the request (its token's {@code sid}), or null
+   * @return its live sessions
+   */
+  public List<com.storeql.iam.dto.Dtos.SessionResponse> sessionsOf(
+      UUID userId, UUID currentSessionId) {
+    return refreshTokens.liveSessions(userId).stream()
+        .map(
+            s ->
+                new com.storeql.iam.dto.Dtos.SessionResponse(
+                    s.id().toString(),
+                    s.deviceLabel() == null
+                        ? com.storeql.iam.domain.ClientLabel.UNKNOWN
+                        : s.deviceLabel(),
+                    s.network(),
+                    s.startedAt().toString(),
+                    s.lastUsedAt().toString(),
+                    s.amr() == null ? "pwd" : s.amr().replace(',', '+'),
+                    s.id().equals(currentSessionId)))
+        .toList();
+  }
+
+  /**
+   * Signs one of the caller's own sessions out: its refresh chain is revoked, the login's push
+   * session is kicked and the act is audited. An access token already issued lives out its minutes
+   * (the gateway's deny list is the next step).
+   *
+   * @param userId the caller's login, from the token
+   * @param sessionId the session to end
+   * @throws ApiException 404 {@code SESSION_NOT_FOUND} when the login holds no such live session
+   *     (another login's, an unknown one, one already ended)
+   */
+  public void endSession(UUID userId, UUID sessionId) {
+    if (refreshTokens.endSession(userId, sessionId) == 0) {
+      throw ApiException.notFound("SESSION_NOT_FOUND", "session not found");
+    }
+    users
+        .findById(userId)
+        .ifPresent(
+            u -> {
+              users.audit(u.tenantId(), userId, "SESSION_ENDED", sessionId.toString());
+              if (u.tenantId() != null) mqttSessions.revoke(u.tenantId(), userId);
+            });
+  }
+
+  /**
    * One-shot bootstrap: creates the first PLATFORM_ADMIN. Rejects if one already exists so the
    * endpoint is safe to leave enabled after first use.
    *
@@ -416,7 +517,7 @@ public class AuthService {
     // password-only administrator the secret is given to prevent.
     byte[] secondFactor =
         totpSecret == null || totpSecret.isBlank() ? null : mfa.parseSecret(totpSecret);
-    User user = newStaffLogin(email, rawPassword);
+    User user = newStaffLogin(null, email, null, rawPassword);
     UUID userId = user.id();
     users.createPlatformAdmin(user);
     if (secondFactor != null) {
@@ -434,7 +535,8 @@ public class AuthService {
   }
 
   /** Change password for an authenticated user (requires current password). */
-  public void changePassword(UUID userId, String currentPassword, String newPassword) {
+  public void changePassword(
+      UUID userId, String currentPassword, String newPassword, String rawLanguage) {
     User user =
         users
             .findById(userId)
@@ -443,11 +545,45 @@ public class AuthService {
       throw ApiException.unauthorized("INVALID_CREDENTIALS", "Current password is incorrect");
     }
     policy.check(newPassword, user.email());
-    users.updatePassword(userId, passwords.hash(newPassword));
+    // The "your password was changed" notice is written with the change itself, never for the
+    // platform administrator (whose credentials the operator's bootstrap owns).
+    boolean staff = user.tenantId() != null || !User.TYPE_CUSTOMER.equals(user.type());
+    OutboxRow changed =
+        PasswordChangedEvent.announces(
+                user.email(), users.rolesOf(userId).contains("PLATFORM_ADMIN"))
+            ? PasswordChangedEvent.row(
+                userId,
+                user.email(),
+                staff,
+                user.tenantId() != null
+                    ? tenantProfiles.businessName(user.tenantId()).orElse(null)
+                    : null,
+                PasswordChangedEvent.VIA_CHANGE,
+                PasswordReset.language(rawLanguage),
+                Instant.now())
+            : null;
+    users.updatePassword(userId, passwords.hash(newPassword), changed);
     // Revoke every outstanding refresh token: a password change must invalidate sessions that
     // may have been established with the old (possibly compromised) credentials.
     refreshTokens.revokeAllForUser(userId);
     users.audit(user.tenantId(), userId, "PASSWORD_CHANGED", user.email());
+  }
+
+  /**
+   * "Sign out everywhere": ends every renewable session of the caller's own login, the one they are
+   * using included. Access tokens already issued live out their few minutes. Audited as {@code
+   * SESSIONS_REVOKED_ALL}.
+   *
+   * @return how many sessions (refresh tokens still valid) were ended
+   */
+  public int revokeAllSessions(UUID userId) {
+    User user =
+        users
+            .findById(userId)
+            .orElseThrow(() -> ApiException.unauthorized("USER_NOT_FOUND", "User not found"));
+    int ended = refreshTokens.revokeLiveForUser(userId);
+    users.audit(user.tenantId(), userId, "SESSIONS_REVOKED_ALL", null);
+    return ended;
   }
 
   /**
@@ -490,16 +626,50 @@ public class AuthService {
 
   // --- helpers ---
 
-  /** A staff login that belongs to no tenant yet, its password checked against the policy. */
-  private User newStaffLogin(String email, String rawPassword) {
+  /**
+   * The {@code UserRegistered} outbox row for a login just made, written on the same transaction as
+   * the login itself. It names the login's business — a provisioned member of staff is made in
+   * theirs — or none, for a shopper's or a business sign-up's; its {@code type} says which kind of
+   * login it is (CUSTOMER or STAFF).
+   */
+  private static OutboxRow userRegistered(User user) {
+    var event =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "UserRegistered");
+    if (user.tenantId() == null) {
+      event.addNull("tenantId");
+    } else {
+      event.add("tenantId", user.tenantId().toString());
+    }
+    String payload =
+        event
+            .add("aggregateId", user.id().toString())
+            .add("occurredAt", user.createdAt().toString())
+            .add("email", user.email())
+            .add("type", user.type())
+            .build()
+            .toString();
+    return new OutboxRow(
+        "UserRegistered", "storeql.iam.user-registered", user.tenantId(), user.id(), payload);
+  }
+
+  /**
+   * A staff login, its password checked against the policy.
+   *
+   * @param tenantId the business it is made in, or null for one that belongs to no business yet (a
+   *     business sign-up, the platform administrator)
+   * @param phone the business sign-up's optional phone, as given; null for every other staff login
+   */
+  private User newStaffLogin(UUID tenantId, String email, String phone, String rawPassword) {
     policy.check(rawPassword, email);
     Instant now = Instant.now();
     return new User(
         Ids.newId(),
-        null,
+        tenantId,
         User.TYPE_STAFF,
         email,
-        null,
+        phone,
         passwords.hash(rawPassword),
         User.STATUS_ACTIVE,
         now,
@@ -511,6 +681,20 @@ public class AuthService {
    *     null for a session older than the record of it
    */
   private TokenResponse issueTokens(User user, List<String> amr, Instant authenticatedAt) {
+    return issueTokens(user, amr, authenticatedAt, null);
+  }
+
+  /**
+   * @param renewing the session being renewed, whose id and start carry over; null for a new
+   *     sign-in, which begins a session of its own
+   */
+  private TokenResponse issueTokens(
+      User user,
+      List<String> amr,
+      Instant authenticatedAt,
+      RefreshTokenRepository.Session renewing) {
+    UUID sessionId = renewing != null ? renewing.sessionId() : Ids.newId();
+    Instant startedAt = renewing != null ? renewing.startedAt() : Instant.now();
     // Read again, and all at once (SJ-D63). The row in hand was read before the password was
     // checked, and that check takes long enough for a staff removal to commit meanwhile: the old
     // row's tenant beside the new roles made a token naming a business the login had just left.
@@ -532,7 +716,8 @@ public class AuthService {
             who.roles(),
             who.storeIds(),
             permissions,
-            amr);
+            amr,
+            sessionId);
 
     String refresh = Tokens.newOpaqueToken();
     refreshTokens.store(
@@ -540,7 +725,13 @@ public class AuthService {
         Tokens.hash(refresh),
         Instant.now().plusSeconds(config.refreshTtlSeconds()),
         String.join(",", amr),
-        authenticatedAt);
+        authenticatedAt,
+        sessionId,
+        startedAt,
+        renewing != null && renewing.deviceLabel() != null
+            ? renewing.deviceLabel()
+            : clientInfo.device(),
+        renewing != null && renewing.network() != null ? renewing.network() : clientInfo.network());
 
     return TokenResponse.bearer(access, refresh, config.accessTtlSeconds());
   }

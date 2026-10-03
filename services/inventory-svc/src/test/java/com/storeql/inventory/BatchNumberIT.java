@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -239,6 +240,257 @@ class BatchNumberIT {
     assertEquals(List.of("CC-" + Ids.shortRef(count)), batchNumbers(variant, "CC-%"));
   }
 
+  // ── refusals: cycle counts, move orders and transfers ────────────────────────
+
+  @Test
+  @DisplayName("A count line that is not there is not found, and the count is left as it was")
+  void aCountLineThatDoesNotExistIsNotFound() {
+    String store = uuid();
+    String count =
+        created(
+                post(
+                    "/admin/inventory/cycle-counts",
+                    "{\"storeId\":\"%s\",\"name\":\"Aisle 4\"}".formatted(store)))
+            .getString("id");
+
+    assertError(
+        post(
+            "/admin/inventory/cycle-counts/" + count + "/lines/" + Ids.newId() + "/count",
+            "{\"countedQty\":1}"),
+        404,
+        "COUNT_LINE_NOT_FOUND");
+    assertEquals(
+        "OPEN",
+        scalar(
+            "SELECT status FROM inventory.cycle_count_headers WHERE tenant_id = '"
+                + T
+                + "' AND id = '"
+                + count
+                + "'"));
+  }
+
+  @Test
+  @DisplayName("A count entered under a count that is not there is not found")
+  void aCountEnteredUnderAnUnknownCountIsNotFound() {
+    assertError(get("/admin/inventory/cycle-counts/" + Ids.newId()), 404, "CYCLE_COUNT_NOT_FOUND");
+    assertError(
+        post(
+            "/admin/inventory/cycle-counts/" + Ids.newId() + "/lines/" + Ids.newId() + "/count",
+            "{\"countedQty\":1}"),
+        404,
+        "CYCLE_COUNT_NOT_FOUND");
+  }
+
+  @Test
+  @DisplayName("An approved count line cannot be counted again; its counted quantity stays")
+  void anApprovedCountLineCannotBeRecounted() {
+    UUID count = Ids.newId();
+    UUID variant = Ids.newId();
+    UUID line = seedApprovedCount(count, uuid(), variant, "4", "6");
+
+    assertError(
+        post(
+            "/admin/inventory/cycle-counts/" + count + "/lines/" + line + "/count",
+            "{\"countedQty\":5}"),
+        422,
+        "COUNT_LINE_NOT_UPDATABLE");
+    assertEquals(
+        0,
+        new BigDecimal(
+                lineOf(
+                    "SELECT counted_qty FROM inventory.cycle_count_lines WHERE tenant_id = '"
+                        + T
+                        + "' AND id = '"
+                        + line
+                        + "'"))
+            .compareTo(new BigDecimal("6")));
+  }
+
+  @Test
+  @DisplayName("A line of another count is refused under this one, and the line is untouched")
+  void aLineOfAnotherCountIsRefused() {
+    UUID first = Ids.newId();
+    UUID second = Ids.newId();
+    String store = uuid();
+    UUID lineOfFirst = seedApprovedCount(first, store, Ids.newId(), "4", "6");
+    seedApprovedCount(second, store, Ids.newId(), "1", "1");
+
+    assertError(
+        post(
+            "/admin/inventory/cycle-counts/" + second + "/lines/" + lineOfFirst + "/count",
+            "{\"countedQty\":1}"),
+        400,
+        "LINE_HEADER_MISMATCH");
+    assertEquals(
+        0,
+        new BigDecimal(
+                lineOf(
+                    "SELECT counted_qty FROM inventory.cycle_count_lines WHERE tenant_id = '"
+                        + T
+                        + "' AND id = '"
+                        + lineOfFirst
+                        + "'"))
+            .compareTo(new BigDecimal("6")));
+  }
+
+  @Test
+  @DisplayName("A count with a tolerance outside 0 to 100 is refused and none is made")
+  void aCountWithAToleranceOutsideNoughtToAHundredIsRefused() {
+    String store = uuid();
+    for (String tolerance : new String[] {"150", "-1", "100.5"}) {
+      assertError(
+          post(
+              "/admin/inventory/cycle-counts",
+              ("{\"storeId\":\"%s\",\"name\":\"Aisle 4\",\"tolerancePct\":%s}")
+                  .formatted(store, tolerance)),
+          400,
+          "INVALID_TOLERANCE");
+    }
+    assertEquals(
+        "0",
+        scalar(
+            "SELECT count(*) FROM inventory.cycle_count_headers WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + store
+                + "'"));
+  }
+
+  @Test
+  @DisplayName("A move order or transfer with no lines is refused and none is made")
+  void aMoveOrTransferWithNoLinesIsRefused() {
+    String store = uuid();
+    String other = uuid();
+    assertError(
+        post(
+            "/admin/inventory/move-orders",
+            ("{\"fromStoreId\":\"%s\",\"toStoreId\":\"%s\",\"fromZone\":\"BACK\","
+                    + "\"toZone\":\"FLOOR\",\"lines\":[]}")
+                .formatted(store, store)),
+        400,
+        "NO_LINES");
+    assertError(
+        post(
+            "/admin/inventory/transfers",
+            ("{\"fromStoreId\":\"%s\",\"toStoreId\":\"%s\",\"transferType\":\"DIRECT\","
+                    + "\"lines\":[]}")
+                .formatted(store, other)),
+        400,
+        "NO_LINES");
+    assertEquals(
+        "0",
+        scalar(
+            "SELECT count(*) FROM inventory.move_orders WHERE tenant_id = '"
+                + T
+                + "' AND from_store_id = '"
+                + store
+                + "'"));
+    assertEquals(
+        "0",
+        scalar(
+            "SELECT count(*) FROM inventory.transfer_orders WHERE tenant_id = '"
+                + T
+                + "' AND from_store_id = '"
+                + store
+                + "'"));
+  }
+
+  @Test
+  @DisplayName("A transfer of a type nobody defined is refused and none is made")
+  void aTransferOfATypeNobodyDefinedIsRefused() {
+    String from = uuid();
+    String to = uuid();
+    UUID variant = Ids.newId();
+    receive(from, variant, "5");
+
+    assertError(
+        post(
+            "/admin/inventory/transfers",
+            ("{\"fromStoreId\":\"%s\",\"toStoreId\":\"%s\",\"transferType\":\"COURIER\","
+                    + "\"lines\":[{\"variantId\":\"%s\",\"requestedQty\":1}]}")
+                .formatted(from, to, variant)),
+        400,
+        "INVALID_TRANSFER_TYPE");
+    assertEquals(
+        "0",
+        scalar(
+            "SELECT count(*) FROM inventory.transfer_orders WHERE tenant_id = '"
+                + T
+                + "' AND from_store_id = '"
+                + from
+                + "'"));
+  }
+
+  @Test
+  @DisplayName("A picked move order cannot be cancelled, and it stays completed")
+  void aPickedMoveOrderCannotBeCancelled() {
+    String store = uuid();
+    UUID variant = Ids.newId();
+    receive(store, variant, "5");
+    String order = createMoveOrder(store, variant, "2");
+    data(post("/admin/inventory/move-orders/" + order + "/pick", null));
+
+    assertError(
+        post("/admin/inventory/move-orders/" + order + "/cancel", null),
+        422,
+        "MOVE_ORDER_NOT_CANCELLABLE");
+    assertEquals(
+        "COMPLETED",
+        scalar(
+            "SELECT status FROM inventory.move_orders WHERE tenant_id = '"
+                + T
+                + "' AND id = '"
+                + order
+                + "'"));
+  }
+
+  @Test
+  @DisplayName("A shipped transfer cannot be cancelled, and it stays shipped")
+  void aShippedTransferCannotBeCancelled() {
+    String from = uuid();
+    String to = uuid();
+    UUID variant = Ids.newId();
+    receive(from, variant, "10");
+    String transfer = createTransfer(from, to, variant, "INTRANSIT");
+    data(post("/admin/inventory/transfers/" + transfer + "/ship", null));
+
+    assertError(
+        post("/admin/inventory/transfers/" + transfer + "/cancel", null),
+        422,
+        "TRANSFER_ORDER_NOT_CANCELLABLE");
+    assertEquals(
+        "SHIPPED",
+        scalar(
+            "SELECT status FROM inventory.transfer_orders WHERE tenant_id = '"
+                + T
+                + "' AND id = '"
+                + transfer
+                + "'"));
+  }
+
+  @Test
+  @DisplayName("A move order or transfer that is not there is not found")
+  void aMoveOrderOrTransferThatIsNotThereIsNotFound() {
+    assertError(get("/admin/inventory/move-orders/" + Ids.newId()), 404, "MOVE_ORDER_NOT_FOUND");
+    assertError(
+        post("/admin/inventory/move-orders/" + Ids.newId() + "/pick", null),
+        404,
+        "MOVE_ORDER_NOT_FOUND");
+    assertError(
+        post("/admin/inventory/move-orders/" + Ids.newId() + "/cancel", null),
+        404,
+        "MOVE_ORDER_NOT_FOUND");
+    assertError(get("/admin/inventory/transfers/" + Ids.newId()), 404, "TRANSFER_ORDER_NOT_FOUND");
+    assertError(
+        post("/admin/inventory/transfers/" + Ids.newId() + "/ship", null),
+        404,
+        "TRANSFER_ORDER_NOT_FOUND");
+    assertError(
+        post("/admin/inventory/transfers/" + Ids.newId() + "/cancel", null),
+        404,
+        "TRANSFER_ORDER_NOT_FOUND");
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────────
 
   private boolean returnOnce(UUID event, UUID tenant, UUID store, UUID variant, UUID order) {
@@ -276,8 +528,9 @@ class BatchNumberIT {
         .getString("id");
   }
 
-  private static void seedApprovedCount(
+  private static UUID seedApprovedCount(
       UUID headerId, String store, UUID variant, String systemQty, String countedQty) {
+    UUID lineId = Ids.newId();
     BigDecimal system = new BigDecimal(systemQty);
     BigDecimal counted = new BigDecimal(countedQty);
     try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
@@ -295,7 +548,7 @@ class BatchNumberIT {
               "INSERT INTO inventory.cycle_count_lines (id, tenant_id, header_id, store_id,"
                   + " variant_id, system_qty, counted_qty, variance, status, counted_at)"
                   + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', now())")) {
-        ps.setObject(1, Ids.newId());
+        ps.setObject(1, lineId);
         ps.setObject(2, Ids.parse(T));
         ps.setObject(3, headerId);
         ps.setObject(4, Ids.parse(store));
@@ -308,6 +561,35 @@ class BatchNumberIT {
     } catch (SQLException e) {
       throw new IllegalStateException("seeding cycle count " + headerId, e);
     }
+    return lineId;
+  }
+
+  /** One number read from this test's database (the caller scopes the SQL to its own rows). */
+  private static String scalar(String sql) {
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = c.createStatement();
+        var rs = st.executeQuery(sql)) {
+      if (!rs.next()) {
+        return null;
+      }
+      return rs.getString(1);
+    } catch (SQLException e) {
+      throw new IllegalStateException("reading " + sql, e);
+    }
+  }
+
+  private Response get(String path) {
+    return target
+        .path(path)
+        .request()
+        .header("X-Tenant-Id", T)
+        .header("X-Roles", "OWNER")
+        .header("X-User-Id", USER)
+        .get();
+  }
+
+  private static String lineOf(String sql) {
+    return scalar(sql);
   }
 
   /** This tenant's batch numbers for one variant matching {@code like}, sorted. */

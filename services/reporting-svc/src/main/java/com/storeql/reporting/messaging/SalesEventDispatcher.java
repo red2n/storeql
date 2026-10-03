@@ -36,6 +36,7 @@ class SalesEventDispatcher extends JsonEventDispatcher {
       case "storeql.order.order-confirmed" -> handleOrderConfirmed(obj);
       case "storeql.payment.payment-refunded" -> handleRefunded(obj);
       case "storeql.order.order-voided" -> handleVoided(obj);
+      case "storeql.order.no-receipt-return-recorded" -> handleNoReceiptReturn(obj);
       default -> {
         return false;
       }
@@ -91,5 +92,19 @@ class SalesEventDispatcher extends JsonEventDispatcher {
     UUID tenantId = Ids.parse(obj.getString("tenantId"));
     UUID orderId = Ids.parse(obj.getString("orderId"));
     service.applySaleVoided(eventId, CONSUMER, tenantId, orderId);
+  }
+
+  /**
+   * A return with no receipt has no sale for a {@code PaymentRefunded} to name, so order-svc
+   * announces the refund itself: it is recorded against its store and day, once per event.
+   */
+  private void handleNoReceiptReturn(JsonObject obj) {
+    UUID eventId = Ids.parse(obj.getString("eventId"));
+    UUID tenantId = Ids.parse(obj.getString("tenantId"));
+    UUID returnId = Ids.parse(obj.getString("returnId"));
+    UUID storeId = optUuid(obj, "storeId");
+    BigDecimal amount = obj.getJsonNumber("amount").bigDecimalValue();
+    String currency = obj.getString("currency");
+    service.applyNoReceiptRefund(eventId, CONSUMER, tenantId, returnId, storeId, amount, currency);
   }
 }

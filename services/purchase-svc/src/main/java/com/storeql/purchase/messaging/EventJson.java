@@ -1,7 +1,7 @@
 package com.storeql.purchase.messaging;
 
 import com.storeql.ids.Ids;
-import jakarta.json.Json;
+import com.storeql.purchase.config.Jsons;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.math.BigDecimal;
@@ -13,7 +13,7 @@ final class EventJson {
   private EventJson() {}
 
   static JsonObject parse(String json) {
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       return reader.readObject();
     }
   }

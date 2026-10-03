@@ -21,6 +21,9 @@ import '../../support/fake_api.dart';
 const _supplier = '01a0b000-0000-7000-8000-0000000000a1';
 const _variant = '01a0b000-0000-7000-8000-0000000000b1';
 
+const _consignmentNote =
+    'Only an owner or a head-office manager arranges dropship or settles with a supplier.';
+
 class _Server implements HttpClientAdapter {
   final List<RequestOptions> requests = [];
   bool refuse = false;
@@ -63,7 +66,8 @@ class _Server implements HttpClientAdapter {
   }
 }
 
-Future<_Server> _pump(WidgetTester tester, {String role = 'MANAGER', bool refuse = false}) async {
+Future<_Server> _pump(WidgetTester tester,
+    {String role = 'MANAGER', bool refuse = false, List<String> storeIds = const []}) async {
   tester.view.physicalSize = const Size(1100, 1200);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -72,7 +76,7 @@ Future<_Server> _pump(WidgetTester tester, {String role = 'MANAGER', bool refuse
   await tester.pumpWidget(ProviderScope(
     overrides: [
       apiClientProvider.overrideWithValue(FakeApiClient(dio)),
-      authNotifierProvider.overrideWith(() => RoleAuth(role)),
+      authNotifierProvider.overrideWith(() => RoleAuth(role, storeIds: storeIds)),
     ],
     child: const MaterialApp(home: Scaffold(body: ConsignmentTab())),
   ));
@@ -119,6 +123,31 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('settle-refusal')), findsOneWidget);
     expect(find.textContaining('no unsettled consignment sale'), findsOneWidget);
+  });
+
+  // Arranging dropship, ending an arrangement and settling a supplier belong to the whole business
+  // (purchase-svc answers 403 BUSINESS_WIDE_ONLY to a manager held to stores), so such a manager
+  // reads the tab and is offered none of the three.
+  testWidgets('a manager held to stores reads the tab without the business-wide controls',
+      (tester) async {
+    await _pump(tester, storeIds: const ['01a0b000-0000-7000-8000-0000000000a1']);
+    expect(find.text('Sale or Return Ltd'), findsOneWidget);
+    expect(find.byKey(const Key('settle-$_supplier')), findsNothing);
+    expect(find.byKey(const Key('dropship-new')), findsNothing);
+    // And it says who does them.
+    expect(find.text(_consignmentNote), findsOneWidget);
+  });
+
+  testWidgets('a head-office manager held to no store is offered them', (tester) async {
+    await _pump(tester);
+    expect(find.byKey(const Key('settle-$_supplier')), findsOneWidget);
+    expect(find.byKey(const Key('dropship-new')), findsOneWidget);
+    expect(find.text(_consignmentNote), findsNothing);
+  });
+
+  testWidgets('staff who are not management are not told about head office', (tester) async {
+    await _pump(tester, role: 'STOREKEEPER', storeIds: const ['01a0b000-0000-7000-8000-0000000000a1']);
+    expect(find.text(_consignmentNote), findsNothing);
   });
 
   testWidgets('staff who may not settle read the tab without the button', (tester) async {

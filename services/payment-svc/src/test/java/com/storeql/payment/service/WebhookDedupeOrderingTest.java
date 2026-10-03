@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -19,6 +20,7 @@ import com.storeql.payment.provider.PaymentProvider;
 import com.storeql.payment.provider.PaymentProvider.DisputeNotice;
 import com.storeql.payment.provider.PaymentProviders;
 import com.storeql.payment.repo.PaymentIntentRepository;
+import com.storeql.web.ApiException;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.function.UnaryOperator;
@@ -61,9 +63,9 @@ class WebhookDedupeOrderingTest {
 
   @BeforeEach
   void wireProvider() {
-    when(providers.forName(PROVIDER)).thenReturn(provider);
-    when(provider.name()).thenReturn(PROVIDER);
-    when(provider.signatureHeaderName()).thenReturn("Stripe-Signature");
+    lenient().when(providers.forName(PROVIDER)).thenReturn(provider);
+    lenient().when(provider.name()).thenReturn(PROVIDER);
+    lenient().when(provider.signatureHeaderName()).thenReturn("Stripe-Signature");
   }
 
   private void deliver(String status) {
@@ -225,6 +227,40 @@ class WebhookDedupeOrderingTest {
 
     deliverDispute();
 
+    verify(disputes, never()).fromProvider(anyString(), any(), any());
+  }
+
+  @Test
+  @DisplayName("A webhook for a provider that is not deployed is refused and records nothing")
+  void aWebhookForAProviderNotDeployedIsRefused() {
+    when(providers.forName("paypal")).thenReturn(null);
+
+    ApiException e =
+        assertThrows(
+            ApiException.class, () -> service.handleWebhook("paypal", "{}".getBytes(), header));
+
+    assertThat(e.status(), is(404));
+    assertThat(e.code(), is("PAYMENT_PROVIDER_UNKNOWN"));
+    verify(repo, never()).hasSeenWebhook(anyString(), anyString());
+    verify(repo, never()).markWebhookSeenIfNew(anyString(), anyString(), anyString());
+    verify(disputes, never()).fromProvider(anyString(), any(), any());
+  }
+
+  @Test
+  @DisplayName("A webhook whose signature does not verify is a 400 and touches nothing")
+  void aWebhookThatDoesNotVerifyIsRefused() {
+    when(provider.verifyWebhook(any(), any()))
+        .thenThrow(new PaymentProvider.ProviderException("bad signature", false, null));
+
+    ApiException e =
+        assertThrows(
+            ApiException.class, () -> service.handleWebhook(PROVIDER, "{}".getBytes(), header));
+
+    assertThat(e.status(), is(400));
+    assertThat(e.code(), is("PAYMENT_WEBHOOK_INVALID"));
+    verify(repo, never()).hasSeenWebhook(anyString(), anyString());
+    verify(repo, never()).markWebhookSeenIfNew(anyString(), anyString(), anyString());
+    verify(repo, never()).captureGuarded(any(), any(), any(), any());
     verify(disputes, never()).fromProvider(anyString(), any(), any());
   }
 }

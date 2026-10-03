@@ -1,14 +1,15 @@
 package com.storeql.purchase.client.accounting;
 
+import com.storeql.purchase.config.Jsons;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientRequest;
 import io.helidon.webclient.api.HttpClientResponse;
 import io.helidon.webclient.api.WebClient;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
 import java.net.ConnectException;
+import java.net.URI;
 import java.net.UnknownHostException;
 import java.nio.channels.UnresolvedAddressException;
 import java.nio.charset.StandardCharsets;
@@ -28,7 +29,8 @@ final class PackageHttp {
 
     /** The body as an object, or an outage: a package that answers no JSON is not answering. */
     JsonObject json() {
-      try (JsonReader reader = Json.createReader(new StringReader(body == null ? "" : body))) {
+      try (JsonReader reader =
+          Jsons.PROVIDER.createReader(new StringReader(body == null ? "" : body))) {
         return reader.readObject();
       } catch (RuntimeException e) {
         throw new AccountingPackage.Unreachable(
@@ -54,25 +56,11 @@ final class PackageHttp {
 
   Reply send(
       String method, String url, Map<String, String> headers, String contentType, String body) {
-    HttpClientRequest request =
-        switch (method) {
-          case "GET" -> http.get(url);
-          case "PUT" -> http.put(url);
-          default -> http.post(url);
-        };
-    request.header(HeaderNames.USER_AGENT, USER_AGENT);
-    for (var h : headers.entrySet()) {
-      request.header(HeaderNames.create(h.getKey()), h.getValue());
-    }
+    HttpClientRequest request = form(method, url, headers, body == null ? null : contentType);
     boolean sent = false;
     try {
-      HttpClientResponse response;
-      if (body == null) {
-        response = request.request();
-      } else {
-        request.header(HeaderNames.CONTENT_TYPE, contentType);
-        response = request.submit(body.getBytes(StandardCharsets.UTF_8));
-      }
+      HttpClientResponse response =
+          body == null ? request.request() : request.submit(body.getBytes(StandardCharsets.UTF_8));
       sent = true;
       try (response) {
         return new Reply(response.status().code(), response.as(String.class));
@@ -81,6 +69,70 @@ final class PackageHttp {
       throw new AccountingPackage.Unreachable(
           e.getClass().getSimpleName() + ": " + e.getMessage(), sent || !looksUnsent(e), e);
     }
+  }
+
+  /**
+   * The request, formed and not yet sent. An address or a header the connection's settings cannot
+   * make is refused here, before anything leaves: there is no answer to wait for and nothing the
+   * clock can mend by trying again, so it is a refusal for a person to put right — never a raw
+   * failure that would leave a claimed push with nobody told.
+   */
+  private HttpClientRequest form(
+      String method, String url, Map<String, String> headers, String contentType) {
+    URI target;
+    try {
+      // A URI, never the String form: that escapes the "?" (and any "%") into the path, and a
+      // package then answers 404 for ".../journalentry%3Fminorversion=…".
+      target = URI.create(url);
+    } catch (IllegalArgumentException e) {
+      throw AccountingPackage.Refused.unsent(
+          "the package's address cannot be formed from the connection's settings ("
+              + e.getMessage()
+              + "); correct them and connect again",
+          e);
+    }
+    for (var h : headers.entrySet()) {
+      if (!fieldValue(h.getValue())) {
+        // Named, never echoed: the value may be a token.
+        throw AccountingPackage.Refused.unsent(
+            "the "
+                + h.getKey()
+                + " header cannot be formed from the connection's settings or tokens (a line break"
+                + " or a control character); correct them and connect again");
+      }
+    }
+    try {
+      HttpClientRequest request =
+          switch (method) {
+            case "GET" -> http.get().uri(target);
+            case "PUT" -> http.put().uri(target);
+            default -> http.post().uri(target);
+          };
+      request.header(HeaderNames.USER_AGENT, USER_AGENT);
+      for (var h : headers.entrySet()) {
+        request.header(HeaderNames.create(h.getKey()), h.getValue());
+      }
+      if (contentType != null) {
+        request.header(HeaderNames.CONTENT_TYPE, contentType);
+      }
+      return request;
+    } catch (IllegalArgumentException e) {
+      // The cause is dropped on purpose: its message may hold a header's value, which may be a
+      // token.
+      throw AccountingPackage.Refused.unsent( // NOPMD - PreserveStackTrace: see above
+          "the request to the package cannot be formed from the connection's settings; correct"
+              + " them and connect again");
+    }
+  }
+
+  /** RFC 9110 §5.5: a field value holds no line break and no control character but a tab. */
+  private static boolean fieldValue(String value) {
+    if (value == null) return false;
+    for (int i = 0; i < value.length(); i++) {
+      char ch = value.charAt(i);
+      if ((ch < 0x20 && ch != '\t') || ch == 0x7F) return false;
+    }
+    return true;
   }
 
   /**

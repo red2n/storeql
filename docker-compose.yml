@@ -940,7 +940,7 @@ services:
       storeql.db.password: ${PAYMENT_DB_PASSWORD:-payment_dev_change_me}
       JAVA_TOOL_OPTIONS: "${PAYMENT_JAVA_OPTS:--Xms128m -Xmx256m -XX:+UseG1GC}"
       STOREQL_ADVERTISE_HOST: payment-svc
-    mem_limit: ${PAYMENT_MEM_LIMIT:-384m}
+    mem_limit: ${PAYMENT_MEM_LIMIT:-512m}
     networks: [storeql_network]
     depends_on: *svc-depends
     healthcheck: *svc-healthcheck

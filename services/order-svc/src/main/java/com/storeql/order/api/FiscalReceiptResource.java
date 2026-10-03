@@ -154,6 +154,11 @@ public class FiscalReceiptResource {
       responseCode = "409",
       description =
           "The store is not this tenant's, or the server lacks the key or credentials the regime needs")
+  @APIResponse(
+      responseCode = "502",
+      description =
+          "FISCAL_TSE_UNAVAILABLE: the security module provider refused or could not be reached"
+              + " when the device was registered; nothing was changed")
   @PUT
   @Path("/fiscal-receipts/settings")
   public Response setSettings(com.storeql.order.dto.Dtos.SetFiscalSettingsRequest req) {

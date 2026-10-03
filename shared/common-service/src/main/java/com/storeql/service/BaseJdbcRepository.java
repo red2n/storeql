@@ -78,10 +78,11 @@ public abstract class BaseJdbcRepository {
   // ── Transaction ───────────────────────────────────────────────────────────
 
   /**
-   * Run {@code work} inside a single JDBC transaction. Re-throws {@link ApiException} after
-   * rollback (so domain-level 4xx/5xx exceptions propagate cleanly). Routes SQL exceptions through
-   * {@link #handleTxSqlException} so subclasses can map unique-violation codes to service-specific
-   * error responses.
+   * Run {@code work} inside a single JDBC transaction. Any other throwable (RuntimeException or
+   * Error) also rolls back and is rethrown unchanged: nothing is ever left committed by a failed
+   * unit of work. Re-throws {@link ApiException} after rollback (so domain-level 4xx/5xx exceptions
+   * propagate cleanly). Routes SQL exceptions through {@link #handleTxSqlException} so subclasses
+   * can map unique-violation codes to service-specific error responses.
    *
    * @param work the transactional unit of work
    * @param what a short present-tense description used in error messages, e.g. {@code "create
@@ -91,47 +92,76 @@ public abstract class BaseJdbcRepository {
    *     {@link #handleTxSqlException} for a {@link SQLException}, or a generic {@code 500 DB_ERROR}
    *     if the connection itself could not be acquired
    */
+  @SuppressWarnings("PMD.AvoidCatchingThrowable") // rolls back on every Throwable, then rethrows it
   protected <R> R inTx(TxWork<R> work, String what) {
     try (Connection c = acquireConnection()) {
       c.setAutoCommit(false);
+      boolean open = true; // true until committed or rolled back
       try {
         R r = work.run(c);
         c.commit();
+        open = false;
         return r;
       } catch (ApiException ae) {
-        c.rollback();
+        open = !rollbackQuietly(c, ae);
         throw ae;
       } catch (SQLException e) {
-        c.rollback();
+        open = !rollbackQuietly(c, e);
         throw handleTxSqlException(what, e);
+      } catch (Throwable t) {
+        // Any other RuntimeException or Error: leave nothing half-committed (setAutoCommit(true)
+        // below would COMMIT an open transaction), and rethrow exactly what was thrown.
+        open = !rollbackQuietly(c, t);
+        throw t;
       } finally {
-        c.setAutoCommit(true);
+        if (open) open = !rollbackQuietly(c, null);
+        // Never switch auto-commit on over a transaction that could not be rolled back: that would
+        // COMMIT it. The connection is closed by the try-with-resources and the pool discards it.
+        if (!open) c.setAutoCommit(true);
       }
     } catch (SQLException e) {
       throw dbError(what + " (connection)", e);
     }
   }
 
+  /** Roll back, never letting a failed rollback mask the failure that caused it. */
+  private static boolean rollbackQuietly(Connection c, Throwable primary) {
+    try {
+      c.rollback();
+      return true;
+    } catch (SQLException re) {
+      if (primary != null) primary.addSuppressed(re);
+      return false;
+    }
+  }
+
   /**
    * Acquires a pooled connection, retrying briefly on transient failures (observed in practice as
-   * pgbouncer transaction-pooling contention under concurrent writes — see the {@code
-   * pgbouncer-gotchas} note: same call retried 1-2x always succeeded). This only retries the
-   * acquire step itself, never {@code work.run(c)}, so a retry can never double-execute business
-   * logic.
+   * pgbouncer transaction-pooling contention under concurrent writes: same call retried 1-2x always
+   * succeeded). This only retries the acquire step itself, never {@code work.run(c)}, so a retry
+   * can never double-execute business logic.
+   *
+   * <p>A failure that took a long time (the pool's own wait expiring) or that is the pool's
+   * "request timed out" is NOT retried: retrying an exhausted pool triples the caller's wait while
+   * the pool is already the bottleneck. The threshold is the MicroProfile Config key {@code
+   * storeql.db.acquire.retry-max-attempt-ms} (default 1000).
    *
    * @return a pooled connection, ready for {@code setAutoCommit(false)}
    * @throws SQLException the last acquisition failure if all 3 attempts (with 100/200/300ms
-   *     backoff) fail, or immediately if the wait is interrupted
+   *     backoff) fail, or immediately if the failure was a pool timeout or the wait is interrupted
    */
   private Connection acquireConnection() throws SQLException {
     final int maxAttempts = 3;
     SQLException last = null;
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      long started = System.nanoTime();
       try {
         return dataSource.getConnection();
       } catch (SQLException e) {
         last = e;
-        if (attempt == maxAttempts) break;
+        if (attempt == maxAttempts || isPoolTimeout(e)) break;
+        long tookMs = (System.nanoTime() - started) / 1_000_000L;
+        if (tookMs > acquireRetryMaxAttemptMillis()) break;
         try {
           Thread.sleep(100L * attempt);
         } catch (InterruptedException ie) {
@@ -141,6 +171,19 @@ public abstract class BaseJdbcRepository {
       }
     }
     throw last;
+  }
+
+  /** True for the pool's own "no connection became free in time" failure. */
+  static boolean isPoolTimeout(SQLException e) {
+    String m = e.getMessage();
+    return e instanceof java.sql.SQLTransientConnectionException
+        && m != null
+        && m.contains("request timed out");
+  }
+
+  /** Longest a single failed acquire may have taken and still be retried. */
+  protected long acquireRetryMaxAttemptMillis() {
+    return Cfg.getLong("storeql.db.acquire.retry-max-attempt-ms", 1000L);
   }
 
   /**

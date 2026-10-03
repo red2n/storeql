@@ -66,6 +66,8 @@ class OrderServiceDeliveryTest {
     svc.windows = windows;
     // 09.16: no deposit scheme reaches these sales; a mock answers empty.
     svc.jurisdictions = org.mockito.Mockito.mock(com.storeql.service.Jurisdictions.class);
+    // Stop-sale and certified scales: nothing here is recalled or weighed; a mock refuses nothing.
+    svc.saleChecks = org.mockito.Mockito.mock(SaleChecks.class);
     // The tenant's declared currency, as tenant-svc would answer (SJ-D53).
     org.mockito.Mockito.lenient().when(profiles.requireCurrency(TENANT)).thenReturn("USD");
     when(ctx.requireTenantId()).thenReturn(TENANT);
@@ -84,36 +86,28 @@ class OrderServiceDeliveryTest {
       String postalCode,
       String recipientName,
       String recipientPhone) {
-    return new PlaceOrderRequest(
-        STORE.toString(),
-        null,
-        "ONLINE",
-        fulfilmentType,
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null)),
-        null,
-        null,
-        null,
-        "USD",
-        null,
-        null, // couponCodes
-        null,
-        null,
-        null,
-        line1,
-        null,
-        city,
-        postalCode,
-        recipientName,
-        recipientPhone,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(STORE.toString())
+        .channel("ONLINE")
+        .fulfilmentType(fulfilmentType)
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    BigDecimal.ONE,
+                    BigDecimal.TEN,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .currency("USD")
+        .deliveryLine1(line1)
+        .deliveryCity(city)
+        .deliveryPostalCode(postalCode)
+        .deliveryRecipientName(recipientName)
+        .deliveryRecipientPhone(recipientPhone)
+        .build();
   }
 
   @Test
@@ -142,7 +136,7 @@ class OrderServiceDeliveryTest {
 
   @Test
   void deliveryWithFullAddressIsPersisted() {
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
 
     Order order =
@@ -160,7 +154,7 @@ class OrderServiceDeliveryTest {
 
   @Test
   void pickupIgnoresAnySuppliedAddressFields() {
-    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList()))
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
 
     // A pickup order should never persist delivery details even if the client sends some

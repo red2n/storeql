@@ -40,6 +40,8 @@ class PriceZonesIT {
 
   private static final String T = "01a090ae-611e-702c-a97b-d1b8025478f1";
   private static final String RIVAL_TENANT = "01a090ae-611e-702c-a97b-d1b8025478f2";
+  private static final String YEN_TENANT = "01a090ae-611e-702c-a97b-d1b8025478f3";
+  private static final String DINAR_TENANT = "01a090ae-611e-702c-a97b-d1b8025478f4";
   private static final String NORTH_STORE = "01a090ae-611e-703c-a378-a4972ea461d1";
   private static final String SOUTH_STORE = "01a090ae-611e-703c-a378-a4972ea461d2";
   private static final String RIVALS_STORE = "01a090ae-611e-703c-a378-a4972ea461d3";
@@ -53,7 +55,9 @@ class PriceZonesIT {
             .withStore(T, NORTH_STORE, "GB")
             .withStore(T, SOUTH_STORE, "GB")
             .with(RIVAL_TENANT, "GBP", "GB")
-            .withStore(RIVAL_TENANT, RIVALS_STORE, "GB");
+            .withStore(RIVAL_TENANT, RIVALS_STORE, "GB")
+            .with(YEN_TENANT, "JPY", "JP")
+            .with(DINAR_TENANT, "KWD", "KW");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -180,6 +184,17 @@ class PriceZonesIT {
     return Envelopes.ok(r).getJsonNumber("unitPrice").bigDecimalValue();
   }
 
+  private static int count(String table, String tenant) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT count(*) FROM pricing." + table + " WHERE tenant_id = '" + tenant + "'")) {
+      rs.next();
+      return rs.getInt(1);
+    }
+  }
+
   // ── zones ──────────────────────────────────────────────────────────────────
 
   @Test
@@ -261,7 +276,7 @@ class PriceZonesIT {
   // ── competitor prices and repricing ────────────────────────────────────────
 
   @Test
-  void aRivalsPriceBecomesAProposalThatAppliesIntoTheZonesListOnly() {
+  void aRivalsPriceBecomesAProposalThatAppliesIntoTheZonesListOnly() throws Exception {
     standardVat();
     priceList("Everywhere", null, "10.00");
     String north = zone("North", NORTH_STORE);
@@ -336,6 +351,10 @@ class PriceZonesIT {
         Envelopes.ok(
             post("/admin/repricing/proposals/" + proposal.getString("id") + "/apply", "{}"));
     assertThat(applied.getString("status"), is("APPLIED"));
+    // At the pound's two places as stored, never the proposal column's four (7.9900).
+    assertThat(
+        applied.getJsonNumber("proposedPrice").bigDecimalValue(), is(new BigDecimal("7.99")));
+    assertThat(storedPrices(T, northList), is("7.99|9.00,7.99"));
     assertThat(resolvedAt(NORTH_STORE), comparesEqualTo(new BigDecimal("7.99")));
     assertThat(resolvedAt(SOUTH_STORE), comparesEqualTo(new BigDecimal("10.00")));
     // Decided once.
@@ -349,8 +368,115 @@ class PriceZonesIT {
     assertThat(Envelopes.okArray(get("/admin/repricing/proposals?status=APPLIED")).size(), is(1));
   }
 
+  /** The list price and its history row as the tables keep them: {@code price|history,in,order}. */
+  private static String storedPrices(String tenant, String list) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            conn.prepareStatement(
+                "SELECT pli.price::text || '|' || (SELECT string_agg(v.price::text, ','"
+                    + " ORDER BY v.valid_from, v.id) FROM pricing.price_list_item_prices v"
+                    + " WHERE v.tenant_id = pli.tenant_id AND v.price_list_item_id = pli.id)"
+                    + " FROM pricing.price_list_items pli"
+                    + " WHERE pli.tenant_id = ?::uuid AND pli.price_list_id = ?::uuid")) {
+      ps.setString(1, tenant);
+      ps.setString(2, list);
+      try (var rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
+    }
+  }
+
+  /** A business's own list, in its own currency, with V priced on it. */
+  private String listIn(String tenant, String currency, String price) {
+    JsonObject pl =
+        Envelopes.created(
+            call(
+                "POST",
+                "/admin/price-lists",
+                "{\"name\":\"Home\",\"channel\":\"ALL\",\"currency\":\""
+                    + currency
+                    + "\",\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
+                tenant,
+                "OWNER"));
+    assertThat(
+        call(
+                "POST",
+                "/admin/price-lists/" + pl.getString("id") + "/items",
+                "{\"variantId\":\"" + V + "\",\"price\":" + price + ",\"minQty\":1}",
+                tenant,
+                "OWNER")
+            .getStatus(),
+        is(200));
+    return pl.getString("id");
+  }
+
+  /** A rival seen today, a match-the-lowest rule on the list run, and its one proposal applied. */
+  private JsonObject matchAndApply(String tenant, String list, String rival, String rounding) {
+    Envelopes.created(
+        call(
+            "POST",
+            "/admin/competitor-prices",
+            "{\"variantId\":\""
+                + V
+                + "\",\"competitor\":\"Rival A\",\"price\":"
+                + rival
+                + ",\"observedOn\":\""
+                + LocalDate.now()
+                + "\"}",
+            tenant,
+            "OWNER"));
+    JsonObject rule =
+        Envelopes.created(
+            call(
+                "POST",
+                "/admin/repricing/rules",
+                "{\"name\":\"Match\",\"priceListId\":\""
+                    + list
+                    + "\",\"strategy\":\"MATCH_LOWEST\",\"value\":0,\"floorPercent\":50,"
+                    + "\"rounding\":\""
+                    + rounding
+                    + "\",\"maxAgeDays\":14}",
+                tenant,
+                "OWNER"));
+    JsonObject run =
+        Envelopes.ok(
+            call(
+                "POST",
+                "/admin/repricing/rules/" + rule.getString("id") + "/run",
+                "{}",
+                tenant,
+                "OWNER"));
+    assertThat(run.getInt("proposed"), is(1));
+    String proposal = run.getJsonArray("proposals").getJsonObject(0).getString("id");
+    return Envelopes.ok(
+        call("POST", "/admin/repricing/proposals/" + proposal + "/apply", "{}", tenant, "OWNER"));
+  }
+
   @Test
-  void repricingIsRefusedByName() {
+  void anAppliedProposalIsWholeYenAndKeepsTheDinarsFilsAsStored() throws Exception {
+    // The proposal column holds four places; the list price it becomes holds the currency's own.
+    String yen = listIn(YEN_TENANT, "JPY", "1300");
+    JsonObject applied = matchAndApply(YEN_TENANT, yen, "1250", "NONE");
+    assertThat(applied.getString("status"), is("APPLIED"));
+    assertThat(
+        applied.getJsonNumber("proposedPrice").bigDecimalValue(), is(new BigDecimal("1250")));
+    assertThat(applied.getJsonNumber("currentPrice").bigDecimalValue(), is(new BigDecimal("1300")));
+    assertThat(storedPrices(YEN_TENANT, yen), is("1250|1300,1250"));
+
+    // A dinar .99 is 8.990 — the hundredths a shopper reads, the third place nought.
+    String dinar = listIn(DINAR_TENANT, "KWD", "9.500");
+    applied = matchAndApply(DINAR_TENANT, dinar, "9.000", "ENDING_99");
+    assertThat(
+        applied.getJsonNumber("proposedPrice").bigDecimalValue(), is(new BigDecimal("8.990")));
+    assertThat(storedPrices(DINAR_TENANT, dinar), is("8.990|9.500,8.990"));
+
+    // Nothing reached another business.
+    assertThat(count("price_list_items", T), is(0));
+    assertThat(count("price_list_items", RIVAL_TENANT), is(0));
+  }
+
+  @Test
+  void repricingIsRefusedByName() throws Exception {
     standardVat();
     String everywhere = priceList("Everywhere", null, "10.00");
     String nobody = Ids.newId().toString();
@@ -406,6 +532,45 @@ class PriceZonesIT {
             post("/admin/repricing/rules", String.format(rule, everywhere, "MATCH_LOWEST", 0, 0)),
             400),
         is("VALIDATION_FAILED"));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(rule, everywhere, "MATCH_LOWEST", 0, 80)
+                    .replace("\"maxAgeDays\":14", "\"maxAgeDays\":0")),
+            400),
+        is("REPRICING_MAX_AGE_INVALID"));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(rule, everywhere, "MATCH_LOWEST", 0, 80)
+                    .replace("\"maxAgeDays\":14", "\"maxAgeDays\":366")),
+            400),
+        is("REPRICING_MAX_AGE_INVALID"));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(rule, everywhere, "MATCH_LOWEST", 0, 80)
+                    .replace("\"rounding\":\"NONE\"", "\"rounding\":\"UP\"")),
+            400),
+        is("REPRICING_ROUNDING_INVALID"));
+    assertThat(
+        code(get("/admin/repricing/proposals?status=LOST"), 400), is("REPRICING_STATUS_INVALID"));
+    assertThat("no rule was stored by a refusal", count("repricing_rules", T), is(0));
+    // A rule's name is taken once per business; another business may use it.
+    String undercut = rule.replace("\"name\":\"r\"", "\"name\":\"North undercut\"");
+    Envelopes.created(
+        post("/admin/repricing/rules", String.format(undercut, everywhere, "MATCH_LOWEST", 0, 80)));
+    assertThat(
+        code(
+            post(
+                "/admin/repricing/rules",
+                String.format(undercut, everywhere, "MATCH_LOWEST", 0, 80)),
+            409),
+        is("REPRICING_RULE_NAME_EXISTS"));
+    assertThat("the refused twin was not stored", count("repricing_rules", T), is(1));
     // A dismissed proposal stays dismissed and a run with no fresh observation proposes nothing.
     Envelopes.created(
         post(
@@ -441,5 +606,243 @@ class PriceZonesIT {
                 "CASHIER")
             .getStatus(),
         is(403));
+  }
+
+  // ── a proposal that has outlived its rival price ───────────────────────────
+
+  /** Ages the rival observation behind every open proposal, as days going by would. */
+  private static void ageProposals(int days) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute("UPDATE pricing.repricing_proposals SET observed_on = CURRENT_DATE - " + days);
+    }
+  }
+
+  private static int priceChanged() throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT count(*) FROM pricing.outbox WHERE event_type = 'PriceChanged'")) {
+      rs.next();
+      return rs.getInt(1);
+    }
+  }
+
+  private String proposalFor(String list, int maxAgeDays) {
+    Envelopes.created(
+        post(
+            "/admin/competitor-prices",
+            "{\"variantId\":\""
+                + V
+                + "\",\"competitor\":\"Rival A\",\"price\":8.50,\"observedOn\":\""
+                + LocalDate.now()
+                + "\"}"));
+    JsonObject rule =
+        Envelopes.created(
+            post(
+                "/admin/repricing/rules",
+                "{\"name\":\"Match\",\"priceListId\":\""
+                    + list
+                    + "\",\"strategy\":\"MATCH_LOWEST\",\"value\":0,\"floorPercent\":50,"
+                    + "\"rounding\":\"NONE\",\"maxAgeDays\":"
+                    + maxAgeDays
+                    + "}"));
+    JsonObject run =
+        Envelopes.ok(post("/admin/repricing/rules/" + rule.getString("id") + "/run", "{}"));
+    assertThat(run.getInt("proposed"), is(1));
+    return run.getJsonArray("proposals").getJsonObject(0).getString("id");
+  }
+
+  @Test
+  void aProposalWhoseRivalPriceHasAgedOutIsNotAppliedButCanBeDismissed() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+
+    ageProposals(15);
+    int changesBefore = priceChanged();
+    assertThat(
+        code(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"), 409),
+        is("PRICING_PROPOSAL_STALE"));
+    assertThat("nothing was written", resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
+    assertThat(
+        "the proposal is still open, undecided",
+        Envelopes.okArray(get("/admin/repricing/proposals?status=PROPOSED")).size(),
+        is(1));
+    assertThat(Envelopes.okArray(get("/admin/repricing/proposals?status=APPLIED")).size(), is(0));
+    assertThat("and no PriceChanged went out for it", priceChanged(), is(changesBefore));
+
+    assertThat(
+        Envelopes.ok(post("/admin/repricing/proposals/" + proposal + "/dismiss", "{}"))
+            .getString("status"),
+        is("DISMISSED"));
+  }
+
+  @Test
+  void aProposalExactlyAtTheRulesReachStillApplies() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+    ageProposals(14);
+    assertThat(
+        Envelopes.ok(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"))
+            .getString("status"),
+        is("APPLIED"));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("8.50")));
+  }
+
+  @Test
+  void aStaleProposalRunAgainAgainstAFreshSightingIsAppliedOnce() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+    ageProposals(30);
+    assertThat(
+        code(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"), 409),
+        is("PRICING_PROPOSAL_STALE"));
+    // Another rival seen today, cheaper: running the rule refreshes the open proposal's
+    // observation.
+    Envelopes.created(
+        post(
+            "/admin/competitor-prices",
+            "{\"variantId\":\""
+                + V
+                + "\",\"competitor\":\"Rival B\",\"price\":8.40,\"observedOn\":\""
+                + LocalDate.now()
+                + "\"}"));
+    String rule = Envelopes.okArray(get("/admin/repricing/rules")).getJsonObject(0).getString("id");
+    Envelopes.ok(post("/admin/repricing/rules/" + rule + "/run", "{}"));
+    assertThat(
+        Envelopes.ok(post("/admin/repricing/proposals/" + proposal + "/apply", "{}"))
+            .getString("status"),
+        is("APPLIED"));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("8.40")));
+  }
+
+  @Test
+  void anotherBusinessAndLowerRolesCannotApplyOrDismissOurProposal() {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    String proposal = proposalFor(list, 14);
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      for (String action : new String[] {"apply", "dismiss"}) {
+        assertThat(
+            code(
+                call(
+                    "POST",
+                    "/admin/repricing/proposals/" + proposal + "/" + action,
+                    "{}",
+                    RIVAL_TENANT,
+                    role),
+                404),
+            is("REPRICING_PROPOSAL_NOT_FOUND"));
+      }
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      for (String action : new String[] {"apply", "dismiss"}) {
+        assertThat(
+            call("POST", "/admin/repricing/proposals/" + proposal + "/" + action, "{}", T, role)
+                .getStatus(),
+            is(403));
+        assertThat(
+            call(
+                    "POST",
+                    "/admin/repricing/proposals/" + proposal + "/" + action,
+                    "{}",
+                    RIVAL_TENANT,
+                    role)
+                .getStatus(),
+            is(403));
+      }
+    }
+    assertThat(Envelopes.okArray(get("/admin/repricing/proposals?status=PROPOSED")).size(), is(1));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
+  }
+
+  // ── bulk observations and running a rule: refusals that keep nothing ───────
+
+  private static String observationJson(String competitor, String extra) {
+    return "{\"variantId\":\""
+        + V
+        + "\",\"competitor\":\""
+        + competitor
+        + "\",\"price\":8.50"
+        + extra
+        + "}";
+  }
+
+  @Test
+  void oneBadRowRefusesTheWholeBatchAndKeepsNothing() throws Exception {
+    standardVat();
+    String good = observationJson("Rival A", "");
+    String nobody = Ids.newId().toString();
+    String[][] bad = {
+      {observationJson("Rival B", ",\"currency\":\"USD\""), "PRICING_COMPETITOR_CURRENCY_MISMATCH"},
+      {
+        observationJson("Rival B", ",\"observedOn\":\"2999-01-01\""),
+        "PRICING_COMPETITOR_DATE_INVALID"
+      },
+      {observationJson("Rival B", ",\"zoneId\":\"" + nobody + "\""), "PRICING_ZONE_UNKNOWN"},
+    };
+    for (String[] row : bad) {
+      assertThat(
+          code(
+              post(
+                  "/admin/competitor-prices/batch",
+                  "{\"observations\":[" + good + "," + row[0] + "]}"),
+              400),
+          is(row[1]));
+      assertThat("the good row was not kept either", count("competitor_prices", T), is(0));
+    }
+    assertThat(
+        code(post("/admin/competitor-prices/batch", "{\"observations\":[]}"), 400),
+        is("VALIDATION_FAILED"));
+    StringBuilder many = new StringBuilder("{\"observations\":[");
+    for (int i = 0; i < 501; i++) many.append(i == 0 ? "" : ",").append(good);
+    many.append("]}");
+    assertThat(
+        code(post("/admin/competitor-prices/batch", many.toString()), 400),
+        is("VALIDATION_FAILED"));
+    assertThat(
+        call(
+                "POST",
+                "/admin/competitor-prices/batch",
+                "{\"observations\":[" + good + "]}",
+                T,
+                "CASHIER")
+            .getStatus(),
+        is(403));
+    assertThat(count("competitor_prices", T), is(0));
+    assertThat(count("competitor_prices", RIVAL_TENANT), is(0));
+  }
+
+  @Test
+  void anotherBusinessOrAnUnknownRuleCannotBeRun() throws Exception {
+    standardVat();
+    String list = priceList("Everywhere", null, "10.00");
+    Envelopes.created(post("/admin/competitor-prices", observationJson("Rival A", "")));
+    JsonObject rule =
+        Envelopes.created(
+            post(
+                "/admin/repricing/rules",
+                "{\"name\":\"Match\",\"priceListId\":\""
+                    + list
+                    + "\",\"strategy\":\"MATCH_LOWEST\",\"value\":0,\"floorPercent\":50,"
+                    + "\"rounding\":\"NONE\",\"maxAgeDays\":14}"));
+    String ours = "/admin/repricing/rules/" + rule.getString("id") + "/run";
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          code(call("POST", ours, "{}", RIVAL_TENANT, role), 404), is("REPRICING_RULE_NOT_FOUND"));
+    }
+    assertThat(
+        code(post("/admin/repricing/rules/" + Ids.newId() + "/run", "{}"), 404),
+        is("REPRICING_RULE_NOT_FOUND"));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER"}) {
+      assertThat(call("POST", ours, "{}", T, role).getStatus(), is(403));
+    }
+    assertThat("no proposal was made", count("repricing_proposals", T), is(0));
+    assertThat(count("repricing_proposals", RIVAL_TENANT), is(0));
+    assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
   }
 }

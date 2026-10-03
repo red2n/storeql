@@ -165,7 +165,13 @@ public class BondService {
   }
 
   public List<BondStock> stock(TenantContext ctx, String storeId) {
-    return repo.stockInBond(ctx.requireTenantId(), Parsing.optionalUuid(storeId, "storeId"));
+    // The duty in the business's own currency's minor units (the rates are set in it); a read-only
+    // report fails open on Fx's precision for an unknown currency.
+    UUID tenantId = ctx.requireTenantId();
+    return repo.stockInBond(
+        tenantId,
+        Parsing.optionalUuid(storeId, "storeId"),
+        Fx.minorUnits(profiles.find(tenantId).map(TenantProfiles.Profile::currency).orElse(null)));
   }
 
   /** The home currency the duty is owed in. */

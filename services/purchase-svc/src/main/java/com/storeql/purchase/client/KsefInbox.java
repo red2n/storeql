@@ -1,9 +1,10 @@
 package com.storeql.purchase.client;
 
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.EInvoiceInbox.Waiting;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
@@ -68,7 +69,7 @@ public class KsefInbox {
   @ConfigProperty(name = "storeql.einvoice.ksef.timeout-seconds", defaultValue = "20")
   long timeoutSeconds;
 
-  private HttpClient http;
+  private volatile HttpClient http;
 
   /** The network could not be reached, or refused. Distinguished so a fetch can be tried again. */
   public static class KsefException extends RuntimeException {
@@ -102,13 +103,30 @@ public class KsefInbox {
 
   private HttpClient http() {
     if (http == null) {
-      http =
-          HttpClient.newBuilder()
-              .connectTimeout(Duration.ofSeconds(Math.max(1, timeoutSeconds)))
-              .followRedirects(HttpClient.Redirect.NEVER)
-              .build();
+      // Built under a lock (no I/O inside it) so two first fetches share one client, and its
+      // selector thread, rather than each making one.
+      synchronized (this) {
+        if (http == null) {
+          http =
+              HttpClient.newBuilder()
+                  .connectTimeout(Duration.ofSeconds(Math.max(1, timeoutSeconds)))
+                  .followRedirects(HttpClient.Redirect.NEVER)
+                  .build();
+        }
+      }
     }
     return http;
+  }
+
+  /** The client owns a selector thread; closed with the application. */
+  @PreDestroy
+  void close() {
+    synchronized (this) {
+      if (http != null) {
+        http.close();
+        http = null;
+      }
+    }
   }
 
   private String baseUrl() {
@@ -129,11 +147,13 @@ public class KsefInbox {
     String access = accessToken(nip, ksefToken);
     List<Waiting> out = new ArrayList<>();
     JsonObject body =
-        Json.createObjectBuilder()
+        Jsons.PROVIDER
+            .createObjectBuilder()
             .add("subjectType", "Subject2")
             .add(
                 "dateRange",
-                Json.createObjectBuilder()
+                Jsons.PROVIDER
+                    .createObjectBuilder()
                     .add("dateType", "Issue")
                     .add("from", from.toString())
                     .add("to", to.toString()))
@@ -148,7 +168,7 @@ public class KsefInbox {
     JsonArray invoices =
         answer.containsKey("invoices")
             ? answer.getJsonArray("invoices")
-            : Json.createArrayBuilder().build();
+            : Jsons.PROVIDER.createArrayBuilder().build();
     for (JsonValue v : invoices) {
       JsonObject o = v.asJsonObject();
       String reference = o.getString("ksefNumber", o.getString("referenceNumber", null));
@@ -169,7 +189,20 @@ public class KsefInbox {
    * @return the document's bytes, exactly as the system gave them: what is kept is what arrived
    */
   public byte[] download(String nip, String ksefToken, String reference) {
-    String access = accessToken(nip, ksefToken);
+    return download(accessToken(nip, ksefToken), reference);
+  }
+
+  /**
+   * Signs in for a fetch: the access token a run of {@link #download(String, String)} calls shares,
+   * so a fetch of many invoices signs in once rather than once per invoice. Held by the caller for
+   * the length of the fetch only, never cached here.
+   */
+  public String signIn(String nip, String ksefToken) {
+    return accessToken(nip, ksefToken);
+  }
+
+  /** One invoice, as FA(3), for a caller that has already signed in. */
+  public byte[] download(String access, String reference) {
     Reply reply = call("/invoices/ksef/" + reference, null, access);
     if (!reply.ok()) {
       throw new KsefException(
@@ -221,11 +254,12 @@ public class KsefInbox {
             : Instant.parse(c.getString("timestamp")).toEpochMilli();
     String sealed = seal(tokenKey, ksefToken + "|" + ms);
     JsonObject init =
-        Json.createObjectBuilder()
+        Jsons.PROVIDER
+            .createObjectBuilder()
             .add("challenge", c.getString("challenge"))
             .add(
                 "contextIdentifier",
-                Json.createObjectBuilder().add("type", "Nip").add("value", nip))
+                Jsons.PROVIDER.createObjectBuilder().add("type", "Nip").add("value", nip))
             .add("encryptedToken", sealed)
             .build();
     Reply started = call("/auth/ksef-token", init.toString(), null);
@@ -282,13 +316,13 @@ public class KsefInbox {
       throw new KsefException(
           "KSeF gave no public keys: HTTP " + reply.status(), reply.status() >= 500, null);
     }
-    try (JsonReader r = Json.createReader(new StringReader(reply.body()))) {
+    try (JsonReader r = Jsons.PROVIDER.createReader(new StringReader(reply.body()))) {
       for (JsonValue v : r.readArray()) {
         JsonObject cert = v.asJsonObject();
         JsonArray usage =
             cert.containsKey("usage")
                 ? cert.getJsonArray("usage")
-                : Json.createArrayBuilder().build();
+                : Jsons.PROVIDER.createArrayBuilder().build();
         for (JsonValue u : usage) {
           String use =
               u.getValueType() == JsonValue.ValueType.STRING
@@ -358,10 +392,11 @@ public class KsefInbox {
 
     JsonObject object() {
       try (JsonReader r =
-          Json.createReader(new StringReader(body == null || body.isBlank() ? "{}" : body))) {
+          Jsons.PROVIDER.createReader(
+              new StringReader(body == null || body.isBlank() ? "{}" : body))) {
         return r.readObject();
       } catch (RuntimeException e) {
-        return Json.createObjectBuilder().build();
+        return Jsons.PROVIDER.createObjectBuilder().build();
       }
     }
   }

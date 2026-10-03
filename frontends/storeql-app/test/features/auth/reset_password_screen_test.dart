@@ -48,6 +48,7 @@ Future<_Answering> _pump(
   ResponseBody Function(RequestOptions) answer, {
   PasswordPolicy policy = PasswordPolicy.fallback,
   String token = 'a-token',
+  Locale? locale,
 }) async {
   final adapter = _Answering(answer);
   await tester.pumpWidget(
@@ -59,6 +60,7 @@ Future<_Answering> _pump(
         passwordPolicyProvider.overrideWith((ref) async => policy),
       ],
       child: MaterialApp(
+        locale: locale,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: ResetPasswordScreen(token: token),
@@ -231,7 +233,7 @@ void main() {
   });
 
   testWidgets(
-    'sends the token from the link and the new password, nothing else',
+    'sends the token from the link, the new password and the language',
     (tester) async {
       final adapter = await _pump(
         tester,
@@ -246,7 +248,22 @@ void main() {
       expect(sent.data, {
         'token': 'tok-123',
         'newPassword': 'a phrase of several words',
+        'language': 'en',
       });
     },
   );
+
+  testWidgets('sends the app\'s own current language code, so the "password changed" email is in it', (
+    tester,
+  ) async {
+    final adapter = await _pump(
+      tester,
+      (_) => _json('{"data":{"reset":true}}'),
+      locale: const Locale('pl'),
+    );
+    await _fill(tester, 'a phrase of several words');
+    await tester.tap(find.byKey(const Key('reset-submit')));
+    await tester.pumpAndSettle();
+    expect((adapter.requests.single.data as Map)['language'], 'pl');
+  });
 }

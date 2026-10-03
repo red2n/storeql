@@ -6,9 +6,9 @@ import com.storeql.tenant.service.StatutoryService;
 import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -84,8 +84,10 @@ public class StatutoryResource {
   @POST
   @Path("/{code}/filings")
   public ApiResponse<StatutoryDtos.ObligationResponse> file(
-      @PathParam("code") String code, @Valid StatutoryDtos.FileRequest req) {
+      @PathParam("code") String code, StatutoryDtos.FileRequest req) {
+    BusinessWide.require(ctx);
     ctx.requireAnyRole("OWNER", "MANAGER");
+    Validations.validate(req);
     return ApiResponse.ok(
         StatutoryMappers.toDto(
             svc.file(

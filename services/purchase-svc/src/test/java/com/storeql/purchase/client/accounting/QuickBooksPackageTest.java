@@ -1,9 +1,11 @@
 package com.storeql.purchase.client.accounting;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.storeql.purchase.domain.Accounting;
 import com.storeql.test.Envelopes;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
@@ -110,6 +112,78 @@ class QuickBooksPackageTest {
     assertTrue(
         refused.getMessage().contains("Accounts element id 2109 not found"), refused.getMessage());
     assertTrue(qbo.idempotentWrites());
+  }
+
+  @Test
+  @DisplayName(
+      "A realm id no address can be made from is refused before anything is sent, for a person to"
+          + " put right: never retried, never a raw failure")
+  void aRealmIdNoAddressCanBeMadeFromIsRefusedUnsent() {
+    stub.answerWith(r -> new PackageStub.Answer(200, "{\"JournalEntry\":{\"Id\":\"1\"}}"));
+    int before = stub.all().size();
+    for (String realm : new String[] {"91 30", "9130%", "9130%zz"}) {
+      Accounting.Connection connection =
+          Journals.connection("QUICKBOOKS", Map.of("realmId", realm));
+      AccountingPackage.Refused pushed =
+          assertThrows(
+              AccountingPackage.Refused.class,
+              () -> qbo.push(connection, Journals.bearer("t"), Journals.rent(), Journals.mapping()),
+              realm);
+      assertFalse(pushed.sent(), realm);
+      assertFalse(pushed.retryable(), realm);
+      assertEquals(AccountingPackage.Refused.UNSENT, pushed.status(), realm);
+      AccountingPackage.Refused chart =
+          assertThrows(
+              AccountingPackage.Refused.class,
+              () -> qbo.accounts(connection, Journals.bearer("t")),
+              realm);
+      assertFalse(chart.sent(), realm);
+      assertFalse(chart.retryable(), realm);
+    }
+    assertEquals(before, stub.all().size(), "QuickBooks was never asked");
+  }
+
+  @Test
+  @DisplayName(
+      "An environment the driver does not know is refused before anything is sent — never read as"
+          + " production — and the two it knows are read in any case")
+  void anEnvironmentTheDriverDoesNotKnowIsRefusedUnsent() {
+    stub.answerWith(r -> new PackageStub.Answer(200, "{\"JournalEntry\":{\"Id\":\"1\"}}"));
+    int before = stub.all().size();
+    for (String environment : new String[] {"PROD", "Sandbx", "live", "production2"}) {
+      Accounting.Connection connection =
+          Journals.connection("QUICKBOOKS", Map.of("realmId", "9130", "environment", environment));
+      AccountingPackage.Refused pushed =
+          assertThrows(
+              AccountingPackage.Refused.class,
+              () -> qbo.push(connection, Journals.bearer("t"), Journals.rent(), Journals.mapping()),
+              environment);
+      assertFalse(pushed.sent(), environment);
+      assertFalse(pushed.retryable(), environment);
+      assertTrue(pushed.getMessage().contains("environment"), pushed.getMessage());
+      AccountingPackage.Refused chart =
+          assertThrows(
+              AccountingPackage.Refused.class,
+              () -> qbo.accounts(connection, Journals.bearer("t")),
+              environment);
+      assertFalse(chart.sent(), environment);
+    }
+    assertEquals(before, stub.all().size(), "QuickBooks was never asked");
+
+    assertEquals(
+        "https://sandbox-quickbooks.api.intuit.com", QuickBooksPackage.baseUrlFor("sandbox"));
+    assertEquals("https://quickbooks.api.intuit.com", QuickBooksPackage.baseUrlFor(" Production "));
+    assertEquals(
+        "1",
+        qbo.push(
+                Journals.connection(
+                    "QUICKBOOKS", Map.of("realmId", "9130", "environment", "sandbox")),
+                Journals.bearer("t"),
+                Journals.rent(),
+                Journals.mapping())
+            .externalId(),
+        "a known environment, in lower case, is sent");
+    assertEquals(before + 1, stub.all().size());
   }
 
   @Test

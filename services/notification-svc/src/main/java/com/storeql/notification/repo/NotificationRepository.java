@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -55,48 +56,63 @@ public class NotificationRepository extends BaseJdbcRepository {
   }
 
   /**
-   * Lists a store's shortage alerts, newest first.
+   * Lists shortage alerts, newest first.
    *
    * @param tenantId owning tenant; the first condition of the query
-   * @param storeId the store whose alerts to list
+   * @param stores the stores whose alerts to list, or {@code null} for every store of the tenant;
+   *     never empty
    * @param limit maximum rows to return; the caller is expected to have capped this
    * @return the matching alerts, newest first
    */
-  public List<ShortageAlert> listAlerts(UUID tenantId, UUID storeId, int limit) {
+  public List<ShortageAlert> listAlerts(UUID tenantId, Set<UUID> stores, int limit) {
     StringBuilder sb =
         new StringBuilder(
             "SELECT id, tenant_id, store_id, variant_id, available, threshold, event_id, alerted_at"
                 + " FROM shortage_alerts WHERE tenant_id = ?");
-    if (storeId != null) sb.append(" AND store_id = ?");
+    if (stores != null) sb.append(" AND store_id = ANY(?)");
     sb.append(" ORDER BY alerted_at DESC LIMIT ?");
     return query(
         sb.toString(),
         ps -> {
-          ps.setObject(1, tenantId);
-          if (storeId != null) ps.setObject(2, storeId);
-          ps.setInt(storeId != null ? 3 : 2, limit);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
+          ps.setInt(i, limit);
         },
         NotificationRepository::mapAlert,
         "list shortage alerts");
   }
 
   /**
-   * Lists one variant's shortage alerts across every store, newest first.
+   * Lists one variant's shortage alerts, newest first.
    *
    * @param tenantId owning tenant; the first condition of the query
    * @param variantId the product variant whose alerts to list
+   * @param stores the stores whose alerts may be read, or {@code null} for every store of the
+   *     tenant; never empty
    * @param limit maximum rows to return; the caller is expected to have capped this
    * @return the matching alerts, newest first
    */
-  public List<ShortageAlert> listAlertsByVariant(UUID tenantId, UUID variantId, int limit) {
+  public List<ShortageAlert> listAlertsByVariant(
+      UUID tenantId, UUID variantId, Set<UUID> stores, int limit) {
+    StringBuilder sb =
+        new StringBuilder(
+            "SELECT id, tenant_id, store_id, variant_id, available, threshold, event_id, alerted_at"
+                + " FROM shortage_alerts WHERE tenant_id = ? AND variant_id = ?");
+    if (stores != null) sb.append(" AND store_id = ANY(?)");
+    sb.append(" ORDER BY alerted_at DESC LIMIT ?");
     return query(
-        "SELECT id, tenant_id, store_id, variant_id, available, threshold, event_id, alerted_at"
-            + " FROM shortage_alerts WHERE tenant_id = ? AND variant_id = ?"
-            + " ORDER BY alerted_at DESC LIMIT ?",
+        sb.toString(),
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setObject(2, variantId);
-          ps.setInt(3, limit);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          ps.setObject(i++, variantId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
+          ps.setInt(i, limit);
         },
         NotificationRepository::mapAlert,
         "list shortage alerts by variant");
@@ -203,19 +219,19 @@ public class NotificationRepository extends BaseJdbcRepository {
   }
 
   /**
-   * Deletes password-reset rows older than the cutoff: a platform rule, not any business's
-   * retention schedule — the row belongs to no tenant, so no tenant's own period ever reaches it,
-   * and there is no hold to check (nobody's account can keep this one back). Called by {@link
-   * com.storeql.notification.service.RetentionPurgeService} on its own daily sweep, once, never per
-   * tenant.
+   * Deletes password-reset and password-changed rows older than the cutoff: a platform rule, not
+   * any business's retention schedule — the row belongs to no tenant, so no tenant's own period
+   * ever reaches it, and there is no hold to check (nobody's account can keep this one back).
+   * Called by {@link com.storeql.notification.service.RetentionPurgeService} on its own daily
+   * sweep, once, never per tenant.
    */
   public int purgePasswordResetsBefore(Instant cutoff) {
     return inTx(
         c -> {
           try (var ps =
               c.prepareStatement(
-                  "DELETE FROM notification_log WHERE type = 'PASSWORD_RESET' AND tenant_id IS"
-                      + " NULL AND created_at < ?")) {
+                  "DELETE FROM notification_log WHERE type IN ('PASSWORD_RESET',"
+                      + " 'PASSWORD_CHANGED') AND tenant_id IS NULL AND created_at < ?")) {
             ps.setObject(1, cutoff.atOffset(ZoneOffset.UTC));
             return ps.executeUpdate();
           }

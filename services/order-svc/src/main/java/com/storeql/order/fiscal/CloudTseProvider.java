@@ -1,6 +1,7 @@
 package com.storeql.order.fiscal;
 
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.order.domain.Domain.TseDevice;
 import com.storeql.order.domain.Domain.TseStamp;
 import com.storeql.web.ApiException;
@@ -10,17 +11,18 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
 import java.math.BigDecimal;
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -107,7 +109,7 @@ public class CloudTseProvider implements TseProvider {
       throw ApiException.badRequest(
           "FISCAL_TSE_ID_REQUIRED", "tseTssId is required to register a cloud device");
     }
-    String token = authenticate();
+    String token = token();
     JsonObject tss = get("/tss/" + req.externalTssId(), token);
     return new TseDevice(
         Ids.newId(),
@@ -132,7 +134,16 @@ public class CloudTseProvider implements TseProvider {
     if (!isConfigured()) {
       throw new TseException("cloud TSE credentials are not configured", null);
     }
-    String token = authenticate();
+    try {
+      return signWith(token(), device, sale);
+    } catch (Unauthorized e) {
+      // The provider no longer honours the cached bearer token: sign in again, once.
+      invalidate();
+      return signWith(token(), device, sale);
+    }
+  }
+
+  private TseStamp signWith(String token, TseDevice device, SaleFigures sale) {
     UUID txId = Ids.newId();
     String path = "/tss/" + device.externalTssId() + "/tx/" + txId;
     put(
@@ -236,6 +247,45 @@ public class CloudTseProvider implements TseProvider {
     return fallback;
   }
 
+  /** A bearer token and the moment it must no longer be used. */
+  private record Token(String value, Instant until) {}
+
+  /** The provider answered 401: the bearer token in use is no longer good. */
+  private static final class Unauthorized extends TseException {
+    private static final long serialVersionUID = 1L;
+
+    Unauthorized(String message) {
+      super(message, null);
+    }
+  }
+
+  private static final Duration EXPIRY_MARGIN = Duration.ofSeconds(30);
+
+  private volatile Token cached;
+  private final ReentrantLock signIn = new ReentrantLock();
+
+  private void invalidate() {
+    cached = null;
+  }
+
+  /**
+   * The bearer token for the provider: the cached one while it lasts, else one fresh sign-in shared
+   * by every caller waiting for it (one authenticates, the rest use the result), so a till does not
+   * make three round trips to the provider per receipt.
+   */
+  private String token() {
+    Token t = cached;
+    if (t != null && Instant.now().isBefore(t.until())) return t.value();
+    signIn.lock();
+    try {
+      t = cached;
+      if (t != null && Instant.now().isBefore(t.until())) return t.value();
+      return authenticate();
+    } finally {
+      signIn.unlock();
+    }
+  }
+
   private String authenticate() {
     JsonObject body =
         Json.createObjectBuilder().add("api_key", apiKey).add("api_secret", apiSecret).build();
@@ -249,7 +299,17 @@ public class CloudTseProvider implements TseProvider {
         throw new TseException(
             "cloud TSE refused the credentials: HTTP " + res.status().code(), null);
       }
-      return parse(text).getString("access_token");
+      JsonObject auth = parse(text);
+      String token = auth.getString("access_token");
+      // Cached only when the provider says how long the token lasts, less a margin.
+      long lifeSeconds =
+          auth.containsKey("access_token_expires_in") && !auth.isNull("access_token_expires_in")
+              ? auth.getJsonNumber("access_token_expires_in").longValue()
+              : 0L;
+      Duration life = Duration.ofSeconds(lifeSeconds).minus(EXPIRY_MARGIN);
+      cached =
+          life.isNegative() || life.isZero() ? null : new Token(token, Instant.now().plus(life));
+      return token;
     } catch (TseException e) {
       throw e;
     } catch (RuntimeException e) {
@@ -257,13 +317,25 @@ public class CloudTseProvider implements TseProvider {
     }
   }
 
+  /**
+   * The address of a path, as a URI: the WebClient's String form escapes the "?" of {@code
+   * ?tx_revision=} into the path, and the TSE answers 404.
+   */
+  private URI target(String path) {
+    return URI.create(baseUrl + path);
+  }
+
   private JsonObject get(String path, String token) {
     try (HttpClientResponse res =
         webClient
-            .get(baseUrl + path)
+            .get()
+            .uri(target(path))
             .header(HeaderNames.AUTHORIZATION, "Bearer " + token)
             .request()) {
       String text = res.as(String.class);
+      if (res.status().code() == 401) {
+        throw new Unauthorized("cloud TSE refused the bearer token for " + path);
+      }
       if (res.status().code() != 200) {
         LOG.log(
             System.Logger.Level.WARNING,
@@ -285,11 +357,15 @@ public class CloudTseProvider implements TseProvider {
   private JsonObject put(String path, String token, JsonObject body) {
     try (HttpClientResponse res =
         webClient
-            .put(baseUrl + path)
+            .put()
+            .uri(target(path))
             .header(HeaderNames.AUTHORIZATION, "Bearer " + token)
             .header(HeaderNames.CONTENT_TYPE, "application/json")
             .submit(body.toString())) {
       String text = res.as(String.class);
+      if (res.status().code() == 401) {
+        throw new Unauthorized("cloud TSE refused the bearer token for " + path);
+      }
       if (res.status().code() != 200) {
         LOG.log(
             System.Logger.Level.WARNING,

@@ -2,10 +2,10 @@ package com.storeql.inventory.api;
 
 import com.storeql.ids.Ids;
 import com.storeql.ids.Ids.InvalidIdException;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.web.TenantContext;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonException;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
@@ -18,6 +18,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.ext.Provider;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.util.List;
 import java.util.UUID;
 
@@ -59,17 +61,26 @@ public class StoreScopeFilter implements ContainerRequestFilter {
     }
     MediaType type = request.getMediaType();
     if (request.hasEntity() && type != null && MediaType.APPLICATION_JSON_TYPE.isCompatible(type)) {
-      byte[] body = request.getEntityStream().readAllBytes();
-      request.setEntityStream(new ByteArrayInputStream(body));
-      if (body.length <= MAX_INSPECTED_BYTES) {
-        inspect(body);
+      // Read one byte past the limit, never the whole body: a large upload is not buffered here.
+      // The stream is the container's and stays open: replay hands it on to the resource.
+      byte[] head = request.getEntityStream().readNBytes(MAX_INSPECTED_BYTES + 1);
+      request.setEntityStream(replay(head, request.getEntityStream()));
+      if (head.length <= MAX_INSPECTED_BYTES) {
+        inspect(head);
       }
     }
   }
 
+  /** The bytes already read, followed by whatever of the stream is left. */
+  static InputStream replay(byte[] head, InputStream rest) {
+    return head.length <= MAX_INSPECTED_BYTES
+        ? new ByteArrayInputStream(head)
+        : new SequenceInputStream(new ByteArrayInputStream(head), rest);
+  }
+
   private void inspect(byte[] body) {
     JsonValue value;
-    try (JsonReader reader = Json.createReader(new ByteArrayInputStream(body))) {
+    try (JsonReader reader = Jsons.createReader(new ByteArrayInputStream(body))) {
       value = reader.readValue();
     } catch (JsonException | IllegalStateException e) {
       return; // not JSON after all: the resource answers that

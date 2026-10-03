@@ -34,7 +34,6 @@ import {
   poll,
   register,
   setTenantStatus,
-  signInUntil,
   staffUser,
   totp,
   truthy,
@@ -148,20 +147,39 @@ function registerAs(email, password) {
   return { email, password, userId: claims(d.accessToken).sub, token: d.accessToken, refreshToken: d.refreshToken };
 }
 
-/** The address signed up afresh and made staff at one of the business's stores. */
+/**
+ * The address made staff at one of the business's stores. Staff are made by the business (29 Sep
+ * 2026): provisioning creates this business's own login for the address, with the password it is
+ * given — a login the address holds anywhere else is never taken on — and the role is then assigned
+ * to that login. Its session is renewed until the role arrives, never signed in again: the address
+ * holds another business's login too, and a run of refused sign-ins would lock it at the gateway.
+ */
 function staffLogin(tenant, role, storeId, email, password) {
-  const user = registerAs(email, password);
-  must(call('POST', `${TS}/admin/staff`, { token: tenant.owner.token, body: { userId: user.userId, storeId, role } }), 201, `assign ${role}`);
-  signInUntil(user, (c) => c.tenant === tenant.tenantId && (c.roles || []).includes(role));
+  const made = must(call('POST', `${AUTH}/admin/staff-users`, { token: tenant.owner.token, body: { email, password } }), 200, `provision ${email} at ${tenant.label}`);
+  must(call('POST', `${TS}/admin/staff`, { token: tenant.owner.token, body: { userId: made.userId, storeId, role } }), 201, `assign ${role}`);
+  const signed = must(call('POST', `${AUTH}/login`, { body: { email, password } }), 200, `sign in ${email} at ${tenant.label}`);
+  const user = { email, password, userId: made.userId, token: signed.accessToken, refreshToken: signed.refreshToken };
+  const took = poll(90, () => {
+    const renewed = data(call('POST', `${AUTH}/refresh`, { body: { refreshToken: user.refreshToken } }));
+    if (!renewed.accessToken) return false;
+    user.token = renewed.accessToken;
+    user.refreshToken = renewed.refreshToken;
+    const c = claims(user.token);
+    return c.tenant === tenant.tenantId && (c.roles || []).includes(role);
+  });
+  if (took < 0) throw new Error(`${email} never became ${role} at ${tenant.label}`);
   return user;
 }
 
 /**
  * A sign-in with a password (20.12): 200 with tokens, or 200 owing a second factor or its set-up —
- * either way the password was right. Anything else (401) it was not.
+ * either way the password was right. Anything else (401) it was not. `accountType` is where it is
+ * made from: CUSTOMER for a storefront; left out, it runs a business (iam-svc's default) — one
+ * address holding staff logins and a shopper's account is signed in to the shopper's only from a
+ * storefront.
  */
-function signIn(email, password) {
-  const res = call('POST', `${AUTH}/login`, { body: { email, password } });
+function signIn(email, password, accountType) {
+  const res = call('POST', `${AUTH}/login`, { body: accountType ? { email, password, accountType } : { email, password } });
   const d = data(res);
   const owes = d.mfaRequired ? 'factor' : d.mfaEnrolmentRequired ? 'enrolment' : null;
   return { res, token: owes ? null : d.accessToken || null, owes, mfaToken: d.mfaToken || null };
@@ -276,7 +294,7 @@ export default function ({ adminEmail, gb, pl, names, address, passwords, staffA
   expect(reset(`${uniq()}${uniq()}${uniq()}`.slice(0, 43), exactly(min)), '[-] a made-up link is refused the same way', 400, 'PASSWORD_RESET_TOKEN_INVALID');
   const stillB = signIn(address, passwords.B);
   truthy('[+] staff B still signs in with the old password, at the Polish business', tenantOf(stillB.token) === pl.tenantId && rolesOf(stillB.token).includes('CASHIER'), claims(stillB.token || ''));
-  const stillShopper = signIn(address, passwords.S);
+  const stillShopper = signIn(address, passwords.S, 'CUSTOMER');
   truthy('[+] ...and so does the shopper login, which belongs to no business', Boolean(stillShopper.token) && !tenantOf(stillShopper.token) && rolesOf(stillShopper.token).includes('CUSTOMER'), claims(stillShopper.token || ''));
   expect(refresh(sessionB), "[+] staff B's session from before the reset renews: a reset touches one login", 200);
 
@@ -295,7 +313,7 @@ export default function ({ adminEmail, gb, pl, names, address, passwords, staffA
   expect(signIn(address, passwords.B).res, "[-] staff B's old password no longer signs in", 401, 'INVALID_CREDENTIALS');
   const inB = signIn(address, newB);
   truthy('[+] ...the new one does, at the Polish business', tenantOf(inB.token) === pl.tenantId, claims(inB.token || ''));
-  truthy("[+] staff A's new password and the shopper's own still sign in", tenantOf(signIn(address, newA).token) === gb.tenantId && Boolean(signIn(address, passwords.S).token));
+  truthy("[+] staff A's new password and the shopper's own still sign in", tenantOf(signIn(address, newA).token) === gb.tenantId && Boolean(signIn(address, passwords.S, 'CUSTOMER').token));
 
   // ── 5. at most three requests an hour for one address ────────────────────────────────────────────
   truthy('[+] a third request, in a language the platform does not have, is told the same', accepted(forgot(address, 'fr')));

@@ -148,8 +148,8 @@ export default function ({ gb, noaddr, cafe, nobody, slow, offline, inbox, inbox
   truthy('[+] ...and the business\'s own electronic address', typeof s0.senderAddress === 'string' && s0.senderAddress.startsWith('0088:'), s0.senderAddress);
 
   // ── refusals ─────────────────────────────────────────────────────────────────────────────────────
-  expect(settings(gb.cashier.token), '[-] a cashier does not read where invoices leave', 403);
-  expect(choose({ network: 'PEPPOL', provider: 'SIMULATED' }, gb.cashier.token), '[-] nor chooses it', 403);
+  expect(settings(gb.cashier.token), '[-] a cashier does not read where invoices leave', 403, 'FORBIDDEN');
+  expect(choose({ network: 'PEPPOL', provider: 'SIMULATED' }, gb.cashier.token), '[-] nor chooses it', 403, 'FORBIDDEN');
   expect(choose({ network: 'FAX', provider: 'SIMULATED' }), '[-] a network that does not exist is refused', 400, 'EINVOICE_NETWORK_UNKNOWN');
   expect(choose({ network: 'PEPPOL' }), '[-] a network needs a provider', 400, 'EINVOICE_PROVIDER_REQUIRED');
   expect(choose({ network: 'KSEF', provider: 'ACCESS_POINT' }), '[-] a provider that does not serve the network is refused', 400, 'EINVOICE_PROVIDER_UNKNOWN');
@@ -159,7 +159,7 @@ export default function ({ gb, noaddr, cafe, nobody, slow, offline, inbox, inbox
   expect(choose({ network: 'KSEF', provider: 'KSEF', providerSecret: 'token' }), '[-] nor KSeF', 409, 'EINVOICE_PROVIDER_NOT_CONFIGURED');
   expect(choose({ network: 'PEPPOL', provider: 'SIMULATED', providerSecret: 'a-password' }), '[-] a credential cannot be kept on a deployment with no secrets key', 409, 'EINVOICE_SECRETS_KEY_MISSING');
   expect(choose({ network: 'PEPPOL', provider: 'SIMULATED' }, noaddr.tenant.owner.token), '[-] Peppol needs the business\'s own electronic address', 409, 'EINVOICE_SENDER_ADDRESS_MISSING');
-  expect(choose({ network: 'PEPPOL', provider: 'SIMULATED', providerAccount: 'x'.repeat(121) }), '[-] an account name too long is refused', 400);
+  expect(choose({ network: 'PEPPOL', provider: 'SIMULATED', providerAccount: 'x'.repeat(121) }), '[-] an account name too long is refused', 400, 'VALIDATION_FAILED');
   expect(choose({ network: 'KSEF', provider: 'SIMULATED' }, noaddr.tenant.owner.token), '[+] KSeF needs no address: the network takes the sender\'s own', 200);
 
   const chosen = choose({ network: 'PEPPOL', provider: 'SIMULATED', providerAccount: 'LE-K6' });
@@ -184,7 +184,7 @@ export default function ({ gb, noaddr, cafe, nobody, slow, offline, inbox, inbox
   truthy('[+] ...and ready says what it means on a stack with no contract: nothing leaves the platform', /nothing leaves it/.test(data(ready).networkDetail || '') && /provider contract/.test(data(ready).networkDetail || ''), data(ready).networkDetail);
   truthy('[+] ...the business is named by its address and its VAT number', /0088:/.test(checkOf(ready, 'SENDER_ADDRESS').detail || '') && checkOf(ready, 'SELLER_VAT_ID').satisfied === true, { sender: checkOf(ready, 'SENDER_ADDRESS'), vat: checkOf(ready, 'SELLER_VAT_ID') });
   truthy('[+] ...and a check sends nothing: the outbox is where it was', (data(outbox('?limit=100')) || []).length === sentBefore, sentBefore);
-  expect(readiness(gb.cashier.token), '[-] a cashier does not ask whether the business can send', 403);
+  expect(readiness(gb.cashier.token), '[-] a cashier does not ask whether the business can send', 403, 'FORBIDDEN');
   truthy("[abuse] a rival asking sees its own readiness, never this business's network", data(readiness(gb.rival.owner.token)).network === 'NONE', data(readiness(gb.rival.owner.token)));
 
   // ── delivered, refused, deferred, nowhere to go ──────────────────────────────────────────────────
@@ -259,13 +259,13 @@ export default function ({ gb, noaddr, cafe, nobody, slow, offline, inbox, inbox
   const rest = outbox(`?limit=100&after=${accepted.json('meta.nextCursor')}`);
   truthy('[+] ...which reads', rest.status === 200 && data(rest).length >= 2, data(rest) && data(rest).length);
   expect(outbox('?status=LOST'), '[-] a status that does not exist is refused', 400, 'EINVOICE_TRANSMISSION_STATUS_UNKNOWN');
-  expect(outbox('?after=not-a-cursor'), '[-] a cursor that is not an attempt is refused', 400);
+  expect(outbox('?after=not-a-cursor'), '[-] a cursor that is not an attempt is refused', 400, 'INVALID_UUID');
 
   // ── abuse ────────────────────────────────────────────────────────────────────────────────────────
   const rival = gb.rival.owner.token;
   truthy('[abuse] another tenant\'s outbox is empty', (data(outbox('', rival)) || []).length === 0, 'rival outbox');
-  expect(attempts(inv.id, rival), '[abuse] another tenant does not see the attempts', 404);
-  expect(send(inv.id, rival), '[abuse] nor sends the document', 404);
+  expect(attempts(inv.id, rival), '[abuse] another tenant does not see the attempts', 404, 'ORDER_INVOICE_NOT_FOUND');
+  expect(send(inv.id, rival), '[abuse] nor sends the document', 404, 'ORDER_INVOICE_NOT_FOUND');
   const path = call('GET', `${O}/admin/sales-invoices/not-an-id/transmissions`, { token: t });
   truthy('[abuse] a path that is not an id is refused, not an error', path.status === 400 || path.status === 404, path.status);
   const before = data(attempts(refused.id)).length;

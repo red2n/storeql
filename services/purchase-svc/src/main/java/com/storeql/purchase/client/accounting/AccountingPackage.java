@@ -56,9 +56,16 @@ public interface AccountingPackage {
    */
   record ExternalAccount(String id, String code, String name, String type) {}
 
-  /** The package answered, and said no. */
+  /**
+   * The package answered, and said no; or the request could not be formed from the connection's
+   * settings, and nothing was sent ({@link #UNSENT}).
+   */
   final class Refused extends RuntimeException {
     private static final long serialVersionUID = 1L;
+
+    /** The status of a refusal made here, before anything left: no package answered it. */
+    public static final int UNSENT = 0;
+
     private final int status;
     private final boolean retryable;
 
@@ -68,8 +75,29 @@ public interface AccountingPackage {
       this.retryable = retryable;
     }
 
+    /**
+     * A request that could not be formed — an address or a header the connection's settings cannot
+     * make. Nothing was sent, and the clock cannot mend a setting: a person does.
+     */
+    public static Refused unsent(String detail) {
+      return new Refused(UNSENT, detail, false);
+    }
+
+    /** As {@link #unsent(String)}, keeping what made the request impossible to form. */
+    public static Refused unsent(String detail, Throwable cause) {
+      Refused r = new Refused(UNSENT, detail, false);
+      r.initCause(cause);
+      return r;
+    }
+
+    /** The package's HTTP status, or {@link #UNSENT}. */
     public int status() {
       return status;
+    }
+
+    /** Whether the request left at all: false for a refusal made before anything was sent. */
+    public boolean sent() {
+      return status != UNSENT;
     }
 
     /** Whether the clock should try again: true unless it needs a person (credentials). */

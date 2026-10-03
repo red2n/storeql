@@ -6,6 +6,7 @@ import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -45,7 +46,8 @@ public class AbcAnalysisResource {
    * @param req the request body
    * @return compile run persisted with its assignments ({@code 201})
    * @throws com.storeql.web.ApiException {@code 400} invalid criteria (must be VALUE or VELOCITY)
-   *     or invalid thresholds
+   *     or invalid thresholds; {@code VALIDATION_FAILED} for a threshold finer than two places or
+   *     out of range
    */
   @Operation(
       summary = "Run an ABC classification compile",
@@ -55,15 +57,23 @@ public class AbcAnalysisResource {
   @APIResponse(responseCode = "201", description = "Compile run persisted with its assignments")
   @APIResponse(
       responseCode = "400",
-      description = "Invalid criteria (must be VALUE or VELOCITY) or invalid thresholds")
+      description =
+          "Invalid criteria (must be VALUE or VELOCITY) or invalid thresholds; VALIDATION_FAILED: a"
+              + " threshold finer than two places or out of range")
   @POST
   @Path("/abc/compile")
   public Response runAbcCompile(RunAbcRequest req) {
+    // A compile sets the classes every replenishment and count plan reads: management's, at a
+    // store the caller keeps (a caller held to stores who names none compiles their own store).
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    // The body is optional (every default); one that is sent is held to the rules.
+    if (req != null) Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId =
-        req != null && req.storeId() != null && !req.storeId().isBlank()
-            ? uuid(req.storeId(), "storeId")
-            : null;
+        ctx.scopeStore(
+            req != null && req.storeId() != null && !req.storeId().isBlank()
+                ? uuid(req.storeId(), "storeId")
+                : null);
     String criteria = req != null ? req.criteria() : null;
     var thA = req != null ? req.thresholdA() : null;
     var thAB = req != null ? req.thresholdAB() : null;

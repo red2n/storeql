@@ -56,5 +56,10 @@
   "resetPasswordDone": "ਪਾਸਵਰਡ ਬਦਲ ਗਿਆ — ਇਸ ਨਾਲ ਸਾਈਨ ਇਨ ਕਰੋ।",
   "resetPasswordDoneStorefront": "ਸਟੋਰਫਰੰਟ ਤੋਂ ਖਰੀਦਦਾਰੀ ਕਰ ਰਹੇ ਹੋ? ਤੁਸੀਂ ਦੁਕਾਨ ਤੋਂ ਸਾਈਨ ਇਨ ਕਰ ਸਕਦੇ ਹੋ।",
   "resetPasswordTokenInvalid": "ਇਹ ਲਿੰਕ ਖਤਮ ਹੋ ਗਿਆ ਹੈ ਜਾਂ ਪਹਿਲਾਂ ਹੀ ਵਰਤਿਆ ਜਾ ਚੁੱਕਾ ਹੈ — ਨਵੇਂ ਲਈ ਬੇਨਤੀ ਕਰੋ।",
-  "resetPasswordRequestNew": "ਨਵੇਂ ਲਿੰਕ ਲਈ ਬੇਨਤੀ ਕਰੋ"
+  "resetPasswordRequestNew": "ਨਵੇਂ ਲਿੰਕ ਲਈ ਬੇਨਤੀ ਕਰੋ",
+  "startBusiness": "ਕਾਰੋਬਾਰ ਸ਼ੁਰੂ ਕਰੋ",
+  "startBusinessTitle": "ਆਪਣਾ ਕਾਰੋਬਾਰ ਸ਼ੁਰੂ ਕਰੋ",
+  "startBusinessIntro": "ਉਹ ਲੌਗਇਨ ਬਣਾਓ ਜਿਸ ਨਾਲ ਤੁਸੀਂ ਆਪਣਾ ਕਾਰੋਬਾਰ ਚਲਾਓਗੇ। ਫਿਰ ਤੁਸੀਂ ਕਾਰੋਬਾਰ ਅਤੇ ਉਸਦੀ ਪਹਿਲੀ ਦੁਕਾਨ ਸੈੱਟ ਕਰੋਗੇ।",
+  "fieldPasswordConfirm": "ਪਾਸਵਰਡ ਦੀ ਪੁਸ਼ਟੀ ਕਰੋ",
+  "fieldPasswordMismatch": "ਇਹ ਉੱਪਰ ਦਿੱਤੇ ਪਾਸਵਰਡ ਨਾਲ ਮੇਲ ਨਹੀਂ ਖਾਂਦਾ।"
 }

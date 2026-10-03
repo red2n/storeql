@@ -8,6 +8,7 @@ import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.Concurrency;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.AddConfig;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -140,18 +141,18 @@ class BillingIT {
 
   /** The platform's own identity, without which nothing can be billed. */
   private void sellerIs(String country, String rate) {
-    Answer saved =
-        platform(
-            "PUT",
-            BILLING + "/profile",
-            "{\"legalName\":\"StoreQL Platform Ltd\",\"addressLine1\":\"1 Quay Street\","
-                + "\"city\":\"Dublin\",\"postcode\":\"D02 XY45\",\"country\":\""
-                + country
-                + "\",\"vatNumber\":\"IE1234567X\",\"invoicePrefix\":\"INV\","
-                + "\"paymentTermsDays\":14,\"taxRate\":\""
-                + rate
-                + "\"}");
+    Answer saved = platform("PUT", BILLING + "/profile", profileJson(country, rate));
     assertThat(saved.text(), saved.status(), is(200));
+  }
+
+  private static String profileJson(String country, String rate) {
+    return "{\"legalName\":\"StoreQL Platform Ltd\",\"addressLine1\":\"1 Quay Street\","
+        + "\"city\":\"Dublin\",\"postcode\":\"D02 XY45\",\"country\":\""
+        + country
+        + "\",\"vatNumber\":\"IE1234567X\",\"invoicePrefix\":\"INV\","
+        + "\"paymentTermsDays\":14,\"taxRate\":\""
+        + rate
+        + "\"}";
   }
 
   /** A plan on sale in euro at {@code amount}, with no trial so the first period bills at once. */
@@ -679,5 +680,512 @@ class BillingIT {
         new BigDecimal(after.get("outstanding").toString()),
         is(new BigDecimal(myInvoice.get("outstanding").toString())));
     assertThat(after.getString("tenantId"), is(mine));
+  }
+
+  // ── refusals the billing surface makes by name ─────────────────────────────
+
+  /**
+   * A plan on sale priced only in {@code currency} at {@code amount}, with a trial of {@code
+   * trialDays}.
+   */
+  private String planIn(String code, String currency, String amount, int trialDays) {
+    Answer written =
+        platform(
+            "POST",
+            PLANS,
+            "{\"code\":\""
+                + code
+                + "\",\"name\":\""
+                + code
+                + " plan\",\"billingInterval\":\"MONTH\",\"trialDays\":"
+                + trialDays
+                + ",\"isPublic\":true,\"sortOrder\":1}");
+    assertThat(written.text(), written.status(), is(201));
+    String id = written.data().getString("id");
+    assertThat(
+        platform(
+                "POST",
+                PLANS + "/" + id + "/prices",
+                "{\"currency\":\"" + currency + "\",\"amount\":" + amount + "}")
+            .status(),
+        is(200));
+    assertThat(platform("POST", PLANS + "/" + id + "/activate", null).status(), is(200));
+    return id;
+  }
+
+  private static String tail() {
+    return Ids.newId().toString().substring(28).toUpperCase(java.util.Locale.ROOT);
+  }
+
+  private String planOf(String tenantId) {
+    return owner("GET", MINE, null, tenantId)
+        .data()
+        .getJsonObject("subscription")
+        .getString("planCode");
+  }
+
+  @Test
+  @DisplayName("A business with no subscription is not found, and nothing is recorded for it")
+  void aBusinessWithNoSubscriptionIsNotFound() {
+    Answer check =
+        platform(
+            "POST",
+            BILLING + "/tenants/" + Ids.newId() + "/vat-check",
+            "{\"vatNumber\":\"DE123456789\",\"source\":\"MANUAL\"}");
+    assertThat(check.text(), check.status(), is(404));
+    assertThat(check.code(), is("SUBSCRIPTION_NOT_FOUND"));
+    // A business's own view of it is the same refusal, rather than an empty page.
+    Answer own = owner("GET", MINE, null, Ids.newId().toString());
+    assertThat(own.text(), own.status(), is(404));
+    assertThat(own.code(), is("SUBSCRIPTION_NOT_FOUND"));
+  }
+
+  @Test
+  @DisplayName("A VAT check names where it came from and what it checked, or it is refused")
+  void aCheckFromNowhereIsRefused() {
+    sellerIs("IE", "0.2300");
+    String plan = sellablePlan("IT-SRC-" + tail(), "10.00");
+    assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
+    String shop = onboard("Checks nothing");
+    assertThat(
+        owner("PUT", MINE + "/details", "{\"country\":\"DE\",\"vatNumber\":\"DE111111111\"}", shop)
+            .status(),
+        is(200));
+
+    Answer guessed =
+        platform(
+            "POST",
+            BILLING + "/tenants/" + shop + "/vat-check",
+            "{\"vatNumber\":\"DE111111111\",\"source\":\"GUESSED\"}");
+    assertThat(guessed.status(), is(400));
+    assertThat(guessed.code(), is("VAT_CHECK_SOURCE_UNKNOWN"));
+
+    // An ideographic space passes a trim()-based not-blank check and is caught by the service.
+    Answer blank =
+        platform(
+            "POST",
+            BILLING + "/tenants/" + shop + "/vat-check",
+            "{\"vatNumber\":\"\\u3000\",\"source\":\"MANUAL\"}");
+    assertThat(blank.status(), is(400));
+    assertThat(blank.code(), is("VAT_NUMBER_REQUIRED"));
+
+    JsonObject buyer =
+        owner("GET", MINE, null, shop).data().getJsonObject("subscription").getJsonObject("buyer");
+    assertThat("the buyer stays unchecked", buyer.getBoolean("vatChecked"), is(false));
+
+    // The platform records checks; a business does not, and another business's id is no help.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer own =
+          call(
+              "POST",
+              BILLING + "/tenants/" + shop + "/vat-check",
+              "{\"vatNumber\":\"DE111111111\",\"source\":\"MANUAL\"}",
+              shop,
+              role);
+      assertThat(role, own.status(), is(403));
+    }
+    assertThat(
+        owner("GET", MINE, null, shop)
+            .data()
+            .getJsonObject("subscription")
+            .getJsonObject("buyer")
+            .getBoolean("vatChecked"),
+        is(false));
+  }
+
+  @Test
+  @DisplayName("A plan change is NOW or at PERIOD_END, and anything else changes nothing")
+  void aPlanChangeIsNowOrAtPeriodEnd() {
+    sellerIs("IE", "0.2300");
+    String tag = tail();
+    String small = sellablePlan("IT-WHEN-S-" + tag, "10.00");
+    String big = sellablePlan("IT-WHEN-B-" + tag, "20.00");
+    assertThat(platform("POST", PLANS + "/" + small + "/default", null).status(), is(200));
+    String shop = onboard("Changes when");
+    String before = planOf(shop);
+    int invoices = invoicesOf(shop).size();
+
+    Answer tomorrow =
+        owner("POST", MINE + "/plan", "{\"planId\":\"" + big + "\",\"when\":\"TOMORROW\"}", shop);
+    assertThat(tomorrow.status(), is(400));
+    assertThat(tomorrow.code(), is("PLAN_CHANGE_WHEN_UNKNOWN"));
+    assertThat("the subscription is unchanged", planOf(shop), is(before));
+    assertThat("and nothing was invoiced", invoicesOf(shop).size(), is(invoices));
+  }
+
+  @Test
+  @DisplayName("Money arrives by transfer or card; any other method is refused and settles nothing")
+  void moneyArrivesByTransferOrCard() {
+    sellerIs("IE", "0.2300");
+    String plan = sellablePlan("IT-METH-" + tail(), "10.00");
+    assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
+    String shop = onboard("Pays by cheque");
+    JsonObject invoice = invoicesOf(shop).get(0);
+    String id = invoice.getString("id");
+
+    Answer cheque =
+        platform(
+            "POST",
+            BILLING + "/invoices/" + id + "/payments",
+            "{\"amount\":1.00,\"method\":\"CHEQUE\",\"providerRef\":\"CHQ-1\"}");
+    assertThat(cheque.status(), is(400));
+    assertThat(cheque.code(), is("PAYMENT_METHOD_UNKNOWN"));
+
+    JsonObject after = invoicesOf(shop).get(0);
+    assertThat("the invoice is as it was", after.getString("status"), is("OPEN"));
+    assertThat(
+        new BigDecimal(after.get("outstanding").toString())
+            .compareTo(new BigDecimal(invoice.get("outstanding").toString())),
+        is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "A payment finer than its invoice's currency is refused, never rounded, and settles nothing")
+  void aPaymentFinerThanItsCurrencyIsRefused() {
+    sellerIs("IE", "0.2300");
+    String plan = sellablePlan("IT-FINE-" + tail(), "10.00");
+    assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
+    String shop = onboard("Pays a fraction");
+    JsonObject invoice = invoicesOf(shop).get(0);
+    String id = invoice.getString("id");
+    assertThat(invoice.getString("currency"), is("EUR"));
+
+    for (String amount : new String[] {"1.005", "0.0001"}) {
+      Answer fine =
+          platform(
+              "POST",
+              BILLING + "/invoices/" + id + "/payments",
+              "{\"amount\":" + amount + ",\"method\":\"BANK_TRANSFER\"}");
+      assertThat(amount + " -> " + fine.text(), fine.status(), is(400));
+      assertThat(fine.code(), is("BILLING_AMOUNT_INVALID"));
+    }
+    Answer zero =
+        platform(
+            "POST",
+            BILLING + "/invoices/" + id + "/payments",
+            "{\"amount\":0,\"method\":\"BANK_TRANSFER\"}");
+    assertThat(zero.status(), is(400));
+
+    JsonObject after = invoicesOf(shop).get(0);
+    assertThat("the invoice is as it was", after.getString("status"), is("OPEN"));
+    assertThat(
+        new BigDecimal(after.get("outstanding").toString())
+            .compareTo(new BigDecimal(invoice.get("outstanding").toString())),
+        is(0));
+    // A euro's two places are an amount of it.
+    Answer cent =
+        platform(
+            "POST",
+            BILLING + "/invoices/" + id + "/payments",
+            "{\"amount\":0.01,\"method\":\"BANK_TRANSFER\"}");
+    assertThat(cent.text(), cent.status(), is(200));
+    assertThat(
+        cent.data().getJsonArray("payments").getJsonObject(0).get("amount").toString(), is("0.01"));
+  }
+
+  @Test
+  @DisplayName("An upgrade to a plan with no price in the business's currency is refused")
+  void anUpgradeToAPlanWithNoPriceInTheBusinessCurrencyIsRefused() {
+    sellerIs("IE", "0.2300");
+    String tag = tail();
+    String small = sellablePlan("IT-CUR-S-" + tag, "10.00");
+    String dollars = planIn("IT-CUR-D-" + tag, "USD", "25.00", 0);
+    assertThat(platform("POST", PLANS + "/" + small + "/default", null).status(), is(200));
+    String shop = onboard("Euro business");
+    String before = planOf(shop);
+    int invoices = invoicesOf(shop).size();
+
+    Answer up =
+        owner("POST", MINE + "/plan", "{\"planId\":\"" + dollars + "\",\"when\":\"NOW\"}", shop);
+    assertThat(up.status(), is(409));
+    assertThat(up.code(), is("PLAN_PRICE_MISSING"));
+    assertThat(planOf(shop), is(before));
+    assertThat("no invoice was issued", invoicesOf(shop).size(), is(invoices));
+  }
+
+  @Test
+  @DisplayName("A change with nothing to bill is refused, and no adjustment is issued")
+  void aChangeWithNothingToBillIsRefused() {
+    sellerIs("IE", "0.2300");
+    String tag = tail();
+    String free = planIn("IT-FREE-A-" + tag, "EUR", "0.00", 14);
+    String alsoFree = planIn("IT-FREE-B-" + tag, "EUR", "0.00", 14);
+    assertThat(platform("POST", PLANS + "/" + free + "/default", null).status(), is(200));
+    String shop = onboard("Free to free");
+    int invoices = invoicesOf(shop).size();
+
+    Answer change =
+        owner("POST", MINE + "/plan", "{\"planId\":\"" + alsoFree + "\",\"when\":\"NOW\"}", shop);
+    assertThat(change.text(), change.status(), is(409));
+    assertThat(change.code(), is("BILLING_PERIOD_ENDING"));
+    assertThat("no adjustment was issued", invoicesOf(shop).size(), is(invoices));
+  }
+
+  private JsonObject buyerOf(String shop) {
+    return owner("GET", MINE, null, shop)
+        .data()
+        .getJsonObject("subscription")
+        .getJsonObject("buyer");
+  }
+
+  @Test
+  @DisplayName(
+      "A billing country that is no ISO code is refused for the buyer, the platform's profile and a"
+          + " VAT rate, and nothing is stored")
+  void aBillingCountryThatIsNoCountryIsRefused() {
+    sellerIs("IE", "0.2300");
+    String plan = sellablePlan("IT-CTRY-" + tail(), "10.00");
+    assertThat(platform("POST", PLANS + "/" + plan + "/default", null).status(), is(200));
+    String shop = onboard("Odd country");
+    assertThat(buyerOf(shop).getString("country"), is("IE"));
+    int rates = platform("GET", BILLING + "/vat-rates", null).list().size();
+
+    // UK is two letters and is not a country (the United Kingdom is GB), and decides a VAT
+    // treatment all the same; two ideographic spaces pass a trim()-based not-blank check.
+    for (String bad : List.of("UK", "ZZ", "G1", "\\u3000\\u3000")) {
+      Answer details =
+          owner("PUT", MINE + "/details", "{\"country\":\"" + bad + "\",\"name\":\"Odd\"}", shop);
+      assertThat(bad + " -> " + details.text(), details.status(), is(400));
+      assertThat(bad, details.code(), is("COUNTRY_INVALID"));
+
+      Answer profile = platform("PUT", BILLING + "/profile", profileJson(bad, "0.2300"));
+      assertThat(bad + " -> " + profile.text(), profile.status(), is(400));
+      assertThat(bad, profile.code(), is("COUNTRY_INVALID"));
+
+      Answer rate =
+          platform(
+              "PUT",
+              BILLING + "/vat-rates",
+              "{\"country\":\"" + bad + "\",\"effectiveFrom\":\"2020-01-01\",\"rate\":\"0.1000\"}");
+      assertThat(bad + " -> " + rate.text(), rate.status(), is(400));
+      assertThat(bad, rate.code(), is("COUNTRY_INVALID"));
+    }
+    assertThat("the buyer stays where it was", buyerOf(shop).getString("country"), is("IE"));
+    assertThat(
+        "and so does the platform's own profile",
+        platform("GET", BILLING + "/profile", null).data().getString("country"),
+        is("IE"));
+    assertThat(
+        "no rate was set for a country that is none",
+        platform("GET", BILLING + "/vat-rates", null).list().size(),
+        is(rates));
+
+    // As it is typed, in capitals or not, it is stored in capitals.
+    Answer typed = owner("PUT", MINE + "/details", "{\"country\":\"de\",\"name\":\"Odd\"}", shop);
+    assertThat(typed.text(), typed.status(), is(200));
+    assertThat(buyerOf(shop).getString("country"), is("DE"));
+
+    // A business's owner cannot write the platform's profile, whatever country it names.
+    Answer theirs = owner("PUT", BILLING + "/profile", profileJson("UK", "0.2300"), shop);
+    assertThat(theirs.text(), theirs.status(), is(403));
+  }
+
+  // ── a body no rate or amount could be (02 Oct 2026) ──────────────────────
+
+  /** The problem's details, as strings. */
+  private static List<String> details(Answer a) {
+    return a.body().containsKey("details")
+        ? a.body().getJsonArray("details").getValuesAs(jakarta.json.JsonString.class).stream()
+            .map(jakarta.json.JsonString::getString)
+            .toList()
+        : List.of();
+  }
+
+  private static String rows(String table) {
+    return Envelopes.scalar(PG, "SELECT count(*) FROM tenant." + table);
+  }
+
+  @Test
+  @DisplayName(
+      "A VAT rate, a payment or a dunning policy no figure could be is the platform's 400"
+          + " VALIDATION_FAILED, field by field, and nothing is written")
+  void aBodyNoFigureCouldBeIsRefusedAndNothingIsWritten() {
+    String rates = rows("platform_vat_rates");
+    String payments = rows("billing_payments");
+    String policy =
+        Envelopes.scalar(
+            PG,
+            "SELECT coalesce(max(reminder_days || '/' || suspend_after_days), '-')"
+                + " FROM tenant.dunning_policy");
+
+    // Written as a number, as a client would: twelve characters, eighty million digits once
+    // written out. @Digits alone wraps an int on 1E+2147483647 and lets it through.
+    for (String absurd : List.of("1E+80000000", "1E-80000000", "1E+2147483647")) {
+      Answer rate =
+          platform(
+              "PUT",
+              BILLING + "/vat-rates",
+              "{\"country\":\"IE\",\"effectiveFrom\":\"2020-01-01\",\"rate\":" + absurd + "}");
+      assertThat(absurd + " -> " + rate.text(), rate.status(), is(400));
+      assertThat(rate.code(), is("VALIDATION_FAILED"));
+      assertThat(details(rate), is(List.of("rate: is out of range")));
+
+      // The request is wrong before the invoice is looked for: 400, not 404.
+      Answer paid =
+          platform(
+              "POST",
+              BILLING + "/invoices/" + Ids.newId() + "/payments",
+              "{\"amount\":" + absurd + ",\"method\":\"BANK_TRANSFER\"}");
+      assertThat(absurd + " -> " + paid.text(), paid.status(), is(400));
+      assertThat(paid.code(), is("VALIDATION_FAILED"));
+      assertThat(details(paid), is(List.of("amount: is out of range")));
+    }
+
+    // A hole in the reminder days was a 500 from sorting a null; now it is named.
+    Answer holed =
+        platform(
+            "PUT",
+            BILLING + "/dunning/policy",
+            "{\"enabled\":true,\"reminderDays\":[1,null,5],\"suspendAfterDays\":7,"
+                + "\"uncollectibleAfterDays\":30}");
+    assertThat(holed.text(), holed.status(), is(400));
+    assertThat(holed.code(), is("VALIDATION_FAILED"));
+    assertThat(details(holed), is(List.of("reminderDays[1]: must not be null")));
+
+    // In the platform's problem shape, not Helidon's constraint-violation body.
+    assertThat(holed.body().getString("type"), is("urn:storeql:problem:VALIDATION_FAILED"));
+
+    // Only the platform administrator is asked what they sent.
+    Answer theirs =
+        call(
+            "PUT",
+            BILLING + "/vat-rates",
+            "{\"country\":\"IE\",\"effectiveFrom\":\"2020-01-01\",\"rate\":1E+80000000}",
+            Ids.newId().toString(),
+            "OWNER");
+    assertThat(theirs.text(), theirs.status(), is(403));
+
+    assertThat("no rate was written", rows("platform_vat_rates"), is(rates));
+    assertThat("no payment was written", rows("billing_payments"), is(payments));
+    assertThat(
+        "the policy is as it was",
+        Envelopes.scalar(
+            PG,
+            "SELECT coalesce(max(reminder_days || '/' || suspend_after_days), '-')"
+                + " FROM tenant.dunning_policy"),
+        is(policy));
+  }
+
+  @Test
+  @DisplayName(
+      "A VAT rate or the platform's own rate of 1 or more, and payment terms past 180 days, broke"
+          + " the tables' checks as 500s; each is 400 VALIDATION_FAILED naming the field, and"
+          + " nothing is written")
+  void aRateIsBelowOneAndTermsAreAtMostHalfAYear() {
+    String rates = rows("platform_vat_rates");
+    String seller =
+        "SELECT coalesce(max(tax_rate || '/' || payment_terms_days), '-')"
+            + " FROM tenant.platform_billing_profile";
+    String sellerBefore = Envelopes.scalar(PG, seller);
+
+    for (String whole : List.of("1", "9.9999")) {
+      Answer rate =
+          platform(
+              "PUT",
+              BILLING + "/vat-rates",
+              "{\"country\":\"IE\",\"effectiveFrom\":\"2020-01-01\",\"rate\":" + whole + "}");
+      assertThat(whole + " -> " + rate.text(), rate.status(), is(400));
+      assertThat(rate.code(), is("VALIDATION_FAILED"));
+      assertThat(details(rate), is(List.of("rate: must be less than 1")));
+
+      Answer profile = platform("PUT", BILLING + "/profile", profileJson("IE", whole));
+      assertThat(whole + " -> " + profile.text(), profile.status(), is(400));
+      assertThat(profile.code(), is("VALIDATION_FAILED"));
+      assertThat(details(profile), is(List.of("taxRate: must be less than 1")));
+    }
+    for (String terms : List.of("181", "2147483647")) {
+      Answer profile =
+          platform(
+              "PUT",
+              BILLING + "/profile",
+              profileJson("IE", "0.2300")
+                  .replace("\"paymentTermsDays\":14", "\"paymentTermsDays\":" + terms));
+      assertThat(terms + " -> " + profile.text(), profile.status(), is(400));
+      assertThat(profile.code(), is("VALIDATION_FAILED"));
+      assertThat(
+          details(profile), is(List.of("paymentTermsDays: must be less than or equal to 180")));
+    }
+    assertThat("no rate was written", rows("platform_vat_rates"), is(rates));
+    assertThat("the seller is as it was", Envelopes.scalar(PG, seller), is(sellerBefore));
+
+    // Just below one, written with a zero the column keeps unchanged, a rate is taken as sent.
+    // Iceland, which no other case here bills in.
+    Answer edge =
+        platform(
+            "PUT",
+            BILLING + "/vat-rates",
+            "{\"country\":\"IS\",\"effectiveFrom\":\"2020-01-01\",\"rate\":0.99990}");
+    assertThat(edge.text(), edge.status(), is(200));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT rate::text FROM tenant.platform_vat_rates WHERE country = 'IS'"
+                + " AND effective_from = '2020-01-01'"),
+        is("0.9999"));
+  }
+
+  @Test
+  @DisplayName("No body where one is needed is a 400, not a 500, and nothing is written")
+  void noBodyIsBodyRequired() {
+    String rates = rows("platform_vat_rates");
+    // A literal null reaches the resource as no body at all (the binder may refuse it first).
+    for (String path : List.of("/vat-rates", "/profile", "/dunning/policy")) {
+      Answer none = platform("PUT", BILLING + path, "null");
+      assertThat(path + " -> " + none.text(), none.status(), is(400));
+      assertThat(
+          path, none.code(), org.hamcrest.Matchers.oneOf("BODY_REQUIRED", "REQUEST_BODY_INVALID"));
+    }
+    assertThat(rows("platform_vat_rates"), is(rates));
+  }
+
+  @Test
+  @DisplayName(
+      "A whole number is the number sent: payment terms of 4294967326 were bound as 30 and"
+          + " written with a 200, 1E+80000000 as 0 and 30.9 as 30; a suspension after 4294967310"
+          + " days as 14. Each is 400 REQUEST_BODY_INVALID now, and nothing is written")
+  void aWholeNumberIsNeverCutDown() {
+    String terms =
+        "SELECT coalesce(max(payment_terms_days)::text, '-') FROM tenant.platform_billing_profile";
+    String policy =
+        "SELECT coalesce(max(reminder_days || '/' || suspend_after_days || '/'"
+            + " || uncollectible_after_days), '-') FROM tenant.dunning_policy";
+    String termsBefore = Envelopes.scalar(PG, terms);
+    String policyBefore = Envelopes.scalar(PG, policy);
+    String profile = profileJson("IE", "0.2300");
+
+    for (String cut : List.of("4294967326", "1E+80000000", "30.9", "-4294967266")) {
+      Answer a =
+          platform(
+              "PUT",
+              BILLING + "/profile",
+              profile.replace("\"paymentTermsDays\":14", "\"paymentTermsDays\":" + cut));
+      assertThat(cut + " -> " + a.text(), a.status(), is(400));
+      assertThat(cut + " -> " + a.text(), a.code(), is("REQUEST_BODY_INVALID"));
+    }
+    for (String body :
+        List.of(
+            "{\"enabled\":true,\"reminderDays\":[3,7],\"suspendAfterDays\":4294967310,"
+                + "\"uncollectibleAfterDays\":60}",
+            "{\"enabled\":true,\"reminderDays\":[3,4294967297],\"suspendAfterDays\":14,"
+                + "\"uncollectibleAfterDays\":60}",
+            "{\"enabled\":true,\"reminderDays\":[3,7],\"suspendAfterDays\":14,"
+                + "\"uncollectibleAfterDays\":60.5}")) {
+      Answer a = platform("PUT", BILLING + "/dunning/policy", body);
+      assertThat(body + " -> " + a.text(), a.status(), is(400));
+      assertThat(body + " -> " + a.text(), a.code(), is("REQUEST_BODY_INVALID"));
+    }
+    assertThat("the terms are as they were", Envelopes.scalar(PG, terms), is(termsBefore));
+    assertThat("the policy is as it was", Envelopes.scalar(PG, policy), is(policyBefore));
+
+    // Sent as the whole number it is, in any form, it is taken as sent.
+    Answer ok =
+        platform(
+            "PUT",
+            BILLING + "/profile",
+            profile.replace("\"paymentTermsDays\":14", "\"paymentTermsDays\":30.0"));
+    assertThat(ok.text(), ok.status(), is(200));
+    assertThat(Envelopes.scalar(PG, terms), is("30"));
+    sellerIs("IE", "0.2300");
   }
 }

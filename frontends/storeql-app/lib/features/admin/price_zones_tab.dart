@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -638,6 +639,14 @@ class _RecordCompetitorPriceDialogState extends ConsumerState<RecordCompetitorPr
   bool _busy = false;
   String? _refusal;
 
+  /// A rival's price as pricing-svc keeps it, NUMERIC(19,4), read the way
+  /// the app's language writes a number ([AmountMarks]): one it cannot read
+  /// is refused under the field, never sent as another figure (1.250 lei as
+  /// 1,25).
+  static const _priceShape = AmountShape(15, 4);
+  final _marks = AmountMarks.ofApp();
+  String? get _priceRefusal => _priceShape.refusal(_price.text.trim(), _marks);
+
   @override
   void dispose() {
     _competitor.dispose();
@@ -651,6 +660,12 @@ class _RecordCompetitorPriceDialogState extends ConsumerState<RecordCompetitorPr
       setState(() => _refusal = 'Pick the product and variant the rival sells.');
       return;
     }
+    if (_priceRefusal != null) return;
+    final price = _priceShape.read(_price.text.trim(), _marks);
+    if (price == null || price == '0') {
+      setState(() => _refusal = 'Give their price, more than 0.');
+      return;
+    }
     setState(() {
       _busy = true;
       _refusal = null;
@@ -661,7 +676,8 @@ class _RecordCompetitorPriceDialogState extends ConsumerState<RecordCompetitorPr
         data: {
           'variantId': _variantId,
           'competitor': _competitor.text.trim(),
-          'price': double.tryParse(_price.text.trim()) ?? -1,
+          // The plain decimal typed: JSON-B reads it exactly.
+          'price': price,
           if (_zoneId != null) 'zoneId': _zoneId,
           if (_observedOn.text.trim().isNotEmpty) 'observedOn': _observedOn.text.trim(),
         },
@@ -708,8 +724,15 @@ class _RecordCompetitorPriceDialogState extends ConsumerState<RecordCompetitorPr
               TextField(
                 key: const Key('competitor-price'),
                 controller: _price,
-                decoration: const InputDecoration(labelText: 'Their price *', helperText: 'In your own currency'),
+                decoration: InputDecoration(
+                  labelText: 'Their price *',
+                  helperText: 'In your own currency',
+                  hintText: _marks.hint(2),
+                  errorText: _priceRefusal,
+                  errorMaxLines: 3,
+                ),
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: 8),
               DropdownButtonFormField<String?>(
@@ -738,7 +761,10 @@ class _RecordCompetitorPriceDialogState extends ConsumerState<RecordCompetitorPr
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('competitor-save'), onPressed: _busy ? null : _save, child: const Text('Record')),
+        FilledButton(
+            key: const Key('competitor-save'),
+            onPressed: _busy || _priceRefusal != null ? null : _save,
+            child: const Text('Record')),
       ],
     );
   }
@@ -934,6 +960,22 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
   final _value = TextEditingController(text: '0');
   final _floor = TextEditingController(text: '80');
   final _maxAge = TextEditingController(text: '14');
+
+  // Each figure is read the way the app's language writes a number, within
+  // what pricing-svc keeps (the undercut NUMERIC(19,4), the floor
+  // NUMERIC(5,2), the days a whole number). One it cannot read is refused
+  // under its field and the rule waits: read as 0, a floor of 80,5 went as no
+  // floor at all and an undercut of 2,5 as none.
+  static const _valueShape = AmountShape(15, 4);
+  static const _floorShape = AmountShape(3, 2);
+  static const _daysShape = AmountShape(3, 0);
+  final _marks = AmountMarks.ofApp();
+  String? get _valueRefusal => _valueShape.refusal(_value.text.trim(), _marks);
+  String? get _floorRefusal => _floorShape.refusal(_floor.text.trim(), _marks);
+  String? get _daysRefusal => _daysShape.refusal(_maxAge.text.trim(), _marks);
+  bool get _undercuts => _strategy != 'MATCH_LOWEST';
+  bool get _refused =>
+      (_undercuts && _valueRefusal != null) || _floorRefusal != null || _daysRefusal != null;
   String? _priceListId;
   String _strategy = 'MATCH_LOWEST';
   String _rounding = 'NONE';
@@ -954,6 +996,22 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
       setState(() => _refusal = 'Pick the price list the rule writes into.');
       return;
     }
+    if (_refused) return;
+    final value = _undercuts ? _valueShape.read(_value.text.trim(), _marks) : '0';
+    if (value == null || (_undercuts && value == '0')) {
+      setState(() => _refusal = _strategy == 'UNDERCUT_PERCENT'
+          ? 'Give the percentage to undercut by.'
+          : 'Give the amount to undercut by.');
+      return;
+    }
+    final floor = _floorShape.read(_floor.text.trim(), _marks);
+    if (floor == null || floor == '0') {
+      setState(() => _refusal =
+          'Give the floor: a share of the current price, more than 0 and at most 100.');
+      return;
+    }
+    // Blank: pricing-svc's own 14 days, as the field started.
+    final days = _daysShape.read(_maxAge.text.trim(), _marks);
     setState(() {
       _busy = true;
       _refusal = null;
@@ -965,10 +1023,11 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
           'name': _name.text.trim(),
           'priceListId': _priceListId,
           'strategy': _strategy,
-          'value': double.tryParse(_value.text.trim()) ?? 0,
-          'floorPercent': double.tryParse(_floor.text.trim()) ?? 0,
+          // The plain decimals typed: JSON-B reads them exactly.
+          'value': value,
+          'floorPercent': floor,
           'rounding': _rounding,
-          'maxAgeDays': int.tryParse(_maxAge.text.trim()) ?? 14,
+          if (days != null) 'maxAgeDays': int.parse(days),
         },
       );
       ref.invalidate(repricingRulesProvider);
@@ -985,7 +1044,7 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final undercuts = _strategy != 'MATCH_LOWEST';
+    final undercuts = _undercuts;
     return AlertDialog(
       title: const Text('New repricing rule'),
       content: SizedBox(
@@ -1015,6 +1074,8 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
               DropdownButtonFormField<String>(
                 key: const Key('rule-strategy'),
                 initialValue: _strategy,
+                // The chosen way ellipsizes rather than overflow the dialog.
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: 'Against the lowest fresh rival price'),
                 items: const [
                   DropdownMenuItem(value: 'MATCH_LOWEST', child: Text('Match it')),
@@ -1028,19 +1089,28 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
                 TextField(
                   key: const Key('rule-value'),
                   controller: _value,
-                  decoration: InputDecoration(labelText: _strategy == 'UNDERCUT_PERCENT' ? 'Percent' : 'Amount'),
+                  decoration: InputDecoration(
+                    labelText: _strategy == 'UNDERCUT_PERCENT' ? 'Percent' : 'Amount',
+                    errorText: _valueRefusal,
+                    errorMaxLines: 3,
+                  ),
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (_) => setState(() {}),
                 ),
               ],
               const SizedBox(height: 8),
               TextField(
                 key: const Key('rule-floor'),
                 controller: _floor,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Floor, % of the current price *',
                   helperText: 'Never below this share. No cost is known here; protect a margin at the buyer\'s cost.',
+                  helperMaxLines: 2,
+                  errorText: _floorRefusal,
+                  errorMaxLines: 3,
                 ),
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
@@ -1057,8 +1127,13 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
               TextField(
                 key: const Key('rule-max-age'),
                 controller: _maxAge,
-                decoration: const InputDecoration(labelText: 'A rival price counts for (days)'),
+                decoration: InputDecoration(
+                  labelText: 'A rival price counts for (days)',
+                  errorText: _daysRefusal,
+                  errorMaxLines: 3,
+                ),
                 keyboardType: TextInputType.number,
+                onChanged: (_) => setState(() {}),
               ),
               if (_refusal != null) ...[
                 const SizedBox(height: 12),
@@ -1070,7 +1145,10 @@ class _NewRepricingRuleDialogState extends ConsumerState<NewRepricingRuleDialog>
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('rule-save'), onPressed: _busy ? null : _save, child: const Text('Create')),
+        FilledButton(
+            key: const Key('rule-save'),
+            onPressed: _busy || _refused ? null : _save,
+            child: const Text('Create')),
       ],
     );
   }

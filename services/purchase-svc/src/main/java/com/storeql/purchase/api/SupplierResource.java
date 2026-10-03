@@ -38,12 +38,6 @@ public class SupplierResource {
   @Inject TenantContext ctx;
 
   /**
-   * Creates a supplier master record for the caller's tenant.
-   *
-   * @param req the supplier's name, VAT details, country, currency and payment terms
-   * @return {@code 201} with the created supplier
-   */
-  /**
    * Corrects a supplier's master data after creation (SJ-D34).
    *
    * @param id the supplier
@@ -55,8 +49,14 @@ public class SupplierResource {
       description =
           "Replaces name, VAT details, country, currency and payment terms. The currency can"
               + " change only while no purchase order against the supplier is open; orders"
-              + " already raised keep the currency they were raised in. Management-only.")
+              + " already raised keep the currency they were raised in. Management held to no"
+              + " store: a supplier's terms and bank details are every store's.")
   @APIResponse(responseCode = "200", description = "Supplier as it now stands")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not management, bank details without finance.payments, or BUSINESS_WIDE_ONLY: a caller"
+              + " held to stores")
   @APIResponse(responseCode = "404", description = "No such supplier in this tenant")
   @APIResponse(
       responseCode = "409",
@@ -69,10 +69,21 @@ public class SupplierResource {
     return Response.ok(ApiResponse.ok(Mappers.toDto(svc.updateSupplier(ctx, id, req)))).build();
   }
 
+  /**
+   * Creates a supplier master record for the caller's tenant.
+   *
+   * @param req the supplier's name, VAT details, country, currency and payment terms
+   * @return {@code 201} with the created supplier
+   */
   @Operation(
       summary = "Create a supplier",
-      description = "Creates a supplier master record for the caller's tenant.")
+      description =
+          "Creates a supplier master record for the caller's tenant. Owner, manager or storekeeper;"
+              + " bank details also need finance.payments.")
   @APIResponse(responseCode = "201", description = "Supplier created")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not a buying role, or bank details without finance.payments")
   @POST
   public Response create(CreateSupplierRequest req) {
     Validations.validate(req);

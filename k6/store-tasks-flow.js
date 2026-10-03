@@ -85,7 +85,7 @@ export default function ({ shop, mumbai, rival }) {
   expect(post(`${ADMIN}/lists`, { title: 'X', kind: 'DAILY', dueTime: 'eight' }), '[-] a time that is not one is refused', 400, 'TASK_TIME_INVALID');
   expect(post(`${ADMIN}/lists`, { title: 'X', kind: 'DAILY', dueTime: '08:00', daysOfWeek: [8] }), '[-] a day outside the week would read as scheduled and never fall due', 400, 'TASK_LIST_INVALID');
   expect(post(`${ADMIN}/lists`, { title: 'X', kind: 'WEEKLY', dueTime: '08:00' }), '[-] a weekly list with no day is refused', 400, 'TASK_LIST_INVALID');
-  expect(post(`${ADMIN}/lists`, { title: 'X', kind: 'DAILY', dueTime: '08:00', lines: [{ text: '  ' }] }), '[-] a blank line is refused', 400);
+  expect(post(`${ADMIN}/lists`, { title: 'X', kind: 'DAILY', dueTime: '08:00', lines: [{ text: '  ' }] }), '[-] a blank line is refused', 400, 'VALIDATION_FAILED');
 
   // ── the day ──────────────────────────────────────────────────────────────────────────────────────
   const first = post(`${ADMIN}/days`, { storeId: store });
@@ -106,12 +106,12 @@ export default function ({ shop, mumbai, rival }) {
   const ticked = data(asCashier('POST', `${WORK}/${list.id}/lines/2/tick`));
   truthy('[+] ...by whoever is at the till, and the count comes down', ticked && ticked.outstanding === 0 && ticked.items[1].tickedBy === cashier.userId, ticked);
   expect(asCashier('POST', `${WORK}/${list.id}/lines/2/tick`), '[-] a line ticked twice is a conflict, not a second tick', 409, 'TASK_LINE_TICKED');
-  expect(asCashier('POST', `${WORK}/${list.id}/lines/9/tick`), '[-] a line that is not on the list is not there', 404);
+  expect(asCashier('POST', `${WORK}/${list.id}/lines/9/tick`), '[-] a line that is not on the list is not there', 404, 'TASK_LINE_NOT_FOUND');
   const done = data(asCashier('POST', `${WORK}/${list.id}/complete`, { note: 'all quiet' }));
   truthy('[+] finished: done, by the cashier, with the optional line left as it was', done && done.status === 'DONE' && done.completedBy === cashier.userId && !done.items[2].tickedAt, done);
   truthy('[+] ...and late, because it fell due at one minute past midnight — late is not missed', done && done.late === true, done);
   expect(asCashier('POST', `${WORK}/${list.id}/complete`, {}), '[-] finishing what is finished is refused', 409, 'TASK_NOT_OPEN');
-  expect(asCashier('POST', `${WORK}/${task.id}/skip`, { reason: '' }), '[-] skipping needs a reason: a skipped closing check with none is what an auditor asks about', 400);
+  expect(asCashier('POST', `${WORK}/${task.id}/skip`, { reason: '' }), '[-] skipping needs a reason: a skipped closing check with none is what an auditor asks about', 400, 'VALIDATION_FAILED');
   const skipped = data(asCashier('POST', `${WORK}/${task.id}/skip`, { reason: 'Bin lorry did not come' }));
   truthy('[+] explained away, with the reason kept', skipped && skipped.status === 'SKIPPED' && skipped.skippedReason === 'Bin lorry did not come', skipped);
 
@@ -137,12 +137,16 @@ export default function ({ shop, mumbai, rival }) {
   expect(get(`${ADMIN}/days?storeId=${store}&from=2026-01-01&to=2026-12-31`), '[-] a range that is too long is refused', 400, 'TASK_RANGE_INVALID');
 
   // ── who may press what ───────────────────────────────────────────────────────────────────────────
-  expect(asCashier('POST', `${ADMIN}/lists`, { title: 'Sneak', kind: 'DAILY', dueTime: '09:00' }), '[-] a cashier does not write the list', 403);
-  expect(asCashier('GET', `${ADMIN}/summary?storeId=${store}&from=${london}&to=${london}`), "[-] nor reads the manager's day", 403);
-  expect(call('POST', `${WORK}/${raised.id}/lines/1/tick`, { token: shop.storekeeper.token }), '[-] a line that is not there is not there for anybody', 404);
+  expect(asCashier('POST', `${ADMIN}/lists`, { title: 'Sneak', kind: 'DAILY', dueTime: '09:00' }), '[-] a cashier does not write the list', 403, 'FORBIDDEN');
+  expect(asCashier('GET', `${ADMIN}/summary?storeId=${store}&from=${london}&to=${london}`), "[-] nor reads the manager's day", 403, 'FORBIDDEN');
+  expect(call('POST', `${WORK}/${raised.id}/lines/1/tick`, { token: shop.storekeeper.token }), '[-] a line that is not there is not there for anybody', 404, 'TASK_LINE_NOT_FOUND');
   expect(call('POST', `${WORK}/${raised.id}/complete`, { token: rival.owner.token, body: {} }), '[abuse] another business does not finish this one\'s work', 404);
   expect(get(`${WORK}/${raised.id}`, rival.owner.token), '[abuse] nor sees it', 404);
   truthy('[abuse] nor its lists', (data(get(`${ADMIN}/lists?all=true`, rival.owner.token)) || []).length === 0, 'rival lists');
+  // The store is judged before the caller: another business naming our store is told it does not
+  // exist, never that it is not theirs (intent/workforce-rules.md, "A store is judged in one order").
+  expect(get(`${ADMIN}/summary?storeId=${store}&from=${london}&to=${london}`, rival.owner.token), "[abuse] nor reads our store's day, which is no store of theirs", 404, 'STORE_NOT_FOUND');
+  expect(get(`${WORK}?storeId=${store}`, rival.owner.token), "[abuse] nor our store's task list", 404, 'STORE_NOT_FOUND');
   expect(call('GET', `${WORK}?storeId=${store}`, {}), '[abuse] nobody at all is refused at the door', 401);
 
   completed.add(1);

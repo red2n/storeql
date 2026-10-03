@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -10,14 +11,19 @@ import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/adaptive_sheet.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../../core/reference/iso_reference.dart';
 import '../../shared/widgets/reference_fields.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/page_header.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'fulfilment_windows_screen.dart';
+import 'order_limits_card.dart';
 import 'providers/admin_providers.dart';
+import 'return_policy_card.dart';
 import 'store_instruments_dialog.dart';
+import 'widgets/business_wide_note.dart';
+import 'widgets/figure_field.dart';
 
 /// A store's status in words: *Open* while it trades, *Closed* when switched
 /// off; a status this screen does not know yet reads as words too.
@@ -26,6 +32,9 @@ String _storeStatusLabel(String status) => switch (status.toUpperCase()) {
       'INACTIVE' => 'Closed',
       _ => humanizeCode(status),
     };
+
+/// [_storeStatusLabel] for the change log and other screens.
+String storeStatusLabel(String status) => _storeStatusLabel(status);
 
 /// What a store's ⋮ menu offers on a narrow list.
 enum _StoreAction { edit, zones, instruments, delivery, slots, toggle }
@@ -49,14 +58,19 @@ class StoresScreen extends ConsumerWidget {
     final storesAsync = ref.watch(storesProvider);
     final auth = ref.watch(authNotifierProvider).value;
     final isManager = auth is AuthAuthenticated && auth.isManager;
+    // Opening a store changes the business, not a store: a manager held to
+    // stores is refused it (BUSINESS_WIDE_ONLY), so the control is not offered.
+    final canAddStore = !heldToStores(auth);
     final gutter = context.pageGutter;
 
     return Scaffold(
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showAddStoreDialog(context, ref),
-        icon: const Icon(Icons.add_business),
-        label: const Text('Add Store'),
-      ),
+      floatingActionButton: canAddStore
+          ? FloatingActionButton.extended(
+              onPressed: () => _showAddStoreDialog(context, ref),
+              icon: const Icon(Icons.add_business),
+              label: const Text('Add Store'),
+            )
+          : null,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -70,6 +84,15 @@ class StoresScreen extends ConsumerWidget {
               ),
             ],
           ),
+          if (!canAddStore)
+            Padding(
+              padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, AppSpacing.sm),
+              child: const Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: BusinessWideNote(key: Key('stores-business-wide-note'))),
+            ),
+          // The business's return policy sits with the business-wide settings, for management.
+          if (isManager) const ReturnPolicyCard(),
           Expanded(
             child: storesAsync.when(
               loading: () => const LoadingView(label: 'Loading stores…'),
@@ -84,11 +107,13 @@ class StoresScreen extends ConsumerWidget {
                     title: 'No stores yet',
                     message:
                         'Add a store or warehouse to start managing inventory.',
-                    action: OutlinedButton.icon(
-                      onPressed: () => _showAddStoreDialog(context, ref),
-                      icon: const Icon(Icons.add_business),
-                      label: const Text('Add Store'),
-                    ),
+                    action: canAddStore
+                        ? OutlinedButton.icon(
+                            onPressed: () => _showAddStoreDialog(context, ref),
+                            icon: const Icon(Icons.add_business),
+                            label: const Text('Add Store'),
+                          )
+                        : null,
                   );
                 }
                 return LayoutBuilder(builder: (context, constraints) {
@@ -106,10 +131,13 @@ class StoresScreen extends ConsumerWidget {
                     // covers the last store's status and menu.
                     padding: EdgeInsetsDirectional.fromSTEB(
                         gutter, 0, gutter, AppSpacing.fabClearance),
-                    itemCount: stores.length,
+                    // Management's last row is the order time limits: it scrolls with the
+                    // stores, so large text on a phone never squeezes the list out.
+                    itemCount: stores.length + (isManager ? 1 : 0),
                     separatorBuilder: (_, _) =>
                         const SizedBox(height: AppSpacing.xs),
                     itemBuilder: (context, i) {
+                      if (i == stores.length) return const OrderLimitsCard();
                       final s = stores[i];
                       final active = s.status.toUpperCase() == 'ACTIVE';
                       return _StoreCard(
@@ -404,7 +432,33 @@ class _StoreCard extends StatelessWidget {
       );
 }
 
-/// Lists, creates, edits and activates/deactivates the zones (aisles/racks)
+/// A zone's status is one of these three (tenant-svc, 30 Sep 2026); anything
+/// else is refused with `ZONE_STATUS_INVALID`.
+const zoneStatuses = ['ACTIVE', 'OUT_OF_SERVICE', 'RETIRED'];
+
+/// A zone's status in words.
+String zoneStatusLabel(String status) => switch (status.toUpperCase()) {
+      'ACTIVE' => 'Active',
+      'OUT_OF_SERVICE' => 'Out of service',
+      'RETIRED' => 'Retired',
+      _ => humanizeCode(status),
+    };
+
+/// What choosing that status does, for the menu that changes it.
+String zoneStatusAction(String status) => switch (status.toUpperCase()) {
+      'ACTIVE' => 'Mark active',
+      'OUT_OF_SERVICE' => 'Mark out of service',
+      'RETIRED' => 'Retire',
+      _ => humanizeCode(status),
+    };
+
+StatusTone zoneStatusTone(String status) => switch (status.toUpperCase()) {
+      'ACTIVE' => StatusTone.success,
+      'OUT_OF_SERVICE' => StatusTone.warning,
+      _ => StatusTone.neutral,
+    };
+
+/// Lists, creates, edits and sets the status of the zones (aisles/racks)
 /// within a store. Stock batches are pinned to a (store, zone).
 class _ZonesDialog extends ConsumerWidget {
   final StoreInfo store;
@@ -457,7 +511,7 @@ class _ZonesDialog extends ConsumerWidget {
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (_, i) {
                 final z = zones[i];
-                final active = z.status.toUpperCase() == 'ACTIVE';
+                final status = z.status.toUpperCase();
                 return ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: Icon(Icons.shelves, color: cs.primary),
@@ -472,24 +526,26 @@ class _ZonesDialog extends ConsumerWidget {
                       Text('${z.code} · ${humanizeCode(z.type)}'),
                       const SizedBox(height: AppSpacing.xs),
                       StatusBadge(
-                        humanizeCode(z.status),
-                        tone: active ? StatusTone.success : StatusTone.neutral,
+                        zoneStatusLabel(status),
+                        tone: zoneStatusTone(status),
                       ),
                     ],
                   ),
                   trailing: context.isCompact
                       ? PopupMenuButton<String>(
                           key: Key('zone-actions-${z.id}'),
-                          tooltip: 'Edit or ${active ? 'deactivate' : 'activate'}',
+                          tooltip: 'Edit or change status',
                           onSelected: (a) => a == 'edit'
                               ? _showZoneForm(context, ref, z)
-                              : _toggleStatus(context, ref, z, active),
+                              : _setStatus(context, ref, z, a),
                           itemBuilder: (_) => [
                             const PopupMenuItem(value: 'edit', child: Text('Edit')),
-                            PopupMenuItem(
-                              value: 'toggle',
-                              child: Text(active ? 'Deactivate' : 'Activate'),
-                            ),
+                            for (final next in zoneStatuses)
+                              if (next != status)
+                                PopupMenuItem(
+                                  value: next,
+                                  child: Text(zoneStatusAction(next)),
+                                ),
                           ],
                         )
                       : Row(
@@ -500,13 +556,23 @@ class _ZonesDialog extends ConsumerWidget {
                               icon: const Icon(Icons.edit_outlined, size: 18),
                               onPressed: () => _showZoneForm(context, ref, z),
                             ),
-                            IconButton(
-                              tooltip: active ? 'Deactivate' : 'Activate',
+                            PopupMenuButton<String>(
+                              key: Key('zone-status-${z.id}'),
+                              tooltip: 'Change status',
                               icon: Icon(
-                                active ? Icons.toggle_on : Icons.toggle_off_outlined,
-                                color: active ? context.status.success : cs.outline,
+                                Icons.swap_horiz,
+                                size: 20,
+                                color: cs.onSurfaceVariant,
                               ),
-                              onPressed: () => _toggleStatus(context, ref, z, active),
+                              onSelected: (next) => _setStatus(context, ref, z, next),
+                              itemBuilder: (_) => [
+                                for (final next in zoneStatuses)
+                                  if (next != status)
+                                    PopupMenuItem(
+                                      value: next,
+                                      child: Text(zoneStatusAction(next)),
+                                    ),
+                              ],
                             ),
                           ],
                         ),
@@ -536,9 +602,8 @@ class _ZonesDialog extends ConsumerWidget {
     );
   }
 
-  Future<void> _toggleStatus(
-      BuildContext context, WidgetRef ref, ZoneInfo zone, bool active) async {
-    final next = active ? 'INACTIVE' : 'ACTIVE';
+  Future<void> _setStatus(
+      BuildContext context, WidgetRef ref, ZoneInfo zone, String next) async {
     try {
       await ref.read(apiClientProvider).dio.patch(
         '/${ApiConstants.tenant}/admin/stores/${store.id}/zones/${zone.id}/status',
@@ -572,6 +637,11 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
   bool _adding = false;
   String? _error;
 
+  /// The priority is a whole number, read with the shared reader. Blank is
+  /// tenant-svc's own 100; text that cannot be read is refused under the
+  /// field, never added at 100 as if nothing had been typed.
+  final _marks = AmountMarks.ofApp();
+
   @override
   void dispose() {
     _pincodeCtrl.dispose();
@@ -585,6 +655,10 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
       setState(() => _error = 'Enter a pincode.');
       return;
     }
+    if (figureRefused(_marks, [(_priorityCtrl, wholeNumber)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
     setState(() {
       _adding = true;
       _error = null;
@@ -594,7 +668,7 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
         '/${ApiConstants.tenant}/admin/stores/${widget.store.id}/delivery-areas',
         data: {
           'pincode': pincode,
-          'priority': int.tryParse(_priorityCtrl.text.trim()) ?? 100,
+          'priority': wholeOf(_priorityCtrl, _marks) ?? 100,
         },
       );
       if (!mounted) return;
@@ -670,13 +744,15 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: TextField(
+                  child: FigureField(
+                    fieldKey: const Key('delivery-area-priority'),
                     controller: _priorityCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Priority',
-                      isDense: true,
-                    ),
+                    shape: wholeNumber,
+                    marks: _marks,
+                    label: 'Priority',
+                    hint: '100',
+                    dense: true,
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -826,11 +902,11 @@ class _ZoneFormDialogState extends ConsumerState<_ZoneFormDialog> {
       setState(() {
         _loading = false;
         final status = e is DioException ? e.response?.statusCode : null;
+        // A 400 reads as its own refusal; a request that broke a field's rule asks for the
+        // fields to be checked (friendlyError's words for VALIDATION_FAILED).
         _error = status == 409
             ? 'A zone with this code already exists in this store.'
-            : status == 400
-                ? 'Please check the fields and try again.'
-                : friendlyError(e, fallback: 'Could not save zone.');
+            : friendlyError(e, fallback: 'Could not save zone.');
       });
     }
   }
@@ -927,7 +1003,11 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
   late final TextEditingController _line1Ctrl;
   late final TextEditingController _cityCtrl;
   late final TextEditingController _stateCtrl;
-  late final TextEditingController _countryCtrl;
+  // The store's ISO 3166-1 alpha-2 code as saved; null or '' is none, which
+  // tenant-svc accepts (Countries.optional). A saved code no service takes
+  // ("UK", "JX") stays here only until the person chooses: CountryField shows it
+  // as needing a country and never sends it.
+  String? _country;
   late final TextEditingController _pincodeCtrl;
   // The store's own zone; never a default (SJ-D54).
   String? _timezone;
@@ -945,7 +1025,8 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
     _line1Ctrl = TextEditingController(text: s.line1 ?? '');
     _cityCtrl = TextEditingController(text: s.city ?? '');
     _stateCtrl = TextEditingController(text: s.state ?? '');
-    _countryCtrl = TextEditingController(text: s.country ?? '');
+    final held = (s.country ?? '').trim().toUpperCase();
+    _country = held.isEmpty ? null : held;
     _pincodeCtrl = TextEditingController(text: s.pincode ?? '');
     _timezone = s.timezone;
     _showPrices = s.showPrices;
@@ -959,7 +1040,6 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
     _line1Ctrl.dispose();
     _cityCtrl.dispose();
     _stateCtrl.dispose();
-    _countryCtrl.dispose();
     _pincodeCtrl.dispose();
     super.dispose();
   }
@@ -983,7 +1063,8 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
           'line2': s.line2,
           'city': _orNull(_cityCtrl.text),
           'state': _orNull(_stateCtrl.text),
-          'country': _orNull(_countryCtrl.text),
+          // Validated above: a code on the list, or none.
+          'country': isCountryCode(_country ?? '') ? _country : null,
           'pincode': _orNull(_pincodeCtrl.text),
           'geoLat': s.geoLat,
           'geoLng': s.geoLng,
@@ -1004,9 +1085,9 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
     } catch (e) {
       setState(() {
         _loading = false;
-        _error = (e is DioException && e.response?.statusCode == 400)
-            ? 'Please check the fields and try again.'
-            : friendlyError(e, fallback: 'Could not update store.');
+        // A 400 reads as its own refusal (a country no service takes, a till phone rule);
+        // a request that broke a field's rule asks for the fields to be checked.
+        _error = friendlyError(e, fallback: 'Could not update store.');
       });
     }
   }
@@ -1087,10 +1168,14 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
                 Row(
                   children: [
                     Expanded(
-                      child: TextFormField(
-                        controller: _countryCtrl,
-                        decoration:
-                            const InputDecoration(labelText: 'Country (code)'),
+                      // Optional, as tenant-svc has it: a store may have no
+                      // country on record.
+                      child: CountryField(
+                        key: const Key('store-edit-country'),
+                        value: _country,
+                        optional: true,
+                        noneLabel: 'Not set',
+                        onChanged: (v) => setState(() => _country = v),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1334,7 +1419,6 @@ class _AddStoreDialogState extends ConsumerState<_AddStoreDialog> {
     if (e is DioException) {
       final status = e.response?.statusCode;
       if (status == 409) return 'A store with this code already exists.';
-      if (status == 400) return 'Please check the fields and try again.';
     }
     return friendlyError(e, fallback: 'Could not create store.');
   }

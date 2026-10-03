@@ -3,15 +3,16 @@ package com.storeql.order.service;
 import static com.storeql.events.EventPayload.esc;
 
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.order.domain.Domain.GiftCard;
 import com.storeql.order.domain.Domain.GiftCardTransaction;
 import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderItem;
+import com.storeql.order.domain.Domain.Return;
 import com.storeql.order.domain.Domain.ReturnItem;
 import com.storeql.order.domain.RecallNotice.Line;
 import com.storeql.order.domain.RecallNotice.Notice;
 import com.storeql.service.OutboxRow;
-import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObjectBuilder;
 import java.math.BigDecimal;
@@ -28,6 +29,8 @@ public final class Events {
 
   static final String TOPIC_RECALL_NOTICE_ISSUED = "storeql.order.recall-notice-issued";
   static final String TOPIC_GIFT_CARD_LOADED = "storeql.order.gift-card-loaded";
+  static final String TOPIC_GIFT_CARD_REDEEMED = "storeql.order.gift-card-redeemed";
+  static final String TOPIC_NO_RECEIPT_RETURN_RECORDED = "storeql.order.no-receipt-return-recorded";
 
   private Events() {}
 
@@ -87,6 +90,44 @@ public final class Events {
    * taken, or the value given away, against the gift card liability, once per card transaction.
    */
   static OutboxRow giftCardLoaded(GiftCard gc, GiftCardTransaction tx, String paidBy) {
+    return giftCardLoaded(gc, tx, paidBy, null, null, null);
+  }
+
+  /**
+   * Value a manager handed out by hand, with no sale behind it: {@code source} says why (GOODWILL,
+   * PROMOTION, COMPENSATION or MIGRATION) and {@code note} is what they wrote. paidBy is
+   * PROMOTIONAL, so purchase-svc books it as value given away.
+   */
+  static OutboxRow giftCardLoadedByHand(
+      GiftCard gc, GiftCardTransaction tx, String source, String note) {
+    return giftCardLoaded(gc, tx, "PROMOTIONAL", null, source, note);
+  }
+
+  /**
+   * Value paid for with a sale: the card was loaded when the order was paid, for what was paid.
+   * {@code paidBy} is the tender taken (empty when the capture did not say); the sale is the
+   * transaction's order.
+   */
+  static OutboxRow giftCardLoadedBySale(GiftCard gc, GiftCardTransaction tx, String paidBy) {
+    return giftCardLoaded(gc, tx, paidBy == null ? "" : paidBy, null, "SALE", null);
+  }
+
+  /**
+   * Value put on a card by a return's refund: paid by {@code RETURN}, which is no tender, and
+   * naming the return. purchase-svc counts it in its gift-card pool but posts nothing, because the
+   * refund is booked from payment-svc's {@code PaymentRefunded}.
+   */
+  static OutboxRow giftCardLoadedByReturn(GiftCard gc, GiftCardTransaction tx, UUID returnId) {
+    return giftCardLoaded(gc, tx, "RETURN", returnId, "RETURN", null);
+  }
+
+  private static OutboxRow giftCardLoaded(
+      GiftCard gc,
+      GiftCardTransaction tx,
+      String paidBy,
+      UUID returnId,
+      String source,
+      String note) {
     JsonObjectBuilder b =
         Json.createObjectBuilder()
             .add("eventId", Ids.newId().toString())
@@ -99,8 +140,36 @@ public final class Events {
             .add("currency", gc.currency())
             .add("paidBy", paidBy);
     nullable(b, "storeId", gc.storeId() == null ? null : gc.storeId().toString());
+    if (returnId != null) b.add("returnId", returnId.toString());
+    // Where the value came from, added last and optional: consumers that do not read it are
+    // unaffected. A note is what a manager wrote for a hand load.
+    if (tx.orderId() != null) b.add("orderId", tx.orderId().toString());
+    if (source != null) b.add("source", source);
+    if (note != null && !note.isBlank()) b.add("note", note);
     return new OutboxRow(
         "GiftCardLoaded", TOPIC_GIFT_CARD_LOADED, gc.tenantId(), gc.id(), b.build().toString());
+  }
+
+  /**
+   * The value a sale loaded on a gift card was taken back off it because the sale was voided or
+   * cancelled. Built by the shared contract; purchase-svc posts the opposite of the sale-loaded
+   * posting, once per event.
+   */
+  static OutboxRow giftCardLoadReversed(GiftCard gc, GiftCardTransaction tx) {
+    return new OutboxRow(
+        "GiftCardLoadReversed",
+        com.storeql.events.contract.GiftCardLoadReversed.TOPIC,
+        gc.tenantId(),
+        gc.id(),
+        com.storeql.events.contract.GiftCardLoadReversed.payload(
+            gc.tenantId(),
+            gc.id(),
+            tx.orderId(),
+            tx.amount(),
+            gc.currency(),
+            com.storeql.events.contract.GiftCardLoadReversed.SOURCE_SALE,
+            tx.createdAt(),
+            gc.storeId()));
   }
 
   private static void nullable(JsonObjectBuilder b, String name, String value) {
@@ -201,7 +270,11 @@ public final class Events {
             + loginPart
             + (groupId != null ? ",\"groupId\":\"" + groupId + "\"" : "")
             + slotFields(slotStartsAt, slotEndsAt, slotTimeZone)
-            + "}");
+            // Last, so nothing that reads the payload from its start moves: consumers that dedupe
+            // on an eventId (the webhook fan-out) skipped an OrderPlaced that carried none.
+            + ",\"eventId\":\""
+            + Ids.newId()
+            + "\"}");
   }
 
   /**
@@ -572,6 +645,30 @@ public final class Events {
             Ids.newId(), tenantId, orderId, esc(reason), kind(channel, fulfilmentType)));
   }
 
+  /**
+   * An order has waited too long for a price (unit-pricing slice 5). Announced once, at the
+   * business's first limit. No consumer yet: notification-svc and reporting-svc take it with the
+   * alerts work.
+   */
+  static OutboxRow orderPriceOverdue(
+      UUID tenantId, UUID orderId, UUID storeId, Instant awaitingSince, BigDecimal total) {
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventType", "OrderPriceOverdue")
+            .add("tenantId", tenantId.toString())
+            .add("orderId", orderId.toString())
+            .add("storeId", storeId.toString())
+            .add("awaitingSince", awaitingSince.toString());
+    if (total != null && total.signum() > 0) b.add("total", total);
+    b.add("eventId", Ids.newId().toString());
+    return new OutboxRow(
+        "OrderPriceOverdue",
+        "storeql.order.price-overdue",
+        tenantId,
+        orderId,
+        b.build().toString());
+  }
+
   /** The {@code channel} and {@code fulfilmentType} members, when known; nothing when not. */
   private static String kind(String channel, String fulfilmentType) {
     return (channel == null ? "" : ",\"channel\":\"" + esc(channel) + "\"")
@@ -708,70 +805,217 @@ public final class Events {
       BigDecimal refundAmount,
       String refundMethod,
       String currency) {
+    return orderReturned(
+        tenantId,
+        orderId,
+        returnId,
+        storeId,
+        items,
+        refundAmount,
+        refundMethod,
+        currency,
+        null,
+        null,
+        false,
+        null);
+  }
+
+  /**
+   * A return the platform must act on: inventory-svc puts each line where its condition says,
+   * payment-svc refunds by the method chosen, customer-svc takes back the loyalty points.
+   *
+   * @param customerId the order's customer, or null for an anonymous sale
+   * @param giftCardId the card a GIFT_CARD refund was put on, else null
+   * @param recall whether the return settles a recall notice (its goods go to RECALLED)
+   * @param approvedBy the {@code sales.refund} holder who allowed a return outside the policy
+   */
+  static OutboxRow orderReturned(
+      UUID tenantId,
+      UUID orderId,
+      UUID returnId,
+      UUID storeId,
+      List<ReturnItem> items,
+      BigDecimal refundAmount,
+      String refundMethod,
+      String currency,
+      UUID customerId,
+      UUID giftCardId,
+      boolean recall,
+      UUID approvedBy) {
+    return orderReturned(
+        tenantId,
+        orderId,
+        returnId,
+        storeId,
+        items,
+        refundAmount,
+        refundMethod,
+        currency,
+        customerId,
+        giftCardId,
+        recall,
+        approvedBy,
+        null,
+        null);
+  }
+
+  /**
+   * As above, for a direct exchange: {@code refundMethod} is EXCHANGE, {@code exchangeOrderId} is
+   * the sale the returned goods pay towards and {@code exchangeAmount} the part of it they pay (the
+   * lesser of the return's value and that sale's total). payment-svc refunds that much of the old
+   * sale's tenders as EXCHANGE, captures it as an EXCHANGE tender on the new sale, and refunds any
+   * surplus of {@code refundAmount} over it to how the customer paid.
+   *
+   * @param exchangeOrderId the sale bought with the return, or null when this is no exchange
+   * @param exchangeAmount what the returned value pays of it, or null when this is no exchange
+   */
+  static OutboxRow orderReturned(
+      UUID tenantId,
+      UUID orderId,
+      UUID returnId,
+      UUID storeId,
+      List<ReturnItem> items,
+      BigDecimal refundAmount,
+      String refundMethod,
+      String currency,
+      UUID customerId,
+      UUID giftCardId,
+      boolean recall,
+      UUID approvedBy,
+      UUID exchangeOrderId,
+      BigDecimal exchangeAmount) {
     // eventId is required by inventory-svc's OrderEventHandler for per-line dedupe — without it
     // every OrderReturned is dropped as malformed and stock is never restocked. refundAmount +
     // refundMethod let payment-svc reverse the captured payment for ORIGINAL-tender returns.
-    StringBuilder sb = new StringBuilder();
-    sb.append("{\"eventId\":\"")
-        .append(Ids.newId())
-        .append("\",\"eventType\":\"OrderReturned\",\"tenantId\":\"")
-        .append(tenantId)
-        .append("\",\"orderId\":\"")
-        .append(orderId)
-        .append("\",\"returnId\":\"")
-        .append(returnId)
-        .append("\",\"storeId\":\"")
-        .append(storeId)
-        .append("\",\"refundAmount\":")
-        .append(refundAmount != null ? refundAmount.toPlainString() : "0")
-        .append(",\"refundMethod\":\"")
-        .append(esc(refundMethod))
-        .append("\",\"currency\":\"")
-        .append(esc(currency))
-        .append("\",\"items\":[");
-    for (int i = 0; i < items.size(); i++) {
-      if (i > 0) sb.append(',');
-      sb.append("{\"variantId\":\"")
-          .append(items.get(i).variantId())
-          .append("\",\"qty\":")
-          .append(items.get(i).qty().toPlainString())
-          .append('}');
+    JsonArrayBuilder lines = Json.createArrayBuilder();
+    for (ReturnItem item : items) {
+      JsonObjectBuilder line =
+          Json.createObjectBuilder()
+              .add("variantId", item.variantId().toString())
+              .add("qty", item.qty());
+      // A line from before conditions existed has none; the consumer reads its absence as sellable.
+      if (item.condition() != null) line.add("condition", item.condition());
+      lines.add(line);
     }
-    sb.append("]}");
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "OrderReturned")
+            .add("tenantId", tenantId.toString())
+            .add("orderId", orderId.toString())
+            .add("returnId", returnId.toString())
+            .add("storeId", storeId.toString())
+            .add("refundAmount", refundAmount != null ? refundAmount : BigDecimal.ZERO)
+            .add("refundMethod", refundMethod)
+            .add("currency", currency)
+            .add("recall", recall)
+            .add("items", lines);
+    nullable(b, "customerId", customerId == null ? null : customerId.toString());
+    nullable(b, "giftCardId", giftCardId == null ? null : giftCardId.toString());
+    nullable(b, "approvedBy", approvedBy == null ? null : approvedBy.toString());
+    if (exchangeOrderId != null) {
+      b.add("exchangeOrderId", exchangeOrderId.toString());
+      b.add("exchangeAmount", exchangeAmount);
+    }
     return new OutboxRow(
-        "OrderReturned", "storeql.order.order-returned", tenantId, orderId, sb.toString());
+        "OrderReturned", "storeql.order.order-returned", tenantId, orderId, b.build().toString());
+  }
+
+  /**
+   * A gift card charged for an order: payment-svc records the GIFT_CARD tender from this, once per
+   * event, so a tender exists only for value the card actually gave up.
+   *
+   * @param order the order the card pays towards, which names the store and the currency
+   */
+  static OutboxRow giftCardRedeemed(GiftCard gc, GiftCardTransaction tx, Order order) {
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "GiftCardRedeemed")
+            .add("tenantId", gc.tenantId().toString())
+            .add("redemptionId", tx.id().toString())
+            .add("giftCardId", gc.id().toString())
+            .add("orderId", order.id().toString())
+            .add("storeId", order.storeId().toString())
+            .add("amount", tx.amount())
+            .add("currency", order.currency());
+    return new OutboxRow(
+        "GiftCardRedeemed", TOPIC_GIFT_CARD_REDEEMED, gc.tenantId(), gc.id(), b.build().toString());
+  }
+
+  /**
+   * A return taken with no receipt. There is no sale, so no {@code OrderReturned}: this is the
+   * announcement customer-svc (store credit), inventory-svc (restock by condition), purchase-svc
+   * (posting) and reporting act on. Amounts include VAT, at the price the store sells at today.
+   *
+   * @param customerId the customer whose store credit it goes to, or null
+   * @param giftCardId the card it was put on, or null
+   * @param items the lines with their unit price (VAT included), VAT and condition
+   */
+  static OutboxRow noReceiptReturnRecorded(
+      Return ret, String currency, BigDecimal taxAmount, List<ReturnItem> items, UUID giftCardId) {
+    JsonArrayBuilder lines = Json.createArrayBuilder();
+    for (ReturnItem item : items) {
+      lines.add(
+          Json.createObjectBuilder()
+              .add("variantId", item.variantId().toString())
+              .add("qty", item.qty())
+              .add("unitPrice", item.unitPrice())
+              .add("taxAmount", item.taxAmount())
+              .add("condition", item.condition()));
+    }
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "NoReceiptReturnRecorded")
+            .add("tenantId", ret.tenantId().toString())
+            .add("returnId", ret.id().toString())
+            .add("storeId", ret.storeId().toString())
+            .add("currency", currency)
+            .add("amount", ret.refundAmount())
+            .add("taxAmount", taxAmount)
+            .add("refundMethod", ret.refundMethod())
+            .add("approvedBy", ret.approvedBy().toString())
+            .add("items", lines);
+    nullable(b, "customerId", ret.customerId() == null ? null : ret.customerId().toString());
+    nullable(b, "giftCardId", giftCardId == null ? null : giftCardId.toString());
+    return new OutboxRow(
+        "NoReceiptReturnRecorded",
+        TOPIC_NO_RECEIPT_RETURN_RECORDED,
+        ret.tenantId(),
+        ret.id(),
+        b.build().toString());
   }
 
   static OutboxRow orderVoided(
       UUID tenantId,
       UUID orderId,
       UUID storeId,
+      UUID customerId,
       List<com.storeql.order.domain.Domain.RestockLine> restock) {
     // SJ-D40 made a paid till sale deduct stock, so voiding one must put the stock back. items is
     // what to put back: each line net of anything already returned, or empty when the sale was
     // never handed over and nothing was deducted. eventId and storeId are what inventory-svc's
     // OrderEventHandler needs to restock and dedupe per line, exactly as for OrderReturned.
-    StringBuilder sb = new StringBuilder();
-    sb.append("{\"eventId\":\"")
-        .append(Ids.newId())
-        .append("\",\"eventType\":\"OrderVoided\",\"tenantId\":\"")
-        .append(tenantId)
-        .append("\",\"orderId\":\"")
-        .append(orderId)
-        .append("\",\"storeId\":\"")
-        .append(storeId)
-        .append("\",\"items\":[");
-    for (int i = 0; i < restock.size(); i++) {
-      if (i > 0) sb.append(',');
-      sb.append("{\"variantId\":\"")
-          .append(restock.get(i).variantId())
-          .append("\",\"qty\":")
-          .append(restock.get(i).qty().toPlainString())
-          .append('}');
+    // customerId lets customer-svc take back the points the sale earned.
+    JsonArrayBuilder lines = Json.createArrayBuilder();
+    for (var line : restock) {
+      lines.add(
+          Json.createObjectBuilder()
+              .add("variantId", line.variantId().toString())
+              .add("qty", line.qty()));
     }
-    sb.append("]}");
+    JsonObjectBuilder b =
+        Json.createObjectBuilder()
+            .add("eventId", Ids.newId().toString())
+            .add("eventType", "OrderVoided")
+            .add("tenantId", tenantId.toString())
+            .add("orderId", orderId.toString())
+            .add("storeId", storeId.toString())
+            .add("items", lines);
+    nullable(b, "customerId", customerId == null ? null : customerId.toString());
     return new OutboxRow(
-        "OrderVoided", "storeql.order.order-voided", tenantId, orderId, sb.toString());
+        "OrderVoided", "storeql.order.order-voided", tenantId, orderId, b.build().toString());
   }
 
   static OutboxRow layawayCreated(UUID tenantId, UUID layawayId) {
@@ -781,8 +1025,9 @@ public final class Events {
         tenantId,
         layawayId,
         String.format(
-            "{\"eventType\":\"LayawayCreated\",\"tenantId\":\"%s\",\"layawayId\":\"%s\"}",
-            tenantId, layawayId));
+            "{\"eventType\":\"LayawayCreated\",\"tenantId\":\"%s\",\"layawayId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, layawayId, Ids.newId()));
   }
 
   static OutboxRow layawayCompleted(UUID tenantId, UUID layawayId) {
@@ -792,8 +1037,9 @@ public final class Events {
         tenantId,
         layawayId,
         String.format(
-            "{\"eventType\":\"LayawayCompleted\",\"tenantId\":\"%s\",\"layawayId\":\"%s\"}",
-            tenantId, layawayId));
+            "{\"eventType\":\"LayawayCompleted\",\"tenantId\":\"%s\",\"layawayId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, layawayId, Ids.newId()));
   }
 
   static OutboxRow layawayCancelled(UUID tenantId, UUID layawayId) {
@@ -803,7 +1049,8 @@ public final class Events {
         tenantId,
         layawayId,
         String.format(
-            "{\"eventType\":\"LayawayCancelled\",\"tenantId\":\"%s\",\"layawayId\":\"%s\"}",
-            tenantId, layawayId));
+            "{\"eventType\":\"LayawayCancelled\",\"tenantId\":\"%s\",\"layawayId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, layawayId, Ids.newId()));
   }
 }

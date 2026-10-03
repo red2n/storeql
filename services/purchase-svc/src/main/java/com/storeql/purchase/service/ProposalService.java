@@ -192,8 +192,10 @@ public class ProposalService {
           .forEach(
               (v, q) -> onOrder.computeIfPresent(v, (k, o) -> o.subtract(q).max(BigDecimal.ZERO)));
     }
-    List<UUID> variants = new ArrayList<>(plans.stream().map(Plan::variantId).toList());
-    for (UUID v : sourcing.demand().keySet()) if (!variants.contains(v)) variants.add(v);
+    java.util.Set<UUID> wanted =
+        new java.util.LinkedHashSet<>(plans.stream().map(Plan::variantId).toList());
+    wanted.addAll(sourcing.demand().keySet());
+    List<UUID> variants = new ArrayList<>(wanted);
     Map<UUID, SupplierChoice> lastBought = repo.lastSupplierByVariant(tenantId, variants);
     Map<UUID, UUID> coded = repo.itemCodeSupplierByVariant(tenantId, variants);
 

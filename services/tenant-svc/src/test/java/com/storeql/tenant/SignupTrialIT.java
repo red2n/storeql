@@ -9,7 +9,7 @@ import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
-import io.helidon.microprofile.testing.junit5.AddConfig;
+import io.helidon.microprofile.testing.AddConfig;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.json.Json;

@@ -19,7 +19,10 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
-/** Deferred revenue for loyalty points and gift card breakage (17.11). Management only. */
+/**
+ * Deferred revenue for loyalty points and gift card breakage (17.11). Management held to no store:
+ * the points and the cards are the business's, spent at any of its stores.
+ */
 @RequestScoped
 @Path("/nominal-ledger/deferred-revenue")
 @Produces(MediaType.APPLICATION_JSON)
@@ -40,7 +43,11 @@ public class DeferredRevenueResource {
               + " spent, breakage recognised (4031) and the liability left since the ledger began"
               + " to follow them. Management only.")
   @APIResponse(responseCode = "200", description = "Where deferred revenue stands")
-  @APIResponse(responseCode = "403", description = "Not a management role")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role, or BUSINESS_WIDE_ONLY: a caller held to stores; points and gift"
+              + " cards are the whole business's")
   @GET
   public Response view() {
     return Response.ok(ApiResponse.ok(Mappers.toDto(deferred.view(ctx)))).build();
@@ -60,7 +67,11 @@ public class DeferredRevenueResource {
       description =
           "A missing field or reason, PURCHASE_POINT_VALUE_INVALID or"
               + " PURCHASE_BREAKAGE_OUT_OF_RANGE")
-  @APIResponse(responseCode = "403", description = "Not a management role")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role, or BUSINESS_WIDE_ONLY: a caller held to stores; points and gift"
+              + " cards are the whole business's")
   @PUT
   @Path("/settings")
   public Response setEstimates(DeferredRevenueSettingsRequest req) {

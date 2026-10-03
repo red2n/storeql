@@ -1,6 +1,7 @@
 package com.storeql.customer.client;
 
 import com.storeql.customer.config.ServiceConfig;
+import com.storeql.customer.json.Jsons;
 import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
@@ -12,7 +13,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -110,9 +110,9 @@ public class OrderClient {
             "order-svc answered " + res.status().code() + ", so the export would be incomplete",
             List.of());
       }
-      try (JsonReader reader = Json.createReader(new StringReader(res.as(String.class)))) {
+      try (JsonReader reader = Jsons.reader(new StringReader(res.as(String.class)))) {
         JsonArray data = reader.readObject().getJsonArray("data");
-        return data == null ? Json.createArrayBuilder().build() : data;
+        return data == null ? Jsons.array().build() : data;
       }
     }
   }

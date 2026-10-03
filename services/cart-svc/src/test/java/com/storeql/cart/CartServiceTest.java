@@ -6,8 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.cart.domain.Domain.Cart;
 import com.storeql.cart.domain.Domain.CartItem;
+import com.storeql.cart.domain.Domain.StaffAction;
 import com.storeql.cart.dto.Dtos.AddItemRequest;
 import com.storeql.cart.dto.Dtos.CreateCartRequest;
+import com.storeql.cart.dto.Dtos.UpdateItemQtyRequest;
 import com.storeql.cart.repo.CartRepository;
 import com.storeql.cart.service.CartService;
 import com.storeql.ids.Ids;
@@ -42,6 +44,8 @@ class CartServiceTest {
   private boolean storeActive = true;
   private Cart insertedCart = null;
   private CartItem insertedItem = null;
+  private StaffAction trace = null;
+  private int plainWrites = 0;
 
   @BeforeEach
   void setUp() {
@@ -103,6 +107,41 @@ class CartServiceTest {
           public CartItem upsertItem(CartItem item) {
             insertedItem = item;
             return item;
+          }
+
+          @Override
+          public CartItem upsertItem(CartItem item, StaffAction audit) {
+            insertedItem = item;
+            trace = audit;
+            return item;
+          }
+
+          @Override
+          public Optional<CartItem> findItemById(UUID tenantId, UUID itemId) {
+            return insertedItem != null && insertedItem.id().equals(itemId)
+                ? Optional.of(insertedItem)
+                : Optional.empty();
+          }
+
+          @Override
+          public void updateItemQty(UUID tenantId, UUID cartId, UUID itemId, BigDecimal qty) {
+            plainWrites++;
+          }
+
+          @Override
+          public void updateItemQty(
+              UUID tenantId, UUID cartId, UUID itemId, BigDecimal qty, StaffAction audit) {
+            trace = audit;
+          }
+
+          @Override
+          public void deleteItem(UUID tenantId, UUID cartId, UUID itemId) {
+            plainWrites++;
+          }
+
+          @Override
+          public void deleteItem(UUID tenantId, UUID cartId, UUID itemId, StaffAction audit) {
+            trace = audit;
           }
         };
 
@@ -214,6 +253,171 @@ class CartServiceTest {
 
     // must not throw — staff may operate on any cart in the tenant
     service.addItem(ctx, req);
+  }
+
+  // ── Assisted shopping leaves a trace ──────────────────────────────────────
+
+  private Cart shoppersCart() {
+    insertedCart =
+        new Cart(
+            Ids.newId(),
+            TENANT,
+            CUSTOMER,
+            null,
+            STORE,
+            Cart.STATUS_ACTIVE,
+            Instant.now(),
+            Instant.now());
+    return insertedCart;
+  }
+
+  @Test
+  void staffAddingToAShoppersCartLeavesATraceNamingWhoAndInWhatRole() {
+    Cart cart = shoppersCart();
+    UUID staff = Ids.newId();
+    UUID variant = Ids.newId();
+    service.addItem(
+        ctx(TENANT, staff, Set.of("CASHIER", "MANAGER")),
+        new AddItemRequest(cart.id().toString(), variant.toString(), BigDecimal.TWO, null, null));
+
+    assertThat(trace.action(), is(StaffAction.ADD_ITEM));
+    assertThat(trace.actorId(), is(staff));
+    assertThat(trace.actorRole(), is("MANAGER"));
+    assertThat(trace.variantId(), is(variant));
+    assertThat(trace.qty().compareTo(BigDecimal.TWO), is(0));
+  }
+
+  @Test
+  void aShopperOnTheirOwnCartLeavesNoTrace() {
+    Cart cart = shoppersCart();
+    service.addItem(
+        ctx(TENANT, CUSTOMER, Set.of("CUSTOMER")),
+        new AddItemRequest(
+            cart.id().toString(), Ids.newId().toString(), BigDecimal.ONE, null, null));
+    assertThat(trace == null, is(true));
+    assertThat(insertedItem != null, is(true));
+  }
+
+  @Test
+  void staffOnTheirOwnCartLeaveNoTrace() {
+    Cart cart = shoppersCart();
+    service.addItem(
+        ctx(TENANT, CUSTOMER, Set.of("CASHIER")),
+        new AddItemRequest(
+            cart.id().toString(), Ids.newId().toString(), BigDecimal.ONE, null, null));
+    assertThat(trace == null, is(true));
+  }
+
+  @Test
+  void staffChangingAndRemovingLeaveATraceEach() {
+    Cart cart = shoppersCart();
+    UUID staff = Ids.newId();
+    var staffCtx = ctx(TENANT, staff, Set.of("STOREKEEPER"));
+    service.addItem(
+        ctx(TENANT, CUSTOMER, Set.of("CUSTOMER")),
+        new AddItemRequest(
+            cart.id().toString(), Ids.newId().toString(), BigDecimal.ONE, null, null));
+    UUID item = insertedItem.id();
+
+    service.updateItemQty(
+        staffCtx, item, new UpdateItemQtyRequest(cart.id().toString(), BigDecimal.TEN, null));
+    assertThat(trace.action(), is(StaffAction.SET_QTY));
+    assertThat(trace.actorId(), is(staff));
+    assertThat(trace.actorRole(), is("STOREKEEPER"));
+    assertThat(trace.itemId(), is(item));
+    assertThat(trace.qty().compareTo(BigDecimal.TEN), is(0));
+
+    trace = null;
+    service.removeItem(staffCtx, item, cart.id().toString(), null);
+    assertThat(trace.action(), is(StaffAction.REMOVE_ITEM));
+    assertThat(trace.itemId(), is(item));
+    assertThat(plainWrites, is(0));
+  }
+
+  @Test
+  void aShoppersOwnChangeAndRemovalUseTheUntracedWrites() {
+    Cart cart = shoppersCart();
+    var mine = ctx(TENANT, CUSTOMER, Set.of("CUSTOMER"));
+    service.addItem(
+        mine,
+        new AddItemRequest(
+            cart.id().toString(), Ids.newId().toString(), BigDecimal.ONE, null, null));
+    UUID item = insertedItem.id();
+    service.updateItemQty(
+        mine, item, new UpdateItemQtyRequest(cart.id().toString(), BigDecimal.TEN, null));
+    service.removeItem(mine, item, cart.id().toString(), null);
+    assertThat(plainWrites, is(2));
+    assertThat(trace == null, is(true));
+  }
+
+  // ── Change and removal obey the same guards as add ────────────────────────
+
+  private Cart cartWithAnItem(String status) {
+    insertedCart = shoppersCart();
+    service.addItem(
+        ctx(TENANT, CUSTOMER, Set.of("CUSTOMER")),
+        new AddItemRequest(
+            insertedCart.id().toString(), Ids.newId().toString(), BigDecimal.ONE, null, null));
+    var c = insertedCart;
+    insertedCart =
+        new Cart(c.id(), TENANT, CUSTOMER, null, STORE, status, c.createdAt(), c.updatedAt());
+    plainWrites = 0;
+    return insertedCart;
+  }
+
+  @Test
+  void changeAndRemoveRefuseACartThatIsNotActive() {
+    for (String status : List.of(Cart.STATUS_CHECKED_OUT, Cart.STATUS_ABANDONED)) {
+      Cart cart = cartWithAnItem(status);
+      var mine = ctx(TENANT, CUSTOMER, Set.of("CUSTOMER"));
+      UUID item = insertedItem.id();
+      ApiException a =
+          assertThrows(
+              ApiException.class,
+              () ->
+                  service.updateItemQty(
+                      mine,
+                      item,
+                      new UpdateItemQtyRequest(cart.id().toString(), BigDecimal.TEN, null)));
+      assertThat(a.code(), is("CART_NOT_ACTIVE"));
+      ApiException b =
+          assertThrows(
+              ApiException.class, () -> service.removeItem(mine, item, cart.id().toString(), null));
+      assertThat(b.code(), is("CART_NOT_ACTIVE"));
+      assertThat(plainWrites, is(0));
+    }
+  }
+
+  @Test
+  void changeAndRemoveRefuseASuspendedBusinessAndAClosedStore() {
+    Cart cart = cartWithAnItem(Cart.STATUS_ACTIVE);
+    var mine = ctx(TENANT, CUSTOMER, Set.of("CUSTOMER"));
+    UUID item = insertedItem.id();
+    var change = new UpdateItemQtyRequest(cart.id().toString(), BigDecimal.TEN, null);
+
+    tenantActive = false;
+    assertThat(
+        assertThrows(ApiException.class, () -> service.updateItemQty(mine, item, change)).code(),
+        is("TENANT_NOT_OPERATIONAL"));
+    assertThat(
+        assertThrows(
+                ApiException.class,
+                () -> service.removeItem(mine, item, cart.id().toString(), null))
+            .code(),
+        is("TENANT_NOT_OPERATIONAL"));
+
+    tenantActive = true;
+    storeActive = false;
+    assertThat(
+        assertThrows(ApiException.class, () -> service.updateItemQty(mine, item, change)).code(),
+        is("STORE_NOT_OPERATIONAL"));
+    assertThat(
+        assertThrows(
+                ApiException.class,
+                () -> service.removeItem(mine, item, cart.id().toString(), null))
+            .code(),
+        is("STORE_NOT_OPERATIONAL"));
+    assertThat(plainWrites, is(0));
   }
 
   @Test

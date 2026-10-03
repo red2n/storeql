@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/format.dart';
 import '../../core/spacing.dart';
 import '../../shared/widgets/status_badge.dart';
@@ -17,6 +18,7 @@ import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_picker.dart';
 
 // ---------------------------------------------------------------------------
@@ -576,7 +578,14 @@ class WaveDialog extends ConsumerStatefulWidget {
 }
 
 class _WaveDialogState extends ConsumerState<WaveDialog> {
+  /// What was picked of each line: a quantity, read the way the app's
+  /// language writes a number ([AmountMarks]) to three places, starting at
+  /// what was directed written the same way (1,5 kg in Romanian). One that
+  /// cannot be read is refused under its line and neither saved nor
+  /// completed: parsed with a point, Romanian's 1,5 was saved as nothing
+  /// picked and completing the wave shorted the order.
   final Map<String, TextEditingController> _picked = {};
+  final _marks = AmountMarks.ofApp();
   bool _busy = false;
 
   @override
@@ -587,8 +596,12 @@ class _WaveDialogState extends ConsumerState<WaveDialog> {
     super.dispose();
   }
 
-  TextEditingController _ctrl(PickWaveLine l) =>
-      _picked.putIfAbsent(l.id, () => TextEditingController(text: _q(l.pickedQty ?? l.directedQty)));
+  TextEditingController _ctrl(PickWaveLine l) => _picked.putIfAbsent(
+      l.id, () => TextEditingController(text: _marks.writeAt(l.pickedQty ?? l.directedQty, 0)));
+
+  /// Whether a line holds a pick that cannot be read: nothing is saved then.
+  bool _refused(PickWave w) =>
+      figureRefused(_marks, [for (final l in w.lines) (_ctrl(l), AmountShape.quantity)]);
 
   /// Posts to the wave and says whether it went through, so a step that depends on the one
   /// before it (Complete after the picks) can stop when that one was refused.
@@ -617,7 +630,9 @@ class _WaveDialogState extends ConsumerState<WaveDialog> {
   Map<String, dynamic> _picksBody(PickWave w) => {
         'lines': [
           for (final l in w.lines)
-            {'lineId': l.id, 'pickedQty': double.tryParse(_ctrl(l).text.trim()) ?? 0},
+            // The plain decimal typed (JSON-B reads it exactly); a line left
+            // blank is nothing picked.
+            {'lineId': l.id, 'pickedQty': figureOf(_ctrl(l), AmountShape.quantity, _marks) ?? '0'},
         ],
       };
 
@@ -659,12 +674,16 @@ class _WaveDialogState extends ConsumerState<WaveDialog> {
                     subtitle: Text('for ${l.orders.map((o) => '${shortRef(o.orderId)} (${_q(o.qty)})').join(', ')}'),
                     trailing: w.status == 'OPEN' && mayPick
                         ? SizedBox(
-                            width: 90,
-                            child: TextField(
-                              key: Key('wave-pick-${l.id}'),
+                            width: 120,
+                            child: FigureField(
+                              fieldKey: Key('wave-pick-${l.id}'),
                               controller: _ctrl(l),
-                              decoration: const InputDecoration(labelText: 'Picked', isDense: true),
-                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              shape: AmountShape.quantity,
+                              marks: _marks,
+                              label: 'Picked',
+                              hint: '0',
+                              dense: true,
+                              onChanged: (_) => setState(() {}),
                             ),
                           )
                         : Text(l.pickedQty == null ? '' : 'picked ${_q(l.pickedQty!)}'),
@@ -685,12 +704,13 @@ class _WaveDialogState extends ConsumerState<WaveDialog> {
                   ),
                   TextButton(
                     key: const Key('wave-save-picks'),
-                    onPressed: _busy ? null : () => _post('/picks', _picksBody(w), 'Picks saved.'),
+                    onPressed:
+                        _busy || _refused(w) ? null : () => _post('/picks', _picksBody(w), 'Picks saved.'),
                     child: const Text('Save picks'),
                   ),
                   FilledButton(
                     key: const Key('wave-complete'),
-                    onPressed: _busy
+                    onPressed: _busy || _refused(w)
                         ? null
                         : () async {
                             // The picks first; a wave completed with picks the server refused

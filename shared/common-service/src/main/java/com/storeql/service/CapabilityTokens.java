@@ -27,7 +27,19 @@ public final class CapabilityTokens {
 
   private CapabilityTokens() {}
 
-  private static final SecureRandom RANDOM = new SecureRandom();
+  /**
+   * DRBG, not the default NativePRNG: NativePRNG reads /dev/urandom under a JVM-wide monitor, which
+   * pins a virtual thread's carrier; DRBG keeps its own state and is seeded from the OS source.
+   */
+  private static final SecureRandom RANDOM = newRandom();
+
+  private static SecureRandom newRandom() {
+    try {
+      return SecureRandom.getInstance("DRBG");
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("every JDK since 9 provides DRBG", e);
+    }
+  }
 
   /** 256 bits, which is what makes guessing it not worth attempting. */
   private static final int BYTES = 32;

@@ -56,6 +56,8 @@ class RetentionPurgeIT {
             .withRetention(UNSET, Map.of("CUSTOMER_RECORDS", 365), List.of())
             .withRetention(YEAR, Map.of("NOTIFICATION_LOG", 365), List.of());
     System.setProperty("storeql.retention-sweeper.enabled", "false");
+    // A small page, so the purge below has to cross several batches.
+    System.setProperty("storeql.retention.batch", "2");
   }
 
   @Inject WebTarget target;
@@ -69,9 +71,9 @@ class RetentionPurgeIT {
 
   @Test
   void oldMessagesGoHeldOnesStayAndTheRunIsAnnounced() {
-    String plain = message(AT_ONCE, null, "0 days");
-    String held = message(AT_ONCE, HELD_CUSTOMER, "0 days");
-    String staff = message(AT_ONCE, null, "0 days");
+    String plain = message(AT_ONCE, null, "1 hour");
+    String held = message(AT_ONCE, HELD_CUSTOMER, "1 hour");
+    String staff = message(AT_ONCE, null, "1 hour");
     JsonObject run = ok(sweep(AT_ONCE, "OWNER"));
     assertThat(run.getString("dataClass"), is("NOTIFICATION_LOG"));
     assertThat(run.getInt("rowsAffected"), is(2));
@@ -90,6 +92,19 @@ class RetentionPurgeIT {
     assertThat(payload, containsString("\"rowsAffected\":2"));
     assertThat(payload, containsString("\"heldSkipped\":1"));
     assertThat(ok(sweep(AT_ONCE, "OWNER")).getInt("rowsAffected"), is(0));
+  }
+
+  @Test
+  void aBacklogLargerThanOneBatchIsPurgedInPagesAndCountedOnce() {
+    List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < 7; i++) {
+      ids.add(message(AT_ONCE, null, "1 hour")); // an hour old: due whatever the clocks do
+    }
+    JsonObject run = ok(sweep(AT_ONCE, "OWNER"));
+    assertThat(run.getInt("rowsAffected"), is(7));
+    for (String id : ids) {
+      assertThat(exists(id), is("0"));
+    }
   }
 
   @Test
@@ -150,6 +165,15 @@ class RetentionPurgeIT {
 
   /** A password-reset row, dated {@code age} ago — {@code tenant_id} is always null. */
   private static String passwordReset(String age) {
+    return passwordRow("PASSWORD_RESET", age);
+  }
+
+  /** A "your password was changed" row, dated {@code age} ago — {@code tenant_id} null too. */
+  private static String passwordChanged(String age) {
+    return passwordRow("PASSWORD_CHANGED", age);
+  }
+
+  private static String passwordRow(String type, String age) {
     String id = Ids.newId().toString();
     exec(
         PG,
@@ -158,7 +182,9 @@ class RetentionPurgeIT {
             + id
             + "', NULL, '"
             + Ids.newId()
-            + "', 'PASSWORD_RESET', 'EMAIL', 'a@example.com', 'Reset your password',"
+            + "', '"
+            + type
+            + "', 'EMAIL', 'a@example.com', 'Reset your password',"
             + "'Shopper account: [link removed]', 'SENT', now() - interval '"
             + age
             + "')");
@@ -177,5 +203,21 @@ class RetentionPurgeIT {
     assertThat(exists(recent), is("1"));
     // Idempotent: a second sweep the same moment finds nothing left due.
     assertThat(retentionService.purgePasswordResets(), is(0));
+  }
+
+  @Test
+  void passwordChangedRowsAreDeletedWithTheResetRowsAfterTheSamePeriod() {
+    String oldChanged = passwordChanged("31 days");
+    String recentChanged = passwordChanged("1 days");
+    String oldReset = passwordReset("31 days");
+
+    int purged = retentionService.purgePasswordResets();
+
+    // Counted by what this test made: other rows in the log are older only if another test made
+    // them.
+    assertThat(purged >= 2, is(true));
+    assertThat(exists(oldChanged), is("0"));
+    assertThat(exists(oldReset), is("0"));
+    assertThat(exists(recentChanged), is("1"));
   }
 }

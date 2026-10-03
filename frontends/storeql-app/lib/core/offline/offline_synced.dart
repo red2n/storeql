@@ -18,7 +18,9 @@ import 'offline_sale.dart';
 class SyncedSale {
   final String id;
   final String orderId;
-  final DateTime capturedAt;
+
+  /// When the cashier completed the sale; null when the queue could not read it.
+  final DateTime? capturedAt;
   final DateTime syncedAt;
   final double total;
   final String currency;
@@ -54,7 +56,7 @@ class SyncedSale {
   Map<String, dynamic> toJson() => {
         'id': id,
         'orderId': orderId,
-        'capturedAt': capturedAt.toUtc().toIso8601String(),
+        'capturedAt': capturedAt?.toUtc().toIso8601String(),
         'syncedAt': syncedAt.toUtc().toIso8601String(),
         'total': total,
         'currency': currency,
@@ -64,7 +66,7 @@ class SyncedSale {
   factory SyncedSale.fromJson(Map<String, dynamic> j) => SyncedSale(
         id: j['id'] as String,
         orderId: j['orderId'] as String? ?? '',
-        capturedAt: DateTime.parse(j['capturedAt'] as String),
+        capturedAt: DateTime.tryParse(j['capturedAt'] as String? ?? ''),
         syncedAt: DateTime.parse(j['syncedAt'] as String),
         total: (j['total'] as num?)?.toDouble() ?? 0,
         currency: j['currency'] as String? ?? '',

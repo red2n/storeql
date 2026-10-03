@@ -11,6 +11,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -115,6 +116,24 @@ public class SalesPostingRepository extends BaseJdbcRepository {
     return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
   }
 
+  /** Sales and VAT earlier refunds of this order took back, for the cap on the next. */
+  public java.math.BigDecimal revenueRefunded(UUID tenantId, UUID orderId) {
+    return query(
+            "SELECT COALESCE(SUM(debit), 0) AS taken FROM nominal_ledger_entries"
+                + " WHERE tenant_id = ? AND source_type = ? AND source_ref = ?"
+                + " AND nominal_code IN (?, ?)",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, com.storeql.purchase.domain.Domain.SOURCE_SALE_REFUND);
+              ps.setObject(3, orderId);
+              ps.setString(4, com.storeql.purchase.domain.Domain.CODE_SALES);
+              ps.setString(5, com.storeql.purchase.domain.Domain.CODE_VAT_OUTPUT);
+            },
+            rs -> rs.getBigDecimal("taken"),
+            "revenue refunded so far")
+        .get(0);
+  }
+
   /** The store an order's tenders were taken at, for a refund of a sale the ledger never saw. */
   public Optional<UUID> findTenderStore(UUID tenantId, UUID orderId) {
     var rows =
@@ -130,15 +149,19 @@ public class SalesPostingRepository extends BaseJdbcRepository {
     return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
   }
 
-  /** Orders whose receipts clearing has not netted to zero, oldest first. */
-  public List<OpenClearing> findOpenClearing(UUID tenantId, UUID storeId, int limit) {
+  /**
+   * Orders whose receipts clearing has not netted to zero, oldest first.
+   *
+   * @param stores the stores to read, or null for every store in the business
+   */
+  public List<OpenClearing> findOpenClearing(UUID tenantId, Set<UUID> stores, int limit) {
     return query(
         "SELECT source_ref, MAX(store_id::text) AS store_id,"
             + "       SUM(debit) - SUM(credit) AS balance,"
             + "       MIN(entry_date) AS first_posted, MAX(entry_date) AS last_posted"
             + "  FROM nominal_ledger_entries"
             + " WHERE tenant_id = ? AND nominal_code = ? AND source_ref IS NOT NULL"
-            + (storeId == null ? "" : " AND store_id = ?")
+            + (stores == null ? "" : " AND store_id = ANY(?)")
             + " GROUP BY source_ref"
             + " HAVING SUM(debit) - SUM(credit) <> 0"
             + " ORDER BY MIN(entry_date), source_ref LIMIT ?",
@@ -146,7 +169,9 @@ public class SalesPostingRepository extends BaseJdbcRepository {
           int i = 1;
           ps.setObject(i++, tenantId);
           ps.setString(i++, Domain.CODE_SALES_CLEARING);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         rs -> {

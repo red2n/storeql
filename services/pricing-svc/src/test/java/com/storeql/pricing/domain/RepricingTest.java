@@ -120,6 +120,51 @@ class RepricingTest {
             .orElseThrow());
   }
 
+  /**
+   * A three-decimal currency's .99 is x.990 — the hundredths a shopper reads, the third decimal
+   * nought — never x.999: Gulf shelf prices end KD 1.990, BD 4.990, and a price a fils short of a
+   * whole dinar cannot be paid in the coins that circulate. Still reached only by rounding down.
+   */
+  @Test
+  void aDinarNinetyNineIsPointNineNineNought() {
+    assertEquals(
+        money("8.990"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "50", "ENDING_99"), money("10.000"), money("9.400"), 3)
+            .orElseThrow());
+    assertEquals(
+        money("9.990"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "50", "ENDING_99"), money("10.000"), money("9.995"), 3)
+            .orElseThrow());
+    // Already a .990: kept; the floor still wins over the ending.
+    assertEquals(
+        money("9.990"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "50", "ENDING_99"), money("10.000"), money("9.990"), 3)
+            .orElseThrow());
+    assertEquals(
+        money("8.600"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "85", "ENDING_99"), money("10.000"), money("8.600"), 3)
+            .orElseThrow());
+    // Without the ending a cut is kept to the fils: 1% under 9.400 is 9.306, not 9.31.
+    assertEquals(
+        money("9.306"),
+        Repricing.propose(
+                rule("UNDERCUT_PERCENT", "1", "50", "NONE"), money("10.000"), money("9.400"), 3)
+            .orElseThrow());
+  }
+
+  /** The ending for every number of minor units, straight: whole yen down, x.99, x.990. */
+  @Test
+  void theEndingIsDefinedForEveryNumberOfMinorUnits() {
+    assertEquals(money("1234"), Repricing.endingNinetyNine(money("1234.5"), 0));
+    assertEquals(money("1233.99"), Repricing.endingNinetyNine(money("1234.5"), 2));
+    assertEquals(money("1233.990"), Repricing.endingNinetyNine(money("1234.5"), 3));
+    assertEquals(money("1234.990"), Repricing.endingNinetyNine(money("1234.995"), 3));
+  }
+
   @Test
   void theLowestFreshObservationPerRivalIsTheOneThatCounts() {
     List<Observation> seen =
@@ -133,5 +178,25 @@ class RepricingTest {
     assertEquals("Rival B", lowest.orElseThrow().competitor());
     assertEquals(money("9.10"), lowest.orElseThrow().price());
     assertTrue(Repricing.lowestFresh(seen, TODAY, 0).isEmpty());
+  }
+
+  @Test
+  void anObservationOlderThanTheRulesReachIsStaleTheDayItAgesOut() {
+    assertTrue(!Repricing.isStale(TODAY, TODAY, 14));
+    assertTrue(!Repricing.isStale(TODAY.minusDays(14), TODAY, 14), "exactly maxAgeDays old counts");
+    assertTrue(Repricing.isStale(TODAY.minusDays(15), TODAY, 14));
+    assertTrue(Repricing.isStale(TODAY.minusDays(1), TODAY, 0));
+    assertTrue(!Repricing.isStale(TODAY, TODAY, 0));
+  }
+
+  @Test
+  void staleMeansTheSameAsNotFreshToTheRunThatMadeTheProposal() {
+    for (int age = 0; age < 40; age++) {
+      LocalDate seen = TODAY.minusDays(age);
+      boolean fresh =
+          Repricing.lowestFresh(List.of(new Observation("R", money("1.00"), seen)), TODAY, 14)
+              .isPresent();
+      assertEquals(!fresh, Repricing.isStale(seen, TODAY, 14), "age " + age);
+    }
   }
 }

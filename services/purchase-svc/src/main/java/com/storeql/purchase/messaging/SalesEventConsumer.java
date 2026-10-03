@@ -56,6 +56,13 @@ class SalesEventConsumer extends BaseKafkaConsumer {
       defaultValue = "storeql.payment.settlement-reconciled")
   String settlementReconciled;
 
+  // A return with no receipt, announced by order-svc itself.
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.no-receipt-return-recorded",
+      defaultValue = "storeql.order.no-receipt-return-recorded")
+  String noReceiptReturn;
+
   @Override
   protected List<String> topics() {
     return List.of(
@@ -65,7 +72,8 @@ class SalesEventConsumer extends BaseKafkaConsumer {
         disputeOpened,
         disputeFundsWithdrawn,
         disputeClosed,
-        settlementReconciled);
+        settlementReconciled,
+        noReceiptReturn);
   }
 
   @Override
@@ -92,6 +100,8 @@ class SalesEventConsumer extends BaseKafkaConsumer {
       handler.disputeClosed(value);
     } else if (topic.equals(settlementReconciled)) {
       handler.settlementReconciled(value);
+    } else if (topic.equals(noReceiptReturn)) {
+      handler.noReceiptReturn(value);
     }
   }
 }

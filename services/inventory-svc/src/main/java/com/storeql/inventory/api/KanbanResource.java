@@ -59,9 +59,13 @@ public class KanbanResource {
   @POST
   @Path("/kanban-cards")
   public Response createKanbanCard(CreateKanbanCardRequest req) {
+    // A card fixes what a store reorders: management's, at a store the caller keeps. Triggering
+    // and replenishing a card stay the floor's.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = uuid(req.storeId(), "storeId");
+    ctx.requireStoreAccess(storeId);
     UUID variantId = uuid(req.variantId(), "variantId");
     UUID sourceStoreId =
         req.sourceStoreId() != null && !req.sourceStoreId().isBlank()
@@ -131,12 +135,18 @@ public class KanbanResource {
   @Operation(
       summary = "Trigger a kanban card",
       description = "Signals the card's reorder point has been hit, moving it to TRIGGERED status.")
+  @APIResponse(
+      responseCode = "400",
+      description = "VALIDATION_FAILED: notes longer than 2000 characters")
   @APIResponse(responseCode = "404", description = "kanban card not found")
   @POST
   @Path("/kanban-cards/{id}/trigger")
   public ApiResponse<KanbanCardResponse> triggerKanbanCard(
       @PathParam("id") UUID id, TriggerKanbanRequest req) {
+    // The body is optional (a trigger needs no note); one that is sent is held to the rules.
+    if (req != null) Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getKanbanCard(tenantId, id).storeId());
     return ApiResponse.ok(
         Mappers.toKanbanCard(
             service.triggerKanbanCard(tenantId, id, req != null ? req.notes() : null)));
@@ -158,6 +168,7 @@ public class KanbanResource {
   @Path("/kanban-cards/{id}/replenish")
   public ApiResponse<KanbanCardResponse> replenishKanbanCard(@PathParam("id") UUID id) {
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getKanbanCard(tenantId, id).storeId());
     return ApiResponse.ok(Mappers.toKanbanCard(service.replenishKanbanCard(tenantId, id)));
   }
 
@@ -176,12 +187,20 @@ public class KanbanResource {
       description =
           "Sets min/max order quantity and lot-size multiplier applied when computing"
               + " the actual reorder qty (Gap #28).")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "BODY_REQUIRED; VALIDATION_FAILED: a negative quantity, a lot of nothing, more than"
+              + " fifteen whole digits or three places")
   @APIResponse(responseCode = "404", description = "kanban card not found")
   @PUT
   @Path("/kanban-cards/{id}/order-modifiers")
   public ApiResponse<KanbanCardResponse> updateKanbanModifiers(
       @PathParam("id") UUID id, UpdateOrderModifiersRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(service.getKanbanCard(tenantId, id).storeId());
     return ApiResponse.ok(
         Mappers.toKanbanCard(
             service.updateKanbanOrderModifiers(

@@ -11,7 +11,9 @@ import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.storeql.iam.domain.TokenIdentity;
 import com.storeql.iam.repo.UserRepository;
+import com.storeql.iam.service.AuthService;
 import com.storeql.ids.Ids;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -57,6 +59,7 @@ class TokenIdentityIT {
 
   @Inject WebTarget target;
   @Inject UserRepository users;
+  @Inject AuthService auth;
 
   @AfterAll
   static void stopDb() {
@@ -95,6 +98,9 @@ class TokenIdentityIT {
     assertThat(shopper.storeIds(), is(empty()));
     assertThat("no custom role, no permission claim", shopper.permissions(), is(nullValue()));
 
+    // A StaffAssigned stamps nobody in now (29 Sep 2026), so the shopper is taken on as one was
+    // before: stamped into the tenant, then bound.
+    takenOnBeforeSeparateIdentities(userId, tenant);
     users.bindStaffOnce(Ids.newId(), CONSUMER, userId, tenant, "CASHIER", store);
     TokenIdentity cashier = users.tokenIdentity(userId).orElseThrow();
     assertThat(cashier.tenantId(), is(tenant));
@@ -133,6 +139,16 @@ class TokenIdentityIT {
     assertThat(gone.type(), is("CUSTOMER"));
     assertThat(gone.roles(), contains("CUSTOMER"));
 
+    // A login made in the business by staff provisioning stays in it when let go, holding no role.
+    UUID made = Ids.parse(auth.provisionStaff(tenant, "identity-4@example.com", PASSWORD).userId());
+    users.bindStaffOnce(Ids.newId(), CONSUMER, made, tenant, "CASHIER", store);
+    assertThat(users.tokenIdentity(made).orElseThrow().roles(), contains("CASHIER"));
+    users.unbindStaffOnce(Ids.newId(), CONSUMER, made, tenant, "CASHIER", store);
+    TokenIdentity letGo = users.tokenIdentity(made).orElseThrow();
+    assertThat(letGo.tenantId(), is(tenant));
+    assertThat(letGo.type(), is("STAFF"));
+    assertThat(letGo.roles(), is(empty()));
+
     assertThat(users.tokenIdentity(Ids.newId()).isPresent(), is(false));
 
     // An owner's role has no store: tenant-wide, and not narrowed by a store-scoped role held too.
@@ -152,13 +168,15 @@ class TokenIdentityIT {
     UUID tenant = Ids.newId();
     UUID store = Ids.newId();
 
-    // One thread takes the login on and lets it go, over and over, each a single transaction...
+    // One thread takes the login on and lets it go, over and over, each a single transaction. The
+    // login moves only as a shopper taken on before 29 Sep 2026 does — stamped in with its role,
+    // then moved back out when let go — so it is taken on here as one was then...
     AtomicBoolean stop = new AtomicBoolean();
     Thread churn =
         new Thread(
             () -> {
               while (!stop.get()) {
-                users.bindStaffOnce(Ids.newId(), CONSUMER, userId, tenant, "CASHIER", store);
+                takenOnAsCashierBeforeSeparateIdentities(userId, tenant, store);
                 pause();
                 users.unbindStaffOnce(Ids.newId(), CONSUMER, userId, tenant, "CASHIER", store);
                 pause();
@@ -185,6 +203,38 @@ class TokenIdentityIT {
       churn.join();
     }
     assertThat("tokens that mixed two moments: " + mixed, mixed, is(empty()));
+  }
+
+  /** A shopper's login stamped into the tenant, as a StaffAssigned did before 29 Sep 2026. */
+  private static void takenOnBeforeSeparateIdentities(UUID userId, UUID tenant) {
+    Envelopes.exec(
+        PG,
+        "UPDATE iam.users SET tenant_id = '"
+            + tenant
+            + "', type = 'STAFF' WHERE id = '"
+            + userId
+            + "' AND tenant_id IS NULL");
+  }
+
+  /**
+   * As {@link #takenOnBeforeSeparateIdentities}, with a CASHIER role at the store, in one statement
+   * and so one transaction — as that StaffAssigned stamped and bound together.
+   */
+  private static void takenOnAsCashierBeforeSeparateIdentities(
+      UUID userId, UUID tenant, UUID store) {
+    Envelopes.exec(
+        PG,
+        "WITH taken AS (UPDATE iam.users SET tenant_id = '"
+            + tenant
+            + "', type = 'STAFF' WHERE id = '"
+            + userId
+            + "' AND tenant_id IS NULL RETURNING id)"
+            + " INSERT INTO iam.user_roles (id, user_id, role_id, store_id)"
+            + " SELECT '"
+            + Ids.newId()
+            + "', taken.id, r.id, '"
+            + store
+            + "' FROM taken, iam.roles r WHERE r.name = 'CASHIER'");
   }
 
   private static void pause() {

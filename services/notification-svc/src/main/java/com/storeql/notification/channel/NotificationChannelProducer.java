@@ -75,6 +75,22 @@ public class NotificationChannelProducer {
   // The publisher's own password for the broker (20.15), from the secret store. It opens the broker
   // and nothing else: this service holds no key that can sign a platform token.
   @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.connect-timeout-ms", defaultValue = "5000")
+  int smtpConnectTimeoutMs;
+
+  @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.read-timeout-ms", defaultValue = "10000")
+  int smtpReadTimeoutMs;
+
+  @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.write-timeout-ms", defaultValue = "10000")
+  int smtpWriteTimeoutMs;
+
+  @Inject
+  @ConfigProperty(name = "storeql.notification.smtp.sender-threads", defaultValue = "4")
+  int smtpSenderThreads;
+
+  @Inject
   @ConfigProperty(name = "storeql.notification.mqtt.publisher-password")
   java.util.Optional<String> mqttPublisherPassword;
 
@@ -100,7 +116,9 @@ public class NotificationChannelProducer {
               blankToNull(smtpUsername),
               blankToNull(smtpPassword),
               from,
-              startTls);
+              startTls,
+              new SmtpChannel.Timeouts(
+                  smtpConnectTimeoutMs, smtpReadTimeoutMs, smtpWriteTimeoutMs, smtpSenderThreads));
       // Always keep the in-app path so the admin feed is populated when email is on.
       return new CompositeChannel(app, smtp);
     }

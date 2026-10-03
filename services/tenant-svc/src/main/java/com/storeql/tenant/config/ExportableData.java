@@ -72,6 +72,9 @@ public class ExportableData extends TenantDataSpec {
             "legal_obligations",
             "the platform's reference data: the law as recorded for every business"),
         Map.entry(
+            "working_time_rules",
+            "the platform's reference data: the working-time law as recorded for every business"),
+        Map.entry(
             "retention_classes",
             "the platform's reference data: the law as recorded for every business"),
         Map.entry(

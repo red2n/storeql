@@ -94,9 +94,28 @@ public class PriceListResource {
   @APIResponse(responseCode = "404", description = "Price list not found")
   @GET
   @Path("/{id}/items")
-  public Response listItems(@PathParam("id") UUID id) {
+  public Response listItems(
+      @PathParam("id") UUID id,
+      @QueryParam("after") String after,
+      @QueryParam("limit") Integer limit) {
+    int size = limit == null || limit < 1 ? defaultItemsLimit : Math.min(limit, maxItemsLimit);
+    var page = svc.listPriceListItemsPage(ctx, id, after, size);
     return Response.ok(
-            ApiResponse.ok(svc.listPriceListItems(ctx, id).stream().map(Mappers::toDto).toList()))
+            ApiResponse.ok(
+                page.items().stream().map(Mappers::toDto).toList(),
+                new ApiResponse.Meta(ctx.requestId(), page.nextCursor())))
         .build();
   }
+
+  @Inject
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.pricing.price-list-items.default-limit",
+      defaultValue = "500")
+  int defaultItemsLimit;
+
+  @Inject
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.pricing.price-list-items.max-limit",
+      defaultValue = "1000")
+  int maxItemsLimit;
 }

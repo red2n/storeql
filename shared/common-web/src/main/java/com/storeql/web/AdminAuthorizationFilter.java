@@ -82,6 +82,9 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
   private static final Set<String> IDENTITY_PATHS =
       Set.of(
           "/auth/register",
+          // Business sign-up ("Start a business"): the login a new business is run with, made
+          // before it holds any role — the business, and its OWNER role, come after it.
+          "/auth/register/business",
           "/auth/login",
           "/auth/platform-login",
           "/auth/refresh",
@@ -94,7 +97,10 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
           // whatever the address, and spending one — the 256-bit token in the body is the whole
           // capability, and it resets exactly the one login it was minted for.
           "/auth/password/forgot",
-          "/auth/password/reset");
+          "/auth/password/reset",
+          // Signing out everywhere: every session of the caller's own login, which comes from the
+          // verified token and nothing else, so a shopper may do it as much as staff.
+          "/auth/sessions/revoke-all");
 
   @Inject TenantContext ctx;
 
@@ -363,6 +369,9 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         || "/promotions".equals(path)
         // The caller's own principal — it describes the caller, so it leaks nothing new.
         || "/auth/me".equals(path)
+        // A person's own sessions (sign-in protection): the login comes from the verified token,
+        // so the only sessions listed are the caller's, shopper or staff.
+        || "/auth/sessions".equals(path)
         // The password rules (password reset): read by a sign-up form and the reset page before
         // anyone has signed in. The same for every login, and nothing about any of them.
         || "/auth/password-policy".equals(path)
@@ -401,13 +410,16 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
    * proxy route {@code /api/{service}/{service-local path}}. Strip that prefix so the allowlists
    * match the same service-local path at the gateway and at the business service.
    */
+  private static final java.util.regex.Pattern API_VERSION =
+      java.util.regex.Pattern.compile("^v\\d+/");
+
   private static String stripGatewayPrefix(String path) {
     if (!path.startsWith("/api/")) {
       return path;
     }
     // The canonical form carries a version segment (22.8): /api/v1/{service}/… strips to the same
     // service-local path as the alias /api/{service}/…, so a public read is public on both.
-    String rest = path.substring("/api/".length()).replaceFirst("^v\\d+/", "");
+    String rest = API_VERSION.matcher(path.substring("/api/".length())).replaceFirst("");
     int afterService = rest.indexOf('/');
     return afterService >= 0 ? rest.substring(afterService) : "/";
   }
@@ -444,6 +456,29 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
     if (!path.startsWith("/billing/pay/")) return false;
     String token = path.substring("/billing/pay/".length());
     return !token.isEmpty() && token.indexOf('/') < 0;
+  }
+
+  /**
+   * {@code POST /orders/{id}/cancel} with an id-shaped segment and nothing after it.
+   *
+   * @param path the service-local request path
+   * @return {@code true} for exactly that shape
+   */
+  private static boolean isOwnOrderCancel(String path) {
+    if (!path.startsWith("/orders/") || !path.endsWith("/cancel")) return false;
+    String id = path.substring("/orders/".length(), path.length() - "/cancel".length());
+    return looksLikeUuid(id);
+  }
+
+  /**
+   * {@code DELETE /auth/sessions/{id}} with an id-shaped segment and nothing after it.
+   *
+   * @param path the service-local request path
+   * @return {@code true} for exactly that shape
+   */
+  private static boolean isOwnSession(String path) {
+    String prefix = "/auth/sessions/";
+    return path.startsWith(prefix) && looksLikeUuid(path.substring(prefix.length()));
   }
 
   private static boolean isOpenMutation(String path) {
@@ -513,6 +548,14 @@ public class AdminAuthorizationFilter implements ContainerRequestFilter {
         // or by an authenticated customer. POS channel orders require a staff role — enforced
         // inside OrderResource.place() after payload deserialisation.
         || "/orders".equals(path)
+        // A shopper cancelling their own order before anything was paid. Not unguarded: order-svc
+        // lets only the shopper the order belongs to cancel it, only while it is an unpaid PENDING
+        // online order, and answers 404 to anyone else. Matched by shape, so nothing else under
+        // /orders/{id}/ is opened by it.
+        || isOwnOrderCancel(path)
+        // Signing one of the caller's own sessions out: iam-svc ends only a session of the login
+        // in the token and answers 404 for anyone else's. Matched by shape.
+        || isOwnSession(path)
         // Shopping cart self-service: a guest (sessionId) or authenticated CUSTOMER manages their
         // own cart with no staff role. Object-level authorization (only the owning
         // customer/session,

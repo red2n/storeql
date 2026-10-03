@@ -31,6 +31,7 @@ import java.util.UUID;
 @ApplicationScoped
 public class DeferredRevenueService {
 
+  static final String GIFT_CARD_REVERSED_CONSUMER = "purchase-svc/gift-card-load-reversed";
   static final String GIFT_CARD_SPENT_CONSUMER = "purchase-svc/gift-card-breakage";
 
   private static final String[] MANAGEMENT = {"PLATFORM_ADMIN", "OWNER", "MANAGER"};
@@ -38,9 +39,19 @@ public class DeferredRevenueService {
   @Inject DeferredRevenueRepository repo;
   @Inject TenantProfiles tenants;
 
-  /** The estimates in force, their history, and where the points and gift cards stand. */
+  /**
+   * The estimates in force, their history, and where the points and gift cards stand.
+   *
+   * <p>The points and the cards are the business's, redeemable at any of its stores, so neither the
+   * pools nor the liability can be split by store: a caller held to stores is refused rather than
+   * shown the whole business's figures.
+   *
+   * @throws ApiException {@code 403} for anyone but management; {@code 403 BUSINESS_WIDE_ONLY} for
+   *     a caller held to stores
+   */
   public DeferredRevenueView view(TenantContext ctx) {
     ctx.requireAnyRole(MANAGEMENT);
+    wholeBusiness(ctx);
     return repo.view(ctx.requireTenantId());
   }
 
@@ -49,10 +60,11 @@ public class DeferredRevenueService {
    * are kept; a change applies from now on, as a change in an accounting estimate does.
    *
    * @throws ApiException {@code 400} naming the estimate that is out of range; {@code 403} for
-   *     anyone but management
+   *     anyone but management; {@code 403 BUSINESS_WIDE_ONLY} for a caller held to stores
    */
   public DeferredRevenueView setEstimates(TenantContext ctx, DeferredRevenueSettingsRequest req) {
     ctx.requireAnyRole(MANAGEMENT);
+    wholeBusiness(ctx);
     UUID tenantId = ctx.requireTenantId();
     String refusal =
         DeferredRevenue.refusal(
@@ -93,8 +105,33 @@ public class DeferredRevenueService {
             new Source(load.tenantId(), load.transactionId(), load.storeId(), today()),
             load.kind(),
             load.paidBy(),
-            load.amount());
+            load.amount(),
+            load.source(),
+            load.orderId(),
+            load.note());
     return repo.recordGiftCardLoad(load, posting);
+  }
+
+  /**
+   * Posts the opposite of a sale-loaded card when the sale was voided or cancelled, dated the
+   * reversal. Once per event.
+   */
+  public boolean giftCardLoadReversed(
+      UUID eventId,
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      BigDecimal amount,
+      java.time.Instant reversedAt) {
+    if (amount == null || amount.signum() <= 0) return false;
+    var src =
+        new Source(tenantId, orderId, storeId, reversedAt.atZone(ZoneOffset.UTC).toLocalDate());
+    return repo.recordGiftCardLoadReversed(
+        eventId,
+        GIFT_CARD_REVERSED_CONSUMER,
+        tenantId,
+        amount,
+        DeferredRevenue.giftCardLoadReversed(src, orderId, amount));
   }
 
   /** Recognises the breakage that goes with a gift card spent as tender. Once per payment. */
@@ -118,8 +155,16 @@ public class DeferredRevenueService {
           DeferredRevenue.earned(src, settings, pool, e.points(), e.orderTotal(), e.orderTax());
       case LoyaltyEvent.REDEEMED -> DeferredRevenue.redeemed(src, settings, pool, e.points());
       case LoyaltyEvent.EXPIRED -> DeferredRevenue.expired(src, settings, pool, e.points());
+      case LoyaltyEvent.REVERSED -> DeferredRevenue.reversed(src, settings, pool, e.points().abs());
       default -> DeferredRevenue.adjusted(src, settings, pool, e.points());
     };
+  }
+
+  private static void wholeBusiness(TenantContext ctx) {
+    BusinessWide.require(
+        ctx,
+        "Loyalty points and gift cards are the whole business's, spent at any of its stores; their"
+            + " estimates and deferred revenue need a caller who is not held to stores");
   }
 
   private static LocalDate today() {

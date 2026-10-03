@@ -39,6 +39,7 @@ class RetentionPurgeIT {
   private static final String AT_ONCE = "01a090ae-611e-7072-8516-000000000001";
   private static final String UNSET = "01a090ae-611e-7072-8516-000000000002";
   private static final String YEAR = "01a090ae-611e-7072-8516-000000000003";
+  private static final String MANY = "01a090ae-611e-7072-8516-000000000004";
   private static final String OWNER = "01a090ae-611e-7072-8516-000000000031";
   private static final UUID HELD_CUSTOMER = Ids.parse("01a090ae-611e-7072-8516-000000000041");
 
@@ -49,13 +50,17 @@ class RetentionPurgeIT {
             .with(AT_ONCE, "GBP", "GB")
             .with(UNSET, "GBP", "GB")
             .with(YEAR, "GBP", "GB")
+            .with(MANY, "GBP", "GB")
             .withRetention(
                 AT_ONCE,
                 Map.of("CUSTOMER_RECORDS", 0),
                 List.of("{\"subjectKind\":\"CUSTOMER\",\"subjectId\":\"" + HELD_CUSTOMER + "\"}"))
             .withRetention(UNSET, Map.of("NOTIFICATION_LOG", 30), List.of())
-            .withRetention(YEAR, Map.of("CUSTOMER_RECORDS", 365), List.of());
+            .withRetention(YEAR, Map.of("CUSTOMER_RECORDS", 365), List.of())
+            .withRetention(MANY, Map.of("CUSTOMER_RECORDS", 0), List.of());
     System.setProperty("storeql.retention-sweeper.enabled", "false");
+    // A small page, so the purge below reads its candidates over several pages.
+    System.setProperty("storeql.customer.retention.batch", "2");
   }
 
   @Inject WebTarget target;
@@ -108,6 +113,20 @@ class RetentionPurgeIT {
     assertThat(payload, containsString("\"rowsAffected\":1"));
     // An erased record is not a candidate again.
     assertThat(ok(sweep(AT_ONCE, "OWNER")).getInt("rowsAffected"), is(0));
+  }
+
+  @Test
+  void moreCandidatesThanOnePageAreAllErasedOnce() {
+    java.util.List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < 7; i++) {
+      ids.add(customer(MANY, null, "1 day"));
+    }
+    JsonObject run = ok(sweep(MANY, "OWNER"));
+    assertThat(run.getInt("rowsAffected"), is(7));
+    for (String id : ids) {
+      assertThat(statusOf(id), is("ANONYMIZED"));
+    }
+    assertThat(ok(sweep(MANY, "OWNER")).getInt("rowsAffected"), is(0));
   }
 
   @Test

@@ -463,6 +463,24 @@ class JwtAuthFilterTest {
   }
 
   @Test
+  void customerTokenCancelsItsOwnOrderAndNothingElseUnderAnOrder() throws IOException {
+    // The shopper's own cancel gets the storefront tenant; order-svc decides whose order it is and
+    // whether it may still be cancelled. Every other write under an order stays staff work.
+    String id = "01a09509-72ec-72e9-9f08-94a93df26a36";
+    org.junit.jupiter.api.Assertions.assertEquals(
+        "tenant-abc", tenantDerivedFor("POST", "api/order-svc/orders/" + id + "/cancel", true));
+    for (String path :
+        new String[] {
+          "api/order-svc/orders/" + id + "/void",
+          "api/order-svc/orders/" + id + "/returns",
+          "api/order-svc/orders/" + id + "/cancel/again",
+          "api/order-svc/orders/mine/cancel",
+        }) {
+      org.junit.jupiter.api.Assertions.assertNull(tenantDerivedFor("POST", path, false), path);
+    }
+  }
+
+  @Test
   void customerTokenReachesItsOwnRecallNoticesAndNothingElseUnderThem() throws IOException {
     // 05.10: the shopper's notices and their choice of remedy get the storefront tenant; a recall's
     // list, its progress and settling a notice do not — those are staff work through the normal
@@ -825,6 +843,66 @@ class JwtAuthFilterTest {
     }
   }
 
+  // ── business sign-up ("Start a business") ─────────────────────────────────
+
+  @Test
+  void aBusinessSignsUpWithoutAToken() throws IOException {
+    for (String path :
+        new String[] {
+          "api/iam-svc/auth/register/business",
+          "api/v1/iam-svc/auth/register/business",
+          // The shopper's sign-up beside it is as public as it was.
+          "api/iam-svc/auth/register"
+        }) {
+      org.mockito.Mockito.reset(requestContext);
+      lenient().when(requestContext.getUriInfo()).thenReturn(uriInfo);
+      lenient().when(requestContext.getHeaders()).thenReturn(headers);
+      when(uriInfo.getPath()).thenReturn(path);
+      lenient().when(requestContext.getMethod()).thenReturn("POST");
+
+      filter.filter(requestContext);
+
+      verify(requestContext, never()).abortWith(any());
+    }
+  }
+
+  @Test
+  void nothingBesideTheBusinessSignUpIsPublic() throws IOException {
+    for (String path :
+        new String[] {
+          "api/iam-svc/auth/register/business/owner",
+          "api/iam-svc/auth/register/businesses",
+          "api/tenant-svc/auth/register/business",
+          "api/product-svc/x/iam-svc/auth/register/business"
+        }) {
+      org.mockito.Mockito.reset(requestContext);
+      lenient().when(requestContext.getUriInfo()).thenReturn(uriInfo);
+      lenient().when(requestContext.getHeaders()).thenReturn(headers);
+      when(uriInfo.getPath()).thenReturn(path);
+      lenient().when(requestContext.getMethod()).thenReturn("POST");
+
+      filter.filter(requestContext);
+
+      org.junit.jupiter.api.Assertions.assertEquals(401, abortedStatus(), path);
+    }
+  }
+
+  @Test
+  void identityHeadersAreStrippedFromABusinessSignUp() throws IOException {
+    // Nobody names their own business, or their own role, by sending the gateway's headers.
+    headers.putSingle("X-Tenant-Id", "01a090ae-611e-702c-a97b-d1b8025478e1");
+    headers.putSingle("X-User-Id", "spoofed");
+    headers.putSingle("X-Roles", "OWNER");
+    when(uriInfo.getPath()).thenReturn("api/iam-svc/auth/register/business");
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Tenant-Id"));
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-User-Id"));
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Roles"));
+  }
+
   // ── delivery and collection slots ─────────────────────────────────────────
 
   @Test
@@ -916,6 +994,41 @@ class JwtAuthFilterTest {
 
     verify(requestContext, never()).abortWith(any());
     org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Auth-Methods"));
+  }
+
+  @Test
+  void theSessionAskingIsStampedFromTheTokenAndNeverFromTheClient() throws IOException {
+    String mine = "01a090ae-611e-700f-b645-a14095230b78";
+    headers.putSingle("X-Session-Id", "01a090ae-611e-700f-b645-a14095230b79");
+    String token =
+        com.auth0
+            .jwt
+            .JWT
+            .create()
+            .withKeyId(KID)
+            .withIssuer("storeql")
+            .withSubject("01a090ae-611e-700f-b645-a14095230b77")
+            .withClaim("tenant", "tenant-xyz")
+            .withArrayClaim("roles", new String[] {"CASHIER"})
+            .withClaim("sid", mine)
+            .sign(SIGNER);
+    protectedRead(token);
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+    org.junit.jupiter.api.Assertions.assertEquals(mine, headers.getFirst("X-Session-Id"));
+  }
+
+  @Test
+  void aTokenThatNamesNoSessionStampsNoneAndAForgedHeaderGoes() throws IOException {
+    headers.putSingle("X-Session-Id", "01a090ae-611e-700f-b645-a14095230b79");
+    protectedRead(staffToken(new String[] {"OWNER"}, null));
+
+    filter.filter(requestContext);
+
+    verify(requestContext, never()).abortWith(any());
+    org.junit.jupiter.api.Assertions.assertFalse(headers.containsKey("X-Session-Id"));
   }
 
   // ── Token signing (20.15; RFC 8725) ────────────────────────────────────────

@@ -30,9 +30,6 @@ public final class Proration {
 
   private Proration() {}
 
-  /** Money as an invoice prints it. The columns hold four places; a person reads two. */
-  private static final int PENCE = 2;
-
   /**
    * What a change part-way through a period is worth.
    *
@@ -66,7 +63,9 @@ public final class Proration {
    * @param periodStart the day the period began
    * @param periodEnd the day the next period begins; the period does not include it
    * @param changeOn the day the change takes effect
-   * @return the credit and the debit, each rounded to the penny
+   * @param minorUnits the minor units of the subscription's currency, as {@code Fx.minorUnits}
+   *     gives them (ISO 4217: none for yen, three for a dinar), never an assumed two
+   * @return the credit and the debit, each rounded to the currency's smallest unit
    * @throws IllegalArgumentException when the period does not end after it begins
    */
   public static Prorated onChange(
@@ -74,7 +73,8 @@ public final class Proration {
       BigDecimal replacement,
       LocalDate periodStart,
       LocalDate periodEnd,
-      LocalDate changeOn) {
+      LocalDate changeOn,
+      int minorUnits) {
 
     if (!periodEnd.isAfter(periodStart)) {
       throw new IllegalArgumentException("a billing period ends after it begins");
@@ -87,8 +87,8 @@ public final class Proration {
         from.isAfter(periodEnd) ? 0 : (int) ChronoUnit.DAYS.between(from, periodEnd);
 
     return new Prorated(
-        share(billed, daysRemaining, daysInPeriod),
-        share(replacement, daysRemaining, daysInPeriod),
+        share(billed, daysRemaining, daysInPeriod, minorUnits),
+        share(replacement, daysRemaining, daysInPeriod, minorUnits),
         daysInPeriod,
         daysRemaining);
   }
@@ -98,13 +98,13 @@ public final class Proration {
    *
    * @return nought for a null or negative price, so a bad figure is never a credit
    */
-  static BigDecimal share(BigDecimal price, int days, int daysInPeriod) {
+  static BigDecimal share(BigDecimal price, int days, int daysInPeriod, int minorUnits) {
     if (price == null || price.signum() <= 0 || days <= 0) {
-      return BigDecimal.ZERO.setScale(PENCE);
+      return BigDecimal.ZERO.setScale(minorUnits);
     }
-    if (days >= daysInPeriod) return price.setScale(PENCE, RoundingMode.HALF_UP);
+    if (days >= daysInPeriod) return price.setScale(minorUnits, RoundingMode.HALF_UP);
     return price
         .multiply(BigDecimal.valueOf(days))
-        .divide(BigDecimal.valueOf(daysInPeriod), PENCE, RoundingMode.HALF_UP);
+        .divide(BigDecimal.valueOf(daysInPeriod), minorUnits, RoundingMode.HALF_UP);
   }
 }

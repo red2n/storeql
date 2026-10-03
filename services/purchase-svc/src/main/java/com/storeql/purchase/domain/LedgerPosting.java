@@ -118,7 +118,7 @@ public final class LedgerPosting {
     if (dr.signum() == 0 && cr.signum() == 0) {
       return this;
     }
-    if (code == null || !code.matches("[A-Za-z0-9]{1,10}")) {
+    if (code == null || !Accounting.NOMINAL_CODE.matcher(code).matches()) {
       throw new IllegalArgumentException("nominal code must be 1-10 letters or digits");
     }
     if (lines.size() >= MAX_LINES) {

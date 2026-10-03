@@ -7,6 +7,7 @@ import com.storeql.web.ApiResponse;
 import com.storeql.web.Cursor;
 import com.storeql.web.HttpHeaders;
 import com.storeql.web.Parsing;
+import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -65,7 +66,8 @@ public class DisputeResource {
       summary = "Record a chargeback the acquirer has told the business about",
       description =
           "For a card taken on a terminal the platform does not talk to. A payment provider's own"
-              + " disputes arrive by webhook. Takes an Idempotency-Key. OWNER or MANAGER.")
+              + " disputes arrive by webhook. Takes an Idempotency-Key. OWNER or MANAGER holding"
+              + " the sales.refund permission.")
   @APIResponse(responseCode = "201", description = "Recorded")
   @APIResponse(
       responseCode = "409",
@@ -74,6 +76,7 @@ public class DisputeResource {
   public Response record(
       DisputeDtos.RecordDisputeRequest req, @HeaderParam(HttpHeaders.IDEMPOTENCY_KEY) String key) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    ctx.requirePermission(Permissions.SALES_REFUND);
     Validations.validate(req);
     Disputes.Dispute d = svc.record(ctx.requireTenantId(), ctx.requireUserId(), req, key);
     return Response.status(Response.Status.CREATED).entity(ApiResponse.ok(toDto(d))).build();
@@ -120,36 +123,45 @@ public class DisputeResource {
       summary = "Answer a dispute with evidence",
       description =
           "Once, and not after its date. A provider's dispute is sent to the provider; one the"
-              + " acquirer told the business about is kept here and sent by the business.")
+              + " acquirer told the business about is kept here and sent by the business. OWNER or"
+              + " MANAGER holding the sales.refund permission.")
+  @APIResponse(responseCode = "403", description = "PERMISSION_DENIED: sales.refund narrowed out")
   @APIResponse(responseCode = "409", description = "Already answered, closed, or past its date")
   @POST
   @Path("/{id}/evidence")
   public ApiResponse<DisputeDtos.FileResponse> evidence(
       @PathParam("id") UUID id, DisputeDtos.EvidenceRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    ctx.requirePermission(Permissions.SALES_REFUND);
     Validations.validate(req);
     return ApiResponse.ok(
         toDto(svc.submitEvidence(ctx.requireTenantId(), ctx.requireUserId(), id, req)));
   }
 
-  @Operation(summary = "Accept a dispute: do not contest it")
+  @Operation(
+      summary = "Accept a dispute: do not contest it",
+      description = "OWNER or MANAGER holding the sales.refund permission.")
   @APIResponse(responseCode = "409", description = "Already closed")
   @POST
   @Path("/{id}/accept")
   public ApiResponse<DisputeDtos.FileResponse> accept(@PathParam("id") UUID id) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    ctx.requirePermission(Permissions.SALES_REFUND);
     return ApiResponse.ok(toDto(svc.accept(ctx.requireTenantId(), ctx.requireUserId(), id)));
   }
 
   @Operation(
       summary = "Record how a dispute the acquirer told the business about ended",
-      description = "WON or LOST. A provider's dispute is decided by its webhook, never here.")
+      description =
+          "WON or LOST. A provider's dispute is decided by its webhook, never here. OWNER or"
+              + " MANAGER holding the sales.refund permission.")
   @APIResponse(responseCode = "409", description = "A provider's dispute, or already closed")
   @POST
   @Path("/{id}/resolve")
   public ApiResponse<DisputeDtos.FileResponse> resolve(
       @PathParam("id") UUID id, DisputeDtos.ResolveRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    ctx.requirePermission(Permissions.SALES_REFUND);
     Validations.validate(req);
     return ApiResponse.ok(toDto(svc.resolve(ctx.requireTenantId(), ctx.requireUserId(), id, req)));
   }

@@ -205,4 +205,20 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'Ask for a new link';
+
+  @override
+  String get startBusiness => 'Start a business';
+
+  @override
+  String get startBusinessTitle => 'Start your business';
+
+  @override
+  String get startBusinessIntro =>
+      'Create the login you will run your business with. Next, you set up the business and its first store.';
+
+  @override
+  String get fieldPasswordConfirm => 'Confirm password';
+
+  @override
+  String get fieldPasswordMismatch => 'This does not match the password above.';
 }

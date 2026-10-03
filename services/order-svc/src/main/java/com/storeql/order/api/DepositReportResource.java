@@ -33,7 +33,10 @@ public class DepositReportResource {
   /**
    * Deposits charged on sales that stand and refunded at the till, by material.
    *
-   * @param storeId one store, or absent for the whole business
+   * @param storeId a store that is named is checked against the caller's own (SJ-D74's {@code
+   *     reportStores}) and refused with {@code 403 STORE_ACCESS_DENIED} otherwise; with none named,
+   *     a caller held to no store reads the whole business and a caller held to some reads exactly
+   *     those, added together
    * @param from inclusive start as a full ISO-8601 instant
    * @param to exclusive end as a full ISO-8601 instant
    * @return the totals and one row per material

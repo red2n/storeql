@@ -63,6 +63,20 @@ class OrderVoidedHandlerTest {
       return true;
     }
 
+    @Override
+    public boolean receiveReturnFromOrderOnce(
+        UUID dedupeId,
+        String consumerName,
+        UUID tenantId,
+        UUID storeId,
+        UUID variantId,
+        BigDecimal qty,
+        UUID orderId,
+        com.storeql.inventory.domain.ReturnDisposition where) {
+      return receiveReturnFromOrderOnce(
+          dedupeId, consumerName, tenantId, storeId, variantId, qty, orderId);
+    }
+
     private static String line(
         String kind,
         UUID dedupeId,

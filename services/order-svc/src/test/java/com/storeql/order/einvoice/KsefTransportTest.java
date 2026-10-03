@@ -37,7 +37,7 @@ import org.junit.jupiter.api.Test;
  */
 class KsefTransportTest {
 
-  private static final String NIP = "5260250991";
+  private static final String NIP = "5260250274";
   private static final String TOKEN = "ksef-token-1";
 
   private static JsonStub stub;
@@ -73,7 +73,7 @@ class KsefTransportTest {
                 new Address("ul. Portowa 1", null, "Gdańsk", "80-001", null, "PL")),
             new Buyer(
                 "Kawiarnia Molo sp. z o.o.",
-                "PL7010001455",
+                "PL7740001454",
                 null,
                 null,
                 new Address("ul. Długa 2", null, "Gdańsk", "80-002", null, "PL"),
@@ -124,8 +124,8 @@ class KsefTransportTest {
     assertEquals(EInvoiceTransports.STATUS_PENDING, first.state());
     Outcome done = transport.status(document(TOKEN), "SES-1/INV-1");
     assertEquals(EInvoiceTransports.STATUS_ACCEPTED, done.state());
-    assertEquals("5260250991-20260916-010203ABCDEF-01", done.reference());
-    assertTrue(done.detail().startsWith("KSeF number 5260250991-20260916-010203ABCDEF-01"));
+    assertEquals("5260250274-20260916-010203ABCDEF-01", done.reference());
+    assertTrue(done.detail().startsWith("KSeF number 5260250274-20260916-010203ABCDEF-01"));
     // Once numbered, nothing is left to ask.
     assertEquals(
         EInvoiceTransports.STATUS_ACCEPTED,
@@ -146,7 +146,7 @@ class KsefTransportTest {
     system.mode("duplicate");
     Outcome dup = transport.status(document(TOKEN), "SES-1/INV-1");
     assertEquals(EInvoiceTransports.STATUS_ACCEPTED, dup.state());
-    assertEquals("5260250991-20260916-0A1B2C3D4E5F-01", dup.reference());
+    assertEquals("5260250274-20260916-0A1B2C3D4E5F-01", dup.reference());
     system.mode("flaky");
     assertThrows(TransportException.class, () -> transport.status(document(TOKEN), "SES-1/INV-1"));
     system.mode("down");

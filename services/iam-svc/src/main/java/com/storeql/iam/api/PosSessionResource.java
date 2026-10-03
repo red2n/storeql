@@ -18,6 +18,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
@@ -87,32 +88,52 @@ public class PosSessionResource {
    *
    * <p>Ending an already-closed session is not an error, so a repeated sign-off is safe.
    *
+   * <p>The session's own cashier ends it freely; anyone else must be OWNER or MANAGER with access
+   * to the session's store and give a {@code reason}, which is recorded with who did it.
+   *
    * @param id the session to close
+   * @param reason why, required when ending a colleague's session
    * @return {@code 204} with no body
-   * @throws com.storeql.web.ApiException {@code 404} when the session is not in the caller's tenant
+   * @throws com.storeql.web.ApiException {@code 404} not in the caller's tenant; {@code 403
+   *     POS_SESSION_NOT_YOURS} for a non-manager naming another's; {@code 403 STORE_ACCESS_DENIED};
+   *     {@code 400 POS_SESSION_REASON_REQUIRED}
    */
   @Operation(summary = "End a POS session", description = "Explicitly closes an active session.")
   @APIResponse(responseCode = "204", description = "Session ended")
   @APIResponse(responseCode = "404", description = "Session not found")
   @DELETE
   @Path("/{id}")
-  public Response end(@PathParam("id") UUID id) {
-    svc.end(ctx, id);
+  public Response end(@PathParam("id") UUID id, @QueryParam("reason") String reason) {
+    svc.end(ctx, id, reason);
     return Response.noContent().build();
   }
 
   /**
    * Lists the tenant's open POS sessions across every store.
    *
-   * @return the active sessions, most recently started first
+   * @param storeId optionally one store the caller keeps
+   * @return the active sessions, most recently started first; management only, store scoped
    */
   @Operation(
       summary = "List active POS sessions",
       description = "Active cashier sessions for the caller's tenant.")
   @APIResponse(responseCode = "200", description = "Active sessions")
   @GET
-  public Response listActive() {
-    List<PosSessionResponse> list = svc.listActive(ctx).stream().map(this::toDto).toList();
+  public Response listActive(@QueryParam("storeId") UUID storeId) {
+    List<PosSessionResponse> list = svc.listActive(ctx, storeId).stream().map(this::toDto).toList();
+    return Response.ok(ApiResponse.ok(list)).build();
+  }
+
+  /**
+   * The caller's own open sessions (any role): what a till asks when it re-attaches.
+   *
+   * @return the caller's active sessions
+   */
+  @Operation(summary = "My open POS sessions")
+  @GET
+  @Path("/mine")
+  public Response mine() {
+    List<PosSessionResponse> list = svc.listMine(ctx).stream().map(this::toDto).toList();
     return Response.ok(ApiResponse.ok(list)).build();
   }
 

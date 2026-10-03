@@ -214,7 +214,7 @@ public final class KsefStub {
       case "duplicate":
         return new JsonStub.Answer(
             200,
-            "{\"referenceNumber\":\"INV-1\",\"status\":{\"code\":440,\"description\":\"Duplikat faktury\",\"extensions\":{\"originalKsefNumber\":\"5260250991-20260916-0A1B2C3D4E5F-01\"}}}");
+            "{\"referenceNumber\":\"INV-1\",\"status\":{\"code\":440,\"description\":\"Duplikat faktury\",\"extensions\":{\"originalKsefNumber\":\"5260250274-20260916-0A1B2C3D4E5F-01\"}}}");
       case "flaky":
         return new JsonStub.Answer(
             200,
@@ -226,7 +226,7 @@ public final class KsefStub {
               "{\"referenceNumber\":\"INV-1\",\"status\":{\"code\":150,\"description\":\"Trwa przetwarzanie\"}}");
         return new JsonStub.Answer(
             200,
-            "{\"referenceNumber\":\"INV-1\",\"invoiceNumber\":\"x\",\"ksefNumber\":\"5260250991-20260916-010203ABCDEF-01\",\"acquisitionDate\":\"2026-09-16T10:00:00Z\",\"status\":{\"code\":200,\"description\":\"Sukces\"}}");
+            "{\"referenceNumber\":\"INV-1\",\"invoiceNumber\":\"x\",\"ksefNumber\":\"5260250274-20260916-010203ABCDEF-01\",\"acquisitionDate\":\"2026-09-16T10:00:00Z\",\"status\":{\"code\":200,\"description\":\"Sukces\"}}");
     }
   }
 

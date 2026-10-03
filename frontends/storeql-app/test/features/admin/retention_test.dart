@@ -194,6 +194,34 @@ void main() {
     expect(_body(put), {'periodDays': 3650});
   });
 
+  // The period is the whole number of days typed, or it is refused under the
+  // field and nothing is saved. Read as a number literal, 0x10 was saved as
+  // sixteen days: records purged on a figure nobody typed.
+  for (final (locale, typed) in const [
+    ('en_GB', '0x10'),
+    ('ro', '+0x1F'),
+    ('pl', '0X10'),
+    ('ar', '0x1e'),
+    ('en', '16.'),
+  ]) {
+    testWidgets('in $locale, a period of "$typed" days is refused, never saved as another figure',
+        (tester) async {
+      Intl.defaultLocale = locale;
+      final adapter = await _pump(tester);
+      await tester.tap(find.byKey(const Key('retention-set-CUSTOMER_RECORDS')));
+      await tester.pumpAndSettle();
+      final field = find.byKey(const Key('retention-period'));
+      for (var i = 1; i <= typed.length; i++) {
+        await tester.enterText(field, typed.substring(0, i));
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(const Key('retention-save')));
+      await tester.pumpAndSettle();
+      expect(adapter.writes, isEmpty);
+      expect(tester.widget<TextField>(field).decoration?.errorText, isNotNull);
+    });
+  }
+
   testWidgets("the server's refusal is shown in its words", (tester) async {
     final adapter = _Adapter()
       ..setReply = (400, '{"error":{"code":"RETENTION_BELOW_LEGAL_MINIMUM","message":"The law requires at least 2190 days for TRANSACTIONS (VATA 1994)"}}');

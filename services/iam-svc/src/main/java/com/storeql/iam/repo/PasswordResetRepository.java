@@ -149,10 +149,12 @@ public class PasswordResetRepository extends BaseOutboxRepository {
    *
    * @param tokenHash the token to spend
    * @param newPasswordHash the already-hashed new password (Argon2); never plaintext
+   * @param changed the {@code PasswordChanged} outbox row, written on the same transaction; or
+   *     {@code null} when nothing is announced
    * @return the login the token belonged to, or empty when it was no longer valid — spent, replaced
    *     or expired since {@link #find} read it
    */
-  public Optional<UUID> reset(String tokenHash, String newPasswordHash) {
+  public Optional<UUID> reset(String tokenHash, String newPasswordHash, OutboxRow changed) {
     return inTx(
         c -> {
           UUID userId;
@@ -193,6 +195,7 @@ public class PasswordResetRepository extends BaseOutboxRepository {
             ps.setObject(3, userId);
             ps.executeUpdate();
           }
+          insertOutbox(c, changed);
           return Optional.of(userId);
         },
         "reset password");

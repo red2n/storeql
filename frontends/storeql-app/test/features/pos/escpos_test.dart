@@ -221,8 +221,9 @@ void main() {
       final lines = textLines(bytes);
       expect(lines.any((l) => l.startsWith('TSE-Seriennr.:') && l.endsWith('SIM-001')), isTrue);
       expect(lines.any((l) => l.startsWith('Transaktionsnr.:') && l.endsWith('7')), isTrue);
-      expect(count(bytes, [gs, 0x28, 0x6B, 4, 0, 49, 65, 50, 0]), 1, reason: 'QR model 2');
-      expect(count(bytes, [gs, 0x28, 0x6B, 3, 0, 49, 81, 48]), 1, reason: 'QR printed');
+      // Two codes: the module's own, and the receipt number's (return-controls).
+      expect(count(bytes, [gs, 0x28, 0x6B, 4, 0, 49, 65, 50, 0]), 2, reason: 'QR model 2');
+      expect(count(bytes, [gs, 0x28, 0x6B, 3, 0, 49, 81, 48]), 2, reason: 'QR printed');
     });
 
     test('a module outage is printed as the law asks', () {
@@ -232,7 +233,8 @@ void main() {
       expect(lines.any((l) => l.startsWith('TSE:') && l.endsWith('ausgefallen')), isTrue);
       expect(count(const EscPosReceipt().encode(receipt(
         stamp: const FiscalStamp(fullNumber: '2026-000043', regime: 'KASSENSICHV', tseError: 'timeout'),
-      )), [gs, 0x28, 0x6B]), 0, reason: 'no QR without a signature');
+      )), [gs, 0x28, 0x6B, 3, 0, 49, 81, 48]), 1,
+          reason: 'no QR of the signature: only the receipt number\'s code');
     });
 
     test('a Portuguese document prints the excerpt and the certificate', () {

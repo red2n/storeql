@@ -1,21 +1,24 @@
 package com.storeql.ids;
 
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
  * Generates RFC 9562 version-7 UUIDs: 48 bits of Unix-epoch milliseconds, the version, a 12-bit
  * counter, the variant, then 62 random bits.
  *
- * <p>Each thread keeps its own millisecond and counter, so no call waits on another thread. A
- * thread's ids are strictly increasing in byte order — the order PostgreSQL sorts {@code uuid} in —
- * even when many are made in the same millisecond or the clock steps back. The counter (RFC 9562
- * §6.2, method 1) starts at a random value below 2048 each new millisecond, so at least 2048 ids
- * fit in one; past that the thread borrows the next millisecond rather than break order.
+ * <p>The millisecond and counter live in one atomic word advanced by compare-and-set: no lock, no
+ * per-thread state to rebuild for every virtual thread, and no call parks another. Ids are strictly
+ * increasing in byte order — the order PostgreSQL sorts {@code uuid} in — even when many are made
+ * in the same millisecond or the clock steps back. The counter (RFC 9562 §6.2, method 1) starts at
+ * a random value below 2048 each new millisecond, so at least 2048 ids fit in one; past that the
+ * thread borrows the next millisecond rather than break order.
  *
- * <p>Ids from different threads interleave by millisecond, which is all index locality needs. Two
- * threads can land on the same millisecond and counter, so uniqueness between them rests on the 62
- * random bits — which is why those must come from a secure source that never repeats a draw.
+ * <p>Ids from every thread share one sequence, so they are also increasing across threads (the
+ * counter is not reset by another thread's claim within a millisecond), which suits index locality
+ * even better. Uniqueness still rests on the 62 random bits — which is why those must come from a
+ * secure source that never repeats a draw.
  *
  * <p>The random bits keep ids unguessable, but the timestamp is readable by anyone holding the id:
  * never use one as a secret, and never read business time out of it.
@@ -30,7 +33,9 @@ final class UuidV7Generator {
 
   private final LongSupplier clock;
   private final LongSupplier random;
-  private final ThreadLocal<Sequence> sequences = ThreadLocal.withInitial(Sequence::new);
+
+  /** Last millisecond (high 52 bits) and counter (low 12 bits) handed out, as one CAS-ed word. */
+  private final AtomicLong state = new AtomicLong();
 
   /**
    * @param clock current time in Unix-epoch milliseconds
@@ -45,18 +50,26 @@ final class UuidV7Generator {
    * @return a new version-7 UUID, greater than every id this generator has returned on this thread
    */
   UUID next() {
-    Sequence sequence = sequences.get();
-    long now = clock.getAsLong();
-    if (now > sequence.lastMillis) {
-      sequence.lastMillis = now;
-      sequence.counter = (int) (random.getAsLong() & COUNTER_SEED_MASK);
-    } else if (sequence.counter < COUNTER_MAX) {
-      sequence.counter++;
-    } else {
-      sequence.lastMillis++;
-      sequence.counter = (int) (random.getAsLong() & COUNTER_SEED_MASK);
+    long claimed;
+    while (true) {
+      long current = state.get();
+      long lastMillis = current >>> 12;
+      int counter = (int) (current & COUNTER_MAX);
+      long now = clock.getAsLong();
+      long updated;
+      if (now > lastMillis) {
+        updated = (now << 12) | (random.getAsLong() & COUNTER_SEED_MASK);
+      } else if (counter < COUNTER_MAX) {
+        updated = current + 1;
+      } else {
+        updated = ((lastMillis + 1) << 12) | (random.getAsLong() & COUNTER_SEED_MASK);
+      }
+      if (state.compareAndSet(current, updated)) {
+        claimed = updated;
+        break;
+      }
     }
-    return layout(sequence.lastMillis, sequence.counter, random.getAsLong());
+    return layout(claimed >>> 12, claimed & COUNTER_MAX, random.getAsLong());
   }
 
   /**
@@ -70,11 +83,5 @@ final class UuidV7Generator {
     return new UUID(
         ((millis & 0xFFFF_FFFF_FFFFL) << 16) | VERSION_7 | (twelveBits & COUNTER_MAX),
         (sixtyTwoBits & RANDOM_62_BITS) | VARIANT_RFC);
-  }
-
-  /** One thread's place: the millisecond it last used and its counter within it. */
-  private static final class Sequence {
-    private long lastMillis = -1;
-    private int counter;
   }
 }

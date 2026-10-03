@@ -83,6 +83,10 @@ class InventoryLevel {
   /// How much of onHand sits in bond with its duty suspended: on hand, never available.
   final double inBond;
 
+  /// How much of onHand is past its last day of sale: on hand and valued, never
+  /// available. It can still be written off or returned to the vendor.
+  final double expired;
+
   const InventoryLevel({
     required this.variantId,
     required this.storeId,
@@ -90,6 +94,7 @@ class InventoryLevel {
     required this.reserved,
     required this.available,
     this.inBond = 0,
+    this.expired = 0,
   });
 
   factory InventoryLevel.fromJson(Map<String, dynamic> j) => InventoryLevel(
@@ -99,7 +104,12 @@ class InventoryLevel {
         reserved: (j['reserved'] as num?)?.toDouble() ?? 0,
         available: (j['available'] as num?)?.toDouble() ?? 0,
         inBond: (j['inBond'] as num?)?.toDouble() ?? 0,
+        expired: (j['expired'] as num?)?.toDouble() ?? 0,
       );
+
+  /// The words for expired stock, or null when there is none:
+  /// `4 expired`. Shown beside the figures, never in place of one.
+  String? get expiredLabel => expired > 0 ? '${expired.toStringAsFixed(0)} expired' : null;
 
   /// Default low-stock heuristic when no reorder threshold is configured.
   bool get isLow => available <= 5;
@@ -686,7 +696,12 @@ final productStoresProvider =
 class StaffMember {
   final String id;
   final String userId;
-  final String storeId;
+
+  /// The store the assignment is at; null for a business-wide (head-office) one.
+  final String? storeId;
+
+  /// A head-office manager's assignment: the whole business, no store.
+  final bool businessWide;
 
   /// The role as assigned: a built-in tier or one of the tenant's own codes.
   final String role;
@@ -698,7 +713,8 @@ class StaffMember {
   const StaffMember({
     required this.id,
     required this.userId,
-    required this.storeId,
+    this.storeId,
+    this.businessWide = false,
     required this.role,
     String? baseTier,
     required this.assignedAt,
@@ -709,7 +725,8 @@ class StaffMember {
   factory StaffMember.fromJson(Map<String, dynamic> j) => StaffMember(
         id: j['id'] as String? ?? '',
         userId: j['userId'] as String? ?? '-',
-        storeId: j['storeId'] as String? ?? '-',
+        storeId: j['storeId'] as String?,
+        businessWide: j['businessWide'] as bool? ?? false,
         role: j['role'] as String? ?? '-',
         baseTier: j['baseTier'] as String?,
         assignedAt: j['assignedAt'] as String? ?? '',
@@ -815,6 +832,12 @@ class PlatformTenant {
   /// For a sandbox, the live business it stands in for.
   final String? sandboxOf;
 
+  /// Why the platform switched the business off, who did and when; null while
+  /// it trades (and for a suspension no person made, such as unpaid dues).
+  final String? deactivatedNote;
+  final String? deactivatedBy;
+  final String? deactivatedAt;
+
   const PlatformTenant({
     required this.id,
     required this.name,
@@ -825,6 +848,9 @@ class PlatformTenant {
     required this.createdAt,
     this.mode = 'LIVE',
     this.sandboxOf,
+    this.deactivatedNote,
+    this.deactivatedBy,
+    this.deactivatedAt,
   });
 
   bool get sandbox => mode.toUpperCase() == 'SANDBOX';
@@ -839,6 +865,9 @@ class PlatformTenant {
         createdAt: j['createdAt'] as String? ?? '',
         mode: j['mode'] as String? ?? 'LIVE',
         sandboxOf: j['sandboxOf'] as String?,
+        deactivatedNote: j['deactivatedNote'] as String?,
+        deactivatedBy: j['deactivatedBy'] as String?,
+        deactivatedAt: j['deactivatedAt'] as String?,
       );
 }
 
@@ -1039,9 +1068,10 @@ final variantPricesProvider =
     FutureProvider.autoDispose<Map<String, double>>((ref) async {
   final listId = await ref.watch(defaultPriceListProvider.future);
   final dio = ref.read(apiClientProvider).dio;
-  final resp =
-      await dio.get('/${ApiConstants.pricing}/price-lists/$listId/items');
-  final items = (resp.data['data'] as List?) ?? [];
+  // The server pages a list's items (meta.nextCursor): every price is needed here.
+  final items = await fetchAllPages(
+      dio, '/${ApiConstants.pricing}/price-lists/$listId/items',
+      pageSize: 500);
   final map = <String, double>{};
   for (final it in items) {
     final m = it as Map<String, dynamic>;
@@ -1133,12 +1163,17 @@ class OrderDetail {
   final double total;
   final List<OrderLine> items;
 
+  /// The customer the sale names, or null for an anonymous till sale. Store
+  /// credit can only go to a named customer.
+  final String? customerId;
+
   const OrderDetail({
     required this.id,
     required this.status,
     required this.currency,
     required this.total,
     required this.items,
+    this.customerId,
   });
 
   factory OrderDetail.fromJson(Map<String, dynamic> j) => OrderDetail(
@@ -1149,6 +1184,9 @@ class OrderDetail {
         items: ((j['items'] as List?) ?? [])
             .map((e) => OrderLine.fromJson(e as Map<String, dynamic>))
             .toList(),
+        customerId: (j['customerId'] as String?)?.isEmpty == true
+            ? null
+            : j['customerId'] as String?,
       );
 }
 

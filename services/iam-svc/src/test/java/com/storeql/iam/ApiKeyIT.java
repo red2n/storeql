@@ -10,6 +10,7 @@ import static org.hamcrest.Matchers.startsWith;
 
 import com.auth0.jwt.JWT;
 import com.storeql.iam.repo.UserRepository;
+import com.storeql.iam.service.AuthService;
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -62,6 +63,7 @@ class ApiKeyIT {
 
   @Inject WebTarget target;
   @Inject UserRepository users;
+  @Inject AuthService auth;
 
   @AfterAll
   static void stop() {
@@ -134,8 +136,12 @@ class ApiKeyIT {
     return new Business(tenant, Ids.newId(), ownerId, new Caller(ownerId, "OWNER", tenant));
   }
 
+  /**
+   * A member of staff made the one way there is: provisioned in the business, then bound at its
+   * store, as a StaffAssigned binds only a login already there.
+   */
   private Caller staff(Business b, String email, String tier) {
-    UUID id = register(email);
+    UUID id = Ids.parse(auth.provisionStaff(b.tenant(), email, PASSWORD).userId());
     users.bindStaffOnce(Ids.newId(), CONSUMER, id, b.tenant(), tier, b.store());
     return new Caller(id, tier, b.tenant());
   }
@@ -181,6 +187,19 @@ class ApiKeyIT {
                 "SELECT count(*) FROM audit_log WHERE tenant_id = ? AND action = ?")) {
       ps.setObject(1, tenant);
       ps.setString(2, action);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  private static int keyRows(UUID tenant) {
+    try (var c = iam();
+        var ps = c.prepareStatement("SELECT count(*) FROM api_keys WHERE tenant_id = ?")) {
+      ps.setObject(1, tenant);
       try (var rs = ps.executeQuery()) {
         rs.next();
         return rs.getInt(1);
@@ -325,7 +344,9 @@ class ApiKeyIT {
     assertThat(unknown.data().getString("reason"), is("unknown"));
     assertThat(absent(unknown.data(), "tenantId"), is(true));
     assertThat(introspect(Caller.PLATFORM, "sqk_short").data().getBoolean("active"), is(false));
-    assertThat(introspect(Caller.PLATFORM, "").status(), is(400));
+    Answer noKey = introspect(Caller.PLATFORM, "");
+    assertThat(noKey.status(), is(400));
+    assertThat(noKey.code(), is("API_KEY_MISSING"));
 
     // Revoking: only this business's owner, once.
     Business other = business("look-other");
@@ -406,5 +427,108 @@ class ApiKeyIT {
     assertThat(absent(rest.data(), "nextCursor"), is(true));
     assertThat(list(b.owner(), "?limit=0").status(), anyOf(is(200), is(400)));
     assertThat(list(b.owner(), "?after=not-an-id").status(), is(400));
+  }
+
+  // ── what is refused at the door ────────────────────────────────────────────
+
+  /**
+   * The request's own constraints (a name, a tier) are judged by the service, each with a code of
+   * its own that k6 and the API guide name, so the resource does not run Validations on top: it
+   * would answer every one of them VALIDATION_FAILED. What the service cannot judge is a body that
+   * is not there, which used to reach it as null.
+   */
+  @Test
+  void aKeyThatIsRefusedIsNeverMade() {
+    Business b = business("refused");
+    String past = Instant.now().minus(1, ChronoUnit.DAYS).toString();
+    record Bad(String json, String code) {}
+    List<Bad> bad =
+        List.of(
+            new Bad(keyBody(null, "MANAGER", null, null), "API_KEY_NAME_INVALID"),
+            new Bad(keyBody("", "MANAGER", null, null), "API_KEY_NAME_INVALID"),
+            new Bad(keyBody("   ", "MANAGER", null, null), "API_KEY_NAME_INVALID"),
+            new Bad(keyBody("n".repeat(81), "MANAGER", null, null), "API_KEY_NAME_INVALID"),
+            new Bad(keyBody("x", null, null, null), "API_KEY_ROLE_INVALID"),
+            new Bad(keyBody("x", "", null, null), "API_KEY_ROLE_INVALID"),
+            new Bad(keyBody("x", "OWNER", null, null), "API_KEY_ROLE_INVALID"),
+            new Bad(keyBody("x", "MANAGER", null, past), "API_KEY_EXPIRY_PAST"),
+            new Bad(keyBody("x", "MANAGER", null, "soon"), "INVALID_DATE"),
+            new Bad(
+                "{\"name\":\"x\",\"role\":\"MANAGER\",\"storeIds\":[\"not-an-id\"]}",
+                "INVALID_UUID"),
+            new Bad("{not json", "REQUEST_BODY_INVALID"),
+            new Bad("[]", "REQUEST_BODY_INVALID"));
+    for (Bad one : bad) {
+      Answer refused = mint(b.owner(), one.json());
+      assertThat(one.json() + " -> " + refused.body(), refused.status(), is(400));
+      assertThat(one.json(), refused.code(), is(one.code()));
+    }
+
+    // No body at all: a literal null, which reaches the resource as null, and nothing, which the
+    // JSON reader itself refuses. Neither is a 500, and neither makes a key.
+    Answer literalNull = mint(b.owner(), "null");
+    assertThat(literalNull.body().toString(), literalNull.status(), is(400));
+    assertThat(literalNull.code(), anyOf(is("BODY_REQUIRED"), is("REQUEST_BODY_INVALID")));
+    assertThat(mint(b.owner(), "").status(), is(400));
+
+    assertThat("no key was made", list(b.owner(), null).data().getJsonArray("items"), hasSize(0));
+    assertThat(keyRows(b.tenant()), is(0));
+    assertThat("nothing was audited as made", audit(b.tenant(), "API_KEY_CREATED"), is(0));
+
+    // The same door still opens for a body that keeps to its rules.
+    Answer fine = mint(b.owner(), keyBody("Accounts", "MANAGER", null, null));
+    assertThat(fine.body().toString(), fine.status(), is(201));
+    assertThat(keyRows(b.tenant()), is(1));
+  }
+
+  @Test
+  void aQuestionWithNoKeyIsRefusedAndNothingIsTouched() {
+    Business b = business("nokey");
+    Answer made = mint(b.owner(), keyBody("Accounts", "MANAGER", null, null));
+    assertThat(made.body().toString(), made.status(), is(201));
+    String id = made.data().getString("id");
+    String secret = made.data().getString("key");
+
+    // The request's not-blank key is judged in the resource, with a code of its own.
+    for (String body : List.of("{}", "{\"key\":null}", "{\"key\":\"\"}", "{\"key\":\"   \"}")) {
+      Answer refused = call("POST", "/platform/api-keys/introspect", Caller.PLATFORM, body);
+      assertThat(body + " -> " + refused.body(), refused.status(), is(400));
+      assertThat(body, refused.code(), is("API_KEY_MISSING"));
+    }
+    Answer literalNull = call("POST", "/platform/api-keys/introspect", Caller.PLATFORM, "null");
+    assertThat(literalNull.status(), is(400));
+    assertThat(literalNull.code(), anyOf(is("API_KEY_MISSING"), is("REQUEST_BODY_INVALID")));
+    assertThat(
+        call("POST", "/platform/api-keys/introspect", Caller.PLATFORM, "").status(), is(400));
+    Answer notJson = call("POST", "/platform/api-keys/introspect", Caller.PLATFORM, "{not json");
+    assertThat(notJson.status(), is(400));
+    assertThat(notJson.code(), is("REQUEST_BODY_INVALID"));
+
+    // Only the platform asks. Every role of this business and of another is told no, and being
+    // told no is not a use of the key.
+    Business other = business("nokey-other");
+    List<Caller> askers = new java.util.ArrayList<>();
+    askers.add(b.owner());
+    askers.add(staff(b, "nokey-manager@example.com", "MANAGER"));
+    askers.add(staff(b, "nokey-keeper@example.com", "STOREKEEPER"));
+    askers.add(staff(b, "nokey-cashier@example.com", "CASHIER"));
+    askers.add(new Caller(Ids.newId(), "CUSTOMER", b.tenant()));
+    askers.add(other.owner());
+    askers.add(staff(other, "nokey-other-manager@example.com", "MANAGER"));
+    askers.add(new Caller(Ids.newId(), "CUSTOMER", other.tenant()));
+    for (Caller who : askers) {
+      Answer told = introspect(who, secret);
+      assertThat(who.roles() + " -> " + told.body(), told.status(), is(403));
+      assertThat(who.roles(), told.body().containsKey("data"), is(false));
+    }
+    JsonObject row = list(b.owner(), null).data().getJsonArray("items").getJsonObject(0);
+    assertThat(row.getString("id"), is(id));
+    assertThat("no refused question counted as a use", absent(row, "lastUsedAt"), is(true));
+
+    // The platform's own question is a use, so the check above is not vacuous.
+    Answer asked = introspect(Caller.PLATFORM, secret);
+    assertThat(asked.body().toString(), asked.data().getBoolean("active"), is(true));
+    JsonObject used = list(b.owner(), null).data().getJsonArray("items").getJsonObject(0);
+    assertThat(absent(used, "lastUsedAt"), is(false));
   }
 }

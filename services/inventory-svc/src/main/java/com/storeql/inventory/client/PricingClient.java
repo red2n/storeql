@@ -1,14 +1,15 @@
 package com.storeql.inventory.client;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.inventory.config.ServiceConfig;
 import com.storeql.inventory.domain.Promotions.PromotionWindow;
 import com.storeql.service.ServiceReader;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
+import jakarta.json.JsonReader;
 import jakarta.json.JsonString;
 import jakarta.json.JsonValue;
 import java.io.StringReader;
@@ -81,7 +82,10 @@ public class PricingClient {
       return Optional.empty();
     }
     List<PromotionWindow> out = new ArrayList<>();
-    JsonObject envelope = Json.createReader(new StringReader(reply.body())).readObject();
+    JsonObject envelope;
+    try (JsonReader reader = Jsons.createReader(new StringReader(reply.body()))) {
+      envelope = reader.readObject();
+    }
     for (JsonObject w : envelope.getJsonArray("data").getValuesAs(JsonObject.class)) {
       Set<UUID> variants = new HashSet<>();
       if (w.containsKey("variantIds") && !w.isNull("variantIds")) {

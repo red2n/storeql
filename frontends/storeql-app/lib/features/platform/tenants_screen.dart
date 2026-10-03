@@ -14,6 +14,7 @@ import '../../shared/widgets/reference_fields.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/scrollable_table.dart';
 import '../../shared/widgets/status_badge.dart';
+import '../../shared/util/short_ref.dart';
 import 'tenant_onboarding_notifier.dart';
 
 class TenantsScreen extends ConsumerWidget {
@@ -113,38 +114,40 @@ class TenantsScreen extends ConsumerWidget {
     final newStatus = activate ? 'ACTIVE' : 'INACTIVE';
     final label = activate ? 'Activate' : 'Deactivate';
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('$label "${tenant.name}"?'),
-        content: Text(activate
-            ? 'The tenant will regain access to the platform.'
-            : 'The tenant and all their users will lose access to the platform.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            style: activate
-                ? null
-                : FilledButton.styleFrom(
-                    backgroundColor: Theme.of(ctx).colorScheme.error,
-                    foregroundColor: Theme.of(ctx).colorScheme.onError,
-                  ),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: Text(label),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !context.mounted) return;
+    // Switching a business off asks why, in the administrator's own words;
+    // switching it back on asks nothing.
+    final String? reason = activate
+        ? ''
+        : await showDialog<String>(
+            context: context,
+            builder: (_) => _SuspendDialog(tenantName: tenant.name),
+          );
+    if (!activate && (reason == null || !context.mounted)) return;
+    if (activate) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('$label "${tenant.name}"?'),
+          content: const Text('The tenant will regain access to the platform.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(label),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !context.mounted) return;
+    }
 
     try {
       await ref.read(apiClientProvider).dio.patch(
         '/${ApiConstants.tenant}/platform/tenants/${tenant.id}/status',
-        data: {'status': newStatus},
+        data: {'status': newStatus, if (!activate) 'reason': reason},
       );
       ref.invalidate(allTenantsProvider);
     } catch (e) {
@@ -165,6 +168,109 @@ class TenantsScreen extends ConsumerWidget {
       context: context,
       barrierDismissible: false,
       builder: (_) => _OnboardingDialog(onDone: () => ref.invalidate(allTenantsProvider)),
+    );
+  }
+}
+
+/// The reason a business is switched off (`TENANT_STATUS_REASON_REQUIRED`
+/// otherwise): required, and sent as typed.
+class _SuspendDialog extends StatefulWidget {
+  final String tenantName;
+  const _SuspendDialog({required this.tenantName});
+
+  @override
+  State<_SuspendDialog> createState() => _SuspendDialogState();
+}
+
+class _SuspendDialogState extends State<_SuspendDialog> {
+  final _reason = TextEditingController();
+
+  @override
+  void dispose() {
+    _reason.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return AlertDialog(
+      title: Text('Deactivate "${widget.tenantName}"?'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+                'The tenant and all their users will lose access to the platform.'),
+            const SizedBox(height: AppSpacing.md),
+            TextField(
+              key: const Key('suspend-reason'),
+              controller: _reason,
+              autofocus: true,
+              maxLength: 500,
+              maxLines: 3,
+              minLines: 1,
+              onChanged: (_) => setState(() {}),
+              decoration: const InputDecoration(
+                labelText: 'Reason',
+                helperText: 'Kept with your name and the time.',
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('suspend-confirm'),
+          style: FilledButton.styleFrom(
+            backgroundColor: cs.error,
+            foregroundColor: cs.onError,
+          ),
+          onPressed: _reason.text.trim().isEmpty
+              ? null
+              : () => Navigator.pop(context, _reason.text.trim()),
+          child: const Text('Deactivate'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Why, by whom and when a business was switched off, under its name; nothing
+/// for a business that trades or whose suspension carries no note (unpaid dues
+/// switch it off without a person).
+class _SuspensionNote extends StatelessWidget {
+  final PlatformTenant tenant;
+  const _SuspensionNote(this.tenant);
+
+  @override
+  Widget build(BuildContext context) {
+    final note = (tenant.deactivatedNote ?? '').trim();
+    if (note.isEmpty) return const SizedBox.shrink();
+    final at = AppFormat.date(tenant.deactivatedAt);
+    final by = (tenant.deactivatedBy ?? '').isEmpty
+        ? ''
+        : ' by the platform administrator (${shortRef(tenant.deactivatedBy!)})';
+    final style = Theme.of(context)
+        .textTheme
+        .bodySmall
+        ?.copyWith(color: context.status.warning);
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        key: const Key('suspension-note'),
+        children: [
+          Text('Switched off$by${at.isEmpty ? '' : ' on $at'}', style: style),
+          Text('Reason: $note', style: style),
+        ],
+      ),
     );
   }
 }
@@ -226,6 +332,7 @@ class _TenantTable extends StatelessWidget {
                             Text(t.legalName!,
                                 style: text.bodySmall
                                     ?.copyWith(color: cs.onSurfaceVariant)),
+                          _SuspensionNote(t),
                         ],
                       ),
                     )),
@@ -318,6 +425,7 @@ class _TenantCard extends StatelessWidget {
               .join(' · '),
           style: secondary,
         ),
+        _SuspensionNote(t),
       ],
     );
     final status = _TenantStatus(t);

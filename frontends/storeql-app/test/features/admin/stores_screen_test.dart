@@ -58,6 +58,8 @@ class _Server implements HttpClientAdapter {
     } else if (o.path.endsWith('/zones') && o.method == 'GET') {
       body = '{"data":[{"id":"z-1","storeId":"store-1","name":"Dairy chiller","code":"CR1",'
           '"type":"COLD_ROOM","status":"ACTIVE"}],"meta":{}}';
+    } else if (o.path.endsWith('/admin/return-policy')) {
+      body = '{"data":{"windowDays":30,"noReceiptAllowed":false}}';
     } else if (o.path.endsWith('/admin/tenant')) {
       body = '{"data":{"id":"tenant-1","name":"Shop","status":"ACTIVE","currency":"USD","country":"US"}}';
     }
@@ -78,6 +80,7 @@ String _store(
         String id = 'store-1',
         String name = 'Main',
         String status = 'ACTIVE',
+        String? country = 'US',
         String? tillPhone}) =>
     jsonEncode({
       'id': id,
@@ -85,7 +88,7 @@ String _store(
       'code': 'MAIN',
       'type': 'STORE',
       'status': status,
-      'country': 'US',
+      'country': ?country,
       'timezone': ?timezone,
       'showPrices': true,
       'enabledPaymentMethods': ['CASH', 'CARD'],
@@ -125,6 +128,61 @@ void main() {
     expect(find.text('No delivery windows yet.'), findsOneWidget);
   });
 
+  // A delivery area's priority is a whole number. Blank is tenant-svc's own
+  // 100; text that is not one was added at 100 as if nothing had been typed,
+  // and is now refused under its field with nothing added.
+  group('a delivery area\'s priority is read as typed, or refused', () {
+    Future<_Server> open(WidgetTester tester) async {
+      final server = await _pump(tester, _store(timezone: 'Europe/Warsaw'));
+      await tester.tap(find.widgetWithText(TextButton, 'Delivery'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.widgetWithText(TextField, 'Pincode'), '00-001');
+      return server;
+    }
+
+    Iterable<RequestOptions> posts(_Server server) =>
+        server.requests.where((r) => r.method == 'POST' && r.path.endsWith('/delivery-areas'));
+
+    Map<String, dynamic> body(RequestOptions r) =>
+        (r.data is String ? jsonDecode(r.data as String) : r.data) as Map<String, dynamic>;
+
+    for (final (typed, why) in [
+      ('1,000', 'Type the amount without thousands separators.'),
+      ('5.', 'Whole amounts only.'),
+      ('.', 'Whole amounts only.'),
+      ('-', 'Type the amount without a sign.'),
+      ('+5', 'Type the amount without a sign.'),
+      ('0x10', 'Only digits.'),
+    ]) {
+      testWidgets('"$typed" is refused under the field, never added at 100', (tester) async {
+        final server = await open(tester);
+        await tester.enterText(find.byKey(const Key('delivery-area-priority')), typed);
+        await tester.pump();
+        expect(
+            tester.widget<TextField>(find.byKey(const Key('delivery-area-priority'))).decoration?.errorText,
+            why);
+        await tester.tap(find.text('Add'));
+        await tester.pumpAndSettle();
+        expect(posts(server), isEmpty);
+        expect(find.text('A figure cannot be read. Correct the one marked.'), findsOneWidget);
+      });
+    }
+
+    testWidgets('5 is added at 5, and blank at the 100 the field starts at', (tester) async {
+      final server = await open(tester);
+      await tester.enterText(find.byKey(const Key('delivery-area-priority')), '5');
+      await tester.tap(find.text('Add'));
+      await tester.pumpAndSettle();
+      expect(body(posts(server).single), {'pincode': '00-001', 'priority': 5});
+
+      await tester.enterText(find.widgetWithText(TextField, 'Pincode'), '00-002');
+      await tester.enterText(find.byKey(const Key('delivery-area-priority')), ' ');
+      await tester.tap(find.text('Add'));
+      await tester.pumpAndSettle();
+      expect(body(posts(server).last), {'pincode': '00-002', 'priority': 100});
+    });
+  });
+
   testWidgets('editing a store sends its own time zone, never UTC', (tester) async {
     final server = await _pump(tester, _store(timezone: 'America/Chicago'));
     await tester.tap(find.text('Main').first);
@@ -148,6 +206,119 @@ void main() {
 
     // Nothing is sent, so nothing is filled in on the store's behalf.
     expect(server.saved, isNull);
+  });
+
+  testWidgets('a store holding a country that is not an ISO code is asked to choose one, never sent as it was',
+      (tester) async {
+    final server = await _pump(tester, _store(timezone: 'Europe/London', country: 'UK'));
+    await tester.tap(find.text('Main').first);
+    await tester.pumpAndSettle();
+    expect(find.byType(DropdownButtonFormField<String>), findsWidgets);
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(server.saved, isNull);
+    expect(find.text('Choose a country'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('store-edit-country')));
+    await tester.pumpAndSettle();
+    // Every country is on the list, so the one wanted may be further down it.
+    await tester.scrollUntilVisible(find.text('United Kingdom (GB)'), 400,
+        scrollable: find.byType(Scrollable).last);
+    await tester.tap(find.text('United Kingdom (GB)').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(server.saved!['country'], 'GB');
+  });
+
+  testWidgets('a store holding a valid country keeps it selected and saves its code', (tester) async {
+    final server = await _pump(tester, _store(timezone: 'America/Chicago', country: 'us'));
+    await tester.tap(find.text('Main').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(server.saved!['country'], 'US');
+  });
+
+  // Location-neutral: tenant-svc takes every ISO 3166-1 code, so the list has to
+  // carry every one, and a store in a country it lacked used to open with its
+  // country blanked and could be saved only under a country it is not in.
+  for (final (code, name, zone) in [
+    ('GE', 'Georgia', 'Asia/Tbilisi'),
+    ('IS', 'Iceland', 'Atlantic/Reykjavik'),
+    ('MN', 'Mongolia', 'Asia/Ulaanbaatar'),
+  ]) {
+    testWidgets('a store in $name opens with $name chosen and saves it unchanged',
+        (tester) async {
+      final server = await _pump(tester, _store(timezone: zone, country: code));
+      await tester.tap(find.text('Main').first);
+      await tester.pumpAndSettle();
+      expect(find.text('$name ($code)'), findsOneWidget);
+      expect(find.text('Choose a country'), findsNothing);
+      await tester.tap(find.text('Save changes'));
+      await tester.pumpAndSettle();
+      expect(find.text('Choose a country'), findsNothing);
+      expect(server.saved, isNotNull, reason: 'the store saves as it stands');
+      expect(server.saved!['country'], code);
+    });
+  }
+
+  // The list is every code the services take, so a two-letter code it does not
+  // carry is one tenant-svc refuses (COUNTRY_INVALID): the dialog says the store
+  // needs a country the moment it opens, and sends one only once it is chosen.
+  testWidgets('a store holding a code no service takes opens asking for a real country',
+      (tester) async {
+    final server = await _pump(tester, _store(timezone: 'UTC', country: 'JX'));
+    await tester.tap(find.text('Main').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Choose a country'), findsOneWidget,
+        reason: 'shown as needing a country before anything is pressed');
+    expect(find.text('JX'), findsNothing, reason: 'never offered as if it were one');
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(server.saved, isNull, reason: 'JX is never sent');
+
+    await tester.tap(find.byKey(const Key('store-edit-country')));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(find.text('Georgia (GE)'), 400,
+        scrollable: find.byType(Scrollable).last);
+    await tester.tap(find.text('Georgia (GE)').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Choose a country'), findsNothing);
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(server.saved!['country'], 'GE');
+  });
+
+  // tenant-svc takes a store with no country (Countries.optional on create and
+  // update), so the dialog does too: it was optional before the list came.
+  testWidgets('a store with no country saves without one, never refused for it',
+      (tester) async {
+    final server = await _pump(tester, _store(timezone: 'Europe/Lisbon', country: null));
+    await tester.tap(find.text('Main').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Choose a country'), findsNothing);
+    expect(find.text('Not set'), findsOneWidget);
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose a country'), findsNothing);
+    expect(server.saved, isNotNull);
+    expect(server.saved!['country'], isNull);
+  });
+
+  testWidgets('a store holding a code no service takes may be left with no country, by choice',
+      (tester) async {
+    final server = await _pump(tester, _store(timezone: 'UTC', country: 'UK'));
+    await tester.tap(find.text('Main').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('store-edit-country')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Not set').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save changes'));
+    await tester.pumpAndSettle();
+    expect(server.saved, isNotNull);
+    expect(server.saved!['country'], isNull);
   });
 
   group('the store list', () {

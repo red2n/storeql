@@ -49,7 +49,13 @@ public final class WorkforceDtos {
   public record ConcernResponse(
       String userId,
       @Schema(description = "DAILY_REST_SHORT, BREAK_EXPECTED or SHIFTS_OVERLAP.") String code,
-      String detail) {}
+      String detail,
+      @Schema(description = "ADVISORY or UNLAWFUL, as the rule's data says; never refused here.")
+          String severity,
+      @Schema(description = "LAW (a rule of law, with its citation) or ROSTER (true anywhere).")
+          String source,
+      @Schema(description = "The instrument the rule comes from; absent for ROSTER.")
+          String citation) {}
 
   @Schema(name = "Roster")
   public record RosterResponse(

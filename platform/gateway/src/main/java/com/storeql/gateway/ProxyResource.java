@@ -21,6 +21,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import java.util.Optional;
 import org.eclipse.microprofile.openapi.annotations.Operation;
@@ -270,7 +271,7 @@ public class ProxyResource {
   record Route(String service, String path) {
     static Route of(String service, String path) {
       String rest = path == null ? "" : path;
-      if (service != null && service.matches("v\\d+")) {
+      if (service != null && ApiVersions.isVersionSegment(service)) {
         int slash = rest.indexOf('/');
         if (slash < 0) {
           return new Route(rest, "");
@@ -326,6 +327,8 @@ public class ProxyResource {
           HttpHeaders.AUTH_SCOPE,
           // How the session was authenticated (20.12, SSO): stamped from the token's amr claim.
           HttpHeaders.AUTH_METHODS,
+          // Which of the person's sessions is asking: stamped from the token's sid claim.
+          HttpHeaders.SESSION_ID,
           // Client-controlled, not identity — forwarded so downstream writes can dedupe retries
           // (golden rule #11). Not stripped/overwritten: the client owns this value.
           HttpHeaders.IDEMPOTENCY_KEY,
@@ -399,11 +402,12 @@ public class ProxyResource {
    * connect/read failures (including the WebClient timeouts configured in {@link GatewayBeans})
    * surface as 504/502 envelopes instead of leaking as container 500s.
    */
-  // upstream IS closed below via `try (upstream) { ... }` — PMD's CloseResource analysis doesn't
-  // track a resource assigned in one try/catch and closed via try-with-resources on the
-  // already-initialized variable in a later block, hence the false positive here.
-  @SuppressWarnings("PMD.CloseResource")
-  private Response relay(
+  // The upstream response is always closed, but not in this method's scope: it is handed to the
+  // streamed body, which closes it when the last byte is written (or the write fails), and is
+  // closed in the finally block only when nothing is streamed. Its ownership moves, so it cannot be
+  // a try-with-resources resource, and PMD's local-scope analysis cannot see the hand-over.
+  @SuppressWarnings({"PMD.CloseResource", "PMD.UseTryWithResources"})
+  Response relay(
       java.util.function.Supplier<HttpClientResponse> call, String service, String requestId) {
     HttpClientResponse upstream;
     try {
@@ -424,7 +428,11 @@ public class ProxyResource {
           .build();
     }
     breaker.recordSuccess(service);
-    try (upstream) {
+    // The body is streamed to the caller and the upstream response closed when the last byte is
+    // written (or the write fails), so a large body is never held whole in gateway heap. When
+    // there is nothing to stream the response is closed here.
+    boolean streaming = false;
+    try {
       int status = upstream.status().code();
       Response.ResponseBuilder rb =
           Response.status(status).header(HttpHeaders.REQUEST_ID, requestId);
@@ -435,24 +443,35 @@ public class ProxyResource {
       // HttpClientResponse.as(String.class) throws IllegalStateException — not an empty string —
       // for a truly absent entity, so probe hasEntity() first instead of relying on status alone.
       if (status != 204 && status != 205 && status != 304 && upstream.entity().hasEntity()) {
-        // Read as raw bytes (not .as(String.class)) so a binary body — e.g. a served product
-        // image — round-trips intact instead of being mangled by string decode/re-encode, and
-        // forward the upstream's own Content-Type instead of hardcoding JSON.
-        byte[] bytes;
-        try {
-          bytes = upstream.entity().inputStream().readAllBytes();
-        } catch (java.io.IOException e) {
-          throw new java.io.UncheckedIOException(e);
-        }
+        // Raw bytes, not a String decode/re-encode, so a binary body — e.g. a served product
+        // image — round-trips intact, with the upstream's own Content-Type instead of hardcoded
+        // JSON and its Content-Length when it states one.
         String contentType =
             upstream
                 .headers()
                 .contentType()
                 .map(Object::toString)
                 .orElse(MediaType.APPLICATION_JSON);
-        rb.type(contentType).entity(bytes);
+        upstream
+            .headers()
+            .first(io.helidon.http.HeaderNames.CONTENT_LENGTH)
+            .ifPresent(len -> rb.header("Content-Length", len));
+        HttpClientResponse body = upstream;
+        StreamingOutput stream =
+            out -> {
+              try (body;
+                  java.io.InputStream in = body.entity().inputStream()) {
+                in.transferTo(out);
+              }
+            };
+        rb.type(contentType).entity(stream);
+        streaming = true;
       }
       return rb.build();
+    } finally {
+      if (!streaming) {
+        upstream.close();
+      }
     }
   }
 

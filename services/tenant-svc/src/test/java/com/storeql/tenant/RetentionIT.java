@@ -230,19 +230,19 @@ class RetentionIT {
         as(BASE + "/holds/" + id + "/release", gb, "OWNER").post(json("{\"reason\":\"Again\"}"));
     assertThat(twice.getStatus(), is(409));
     assertThat(twice.readEntity(String.class), containsString("RETENTION_HOLD_RELEASED"));
-    assertThat(
+    Response unknownHold =
         as(BASE + "/holds/" + Ids.newId() + "/release", gb, "OWNER")
-            .post(json("{\"reason\":\"x\"}"))
-            .getStatus(),
-        is(404));
+            .post(json("{\"reason\":\"x\"}"));
+    assertThat(unknownHold.getStatus(), is(404));
+    assertThat(unknownHold.readEntity(String.class), containsString("RETENTION_HOLD_NOT_FOUND"));
     assertThat(
         as(BASE + "/holds/" + id + "/release", gb, "OWNER").post(json("{}")).getStatus(), is(400));
     String rival = onboard("GB", "GBP");
-    assertThat(
+    Response rivalRelease =
         as(BASE + "/holds/" + everything.getString("id") + "/release", rival, "OWNER")
-            .post(json("{\"reason\":\"x\"}"))
-            .getStatus(),
-        is(404));
+            .post(json("{\"reason\":\"x\"}"));
+    assertThat(rivalRelease.getStatus(), is(404));
+    assertThat(rivalRelease.readEntity(String.class), containsString("RETENTION_HOLD_NOT_FOUND"));
     assertThat(okArray(as(BASE + "/holds?active=true", gb, "OWNER").get()).size(), is(1));
     assertThat(okArray(as(BASE + "/holds?active=false", gb, "OWNER").get()).size(), is(2));
     assertThat(okArray(as(BASE + "/holds", rival, "OWNER").get()).size(), is(0));

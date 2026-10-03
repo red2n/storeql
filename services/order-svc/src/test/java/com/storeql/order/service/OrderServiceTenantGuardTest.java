@@ -69,9 +69,12 @@ class OrderServiceTenantGuardTest {
 
   @Test
   void issueGiftCardWithoutTenantIsRejectedBeforeAnyWrite() {
-    var req = new IssueGiftCardRequest(STORE.toString(), BigDecimal.TEN, "USD", null, "CASH");
+    var req =
+        new IssueGiftCardRequest(
+            STORE.toString(), BigDecimal.TEN, "USD", null, null, "GOODWILL", null);
 
-    ApiException e = assertThrows(ApiException.class, () -> svc.issueGiftCard(req, ctx));
+    ApiException e =
+        assertThrows(ApiException.class, () -> svc.issueGiftCard(req, Ids.newId().toString(), ctx));
     assertEquals("NO_TENANT", e.code());
     verifyNoInteractions(repo);
   }

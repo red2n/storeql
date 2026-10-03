@@ -3,6 +3,7 @@ package com.storeql.purchase.client;
 import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.config.ServiceConfig;
 import com.storeql.web.HttpHeaders;
 import io.helidon.http.HeaderNames;
@@ -11,7 +12,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
@@ -129,7 +129,7 @@ public class PricingClient {
    * @return code to rate; empty rather than throwing if the payload is not the expected shape
    */
   static Map<String, BigDecimal> parseRates(String body) {
-    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
       JsonArray data = reader.readObject().getJsonArray("data");
       if (data == null) return Map.of();
       Map<String, BigDecimal> rates = new HashMap<>();

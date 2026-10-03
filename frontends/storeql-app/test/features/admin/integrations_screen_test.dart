@@ -77,7 +77,7 @@ class _Server implements HttpClientAdapter {
   }
 }
 
-Future<_Server> _pump(WidgetTester tester, String role) async {
+Future<_Server> _pump(WidgetTester tester, String role, {List<String> storeIds = const []}) async {
   tester.view.physicalSize = const Size(1400, 2400);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -85,9 +85,10 @@ Future<_Server> _pump(WidgetTester tester, String role) async {
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
   await tester.pumpWidget(
     ProviderScope(
+      key: UniqueKey(),
       overrides: [
         apiClientProvider.overrideWithValue(FakeApiClient(dio)),
-        authNotifierProvider.overrideWith(() => RoleAuth(role)),
+        authNotifierProvider.overrideWith(() => RoleAuth(role, storeIds: storeIds)),
       ],
       child: const MaterialApp(home: IntegrationsScreen()),
     ),
@@ -117,6 +118,21 @@ void main() {
     expect(find.text('Warehouse ERP'), findsOneWidget);
     expect(find.byKey(const Key('mint-key')), findsNothing);
     expect(find.byKey(const Key('revoke-$_active')), findsNothing);
+  });
+
+  // The accounting connection is the whole business's books (purchase-svc: 403
+  // BUSINESS_WIDE_ONLY to a manager held to stores, reads included): such a manager is told who
+  // keeps it and the page never asks for it; a head-office manager's page reads it.
+  testWidgets('a manager held to stores is told who keeps the books, and they are never asked', (tester) async {
+    final server = await _pump(tester, 'MANAGER', storeIds: const [_store]);
+    expect(find.text('Only an owner or a head-office manager reads or changes the accounting connection.'),
+        findsOneWidget);
+    expect(server.requests.where((r) => r.path.contains('/accounting/')), isEmpty);
+
+    final headOffice = await _pump(tester, 'MANAGER');
+    expect(find.text('Only an owner or a head-office manager reads or changes the accounting connection.'),
+        findsNothing);
+    expect(headOffice.requests.where((r) => r.path.endsWith('/accounting/connection')), isNotEmpty);
   });
 
   testWidgets('minting asks for a name, a tier and the stores, then shows the key once', (tester) async {

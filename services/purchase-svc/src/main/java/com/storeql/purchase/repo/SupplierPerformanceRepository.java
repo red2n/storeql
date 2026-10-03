@@ -22,6 +22,7 @@ import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -113,19 +114,28 @@ public class SupplierPerformanceRepository extends BaseJdbcRepository {
 
   // ── Reads ──────────────────────────────────────────────────────────────────
 
-  /** A supplier's deliveries in the period, newest first. */
-  public List<Delivery> deliveries(UUID tenantId, UUID supplierId, LocalDate from, LocalDate to) {
+  /**
+   * A supplier's deliveries in the period, newest first.
+   *
+   * @param stores the stores delivered to, or null for every store in the business
+   */
+  public List<Delivery> deliveries(
+      UUID tenantId, UUID supplierId, LocalDate from, LocalDate to, Set<UUID> stores) {
     return query(
         "SELECT id, tenant_id, supplier_id, po_id, gr_id, store_id, ordered_at, promised_date,"
             + " received_at, lead_days, late_days, complete, received_qty FROM supplier_deliveries"
             + " WHERE tenant_id = ? AND supplier_id = ?"
             + " AND received_at >= ?::date AND received_at < (?::date + 1)"
+            + (stores != null ? " AND store_id = ANY(?)" : "")
             + " ORDER BY received_at DESC, id DESC LIMIT 200",
         ps -> {
           ps.setObject(1, tenantId);
           ps.setObject(2, supplierId);
           ps.setObject(3, from);
           ps.setObject(4, to);
+          if (stores != null) {
+            ps.setArray(5, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
         },
         SupplierPerformanceRepository::mapDelivery,
         "list supplier deliveries");

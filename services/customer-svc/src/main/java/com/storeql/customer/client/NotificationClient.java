@@ -1,6 +1,7 @@
 package com.storeql.customer.client;
 
 import com.storeql.customer.config.ServiceConfig;
+import com.storeql.customer.json.Jsons;
 import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
@@ -12,7 +13,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObjectBuilder;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
@@ -73,7 +73,7 @@ public class NotificationClient {
       return false;
     }
     JsonObjectBuilder json =
-        Json.createObjectBuilder()
+        Jsons.object()
             .add("recipient", recipient)
             .add("subject", subject)
             .add("body", body)

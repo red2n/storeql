@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:storeql_app/core/auth/password_policy.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/admin_shell.dart';
+import 'package:storeql_app/l10n/gen/app_localizations.dart';
 
 // ---------------------------------------------------------------------------
 // The signed-in staff member's own change-password dialog: shows the
@@ -27,6 +28,7 @@ class _FakeApiClient implements ApiClient {
 class _Adapter implements HttpClientAdapter {
   int status = 401;
   String body = '{"error":{"code":"UNAUTHORIZED","message":"bad credentials"}}';
+  RequestOptions? last;
 
   @override
   void close({bool force = false}) {}
@@ -34,6 +36,7 @@ class _Adapter implements HttpClientAdapter {
   @override
   Future<ResponseBody> fetch(RequestOptions options, Stream<List<int>>? stream,
       Future<void>? cancel) async {
+    last = options;
     return ResponseBody.fromString(body, status, headers: {
       Headers.contentTypeHeader: [Headers.jsonContentType],
     });
@@ -44,6 +47,7 @@ Future<void> _pump(
   WidgetTester tester, {
   PasswordPolicy policy = PasswordPolicy.fallback,
   ApiClient? apiClient,
+  Locale? locale,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -51,7 +55,12 @@ Future<void> _pump(
         passwordPolicyProvider.overrideWith((ref) async => policy),
         if (apiClient != null) apiClientProvider.overrideWithValue(apiClient),
       ],
-      child: const MaterialApp(home: Scaffold(body: ChangePasswordDialog())),
+      child: MaterialApp(
+        locale: locale,
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: const Scaffold(body: ChangePasswordDialog()),
+      ),
     ),
   );
   await tester.pumpAndSettle();
@@ -171,6 +180,35 @@ void main() {
           find.text(passwordPolicyRefusal(
               'PASSWORD_BREACHED', PasswordPolicy.fallback)!),
           findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'sends the app\'s own language code with the new password, so the '
+    '"password changed" email is written in it',
+    (tester) async {
+      final adapter = _Adapter()
+        ..status = 200
+        ..body = '{"data":{}}';
+      final dio = Dio(BaseOptions(baseUrl: 'http://localhost'))
+        ..httpClientAdapter = adapter;
+      await _pump(tester,
+          apiClient: _FakeApiClient(dio), locale: const Locale('pl'));
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Current password'),
+        'whatever it was',
+      );
+      await tester.enterText(
+        find.byKey(const Key('change-password-new')),
+        'a phrase of several words',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Change'));
+      await tester.pumpAndSettle();
+      expect(adapter.last!.data, {
+        'currentPassword': 'whatever it was',
+        'newPassword': 'a phrase of several words',
+        'language': 'pl',
+      });
     },
   );
 }

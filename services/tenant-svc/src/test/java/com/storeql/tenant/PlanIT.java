@@ -7,6 +7,8 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
+import com.storeql.test.Concurrency;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -19,6 +21,7 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -288,6 +291,11 @@ class PlanIT {
     Answer none = owner("GET", MINE, null, later);
     assertThat("a business on no plan carries no plan", absent(none.data(), "plan"), is(true));
     assertThat(none.data().getString("note"), is("This business is on no plan"));
+    // And it was never subscribed to anything, so its billing page says so rather than inventing
+    // one.
+    Answer noSubscription = owner("GET", "/admin/tenant/billing", null, later);
+    assertThat(noSubscription.status(), is(404));
+    assertThat(noSubscription.code(), is("SUBSCRIPTION_NOT_FOUND"));
     assertThat("no plan is no limit", addStore(later, "FREE").status(), is(201));
   }
 
@@ -360,6 +368,30 @@ class PlanIT {
                 "{\"currency\":\"GBP\",\"amount\":1,\"effectiveFrom\":\"soon\"}")
             .code(),
         is("PLAN_PRICE_DATE_INVALID"));
+    // A price is an amount of its currency, held to that currency's minor units (ISO 4217).
+    assertThat(
+        "three letters that are no currency",
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"XYZ\",\"amount\":1}")
+            .code(),
+        is("CURRENCY_INVALID"));
+    assertThat(
+        "half a yen is no price",
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"JPY\",\"amount\":1000.5}")
+            .code(),
+        is("PLAN_PRICE_INVALID"));
+    assertThat(
+        "a tenth of a fils is no price",
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"KWD\",\"amount\":9.9995}")
+            .code(),
+        is("PLAN_PRICE_INVALID"));
+    assertThat(
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"JPY\",\"amount\":1000}")
+            .status(),
+        is(200));
+    assertThat(
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"KWD\",\"amount\":9.995}")
+            .status(),
+        is(200));
 
     assertThat(
         "a key nobody enforces is a promise nobody keeps",
@@ -383,6 +415,126 @@ class PlanIT {
                 "{\"grants\":[{\"key\":\"feature.storefront\",\"limitValue\":3}]}")
             .code(),
         is("PLAN_ENTITLEMENT_SHAPE"));
+
+    for (String key :
+        java.util.List.of("images.per-product.max", "proofs.mb.max", "sms.per-month")) {
+      assertThat(
+          key + " is named but nothing refuses on it yet",
+          platform(
+                  "PUT",
+                  PLANS + "/" + id + "/includes",
+                  "{\"grants\":[{\"key\":\"" + key + "\",\"limitValue\":3}]}")
+              .code(),
+          is("PLAN_ENTITLEMENT_NOT_ENFORCED"));
+    }
+
+    // Each grant and meter is checked: a limit of -1 broke ck_plan_entitlements_limit as a 500.
+    // The plan holds a grant and a meter first, so a refusal that wrote anything to either table —
+    // an empty list included — shows.
+    assertThat(
+        platform(
+                "PUT",
+                PLANS + "/" + id + "/includes",
+                "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":2}]}")
+            .status(),
+        is(200));
+    assertThat(
+        platform(
+                "PUT",
+                PLANS + "/" + id + "/meters",
+                "{\"meters\":[{\"meter\":\"ORDERS\",\"included\":5}]}")
+            .status(),
+        is(200));
+    String includes = "SELECT count(*) FROM tenant.plan_entitlements WHERE plan_id = '" + id + "'";
+    String meters = "SELECT count(*) FROM tenant.plan_meters WHERE plan_id = '" + id + "'";
+    String before = Envelopes.scalar(PG, includes);
+    String metersBefore = Envelopes.scalar(PG, meters);
+    assertThat(before, is("1"));
+    assertThat(metersBefore, is("1"));
+    Answer belowNothing =
+        platform(
+            "PUT",
+            PLANS + "/" + id + "/includes",
+            "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":-1}]}");
+    assertThat(belowNothing.body().toString(), belowNothing.status(), is(400));
+    assertThat(belowNothing.code(), is("VALIDATION_FAILED"));
+    assertThat(
+        belowNothing.body().getJsonArray("details").getString(0),
+        is("limitValue: must be greater than or equal to 0"));
+    Answer noKey =
+        platform("PUT", PLANS + "/" + id + "/includes", "{\"grants\":[{\"limitValue\":3}]}");
+    assertThat(noKey.body().toString(), noKey.status(), is(400));
+    assertThat(noKey.code(), is("VALIDATION_FAILED"));
+    Answer noMeter =
+        platform("PUT", PLANS + "/" + id + "/meters", "{\"meters\":[{\"included\":5}]}");
+    assertThat(noMeter.body().toString(), noMeter.status(), is(400));
+    assertThat(noMeter.code(), is("VALIDATION_FAILED"));
+    assertThat(noMeter.body().getJsonArray("details").getString(0), is("meter: must not be blank"));
+    // A key named twice, or a padded copy the platform reads as the same key, is the body's fault:
+    // one batch holding both broke plan_entitlements' primary key as a 500 DB_ERROR (2 Oct 2026).
+    for (String twice :
+        List.of(
+            "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":1},"
+                + "{\"key\":\"stores.max\",\"limitValue\":2}]}",
+            "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":1},"
+                + "{\"key\":\" stores.max \",\"limitValue\":2}]}",
+            "{\"grants\":[{\"key\":\"feature.storefront\",\"enabled\":true},"
+                + "{\"key\":\"feature.storefront\",\"enabled\":false}]}")) {
+      Answer repeated = platform("PUT", PLANS + "/" + id + "/includes", twice);
+      assertThat(twice + " " + repeated.body(), repeated.status(), is(400));
+      assertThat(twice, repeated.code(), is("PLAN_ENTITLEMENT_TWICE"));
+    }
+    // A meter named twice was already refused; it stays so, and writes nothing either.
+    Answer meterTwice =
+        platform(
+            "PUT",
+            PLANS + "/" + id + "/meters",
+            "{\"meters\":[{\"meter\":\"SMS\",\"included\":1},{\"meter\":\"sms\",\"included\":2}]}");
+    assertThat(meterTwice.body().toString(), meterTwice.status(), is(400));
+    assertThat(meterTwice.code(), is("PLAN_METER_TWICE"));
+    // An allowance below nothing keeps the code the route has published since 21.10 (UsageIT, k6
+    // usage-metering-flow, the API guide), however far below, and writes nothing.
+    for (String included : List.of("-1", String.valueOf(Long.MIN_VALUE))) {
+      Answer negative =
+          platform(
+              "PUT",
+              PLANS + "/" + id + "/meters",
+              "{\"meters\":[{\"meter\":\"SMS\",\"included\":" + included + "}]}");
+      assertThat(included + " " + negative.body(), negative.status(), is(400));
+      assertThat(included, negative.code(), is("PLAN_METER_INCLUDED_INVALID"));
+    }
+    // A body that leaves the list out is refused, not read as an empty list: a PUT of {} emptied
+    // the plan's includes or meters with a 200 (2 Oct 2026). An explicit [] stays a deliberate
+    // empty (UsageIT, the owner's refusal; PlanBodyValidationTest).
+    for (String[] missing :
+        List.of(
+            new String[] {"includes", "{}", "grants: must not be null"},
+            new String[] {"includes", "{\"grants\":null}", "grants: must not be null"},
+            new String[] {"includes", "{\"grants\":[null]}", "grants[0]: must not be null"},
+            new String[] {"meters", "{}", "meters: must not be null"},
+            new String[] {"meters", "{\"meters\":null}", "meters: must not be null"},
+            new String[] {"meters", "{\"meters\":[null]}", "meters[0]: must not be null"})) {
+      Answer refused = platform("PUT", PLANS + "/" + id + "/" + missing[0], missing[1]);
+      assertThat(missing[1] + " " + refused.body(), refused.status(), is(400));
+      assertThat(missing[1], refused.code(), is("VALIDATION_FAILED"));
+      assertThat(missing[1], refused.body().getJsonArray("details").getString(0), is(missing[2]));
+    }
+    assertThat("nothing was written", Envelopes.scalar(PG, includes), is(before));
+    assertThat("no meter was written", Envelopes.scalar(PG, meters), is(metersBefore));
+    assertThat(
+        "the plan still includes what it did",
+        Envelopes.scalar(
+            PG,
+            "SELECT key || '=' || limit_value FROM tenant.plan_entitlements WHERE plan_id = '"
+                + id
+                + "'"),
+        is("stores.max=2"));
+    assertThat(
+        "and still counts what it did",
+        Envelopes.scalar(
+            PG,
+            "SELECT meter || '=' || included FROM tenant.plan_meters WHERE plan_id = '" + id + "'"),
+        is("ORDERS=5"));
 
     assertThat(platform("GET", PLANS + "/" + Ids.newId()).code(), is("PLAN_NOT_FOUND"));
     assertThat(
@@ -480,8 +632,124 @@ class PlanIT {
     assertThat(body, containsString("requests.per-minute"));
     assertThat(body, containsString("images.mb.max"));
     assertThat(body, containsString("documents.mb.max"));
+    assertThat(body, containsString("Purchasing documents (MB)"));
+    // 0.4: named but not enforced yet, so not offered.
+    assertThat(body, not(containsString("images.per-product.max")));
+    assertThat(body, not(containsString("proofs.mb.max")));
+    assertThat(body, not(containsString("sms.per-month")));
     assertThat("each names who refuses when it is exceeded", body, containsString("tenant-svc"));
     assertThat(body, containsString("gateway"));
     assertThat(call("GET", PLANS + "/entitlement-keys", null, null, "OWNER").status(), is(403));
+  }
+
+  // ── refusals: a plan on sale is not sold again, the clock is not the caller's ──
+
+  /** A plan, priced in sterling and left in draft. */
+  private String pricedDraft(String code) {
+    Answer written = platform("POST", PLANS, planBody(code, "MONTH"));
+    assertThat(written.body().toString(), written.status(), is(201));
+    String id = written.data().getString("id");
+    assertThat(
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"GBP\",\"amount\":19.00}")
+            .status(),
+        is(200));
+    return id;
+  }
+
+  private String uniqueCode(String prefix) {
+    return prefix + "-" + Ids.newId().toString().substring(28).toUpperCase(java.util.Locale.ROOT);
+  }
+
+  @Test
+  @DisplayName("A plan already on sale is not sold again, and stays as it was")
+  void sellingAPlanAlreadyOnSaleIsRefused() {
+    String id = pricedDraft(uniqueCode("TWICE"));
+    assertThat(platform("POST", PLANS + "/" + id + "/activate").status(), is(200));
+
+    Answer again = platform("POST", PLANS + "/" + id + "/activate");
+    assertThat(again.status(), is(409));
+    assertThat(again.code(), is("PLAN_ALREADY_SOLD"));
+    assertThat(
+        "it is still on sale",
+        platform("GET", PLANS + "/" + id).data().getString("status"),
+        is("ACTIVE"));
+
+    // Nobody but the platform administrator sells a plan, and an owner's attempt moves nothing.
+    String shop = onboard("Sells nothing");
+    Answer owners = call("POST", PLANS + "/" + id + "/activate", null, shop, "OWNER");
+    assertThat(owners.status(), is(403));
+  }
+
+  @Test
+  @DisplayName("Twenty activations and twenty retirements at once each change a plan once")
+  void twentyActivationsAtOnceSellAPlanOnce() throws Exception {
+    String id = pricedDraft(uniqueCode("RACE"));
+    List<Answer> activations =
+        Concurrency.inParallel(20, () -> platform("POST", PLANS + "/" + id + "/activate"));
+    assertThat(
+        "exactly one activation wins",
+        activations.stream().filter(a -> a.status() == 200).count(),
+        is(1L));
+    for (Answer a : activations) {
+      if (a.status() != 200) {
+        assertThat(a.body().toString(), a.status(), is(409));
+        assertThat(
+            a.code(),
+            org.hamcrest.Matchers.either(is("PLAN_ALREADY_SOLD")).or(is("PLAN_CHANGED_MEANWHILE")));
+      }
+    }
+    assertThat(platform("GET", PLANS + "/" + id).data().getString("status"), is("ACTIVE"));
+
+    List<Answer> retirements =
+        Concurrency.inParallel(20, () -> platform("POST", PLANS + "/" + id + "/retire"));
+    assertThat(
+        "exactly one retirement wins",
+        retirements.stream().filter(a -> a.status() == 200).count(),
+        is(1L));
+    for (Answer a : retirements) {
+      if (a.status() != 200) {
+        assertThat(a.body().toString(), a.status(), is(409));
+        assertThat(
+            a.code(),
+            org.hamcrest.Matchers.either(is("PLAN_NOT_SOLD")).or(is("PLAN_CHANGED_MEANWHILE")));
+      }
+    }
+    assertThat(platform("GET", PLANS + "/" + id).data().getString("status"), is("RETIRED"));
+  }
+
+  @Test
+  @DisplayName("Naming the day of a billing run is refused where the test clock is off")
+  void namingTheDayOfARunIsRefusedWhereTheTestClockIsOff() {
+    for (String path : new String[] {"/platform/billing/run", "/platform/billing/dunning/run"}) {
+      Answer run = namedDay("POST", path, "2026-11-01", "PLATFORM_ADMIN");
+      assertThat(path, run.status(), is(403));
+      assertThat(path, run.code(), is("BILLING_TEST_CLOCK_DISABLED"));
+    }
+    Answer overdue =
+        namedDay("GET", "/platform/billing/dunning/overdue", "2026-11-01", "PLATFORM_ADMIN");
+    assertThat(overdue.status(), is(403));
+    assertThat(overdue.code(), is("BILLING_TEST_CLOCK_DISABLED"));
+    // The role is judged first: nobody else gets as far as the clock.
+    Answer owner = namedDay("POST", "/platform/billing/run", "2026-11-01", "OWNER");
+    assertThat(owner.status(), is(403));
+    assertThat(owner.code(), not(is("BILLING_TEST_CLOCK_DISABLED")));
+  }
+
+  private Answer namedDay(String method, String path, String asOf, String roles) {
+    Invocation.Builder b =
+        target
+            .path(path)
+            .queryParam("asOf", asOf)
+            .request(MediaType.APPLICATION_JSON)
+            .header("X-User-Id", Ids.newId())
+            .header("X-Roles", roles);
+    Response r =
+        "GET".equals(method) ? b.get() : b.post(Entity.entity("{}", MediaType.APPLICATION_JSON));
+    String text = r.readEntity(String.class);
+    return new Answer(
+        r.getStatus(),
+        text == null || text.isBlank()
+            ? JsonObject.EMPTY_JSON_OBJECT
+            : Json.createReader(new StringReader(text)).readObject());
   }
 }

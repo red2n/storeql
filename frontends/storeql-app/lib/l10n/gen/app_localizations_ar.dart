@@ -204,4 +204,21 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'طلب رابط جديد';
+
+  @override
+  String get startBusiness => 'ابدأ نشاطًا تجاريًا';
+
+  @override
+  String get startBusinessTitle => 'ابدأ نشاطك التجاري';
+
+  @override
+  String get startBusinessIntro =>
+      'أنشئ حساب الدخول الذي ستدير به نشاطك التجاري. بعد ذلك تُعِدّ النشاط التجاري وأول متجر له.';
+
+  @override
+  String get fieldPasswordConfirm => 'تأكيد كلمة المرور';
+
+  @override
+  String get fieldPasswordMismatch =>
+      'هذا لا يطابق كلمة المرور المذكورة أعلاه.';
 }

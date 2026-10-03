@@ -34,16 +34,21 @@ public class SimulatedSmsProvider implements SmsProvider {
   }
 
   @Override
-  public synchronized String send(String to, String body) {
+  public String send(String to, String body) {
     String id = "sim-" + Ids.newId();
-    sent.addFirst(new Sent(to, body, id));
-    while (sent.size() > KEEP) sent.removeLast();
+    // Only the in-memory list is guarded; the log line (a blocking console write) is outside it.
+    synchronized (sent) {
+      sent.addFirst(new Sent(to, body, id));
+      while (sent.size() > KEEP) sent.removeLast();
+    }
     LOG.log(Level.INFO, "[simulated SMS -> {0}] {1}", to, body);
     return id;
   }
 
   /** What was sent, newest first. */
-  public synchronized List<Sent> sent() {
-    return List.copyOf(sent);
+  public List<Sent> sent() {
+    synchronized (sent) {
+      return List.copyOf(sent);
+    }
   }
 }
