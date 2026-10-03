@@ -100,7 +100,7 @@ public class InventoryClient {
                   lineKey(idemBase, i, lines)));
         } catch (RuntimeException e) {
           releaseQuietly(tenantId, held);
-          throw e;
+          throw asReported(e);
         }
       }
       return held;
@@ -126,7 +126,7 @@ public class InventoryClient {
           if (failure == null) {
             failure =
                 e.getCause() instanceof RuntimeException re
-                    ? re
+                    ? asReported(re)
                     : unavailable("inventory-svc reservation failed", e.getCause());
           }
         } catch (InterruptedException e) {
@@ -265,5 +265,16 @@ public class InventoryClient {
 
   private static ApiException unavailable(String message, Throwable cause) {
     return new ApiException(503, "ORDER_INVENTORY_UNAVAILABLE", message, List.of(), cause);
+  }
+
+  /**
+   * A failure as the checkout reports it. An open circuit is raised by the breaker's interceptor
+   * outside {@link #reserveLine}, so that method's own catch never sees it; left alone it would
+   * leave as an unmapped 500 and not the 503 this client promises when inventory cannot answer.
+   */
+  private static RuntimeException asReported(RuntimeException e) {
+    return e instanceof CircuitBreakerOpenException
+        ? unavailable("inventory-svc circuit open — too many recent failures", e)
+        : e;
   }
 }

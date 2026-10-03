@@ -120,6 +120,51 @@ class RepricingTest {
             .orElseThrow());
   }
 
+  /**
+   * A three-decimal currency's .99 is x.990 — the hundredths a shopper reads, the third decimal
+   * nought — never x.999: Gulf shelf prices end KD 1.990, BD 4.990, and a price a fils short of a
+   * whole dinar cannot be paid in the coins that circulate. Still reached only by rounding down.
+   */
+  @Test
+  void aDinarNinetyNineIsPointNineNineNought() {
+    assertEquals(
+        money("8.990"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "50", "ENDING_99"), money("10.000"), money("9.400"), 3)
+            .orElseThrow());
+    assertEquals(
+        money("9.990"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "50", "ENDING_99"), money("10.000"), money("9.995"), 3)
+            .orElseThrow());
+    // Already a .990: kept; the floor still wins over the ending.
+    assertEquals(
+        money("9.990"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "50", "ENDING_99"), money("10.000"), money("9.990"), 3)
+            .orElseThrow());
+    assertEquals(
+        money("8.600"),
+        Repricing.propose(
+                rule("MATCH_LOWEST", "0", "85", "ENDING_99"), money("10.000"), money("8.600"), 3)
+            .orElseThrow());
+    // Without the ending a cut is kept to the fils: 1% under 9.400 is 9.306, not 9.31.
+    assertEquals(
+        money("9.306"),
+        Repricing.propose(
+                rule("UNDERCUT_PERCENT", "1", "50", "NONE"), money("10.000"), money("9.400"), 3)
+            .orElseThrow());
+  }
+
+  /** The ending for every number of minor units, straight: whole yen down, x.99, x.990. */
+  @Test
+  void theEndingIsDefinedForEveryNumberOfMinorUnits() {
+    assertEquals(money("1234"), Repricing.endingNinetyNine(money("1234.5"), 0));
+    assertEquals(money("1233.99"), Repricing.endingNinetyNine(money("1234.5"), 2));
+    assertEquals(money("1233.990"), Repricing.endingNinetyNine(money("1234.5"), 3));
+    assertEquals(money("1234.990"), Repricing.endingNinetyNine(money("1234.995"), 3));
+  }
+
   @Test
   void theLowestFreshObservationPerRivalIsTheOneThatCounts() {
     List<Observation> seen =

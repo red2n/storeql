@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 
 import com.storeql.purchase.domain.Bacs18;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -20,7 +21,9 @@ import jakarta.inject.Inject;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonValue;
+import jakarta.ws.rs.client.Entity;
 import jakarta.ws.rs.client.WebTarget;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
@@ -67,6 +70,8 @@ class BankFileIT {
       "\"bankAccountName\":\"Muster GmbH\",\"bankIban\":\"DE89 3704 0044 0532 0130 00\",\"bankBic\":\"DEUTDEFF\"";
   private static final String FR_BANK =
       "\"bankAccountName\":\"Dupont SA\",\"bankIban\":\"FR14 2004 1010 0505 0001 3M02 606\"";
+  private static final String ES_BANK =
+      "\"bankAccountName\":\"Garcia SL\",\"bankIban\":\"ES91 2100 0418 4502 0005 1332\"";
 
   @Inject WebTarget target;
   private PaymentRunSteps api;
@@ -487,7 +492,144 @@ class BankFileIT {
         data(api.post(f.path + "/pay", "{}", "OWNER", USER), 200).getString("status"), is("PAID"));
   }
 
+  // ── another business ────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "Another business, of any role, cannot read, approve, pay, cancel, file, answer for or release"
+          + " our payment run, nor change what we pay from; nothing moves")
+  void anotherBusinessCannotTouchOurRunOrOurPayingAccount() throws Exception {
+    Fixture f = euroRun();
+    // And a euro invoice of ours that is due and in no run: what a proposal would pay, so that
+    // another business's proposal finding nothing proves it cannot see ours.
+    String garcia = api.supplier("Garcia SL", "EUR", ES_BANK);
+    api.dueInvoice(garcia, "INV-G1", "EUR", 3, "12.00");
+    // A close match is held, so there is a payee of ours to release.
+    String report =
+        report(
+            "RPT-1",
+            f.reference,
+            tx(f.e2e.get("Muster GmbH"), "ACCP", "CMTC", "MUSTER HANDELS GMBH"),
+            tx(f.e2e.get("Dupont SA"), "ACCP", "MTCH", null));
+    data(api.postXml(f.path + "/status-report", report, "MANAGER", USER), 200);
+    JsonArray ourAccounts = dataArray(api.get("/payment-runs/paying-accounts", "MANAGER", USER));
+    String reports = Envelopes.scalar(PG, "SELECT count(*) FROM purchase.payment_status_reports");
+    String releases = Envelopes.scalar(PG, "SELECT count(*) FROM purchase.payment_hold_releases");
+    String events = Envelopes.scalar(PG, "SELECT count(*) FROM purchase.outbox");
+
+    // Every route that names the run or one of its payees. Their owner and manager reach the
+    // service and find no such run; a shelf or till role is refused as at home, and a shopper
+    // before either.
+    String[][] routes = {
+      {"GET", f.path, null},
+      {"POST", f.path + "/approve", "{}"},
+      {"POST", f.path + "/pay", "{}"},
+      {"POST", f.path + "/cancel", "{\"reason\":\"not ours\"}"},
+      {"GET", f.path + "/bank-file", null},
+      {"GET", f.path + "/bank-file?format=PAIN001", null},
+      {"POST", f.path + "/status-report", report.replace("RPT-1", "RPT-9")},
+      {"POST", f.path + "/payments/" + f.muster + "/release", "{\"reason\":\"not ours\"}"}
+    };
+    for (String[] route : routes) {
+      for (String roles : new String[] {"OWNER", "MANAGER"}) {
+        Response r = send(route, T2, roles);
+        String body = r.readEntity(String.class);
+        String what = roles + " " + route[0] + " " + route[1] + ": " + body;
+        assertThat(what, r.getStatus(), is(404));
+        assertThat(
+            what, Envelopes.parse(body).getString("code"), is("PURCHASE_PAYMENT_RUN_NOT_FOUND"));
+      }
+      for (String roles : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+        assertThat(
+            roles + " " + route[0] + " " + route[1], send(route, T2, roles).getStatus(), is(403));
+      }
+    }
+    // Their own list is their own, and what they would pay is theirs: ours is not due to them —
+    // not paid, and not even named as left out. In euros, which our Garcia invoice is due in.
+    assertThat(dataArray(api.as("/payment-runs", T2, "OWNER", USER2).get()).size(), is(0));
+    Response theirProposal =
+        api.as("/payment-runs", T2, "OWNER", USER2)
+            .post(
+                Entity.entity(
+                    "{\"payUpTo\":\""
+                        + TODAY
+                        + "\",\"paymentDate\":\""
+                        + TODAY
+                        + "\",\"currency\":\"EUR\"}",
+                    MediaType.APPLICATION_JSON));
+    String theirs = theirProposal.readEntity(String.class);
+    assertThat(theirs, theirProposal.getStatus(), is(409));
+    JsonObject nothingDue = Envelopes.parse(theirs);
+    assertThat(theirs, nothingDue.getString("code"), is("PURCHASE_PAYMENT_RUN_NOTHING_DUE"));
+    assertThat(
+        "none of our suppliers is named, even as left out",
+        nothingDue.getJsonArray("details").size(),
+        is(0));
+    assertThat(theirs, not(containsString(garcia)));
+    assertThat(theirs, not(containsString("Garcia")));
+    // The account they pay from is theirs to set, and setting it leaves ours as it was.
+    data(
+        api.as("/payment-runs/paying-accounts/EUR", T2, "OWNER", USER2)
+            .put(Entity.entity(EUR_ACCOUNT, MediaType.APPLICATION_JSON)),
+        200);
+    assertThat(
+        "our paying accounts are as they were",
+        dataArray(api.get("/payment-runs/paying-accounts", "MANAGER", USER)),
+        is(ourAccounts));
+
+    assertThat("our run is still approved", runStatus(f), is("APPROVED"));
+    assertThat(
+        Envelopes.scalar(PG, "SELECT count(*) FROM purchase.payment_status_reports"), is(reports));
+    assertThat(
+        Envelopes.scalar(PG, "SELECT count(*) FROM purchase.payment_hold_releases"), is(releases));
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM purchase.outbox"), is(events));
+
+    // What was refused used none of it up: our manager still releases the payee, once, and our
+    // owner then pays the run.
+    data(
+        api.post(
+            f.path + "/payments/" + f.muster + "/release",
+            "{\"reason\":\"Rang Muster: the bank's name is their registered name\"}",
+            "MANAGER",
+            USER2),
+        200);
+    assertThat(
+        data(api.post(f.path + "/pay", "{}", "OWNER", USER), 200).getString("status"), is("PAID"));
+
+    // And the Garcia invoice they could not see is ours to pay: our own proposal finds it.
+    JsonObject ours =
+        data(
+            api.post(
+                "/payment-runs",
+                "{\"payUpTo\":\""
+                    + TODAY
+                    + "\",\"paymentDate\":\""
+                    + TODAY
+                    + "\",\"currency\":\"EUR\"}",
+                "MANAGER",
+                USER),
+            201);
+    JsonArray payees = ours.getJsonArray("suppliers");
+    assertThat(payees.toString(), payees.size(), is(1));
+    assertThat(payees.getJsonObject(0).getString("supplierId"), is(garcia));
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────────────
+
+  /** One route of the payment-run API as a business's member calls it. */
+  private Response send(String[] route, String tenant, String roles) {
+    var request = api.as(route[1], tenant, roles, USER2);
+    if ("GET".equals(route[0])) {
+      return request.get();
+    }
+    String type =
+        route[1].endsWith("/status-report") ? "application/xml" : MediaType.APPLICATION_JSON;
+    return request.post(Entity.entity(route[2], type));
+  }
+
+  private String runStatus(Fixture f) {
+    return data(api.get(f.path, "MANAGER", USER), 200).getString("status");
+  }
 
   private record Fixture(
       String path, String reference, String muster, String dupont, Map<String, String> e2e) {}

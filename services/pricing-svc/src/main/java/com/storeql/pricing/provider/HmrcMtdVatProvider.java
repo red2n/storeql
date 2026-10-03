@@ -14,6 +14,7 @@ import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -299,8 +300,10 @@ public class HmrcMtdVatProvider implements VatSubmissionProvider {
           false);
     }
     String token = cipher.decrypt(reg.accessTokenCipher());
+    // A URI, never the String form: that escapes the "?" of the obligations query into the path.
+    URI target = URI.create(baseUrl + path);
     HttpClientRequest req =
-        "POST".equals(method) ? webClient.post(baseUrl + path) : webClient.get(baseUrl + path);
+        "POST".equals(method) ? webClient.post().uri(target) : webClient.get().uri(target);
     req =
         req.header(HeaderNames.ACCEPT, ACCEPT).header(HeaderNames.AUTHORIZATION, "Bearer " + token);
     for (var h : fraudHeaders(clientHeaders, vendorProductName, vendorVersion).entrySet()) {

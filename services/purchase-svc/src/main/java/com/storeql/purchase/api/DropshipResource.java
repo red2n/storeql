@@ -44,6 +44,11 @@ public class DropshipResource {
   @APIResponse(responseCode = "201", description = "Arrangement made")
   @APIResponse(responseCode = "404", description = "PURCHASE_SUPPLIER_NOT_FOUND")
   @APIResponse(responseCode = "409", description = "PURCHASE_DROPSHIP_ARRANGEMENT_EXISTS")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "BUSINESS_WIDE_ONLY: an arrangement sources the product at every store; a caller held"
+              + " to stores cannot make or end one")
   @POST
   public Response create(CreateDropshipArrangementRequest req) {
     Validations.validate(req);
@@ -66,6 +71,11 @@ public class DropshipResource {
   @APIResponse(responseCode = "200", description = "Arrangement ended")
   @APIResponse(responseCode = "404", description = "PURCHASE_DROPSHIP_ARRANGEMENT_NOT_FOUND")
   @APIResponse(responseCode = "409", description = "PURCHASE_DROPSHIP_ARRANGEMENT_ENDED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "BUSINESS_WIDE_ONLY: an arrangement sources the product at every store; a caller held"
+              + " to stores cannot make or end one")
   @POST
   @Path("/{id}/end")
   public Response end(@PathParam("id") String id) {

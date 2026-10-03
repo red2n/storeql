@@ -161,6 +161,26 @@ class RfqTest {
     assertThat(c.bids().get(0).rank(), is(nullValue()));
   }
 
+  @Test
+  void aBidsLineTotalIsInItsOwnCurrencysMinorUnits() {
+    // 3 units at a price finer than any currency's minor unit: the yen has none, the dinar three.
+    Rfq.Comparison c =
+        Rfq.compare(
+            "GBP",
+            List.of(line(LINE_A, 3, 0)),
+            List.of(
+                bid(S1, Rfq.QUOTED, "JPY", Map.of(LINE_A, new BigDecimal("123.4567"))),
+                bid(S2, Rfq.QUOTED, "KWD", Map.of(LINE_A, new BigDecimal("1.23456"))),
+                bid(S3, Rfq.QUOTED, "GBP", Map.of(LINE_A, new BigDecimal("1.23456")))),
+            FX);
+    List<Rfq.Price> prices = c.lines().get(0).prices();
+    assertThat(prices.get(0).lineTotal().toPlainString(), is("370"));
+    assertThat(prices.get(1).lineTotal().toPlainString(), is("3.704"));
+    assertThat(prices.get(2).lineTotal().toPlainString(), is("3.70"));
+    assertThat(c.bids().get(0).total().toPlainString(), is("370"));
+    assertThat(c.bids().get(1).total().toPlainString(), is("3.704"));
+  }
+
   // ── an award away from the lowest bid needs a reason ───────────────────────
 
   private static Rfq.Comparison twoLines(List<Rfq.Bid> bids) {

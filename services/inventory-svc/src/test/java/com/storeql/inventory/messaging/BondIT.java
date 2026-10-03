@@ -46,8 +46,12 @@ class BondIT {
     System.setProperty("storeql.db.schema", "inventory");
     System.setProperty("storeql.consul.enabled", "false");
     System.setProperty("storeql.kafka.enabled", "false");
-    // The business trades in pounds: the duty a release owes is in its home currency.
-    com.storeql.test.TenantSvcStub.start().with(BondIT.T, "GBP", "GB");
+    // The business trades in pounds: the duty a release owes is in its home currency. A dinar and
+    // a yen business beside it, whose valuations are kept to their own minor units.
+    com.storeql.test.TenantSvcStub.start()
+        .with(BondIT.T, "GBP", "GB")
+        .with(BondIT.KW, "KWD", "KW")
+        .with(BondIT.JP, "JPY", "JP");
   }
 
   private static final String T = "01a090ae-611e-702c-a97b-d1b8025478e1";
@@ -56,6 +60,8 @@ class BondIT {
   private static final String WHISKY = "01a090ae-611e-7037-a4b7-c854f0266ae1";
   private static final String UNRATED = "01a090ae-611e-7037-a4b7-c854f0266ae2";
   private static final String OTHER_T = "01a090ae-611e-702c-a97b-d1b8025478e9";
+  private static final String KW = "01a090ae-611e-702c-a97b-d1b8025478ea";
+  private static final String JP = "01a090ae-611e-702c-a97b-d1b8025478eb";
   private static final String ORDER = "01a090ae-611e-705c-994c-5daee3fbd0e1";
 
   @Inject WebTarget target;
@@ -265,6 +271,56 @@ class BondIT {
     assertThat(
         whisky.getJsonNumber("dutyPotential").bigDecimalValue(),
         comparesEqualTo(new BigDecimal("25.00")));
+  }
+
+  // ── the currency's own minor units ─────────────────────────────────────────
+
+  /** Three of the whisky received at {@code cost} by a business, and its valuation row read. */
+  private JsonObject valuedAt(String tenant, String cost) {
+    Envelopes.created(
+        callAs(
+            "POST",
+            "/admin/inventory/receive",
+            "{\"storeId\":\""
+                + SHOP
+                + "\",\"variantId\":\""
+                + WHISKY
+                + "\",\"qty\":3,\"batchNo\":\"V-1\",\"costPrice\":"
+                + cost
+                + ",\"expiryDate\":\""
+                + LocalDate.now().plusYears(5)
+                + "\"}",
+            tenant,
+            "OWNER",
+            null,
+            null));
+    JsonArray rows =
+        Envelopes.okArray(
+            callAs(
+                "GET",
+                "/admin/inventory/reports/valuation?groupBy=VARIANT&limit=50",
+                null,
+                tenant,
+                "OWNER",
+                null,
+                null));
+    return Envelopes.find(rows, "groupKey", WHISKY);
+  }
+
+  @Test
+  @DisplayName("A valuation is kept to the business currency's own minor units, never two places")
+  void aValuationIsInTheBusinessCurrencysOwnMinorUnits() {
+    // 3 × KWD 1.2345 is 3.7035: 3.704 in dinars, never 3.70.
+    assertThat(
+        valuedAt(KW, "1.2345").getJsonNumber("value").bigDecimalValue(),
+        is(new BigDecimal("3.704")));
+    // 3 × ¥333.3333 is 999.9999: ¥1,000, never 1000.00.
+    assertThat(
+        valuedAt(JP, "333.3333").getJsonNumber("value").bigDecimalValue(),
+        is(new BigDecimal("1000")));
+    // The pound keeps its pence: 3 × 1.2345 is 3.70 (3.7035).
+    assertThat(
+        valuedAt(T, "1.2345").getJsonNumber("value").bigDecimalValue(), is(new BigDecimal("3.70")));
   }
 
   // ── released to home use: the duty crystallises ────────────────────────────

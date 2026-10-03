@@ -4,10 +4,12 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/consignment_tab.dart';
+import 'package:storeql_app/features/admin/procurement_providers.dart';
 import 'package:storeql_app/features/admin/procurement_screen.dart';
 
 import '../../support/fake_api.dart';
@@ -76,6 +78,7 @@ Future<_Server> _pumpTab(WidgetTester tester, {String role = 'MANAGER'}) async {
 }
 
 void main() {
+  dialogTests();
   // Dates are written with AppFormat, in the app's en_GB locale.
   setUpAll(initializeDateFormatting);
   testWidgets('an arrangement names the supplier and its cost; End posts and the row says ended',
@@ -132,5 +135,123 @@ void main() {
     expect(find.byKey(const Key('po-ship-to')), findsOneWidget);
     expect(find.textContaining('Chris Carter'), findsOneWidget);
     expect(jsonDecode('{"ok":true}')['ok'], isTrue);
+  });
+}
+
+// What the supplier charges per unit is a purchase unit cost, to six places
+// as an order line carries it, read the way the app's language writes a
+// number and sent as the decimal typed: read with a point, Romanian's 80,50
+// went as -1 and the arrangement was refused for a cost nobody typed.
+class _DialogServer implements HttpClientAdapter {
+  final List<RequestOptions> requests = [];
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions o, Stream<List<int>>? s, Future<void>? c) async {
+    requests.add(o);
+    if (o.path.endsWith('/admin/products')) {
+      return jsonResponse('{"data":[{"id":"p-oat","name":"Oat milk"}],"meta":{"nextCursor":null}}');
+    }
+    if (o.path.endsWith('/admin/products/p-oat/variants')) {
+      return jsonResponse('{"data":[{"id":"v-oat","productId":"p-oat","sku":"OAT-1"}]}');
+    }
+    return jsonResponse('{"data":{}}');
+  }
+}
+
+Future<_DialogServer> _openArrangement(WidgetTester tester) async {
+  tester.view.physicalSize = const Size(1200, 1200);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  final server = _DialogServer();
+  final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
+  await tester.pumpWidget(ProviderScope(
+    overrides: [apiClientProvider.overrideWithValue(FakeApiClient(dio))],
+    child: MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => showDialog<void>(
+              context: context,
+              builder: (_) => const NewDropshipArrangementDialog(suppliers: [
+                Supplier(id: 's-1', name: 'Acme', vatRegistered: true, currency: 'GBP', paymentTermsDays: 30),
+              ]),
+            ),
+            child: const Text('open'),
+          ),
+        ),
+      ),
+    ),
+  ));
+  await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Product *'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Oat milk').last);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Variant *'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('OAT-1').last);
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('dropship-supplier')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Acme').last);
+  await tester.pumpAndSettle();
+  return server;
+}
+
+void dialogTests() {
+  group('the cost of a dropship arrangement', () {
+    tearDown(() => Intl.defaultLocale = null);
+
+    Future<void> press(WidgetTester tester, String text) async {
+      for (var i = 1; i <= text.length; i++) {
+        await tester.enterText(find.byKey(const Key('dropship-cost')), text.substring(0, i));
+        await tester.pump();
+      }
+    }
+
+    String? says(WidgetTester tester) =>
+        tester.widget<TextField>(find.byKey(const Key('dropship-cost'))).decoration?.errorText;
+
+    Iterable<Map<String, dynamic>> posts(_DialogServer s) => [
+          for (final r in s.requests)
+            if (r.method == 'POST')
+              (r.data is String ? jsonDecode(r.data as String) : r.data) as Map<String, dynamic>,
+        ];
+
+    for (final (locale, typed, sent) in [
+      ('ro', '80,50', '80.5'),
+      ('en_GB', '0.0125', '0.0125'),
+      ('en', '80', '80'),
+      ('pl', '12,125', '12.125'),
+      ('ar', '1٫5', '1.5'),
+    ]) {
+      testWidgets('in $locale, $typed is arranged as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _openArrangement(tester);
+        await press(tester, typed);
+        expect(says(tester), isNull);
+        await tester.tap(find.byKey(const Key('dropship-save')));
+        await tester.pumpAndSettle();
+        expect(posts(server).single,
+            {'variantId': 'v-oat', 'supplierId': 's-1', 'unitCost': sent});
+      });
+    }
+
+    for (final (locale, typed) in [('ro', '80.50'), ('en', '80,50'), ('pl', '1.250'), ('en_GB', '.'), ('ar', '-1'), ('en_GB', '')]) {
+      testWidgets('in $locale, "$typed" is refused and nothing is arranged', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _openArrangement(tester);
+        await press(tester, typed);
+        await tester.tap(find.byKey(const Key('dropship-save')));
+        await tester.pumpAndSettle();
+        expect(says(tester) ?? (find.byKey(const Key('dropship-refusal')).evaluate().isEmpty ? null : 'refused'),
+            isNotNull);
+        expect(posts(server), isEmpty);
+      });
+    }
   });
 }

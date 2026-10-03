@@ -34,16 +34,23 @@ public class LoyaltyProgrammeService {
   }
 
   /**
-   * Sets the programme.
+   * Sets the programme. It covers every store's customers, so only a caller held to no store sets
+   * it, as with the return policy.
    *
-   * @throws ApiException {@code 400 LOYALTY_TIERS_INVALID} for a ladder that cannot be honoured,
-   *     {@code 400 LOYALTY_EXPIRY_INVALID} for months out of range
+   * @throws ApiException {@code 403 BUSINESS_WIDE_ONLY} for a caller held to stores; {@code 400
+   *     LOYALTY_TIERS_INVALID} for a ladder that cannot be honoured, {@code 400
+   *     LOYALTY_EXPIRY_INVALID} for months out of range
    */
   public LoyaltyProgramme set(TenantContext ctx, SetLoyaltyProgrammeRequest req) {
+    requireBusinessWide(ctx, "set");
     UUID tenantId = ctx.requireTenantId();
     List<Tier> tiers = new ArrayList<>();
     if (req.tiers() != null) {
       for (TierRequest t : req.tiers()) {
+        if (t == null) {
+          throw ApiException.badRequest(
+              "LOYALTY_TIERS_INVALID", "a tier is a name, a threshold and a multiplier");
+        }
         tiers.add(
             new Tier(
                 t.name() == null ? null : t.name().trim(),
@@ -86,9 +93,30 @@ public class LoyaltyProgrammeService {
     return new ExpiryRun(customers, points, retiered);
   }
 
-  /** One business's sweep, as the management endpoint runs it. */
+  /**
+   * One business's sweep, as the management endpoint runs it. It expires points and re-tiers the
+   * customers of every store, so only a caller held to no store runs it by hand — refused before
+   * anything is read or written; the hourly sweeper is not a caller and is not asked.
+   *
+   * @throws ApiException {@code 403 BUSINESS_WIDE_ONLY} for a caller held to stores
+   */
   public ExpiryRun sweep(TenantContext ctx) {
+    requireBusinessWide(ctx, "run by hand");
     return sweep(ctx.requireTenantId(), Instant.now());
+  }
+
+  /**
+   * The programme covers every store's customers, so what changes it for the whole business needs a
+   * caller held to no store (an owner, a business-wide manager, the platform).
+   */
+  private static void requireBusinessWide(TenantContext ctx, String what) {
+    if (!ctx.storeIds().isEmpty()) {
+      throw ApiException.forbidden(
+          "BUSINESS_WIDE_ONLY",
+          "the loyalty programme covers every store, so it is "
+              + what
+              + " by a caller held to no store");
+    }
   }
 
   private ExpiryRun sweep(UUID tenantId, Instant now) {

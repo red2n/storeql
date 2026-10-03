@@ -3554,8 +3554,13 @@ public class InventoryRepository extends BaseOutboxRepository {
     }
   }
 
-  /** Cost prices are held to {@code inventory_batches.cost_price NUMERIC(18,2)}. */
-  private static final int COST_SCALE = 2;
+  /**
+   * The share of {@code amount} that {@code back} of {@code over} units carries, half up at {@code
+   * scale} — the minor units of the currency the sale was recorded in (whole yen, pence, fils).
+   */
+  static BigDecimal takenBack(BigDecimal amount, BigDecimal back, BigDecimal over, int scale) {
+    return amount.multiply(back).divide(over, scale, RoundingMode.HALF_UP);
+  }
 
   /**
    * Takes back the revenue and the cost of {@code qty} returned units, at the averages the order's
@@ -3590,8 +3595,10 @@ public class InventoryRepository extends BaseOutboxRepository {
     if (soldQty.signum() <= 0 || unreturned.signum() <= 0) return;
     BigDecimal back = qty.min(unreturned);
     // The currency's scale is the one order-svc sent the sale in; this service does not know it.
-    BigDecimal netBack =
-        soldNet.multiply(back).divide(soldQty, soldNet.scale(), RoundingMode.HALF_UP);
+    // The cost taken back is money in the same (home) currency, so it is kept to the same minor
+    // units: whole yen, pence, three-decimal dinars — never two decimals assumed.
+    int moneyScale = Math.max(soldNet.scale(), 0);
+    BigDecimal netBack = takenBack(soldNet, back, soldQty, moneyScale);
     BigDecimal costBack = null;
     try (PreparedStatement ps =
         c.prepareStatement(
@@ -3606,10 +3613,7 @@ public class InventoryRepository extends BaseOutboxRepository {
         if (rs.next()) {
           BigDecimal costedQty = rs.getBigDecimal("q");
           if (costedQty != null && costedQty.signum() > 0) {
-            costBack =
-                rs.getBigDecimal("cost")
-                    .multiply(back)
-                    .divide(costedQty, COST_SCALE, RoundingMode.HALF_UP);
+            costBack = takenBack(rs.getBigDecimal("cost"), back, costedQty, moneyScale);
           }
         }
       }

@@ -20,6 +20,8 @@ import '../../shared/util/short_ref.dart';
 import 'package:storeql_app/core/ids.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
+import '../../core/amount_entry.dart';
+import 'widgets/figure_field.dart';
 
 class SalesScreen extends ConsumerWidget {
   const SalesScreen({super.key, this.initialTab});
@@ -145,7 +147,7 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
     // Value put on a card by hand is a manager's and says why (order-svc, 30 Sep 2026).
     final value = await _valueDialog(
         context, reload ? 'Reload gift card' : 'Redeem gift card',
-        askReason: reload);
+        askReason: reload, currency: card.currency);
     if (value == null || !mounted) return;
     Options? options;
     if (reload) {
@@ -161,6 +163,7 @@ class _GiftCardsTabState extends ConsumerState<_GiftCardsTab> {
       await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.order}/gift-cards/${card.code}/$action',
         data: {
+          // The plain decimal typed: JSON-B reads it exactly.
           'amount': value.amount,
           if (reload) 'reason': value.reason,
           if (reload && value.note != null) 'note': value.note,
@@ -412,9 +415,19 @@ class _IssueGiftCardDialogState extends ConsumerState<_IssueGiftCardDialog> {
     super.dispose();
   }
 
+  // The card's value is money in its currency (the one chosen, else the
+  // business's own), to that currency's places, read the way the app's
+  // language writes a number ([AmountMarks]) and sent as the decimal typed.
+  // One that cannot be read is refused under the field and nothing is
+  // issued: read with a point, Romanian's 12,50 was no amount at all.
+  final _marks = AmountMarks.ofApp();
+  AmountShape get _shape =>
+      AmountShape.money(_currency ?? ref.read(tenantInfoProvider).value?.currency);
+
   Future<void> _submit() async {
-    final amount = double.tryParse(_amountCtrl.text.trim());
-    if (_storeId == null || amount == null || amount <= 0 || _reason == null) {
+    if (figureRefused(_marks, [(_amountCtrl, _shape)])) return;
+    final amount = figureOf(_amountCtrl, _shape, _marks);
+    if (_storeId == null || amount == null || amount == '0' || _reason == null) {
       setState(() => _error = 'Pick a store, enter an amount and say why the card is given.');
       return;
     }
@@ -433,6 +446,7 @@ class _IssueGiftCardDialogState extends ConsumerState<_IssueGiftCardDialog> {
         '/${ApiConstants.order}/gift-cards',
         data: {
           'storeId': _storeId,
+          // The plain decimal typed: JSON-B reads it exactly.
           'amount': amount,
           // Omitted, order-svc issues it in the tenant's own currency (SJ-D53).
           if (_currency != null) 'currency': _currency,
@@ -503,11 +517,14 @@ class _IssueGiftCardDialogState extends ConsumerState<_IssueGiftCardDialog> {
             Row(
               children: [
                 Expanded(
-                  child: TextField(
+                  child: FigureField(
+                    fieldKey: const Key('gift-card-issue-amount'),
                     controller: _amountCtrl,
-                    keyboardType:
-                        const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(labelText: 'Amount'),
+                    shape: AmountShape.money(
+                        _currency ?? ref.watch(tenantInfoProvider).value?.currency),
+                    marks: _marks,
+                    label: 'Amount',
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -531,7 +548,8 @@ class _IssueGiftCardDialogState extends ConsumerState<_IssueGiftCardDialog> {
           ],
         ),
       ),
-      actions: _actions(context, _loading, _submit, 'Issue'),
+      actions: _actions(context, _loading, _submit, 'Issue',
+          refused: figureRefused(_marks, [(_amountCtrl, _shape)])),
     );
   }
 }
@@ -594,7 +612,8 @@ class _LayawaysTabState extends ConsumerState<_LayawaysTab> {
     final dio = ref.read(apiClientProvider).dio;
     try {
       if (action == 'deposit') {
-        final amount = await _amountDialog(context, 'Add deposit');
+        final amount = await _amountDialog(context, 'Add deposit',
+            currency: ref.read(tenantInfoProvider).value?.currency);
         if (amount == null) return;
         await dio.post('/${ApiConstants.order}/layaways/${l.id}/deposits',
             data: {'amount': amount, 'paymentMethod': 'CASH'});
@@ -697,7 +716,13 @@ class _CreateLayawayDialog extends ConsumerStatefulWidget {
 
 class _CreateLayawayDialogState extends ConsumerState<_CreateLayawayDialog> {
   String? _storeId;
+
+  /// The deposit is money in the business's currency, read the way the app's
+  /// language writes a number ([AmountMarks]) and sent as the decimal typed.
   final _depositCtrl = TextEditingController();
+  final _marks = AmountMarks.ofApp();
+  AmountShape get _depositShape =>
+      AmountShape.money(ref.read(tenantInfoProvider).value?.currency);
   final List<Map<String, dynamic>> _items = [];
   bool _loading = false;
   String? _error;
@@ -709,8 +734,9 @@ class _CreateLayawayDialogState extends ConsumerState<_CreateLayawayDialog> {
   }
 
   Future<void> _submit() async {
-    final deposit = double.tryParse(_depositCtrl.text.trim());
-    if (_storeId == null || _items.isEmpty || deposit == null || deposit <= 0) {
+    if (figureRefused(_marks, [(_depositCtrl, _depositShape)])) return;
+    final deposit = figureOf(_depositCtrl, _depositShape, _marks);
+    if (_storeId == null || _items.isEmpty || deposit == null || deposit == '0') {
       setState(() => _error = 'Pick a store, add items, and enter a deposit.');
       return;
     }
@@ -724,6 +750,7 @@ class _CreateLayawayDialogState extends ConsumerState<_CreateLayawayDialog> {
         data: {
           'storeId': _storeId,
           'items': _items,
+          // The plain decimal typed: JSON-B reads it exactly.
           'initialDeposit': deposit,
           'paymentMethod': 'CASH',
         },
@@ -777,16 +804,20 @@ class _CreateLayawayDialogState extends ConsumerState<_CreateLayawayDialog> {
                 onChanged: () => setState(() {}),
               ),
               const SizedBox(height: 12),
-              TextField(
+              FigureField(
+                fieldKey: const Key('layaway-deposit'),
                 controller: _depositCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(labelText: 'Initial deposit'),
+                shape: AmountShape.money(ref.watch(tenantInfoProvider).value?.currency),
+                marks: _marks,
+                label: 'Initial deposit',
+                onChanged: (_) => setState(() {}),
               ),
             ],
           ),
         ),
       ),
-      actions: _actions(context, _loading, _submit, 'Create'),
+      actions: _actions(context, _loading, _submit, 'Create',
+          refused: figureRefused(_marks, [(_depositCtrl, _depositShape)])),
     );
   }
 }
@@ -1036,8 +1067,19 @@ class _LineItemsEditor extends ConsumerStatefulWidget {
 class _LineItemsEditorState extends ConsumerState<_LineItemsEditor> {
   String? _productId;
   String? _variantId;
+
+  // A line's quantity (three places) and its price (money in the business's
+  // currency, to its places), read the way the app's language writes a
+  // number ([AmountMarks]) and kept as the decimals typed. One that cannot be
+  // read is refused under its field and the line is not added: read with a
+  // point, Romanian's 1,5 was no quantity at all.
+  final _marks = AmountMarks.ofApp();
   final _qtyCtrl = TextEditingController(text: '1');
   final _priceCtrl = TextEditingController();
+  AmountShape get _priceShape =>
+      AmountShape.money(ref.read(tenantInfoProvider).value?.currency);
+  bool get _refused => figureRefused(
+      _marks, [(_qtyCtrl, AmountShape.quantity), (_priceCtrl, _priceShape)]);
 
   @override
   void dispose() {
@@ -1047,11 +1089,13 @@ class _LineItemsEditorState extends ConsumerState<_LineItemsEditor> {
   }
 
   void _add() {
-    final qty = double.tryParse(_qtyCtrl.text.trim());
-    final price = double.tryParse(_priceCtrl.text.trim());
-    if (_variantId == null || qty == null || qty <= 0 || price == null || price <= 0) {
+    if (_refused) return;
+    final qty = figureOf(_qtyCtrl, AmountShape.quantity, _marks);
+    final price = figureOf(_priceCtrl, _priceShape, _marks);
+    if (_variantId == null || qty == null || qty == '0' || price == null || price == '0') {
       return;
     }
+    // The plain decimals typed: JSON-B reads them exactly.
     widget.items.add({'variantId': _variantId, 'qty': qty, 'unitPrice': price});
     _variantId = null;
     _priceCtrl.clear();
@@ -1097,23 +1141,33 @@ class _LineItemsEditorState extends ConsumerState<_LineItemsEditor> {
         Row(
           children: [
             Expanded(
-              child: TextField(
+              child: FigureField(
+                fieldKey: const Key('line-qty'),
                 controller: _qtyCtrl,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Qty', isDense: true),
+                shape: AmountShape.quantity,
+                marks: _marks,
+                label: 'Qty',
+                dense: true,
+                onChanged: (_) => setState(() {}),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: TextField(
+              child: FigureField(
+                fieldKey: const Key('line-price'),
                 controller: _priceCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(labelText: 'Price', isDense: true),
+                shape: AmountShape.money(ref.watch(tenantInfoProvider).value?.currency),
+                marks: _marks,
+                label: 'Price',
+                dense: true,
+                onChanged: (_) => setState(() {}),
               ),
             ),
             const SizedBox(width: 8),
             IconButton.filledTonal(
-                onPressed: _add, icon: const Icon(Icons.add)),
+                tooltip: 'Add item',
+                onPressed: _refused ? null : _add,
+                icon: const Icon(Icons.add)),
           ],
         ),
       ],
@@ -1157,22 +1211,27 @@ StatusTone _specialOrderStatusTone(String status) =>
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
-Future<double?> _amountDialog(BuildContext context, String title) async =>
-    (await _valueDialog(context, title, askReason: false))?.amount;
+/// An amount of money in [currency], as the plain decimal typed.
+Future<String?> _amountDialog(BuildContext context, String title, {String? currency}) async =>
+    (await _valueDialog(context, title, askReason: false, currency: currency))?.amount;
 
-/// An amount and, for value put on a gift card by hand, why (a manager's act).
-Future<({double amount, String? reason, String? note})?> _valueDialog(
+/// An amount of money in [currency] — the plain decimal typed — and, for
+/// value put on a gift card by hand, why (a manager's act).
+Future<({String amount, String? reason, String? note})?> _valueDialog(
         BuildContext context, String title,
-        {required bool askReason}) =>
-    showDialog<({double amount, String? reason, String? note})>(
+        {required bool askReason, String? currency}) =>
+    showDialog<({String amount, String? reason, String? note})>(
       context: context,
-      builder: (_) => _ValueDialog(title: title, askReason: askReason),
+      builder: (_) => _ValueDialog(title: title, askReason: askReason, currency: currency),
     );
 
 class _ValueDialog extends StatefulWidget {
   final String title;
   final bool askReason;
-  const _ValueDialog({required this.title, required this.askReason});
+
+  /// The money's currency: the amount is read to its places.
+  final String? currency;
+  const _ValueDialog({required this.title, required this.askReason, this.currency});
 
   @override
   State<_ValueDialog> createState() => _ValueDialogState();
@@ -1183,6 +1242,11 @@ class _ValueDialogState extends State<_ValueDialog> {
   final _amount = TextEditingController();
   final _note = TextEditingController();
   String? _reason;
+
+  // Read the way the app's language writes a number ([AmountMarks]), to the
+  // currency's places; one that cannot be read is refused under the field.
+  final _marks = AmountMarks.ofApp();
+  late final _shape = AmountShape.money(widget.currency);
 
   @override
   void dispose() {
@@ -1198,11 +1262,14 @@ class _ValueDialogState extends State<_ValueDialog> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          TextField(
+          FigureField(
+            fieldKey: const Key('value-dialog-amount'),
             controller: _amount,
+            shape: _shape,
+            marks: _marks,
             autofocus: true,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(labelText: 'Amount'),
+            label: 'Amount',
+            onChanged: (_) => setState(() {}),
           ),
           if (widget.askReason) ...[
             const SizedBox(height: 12),
@@ -1221,17 +1288,19 @@ class _ValueDialogState extends State<_ValueDialog> {
         TextButton(
             onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         FilledButton(
-          onPressed: () {
-            final v = double.tryParse(_amount.text.trim());
-            if (v != null && v > 0 && (!widget.askReason || _reason != null)) {
-              final note = _note.text.trim();
-              Navigator.pop(context, (
-                amount: v,
-                reason: _reason,
-                note: note.isEmpty ? null : note
-              ));
-            }
-          },
+          onPressed: figureRefused(_marks, [(_amount, _shape)])
+              ? null
+              : () {
+                  final v = figureOf(_amount, _shape, _marks);
+                  if (v != null && v != '0' && (!widget.askReason || _reason != null)) {
+                    final note = _note.text.trim();
+                    Navigator.pop(context, (
+                      amount: v,
+                      reason: _reason,
+                      note: note.isEmpty ? null : note
+                    ));
+                  }
+                },
           child: const Text('OK'),
         ),
       ],
@@ -1267,15 +1336,18 @@ class _ReasonField extends StatelessWidget {
       );
 }
 
+/// Cancel and [label]; [label] waits while [loading] and while a figure the
+/// dialog cannot read is [refused] (its field says why).
 List<Widget> _actions(
-    BuildContext context, bool loading, VoidCallback onSubmit, String label) {
+    BuildContext context, bool loading, VoidCallback onSubmit, String label,
+    {bool refused = false}) {
   return [
     TextButton(
       onPressed: loading ? null : () => Navigator.pop(context),
       child: const Text('Cancel'),
     ),
     FilledButton(
-      onPressed: loading ? null : onSubmit,
+      onPressed: loading || refused ? null : onSubmit,
       child: loading
           ?  SizedBox(
               height: 18,

@@ -517,6 +517,86 @@ public class TenantClient {
     return Optional.empty();
   }
 
+  /**
+   * What an arrangement pays in: its basis, and for a per-unit one the currency its amount is in.
+   *
+   * @param currency the ISO 4217 code a {@code PER_UNIT} amount is in; null for a percentage
+   */
+  public record SchemeTerms(String basis, String currency) {
+
+    /** Whether the arrangement pays an amount per unit, in its own currency. */
+    public boolean perUnit() {
+      return "PER_UNIT".equals(basis);
+    }
+  }
+
+  /**
+   * Every arrangement the business has had — withdrawn and superseded versions too, since a period
+   * may have been earned under any of them — with what each pays in.
+   *
+   * <p>A rating answer says which scheme a stretch of days was under but not what that scheme pays
+   * in, and a seller's single {@code currency} names only the last per-unit scheme they were on:
+   * this is what says, stretch by stretch, whether a commission is in the statement's currency or
+   * has to be translated into it.
+   *
+   * @return the terms by scheme id, or empty when tenant-svc could not be reached or refused — the
+   *     caller then refuses to state anything rather than guess a currency
+   */
+  @Retry(maxRetries = 2, delay = 300)
+  @CircuitBreaker(requestVolumeThreshold = 4, failureRatio = 0.6, delay = 5000)
+  @Fallback(fallbackMethod = "schemesUnavailable")
+  public Optional<java.util.Map<UUID, SchemeTerms>> commissionSchemes(
+      UUID tenantId, TenantContext ctx) {
+    String base = locate().orElse(null);
+    if (base == null) {
+      LOG.log(Level.WARNING, "tenant-svc could not be located — commission schemes not read");
+      return Optional.empty();
+    }
+    try (HttpClientResponse res =
+        forward(webClient.get(base + "/admin/workforce/commission/schemes?all=true"), tenantId, ctx)
+            .request()) {
+      int status = res.status().code();
+      String answer = res.as(String.class);
+      if (status != 200) {
+        LOG.log(Level.WARNING, "commission schemes HTTP {0}: {1}", status, answer);
+        return Optional.empty();
+      }
+      return Optional.of(schemeTerms(answer));
+    } catch (CircuitBreakerOpenException e) {
+      LOG.log(Level.WARNING, "tenant-svc circuit open — commission schemes not read");
+      return Optional.empty();
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "commission schemes read failed: {0}", e.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /** tenant-svc's scheme list, as the terms each scheme pays in, by id. */
+  static java.util.Map<UUID, SchemeTerms> schemeTerms(String body) {
+    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+      java.util.Map<UUID, SchemeTerms> out = new java.util.LinkedHashMap<>();
+      for (JsonValue v : reader.readObject().getJsonArray("data")) {
+        JsonObject o = v.asJsonObject();
+        String currency = text(o, "currency");
+        out.put(
+            Ids.parse(o.getString("id")),
+            new SchemeTerms(
+                text(o, "basis"),
+                currency == null || currency.isBlank()
+                    ? null
+                    : currency.strip().toUpperCase(java.util.Locale.ROOT)));
+      }
+      return java.util.Map.copyOf(out);
+    }
+  }
+
+  // Only called reflectively by MicroProfile Fault Tolerance via @Fallback above.
+  @SuppressWarnings("unused")
+  Optional<java.util.Map<UUID, SchemeTerms>> schemesUnavailable(UUID tenantId, TenantContext ctx) {
+    LOG.log(Level.WARNING, "tenant-svc unavailable; commission schemes not read");
+    return Optional.empty();
+  }
+
   private static io.helidon.webclient.api.HttpClientRequest forward(
       io.helidon.webclient.api.HttpClientRequest req, UUID tenantId, TenantContext ctx) {
     io.helidon.webclient.api.HttpClientRequest out =

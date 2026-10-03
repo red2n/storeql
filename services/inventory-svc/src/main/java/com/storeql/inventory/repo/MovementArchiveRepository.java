@@ -14,8 +14,10 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * self-contained.
  *
  * <p>Golden rule #8: {@code stock_movements} stays append-only. "Purge" relocates matching rows
- * into {@code stock_movements_archive} (insert + delete in one transaction) instead of destroying
- * them — the hot table shrinks, history is never lost.
+ * into {@code stock_movements_archive} instead of destroying them — the hot table shrinks, history
+ * is never lost. The move is made in chunks: each chunk's delete and archive insert are one
+ * statement on one transaction, so a chunk is moved whole or not at all, and a purge interrupted
+ * between chunks is simply run again.
  */
 @ApplicationScoped
 public class MovementArchiveRepository extends BaseJdbcRepository {
@@ -26,11 +28,12 @@ public class MovementArchiveRepository extends BaseJdbcRepository {
   int chunkRows;
 
   /**
-   * Copies movements older than a cutoff into the archive table and deletes the originals —
-   * atomically.
+   * Moves movements older than a cutoff into the archive table, removing the originals, a chunk at
+   * a time.
    *
-   * <p>Archive-then-delete in one transaction, so the append-only trail is never simply thrown
-   * away: it moves. The caller enforces the minimum age.
+   * <p>Each chunk is archived and deleted atomically, so the append-only trail is never simply
+   * thrown away: it moves. The whole call is not one transaction — an interruption leaves the
+   * earlier chunks archived. The caller enforces the minimum age.
    *
    * @param tenantId owning tenant; the first condition of the query
    * @param before purge movements recorded strictly before this instant

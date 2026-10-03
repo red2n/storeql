@@ -148,7 +148,7 @@ class ReturnDiscountShareTest {
     assertThat(
         ReturnValue.worth(d("3.00"), d("1.00"), d("3"), BigDecimal.ZERO, BigDecimal.ZERO, d("1"), 2)
             .value(),
-        is(ReturnValue.grossOf(d("1.00"), d("1"), d("1.00"), d("3"))));
+        is(ReturnValue.grossOf(d("1.00"), d("1"), d("1.00"), d("3"), 2)));
     assertThat(
         ReturnValue.worth(d("30.00"), null, d("3"), null, BigDecimal.ZERO, d("3"), 2).value(),
         is(d("30.00")));

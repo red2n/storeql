@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/format.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/disputes_screen.dart';
@@ -209,5 +210,78 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('dispute-record-error')), findsOneWidget);
     expect(server.requests.where((r) => r.method == 'POST'), isEmpty, reason: 'nothing is sent until it is complete');
+  });
+
+  // The amount disputed and the acquirer's fee are read the way the app's
+  // language writes a number, with the shared amount reader. One the dialog
+  // cannot read is refused under its field and nothing is sent: dropped from
+  // the request, an amount typed as 45,99 in Romanian was recorded as the
+  // whole payment and a fee as none.
+  group('the sums are read as typed, or refused', () {
+    tearDown(() => Intl.defaultLocale = null);
+
+    Future<void> fill(WidgetTester tester, String amount, String fee) async {
+      await tester.enterText(find.byKey(const Key('dispute-payment')), '01920000-0000-7000-8000-000000000001');
+      await tester.enterText(find.byKey(const Key('dispute-case')), 'CB-77');
+      await tester.enterText(find.byKey(const Key('dispute-amount')), amount);
+      await tester.enterText(find.byKey(const Key('dispute-fee')), fee);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('dispute-due')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+    }
+
+    String? says(WidgetTester tester, String key) =>
+        tester.widget<TextField>(find.byKey(Key(key))).decoration?.errorText;
+
+    testWidgets('in Romanian, 45,99 and a fee of 15,00 are sent as typed', (tester) async {
+      Intl.defaultLocale = 'ro';
+      final server = await _pump(tester, _fileOf(_needs), const RecordDisputeDialog());
+      await fill(tester, '45,99', '15,00');
+      await tester.tap(find.byKey(const Key('dispute-save')));
+      await tester.pumpAndSettle();
+      final sent = server.requests.singleWhere((r) => r.method == 'POST').data as Map;
+      expect(sent['amount'], '45.99', reason: 'never left out, which is the whole payment');
+      expect(sent['feeAmount'], '15');
+    });
+
+    testWidgets('in English, 1,045.99 or a fee of 12,50 is refused in words and nothing is sent',
+        (tester) async {
+      Intl.defaultLocale = 'en_GB';
+      final server = await _pump(tester, _fileOf(_needs), const RecordDisputeDialog());
+      await fill(tester, '1,045.99', '12,50');
+      const says_ = 'Type the amount without thousands separators. Decimals go after a point.';
+      expect(says(tester, 'dispute-amount'), says_);
+      expect(says(tester, 'dispute-fee'), says_);
+      expect(tester.widget<FilledButton>(find.byKey(const Key('dispute-save'))).onPressed, isNull);
+      await tester.tap(find.byKey(const Key('dispute-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+    });
+
+    // A mark or a sign alone is no figure and is not blank either: refused,
+    // never left out of the request, which records the whole payment
+    // disputed and no fee.
+    for (final (locale, amount, fee) in [
+      ('ro', ',', '-'),
+      ('en_GB', '.', '+'),
+      ('en', '.', '\u2212'),
+      ('pl', ',', '.'),
+      ('ar', '\u066B', '.'),
+    ]) {
+      testWidgets('in $locale, "$amount" disputed and "$fee" of fee are refused and nothing is sent',
+          (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester, _fileOf(_needs), const RecordDisputeDialog());
+        await fill(tester, amount, fee);
+        expect(says(tester, 'dispute-amount'), 'Type the amount in digits.');
+        expect(says(tester, 'dispute-fee'), isNotNull);
+        expect(tester.widget<FilledButton>(find.byKey(const Key('dispute-save'))).onPressed, isNull);
+        await tester.tap(find.byKey(const Key('dispute-save')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+      });
+    }
   });
 }

@@ -897,4 +897,28 @@ class SsoIT {
             .code(),
         is("TENANT_INACTIVE"));
   }
+
+  @Test
+  @DisplayName(
+      "A connection whose client secret was never entered again refuses to start a sign-in")
+  void aConnectionWithoutItsSecretIsNotReady() throws Exception {
+    Business b = business("sso-nosecret");
+    connect(b, "sso-nosecret", "");
+    // What an import leaves behind: the connection, with its secret to be entered again.
+    sql("UPDATE sso_connections SET client_secret_sealed = NULL WHERE tenant_id = ?", b.tenant());
+
+    Answer started =
+        call(
+            "POST",
+            "/auth/sso/start",
+            Caller.NOBODY,
+            "{\"slug\":\"sso-nosecret\",\"codeChallenge\":\""
+                + Pkce.challenge(Pkce.newVerifier())
+                + "\"}");
+
+    assertThat(started.body().toString(), started.status(), is(409));
+    assertThat(started.code(), is("SSO_NOT_READY"));
+    // The provider was never asked: nothing was sent to its authorization endpoint.
+    assertThat(started.body().toString(), not(containsString("authorizationUrl")));
+  }
 }

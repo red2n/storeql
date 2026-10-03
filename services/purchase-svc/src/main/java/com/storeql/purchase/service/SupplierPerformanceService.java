@@ -126,7 +126,8 @@ public class SupplierPerformanceService {
   }
 
   /**
-   * A supplier's deliveries in the period, newest first.
+   * A supplier's deliveries in the period, newest first: a caller held to stores reads the
+   * deliveries into those stores (the card itself is the supplier's, judged over the business).
    *
    * @throws ApiException 404 {@code PURCHASE_SUPPLIER_NOT_FOUND}
    */
@@ -137,7 +138,7 @@ public class SupplierPerformanceService {
           "PURCHASE_SUPPLIER_NOT_FOUND", "Supplier not found: " + supplierId);
     }
     Period p = period(from, to);
-    return repo.deliveries(tenantId, supplierId, p.from(), p.to());
+    return repo.deliveries(tenantId, supplierId, p.from(), p.to(), ctx.reportStores(null));
   }
 
   /** The period's figures weighed into the card; a share of nothing is unknown, not zero. */

@@ -1016,7 +1016,8 @@ public final class Domain {
       Instant setAt) {
 
     public DeferredRevenue.Settings estimates() {
-      return new DeferredRevenue.Settings(pointValue, pointsBreakagePct, giftCardBreakagePct);
+      return new DeferredRevenue.Settings(
+          pointValue, pointsBreakagePct, giftCardBreakagePct, currency);
     }
   }
 

@@ -42,6 +42,67 @@ void main() {
       expect(AppFormat.money(1.234, currencyCode: 'KWD'), contains('1.234'));
     });
 
+    test('the marks a language writes a number with, so a typed amount is read the same way', () {
+      // Every language the app ships that writes a decimal comma, and one
+      // that groups with a point; the app's own language when none is named.
+      expect(AppFormat.numberMarks(locale: 'pl'), (decimal: ',', group: ' '));
+      expect(AppFormat.numberMarks(locale: 'ro'), (decimal: ',', group: '.'));
+      expect(AppFormat.numberMarks(locale: 'en_ZA'), (decimal: ',', group: ' '));
+      expect(AppFormat.numberMarks(locale: 'en_US'), (decimal: '.', group: ','));
+      expect(AppFormat.numberMarks(), (decimal: '.', group: ','));
+      Intl.defaultLocale = 'pl';
+      expect(AppFormat.numberMarks(), (decimal: ',', group: ' '));
+    });
+
+    test('the minor units a currency is paid in', () {
+      expect(AppFormat.minorUnits('GBP'), 2);
+      expect(AppFormat.minorUnits('JPY'), 0);
+      expect(AppFormat.minorUnits('KWD'), 3);
+      expect(AppFormat.minorUnits(' jpy '), 0);
+      // No currency: two places, as money() writes it.
+      expect(AppFormat.minorUnits(null), 2);
+      expect(AppFormat.minorUnits(''), 2);
+    });
+
+    test('minor units are ISO 4217\'s, as every service rounds and stores '
+        'money, not the CLDR display digits intl carries', () {
+      // intl's CLDR table says 0 for these, where ISO 4217 and the services
+      // (`Currency.getDefaultFractionDigits`, `Fx.minorUnits`) say 2: a store
+      // in Serbia selling at 129.99 must be able to take 129.99.
+      for (final code in [
+        'RSD', 'HUF', 'PKR', 'IDR', 'COP', 'ALL', 'AFN', 'LAK', 'MMK', //
+        'SYP', 'LBP', 'IRR', 'MGA', 'SOS', 'YER', 'KPW', 'SLL',
+      ]) {
+        expect(AppFormat.minorUnits(code), 2, reason: code);
+      }
+      // intl says 0 for the Iraqi dinar; ISO 4217 says 3.
+      expect(AppFormat.minorUnits('IQD'), 3);
+      // The rest of ISO's exceptions to two, as the JDK has them.
+      for (final code in ['BHD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND']) {
+        expect(AppFormat.minorUnits(code), 3, reason: code);
+      }
+      for (final code in [
+        'BIF', 'CLP', 'DJF', 'GNF', 'ISK', 'JPY', 'KMF', 'KRW', 'PYG', //
+        'RWF', 'UGX', 'UYI', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
+      ]) {
+        expect(AppFormat.minorUnits(code), 0, reason: code);
+      }
+      expect(AppFormat.minorUnits('CLF'), 4);
+      // A metal or fund with no minor unit (the JDK's -1) and a code nobody
+      // issued are two, as `Fx.minorUnits` reads them.
+      expect(AppFormat.minorUnits('XAU'), 2);
+      expect(AppFormat.minorUnits('QQQ'), 2);
+    });
+
+    test('money is written to the same minor units the sale is charged in', () {
+      expect(AppFormat.money(129.99, currencyCode: 'RSD'), contains('129.99'));
+      expect(AppFormat.money(1299.5, currencyCode: 'HUF'), contains('1,299.50'));
+      expect(AppFormat.money(1.25, currencyCode: 'IQD'), contains('1.250'));
+      // Unchanged where the two tables agree.
+      expect(AppFormat.money(3702, currencyCode: 'JPY'), isNot(contains('.')));
+      expect(AppFormat.money(1.5, currencyCode: 'GBP'), contains('1.50'));
+    });
+
     test('the currency symbol follows the code, and is empty without one', () {
       expect(AppFormat.currencySymbol('GBP'), '£');
       expect(AppFormat.currencySymbol('JPY'), contains('¥'));

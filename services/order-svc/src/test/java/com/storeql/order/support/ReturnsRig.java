@@ -51,6 +51,12 @@ public final class ReturnsRig {
           V_C, new Item("4.00", "0"),
           V_TAX, new Item("10.00", "0.20"));
 
+  /** A reduce-to-clear sticker (05.4) on {@link #V_A}: six each instead of ten. */
+  public static final String STICKER_A = "01a0a1c3-3333-7000-8000-0000000000d1";
+
+  /** What each sticker sells its product at, by sticker id, as pricing-svc quotes it. */
+  private static final Map<String, String> STICKERS = Map.of(STICKER_A, "6.00");
+
   private final WebTarget target;
   private final OrderService orders;
   private final PostgresSupport pg;
@@ -89,7 +95,13 @@ public final class ReturnsRig {
               404, "{\"error\":{\"code\":\"PRICING_NO_PRICE\",\"message\":\"no price\"}}");
         }
         BigDecimal qty = l.getJsonNumber("qty").bigDecimalValue();
-        BigDecimal lineTotal = new BigDecimal(item.unitPrice()).multiply(qty);
+        // A line a sticker was scanned for is priced at the sticker, as pricing-svc prices it.
+        String sticker =
+            l.containsKey("markdownId") && !l.isNull("markdownId")
+                ? STICKERS.get(l.getString("markdownId"))
+                : null;
+        BigDecimal unit = new BigDecimal(sticker != null ? sticker : item.unitPrice());
+        BigDecimal lineTotal = unit.multiply(qty);
         lines.add(
             Json.createObjectBuilder()
                 .add("variantId", l.getString("variantId"))

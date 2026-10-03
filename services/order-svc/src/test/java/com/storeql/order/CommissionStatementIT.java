@@ -603,4 +603,94 @@ class CommissionStatementIT {
     String order = sold(T, S, null, 908);
     assertThat(order(T, order).getString("sellerUserId"), is(MANAGER));
   }
+
+  @Inject com.storeql.order.repo.CommissionRepository commissions;
+
+  /**
+   * A per-unit band's threshold is a count of units and is kept as rated — a fractional one from
+   * before whole units were required (2.125) is not rounded to whole yen, and 100.000 units are not
+   * money — and a line translated from the arrangement's currency says so, with what it earned
+   * there. Written through the repository, as the service writes a rated draft; read back over
+   * HTTP, as a manager reads it.
+   */
+  @Test
+  @DisplayName("A per-unit threshold is kept as rated, and a translated line names its currency")
+  void aPerUnitThresholdIsKeptAsRatedAndATranslatedLineNamesItsCurrency() {
+    java.util.UUID tenant = Ids.parse(T);
+    java.util.UUID statementId = Ids.newId();
+    java.util.UUID scheme = Ids.newId();
+    LocalDate from = LocalDate.of(2020, 1, 1);
+    LocalDate to = LocalDate.of(2020, 1, 31);
+    java.util.function.Function<String[], com.storeql.order.domain.SalesAttribution.StatementLine>
+        line =
+            f ->
+                new com.storeql.order.domain.SalesAttribution.StatementLine(
+                    Ids.newId(),
+                    tenant,
+                    statementId,
+                    Ids.parse(ALICE),
+                    scheme,
+                    "per tin",
+                    from,
+                    to,
+                    new java.math.BigDecimal(f[0]),
+                    new java.math.BigDecimal("0.10"),
+                    new java.math.BigDecimal(f[1]),
+                    new java.math.BigDecimal(f[2]),
+                    "EUR",
+                    new java.math.BigDecimal(f[3]));
+    commissions.record(
+        new com.storeql.order.domain.SalesAttribution.Statement(
+            statementId,
+            tenant,
+            null,
+            from,
+            to,
+            "JPY",
+            com.storeql.order.domain.SalesAttribution.DRAFT,
+            new java.math.BigDecimal("15000"),
+            new java.math.BigDecimal("2421"),
+            null,
+            null,
+            null,
+            java.time.Instant.now(),
+            Ids.parse(MANAGER),
+            null,
+            null,
+            List.of(
+                line.apply(new String[] {"0.000", "2.125", "34", "0.21"}),
+                line.apply(new String[] {"2.125", "97.875", "1580", "9.79"}),
+                line.apply(new String[] {"100.000", "50.000", "807", "5.00"}))));
+
+    JsonObject read = statement(T, statementId.toString());
+    assertThat(read.getString("currency"), is("JPY"));
+    List<JsonObject> lines = read.getJsonArray("lines").getValuesAs(JsonObject.class);
+    assertThat(lines, hasSize(3));
+    assertThat(lines.get(0).getString("thresholdFrom"), is("0.000"));
+    assertThat("never whole yen", lines.get(1).getString("thresholdFrom"), is("2.125"));
+    assertThat(lines.get(2).getString("thresholdFrom"), is("100.000"));
+    assertThat(lines.get(1).getString("commission"), is("1580"));
+    assertThat(lines.get(1).getString("rateCurrency"), is("EUR"));
+    assertThat(lines.get(1).getString("ratedCommission"), is("9.79"));
+    // The columns hold it as written: no scale of the statement's currency imposed.
+    try (Connection c = PG.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                // The table alias keeps ORDER BY on the numeric column: a bare name would resolve
+                // to the ::text output column of the same name and sort "100.000" before "2.125".
+                "SELECT l.threshold_from::text, l.rate_currency, l.rated_commission::text FROM"
+                    + " \"order\".commission_statement_lines l WHERE l.statement_id = ?"
+                    + " ORDER BY l.threshold_from")) {
+      ps.setObject(1, statementId);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        rs.next();
+        assertThat(rs.getString(1), is("2.125"));
+        assertThat(rs.getString(2), is("EUR"));
+        assertThat(rs.getString(3), is("9.79"));
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException(e);
+    }
+  }
 }

@@ -1,5 +1,6 @@
 package com.storeql.customer.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.util.List;
@@ -113,7 +114,7 @@ public final class PrivacyDtos {
 
   @Schema(name = "ChooseConsentsRequest")
   public record ChooseRequest(
-      @NotNull @Size(min = 1, max = 8) List<ChoiceRequest> choices,
+      @NotNull @Size(min = 1, max = 8) List<@NotNull @Valid ChoiceRequest> choices,
       @Schema(description = "The language the person read the notice in; English when left out.")
           String language) {}
 

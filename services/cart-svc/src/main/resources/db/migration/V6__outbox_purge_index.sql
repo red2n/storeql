@@ -1,0 +1,14 @@
+-- The hourly purge (common-service OutboxPublisher, through BaseOutboxRepository) deletes published
+-- outbox rows in batches, oldest first:
+--
+--   DELETE FROM outbox WHERE id IN (SELECT id FROM outbox
+--     WHERE published_at IS NOT NULL AND published_at < ? ORDER BY published_at ASC LIMIT ?
+--     FOR UPDATE SKIP LOCKED)
+--
+-- With no index on published_at every batch scans and sorts the whole table. The index is partial,
+-- like the drain's (idx_outbox_unpublished holds the rows still to send, this one the rows already
+-- sent), so it stays as small as the retention window once the purge keeps up.
+--
+-- cart-svc keeps no processed_events table (a redelivered OrderPlaced is a no-op on the cart's own
+-- status), so the purge's second statement finds nothing to trim and needs no index here.
+CREATE INDEX IF NOT EXISTS idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;

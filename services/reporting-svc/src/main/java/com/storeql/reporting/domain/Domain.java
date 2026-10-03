@@ -126,10 +126,19 @@ public final class Domain {
       return labourCost.multiply(BigDecimal.valueOf(100)).divide(net(), 2, RoundingMode.HALF_UP);
     }
 
-    /** Net takings per hour worked, the other way the same pair is read. */
-    public BigDecimal salesPerHour() {
+    /**
+     * Net takings per hour worked, the other way the same pair is read: money, so rounded half up
+     * to the currency's own minor units — whole yen, a dinar's three places — which the caller
+     * gives (ISO 4217, through common-service {@code Fx.minorUnits}; this record stays pure).
+     *
+     * @param minorUnits the currency's minor units
+     */
+    public BigDecimal salesPerHour(int minorUnits) {
       if (minutes <= 0) return null;
-      return net().divide(hours(), 2, RoundingMode.HALF_UP);
+      // From the minutes, not the hours already rounded to two places, so it is rounded once.
+      return net()
+          .multiply(BigDecimal.valueOf(60))
+          .divide(BigDecimal.valueOf(minutes), minorUnits, RoundingMode.HALF_UP);
     }
   }
 }

@@ -803,10 +803,11 @@ public class ReportingRepository extends BaseJdbcRepository {
             + ")"
             + "SELECT COALESCE(s.day, l.day) AS day,"
             + "       COALESCE(s.currency, l.currency) AS currency,"
-            // Scaled, not bare: a day with hours and no sales would otherwise answer 0 where a
-            // trading day answers 0.00, and a column of mixed scales reads as broken.
-            + "       COALESCE(s.gross, 0)::numeric(18,2) AS gross,"
-            + "       COALESCE(s.refunded, 0)::numeric(18,2) AS refunded,"
+            // Not cast to a scale here: a cast to two places rounded a dinar's third. The report
+            // writes every figure at its own currency's minor units (Mappers.money), so a day with
+            // hours and no sales still answers 0.00 pounds, or 0 yen, beside a trading day.
+            + "       COALESCE(s.gross, 0) AS gross,"
+            + "       COALESCE(s.refunded, 0) AS refunded,"
             + "       COALESCE(l.minutes, 0) AS minutes,"
             + "       COALESCE(l.uncosted, 0) AS uncosted,"
             + "       l.cost AS cost"

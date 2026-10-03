@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/format.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
@@ -14,6 +15,7 @@ import '../../shared/widgets/page_header.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart';
 import 'recall_providers.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_picker.dart';
 import '../../shared/util/short_ref.dart';
 import '../../shared/util/status_labels.dart' show recallSourceChoices, recallSourceLabel;
@@ -924,6 +926,13 @@ class _StoreActionDialogState extends ConsumerState<_StoreActionDialog> {
   bool _saving = false;
   String? _error;
 
+  /// What was found is a quantity, read the way the app's language writes a
+  /// number ([AmountMarks]) to three places and recorded as the decimal
+  /// typed. One that cannot be read is refused under its field and nothing is
+  /// recorded: parsed with a point, Romanian's 1.250 packs of a recalled lot
+  /// were recorded as one and a quarter found.
+  final _marks = AmountMarks.ofApp();
+
   @override
   void dispose() {
     _qtyCtrl.dispose();
@@ -932,8 +941,12 @@ class _StoreActionDialogState extends ConsumerState<_StoreActionDialog> {
   }
 
   Future<void> _save() async {
-    final qty = double.tryParse(_qtyCtrl.text.trim());
-    if (qty == null || qty < 0) {
+    if (figureRefused(_marks, [(_qtyCtrl, AmountShape.quantity)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
+    final qty = figureOf(_qtyCtrl, AmountShape.quantity, _marks);
+    if (qty == null) {
       setState(() => _error = 'Enter how much was found — 0 if none.');
       return;
     }
@@ -979,15 +992,14 @@ class _StoreActionDialogState extends ConsumerState<_StoreActionDialog> {
                 ),
               Text('The system took ${_qty(widget.qtyHeld)} off sale here.'),
               const SizedBox(height: AppSpacing.sm),
-              TextField(
-                key: const Key('recall-qty-found'),
+              FigureField(
+                fieldKey: const Key('recall-qty-found'),
                 controller: _qtyCtrl,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                ),
-                decoration: const InputDecoration(
-                  labelText: 'Found on the shelves and in the back *',
-                ),
+                shape: AmountShape.quantity,
+                marks: _marks,
+                label: 'Found on the shelves and in the back *',
+                hint: '0',
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: AppSpacing.md),
               const Text('What became of it'),

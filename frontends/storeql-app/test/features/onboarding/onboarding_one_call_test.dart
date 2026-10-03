@@ -133,6 +133,9 @@ Future<void> _businessDetails(WidgetTester tester) async {
     find.widgetWithText(DropdownButtonFormField<String>, 'Country *'),
   );
   await tester.pumpAndSettle();
+  // Every country is listed, by name: Japan may be below the fold.
+  await tester.scrollUntilVisible(find.text('Japan (JP)'), 400,
+      scrollable: find.byType(Scrollable).last);
   await tester.tap(find.text('Japan (JP)').last);
   await tester.pumpAndSettle();
   await tester.tap(find.text('Continue'));

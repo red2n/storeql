@@ -44,14 +44,14 @@ void main() {
       expect(words, isNot(contains('01a0b000')));
     });
 
+    // Words for when the server sent none: the server's own text is kept when it
+    // says more, because for these it names a particular the sentence cannot.
     final fallbacks = {
       'PRODUCT_SKU_DUPLICATE': 'already has that SKU',
       'PRODUCT_BARCODE_DUPLICATE': 'already has that barcode',
       'PRODUCT_CATEGORY_CYCLE': 'under itself',
-      'STAFF_OWNER_TIER_OWNER_ONLY': 'Only an owner',
       'ROLE_EXCEEDS_CALLER': 'do not hold yourself',
-      'ROLE_STAFF_MANAGE_OWNER_ONLY': 'Only an owner',
-      'STORE_ACCESS_DENIED': 'not one of your stores',
+      'STAFF_BUSINESS_WIDE_TIER': 'for a manager',
     };
     fallbacks.forEach((code, fragment) {
       test('$code reads as a sentence when the server sent no words of its own', () {
@@ -63,15 +63,73 @@ void main() {
       });
     });
 
-    test('a server message that says more is kept', () {
-      expect(
-        friendlyError(_refusal(403, 'STORE_ACCESS_DENIED', 'The security trail is business-wide; ask an owner')),
+    // The access refusals: who may do this. The server's text names the check
+    // that said no ("Caller is not assigned to this store"), so the app's own
+    // sentence shows whatever the server sent.
+    final access = {
+      'STORE_ACCESS_DENIED': 'That is not one of your stores.',
+      'BUSINESS_WIDE_ONLY': 'Only an owner or a head-office manager can do this.',
+      'PERMISSION_DENIED': 'Your role does not allow this. Ask an owner or a manager.',
+      'TENANT_ACCESS_DENIED': 'Only the owner of the business changes this.',
+      'STAFF_OWNER_TIER_OWNER_ONLY': 'Only an owner of the business can make another owner.',
+      'ROLE_STAFF_MANAGE_OWNER_ONLY':
+          'Only an owner of the business can give a role the right to manage staff.',
+      'STAFF_BUSINESS_WIDE_OWNER_ONLY':
+          'Only an owner of the business gives or removes a head-office assignment.',
+      'POS_SESSION_NOT_YOURS': "Only a manager ends another person's session.",
+    };
+    access.forEach((code, words) {
+      test('$code shows the app\'s words whether the server sent none or its own English', () {
+        for (final said in [
+          null,
+          '',
+          'An unexpected error occurred.',
+          code,
+          'Caller is not assigned to this store',
+          'a limit that applies to the whole business is set by a caller held to no store',
+          'Only an owner of the business may make another owner',
+        ]) {
+          final shown = friendlyError(_refusal(403, code, said));
+          expect(shown, words, reason: 'said: $said');
+          expect(shown, isNot(contains('_')), reason: 'no code in the words');
+          expect(shown.toLowerCase(), isNot(contains('caller')), reason: 'never the check\'s own vocabulary');
+        }
+      });
+    });
+
+    test('a STORE_ACCESS_DENIED that arrives with a server message still shows the app\'s words', () {
+      final shown = friendlyError(_refusal(403, 'STORE_ACCESS_DENIED', 'Caller is not assigned to this store'));
+      expect(shown, 'That is not one of your stores.');
+      expect(shown, isNot(contains('Caller')));
+    });
+
+    test('the security trail refused to a manager held to stores reads as business-wide, never as a store', () {
+      // iam-svc answers BUSINESS_WIDE_ONLY there: the trail covers every login of
+      // the business and no store is named, so "not one of your stores" would be
+      // untrue. Both the server's earlier wording and its present one.
+      for (final said in [
         'The security trail is business-wide; ask an owner',
-      );
+        'The security trail is business-wide, so it needs a caller who is not held to stores',
+      ]) {
+        final shown = friendlyError(_refusal(403, 'BUSINESS_WIDE_ONLY', said));
+        expect(shown, 'Only an owner or a head-office manager can do this.', reason: 'said: $said');
+        expect(shown, isNot(contains('not one of your stores')), reason: 'said: $said');
+        expect(shown.toLowerCase(), isNot(contains('caller')), reason: 'said: $said');
+      }
+    });
+
+    test('a server message that says more is kept where the sentence cannot say it', () {
+      // The role's own permissions, in the keys the Roles screen prints.
       expect(
         friendlyError(_refusal(403, 'ROLE_EXCEEDS_CALLER',
             'That role holds permissions you do not hold yourself: stock.adjust')),
         contains('stock.adjust'),
+      );
+      // A validation, not an access refusal: the server names the tier.
+      expect(
+        friendlyError(_refusal(400, 'STAFF_BUSINESS_WIDE_TIER',
+            'a business-wide assignment is for the MANAGER tier only, not CASHIER')),
+        contains('not CASHIER'),
       );
     });
 

@@ -26,7 +26,7 @@ A genuine person who mistypes a password five times is locked out for fifteen mi
 
 - **Personas** ([PRD §2](../PRD.md)): the owner and the manager (unlock and end sessions for their staff), the platform administrator (everything), any signed-in person (their own sessions), a locked-out shopper (waits, or is unlocked by support).
 - **Channels:** gateway · back-office (staff, security screens) · platform console · every shell's account screen (own sessions).
-- **Scope:** per login. Business-wide for the owner and the unrestricted manager (`BusinessWide.require`, as wave 1 set out in `2026-09-30-tenant-svc.md` item 8): a manager held to stores does not unlock or end sessions (`403 BUSINESS_WIDE_ONLY`, `403 STORE_ACCESS_DENIED` for the staff list, as the security-events read does today).
+- **Scope:** per login. Business-wide for the owner and the unrestricted manager (`BusinessWide.require`, as wave 1 set out in `2026-09-30-tenant-svc.md` item 8): a manager held to stores does not unlock or end sessions (`403 BUSINESS_WIDE_ONLY`, as the security-events read does since 2 Oct 2026 — it answered `STORE_ACCESS_DENIED` until then; `403 STORE_ACCESS_DENIED` for the staff list).
 - **Roles that can write:** OWNER, MANAGER held to no store, PLATFORM_ADMIN (and the tiers on [platform-administration](platform-administration.md): an operator unlocks, a support tier only reads). CASHIER, STOREKEEPER, CUSTOMER: `403 FORBIDDEN`.
 - **Sandbox tenant:** behaves the same. A sandbox's staff logins are unlocked by their owner like any other.
 

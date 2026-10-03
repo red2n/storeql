@@ -232,7 +232,7 @@ public class PaymentRunService {
     requireStatus(run, APPROVED);
     List<Item> items = runs.findItems(tenantId, List.of(id));
     Map<UUID, Supplier> suppliers = supplierMap(tenantId, supplierIds(items));
-    requireBankDetailsUnchangedSinceApproval(run, suppliers.values());
+    requireBankDetailsUnchangedSinceApproval(tenantId, run, suppliers);
     View view = view(run, items, suppliers, checksOf(tenantId, id));
     requireAllPayable(view);
     requireNothingHeld(view);
@@ -302,7 +302,7 @@ public class PaymentRunService {
     }
     List<Item> items = runs.findItems(tenantId, List.of(id));
     Map<UUID, Supplier> suppliers = supplierMap(tenantId, supplierIds(items));
-    requireBankDetailsUnchangedSinceApproval(run, suppliers.values());
+    requireBankDetailsUnchangedSinceApproval(tenantId, run, suppliers);
     View view = view(run, items, suppliers, checksOf(tenantId, id));
     requireAllPayable(view);
     return view;
@@ -435,16 +435,17 @@ public class PaymentRunService {
     }
   }
 
-  private static void requireBankDetailsUnchangedSinceApproval(
-      PaymentRun run, Collection<Supplier> suppliers) {
+  /**
+   * Refuses a run whose payee's bank details changed after it was approved (payment diversion).
+   * Counted, not timed: the change's stamp is this service's clock and the approval the database's,
+   * and comparing the two missed a change stamped early and refused one stamped late (V35).
+   */
+  private void requireBankDetailsUnchangedSinceApproval(
+      UUID tenantId, PaymentRun run, Map<UUID, Supplier> suppliers) {
     if (run.approvedAt() == null) return;
     List<String> changed =
-        suppliers.stream()
-            .filter(
-                s ->
-                    s.bankDetailsChangedAt() != null
-                        && s.bankDetailsChangedAt().isAfter(run.approvedAt()))
-            .map(Supplier::name)
+        runs.payeesChangedSinceApproval(tenantId, run.id()).stream()
+            .map(id -> suppliers.containsKey(id) ? suppliers.get(id).name() : id.toString())
             .sorted()
             .toList();
     if (!changed.isEmpty()) {

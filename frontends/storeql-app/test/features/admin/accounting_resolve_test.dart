@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/accounting_section.dart';
 
@@ -100,7 +101,11 @@ Future<_Server> _pump(WidgetTester tester) async {
   final server = _Server();
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
   await tester.pumpWidget(ProviderScope(
-    overrides: [apiClientProvider.overrideWithValue(FakeApiClient(dio))],
+    overrides: [
+      apiClientProvider.overrideWithValue(FakeApiClient(dio)),
+      // The section asks nothing until the sign-in is known.
+      authNotifierProvider.overrideWith(() => RoleAuth('OWNER')),
+    ],
     child: const MaterialApp(
       home: Scaffold(body: SingleChildScrollView(child: AccountingSection(owner: true))),
     ),
@@ -195,7 +200,10 @@ void main() {
     final server = _Server();
     final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
     await tester.pumpWidget(ProviderScope(
-      overrides: [apiClientProvider.overrideWithValue(FakeApiClient(dio))],
+      overrides: [
+        apiClientProvider.overrideWithValue(FakeApiClient(dio)),
+        authNotifierProvider.overrideWith(() => RoleAuth('OWNER')),
+      ],
       child: const MaterialApp(home: Scaffold(body: SingleChildScrollView(child: AccountingSection(owner: true)))),
     ));
     await tester.pumpAndSettle();

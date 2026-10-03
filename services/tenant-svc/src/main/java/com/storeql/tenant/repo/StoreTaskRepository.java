@@ -159,17 +159,33 @@ public class StoreTaskRepository extends BaseOutboxRepository {
 
   /** The lists a business keeps, active ones first and newest within that. */
   public List<Template> templates(UUID tenantId, boolean activeOnly) {
+    return templates(tenantId, activeOnly, null);
+  }
+
+  /**
+   * The business's lists, held to stores: a store's own lists and those for every store (which fall
+   * due at the caller's stores too).
+   *
+   * @param stores the caller's stores, or null for every list of the business
+   */
+  public List<Template> templates(UUID tenantId, boolean activeOnly, Set<UUID> stores) {
     String sql =
         "SELECT "
             + TEMPLATE_COLUMNS
             + " FROM task_templates WHERE tenant_id = ?"
             + (activeOnly ? " AND status = 'ACTIVE'" : "")
+            + (stores == null ? "" : " AND (store_id IS NULL OR store_id = ANY(?))")
             + " ORDER BY status, kind, due_time, created_at DESC";
     return withTemplateItems(
         tenantId,
         query(
             sql,
-            ps -> ps.setObject(1, tenantId),
+            ps -> {
+              ps.setObject(1, tenantId);
+              if (stores != null) {
+                ps.setArray(2, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+              }
+            },
             StoreTaskRepository::mapTemplate,
             "list task lists"));
   }

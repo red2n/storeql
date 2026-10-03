@@ -3,6 +3,7 @@ package com.storeql.purchase.api;
 import com.storeql.purchase.dto.AccountingDtos;
 import com.storeql.purchase.mapper.AccountingMappers;
 import com.storeql.purchase.service.AccountingService;
+import com.storeql.purchase.service.BusinessWide;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.Parsing;
 import com.storeql.web.Permissions;
@@ -30,6 +31,10 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
  * Accounting connectors (17.9), under {@code /accounting}: the package a business keeps its books
  * in, the mapping of its nominal codes onto the package's accounts, and every journal's push. Read
  * by management; the connection itself is the owner's to make and remove.
+ *
+ * <p>All of it is the business's books as a whole — one connection, one mapping, every store's
+ * journals pushed through it — so every route but the catalogue of packages needs a caller held to
+ * no store ({@code 403 BUSINESS_WIDE_ONLY}), as the business's other settings do.
  */
 @Path("/accounting")
 @ApplicationScoped
@@ -56,10 +61,15 @@ public class AccountingResource {
       description =
           "Management. Never the tokens; with what has been pushed, is waiting, failed or is uncertain.")
   @APIResponse(responseCode = "404", description = "ACCOUNTING_NOT_CONNECTED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; BUSINESS_WIDE_ONLY: a caller held to stores, the books being"
+              + " the whole business's")
   @GET
   @Path("/connection")
   public ApiResponse<AccountingDtos.ConnectionResponse> connection() {
-    management();
+    books();
     return ApiResponse.ok(AccountingMappers.toConnection(service.view(ctx.requireTenantId())));
   }
 
@@ -75,6 +85,11 @@ public class AccountingResource {
   @APIResponse(
       responseCode = "503",
       description = "ACCOUNTING_NOT_CONFIGURED: no sealing key in this deployment")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not the owner; BUSINESS_WIDE_ONLY: an owner held to stores, the books being"
+              + " the whole business's")
   @PUT
   @Path("/connection")
   public ApiResponse<AccountingDtos.ConnectionResponse> connect(AccountingDtos.ConnectRequest req) {
@@ -88,6 +103,11 @@ public class AccountingResource {
       summary = "Disconnect the package",
       description = "OWNER only. The tokens, the mapping and the log go with it.")
   @APIResponse(responseCode = "404", description = "ACCOUNTING_NOT_CONNECTED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not the owner; BUSINESS_WIDE_ONLY: an owner held to stores, the books being"
+              + " the whole business's")
   @DELETE
   @Path("/connection")
   public ApiResponse<Void> disconnect() {
@@ -99,6 +119,11 @@ public class AccountingResource {
   @Operation(
       summary = "Switch the connection off",
       description = "OWNER only. Nothing is queued or pushed until it is switched on.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not the owner; BUSINESS_WIDE_ONLY: an owner held to stores, the books being"
+              + " the whole business's")
   @POST
   @Path("/connection/disable")
   public ApiResponse<AccountingDtos.ConnectionResponse> disable() {
@@ -111,6 +136,11 @@ public class AccountingResource {
   @Operation(
       summary = "Switch the connection on",
       description = "OWNER only. What the ledger posted meanwhile is pushed on the next pass.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not the owner; BUSINESS_WIDE_ONLY: an owner held to stores, the books being"
+              + " the whole business's")
   @POST
   @Path("/connection/enable")
   public ApiResponse<AccountingDtos.ConnectionResponse> enable() {
@@ -128,10 +158,20 @@ public class AccountingResource {
       responseCode = "502",
       description = "ACCOUNTING_PROVIDER_REFUSED: the package said no, with its words")
   @APIResponse(responseCode = "503", description = "ACCOUNTING_PROVIDER_UNREACHABLE")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "ACCOUNTING_SETTINGS_INVALID: the connection was kept with a setting the package"
+              + " cannot be reached by; nothing is sent")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; BUSINESS_WIDE_ONLY: a caller held to stores, the books being"
+              + " the whole business's")
   @GET
   @Path("/connection/accounts")
   public ApiResponse<List<AccountingDtos.ExternalAccountResponse>> accounts() {
-    management();
+    books();
     return ApiResponse.ok(
         service.accounts(ctx.requireTenantId()).stream()
             .map(AccountingMappers::toAccount)
@@ -141,10 +181,15 @@ public class AccountingResource {
   @Operation(
       summary = "The mapping of nominal codes onto the package's accounts",
       description = "Management. A code not mapped is sent as itself.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; BUSINESS_WIDE_ONLY: a caller held to stores, the books being"
+              + " the whole business's")
   @GET
   @Path("/connection/mappings")
   public ApiResponse<List<AccountingDtos.MappingResponse>> mappings() {
-    management();
+    books();
     return ApiResponse.ok(
         service.mappings(ctx.requireTenantId()).stream()
             .map(AccountingMappers::toMapping)
@@ -156,6 +201,11 @@ public class AccountingResource {
       description =
           "Management with finance.journal. The whole mapping; what is left out is removed.")
   @APIResponse(responseCode = "400", description = "ACCOUNTING_MAPPING_INVALID")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; PERMISSION_DENIED: no finance.journal; BUSINESS_WIDE_ONLY: a"
+              + " caller held to stores, the books being the whole business's")
   @PUT
   @Path("/connection/mappings")
   public ApiResponse<List<AccountingDtos.MappingResponse>> replaceMappings(
@@ -175,6 +225,11 @@ public class AccountingResource {
           "Management with finance.journal. One pass: every journal posted since the day chosen is"
               + " queued, and everything due is tried. The clock does the same every half minute.")
   @APIResponse(responseCode = "409", description = "ACCOUNTING_DISABLED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; PERMISSION_DENIED: no finance.journal; BUSINESS_WIDE_ONLY: a"
+              + " caller held to stores, the books being the whole business's")
   @POST
   @Path("/connection/sync")
   public ApiResponse<AccountingDtos.RunResponse> sync() {
@@ -187,13 +242,18 @@ public class AccountingResource {
       description =
           "Management. Cursor on the id; status one of PENDING, DELIVERED, FAILED, UNCERTAIN, SKIPPED.")
   @APIResponse(responseCode = "400", description = "ACCOUNTING_STATUS_INVALID")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; BUSINESS_WIDE_ONLY: a caller held to stores, the books being"
+              + " the whole business's")
   @GET
   @Path("/syncs")
   public ApiResponse<AccountingDtos.SyncPage> syncs(
       @QueryParam("status") String status,
       @QueryParam("after") String after,
       @QueryParam("limit") @DefaultValue("20") int limit) {
-    management();
+    books();
     AccountingService.Page page =
         service.syncs(
             ctx.requireTenantId(),
@@ -211,10 +271,15 @@ public class AccountingResource {
       summary = "One journal's push, whole",
       description = "Management. With the journal's lines and every try.")
   @APIResponse(responseCode = "404", description = "ACCOUNTING_SYNC_NOT_FOUND")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; BUSINESS_WIDE_ONLY: a caller held to stores, the books being"
+              + " the whole business's")
   @GET
   @Path("/syncs/{id}")
   public ApiResponse<AccountingDtos.SyncResponse> sync(@PathParam("id") UUID id) {
-    management();
+    books();
     return ApiResponse.ok(AccountingMappers.toSync(service.sync(ctx.requireTenantId(), id)));
   }
 
@@ -224,6 +289,11 @@ public class AccountingResource {
   @APIResponse(
       responseCode = "409",
       description = "ACCOUNTING_SYNC_DELIVERED: already in the package")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; PERMISSION_DENIED: no finance.journal; BUSINESS_WIDE_ONLY: a"
+              + " caller held to stores, the books being the whole business's")
   @POST
   @Path("/syncs/{id}/retry")
   public ApiResponse<AccountingDtos.SyncResponse> retry(@PathParam("id") UUID id) {
@@ -241,14 +311,24 @@ public class AccountingResource {
               + " decided and when.")
   @APIResponse(
       responseCode = "400",
-      description = "ACCOUNTING_OUTCOME_INVALID, ACCOUNTING_EXTERNAL_ID_REQUIRED")
+      description =
+          "ACCOUNTING_OUTCOME_INVALID, ACCOUNTING_EXTERNAL_ID_REQUIRED, ACCOUNTING_NOTE_TOO_LONG")
   @APIResponse(responseCode = "404", description = "ACCOUNTING_SYNC_NOT_FOUND")
   @APIResponse(responseCode = "409", description = "ACCOUNTING_SYNC_NOT_UNCERTAIN")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; PERMISSION_DENIED: no finance.journal; BUSINESS_WIDE_ONLY: a"
+              + " caller held to stores, the books being the whole business's")
   @POST
   @Path("/syncs/{id}/resolve")
   public ApiResponse<AccountingDtos.SyncResponse> resolve(
       @PathParam("id") UUID id, AccountingDtos.ResolveRequest req) {
     finance();
+    // The request carries no Bean Validation: the service reads every field and names each
+    // refusal (ACCOUNTING_OUTCOME_INVALID, ACCOUNTING_EXTERNAL_ID_REQUIRED,
+    // ACCOUNTING_NOTE_TOO_LONG) before anything is written, and a missing body is an outcome
+    // nobody gave.
     AccountingDtos.ResolveRequest r =
         req == null ? new AccountingDtos.ResolveRequest(null, null, null) : req;
     return ApiResponse.ok(
@@ -263,11 +343,17 @@ public class AccountingResource {
           "Management with finance.journal, with a reason — entered by hand, or not wanted there.")
   @APIResponse(responseCode = "400", description = "ACCOUNTING_REASON_REQUIRED")
   @APIResponse(responseCode = "409", description = "ACCOUNTING_SYNC_DELIVERED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN: not management; PERMISSION_DENIED: no finance.journal; BUSINESS_WIDE_ONLY: a"
+              + " caller held to stores, the books being the whole business's")
   @POST
   @Path("/syncs/{id}/skip")
   public ApiResponse<AccountingDtos.SyncResponse> skip(
       @PathParam("id") UUID id, AccountingDtos.SkipRequest req) {
     finance();
+    // As for resolve: the service checks the reason (ACCOUNTING_REASON_REQUIRED) before it writes.
     return ApiResponse.ok(
         AccountingMappers.toSync(
             service.skip(ctx.requireTenantId(), id, req == null ? null : req.reason())));
@@ -277,12 +363,35 @@ public class AccountingResource {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
   }
 
+  /**
+   * Management, held to no store: the connection, its mapping and every push are the business's.
+   */
+  private void books() {
+    management();
+    wholeBusiness();
+  }
+
+  /**
+   * Management with {@code finance.journal}, held to no store. The role first ({@code FORBIDDEN}),
+   * then the permission ({@code PERMISSION_DENIED}), then the scope ({@code BUSINESS_WIDE_ONLY}): a
+   * caller is told what they may not do at all before they are told where they may not do it, as on
+   * every {@code /payment-runs} route.
+   */
   private void finance() {
     management();
     ctx.requirePermission(Permissions.FINANCE_JOURNAL);
+    wholeBusiness();
   }
 
   private void owner() {
     ctx.requireAnyRole("OWNER");
+    wholeBusiness();
+  }
+
+  private void wholeBusiness() {
+    BusinessWide.require(
+        ctx,
+        "The accounting connection and every journal's push are the whole business's books; they"
+            + " need a caller who is not held to stores");
   }
 }

@@ -26,6 +26,8 @@ import '../../shared/util/short_ref.dart';
 import '../../shared/util/slot_label.dart';
 import '../../shared/util/status_labels.dart';
 import 'package:storeql_app/core/ids.dart';
+import '../../core/amount_entry.dart';
+import 'widgets/figure_field.dart';
 
 /// The body of a cancel. The reason is optional, and the server takes "no
 /// reason" as no body at all: a body with a blank reason is refused (SJ-D49),
@@ -1516,9 +1518,18 @@ class FulfilDialog extends ConsumerStatefulWidget {
 }
 
 class _FulfilDialogState extends ConsumerState<FulfilDialog> {
+  /// What goes now of each line: a quantity, read the way the app's language
+  /// writes a number ([AmountMarks]) to three places, starting at what is
+  /// outstanding written the same way. One that cannot be read is refused
+  /// under it and nothing is sent: read with a point, Romanian's 1,5 was no
+  /// quantity at all.
   final Map<String, TextEditingController> _qty = {};
+  final _marks = AmountMarks.ofApp();
   bool _saving = false;
   String? _error;
+
+  bool get _refused =>
+      figureRefused(_marks, [for (final c in _qty.values) (c, AmountShape.quantity)]);
 
   @override
   void dispose() {
@@ -1535,19 +1546,23 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
     final outstanding = lines.where((l) => l.remainingQty > 0).toList();
     final chosen = <Map<String, dynamic>>[];
     var everything = true;
+    if (_refused) return;
     for (final l in outstanding) {
-      final v = double.tryParse(_qty[l.variantId]?.text.trim() ?? '');
-      if (v == null || v < 0) {
+      final c = _qty[l.variantId];
+      final plain = c == null ? null : figureOf(c, AmountShape.quantity, _marks);
+      if (plain == null) {
         setState(() => _error = 'Enter a quantity for every line (0 for none now).');
         return;
       }
+      final v = double.parse(plain);
       if (v > l.remainingQty) {
         setState(() => _error = 'Only ${_fmt(l.remainingQty)} outstanding on '
             '${variantDisplayName(l.variantId, labels)}.');
         return;
       }
       if (v != l.remainingQty) everything = false;
-      if (v > 0) chosen.add({'variantId': l.variantId, 'qty': v});
+      // The plain decimal typed: JSON-B reads it exactly.
+      if (plain != '0') chosen.add({'variantId': l.variantId, 'qty': plain});
     }
     if (chosen.isEmpty) {
       setState(() => _error = 'Nothing to hand over.');
@@ -1597,7 +1612,8 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
           data: (d) {
             final outstanding = d.items.where((l) => l.remainingQty > 0).toList();
             for (final l in outstanding) {
-              _qty.putIfAbsent(l.variantId, () => TextEditingController(text: _fmt(l.remainingQty)));
+              _qty.putIfAbsent(
+                  l.variantId, () => TextEditingController(text: _marks.writeAt(l.remainingQty, 0)));
             }
             // Scrolls: at large text on a phone the lines and their fields
             // outgrow the dialog.
@@ -1625,12 +1641,15 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
                       ),
                       const SizedBox(width: AppSpacing.sm),
                       SizedBox(
-                        width: 90,
-                        child: TextField(
-                          key: Key('fulfil-qty-${l.variantId}'),
-                          controller: _qty[l.variantId],
-                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          decoration: const InputDecoration(labelText: 'Now'),
+                        width: 120,
+                        child: FigureField(
+                          fieldKey: Key('fulfil-qty-${l.variantId}'),
+                          controller: _qty[l.variantId]!,
+                          shape: AmountShape.quantity,
+                          marks: _marks,
+                          label: 'Now',
+                          hint: '0',
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                     ]),
@@ -1648,7 +1667,7 @@ class _FulfilDialogState extends ConsumerState<FulfilDialog> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         FilledButton(
-          onPressed: _saving || !detail.hasValue
+          onPressed: _saving || !detail.hasValue || _refused
               ? null
               : () => _submit(detail.value!.items, labels),
           child: const Text('Picked & packed'),
@@ -1674,10 +1693,20 @@ class PriceOrderDialog extends ConsumerStatefulWidget {
 }
 
 class _PriceOrderDialogState extends ConsumerState<PriceOrderDialog> {
+  // Each unit price and the VAT are money in the order's currency, to its
+  // places, read the way the app's language writes a number ([AmountMarks])
+  // and sent as the decimals typed. One that cannot be read is refused under
+  // its field and nothing is sent: read with a point, Romanian's 4,50 was no
+  // price at all.
   final Map<String, TextEditingController> _price = {};
   final _tax = TextEditingController(text: '0');
+  final _marks = AmountMarks.ofApp();
+  late final _money = AmountShape.money(widget.currency);
   bool _saving = false;
   String? _error;
+
+  bool get _refused => figureRefused(
+      _marks, [for (final c in _price.values) (c, _money), (_tax, _money)]);
 
   @override
   void dispose() {
@@ -1691,17 +1720,20 @@ class _PriceOrderDialogState extends ConsumerState<PriceOrderDialog> {
   String _fmt(double v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
 
   Future<void> _submit(List<OrderLine> lines) async {
+    if (_refused) return;
     final priced = <Map<String, dynamic>>[];
     for (final l in lines) {
-      final v = double.tryParse(_price[l.variantId]?.text.trim() ?? '');
-      if (v == null || v < 0) {
+      final c = _price[l.variantId];
+      final v = c == null ? null : figureOf(c, _money, _marks);
+      if (v == null) {
         setState(() => _error = 'Give every line a price of at least 0.');
         return;
       }
+      // The plain decimal typed: JSON-B reads it exactly.
       priced.add({'variantId': l.variantId, 'unitPrice': v});
     }
-    final tax = double.tryParse(_tax.text.trim());
-    if (tax == null || tax < 0) {
+    final tax = figureOf(_tax, _money, _marks);
+    if (tax == null) {
       setState(() => _error = 'VAT must be a number of at least 0.');
       return;
     }
@@ -1769,21 +1801,25 @@ class _PriceOrderDialogState extends ConsumerState<PriceOrderDialog> {
                       ),
                       const SizedBox(width: AppSpacing.sm),
                       SizedBox(
-                        width: 110,
-                        child: TextField(
-                          key: Key('price-${l.variantId}'),
-                          controller: _price[l.variantId],
-                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          decoration: const InputDecoration(labelText: 'Unit price'),
+                        width: 130,
+                        child: FigureField(
+                          fieldKey: Key('price-${l.variantId}'),
+                          controller: _price[l.variantId]!,
+                          shape: _money,
+                          marks: _marks,
+                          label: 'Unit price',
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                     ]),
                   ),
-                TextField(
-                  key: const Key('price-tax'),
+                FigureField(
+                  fieldKey: const Key('price-tax'),
                   controller: _tax,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(labelText: 'VAT on the order'),
+                  shape: _money,
+                  marks: _marks,
+                  label: 'VAT on the order',
+                  onChanged: (_) => setState(() {}),
                 ),
                 if (_error != null) ...[
                   const SizedBox(height: AppSpacing.sm),
@@ -1798,7 +1834,9 @@ class _PriceOrderDialogState extends ConsumerState<PriceOrderDialog> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
         FilledButton(
-          onPressed: _saving || !detail.hasValue ? null : () => _submit(detail.value!.items),
+          onPressed: _saving || !detail.hasValue || _refused
+              ? null
+              : () => _submit(detail.value!.items),
           child: const Text('Price and release'),
         ),
       ],

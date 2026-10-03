@@ -258,9 +258,24 @@ public class OrderResource {
       responseCode = "400",
       description =
           "No items, missing delivery address for DELIVERY orders, invalid paymentMethod, missing"
-              + " Idempotency-Key, missing price in non-enforced mode, or discount exceeds"
-              + " subtotal")
-  @APIResponse(responseCode = "403", description = "Non-staff caller attempted to apply a discount")
+              + " Idempotency-Key, missing price in non-enforced mode;"
+              + " ORDER_DISCOUNT_NEGATIVE, ORDER_DISCOUNT_REASON_REQUIRED;"
+              + " ORDER_DISCOUNT_EXCEEDS_SUBTOTAL for a discount above the subtotal — on a POS sale,"
+              + " only one above the goods as the till rang them up (each line's qty × the"
+              + " unitPrice it sent, added, then rounded half up once): one within them is the"
+              + " whole basket and is capped at the subtotal, which rounds each line first;"
+              + " VALIDATION_FAILED for a discountAmount off the till (or, with pricing not"
+              + " enforced, a unitPrice or taxAmount) with more decimals than the business's"
+              + " currency has — whole yen, three places for a dinar; a POS sale's discountAmount"
+              + " is the till's own floating-point figure and is rounded half up to the"
+              + " currency's units instead; GIFT_CARD_AMOUNT_INVALID likewise for a gift-card"
+              + " line")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "ORDER_DISCOUNT_NOT_ALLOWED: a caller with no discount authority applied one;"
+              + " ORDER_DISCOUNT_EXCEEDS_AUTHORITY: the discount (on a POS sale, as capped) is"
+              + " above the caller role's percentage ceiling")
   @APIResponse(
       responseCode = "409",
       description =
@@ -461,7 +476,12 @@ public class OrderResource {
               + " the order gets its unit price here; the totals are recomputed and the order"
               + " becomes PENDING, payable like any other. Management-only (SJ-D41).")
   @APIResponse(responseCode = "200", description = "Order priced, now PENDING")
-  @APIResponse(responseCode = "400", description = "A line unpriced, unknown, or priced below zero")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "ORDER_PRICE_LINE_MISSING, ORDER_PRICE_LINE_UNKNOWN; ORDER_PRICE_INVALID for a line"
+              + " priced below zero, or a unit price or taxAmount with more decimals than the"
+              + " order's currency has")
   @APIResponse(responseCode = "409", description = "Order is not AWAITING_PRICE")
   @POST
   @Path("/{id}/price")
@@ -929,17 +949,37 @@ public class OrderResource {
               + " sales.refund outside it) and the new sale is priced as any till sale. The"
               + " returned value pays the new basket directly: exchangeAmount is the lesser of"
               + " the two, dueFromCustomer is collected with normal tenders on the new sale, and"
-              + " refundToCustomer goes back to how the customer paid. Requires an"
-              + " Idempotency-Key: a retry answers with the first exchange.")
+              + " refundToCustomer goes back to how the customer paid. Each new item carries what"
+              + " its pack said as a till sale's line does (batchNo, expiry, markdownId,"
+              + " weighingInstrumentId), so the new basket is checked against open recalls,"
+              + " priced at a sticker and its scale judged exactly as a sale's. Requires an"
+              + " Idempotency-Key: a retry answers with the first exchange. Refusals come in one"
+              + " order: the request (400), the sale (404), the caller's store (403), then the"
+              + " key's first answer, the return and the new sale.")
   @APIResponse(responseCode = "201", description = "Exchange recorded (or the first, on a retry)")
   @APIResponse(
       responseCode = "400",
       description =
-          "IDEMPOTENCY_KEY_REQUIRED, ORDER_RETURN_NO_ITEMS, ORDER_EXCHANGE_NO_NEW_ITEMS,"
+          "IDEMPOTENCY_KEY_REQUIRED, IDEMPOTENCY_KEY_INVALID, VALIDATION_FAILED (a field of the"
+              + " body, e.g. newItems[i].qty finer than a till's reading or under 0.001),"
+              + " INVALID_UUID (newItems[i].variantId / markdownId / weighingInstrumentId,"
+              + " returnItems[i].variantId, customerId), ORDER_LINE_EXPIRY_INVALID"
+              + " (newItems[i].expiry), ORDER_RETURN_NO_ITEMS, ORDER_EXCHANGE_NO_NEW_ITEMS,"
               + " ORDER_RETURN_CONDITION_REQUIRED, ORDER_RETURN_CONDITION_INVALID")
-  @APIResponse(responseCode = "403", description = "ORDER_RETURN_NEEDS_MANAGER")
-  @APIResponse(responseCode = "404", description = "The sale is not found in this business")
-  @APIResponse(responseCode = "409", description = "ORDER_CANNOT_RETURN or a refused sale")
+  @APIResponse(
+      responseCode = "403",
+      description = "FORBIDDEN (not a till role), STORE_ACCESS_DENIED, ORDER_RETURN_NEEDS_MANAGER")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "ORDER_NOT_FOUND (not a sale of this business), ITEM_NOT_IN_ORDER, a sticker"
+              + " pricing-svc does not know (PRICING_MARKDOWN_*)")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "ORDER_CANNOT_RETURN, IDEMPOTENCY_KEY_REUSED, ORDER_EXCHANGE_CURRENCY_MISMATCH,"
+              + " ORDER_EXCHANGE_INCOMPLETE, ORDER_LINE_RECALLED (a new item of a recalled lot),"
+              + " ORDER_SCALE_NOT_CERTIFIED, or another refusal of the new sale")
   @POST
   @Path("/{id}/exchange")
   public Response exchange(

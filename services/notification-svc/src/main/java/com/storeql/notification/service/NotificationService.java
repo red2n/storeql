@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -48,29 +49,34 @@ public class NotificationService {
   }
 
   /**
-   * Lists recent stock-shortage alerts for a store, newest first.
+   * Lists recent stock-shortage alerts, newest first.
    *
    * @param tenantId owning tenant
-   * @param storeId the store whose alerts to list
+   * @param stores the stores whose alerts the caller may read, or {@code null} for every store of
+   *     the tenant ({@code TenantContext#reportStores})
    * @param limit maximum rows to return; capped at 100
    * @return the matching alerts, newest first
    */
-  public List<ShortageAlert> listAlerts(UUID tenantId, UUID storeId, int limit) {
+  public List<ShortageAlert> listAlerts(UUID tenantId, Set<UUID> stores, int limit) {
     int cap = Math.min(limit, 100);
-    return repo.listAlerts(tenantId, storeId, cap);
+    return repo.listAlerts(tenantId, stores, cap);
   }
 
   /**
-   * Lists recent stock-shortage alerts for one variant across every store, newest first.
+   * Lists recent stock-shortage alerts for one variant across the stores the caller may read,
+   * newest first.
    *
    * @param tenantId owning tenant
    * @param variantId the product variant whose alerts to list
+   * @param stores the stores whose alerts the caller may read, or {@code null} for every store of
+   *     the tenant
    * @param limit maximum rows to return; capped at 100
    * @return the matching alerts, newest first
    */
-  public List<ShortageAlert> listAlertsByVariant(UUID tenantId, UUID variantId, int limit) {
+  public List<ShortageAlert> listAlertsByVariant(
+      UUID tenantId, UUID variantId, Set<UUID> stores, int limit) {
     int cap = Math.min(limit, 100);
-    return repo.listAlertsByVariant(tenantId, variantId, cap);
+    return repo.listAlertsByVariant(tenantId, variantId, stores, cap);
   }
 
   /** In-app notifications feed for a tenant, newest first (optionally filtered by recipient). */

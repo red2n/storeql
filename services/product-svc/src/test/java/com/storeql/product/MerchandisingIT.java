@@ -50,6 +50,9 @@ class MerchandisingIT {
   private static final String T = Ids.newId().toString();
   private static final String RIVAL = Ids.newId().toString();
   private static final String STORE = Ids.newId().toString();
+  private static final String OTHER_STORE = Ids.newId().toString();
+  // The rival's own: a store is the business's that names it (404 MERCH_STORE_NOT_FOUND otherwise).
+  private static final String RIVAL_STORE = Ids.newId().toString();
   private static final String USER = Ids.newId().toString();
 
   private static final PostgresSupport PG;
@@ -68,7 +71,12 @@ class MerchandisingIT {
     System.setProperty("storeql.redis.host", REDIS.host());
     System.setProperty("storeql.redis.port", String.valueOf(REDIS.port()));
     System.setProperty("storeql.redis.password", "");
-    TenantSvcStub.start().with(T, "GBP", "GB").with(RIVAL, "GBP", "GB");
+    TenantSvcStub.start()
+        .with(T, "GBP", "GB")
+        .withStore(T, STORE, "GB")
+        .withStore(T, OTHER_STORE, "GB")
+        .with(RIVAL, "GBP", "GB")
+        .withStore(RIVAL, RIVAL_STORE, "GB");
   }
 
   @Inject WebTarget target;
@@ -445,7 +453,7 @@ class MerchandisingIT {
         body(
             get("/admin/merchandising/fixtures/" + fixtureId + "/planogram", null, null, RIVAL),
             404),
-        containsString("PLANOGRAM_NOT_FOUND"));
+        containsString("FIXTURE_NOT_FOUND"));
     assertThat(
         body(post("/admin/merchandising/fixtures/" + fixtureId + "/retire", "{}", RIVAL), 404),
         containsString("FIXTURE_NOT_FOUND"));
@@ -611,7 +619,14 @@ class MerchandisingIT {
     assertThat("still one", count(named, T, code), is(1));
 
     // Another business may use it.
-    body(send("POST", "/admin/merchandising/fixtures", gondola, RIVAL, "OWNER"), 201);
+    body(
+        send(
+            "POST",
+            "/admin/merchandising/fixtures",
+            gondola.replace(STORE, RIVAL_STORE),
+            RIVAL,
+            "OWNER"),
+        201);
 
     // Retired, the code is free again, and retiring twice is refused.
     body(send("POST", "/admin/merchandising/fixtures/" + first + "/retire", "{}", T, "OWNER"), 200);
@@ -902,7 +917,9 @@ class MerchandisingIT {
   @Test
   @DisplayName("A category's plan saved with the id in capitals is answered, not lost")
   void aPlanSavedWithAnUppercaseCategoryIdIsAnswered() {
-    String store = Ids.newId().toString();
+    // The business's own store (a store nobody has is 404 MERCH_STORE_NOT_FOUND); the category
+    // is new, so the plan is this test's alone.
+    String store = STORE;
     String categoryId = category(T);
     Response saved =
         put(
@@ -922,6 +939,393 @@ class MerchandisingIT {
                 + " AND store_id = ?::uuid",
             categoryId,
             store),
+        is(1));
+  }
+
+  /**
+   * The audit that found the upper-case defect said the same of a padded id: it is read as the id
+   * it spells, the plan is saved under that id, and the answer finds the plan again by that id. The
+   * answer's {@code 404 SPACE_PLAN_NOT_FOUND} is the check that the plan was saved, so it is only
+   * ever the answer when the save and the read-back disagree about which id they mean.
+   */
+  @Test
+  @DisplayName(
+      "A plan saved with its ids padded or in capitals is the same plan, replaced not added")
+  void aPlanSavedWithPaddedIdsIsTheSamePlan() {
+    // The business's own store (a store nobody has is 404 MERCH_STORE_NOT_FOUND); the category
+    // is new, so the plan is this test's alone.
+    String store = STORE;
+    String categoryId = category(T);
+    String plans =
+        "SELECT count(*) FROM product.category_space_plans WHERE category_id = ?::uuid"
+            + " AND store_id = ?::uuid";
+
+    // Spaces and a tab round the ids, as pasted from a spreadsheet cell.
+    String first =
+        body(
+            put(
+                "/admin/merchandising/space-plans",
+                "{\"storeId\":\"  "
+                    + store
+                    + " \",\"categoryId\":\" "
+                    + categoryId
+                    + "\\t\",\"targetShare\":0.0800}",
+                T),
+            200);
+    assertThat("the answer is the plan, under the id it spells", first, containsString(categoryId));
+    assertThat(first, containsString("\"targetShare\":\"0.0800\""));
+    assertThat(count(plans, categoryId, store), is(1));
+
+    // The same plan again, both ids in capitals: it replaces the first, as the endpoint says.
+    String second =
+        body(
+            put(
+                "/admin/merchandising/space-plans",
+                "{\"storeId\":\""
+                    + store.toUpperCase(java.util.Locale.ROOT)
+                    + "\",\"categoryId\":\""
+                    + categoryId.toUpperCase(java.util.Locale.ROOT)
+                    + "\",\"targetShare\":0.1200}",
+                T),
+            200);
+    assertThat(second, containsString("\"targetShare\":\"0.1200\""));
+    assertThat("one plan for the pair, not two", count(plans, categoryId, store), is(1));
+  }
+
+  // ── store scope (3 Oct 2026) ────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A store nobody has, or another business's, is not found — an owner included")
+  void theNamedStoreIsTheBusinesssFirst() {
+    String fixtures = "SELECT count(*) FROM product.merch_fixtures WHERE tenant_id = ?::uuid";
+    int ours = count(fixtures, T);
+    int theirs = count(fixtures, RIVAL);
+    String nobodys = Ids.newId().toString();
+    java.util.function.Function<String, String> gondolaAt =
+        store ->
+            "{\"storeId\":\""
+                + store
+                + "\",\"code\":\"NF-"
+                + Ids.newId()
+                + "\",\"name\":\"Gondola\",\"kind\":\"GONDOLA\",\"shelfCount\":4,"
+                + "\"shelfWidthMm\":1000}";
+    java.util.function.Function<String, String> planAt =
+        store ->
+            "{\"storeId\":\""
+                + store
+                + "\",\"categoryId\":\""
+                + Ids.newId()
+                + "\",\"targetShare\":0.25}";
+
+    // Our owner and our whole-business manager, naming a store nobody has.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(
+          send("POST", "/admin/merchandising/fixtures", gondolaAt.apply(nobodys), T, role),
+          404,
+          "MERCH_STORE_NOT_FOUND");
+      assertRefused(
+          send("PUT", "/admin/merchandising/space-plans", planAt.apply(nobodys), T, role),
+          404,
+          "MERCH_STORE_NOT_FOUND");
+    }
+    // Another business's owner and manager, naming our store: not theirs, so not found.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(
+          send("POST", "/admin/merchandising/fixtures", gondolaAt.apply(STORE), RIVAL, role),
+          404,
+          "MERCH_STORE_NOT_FOUND");
+      assertRefused(
+          send("PUT", "/admin/merchandising/space-plans", planAt.apply(STORE), RIVAL, role),
+          404,
+          "MERCH_STORE_NOT_FOUND");
+    }
+    assertThat("nothing of ours was written", count(fixtures, T), is(ours));
+    assertThat("nor of theirs", count(fixtures, RIVAL), is(theirs));
+  }
+
+  /** A request by {@code role} of {@code tenant}, held to {@code held} stores (null: none). */
+  private Response as(
+      String verb, String path, String json, String tenant, String role, String held) {
+    var b =
+        com.storeql.test.WebTargets.at(target, path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", Ids.newId().toString())
+            .header("X-Roles", role);
+    if (held != null) b = b.header("X-Store-Ids", held);
+    return json == null
+        ? b.method(verb)
+        : b.method(verb, Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  private String fixtureAt(String store) {
+    return id(
+        post(
+            "/admin/merchandising/fixtures",
+            "{\"storeId\":\""
+                + store
+                + "\",\"code\":\"F-"
+                + Ids.newId()
+                + "\",\"name\":\"Gondola\",\"kind\":\"GONDOLA\",\"shelfCount\":2,\"shelfWidthMm\":2000}",
+            T));
+  }
+
+  private String publishedAt(String fixtureId) {
+    String planogram = draft(T, fixtureId);
+    body(
+        put(
+            "/admin/merchandising/planograms/" + planogram + "/positions",
+            "{\"positions\":[" + position(variant(T, 100), 1, 1, 2, 2) + "]}",
+            T),
+        200);
+    body(post("/admin/merchandising/planograms/" + planogram + "/publish", "{}", T), 200);
+    return planogram;
+  }
+
+  private static void assertDenied(Response r) {
+    assertRefused(r, 403, "STORE_ACCESS_DENIED");
+  }
+
+  @Test
+  @DisplayName("A manager held to one store cannot read or change another store's fixtures")
+  void aHeldManagerIsKeptToTheirStores() {
+    String a = STORE;
+    String b = OTHER_STORE;
+    String fixB = fixtureAt(b);
+    String draftB = draft(T, fixB);
+    String fixA = fixtureAt(a);
+    String draftA = draft(T, fixA);
+    String m = "MANAGER";
+    String base = "/admin/merchandising";
+
+    // Writes at B: refused, nothing moves.
+    assertDenied(as("POST", base + "/fixtures/" + fixB + "/retire", "{}", T, m, a));
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.merch_fixtures WHERE id = ?::uuid AND status = 'ACTIVE'",
+            fixB),
+        is(1));
+    assertDenied(
+        as(
+            "POST",
+            base + "/fixtures/" + fixB + "/planograms",
+            "{\"effectiveFrom\":\"2026-11-01\"}",
+            T,
+            m,
+            a));
+    assertThat(
+        count("SELECT count(*) FROM product.planograms WHERE fixture_id = ?::uuid", fixB), is(1));
+    String positions = "{\"positions\":[" + position(variant(T, 100), 1, 1, 1, 1) + "]}";
+    assertDenied(as("PUT", base + "/planograms/" + draftB + "/positions", positions, T, m, a));
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.planogram_positions WHERE planogram_id = ?::uuid",
+            draftB),
+        is(0));
+    assertDenied(as("POST", base + "/planograms/" + draftB + "/publish", "{}", T, m, a));
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.planograms WHERE id = ?::uuid AND status = 'DRAFT'",
+            draftB),
+        is(1));
+    assertDenied(
+        as(
+            "POST",
+            base + "/fixtures",
+            "{\"storeId\":\""
+                + b
+                + "\",\"code\":\"Z\",\"name\":\"Z\",\"kind\":\"GONDOLA\",\"shelfCount\":1,\"shelfWidthMm\":100}",
+            T,
+            m,
+            a));
+
+    // Reads at B: refused. A named store must be theirs.
+    assertDenied(as("GET", base + "/planograms/" + draftB, null, T, m, a));
+    assertDenied(as("GET", base + "/fixtures/" + fixB + "/planograms", null, T, m, a));
+    assertDenied(as("GET", base + "/fixtures/" + fixB + "/planogram", null, T, m, a));
+    assertDenied(as("GET", base + "/fixtures?store=" + b, null, T, m, a));
+    assertDenied(as("GET", base + "/space?store=" + b, null, T, m, a));
+    assertDenied(
+        as(
+            "PUT",
+            base + "/space-plans",
+            "{\"storeId\":\""
+                + b
+                + "\",\"categoryId\":\""
+                + category(T)
+                + "\",\"targetShare\":0.1}",
+            T,
+            m,
+            a));
+
+    // Their own store: allowed.
+    body(as("GET", base + "/fixtures?store=" + a, null, T, m, a), 200);
+    body(as("GET", base + "/space?store=" + a, null, T, m, a), 200);
+    body(as("GET", base + "/planograms/" + draftA, null, T, m, a), 200);
+    body(as("GET", base + "/fixtures/" + fixA + "/planograms", null, T, m, a), 200);
+    body(
+        as(
+            "PUT",
+            base + "/planograms/" + draftA + "/positions",
+            "{\"positions\":[" + position(variant(T, 100), 1, 1, 1, 1) + "]}",
+            T,
+            m,
+            a),
+        200);
+    body(as("POST", base + "/planograms/" + draftA + "/publish", "{}", T, m, a), 200);
+    body(as("POST", base + "/fixtures/" + fixA + "/retire", "{}", T, m, a), 200);
+
+    // Held to both: both are theirs. Held to none, and an owner: any.
+    body(as("GET", base + "/planograms/" + draftB, null, T, m, a + "," + b), 200);
+    body(as("GET", base + "/planograms/" + draftB, null, T, m, null), 200);
+    body(
+        as("PUT", base + "/planograms/" + draftB + "/positions", positions, T, "OWNER", null), 200);
+    body(as("POST", base + "/planograms/" + draftB + "/publish", "{}", T, m, null), 200);
+    body(as("POST", base + "/fixtures/" + fixB + "/retire", "{}", T, "OWNER", null), 200);
+  }
+
+  @Test
+  @DisplayName(
+      "A reset is held to the stores of its layouts: refused, nothing moves; listed likewise")
+  void resetsFollowTheirLayoutsStores() {
+    String a = STORE;
+    String b = OTHER_STORE;
+    String base = "/admin/merchandising/resets/";
+    String atB = publishedAt(fixtureAt(b));
+    String atA = publishedAt(fixtureAt(a));
+    String resetB = reset(T, category(T));
+    body(post(base + resetB + "/planograms", attachBody(atB), T), 200);
+    String resetBoth = reset(T, category(T));
+    body(post(base + resetBoth + "/planograms", attachBody(atA), T), 200);
+    body(post(base + resetBoth + "/planograms", attachBody(publishedAt(fixtureAt(b))), T), 200);
+    String empty = reset(T, category(T));
+
+    // The reset at B only: refused to a manager held to A, whatever they do with it.
+    assertDenied(as("POST", base + resetB + "/complete", "{}", T, "MANAGER", a));
+    assertDenied(as("POST", base + resetB + "/cancel", "{\"reason\":\"no\"}", T, "MANAGER", a));
+    assertDenied(as("POST", base + resetB + "/planograms", attachBody(atA), T, "MANAGER", a));
+    // An empty reset takes B's layout only from someone who holds B's store.
+    assertDenied(as("POST", base + empty + "/planograms", attachBody(atB), T, "MANAGER", a));
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.category_resets WHERE id = ?::uuid AND status = 'PLANNED'",
+            resetB),
+        is(1));
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.category_reset_planograms WHERE reset_id = ?::uuid",
+            resetB),
+        is(1));
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.category_reset_planograms WHERE reset_id = ?::uuid",
+            empty),
+        is(0));
+
+    // The list: B's reset is not theirs to see; the empty one and one touching A are.
+    String listed = body(as("GET", "/admin/merchandising/resets", null, T, "MANAGER", a), 200);
+    assertThat(listed, not(containsString(resetB)));
+    assertThat(listed, containsString(empty));
+    assertThat(listed, containsString(resetBoth));
+
+    // Held to A, their own layout into an empty reset is theirs; the reset then carries A.
+    // A layout no other reset has claimed (a shelf is moved by one reset at a time).
+    body(
+        as(
+            "POST",
+            base + empty + "/planograms",
+            attachBody(publishedAt(fixtureAt(a))),
+            T,
+            "MANAGER",
+            a),
+        200);
+    body(as("POST", base + empty + "/complete", "{}", T, "MANAGER", a), 200);
+
+    // Held to both, to none, and an owner: allowed.
+    body(
+        as(
+            "POST",
+            base + resetB + "/cancel",
+            "{\"reason\":\"range changed\"}",
+            T,
+            "MANAGER",
+            a + "," + b),
+        200);
+    String another = reset(T, category(T));
+    body(post(base + another + "/planograms", attachBody(publishedAt(fixtureAt(b))), T), 200);
+    body(as("POST", base + another + "/complete", "{}", T, "MANAGER", null), 200);
+  }
+
+  @Test
+  @DisplayName("Another business's staff, with our store named, find or move nothing here")
+  void anotherBusinessWithOurStoreNamedMovesNothing() {
+    String fixture = fixtureAt(STORE);
+    String planogram = draft(T, fixture);
+    String reset = reset(T, category(T));
+    String base = "/admin/merchandising";
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      boolean management = role.equals("OWNER") || role.equals("MANAGER");
+      int status = management ? 404 : 403;
+      String code = management ? "NOT_FOUND" : "FORBIDDEN";
+      assertRefused(
+          as("POST", base + "/fixtures/" + fixture + "/retire", "{}", RIVAL, role, STORE),
+          status,
+          code);
+      assertRefused(
+          as(
+              "POST",
+              base + "/fixtures/" + fixture + "/planograms",
+              "{\"effectiveFrom\":\"2026-11-01\"}",
+              RIVAL,
+              role,
+              STORE),
+          status,
+          code);
+      assertRefused(
+          as("GET", base + "/fixtures/" + fixture + "/planograms", null, RIVAL, role, STORE),
+          status,
+          code);
+      assertRefused(
+          as(
+              "PUT",
+              base + "/planograms/" + planogram + "/positions",
+              "{\"positions\":[]}",
+              RIVAL,
+              role,
+              STORE),
+          status,
+          code);
+      assertRefused(
+          as("POST", base + "/planograms/" + planogram + "/publish", "{}", RIVAL, role, STORE),
+          status,
+          code);
+      assertRefused(
+          as("POST", base + "/resets/" + reset + "/complete", "{}", RIVAL, role, STORE),
+          status,
+          code);
+      assertRefused(
+          as(
+              "POST",
+              base + "/resets/" + reset + "/cancel",
+              "{\"reason\":\"x\"}",
+              RIVAL,
+              role,
+              STORE),
+          status,
+          code);
+    }
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.merch_fixtures WHERE id = ?::uuid AND status = 'ACTIVE'",
+            fixture),
+        is(1));
+    assertThat(
+        count("SELECT count(*) FROM product.planograms WHERE fixture_id = ?::uuid", fixture),
+        is(1));
+    assertThat(
+        count(
+            "SELECT count(*) FROM product.category_resets WHERE id = ?::uuid AND status = 'PLANNED'",
+            reset),
         is(1));
   }
 }

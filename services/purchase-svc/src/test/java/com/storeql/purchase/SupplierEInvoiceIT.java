@@ -575,6 +575,273 @@ class SupplierEInvoiceIT {
     assertCode(get("/e-invoices?status=LOST", T, "OWNER"), 400, "PURCHASE_EINVOICE_STATUS_INVALID");
   }
 
+  // ── store-held callers ───────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "A document billing store A's order is store A's: a manager held to another store does not"
+          + " list it and is refused STORE_ACCESS_DENIED reading it, its original, refusing or"
+          + " matching it, and matching a document with no order to store A's order; a document"
+          + " with no order is the whole inbox's; another business, even naming store A, finds"
+          + " none of it; a shopper is turned away; nothing moves")
+  void aCallerHeldToStoresSeesAndDecidesOnlyTheirStoresDocuments() {
+    String supplier = supplier("Scope Farms", "GB999999973", null, null);
+    String po = receivedOrder(supplier, 10, "2.50");
+    String billed =
+        data(
+                send(
+                    ubl(
+                        invoice(
+                            "SC-1",
+                            "GB999999973",
+                            null,
+                            OUR_VAT,
+                            po,
+                            "380",
+                            null,
+                            line("Pears", null, null, "10", "2.50"))),
+                    "application/xml",
+                    T,
+                    "OWNER"),
+                201)
+            .getString("id");
+    String orphan =
+        data(
+                send(
+                    ubl(
+                        invoice(
+                            "SC-2",
+                            "GB999999973",
+                            null,
+                            OUR_VAT,
+                            "4500012345",
+                            "380",
+                            null,
+                            line("Apples", null, "1", "10", "2.50"))),
+                    "application/xml",
+                    T,
+                    "OWNER"),
+                201)
+            .getString("id");
+    String elsewhere = Ids.newId().toString();
+    String before = inbox();
+
+    // Held to another store: the inbox's document, not store A's.
+    String listed = text(held("GET", "/e-invoices", null, T, "MANAGER", elsewhere), 200);
+    assertThat(listed, containsString(orphan));
+    assertThat(listed, not(containsString(billed)));
+    for (String[] c :
+        new String[][] {
+          {"GET", "/e-invoices/" + billed, null},
+          {"GET", "/e-invoices/" + billed + "/document", null},
+          {"POST", "/e-invoices/" + billed + "/refuse", "{\"reason\":\"not ours\"}"},
+          {"POST", "/e-invoices/" + billed + "/match", "{}"},
+          {"POST", "/e-invoices/" + orphan + "/match", "{\"poId\":\"" + po + "\"}"},
+          {
+            "POST",
+            "/e-invoices/" + orphan + "/match",
+            "{\"poId\":\"" + po + "\",\"remember\":true}"
+          },
+        }) {
+      assertCode(held(c[0], c[1], c[2], T, "MANAGER", elsewhere), 403, "STORE_ACCESS_DENIED");
+    }
+    assertThat(
+        held("GET", "/e-invoices/" + orphan, null, T, "MANAGER", elsewhere).getStatus(), is(200));
+    assertThat("nothing was refused, matched, captured or learnt", inbox(), is(before));
+
+    // Held to store A: both.
+    String atA = text(held("GET", "/e-invoices", null, T, "MANAGER", STORE_A), 200);
+    assertThat(atA, containsString(orphan));
+    assertThat(atA, containsString(billed));
+    assertThat(
+        held("GET", "/e-invoices/" + billed, null, T, "MANAGER", STORE_A).getStatus(), is(200));
+    assertThat(
+        held("GET", "/e-invoices/" + billed + "/document", null, T, "MANAGER", STORE_A).getStatus(),
+        is(200));
+
+    // Another business, of every role, held to none or naming our store A: none of it.
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      for (String stores : new String[] {null, STORE_A}) {
+        assertThat(
+            role,
+            text(held("GET", "/e-invoices", null, T2, role, stores), 200),
+            containsString("\"data\":[]"));
+        for (String id : new String[] {billed, orphan}) {
+          assertThat(
+              role + " " + id,
+              held("GET", "/e-invoices/" + id, null, T2, role, stores).getStatus(),
+              is(404));
+          assertThat(
+              held("GET", "/e-invoices/" + id + "/document", null, T2, role, stores).getStatus(),
+              is(404));
+          assertThat(
+              held("POST", "/e-invoices/" + id + "/refuse", "{\"reason\":\"x\"}", T2, role, stores)
+                  .getStatus(),
+              anyOf(is(403), is(404)));
+          assertThat(
+              held("POST", "/e-invoices/" + id + "/match", "{}", T2, role, stores).getStatus(),
+              is(404));
+        }
+      }
+    }
+    for (String tenant : new String[] {T, T2}) {
+      assertThat(held("GET", "/e-invoices", null, tenant, "CUSTOMER", null).getStatus(), is(403));
+      assertThat(
+          held("GET", "/e-invoices/" + billed, null, tenant, "CUSTOMER", null).getStatus(),
+          is(403));
+      assertThat(
+          held(
+                  "POST",
+                  "/e-invoices/" + billed + "/refuse",
+                  "{\"reason\":\"x\"}",
+                  tenant,
+                  "CUSTOMER",
+                  null)
+              .getStatus(),
+          is(403));
+    }
+    assertThat("nothing moved", inbox(), is(before));
+  }
+
+  @Test
+  @DisplayName(
+      "A manager held to another store uploads a document billing store A's order: it is received"
+          + " and kept NEEDS_DECISION against that order, never captured on their word, and they"
+          + " are answered without the order — its id, the order lines, what it became; a manager"
+          + " at store A sees it whole and captures it")
+  void anUploadBillingAnotherStoresOrderWaitsThereAndIsAnsweredWithoutIt() {
+    String supplier = supplier("Upload Farms", "GB999999973", null, null);
+    String po = receivedOrder(supplier, 10, "2.50");
+    String elsewhere = Ids.newId().toString();
+    String before = inbox(); // no document yet: "/<invoices>/<codes>/<ledger lines>"
+    byte[] document =
+        ubl(
+            invoice(
+                "UP-1",
+                "GB999999973",
+                null,
+                OUR_VAT,
+                po,
+                "380",
+                null,
+                line("Apples", null, "1", "10", "2.50")));
+    JsonObject answer =
+        data(
+            as("/e-invoices", T, "MANAGER")
+                .header("X-Store-Ids", elsewhere)
+                .post(Entity.entity(document, "application/xml")),
+            201);
+    assertThat(answer.toString(), answer.getString("status"), is("NEEDS_DECISION"));
+    assertThat(answer.toString(), absent(answer, "poId"), is(true));
+    assertThat(answer.toString(), absent(answer, "supplierInvoiceId"), is(true));
+    assertThat(answer.getString("problem"), not(containsString("RECEIVED")));
+    for (var l : answer.getJsonArray("lines")) {
+      assertThat(l.toString(), absent(l.asJsonObject(), "poLineId"), is(true));
+    }
+    String id = answer.getString("id");
+    assertThat(
+        "kept against store A's order; nothing captured, learnt or posted",
+        inbox(),
+        is("NEEDS_DECISION:" + po + ":-" + before));
+
+    JsonObject atA = data(held("GET", "/e-invoices/" + id, null, T, "MANAGER", STORE_A), 200);
+    assertThat(atA.getString("poId"), is(po));
+    JsonObject captured =
+        data(held("POST", "/e-invoices/" + id + "/match", "{}", T, "MANAGER", STORE_A), 200);
+    assertThat(captured.toString(), captured.getString("status"), is("CAPTURED"));
+  }
+
+  @Test
+  @DisplayName(
+      "A match with remember by a manager held to stores is made, but the supplier's record is"
+          + " left alone and the answer says so (notRemembered); an owner's match keeps the address")
+  void aStoreHeldMatchDoesNotChangeTheSupplier() {
+    String supplier = supplier("Held Farms", null, null, null);
+    String po = receivedOrder(supplier, 10, "2.50");
+    byte[] first =
+        ubl(
+            invoice(
+                "HF-1",
+                "GB555555555",
+                "GB555555555",
+                OUR_VAT,
+                po,
+                "380",
+                null,
+                line("Apples", null, "1", "10", "2.50")));
+    String id = data(send(first, "application/xml", T, "OWNER"), 201).getString("id");
+    JsonObject matched =
+        data(
+            held(
+                "POST",
+                "/e-invoices/" + id + "/match",
+                "{\"supplierId\":\"" + supplier + "\",\"remember\":true}",
+                T,
+                "MANAGER",
+                STORE_A),
+            200);
+    assertThat(matched.toString(), matched.getString("status"), is("CAPTURED"));
+    assertThat(matched.getString("notRemembered"), containsString("electronic address"));
+    JsonObject unchanged = data(get("/suppliers/" + supplier, T, "OWNER"), 200);
+    assertThat(unchanged.toString(), absent(unchanged, "einvoiceId"), is(true));
+
+    String po2 = receivedOrder(supplier, 10, "2.50");
+    byte[] second =
+        ubl(
+            invoice(
+                "HF-2",
+                "GB555555555",
+                "GB555555555",
+                OUR_VAT,
+                po2,
+                "380",
+                null,
+                line("Apples", null, "1", "10", "2.50")));
+    JsonObject next = data(send(second, "application/xml", T, "OWNER"), 201);
+    assertThat("not taught, so not found", next.getString("status"), is("NEEDS_SUPPLIER"));
+    JsonObject byOwner =
+        data(
+            post(
+                "/e-invoices/" + next.getString("id") + "/match",
+                "{\"supplierId\":\"" + supplier + "\",\"remember\":true}",
+                T,
+                "OWNER"),
+            200);
+    assertThat(byOwner.toString(), absent(byOwner, "notRemembered"), is(true));
+    assertThat(
+        data(get("/suppliers/" + supplier, T, "OWNER"), 200).getString("einvoiceId"),
+        is("GB555555555"));
+  }
+
+  /** Every document's status and order, the invoices captured and the codes learnt, as one. */
+  private String inbox() {
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = c.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT (SELECT coalesce(string_agg(status || ':' || coalesce(po_id::text, '-')"
+                    + " || ':' || coalesce(decision_reason, '-'), ',' ORDER BY id), '')"
+                    + " FROM purchase.supplier_einvoices)"
+                    + " || '/' || (SELECT count(*) FROM purchase.supplier_invoices)"
+                    + " || '/' || (SELECT count(*) FROM purchase.supplier_item_codes)"
+                    + " || '/' || (SELECT count(*) FROM purchase.nominal_ledger_entries)")) {
+      rs.next();
+      return rs.getString(1);
+    } catch (java.sql.SQLException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /** Any method, as somebody of a business held to the stores named (comma-separated) or none. */
+  private Response held(
+      String method, String path, String json, String tenant, String role, String stores) {
+    Invocation.Builder b = as(path, tenant, role);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
+    return json == null
+        ? b.build(method).invoke()
+        : b.build(method, Entity.entity(json, MediaType.APPLICATION_JSON)).invoke();
+  }
+
   // ── delivered by a network (the transport seam) ───────────────────────────────
 
   @Test
@@ -820,6 +1087,11 @@ class SupplierEInvoiceIT {
 
   private Response post(String path, String json, String tenant, String role) {
     return as(path, tenant, role).post(Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  /** JSON-B leaves a null out altogether, so "none" is an absent member or an explicit null. */
+  private static boolean absent(JsonObject o, String field) {
+    return !o.containsKey(field) || o.isNull(field);
   }
 
   private static String text(Response r, int status) {

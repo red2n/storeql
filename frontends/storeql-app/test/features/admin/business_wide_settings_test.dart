@@ -23,6 +23,11 @@ import '../../support/fake_api.dart';
 // ---------------------------------------------------------------------------
 
 const _note = 'Only an owner or a head-office manager changes this.';
+const _returnPolicyNote = 'Only an owner or a head-office manager changes the return policy.';
+
+// The refusal itself, wherever it arrives: true of a read (iam-svc's security
+// trail) as well as a change, so it says "can do this", not "changes this".
+const _refusal = 'Only an owner or a head-office manager can do this.';
 
 class _Server implements HttpClientAdapter {
   @override
@@ -40,6 +45,8 @@ class _Server implements HttpClientAdapter {
       body = '{"data":{"country":"GB","countries":["GB"],"classes":[],"holds":[]}}';
     } else if (p.endsWith('/admin/stores')) {
       body = '{"data":[{"id":"s1","name":"Main","code":"MAIN","type":"STORE","status":"ACTIVE"}],"meta":{}}';
+    } else if (p.endsWith('/admin/return-policy')) {
+      body = '{"data":{"windowDays":30,"cashierCeiling":50.0,"noReceiptAllowed":false,"currency":"GBP"}}';
     } else if (p.contains('security-notices')) {
       body = '{"data":[{"id":"n1","incidentId":"i1","title":"Security notice","body":"Read this.",'
           '"issuedAt":"2026-09-14T08:00:00Z","acknowledgedAt":null,"acknowledged":false}]}';
@@ -88,6 +95,15 @@ void main() {
       expect(find.text(_note), findsOneWidget);
     });
 
+    // order-svc answers PUT /admin/return-policy with 403 BUSINESS_WIDE_ONLY to a manager held to
+    // stores: the policy is read, Edit is not offered, and the card says who changes it.
+    testWidgets('reads the return policy but is not offered changing it', (tester) async {
+      await _pump(tester, const StoresScreen(), role: 'MANAGER', storeIds: ['s1']);
+      expect(find.byKey(const Key('return-policy-summary')), findsOneWidget);
+      expect(find.byKey(const Key('return-policy-edit')), findsNothing);
+      expect(find.text(_returnPolicyNote), findsOneWidget);
+    });
+
     testWidgets('reads a security notice but does not acknowledge it', (tester) async {
       await _pump(tester, const SecurityNoticesScreen(), role: 'MANAGER', storeIds: ['s1']);
       expect(find.text('Security notice'), findsOneWidget);
@@ -102,6 +118,8 @@ void main() {
         await _pump(tester, const StoresScreen(), role: role);
         expect(find.text('Add Store'), findsOneWidget);
         expect(find.text(_note), findsNothing);
+        expect(find.byKey(const Key('return-policy-edit')), findsOneWidget);
+        expect(find.text(_returnPolicyNote), findsNothing);
         await _pump(tester, const RetentionScreen(), role: role);
         expect(find.byKey(const Key('retention-hold-place')), findsOneWidget);
         expect(find.text(_note), findsNothing);
@@ -124,12 +142,18 @@ void main() {
         );
 
     test('reads in words when the server sent only the code', () {
-      expect(friendlyError(refused('BUSINESS_WIDE_ONLY')), _note);
-      expect(friendlyError(refused('')), _note);
+      expect(friendlyError(refused('BUSINESS_WIDE_ONLY')), _refusal);
+      expect(friendlyError(refused('')), _refusal);
     });
 
-    test('keeps a server message that says more', () {
-      expect(friendlyError(refused('Roles are set for the whole business.')), 'Roles are set for the whole business.');
+    test('shows the app\'s words over any server message, however plain', () {
+      // An access refusal is the same sentence wherever it arrives, so staff learn
+      // it once; the server's own text names the check ("a caller held to no store").
+      expect(friendlyError(refused('Roles are set for the whole business.')), _refusal);
+      expect(
+        friendlyError(refused('a limit that applies to the whole business is set by a caller held to no store')),
+        _refusal,
+      );
     });
   });
 }

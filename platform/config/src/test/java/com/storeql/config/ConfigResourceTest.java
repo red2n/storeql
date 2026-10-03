@@ -2,6 +2,7 @@ package com.storeql.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.web.ApiException;
@@ -122,5 +123,30 @@ class ConfigResourceTest {
     Map<String, String> merged = resource.get("iam-svc", "default").data();
     assertEquals("overlay", merged.get("storeql.shared"));
     assertEquals("1", merged.get("storeql.base"));
+  }
+
+  @Test
+  @DisplayName(
+      "A file that cannot be read is a server fault of its own, naming the file and nothing of the disk")
+  void aFileThatCannotBeReadIsAServerFault() throws IOException {
+    // A directory where the file should be passes the readable check and fails on the read: the
+    // disk, not the caller, is what is wrong.
+    Files.createDirectory(repo.resolve("broken-svc.properties"));
+    ApiException base = refused(() -> resource.get("broken-svc", "default"));
+    assertEquals(500, base.status());
+    assertEquals("CONFIG_READ_ERROR", base.code());
+    assertEquals("Failed to read broken-svc.properties", base.getMessage());
+    assertFalse(base.getMessage().contains(temp.toString()), "no path of the disk is told");
+    assertNotNull(base.getCause(), "the cause is kept for the log");
+
+    // The overlay failing after a base that read fine serves nothing: not the base alone.
+    Files.createDirectory(repo.resolve("iam-svc-broken.properties"));
+    ApiException overlay = refused(() -> resource.get("iam-svc", "broken"));
+    assertEquals(500, overlay.status());
+    assertEquals("CONFIG_READ_ERROR", overlay.code());
+    assertEquals("Failed to read iam-svc-broken.properties", overlay.getMessage());
+
+    // The same service, with a profile whose file is whole, is as it was.
+    assertEquals("overlay", resource.get("iam-svc", "default").data().get("storeql.shared"));
   }
 }

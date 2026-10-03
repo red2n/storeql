@@ -112,7 +112,7 @@ export default function ({ inb, optional, required, quiet, london, cashier, keep
   expect(choose(optional.id, 'OFF', keeper.token), '[-] nor a storekeeper', 403);
   for (const [role, who] of Object.entries(rivals)) {
     const r = choose(optional.id, 'OFF', who.token);
-    truthy(`[-] the rival's ${role.toLowerCase()} cannot choose for our shop`, r.status === 404 || r.status === 403, `${r.status} ${errorCode(r)}`);
+    expect(r, `[-] the rival's ${role.toLowerCase()} cannot choose for our shop`, [404, 403]);
   }
   expect(storeOf(optional.id, rivals.OWNER.token), "[-] ...nor read our shop's", 404);
   truthy("[-] ...nor find it in their till's store list", !listed(rivals.CASHIER.token).some((s) => s.storeId === optional.id));

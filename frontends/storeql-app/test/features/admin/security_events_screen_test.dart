@@ -35,7 +35,20 @@ class _Server implements HttpClientAdapter {
     requests.add(o);
     if (o.path.endsWith('/auth/admin/security-events')) {
       if (status != 200) {
-        return jsonResponse(jsonEncode({'error': {'code': 'STORE_ACCESS_DENIED', 'message': 'STORE_ACCESS_DENIED'}}), status);
+        // What iam-svc answers a manager held to stores: the trail covers every
+        // login of the business, so it is business-wide, never a store refusal.
+        return jsonResponse(
+            jsonEncode({
+              'type': 'urn:storeql:problem:BUSINESS_WIDE_ONLY',
+              'status': status,
+              'detail': 'The security trail is business-wide, so it needs a caller who is not held to stores',
+              'code': 'BUSINESS_WIDE_ONLY',
+              'error': {
+                'code': 'BUSINESS_WIDE_ONLY',
+                'message': 'The security trail is business-wide, so it needs a caller who is not held to stores',
+              },
+            }),
+            status);
       }
       if (empty) return jsonResponse('{"data":{"items":[],"nextCursor":null}}');
       if (o.queryParameters['after'] == 'c1') {
@@ -169,8 +182,10 @@ void main() {
   testWidgets('a refusal reads in words', (tester) async {
     final srv = _Server()..status = 403;
     await _pump(tester, server: srv);
-    expect(find.text('That is not one of your stores.'), findsOneWidget);
-    expect(find.textContaining('STORE_ACCESS_DENIED'), findsNothing);
+    expect(find.text('Only an owner or a head-office manager can do this.'), findsOneWidget);
+    expect(find.textContaining('not one of your stores'), findsNothing);
+    expect(find.textContaining('BUSINESS_WIDE_ONLY'), findsNothing);
+    expect(find.textContaining('caller'), findsNothing);
   });
 
   testWidgets('a manager held to stores is told who reads it and nothing is asked', (tester) async {

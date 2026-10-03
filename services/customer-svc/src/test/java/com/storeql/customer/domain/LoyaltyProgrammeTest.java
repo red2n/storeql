@@ -123,6 +123,35 @@ class LoyaltyProgrammeTest {
         LoyaltyProgramme.validate(
             12, 12, List.of(new Tier("bronze tier!", BigDecimal.ZERO, BigDecimal.ONE))),
         containsString("name"));
+    // A threshold the ledger cannot hold is refused by name, not rounded to another figure or left
+    // to the database: three decimals, and more digits than NUMERIC(18,2) has room for.
+    assertThat(
+        LoyaltyProgramme.validate(
+            12,
+            12,
+            List.of(
+                new Tier("BRONZE", BigDecimal.ZERO, BigDecimal.ONE),
+                new Tier("SILVER", new BigDecimal("10.005"), BigDecimal.ONE))),
+        containsString("threshold"));
+    assertThat(
+        LoyaltyProgramme.validate(
+            12,
+            12,
+            List.of(
+                new Tier("BRONZE", BigDecimal.ZERO, BigDecimal.ONE),
+                new Tier("SILVER", new BigDecimal("1e17"), BigDecimal.ONE))),
+        containsString("threshold"));
+    // What it can hold passes: two decimals, trailing zeros, and the largest it has room for.
+    assertThat(
+        LoyaltyProgramme.validate(
+            12,
+            12,
+            List.of(
+                new Tier("BRONZE", BigDecimal.ZERO, BigDecimal.ONE),
+                new Tier("SILVER", new BigDecimal("10.50"), BigDecimal.ONE),
+                new Tier("GOLD", new BigDecimal("20.500"), BigDecimal.ONE),
+                new Tier("PLATINUM", new BigDecimal("9999999999999999.99"), BigDecimal.ONE))),
+        is(nullValue()));
     List<Tier> seven = new java.util.ArrayList<>();
     for (int i = 0; i < 7; i++) {
       seven.add(new Tier("T" + i, BigDecimal.valueOf(i * 100L), BigDecimal.ONE));

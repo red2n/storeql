@@ -138,7 +138,7 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Issue'));
     await tester.pumpAndSettle();
     final issue = server.posts('/gift-cards').single;
-    expect(issue.data, {'storeId': 's1', 'amount': 25.0, 'reason': 'GOODWILL'});
+    expect(issue.data, {'storeId': 's1', 'amount': '25', 'reason': 'GOODWILL'});
     expect(issue.data, isNot(contains('paidBy')));
     expect(isV7(issue.headers['Idempotency-Key'] as String), isTrue);
     expect(find.text('Gift card issued'), findsOneWidget);
@@ -192,7 +192,7 @@ void main() {
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();
     final reload = server.posts('/reload').single;
-    expect(reload.data, {'amount': 10.0, 'reason': 'COMPENSATION'});
+    expect(reload.data, {'amount': '10', 'reason': 'COMPENSATION'});
     expect(isV7(reload.headers['Idempotency-Key'] as String), isTrue);
 
     await tester.tap(find.text('Redeem'));
@@ -202,7 +202,7 @@ void main() {
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();
     final redeem = server.posts('/redeem').single;
-    expect(redeem.data, {'amount': 5.0});
+    expect(redeem.data, {'amount': '5'});
     expect(redeem.headers.containsKey('Idempotency-Key'), isFalse);
   });
 

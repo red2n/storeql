@@ -14,7 +14,10 @@ import jakarta.ws.rs.client.Entity;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -60,6 +63,8 @@ class InventoryIT {
 
   @Inject WebTarget target;
   @Inject com.storeql.inventory.service.InventoryService inventoryService;
+  @Inject com.storeql.inventory.repo.InventoryRepository inventoryRepo;
+  @Inject com.storeql.inventory.repo.SerialRepository serialRepo;
 
   @AfterAll
   static void stopDb() {
@@ -777,6 +782,103 @@ class InventoryIT {
     }
   }
 
+  /** The purge as any role of any business, optionally held to stores. */
+  private Response purgeAs(String tenant, String roles, String storeIds, String body) {
+    var b =
+        target
+            .path("/admin/inventory/movements/purge")
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-Roles", roles);
+    if (storeIds != null) b = b.header("X-Store-Ids", storeIds);
+    return b.post(Entity.entity(body, MediaType.APPLICATION_JSON));
+  }
+
+  /** A movement of 2019 at a store of its own: old enough for any purge to take. */
+  private static void oldMovement(UUID tenant) {
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "INSERT INTO inventory.stock_movements (id, tenant_id, store_id, variant_id, type, qty,"
+            + " created_at) VALUES ('"
+            + Ids.newId()
+            + "', '"
+            + tenant
+            + "', '"
+            + Ids.newId()
+            + "', '"
+            + Ids.newId()
+            + "', 'ADJUST', 1, '2019-01-01T00:00:00Z')");
+  }
+
+  /** What the business holds in the live ledger and in the archive, as {@code live|archived}. */
+  private static String ledgerOf(UUID tenant) {
+    return scalar(
+        "SELECT (SELECT count(*) FROM inventory.stock_movements WHERE tenant_id = '"
+            + tenant
+            + "') || '|' || (SELECT count(*) FROM inventory.stock_movements_archive"
+            + " WHERE tenant_id = '"
+            + tenant
+            + "')");
+  }
+
+  @Test
+  @DisplayName("Only management held to no store moves a business's movement history away")
+  void onlyManagementHeldToNoStoreMovesTheHistory() {
+    UUID tenant = Ids.newId();
+    UUID other = Ids.newId();
+    oldMovement(tenant);
+    oldMovement(other);
+    String body = "{\"before\":\"2020-01-01T00:00:00Z\"}";
+
+    // The till, the shelf and a shopper have no say in which history leaves the live ledger.
+    for (String role : List.of("CASHIER", "STOREKEEPER", "CUSTOMER")) {
+      assertThat(
+          role, refusedWith(purgeAs(tenant.toString(), role, null, body), 403), is("FORBIDDEN"));
+    }
+    // Nor has a manager held to some stores: the history is the whole business's.
+    assertThat(
+        refusedWith(purgeAs(tenant.toString(), "MANAGER", Ids.newId().toString(), body), 403),
+        is("BUSINESS_WIDE_ONLY"));
+    assertThat(ledgerOf(tenant), is("1|0"));
+    assertThat(ledgerOf(other), is("1|0"));
+
+    // Another business's management moves its own history and nothing of ours.
+    Response theirs = purgeAs(other.toString(), "OWNER", null, body);
+    String theirsBody = theirs.readEntity(String.class);
+    assertThat(theirsBody, theirs.getStatus(), is(200));
+    assertThat(theirsBody, containsString("\"purged\":1"));
+    assertThat(ledgerOf(other), is("0|1"));
+    assertThat(ledgerOf(tenant), is("1|0"));
+
+    // Ours, held to no store, moves ours.
+    Response ours = purgeAs(tenant.toString(), "MANAGER", null, body);
+    String oursBody = ours.readEntity(String.class);
+    assertThat(oursBody, ours.getStatus(), is(200));
+    assertThat(oursBody, containsString("\"purged\":1"));
+    assertThat(ledgerOf(tenant), is("0|1"));
+  }
+
+  @Test
+  @DisplayName("A purge naming no instant, or one that is not an instant, is refused")
+  void aPurgeNamingNoInstantOrABadOneMovesNothing() {
+    UUID tenant = Ids.newId();
+    oldMovement(tenant);
+    for (String bad : List.of("{}", "{\"before\":\"\"}", "{\"before\":\"   \"}")) {
+      assertThat(
+          bad,
+          refusedWith(purgeAs(tenant.toString(), "OWNER", null, bad), 400),
+          is("VALIDATION_FAILED"));
+    }
+    for (String text : List.of("yesterday", "2020-01-01", "2020-01-01 00:00:00")) {
+      assertThat(
+          text,
+          refusedWith(
+              purgeAs(tenant.toString(), "OWNER", null, "{\"before\":\"" + text + "\"}"), 400),
+          is("INVALID_DATE"));
+    }
+    assertThat(ledgerOf(tenant), is("1|0"));
+  }
+
   // ── Tier-1 Gap #31: Zone GL mappings ─────────────────────────────────────
 
   @Test
@@ -921,6 +1023,162 @@ class InventoryIT {
     // cascading Bean Validation instead of silently receiving zero stock.
     String body = "{\"items\":[{\"storeId\":\"" + S + "\",\"variantId\":\"" + V + "\",\"qty\":0}]}";
     assertThat(post("/admin/inventory/receive/batch", body, T).getStatus(), is(400));
+  }
+
+  @Test
+  @DisplayName("a receipt whose idempotency key is already taken is refused 409 and stocks nothing")
+  void aReceiptWithATakenIdempotencyKeyIsRefusedAndStocksNothingTwice() throws Exception {
+    UUID tenant = Ids.parse(T);
+    UUID variant = Ids.newId();
+    String key = Ids.newId().toString();
+    String body =
+        "{\"storeId\":\""
+            + S
+            + "\",\"variantId\":\""
+            + variant
+            + "\",\"qty\":10,\"batchNo\":\"DK\"}";
+    assertThat(
+        postWithIdempotencyKey("/admin/inventory/receive", body, T, key).getStatus(), is(201));
+
+    // The repository's own word, which the service turns into a replay: with the key already on a
+    // batch, a second insert is refused whole — no second batch, movement or event.
+    UUID batchId = Ids.newId();
+    var again =
+        new com.storeql.inventory.domain.Domain.Batch(
+            batchId,
+            tenant,
+            Ids.parse(S),
+            variant,
+            "DK2",
+            new java.math.BigDecimal("5"),
+            new java.math.BigDecimal("5"),
+            null,
+            null,
+            Instant.now(),
+            null,
+            null,
+            null,
+            null,
+            null);
+    var event =
+        new com.storeql.service.OutboxRow(
+            "StockReceived", "storeql.inventory.stock-received", tenant, batchId, "{}");
+    var refused =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            com.storeql.web.ApiException.class,
+            () -> inventoryRepo.receive(again, "MANUAL", batchId, event, key));
+    assertThat(refused.status(), is(409));
+    assertThat(refused.code(), is("BATCH_DUPLICATE_KEY"));
+
+    assertThat(count("inventory_batches", variant), is("1"));
+    assertThat(count("stock_movements", variant), is("1"));
+    assertThat(
+        com.storeql.test.Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.outbox WHERE aggregate_id = '" + batchId + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName(
+      "two holds racing on one idempotency key: the loser is refused 409 and holds nothing")
+  void aReservationRacingOnATakenIdempotencyKeyIsRefusedAndHoldsNothing() throws Exception {
+    UUID tenant = Ids.parse(T);
+    UUID store = Ids.parse(S);
+    UUID variant = Ids.newId();
+    String key = Ids.newId().toString();
+    assertThat(
+        post(
+                "/admin/inventory/receive",
+                "{\"storeId\":\""
+                    + S
+                    + "\",\"variantId\":\""
+                    + variant
+                    + "\",\"qty\":10,\"batchNo\":\"RK\"}",
+                T)
+            .getStatus(),
+        is(201));
+
+    var loser =
+        new com.storeql.inventory.domain.Domain.Reservation(
+            Ids.newId(),
+            tenant,
+            store,
+            variant,
+            new java.math.BigDecimal("2"),
+            Ids.newId(),
+            com.storeql.inventory.domain.Domain.Reservation.HELD,
+            Instant.now().plusSeconds(600),
+            Instant.now());
+    var event =
+        new com.storeql.service.OutboxRow(
+            "StockReserved", "storeql.inventory.stock-reserved", tenant, loser.id(), "{}");
+
+    java.util.concurrent.Future<?> racing;
+    // The executor is declared first so it is closed last: should the test fail before the winner
+    // commits, closing the winner rolls its key back and frees the loser, and closing the executor
+    // (which waits for the loser) then returns instead of hanging the build.
+    try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        var winner =
+            java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
+      // The winner has the key but has not committed, so the loser's look-up cannot see it.
+      winner.setAutoCommit(false);
+      try (var ps =
+          winner.prepareStatement(
+              "INSERT INTO inventory.reservations (id, tenant_id, store_id, variant_id, qty,"
+                  + " order_id, status, expires_at, created_at, idempotency_key, fulfilment)"
+                  + " VALUES (?,?,?,?,2,?,'HELD', now() + interval '10 minutes', now(), ?,"
+                  + " 'STOCK')")) {
+        ps.setObject(1, Ids.newId());
+        ps.setObject(2, tenant);
+        ps.setObject(3, store);
+        ps.setObject(4, variant);
+        ps.setObject(5, Ids.newId());
+        ps.setString(6, key);
+        ps.executeUpdate();
+      }
+      racing = executor.submit(() -> inventoryRepo.reserve(loser, event, key));
+      // Wait until the loser is parked on the winner's key, then let the winner commit.
+      long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+      while (!"1".equals(waitingOnReservationInsert())) {
+        if (System.nanoTime() > deadline)
+          throw new AssertionError("the loser never reached the key");
+        Thread.sleep(50);
+      }
+      winner.commit();
+    }
+    var failure =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            java.util.concurrent.ExecutionException.class,
+            () -> racing.get(20, java.util.concurrent.TimeUnit.SECONDS));
+    var refused = (com.storeql.web.ApiException) failure.getCause();
+    assertThat(refused.status(), is(409));
+    assertThat(refused.code(), is("RESERVATION_DUPLICATE_KEY"));
+
+    // One hold for the key (the winner's); the loser's whole transaction rolled back.
+    assertThat(count("reservations", variant), is("1"));
+    assertThat(
+        com.storeql.test.Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.outbox WHERE aggregate_id = '" + loser.id() + "'"),
+        is("0"));
+  }
+
+  private static String waitingOnReservationInsert() {
+    return com.storeql.test.Envelopes.scalar(
+        PG,
+        "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+            + " AND query LIKE 'INSERT INTO reservations%'");
+  }
+
+  private static String count(String table, UUID variant) {
+    return com.storeql.test.Envelopes.scalar(
+        PG,
+        "SELECT count(*) FROM inventory."
+            + table
+            + " WHERE tenant_id = '"
+            + T
+            + "' AND variant_id = '"
+            + variant
+            + "'");
   }
 
   private Response postWithIdempotencyKey(String path, String json, String tenant, String key) {
@@ -2275,6 +2533,114 @@ class InventoryIT {
             send("POST", "/admin/inventory/lot-genealogy", body.formatted("SPLIT"), T), 409),
         is("LOT_LINK_EXISTS"));
     assertThat(scalar(links), is("1"));
+  }
+
+  // ── the scheduled purge of the outbox and the dedupe table ──────────────────
+
+  @Test
+  @DisplayName("The scheduled purge has the indexes its predicates walk")
+  void theScheduledPurgeHasTheIndexesItsPredicatesWalk() {
+    String outbox =
+        scalar(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'inventory'"
+                + " AND indexname = 'idx_outbox_published'");
+    assertThat(outbox, containsString("(published_at)"));
+    assertThat(outbox, containsString("published_at IS NOT NULL"));
+    String dedupe =
+        scalar(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'inventory'"
+                + " AND indexname = 'idx_processed_events_processed_at'");
+    assertThat(dedupe, containsString("(processed_at)"));
+  }
+
+  @Test
+  @DisplayName("The scheduled purge removes what is old and done, a batch at a time, and no more")
+  void theScheduledPurgeRemovesOnlyWhatIsOldAndDone() {
+    UUID tenant = Ids.newId();
+    String longAgo = "now() - interval '400 days'";
+    String recently = "now() - interval '1 hour'";
+    String[] oldPublished = {
+      Ids.newId().toString(), Ids.newId().toString(), Ids.newId().toString()
+    };
+    String freshPublished = Ids.newId().toString();
+    String oldPending = Ids.newId().toString();
+    for (String id : oldPublished) {
+      probeOutbox(id, tenant, longAgo, longAgo);
+    }
+    probeOutbox(freshPublished, tenant, recently, recently);
+    probeOutbox(oldPending, tenant, longAgo, "NULL");
+    String[] oldDedupe = {Ids.newId().toString(), Ids.newId().toString(), Ids.newId().toString()};
+    String freshDedupe = Ids.newId().toString();
+    for (String id : oldDedupe) {
+      probeDedupe(id, longAgo);
+    }
+    probeDedupe(freshDedupe, recently);
+
+    Instant cutoff = Instant.now().minus(Duration.ofDays(30));
+    // Published rows go oldest first, a batch at a time: two, then the one left, then none.
+    assertThat(serialRepo.purgePublished(cutoff, 2), is(2));
+    assertThat(serialRepo.purgePublished(cutoff, 2), is(1));
+    assertThat(serialRepo.purgePublished(cutoff, 2), is(0));
+    assertThat(serialRepo.purgeProcessedEvents(cutoff, 2), is(2));
+    assertThat(serialRepo.purgeProcessedEvents(cutoff, 2), is(1));
+    assertThat(serialRepo.purgeProcessedEvents(cutoff, 2), is(0));
+
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.outbox WHERE id IN ('"
+                + String.join("','", oldPublished)
+                + "')"),
+        is("0"));
+    // A row still to publish is never touched, however old; nor is one published recently.
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.outbox WHERE id IN ('"
+                + freshPublished
+                + "','"
+                + oldPending
+                + "')"),
+        is("2"));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.processed_events WHERE event_id IN ('"
+                + String.join("','", oldDedupe)
+                + "')"),
+        is("0"));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.processed_events WHERE event_id = '"
+                + freshDedupe
+                + "'"),
+        is("1"));
+  }
+
+  /** One outbox row, created and published (or not: {@code NULL}) at the SQL moments given. */
+  private static void probeOutbox(String id, UUID tenant, String createdAt, String publishedAt) {
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "INSERT INTO inventory.outbox (id, event_type, topic, tenant_id, aggregate_id, payload,"
+            + " created_at, published_at) VALUES ('"
+            + id
+            + "', 'PurgeProbe', 'storeql.inventory.purge-probe', '"
+            + tenant
+            + "', '"
+            + Ids.newId()
+            + "', '{}', "
+            + createdAt
+            + ", "
+            + publishedAt
+            + ")");
+  }
+
+  /** One consumer dedupe row, processed at the SQL moment given. */
+  private static void probeDedupe(String eventId, String processedAt) {
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "INSERT INTO inventory.processed_events (event_id, consumer, processed_at) VALUES ('"
+            + eventId
+            + "', 'purge-probe', "
+            + processedAt
+            + ")");
   }
 
   @org.junit.jupiter.api.Test

@@ -330,6 +330,9 @@ public class OrderRepository extends BaseOutboxRepository {
   private Order createOrderTx(Connection c, NewOrder n, UUID groupId, Integer groupPart)
       throws java.sql.SQLException {
     Order order = n.order();
+    // Every amount at the order currency's own minor units, half up — what the NUMERIC(18,2)
+    // columns used to do for the pound, and right for the yen and the dinar (SJ-D25, V49).
+    int scale = com.storeql.service.Fx.minorUnits(order.currency());
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO orders"
@@ -350,10 +353,10 @@ public class OrderRepository extends BaseOutboxRepository {
       ps.setString(6, order.channel());
       ps.setString(7, order.fulfilmentType());
       ps.setString(8, order.status());
-      ps.setBigDecimal(9, order.subtotal());
-      ps.setBigDecimal(10, order.taxAmount());
-      ps.setBigDecimal(11, order.discountAmount());
-      ps.setBigDecimal(12, order.total());
+      ps.setBigDecimal(9, money(order.subtotal(), scale));
+      ps.setBigDecimal(10, money(order.taxAmount(), scale));
+      ps.setBigDecimal(11, money(order.discountAmount(), scale));
+      ps.setBigDecimal(12, money(order.total(), scale));
       ps.setString(13, order.currency());
       ps.setString(14, order.notes());
       ps.setString(15, order.idempotencyKey());
@@ -371,7 +374,7 @@ public class OrderRepository extends BaseOutboxRepository {
           26,
           order.promotionDiscount() == null
               ? java.math.BigDecimal.ZERO
-              : order.promotionDiscount());
+              : money(order.promotionDiscount(), scale));
       ps.setObject(27, order.sellerUserId());
       ps.setObject(28, groupId);
       if (groupPart == null) ps.setNull(29, java.sql.Types.SMALLINT);
@@ -391,18 +394,26 @@ public class OrderRepository extends BaseOutboxRepository {
             409, "ORDER_DUPLICATE_KEY", "duplicate idempotency key", java.util.List.of(), sqle);
       throw sqle;
     }
-    insertOrderItems(c, n.items());
+    insertOrderItems(c, n.items(), scale);
     for (var deposit : n.deposits()) DepositRepository.insertDeposit(c, deposit);
     appendStatusHistory(c, order.tenantId(), order.id(), null, order.status(), "created", null);
-    if (n.discount() != null) insertOrderDiscount(c, n.discount());
+    if (n.discount() != null) insertOrderDiscount(c, n.discount(), scale);
     for (OfflineSaleFlag flag : n.offlineFlags()) insertOfflineSaleFlag(c, flag);
-    insertOrderPromotionsTx(c, order.tenantId(), order.id(), n.appliedPromotions());
+    insertOrderPromotionsTx(c, order.tenantId(), order.id(), n.appliedPromotions(), scale);
     insertOutbox(c, n.event());
     return order;
   }
 
+  /**
+   * An amount at a currency's own minor units ({@code scale}, from {@code Fx.minorUnits}), half up:
+   * what a NUMERIC(18,2) column did for the pound before V49, and right for the yen and the dinar.
+   */
+  static BigDecimal money(BigDecimal amount, int scale) {
+    return amount == null ? null : amount.setScale(scale, java.math.RoundingMode.HALF_UP);
+  }
+
   /** Append-only (golden rule #8): inserted with the order, never updated or deleted. */
-  private static void insertOrderDiscount(java.sql.Connection c, OrderDiscount d)
+  private static void insertOrderDiscount(java.sql.Connection c, OrderDiscount d, int scale)
       throws java.sql.SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
@@ -414,8 +425,8 @@ public class OrderRepository extends BaseOutboxRepository {
       ps.setObject(2, d.tenantId());
       ps.setObject(3, d.orderId());
       ps.setObject(4, d.storeId());
-      ps.setBigDecimal(5, d.subtotal());
-      ps.setBigDecimal(6, d.discountAmount());
+      ps.setBigDecimal(5, money(d.subtotal(), scale));
+      ps.setBigDecimal(6, money(d.discountAmount(), scale));
       ps.setBigDecimal(7, d.discountPct());
       ps.setString(8, d.reason());
       ps.setObject(9, d.grantedBy());
@@ -750,6 +761,8 @@ public class OrderRepository extends BaseOutboxRepository {
           // deposit shrinking to what stands of it.
           BigDecimal left = qty;
           UUID firstItem = null;
+          // What stands of a line is kept to the order currency's own minor units.
+          int scale = com.storeql.service.Fx.minorUnits(before.currency());
           for (OrderItem i : ofVariant) {
             if (left.signum() <= 0) break;
             if (i.remainingQty().signum() <= 0) continue;
@@ -759,10 +772,10 @@ public class OrderRepository extends BaseOutboxRepository {
             BigDecimal standingAfter = standingBefore.subtract(take);
             BigDecimal lineTotal =
                 com.storeql.order.domain.SubstitutePrice.share(
-                    i.lineTotal(), standingAfter, standingBefore, 2);
+                    i.lineTotal(), standingAfter, standingBefore, scale);
             BigDecimal vat =
                 com.storeql.order.domain.SubstitutePrice.share(
-                    i.vatAmount(), standingAfter, standingBefore, 2);
+                    i.vatAmount(), standingAfter, standingBefore, scale);
             try (PreparedStatement ps =
                 c.prepareStatement(
                     "UPDATE order_items SET short_qty = short_qty + ?, line_total = ?,"
@@ -779,7 +792,8 @@ public class OrderRepository extends BaseOutboxRepository {
                     "ORDER_LINE_QTY_EXCEEDS_OUTSTANDING", "line changed under this request");
               }
             }
-            DepositRepository.shrinkDepositTx(c, tenantId, i.id(), standingAfter, standingBefore);
+            DepositRepository.shrinkDepositTx(
+                c, tenantId, i.id(), standingAfter, standingBefore, scale);
             left = left.subtract(take);
           }
           OrderItem subItem = null;
@@ -802,7 +816,7 @@ public class OrderRepository extends BaseOutboxRepository {
                     substitute.vatRate(),
                     BigDecimal.ZERO,
                     firstItem);
-            insertOrderItem(c, subItem);
+            insertOrderItem(c, subItem, scale);
           }
           // The totals, as the checkout computed them: lines, their VAT (pro rata to the subtotal
           // when a line carries none), less the discounts as they were, plus the deposits.
@@ -898,11 +912,13 @@ public class OrderRepository extends BaseOutboxRepository {
         }
       }
     }
+    // The order's own currency decides the precision: whole yen, three-decimal dinars.
+    int scale = com.storeql.service.Fx.minorUnits(before.currency());
     BigDecimal tax =
         everyLineTaxed
-            ? vat.setScale(2, java.math.RoundingMode.HALF_UP)
+            ? vat.setScale(scale, java.math.RoundingMode.HALF_UP)
             : com.storeql.order.domain.SubstitutePrice.share(
-                before.taxAmount(), subtotal, before.subtotal(), 2);
+                before.taxAmount(), subtotal, before.subtotal(), scale);
     BigDecimal deposits = DepositRepository.depositTotalTx(c, tenantId, orderId);
     BigDecimal total =
         subtotal
@@ -1921,9 +1937,11 @@ public class OrderRepository extends BaseOutboxRepository {
         c -> {
           String status;
           BigDecimal discount;
+          int scale;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "SELECT status, discount_amount FROM orders WHERE tenant_id=? AND id=? FOR UPDATE")) {
+                  "SELECT status, discount_amount, currency FROM orders"
+                      + " WHERE tenant_id=? AND id=? FOR UPDATE")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, orderId);
             try (ResultSet rs = ps.executeQuery()) {
@@ -1932,6 +1950,8 @@ public class OrderRepository extends BaseOutboxRepository {
               }
               status = rs.getString(1);
               discount = rs.getBigDecimal(2) == null ? BigDecimal.ZERO : rs.getBigDecimal(2);
+              // Line totals and the tax are kept to the order currency's own minor units.
+              scale = com.storeql.service.Fx.minorUnits(rs.getString(3));
             }
           }
           if (!Order.STATUS_AWAITING_PRICE.equals(status)) {
@@ -1969,7 +1989,7 @@ public class OrderRepository extends BaseOutboxRepository {
                   "ORDER_PRICE_LINE_MISSING", "no price given for variant " + i.variantId());
             }
             BigDecimal lineTotal =
-                price.multiply(i.qty()).setScale(2, java.math.RoundingMode.HALF_UP);
+                price.multiply(i.qty()).setScale(scale, java.math.RoundingMode.HALF_UP);
             try (PreparedStatement ps =
                 c.prepareStatement(
                     "UPDATE order_items SET unit_price=?, line_total=? WHERE tenant_id=? AND id=?")) {
@@ -1981,13 +2001,15 @@ public class OrderRepository extends BaseOutboxRepository {
             }
             subtotal = subtotal.add(lineTotal);
           }
-          BigDecimal total = subtotal.add(tax).subtract(discount).max(BigDecimal.ZERO);
+          // The manager's VAT figure, to the currency's minor unit as every other total is.
+          BigDecimal taxAtScale = tax.setScale(scale, java.math.RoundingMode.HALF_UP);
+          BigDecimal total = subtotal.add(taxAtScale).subtract(discount).max(BigDecimal.ZERO);
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE orders SET subtotal=?, tax_amount=?, total=?, status=?, updated_at=now()"
                       + " WHERE tenant_id=? AND id=?")) {
             ps.setBigDecimal(1, subtotal);
-            ps.setBigDecimal(2, tax);
+            ps.setBigDecimal(2, taxAtScale);
             ps.setBigDecimal(3, total);
             ps.setString(4, Order.STATUS_PENDING);
             ps.setObject(5, tenantId);
@@ -3858,12 +3880,17 @@ public class OrderRepository extends BaseOutboxRepository {
 
   // ── private helpers ───────────────────────────────────────────────────────
 
-  private void insertOrderItem(Connection c, OrderItem item) throws SQLException {
-    insertOrderItems(c, List.of(item));
+  private void insertOrderItem(Connection c, OrderItem item, int scale) throws SQLException {
+    insertOrderItems(c, List.of(item), scale);
   }
 
-  /** The lines of an order in one batch: one round trip however many lines the basket has. */
-  private void insertOrderItems(Connection c, List<OrderItem> items) throws SQLException {
+  /**
+   * The lines of an order in one batch: one round trip however many lines the basket has. The unit
+   * price and line total at the order currency's minor units ({@code scale}); the VAT keeps the
+   * four places its column has.
+   */
+  private void insertOrderItems(Connection c, List<OrderItem> items, int scale)
+      throws SQLException {
     if (items.isEmpty()) return;
     try (PreparedStatement ps =
         c.prepareStatement(
@@ -3878,8 +3905,8 @@ public class OrderRepository extends BaseOutboxRepository {
         ps.setObject(3, item.orderId());
         ps.setObject(4, item.variantId());
         ps.setBigDecimal(5, item.qty());
-        ps.setBigDecimal(6, item.unitPrice());
-        ps.setBigDecimal(7, item.lineTotal());
+        ps.setBigDecimal(6, money(item.unitPrice(), scale));
+        ps.setBigDecimal(7, money(item.lineTotal(), scale));
         ps.setString(8, item.notes());
         ps.setObject(9, item.weighingInstrumentId());
         ps.setBigDecimal(10, item.vatAmount());
@@ -4148,7 +4175,8 @@ public class OrderRepository extends BaseOutboxRepository {
       java.sql.Connection c,
       UUID tenantId,
       UUID orderId,
-      List<com.storeql.order.client.PricingClient.AppliedPromotion> applied)
+      List<com.storeql.order.client.PricingClient.AppliedPromotion> applied,
+      int scale)
       throws SQLException {
     if (applied.isEmpty()) return;
     try (PreparedStatement ps =
@@ -4163,7 +4191,7 @@ public class OrderRepository extends BaseOutboxRepository {
         ps.setObject(4, a.promotionId());
         ps.setString(5, a.name());
         ps.setObject(6, a.variantId());
-        ps.setBigDecimal(7, a.amount());
+        ps.setBigDecimal(7, money(a.amount(), scale));
         ps.addBatch();
       }
       ps.executeBatch();
@@ -4336,6 +4364,9 @@ public class OrderRepository extends BaseOutboxRepository {
    * @param so the special-order header to persist
    * @param items the lines being ordered in
    * @return the special order as stored
+   * @throws com.storeql.web.ApiException 409 {@code SPECIAL_ORDER_DUPLICATE_KEY} when the key
+   *     already made one: the signal that tells the service a retry (or a lost race) has the first
+   *     order to be answered with; it never reaches a client
    */
   public SpecialOrder createSpecialOrder(SpecialOrder so, List<SpecialOrderItem> items) {
     return inTx(
@@ -4386,7 +4417,10 @@ public class OrderRepository extends BaseOutboxRepository {
             }
           }
           appendSpecialOrderHistory(c, so.tenantId(), so.id(), null, so.status(), "created", null);
-          return so;
+          // The order as the tables keep it (their moment, their decimal places), not as it was
+          // built: a retry under the same key is answered from the table, and its answer must be
+          // the first one's.
+          return findSpecialOrderInTx(c, so.tenantId(), so.id());
         },
         "create special order");
   }
@@ -4452,6 +4486,31 @@ public class OrderRepository extends BaseOutboxRepository {
             },
             this::mapSpecialOrder,
             "find special order");
+    return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
+  }
+
+  /**
+   * Looks a special order up by the Idempotency-Key it was made under, so a retry can be answered
+   * with it.
+   *
+   * @param tenantId owning tenant; the first condition of the query, so another business's order
+   *     made under the same key is never found
+   * @param idempotencyKey the key, in the canonical lowercase form it is stored in
+   * @return the special order, or empty when none was made under this key in this tenant
+   */
+  public Optional<SpecialOrder> findSpecialOrderByKey(UUID tenantId, String idempotencyKey) {
+    var list =
+        query(
+            "SELECT id, tenant_id, store_id, customer_id, customer_name, customer_phone,"
+                + " customer_email, delivery_address, requested_delivery_date, notes, status,"
+                + " subtotal, total, currency, idempotency_key, created_at, updated_at"
+                + " FROM special_orders WHERE tenant_id=? AND idempotency_key=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, idempotencyKey);
+            },
+            this::mapSpecialOrder,
+            "find special order by key");
     return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
   }
 

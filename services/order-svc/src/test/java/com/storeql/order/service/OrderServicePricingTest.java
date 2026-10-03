@@ -182,6 +182,177 @@ class OrderServicePricingTest {
     verifyNoInteractions(repo);
   }
 
+  // ── a till's full-basket discount on weighed goods ─────────────────────────
+
+  /**
+   * Two weighed lines of 0.333 at {@code unitPrice}, a till sale with the till's own discount. The
+   * till adds the lines up unrounded and caps the discount at that; this service rounds each line
+   * half up at the currency's units first, so the till's cap can be the rounded subtotal plus a
+   * part of a minor unit per line.
+   */
+  private static PlaceOrderRequest weighedTillSale(String unitPrice, String discount) {
+    BigDecimal qty = new BigDecimal("0.333");
+    BigDecimal price = new BigDecimal(unitPrice);
+    return PlaceOrderRequest.builder()
+        .storeId(STORE.toString())
+        .channel("POS")
+        .fulfilmentType("INSTORE")
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    Ids.newId().toString(), qty, price, null, null, null, null, null),
+                new OrderItemRequest(
+                    Ids.newId().toString(), qty, price, null, null, null, null, null)))
+        .discountAmount(new BigDecimal(discount))
+        .discountReason("staff party")
+        .build();
+  }
+
+  private Order placeWeighedAsOwner(String currency, String unitPrice, String discount) {
+    when(config.pricingEnforce()).thenReturn(false);
+    org.mockito.Mockito.lenient().when(profiles.requireCurrency(TENANT)).thenReturn(currency);
+    when(config.discountCeilings()).thenReturn(Map.of("OWNER", new BigDecimal("100")));
+    when(ctx.roles()).thenReturn(Set.of("OWNER"));
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
+    return svc.placeOrder(weighedTillSale(unitPrice, discount), ctx, null);
+  }
+
+  /**
+   * 2 × 0.333 kg at 1.99 is 1.32534 on the till, which shows 1.33; here each line is 0.66 and the
+   * order 1.32. The cashier gives the whole basket away: the till's 1.32534, half up 1.33, is more
+   * than the order, and was refused 400 ORDER_DISCOUNT_EXCEEDS_SUBTOTAL — the sale stopped and its
+   * offline replay refused for ever. It is the whole basket: 1.32.
+   */
+  @Test
+  void aTillsFullBasketDiscountOnWeighedGoodsIsCappedAtTheSubtotal() {
+    Order order = placeWeighedAsOwner("USD", "1.99", "1.32534");
+
+    assertEquals(new BigDecimal("1.32"), order.subtotal());
+    assertEquals(new BigDecimal("1.32"), order.discountAmount());
+    assertEquals(0, order.total().signum());
+    ArgumentCaptor<Domain.OrderDiscount> audit =
+        ArgumentCaptor.forClass(Domain.OrderDiscount.class);
+    org.mockito.Mockito.verify(repo)
+        .createOrder(
+            any(), anyList(), any(), audit.capture(), anyList(), anyList(), anyList(), any());
+    // The audit row says what was given, measured against what the order came to.
+    assertEquals(new BigDecimal("1.32"), audit.getValue().discountAmount());
+    assertEquals(new BigDecimal("100.000"), audit.getValue().discountPct());
+  }
+
+  /** The same at a dinar's three places: 2 × 0.664 is 1.328; the till's 1.32867 is 1.329. */
+  @Test
+  void aDinarTillsFullBasketDiscountIsCappedAtTheSubtotalsFils() {
+    Order order = placeWeighedAsOwner("KWD", "1.995", "1.32867");
+
+    assertEquals(new BigDecimal("1.328"), order.subtotal());
+    assertEquals(new BigDecimal("1.328"), order.discountAmount());
+    assertEquals(0, order.total().signum());
+  }
+
+  /** And in whole yen: 2 × ¥66 is ¥132; the till's 132.534 is ¥133. */
+  @Test
+  void aYenTillsFullBasketDiscountIsCappedAtTheSubtotalsYen() {
+    Order order = placeWeighedAsOwner("JPY", "199", "132.534");
+
+    assertEquals(new BigDecimal("132"), order.subtotal());
+    assertEquals(new BigDecimal("132"), order.discountAmount());
+    assertEquals(0, order.total().signum());
+  }
+
+  /**
+   * With pricing enforced the lines are the quote's, each already rounded by pricing-svc; the
+   * till's figure is still capped at them.
+   */
+  @Test
+  void aTillsFullBasketDiscountIsCappedAtTheQuotedSubtotal() {
+    when(config.pricingEnforce()).thenReturn(true);
+    when(config.discountCeilings()).thenReturn(Map.of("OWNER", new BigDecimal("100")));
+    when(ctx.roles()).thenReturn(Set.of("OWNER"));
+    PricingClient.QuotedLine line =
+        new PricingClient.QuotedLine(
+            new BigDecimal("1.99"), new BigDecimal("0.66"), BigDecimal.ZERO);
+    when(pricing.quoteBasket(eq(TENANT), anyList(), eq(STORE), eq("POS"), any(), any()))
+        .thenReturn(quoted(line, line));
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
+
+    Order order = svc.placeOrder(weighedTillSale("1.99", "1.3253400000000002"), ctx, null);
+
+    assertEquals(new BigDecimal("1.32"), order.discountAmount());
+    assertEquals(0, order.total().signum());
+  }
+
+  /**
+   * The till's prices may be older than the quote's (a sale rung up offline before a price came
+   * down): the cashier gave away the basket the till showed, 2 × 0.333 kg at 2.50 = 1.665, half up
+   * 1.67. It is still the whole basket, at the quote's 1.32.
+   */
+  @Test
+  void aTillsDiscountAtAnOlderShelfPriceIsStillTheWholeBasket() {
+    when(config.pricingEnforce()).thenReturn(true);
+    when(config.discountCeilings()).thenReturn(Map.of("OWNER", new BigDecimal("100")));
+    when(ctx.roles()).thenReturn(Set.of("OWNER"));
+    PricingClient.QuotedLine line =
+        new PricingClient.QuotedLine(
+            new BigDecimal("1.99"), new BigDecimal("0.66"), BigDecimal.ZERO);
+    when(pricing.quoteBasket(eq(TENANT), anyList(), eq(STORE), eq("POS"), any(), any()))
+        .thenReturn(quoted(line, line));
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
+
+    Order order = svc.placeOrder(weighedTillSale("2.50", "1.665"), ctx, null);
+
+    assertEquals(new BigDecimal("1.32"), order.discountAmount());
+    assertEquals(0, order.total().signum());
+  }
+
+  /**
+   * More than the goods the till itself rang up is no rounding of the till's but a wrong figure:
+   * refused by name, as a discount typed anywhere else is, and nothing written — at a pound's two
+   * places, a dinar's three and in whole yen.
+   */
+  @Test
+  void aTillsDiscountAboveTheGoodsItRangUpIsRefused() {
+    when(config.pricingEnforce()).thenReturn(false);
+    String[][] cases = {
+      {"USD", "1.99", "1.34"}, // the till's goods 1.32534 → 1.33
+      {"KWD", "1.995", "1.330"}, // 1.32867 → 1.329
+      {"JPY", "199", "134"}, // 132.534 → 133
+    };
+    for (String[] c : cases) {
+      org.mockito.Mockito.lenient().when(profiles.requireCurrency(TENANT)).thenReturn(c[0]);
+      ApiException e =
+          assertThrows(
+              ApiException.class,
+              () -> svc.placeOrder(weighedTillSale(c[1], c[2]), ctx, null),
+              c[0]);
+      assertEquals("ORDER_DISCOUNT_EXCEEDS_SUBTOTAL", e.code(), c[0]);
+      assertEquals(400, e.status(), c[0]);
+    }
+    verifyNoInteractions(repo);
+  }
+
+  /**
+   * The cap never widens anyone's authority: a manager's ceiling is measured on the capped figure,
+   * and the whole basket is over a 50% ceiling — refused as before, nothing written.
+   */
+  @Test
+  void theCappedDiscountIsStillHeldToTheRolesCeiling() {
+    when(config.pricingEnforce()).thenReturn(false);
+    when(config.discountCeilings()).thenReturn(Map.of("MANAGER", new BigDecimal("50")));
+    when(ctx.roles()).thenReturn(Set.of("MANAGER"));
+
+    ApiException e =
+        assertThrows(
+            ApiException.class,
+            () -> svc.placeOrder(weighedTillSale("1.99", "1.32534"), ctx, null));
+    assertEquals("ORDER_DISCOUNT_EXCEEDS_AUTHORITY", e.code());
+    assertEquals(403, e.status());
+    verifyNoInteractions(repo);
+  }
+
   @Test
   void nonStaffCallerCannotSelfApplyADiscount() {
     when(config.pricingEnforce()).thenReturn(false);
@@ -409,5 +580,250 @@ class OrderServicePricingTest {
 
     org.mockito.Mockito.verify(pricing, org.mockito.Mockito.never())
         .recordMarkdownRedemptionsQuietly(any(), any(), any());
+  }
+
+  // ── a weighed line: counted to three places, valued per line ───────────────
+
+  /**
+   * Two weighings of the same product added on the till post as 0.30000000000000004 kg. The line is
+   * 0.300 kg — held, kept and deducted as the column keeps it — and is worth 0.300 × 1.99 = 0.597,
+   * £0.60: the quantity it stands for, valued by the one line rule, not refused and not charged on
+   * a figure the stock never sees. At a dinar's three places and in whole yen too.
+   */
+  @Test
+  void aTillsAddedWeighingsAreCountedAtThreePlacesAndValuedPerLine() {
+    when(config.pricingEnforce()).thenReturn(false);
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
+    String[][] cases = {
+      {"USD", "1.99", "0.60"}, {"KWD", "1.995", "0.599"}, {"JPY", "199", "60"},
+    };
+    for (String[] c : cases) {
+      org.mockito.Mockito.lenient().when(profiles.requireCurrency(TENANT)).thenReturn(c[0]);
+      PlaceOrderRequest sale =
+          PlaceOrderRequest.builder()
+              .storeId(STORE.toString())
+              .channel("POS")
+              .fulfilmentType("INSTORE")
+              .items(
+                  List.of(
+                      new OrderItemRequest(
+                          VARIANT.toString(),
+                          new BigDecimal("0.30000000000000004"),
+                          new BigDecimal(c[1]),
+                          null,
+                          null,
+                          null,
+                          null,
+                          null)))
+              .build();
+
+      Order order = svc.placeOrder(sale, ctx, null);
+
+      assertEquals(new BigDecimal(c[2]), order.subtotal(), c[0]);
+    }
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<List<OrderItem>> items = ArgumentCaptor.forClass(List.class);
+    org.mockito.Mockito.verify(repo, org.mockito.Mockito.times(3))
+        .createOrder(any(), items.capture(), any(), any(), anyList(), anyList(), anyList(), any());
+    for (List<OrderItem> lines : items.getAllValues()) {
+      assertEquals(new BigDecimal("0.300"), lines.get(0).qty());
+    }
+    assertEquals(new BigDecimal("0.60"), items.getAllValues().get(0).get(0).lineTotal());
+    assertEquals(new BigDecimal("0.599"), items.getAllValues().get(1).get(0).lineTotal());
+    assertEquals(new BigDecimal("60"), items.getAllValues().get(2).get(0).lineTotal());
+  }
+
+  /**
+   * A quantity finer than a reading's six places, and no double's noise around one, is no weight
+   * any scale or label gives: refused, never rounded, nothing written.
+   */
+  @Test
+  void aTillQuantityFinerThanThreePlacesIsRefusedNotRounded() {
+    PlaceOrderRequest sale =
+        PlaceOrderRequest.builder()
+            .storeId(STORE.toString())
+            .channel("POS")
+            .fulfilmentType("INSTORE")
+            .items(
+                List.of(
+                    new OrderItemRequest(
+                        VARIANT.toString(),
+                        new BigDecimal("0.3755123"),
+                        new BigDecimal("1.99"),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null)))
+            .build();
+    // Refused before anything is asked of the business: the stubs this class sets up are spent
+    // here so the refusal is what is measured.
+    ctx.requireTenantId();
+    tenantStatusRepo.isActive(TENANT);
+    storeStatusRepo.isActive(TENANT, STORE);
+
+    ApiException e = assertThrows(ApiException.class, () -> svc.placeOrder(sale, ctx, null));
+    assertEquals("VALIDATION_FAILED", e.code());
+    assertEquals(400, e.status());
+    verifyNoInteractions(repo, pricing, inventory);
+  }
+
+  // ── a label's weight: the gram below, priced, held and kept at one figure ──
+
+  private static PlaceOrderRequest labelSale(String qty, String price, String key) {
+    return PlaceOrderRequest.builder()
+        .storeId(STORE.toString())
+        .channel("POS")
+        .fulfilmentType("INSTORE")
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    new BigDecimal(qty),
+                    new BigDecimal(price),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .build();
+  }
+
+  /**
+   * A pack labelled 0.37512 kg (GS1 AI 3105), which the till sells at the label's reading: the line
+   * is 0.375 kg, the gram below, and is charged, kept and priced at that one figure — 0.375 ×
+   * 100.00 = 37.50, which the till's own 37.512 always covers — not refused, and not charged on a
+   * weight the stock never sees. In a dinar's fils and whole yen by the same rule.
+   */
+  @Test
+  void aTillsLabelWeightIsChargedAndKeptAtTheGramBelow() {
+    when(config.pricingEnforce()).thenReturn(false);
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
+    String[][] cases = {
+      {"USD", "100.00", "37.50"}, {"KWD", "1.995", "0.748"}, {"JPY", "199", "75"},
+    };
+    for (String[] c : cases) {
+      org.mockito.Mockito.lenient().when(profiles.requireCurrency(TENANT)).thenReturn(c[0]);
+
+      Order order = svc.placeOrder(labelSale("0.37512", c[1], null), ctx, null);
+
+      assertEquals(new BigDecimal(c[2]), order.subtotal(), c[0]);
+    }
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<List<OrderItem>> items = ArgumentCaptor.forClass(List.class);
+    org.mockito.Mockito.verify(repo, org.mockito.Mockito.times(3))
+        .createOrder(any(), items.capture(), any(), any(), anyList(), anyList(), anyList(), any());
+    for (List<OrderItem> lines : items.getAllValues()) {
+      assertEquals(new BigDecimal("0.375"), lines.get(0).qty());
+    }
+  }
+
+  /** Under enforcement the quote is asked for the gram figure the line is kept at. */
+  @Test
+  void aTillsLabelWeightIsQuotedAtTheGramBelow() {
+    when(config.pricingEnforce()).thenReturn(true);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<List<PricingClient.LineRequest>> asked = ArgumentCaptor.forClass(List.class);
+    when(pricing.quoteBasket(eq(TENANT), asked.capture(), eq(STORE), eq("POS"), any(), any()))
+        .thenReturn(
+            quoted(
+                new PricingClient.QuotedLine(
+                    new BigDecimal("4.87"), new BigDecimal("4.87"), BigDecimal.ZERO)));
+    when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
+
+    svc.placeOrder(labelSale("0.37512", "12.99", null), ctx, null);
+
+    assertEquals(new BigDecimal("0.375"), asked.getValue().get(0).qty());
+  }
+
+  private static Order standing(UUID store, String key) {
+    return new Order(
+        Ids.newId(),
+        TENANT,
+        store,
+        null,
+        null,
+        "POS",
+        "INSTORE",
+        "CONFIRMED",
+        new BigDecimal("37.51"),
+        BigDecimal.ZERO,
+        BigDecimal.ZERO,
+        new BigDecimal("37.51"),
+        "USD",
+        null,
+        key,
+        java.time.Instant.now(),
+        java.time.Instant.now(),
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        BigDecimal.ZERO,
+        null,
+        true);
+  }
+
+  /**
+   * A till sale accepted before quantities were counted (the column rounded it then) is retried
+   * from the offline queue under its key: the sale that stands is the answer, not a refusal of a
+   * figure nothing will be written from.
+   */
+  @Test
+  void aRetriedSaleThatStandsIsAnsweredWhereItsQuantityIsNowRefused() {
+    String key = Ids.newId().toString();
+    Order earlier = standing(STORE, key);
+    when(repo.findOrderByIdempotencyKey(TENANT, key)).thenReturn(java.util.Optional.of(earlier));
+    when(ctx.hasStoreAccess(STORE)).thenReturn(true);
+    tenantStatusRepo.isActive(TENANT);
+    storeStatusRepo.isActive(TENANT, STORE);
+
+    Order answer = svc.placeOrder(labelSale("0.3755123", "100.00", key), ctx, key);
+
+    assertEquals(earlier, answer);
+    org.mockito.Mockito.verify(repo, org.mockito.Mockito.never())
+        .createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any());
+    verifyNoInteractions(pricing, inventory);
+  }
+
+  /**
+   * The refusal stands for a caller held to other stores than the earlier sale's, and with no key
+   * nothing is looked up at all.
+   */
+  @Test
+  void aRefusedQuantityIsNoWayToReadAnotherStoresSale() {
+    String key = Ids.newId().toString();
+    UUID elsewhere = Ids.newId();
+    when(repo.findOrderByIdempotencyKey(TENANT, key))
+        .thenReturn(java.util.Optional.of(standing(elsewhere, key)));
+    when(ctx.hasStoreAccess(elsewhere)).thenReturn(false);
+    tenantStatusRepo.isActive(TENANT);
+    storeStatusRepo.isActive(TENANT, STORE);
+
+    ApiException held =
+        assertThrows(
+            ApiException.class,
+            () -> svc.placeOrder(labelSale("0.3755123", "100.00", key), ctx, key));
+    assertEquals(400, held.status());
+    assertEquals("VALIDATION_FAILED", held.code());
+
+    ApiException keyless =
+        assertThrows(
+            ApiException.class,
+            () -> svc.placeOrder(labelSale("0.3755123", "100.00", null), ctx, null));
+    assertEquals(400, keyless.status());
+    org.mockito.Mockito.verify(repo, org.mockito.Mockito.times(1))
+        .findOrderByIdempotencyKey(any(), any());
+    org.mockito.Mockito.verify(repo, org.mockito.Mockito.never())
+        .createOrder(any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any());
   }
 }

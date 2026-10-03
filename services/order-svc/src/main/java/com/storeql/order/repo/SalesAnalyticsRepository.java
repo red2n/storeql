@@ -80,8 +80,9 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
                 + tzExpr
                 + ")::int AS hour_of_day,"
                 + " COUNT(*) AS orders,"
-                + " COALESCE(SUM(total),0)::numeric(18,2) AS gross_amount,"
-                + " COALESCE(SUM(discount_amount),0)::numeric(18,2) AS discount_amount"
+                // Unrounded: the service rounds to the business currency's own minor units.
+                + " COALESCE(SUM(total),0) AS gross_amount,"
+                + " COALESCE(SUM(discount_amount),0) AS discount_amount"
                 + " FROM orders WHERE tenant_id = ?"
                 + REVENUE_STATUSES);
     if (stores != null) sql.append(" AND store_id = ANY(?)");
@@ -133,8 +134,9 @@ public class SalesAnalyticsRepository extends BaseJdbcRepository {
             // data is.
             "SELECT COALESCE(cashier_id::text, 'UNATTRIBUTED') AS group_key,"
                 + " COUNT(*) AS sales,"
-                + " COALESCE(SUM(total),0)::numeric(18,2) AS gross_amount,"
-                + " COALESCE(SUM(discount_amount),0)::numeric(18,2) AS discount_amount"
+                // Unrounded: the service rounds to the business currency's own minor units.
+                + " COALESCE(SUM(total),0) AS gross_amount,"
+                + " COALESCE(SUM(discount_amount),0) AS discount_amount"
                 + " FROM pos_log_entries WHERE tenant_id = ?");
     if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (from != null) sql.append(" AND transaction_ts >= ?");

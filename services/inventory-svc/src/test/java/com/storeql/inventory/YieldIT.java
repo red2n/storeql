@@ -37,8 +37,21 @@ class YieldIT {
 
   private static final PostgresSupport PG;
 
+  /**
+   * The businesses as tenant-svc would describe them: a breakdown's costs are kept to the business
+   * currency's minor units, so its currency is read (the currency minor-units sweep) — a pound
+   * business, a dinar business and a yen business.
+   */
+  private static final com.storeql.test.TenantSvcStub TENANTS;
+
   static {
     PG = PostgresSupport.start();
+    TENANTS =
+        com.storeql.test.TenantSvcStub.start()
+            .with(YieldIT.T, "GBP", "GB")
+            .with(YieldIT.T2, "GBP", "GB")
+            .with(YieldIT.KW, "KWD", "KW")
+            .with(YieldIT.JP, "JPY", "JP");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -50,6 +63,8 @@ class YieldIT {
 
   private static final String T = "01a091ae-611e-702c-a97b-d1b8025478e1";
   private static final String T2 = "01a091ae-611e-702c-a97b-d1b8025478e2";
+  private static final String KW = "01a091ae-611e-702c-a97b-d1b8025478e3";
+  private static final String JP = "01a091ae-611e-702c-a97b-d1b8025478e4";
   private static final String STORE = "01a091ae-611e-703c-a378-a4972ea461e1";
   private static final String SIDE = "01a091ae-611e-7037-a4b7-c854f0266ae1";
   private static final String SIRLOIN = "01a091ae-611e-7037-a4b7-c854f0266ae2";
@@ -353,6 +368,76 @@ class YieldIT {
     // The keeper of the store, holding stock.adjust by their tier, records it.
     Envelopes.created(callAs("POST", path, body, T, "STOREKEEPER", null, STORE));
     assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.yield_runs"), is("1"));
+  }
+
+  // ── the currency's own minor units ─────────────────────────────────────────
+
+  /** A breakdown at a business, its side received at {@code unitCost}, costed as recorded. */
+  private JsonObject breakdownAt(String tenant, String unitCost) {
+    String templateId =
+        Envelopes.created(
+                call("POST", "/admin/inventory/yield/templates", TEMPLATE, tenant, "OWNER"))
+            .getString("id");
+    Envelopes.created(
+        call(
+            "POST",
+            "/admin/inventory/receive",
+            "{\"storeId\":\""
+                + STORE
+                + "\",\"variantId\":\""
+                + SIDE
+                + "\",\"qty\":100,\"batchNo\":\"LOT-C\",\"costPrice\":"
+                + unitCost
+                + ",\"expiryDate\":\""
+                + LocalDate.now().plusDays(10)
+                + "\"}",
+            tenant,
+            "OWNER"));
+    return Envelopes.created(
+        call(
+            "POST",
+            "/admin/inventory/yield/runs",
+            run(templateId, 100, 34, 44, ""),
+            tenant,
+            "STOREKEEPER"));
+  }
+
+  private static BigDecimal number(JsonObject o, String field) {
+    return o.getJsonNumber(field).bigDecimalValue();
+  }
+
+  @Test
+  @DisplayName("A dinar breakdown keeps its fils; a yen breakdown is costed in whole yen")
+  void aBreakdownIsCostedInTheBusinessCurrencysOwnMinorUnits() {
+    // KWD 5.001 a kilo on 100 kg is 500.100; sirloin carries 60% over 34 kg (8.8253 → 8.825),
+    // mince 40% over 44 kg (4.5464 → 4.546), and 22 kg lost is 110.022 — never two places.
+    JsonObject dinar = breakdownAt(KW, "5.001");
+    assertThat(number(dinar, "inputCost"), is(new BigDecimal("500.100")));
+    assertThat(number(dinar, "lossAtCost"), is(new BigDecimal("110.022")));
+    JsonArray dinarCuts = dinar.getJsonArray("outputs");
+    assertThat(
+        number(Envelopes.find(dinarCuts, "variantId", SIRLOIN), "unitCost"),
+        is(new BigDecimal("8.825")));
+    assertThat(
+        number(Envelopes.find(dinarCuts, "variantId", MINCE), "unitCost"),
+        is(new BigDecimal("4.546")));
+    // Read back from the table, not only from the answer: the third decimal is kept.
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT input_cost::text FROM inventory.yield_runs WHERE tenant_id = '" + KW + "'"),
+        is("500.100"));
+
+    // ¥500 a kilo on 100 kg is ¥50,000: sirloin ¥882 (882.35), mince ¥455 (454.55), the loss
+    // ¥11,000 — whole yen, never 882.35 or 50000.00.
+    JsonObject yen = breakdownAt(JP, "500");
+    assertThat(number(yen, "inputCost"), is(new BigDecimal("50000")));
+    assertThat(number(yen, "lossAtCost"), is(new BigDecimal("11000")));
+    JsonArray yenCuts = yen.getJsonArray("outputs");
+    assertThat(
+        number(Envelopes.find(yenCuts, "variantId", SIRLOIN), "unitCost"),
+        is(new BigDecimal("882")));
+    assertThat(
+        number(Envelopes.find(yenCuts, "variantId", MINCE), "unitCost"), is(new BigDecimal("455")));
   }
 
   // ── the breakdown: the primal consumed, the cuts made at cost, the loss known ─

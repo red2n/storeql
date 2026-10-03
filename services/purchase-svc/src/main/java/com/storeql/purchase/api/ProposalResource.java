@@ -58,6 +58,9 @@ public class ProposalResource {
       responseCode = "409",
       description = "A proposed order for the store is still a draft")
   @APIResponse(responseCode = "503", description = "The stock position could not be read")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the store named is not one the caller is held to")
   @POST
   @Path("/run")
   public ApiResponse<ProposalRunResponse> run(ProposalRunRequest req) {
@@ -71,6 +74,9 @@ public class ProposalResource {
           "Each run with the orders it raised as they stand now and the items it skipped.")
   @APIResponse(responseCode = "200", description = "Runs")
   @APIResponse(responseCode = "400", description = "No store named, or one that is not a UUID")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the store named is not one the caller is held to")
   @GET
   public ApiResponse<List<ProposalRunResponse>> list(
       @QueryParam("store") String store, @QueryParam("limit") Integer limitParam) {

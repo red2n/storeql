@@ -503,6 +503,8 @@ class _RetireDialogState extends State<_RetireDialog> {
           TextField(
             key: const Key('terminal-retire-reason'),
             controller: _reason,
+            // payment-svc refuses a longer reason (400 VALIDATION_FAILED).
+            maxLength: 300,
             decoration: const InputDecoration(
               labelText: 'Why',
               helperText: 'e.g. "screen cracked", "replaced on upgrade".',

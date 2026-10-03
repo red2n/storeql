@@ -4,12 +4,14 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.Envelopes;
 import com.storeql.test.JsonStub;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
+import io.helidon.microprofile.testing.AddConfig;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.json.JsonObject;
@@ -25,6 +27,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -58,6 +61,16 @@ import org.junit.jupiter.api.Test;
  * test can open one between two sales.
  */
 @HelidonTest
+// This class's own settings, never system properties: those outlive a class, and a value read
+// before
+// this class set one (the recall cache at its default ten seconds) let a recall opened or ended in
+// one test reach the next only in the full suite.
+// Holds on, so an online order that is refused can be seen to hold nothing.
+@AddConfig(key = "storeql.order.inventory.reserve-enforce", value = "true")
+// Recalls read afresh on every order, so a test can open one between two sales.
+@AddConfig(key = "storeql.order.recall-check.cache-seconds", value = "0")
+// GRACE, in hours.
+@AddConfig(key = "storeql.order.offline-replay.grace-hours", value = "48")
 class SaleChecksIT {
 
   // An Indian business with two shops, a German one, a Brazilian one whose neighbours cannot be
@@ -125,16 +138,6 @@ class SaleChecksIT {
 
   /** Who iam-svc's staff directory holds at each business's store, as {@code tenant|store}. */
   private static final Map<String, Set<String>> STAFF_AT = new ConcurrentHashMap<>();
-
-  /** What the suite found, put back when it ends: system properties outlive a test class. */
-  private static final String ENFORCE_BEFORE =
-      System.getProperty("storeql.order.inventory.reserve-enforce");
-
-  private static final String CACHE_BEFORE =
-      System.getProperty("storeql.order.recall-check.cache-seconds");
-
-  private static final String GRACE_BEFORE =
-      System.getProperty("storeql.order.offline-replay.grace-hours");
 
   private static final PostgresSupport PG;
   private static final TenantSvcStub TENANTS;
@@ -226,11 +229,6 @@ class SaleChecksIT {
     System.setProperty("storeql.consul.enabled", "false");
     System.setProperty("storeql.kafka.enabled", "false");
     System.setProperty("storeql.order.pricing.enforce", "false");
-    // Holds on, so an online order that is refused can be seen to hold nothing.
-    System.setProperty("storeql.order.inventory.reserve-enforce", "true");
-    // Recalls read afresh on every order, so a test can open one between two sales.
-    System.setProperty("storeql.order.recall-check.cache-seconds", "0");
-    System.setProperty("storeql.order.offline-replay.grace-hours", String.valueOf(GRACE.toHours()));
   }
 
   @Inject WebTarget target;
@@ -239,15 +237,7 @@ class SaleChecksIT {
   static void stop() {
     INVENTORY.close();
     IAM.close();
-    restore("storeql.order.inventory.reserve-enforce", ENFORCE_BEFORE);
-    restore("storeql.order.recall-check.cache-seconds", CACHE_BEFORE);
-    restore("storeql.order.offline-replay.grace-hours", GRACE_BEFORE);
     PG.stop();
-  }
-
-  private static void restore(String key, String before) {
-    if (before == null) System.clearProperty(key);
-    else System.setProperty(key, before);
   }
 
   @BeforeEach
@@ -468,6 +458,18 @@ class SaleChecksIT {
     return Envelopes.scalar(
         PG,
         "SELECT count(*) FROM \"order\".offline_sale_flags WHERE tenant_id = '"
+            + tenant
+            + "' AND order_id = '"
+            + orderId
+            + "'");
+  }
+
+  /** The offline-sale entries on one order as "KIND:line", comma-separated, in order. */
+  private static String flagKindsOn(String tenant, String orderId) {
+    return Envelopes.scalar(
+        PG,
+        "SELECT coalesce(string_agg(kind || ':' || line_no, ',' ORDER BY kind, line_no), '')"
+            + " FROM \"order\".offline_sale_flags WHERE tenant_id = '"
             + tenant
             + "' AND order_id = '"
             + orderId
@@ -794,6 +796,156 @@ class SaleChecksIT {
     assertThat("nor there", ordersAt(T2, SHOP), is("0"));
   }
 
+  // ── who may replay a sale: the key opens nothing that the caller could not already reach ──
+
+  @Test
+  @DisplayName("A sale's key replayed by another business at this store reads nothing of the sale")
+  void aSalesKeyReplayedByAnotherBusinessReadsNothingOfTheSale() {
+    storeBelongsTo(SHOP, T);
+    String key = key();
+    String saleId = Envelopes.created(tillSale(T, SHOP, key, plain(CLEAN))).getString("id");
+    String before = ordersAt(T, SHOP);
+
+    // Every role of another business, naming this store and this sale's own key and basket: the
+    // store is not theirs, so it is refused, and the refusal says nothing of the sale.
+    for (String roles : new String[] {"OWNER", "MANAGER", "CASHIER"}) {
+      Response r = as(T2, CASHIER, roles, SHOP, key).post(json(sale(SHOP, "POS", plain(CLEAN))));
+      String body = Envelopes.bodyOf(r, 409);
+      assertThat(roles, Envelopes.parse(body).getString("code"), is("STORE_NOT_OPERATIONAL"));
+      assertThat(roles, body, not(containsString(saleId)));
+    }
+    for (String roles : new String[] {"STOREKEEPER", "CUSTOMER"}) {
+      Response r = as(T2, CASHIER, roles, SHOP, key).post(json(sale(SHOP, "POS", plain(CLEAN))));
+      String body = Envelopes.bodyOf(r, 403);
+      assertThat(roles, Envelopes.parse(body).getString("code"), is("FORBIDDEN"));
+      assertThat(roles, body, not(containsString(saleId)));
+    }
+    String onlineBody = Envelopes.bodyOf(online(T2, SHOP, key, plain(CLEAN)), 409);
+    assertThat(Envelopes.parse(onlineBody).getString("code"), is("STORE_NOT_OPERATIONAL"));
+    assertThat(onlineBody, not(containsString(saleId)));
+
+    assertThat("the sale stands, once", placedWith(T, key), is("1"));
+    assertThat("nothing moved here", ordersAt(T, SHOP), is(before));
+    assertThat("nothing was placed for them", placedWith(T2, key), is("0"));
+    assertThat("nor at their store", ordersAt(T2, SHOP), is("0"));
+  }
+
+  @Test
+  @DisplayName("A key is per business, and not per case: the same key elsewhere is its own sale")
+  void aKeyIsPerBusinessAndNotPerCase() {
+    String key = key();
+    String ours = Envelopes.created(tillSale(T, SHOP, key, plain(CLEAN))).getString("id");
+    String theirs = Envelopes.created(tillSale(T2, SHOP2, key, plain(CLEAN))).getString("id");
+    assertThat("two businesses, two sales", theirs, not(is(ours)));
+    assertThat(placedWith(T, key), is("1"));
+    assertThat(placedWith(T2, key), is("1"));
+
+    // Each is replayed to its own, never to the other's.
+    assertThat(Envelopes.created(tillSale(T, SHOP, key, plain(CLEAN))).getString("id"), is(ours));
+    assertThat(
+        Envelopes.created(tillSale(T2, SHOP2, key, plain(CLEAN))).getString("id"), is(theirs));
+    // A till that sends the key in capitals is sending the same key: the same sale, not a second.
+    String shouted = key.toUpperCase(Locale.ROOT);
+    assertThat(
+        Envelopes.created(tillSale(T, SHOP, shouted, plain(CLEAN))).getString("id"), is(ours));
+    assertThat(placedWith(T, key), is("1"));
+    assertThat(placedWith(T2, key), is("1"));
+  }
+
+  @Test
+  @DisplayName("Staff held to another store replaying a sale are refused; it is not read back")
+  void staffHeldToAnotherStoreCannotReplayASale() {
+    String key = key();
+    String saleId = Envelopes.created(tillSale(T, SHOP, key, plain(CLEAN))).getString("id");
+    String before = ordersAt(T, SHOP);
+
+    for (String roles : new String[] {"CASHIER", "MANAGER"}) {
+      Response r =
+          as(T, CASHIER, roles, OTHER_SHOP, key).post(json(sale(SHOP, "POS", plain(CLEAN))));
+      String body = Envelopes.bodyOf(r, 403);
+      assertThat(roles, Envelopes.parse(body).getString("code"), is("STORE_ACCESS_DENIED"));
+      assertThat(roles, body, not(containsString(saleId)));
+    }
+    // An online order is no different: held to another store, they may not place at this one.
+    Response online =
+        as(T, CASHIER, "STOREKEEPER", OTHER_SHOP, key)
+            .post(json(sale(SHOP, "ONLINE", plain(CLEAN))));
+    String heldOnline = Envelopes.bodyOf(online, 403);
+    assertThat(Envelopes.parse(heldOnline).getString("code"), is("STORE_ACCESS_DENIED"));
+    assertThat(heldOnline, not(containsString(saleId)));
+    assertThat("nothing moved", ordersAt(T, SHOP), is(before));
+    assertThat(placedWith(T, key), is("1"));
+
+    // A manager held to this store, syncing the cashier's queue, gets the sale that stands.
+    Response syncing =
+        as(T, MANAGER, "MANAGER", SHOP, key).post(json(sale(SHOP, "POS", plain(CLEAN))));
+    assertThat(Envelopes.created(syncing).getString("id"), is(saleId));
+    assertThat(ordersAt(T, SHOP), is(before));
+  }
+
+  @Test
+  @DisplayName("A shopper cannot place or replay a till sale, whatever time it claims to be from")
+  void aShopperCannotReplayATillSale() {
+    String key = key();
+    String saleId = Envelopes.created(tillSale(T, SHOP, key, plain(CLEAN))).getString("id");
+    String before = ordersAt(T, SHOP);
+    String flagged = flagsOf(T);
+    String aSale = sale(SHOP, "POS", plain(CLEAN));
+
+    String own = Envelopes.bodyOf(as(T, SHOPPER, "CUSTOMER", null, key).post(json(aSale)), 403);
+    assertThat(Envelopes.parse(own).getString("code"), is("FORBIDDEN"));
+    assertThat(own, not(containsString(saleId)));
+    // Nor does a capture time, which only the till's replay carries, open the till to a shopper.
+    String claimed = captured(aSale, aMinuteAgo());
+    String fresh = key();
+    Response replay = as(T, SHOPPER, "CUSTOMER", null, fresh).post(json(claimed));
+    assertThat(Envelopes.parse(Envelopes.bodyOf(replay, 403)).getString("code"), is("FORBIDDEN"));
+    assertThat(placedWith(T, fresh), is("0"));
+    assertThat("nothing moved", ordersAt(T, SHOP), is(before));
+    assertThat("and nothing was flagged for a manager", flagsOf(T), is(flagged));
+  }
+
+  @Test
+  @DisplayName("A sale sent with no key, or a key that is not a UUIDv7, is refused and not placed")
+  void aSaleWithoutAProperKeyIsNotPlaced() {
+    String before = ordersAt(T, SHOP);
+    String body = sale(SHOP, "POS", plain(CLEAN));
+
+    // No key at all, in the header or the body.
+    Response none =
+        target
+            .path("/orders")
+            .request()
+            .header("X-Tenant-Id", T)
+            .header("X-User-Id", CASHIER)
+            .header("X-Roles", "CASHIER")
+            .header("X-Store-Ids", SHOP)
+            .post(json(body));
+    assertThat(
+        Envelopes.parse(Envelopes.bodyOf(none, 400)).getString("code"),
+        is("MISSING_IDEMPOTENCY_KEY"));
+
+    // A version 4 id, and a key made from a clock reading: neither is a UUIDv7.
+    for (String bad :
+        new String[] {"7c9e6679-7425-40de-944b-e07fc1f90ae7", "pos-1760000000000-order"}) {
+      Response r = as(T, CASHIER, "CASHIER", SHOP, bad).post(json(body));
+      assertThat(bad, Envelopes.bodyOf(r, 400), containsString("IDEMPOTENCY_KEY_INVALID"));
+    }
+    // The body's own key is held to the same rule.
+    String inBody = body.substring(0, body.length() - 1) + ",\"idempotencyKey\":\"not-a-key\"}";
+    Response viaBody =
+        target
+            .path("/orders")
+            .request()
+            .header("X-Tenant-Id", T)
+            .header("X-User-Id", CASHIER)
+            .header("X-Roles", "CASHIER")
+            .header("X-Store-Ids", SHOP)
+            .post(json(inBody));
+    assertThat(Envelopes.bodyOf(viaBody, 400), containsString("IDEMPOTENCY_KEY_INVALID"));
+    assertThat("nothing was placed", ordersAt(T, SHOP), is(before));
+  }
+
   @Test
   @DisplayName("Weighed offline after its scale lapsed: placed on replay, flagged for a manager")
   void aWeighedSaleRungUpOfflineAfterItsScaleLapsedIsPlacedAndFlagged() {
@@ -831,7 +983,8 @@ class SaleChecksIT {
 
     String again = placedReplay(T4, SHOP4, after, rungUp, line);
     assertThat("a retried replay gets the sale that stands", again, is(late));
-    assertThat("and it is flagged once", flagsOn(T4, late), is("1"));
+    assertThat(
+        "and it is flagged once", flagKindsOn(T4, late), is("OFFLINE_SALE_ON_UNFIT_SCALE:1"));
     assertThat(
         "a sale made now is refused, as before",
         refused(tillSale(T4, SHOP4, key(), line), 409).getString("code"),

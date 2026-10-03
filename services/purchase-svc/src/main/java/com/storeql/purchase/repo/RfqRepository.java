@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -150,8 +151,12 @@ public class RfqRepository extends BaseJdbcRepository {
     return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
   }
 
-  /** The tenant's requests, newest first, at one status or all of them. */
-  public List<Summary> list(UUID tenantId, String status, int limit) {
+  /**
+   * The tenant's requests, newest first, at one status or all of them.
+   *
+   * @param stores the stores the requests were raised for, or null for every store
+   */
+  public List<Summary> list(UUID tenantId, String status, Set<UUID> stores, int limit) {
     return query(
         "SELECT "
             + HEADER_COLUMNS
@@ -161,11 +166,15 @@ public class RfqRepository extends BaseJdbcRepository {
             + " rfq_suppliers s WHERE s.tenant_id = r.tenant_id AND s.rfq_id = r.id AND s.status ="
             + " 'QUOTED') AS quote_count FROM rfqs r WHERE tenant_id = ?"
             + (status == null ? "" : " AND status = ?")
+            + (stores == null ? "" : " AND r.store_id = ANY(?)")
             + " ORDER BY created_at DESC, id DESC LIMIT ?",
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
           if (status != null) ps.setString(i++, status);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         rs ->

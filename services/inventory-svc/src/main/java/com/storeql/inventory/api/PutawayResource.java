@@ -102,6 +102,8 @@ public class PutawayResource {
   @POST
   @Path("/tasks/{id}/place")
   public Response place(@PathParam("id") String id, PlaceRequest req) {
+    // The body is optional (the suggested zone); one that is sent is held to the rules.
+    if (req != null) Validations.validate(req);
     return Response.ok(
             ApiResponse.ok(
                 WaveMappers.toDto(

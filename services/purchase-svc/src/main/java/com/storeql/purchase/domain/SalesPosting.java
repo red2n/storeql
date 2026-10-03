@@ -102,11 +102,13 @@ public final class SalesPosting {
 
   /**
    * A refund: Cr each tender's control account with its share; Dr sales and VAT output in the
-   * sale's own ratio of VAT to total, the VAT rounded to the minor unit and sales taking the
+   * sale's own ratio of VAT to total, the VAT rounded to the sale currency's own minor units (ISO
+   * 4217: whole yen, thousandths of a dinar — never a fixed two places) and sales taking the
    * remainder — or Dr clearing when the sale was never confirmed. Shares of nothing are ignored.
    *
    * @param saleTotal the confirmed sale's total, when there is one
    * @param saleTax the VAT inside it
+   * @param currency the confirmed sale's ISO 4217 currency (what the VAT share is rounded in)
    * @param confirmed whether the ledger has the sale
    */
   public static List<NominalLedgerEntry> refund(
@@ -116,10 +118,20 @@ public final class SalesPosting {
       List<Allocation> allocations,
       BigDecimal saleTotal,
       BigDecimal saleTax,
+      String currency,
       boolean confirmed,
       LocalDate date) {
     return refund(
-        tenantId, orderId, storeId, allocations, saleTotal, saleTax, confirmed, date, null);
+        tenantId,
+        orderId,
+        storeId,
+        allocations,
+        saleTotal,
+        saleTax,
+        currency,
+        confirmed,
+        date,
+        null);
   }
 
   /**
@@ -138,6 +150,7 @@ public final class SalesPosting {
       List<Allocation> allocations,
       BigDecimal saleTotal,
       BigDecimal saleTax,
+      String currency,
       boolean confirmed,
       LocalDate date,
       BigDecimal revenueRefunded) {
@@ -162,7 +175,13 @@ public final class SalesPosting {
       BigDecimal left =
           saleTotal.subtract(revenueRefunded == null ? BigDecimal.ZERO : revenueRefunded);
       BigDecimal ofSale = refunded.min(left.max(BigDecimal.ZERO));
-      BigDecimal vat = ofSale.multiply(tax).divide(saleTotal, 2, RoundingMode.HALF_UP).min(ofSale);
+      // One rounding, straight to the sale currency's minor units (a working scale first would
+      // round twice).
+      BigDecimal vat =
+          ofSale
+              .multiply(tax)
+              .divide(saleTotal, Money.scaleOf(currency), RoundingMode.HALF_UP)
+              .min(ofSale);
       p.debit(Domain.CODE_SALES, Domain.NAME_SALES, ofSale.subtract(vat))
           .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat)
           .debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, refunded.subtract(ofSale));

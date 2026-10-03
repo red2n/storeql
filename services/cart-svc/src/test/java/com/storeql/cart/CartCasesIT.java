@@ -43,6 +43,7 @@ class CartCasesIT {
   @Inject TenantStatusRepository tenants;
   @Inject StoreStatusRepository stores;
   @Inject CartRepository carts;
+  @Inject com.storeql.service.TenantDataRepository outbox;
 
   @AfterAll
   static void stopDb() {
@@ -301,6 +302,18 @@ class CartCasesIT {
             .get()
             .getStatus(),
         is(200));
+  }
+
+  @Test
+  @DisplayName("a read naming no cart, no session and no signed-in shopper is refused 400")
+  void aCartReadWithNoIdentityIsRefused() {
+    UUID tenant = Ids.newId();
+    // A shopper's cart exists, but a caller who names nothing and is nobody is not handed it.
+    cartOf(tenant, Ids.newId(), Ids.newId());
+
+    refused(as("/cart", tenant, null, null).get(), 400, "CART_NO_IDENTITY");
+    // A blank session token names nothing either.
+    refused(as("/cart?session=", tenant, null, null).get(), 400, "CART_NO_IDENTITY");
   }
 
   @Test
@@ -576,5 +589,76 @@ class CartCasesIT {
             "{\"cartId\":\"" + staffCart + "\",\"variantId\":\"" + Ids.newId() + "\",\"qty\":1}"),
         200);
     assertThat(count("cart_staff_actions", tenant, staffCart), is(0L));
+  }
+
+  /** An outbox row of the probe, created long ago, published when {@code published} says. */
+  private static void outboxProbe(String marker, String published) {
+    Envelopes.exec(
+        PG,
+        "INSERT INTO cart.outbox (id, event_type, topic, tenant_id, aggregate_id, payload,"
+            + " created_at, published_at) VALUES ('"
+            + Ids.newId()
+            + "', 'PurgeProbe', '"
+            + marker
+            + "', '"
+            + Ids.newId()
+            + "', '"
+            + Ids.newId()
+            + "', '{}', now() - interval '11 days', "
+            + published
+            + ")");
+  }
+
+  /**
+   * The hourly purge, run against this schema: published outbox rows older than the cutoff go, in
+   * batches, oldest first; a row recent enough, or not yet published, stays whatever its age. This
+   * service keeps no processed_events table, which the purge's second statement takes as nothing to
+   * trim and not as an error.
+   */
+  @Test
+  @DisplayName("The purge trims published outbox rows in batches, and no more")
+  void thePurgeTrimsOnlyWhatIsPublishedAndOld() {
+    String tail = Ids.newId().toString();
+    String marker = "purge-" + tail.substring(tail.length() - 12);
+    for (int i = 0; i < 3; i++) outboxProbe(marker, "now() - interval '10 days'");
+    for (int i = 0; i < 2; i++) outboxProbe(marker, "now() - interval '1 hour'");
+    outboxProbe(marker, "NULL");
+    Instant cutoff = Instant.now().minus(java.time.Duration.ofDays(7));
+
+    assertThat("a batch of two", outbox.purgePublished(cutoff, 2), is(2));
+    assertThat("then the rest", outbox.purgePublished(cutoff, 2), is(1));
+    assertThat("and no more", outbox.purgePublished(cutoff, 2), is(0));
+    assertThat(
+        "the recent and the unpublished stay",
+        scalar("SELECT count(*) FROM cart.outbox WHERE topic = '" + marker + "'"),
+        is("3"));
+    assertThat("no dedupe table is no error", outbox.purgeProcessedEvents(cutoff, 100), is(0));
+  }
+
+  /**
+   * The hourly purge (common-service) deletes published outbox rows in batches, oldest first, and
+   * each batch needs an index on published_at or it scans the whole table. With sequential scans
+   * switched off the planner takes an index only when one can serve the statement, so the plan
+   * names it. (cart-svc keeps no processed_events table, so there is no second statement to serve.)
+   */
+  @Test
+  @DisplayName("The purge of published outbox rows is served by an index")
+  void thePurgeOfPublishedOutboxRowsIsServedByAnIndex() throws Exception {
+    StringBuilder plan = new StringBuilder();
+    try (var conn =
+            java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      try (var rs =
+          st.executeQuery(
+              "EXPLAIN SELECT id FROM cart.outbox WHERE published_at IS NOT NULL"
+                  + " AND published_at < now() ORDER BY published_at ASC LIMIT 1000"
+                  + " FOR UPDATE SKIP LOCKED")) {
+        while (rs.next()) {
+          plan.append(rs.getString(1)).append('\n');
+        }
+      }
+    }
+    assertThat(plan.toString(), containsString("idx_outbox_published"));
   }
 }

@@ -89,12 +89,17 @@ class NoReceiptStoreCreditIT {
   private String balance(UUID tenantId, String customerId, String currency) throws SQLException {
     String v =
         sql(
-            "SELECT balance::text FROM customer.store_credit_accounts"
+            "SELECT balance FROM customer.store_credit_accounts"
                 + " WHERE tenant_id = ? AND customer_id = ? AND currency = ?",
             tenantId,
             Ids.parse(customerId),
             currency);
-    return v == null ? "none" : v;
+    // The column holds four places for any currency; the balance is read as it is written, at
+    // the currency's own minor units.
+    return v == null
+        ? "none"
+        : com.storeql.customer.mapper.Mappers.money(new java.math.BigDecimal(v), currency)
+            .toPlainString();
   }
 
   private static String event(

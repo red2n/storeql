@@ -17,8 +17,6 @@ import java.util.UUID;
  */
 public final class OrderSplit {
 
-  private static final int MONEY = 2;
-
   private OrderSplit() {}
 
   /**
@@ -52,13 +50,16 @@ public final class OrderSplit {
    * @param tax the order's tax as quoted
    * @param discount the order's discount
    * @param promotion the whole-basket promotion
+   * @param scale the order currency's minor units ({@code Fx.minorUnits}): 2 for the pound, 0 for
+   *     the yen, 3 for the dinar — every share is rounded to it
    */
   public static List<Part> split(
       List<Line> lines,
       Map<UUID, Map<UUID, BigDecimal>> plan,
       BigDecimal tax,
       BigDecimal discount,
-      BigDecimal promotion) {
+      BigDecimal promotion,
+      int scale) {
     // What of each line each store takes, the last taker of a line getting what is left of it.
     Map<Integer, BigDecimal> qtyLeft = new HashMap<>();
     Map<Integer, BigDecimal> totalLeft = new HashMap<>();
@@ -82,11 +83,11 @@ public final class OrderSplit {
           BigDecimal take = has.min(need);
           boolean last = take.compareTo(has) == 0;
           BigDecimal total =
-              last ? totalLeft.get(i) : share(line.lineTotal(), take, line.qty(), MONEY);
+              last ? totalLeft.get(i) : share(line.lineTotal(), take, line.qty(), scale);
           BigDecimal vat =
               line.vat() == null
                   ? null
-                  : last ? vatLeft.get(i) : share(line.vat(), take, line.qty(), MONEY);
+                  : last ? vatLeft.get(i) : share(line.vat(), take, line.qty(), scale);
           parts.add(new LinePart(i, line.variantId(), take, total, vat));
           qtyLeft.put(i, has.subtract(take));
           totalLeft.put(i, totalLeft.get(i).subtract(total));
@@ -120,10 +121,10 @@ public final class OrderSplit {
                 ? parts.stream()
                     .map(LinePart::vat)
                     .reduce(BigDecimal.ZERO, BigDecimal::add)
-                    .setScale(MONEY, RoundingMode.HALF_UP)
-                : share(zero(tax), subtotal, whole, MONEY);
-        dsc = share(zero(discount), subtotal, whole, MONEY);
-        prm = share(zero(promotion), subtotal, whole, MONEY);
+                    .setScale(scale, RoundingMode.HALF_UP)
+                : share(zero(tax), subtotal, whole, scale);
+        dsc = share(zero(discount), subtotal, whole, scale);
+        prm = share(zero(promotion), subtotal, whole, scale);
       }
       taxGiven = taxGiven.add(t);
       discGiven = discGiven.add(dsc);
@@ -134,10 +135,12 @@ public final class OrderSplit {
   }
 
   /**
-   * An amount shared by weights, to the cent, the last part with any weight taking what is left: a
-   * line promotion shared by the quantities of a line split across parts.
+   * An amount shared by weights, to the currency's minor unit, the last part with any weight taking
+   * what is left: a line promotion shared by the quantities of a line split across parts.
+   *
+   * @param scale the currency's minor units ({@code Fx.minorUnits})
    */
-  public static List<BigDecimal> share(BigDecimal amount, List<BigDecimal> weights) {
+  public static List<BigDecimal> share(BigDecimal amount, List<BigDecimal> weights, int scale) {
     BigDecimal whole = weights.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
     int last = -1;
     for (int i = 0; i < weights.size(); i++) if (weights.get(i).signum() > 0) last = i;
@@ -147,7 +150,7 @@ public final class OrderSplit {
       BigDecimal s;
       if (weights.get(i).signum() <= 0) s = BigDecimal.ZERO;
       else if (i == last) s = amount.subtract(given);
-      else s = share(amount, weights.get(i), whole, MONEY);
+      else s = share(amount, weights.get(i), whole, scale);
       given = given.add(s);
       out.add(s);
     }

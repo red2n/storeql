@@ -67,7 +67,11 @@ public class WebhookService {
   /** An endpoint as made, with the one showing of its secret. */
   public record Made(Endpoint endpoint, String secret) {}
 
-  public Made register(UUID tenantId, UUID by, WebhookDtos.CreateRequest req) {
+  /**
+   * @throws ApiException 503 {@code WEBHOOKS_NOT_CONFIGURED} when the deployment has no key to seal
+   *     a secret under: no secret can be minted for a new endpoint or a rotation
+   */
+  private void requireSealingKey() {
     if (!secrets.isConfigured()) {
       throw new ApiException(
           503,
@@ -75,6 +79,10 @@ public class WebhookService {
           "Webhooks are not switched on for this deployment: no sealing key",
           List.of());
     }
+  }
+
+  public Made register(UUID tenantId, UUID by, WebhookDtos.CreateRequest req) {
+    requireSealingKey();
     String url = checkedUrl(req.url());
     String description = checkedDescription(req.description());
     List<String> events = checkedEvents(req.events());
@@ -149,6 +157,7 @@ public class WebhookService {
   /** A new secret, sealed for the database and returned once; the old one signs nothing more. */
   public String rotateSecret(UUID tenantId, UUID id) {
     get(tenantId, id);
+    requireSealingKey();
     String secret = newSecret();
     if (!repo.rotateSecret(tenantId, id, secrets.seal(secret), Instant.now())) {
       throw ApiException.notFound("WEBHOOK_ENDPOINT_NOT_FOUND", "No such endpoint");

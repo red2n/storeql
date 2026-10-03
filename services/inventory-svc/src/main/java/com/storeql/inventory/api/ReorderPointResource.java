@@ -155,6 +155,11 @@ public class ReorderPointResource {
       description =
           "Sets min/max order quantity and lot-size multiplier applied to the computed"
               + " EOQ (Gap #28).")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "BODY_REQUIRED; VALIDATION_FAILED: a negative quantity, a lot of nothing, more than"
+              + " fifteen whole digits or three places")
   @APIResponse(responseCode = "403", description = "Not management, or STORE_ACCESS_DENIED")
   @APIResponse(responseCode = "404", description = "ROP plan not found")
   @PUT
@@ -164,6 +169,7 @@ public class ReorderPointResource {
     // The order modifiers shape what gets ordered: management's, at a store the caller keeps. A
     // plan of another business is not found, whatever role asks.
     ctx.requireAnyRole(MANAGEMENT);
+    Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     ctx.requireStoreAccess(service.getRopPlanById(tenantId, id).storeId());
     return ApiResponse.ok(

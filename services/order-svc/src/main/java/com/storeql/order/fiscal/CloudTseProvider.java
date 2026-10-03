@@ -17,6 +17,7 @@ import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
 import java.math.BigDecimal;
+import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
@@ -316,10 +317,19 @@ public class CloudTseProvider implements TseProvider {
     }
   }
 
+  /**
+   * The address of a path, as a URI: the WebClient's String form escapes the "?" of {@code
+   * ?tx_revision=} into the path, and the TSE answers 404.
+   */
+  private URI target(String path) {
+    return URI.create(baseUrl + path);
+  }
+
   private JsonObject get(String path, String token) {
     try (HttpClientResponse res =
         webClient
-            .get(baseUrl + path)
+            .get()
+            .uri(target(path))
             .header(HeaderNames.AUTHORIZATION, "Bearer " + token)
             .request()) {
       String text = res.as(String.class);
@@ -347,7 +357,8 @@ public class CloudTseProvider implements TseProvider {
   private JsonObject put(String path, String token, JsonObject body) {
     try (HttpClientResponse res =
         webClient
-            .put(baseUrl + path)
+            .put()
+            .uri(target(path))
             .header(HeaderNames.AUTHORIZATION, "Bearer " + token)
             .header(HeaderNames.CONTENT_TYPE, "application/json")
             .submit(body.toString())) {

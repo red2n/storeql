@@ -1,8 +1,8 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/format.dart';
@@ -313,6 +313,17 @@ class _PointTile extends ConsumerWidget {
   }
 }
 
+/// A temperature as inventory-svc keeps it, NUMERIC(6,2): four whole digits,
+/// two places, below nought where it is cold. Read with the shared amount
+/// reader, signed, so a key it cannot read is refused in words, never dropped.
+const _celsius = AmountShape(4, 2, signed: true);
+
+/// What [c] holds as degrees, or null while blank or refused.
+double? _readCelsius(TextEditingController c, AmountMarks marks) {
+  final plain = _celsius.read(c.text.trim(), marks);
+  return plain == null ? null : double.parse(plain);
+}
+
 /// Takes one check. A failure is saved as a failure at once — a failed
 /// reading must be on record even if nothing is done about it yet — and the
 /// dialog then asks what was done, which can be left for later but not
@@ -343,13 +354,14 @@ class _RecordCheckDialogState extends ConsumerState<RecordCheckDialog> {
     super.dispose();
   }
 
-  /// The reading as typed, or null. A comma is a decimal point on many
-  /// keyboards; more than two places is refused, as the server refuses it.
-  double? get _reading {
-    final text = _value.text.trim().replaceAll(',', '.');
-    if (!RegExp(r'^-?\d{1,4}(\.\d{1,2})?$').hasMatch(text)) return null;
-    return double.tryParse(text);
-  }
+  final _marks = AmountMarks.ofApp();
+
+  /// The reading as typed, or null while nothing is typed or what is typed is
+  /// refused ([_refusal]).
+  double? get _reading => _readCelsius(_value, _marks);
+
+  /// Why the reading cannot be saved, in words, or null.
+  String? get _refusal => _celsius.refusal(_value.text.trim(), _marks);
 
   bool get _ready =>
       widget.point.checkType.isTemperature ? _reading != null : _passed != null;
@@ -418,13 +430,16 @@ class _RecordCheckDialogState extends ConsumerState<RecordCheckDialog> {
                 autofocus: true,
                 keyboardType: const TextInputType.numberWithOptions(
                     signed: true, decimal: true),
-                inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp(r'[-0-9.,]')),
-                ],
-                decoration: const InputDecoration(
+                // Every key stays where it was typed ([_celsius]): one the
+                // reading cannot take is refused under the field and Save
+                // waits. Filtered out unsaid, the keys after it were read: 62٫5
+                // was saved as 625, a pass, and −18 as 18.
+                decoration: InputDecoration(
                   labelText: 'Reading',
                   suffixText: '°C',
                   helperText: 'The probe or display reading, to two decimal places at most',
+                  errorText: _refusal,
+                  errorMaxLines: 3,
                 ),
                 onChanged: (_) => setState(() {}),
               ),
@@ -926,10 +941,11 @@ class PointDialog extends ConsumerStatefulWidget {
 
 class _PointDialogState extends ConsumerState<PointDialog> {
   late final _name = TextEditingController(text: widget.point?.name ?? '');
-  late final _min = TextEditingController(
-      text: widget.point?.minValue?.toStringAsFixed(2) ?? '');
-  late final _max = TextEditingController(
-      text: widget.point?.maxValue?.toStringAsFixed(2) ?? '');
+  final _marks = AmountMarks.ofApp();
+  // Written the way the app's language writes a number, so it reads back
+  // unchanged: 8,00 in Romanian, where 8.00 is refused.
+  late final _min = TextEditingController(text: _written(widget.point?.minValue));
+  late final _max = TextEditingController(text: _written(widget.point?.maxValue));
   late String? _typeId = widget.point?.checkType.id;
   late int _hours = widget.point?.frequencyHours ?? 4;
   bool _saving = false;
@@ -945,8 +961,15 @@ class _PointDialogState extends ConsumerState<PointDialog> {
     super.dispose();
   }
 
-  double? _parse(TextEditingController c) =>
-      double.tryParse(c.text.trim().replaceAll(',', '.'));
+  String _written(double? limit) =>
+      limit == null ? '' : _marks.write(limit.toStringAsFixed(2));
+
+  /// A limit as typed, or null when blank: the check type's own. One that
+  /// cannot be read is refused ([_limitRefusal]) and never sent as blank,
+  /// which would save the type's laxer limit.
+  double? _parse(TextEditingController c) => _readCelsius(c, _marks);
+
+  String? _limitRefusal(TextEditingController c) => _celsius.refusal(c.text.trim(), _marks);
 
   Future<void> _save(FsCheckType type) async {
     setState(() {
@@ -1022,24 +1045,34 @@ class _PointDialogState extends ConsumerState<PointDialog> {
                         'You can set a stricter limit here, not a laxer one.',
                       ),
                     ),
-                    Row(children: [
+                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Expanded(
                         child: TextField(
+                          key: const Key('fs-point-min'),
                           controller: _min,
                           keyboardType: const TextInputType.numberWithOptions(
                               signed: true, decimal: true),
-                          decoration: const InputDecoration(
-                              labelText: 'Lowest', suffixText: '°C'),
+                          decoration: InputDecoration(
+                              labelText: 'Lowest',
+                              suffixText: '°C',
+                              errorText: _limitRefusal(_min),
+                              errorMaxLines: 3),
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                       const SizedBox(width: AppSpacing.md),
                       Expanded(
                         child: TextField(
+                          key: const Key('fs-point-max'),
                           controller: _max,
                           keyboardType: const TextInputType.numberWithOptions(
                               signed: true, decimal: true),
-                          decoration: const InputDecoration(
-                              labelText: 'Highest', suffixText: '°C'),
+                          decoration: InputDecoration(
+                              labelText: 'Highest',
+                              suffixText: '°C',
+                              errorText: _limitRefusal(_max),
+                              errorMaxLines: 3),
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                     ]),
@@ -1069,7 +1102,11 @@ class _PointDialogState extends ConsumerState<PointDialog> {
             onPressed: _saving ? null : () => Navigator.of(context).pop(),
             child: const Text('Cancel')),
         FilledButton(
-          onPressed: _saving || type == null || _name.text.trim().isEmpty
+          onPressed: _saving ||
+                  type == null ||
+                  _name.text.trim().isEmpty ||
+                  (type.isTemperature &&
+                      (_limitRefusal(_min) != null || _limitRefusal(_max) != null))
               ? null
               : () => _save(type),
           child: Text(_saving ? 'Saving…' : 'Save'),

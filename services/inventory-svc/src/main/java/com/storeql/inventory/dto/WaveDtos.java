@@ -39,7 +39,8 @@ public final class WaveDtos {
 
   @Schema(name = "PickLineRequest")
   public record PickLineRequest(
-      @NotBlank String lineId, @NotNull @DecimalMin("0") BigDecimal pickedQty) {}
+      @NotBlank String lineId,
+      @NotNull @DecimalMin("0") @Fits(integer = 15, fraction = 3) BigDecimal pickedQty) {}
 
   @Schema(
       name = "RecordPicksRequest",

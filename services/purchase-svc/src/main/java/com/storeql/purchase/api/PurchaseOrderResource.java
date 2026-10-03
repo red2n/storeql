@@ -64,6 +64,9 @@ public class PurchaseOrderResource {
       description = "Creates a DRAFT purchase order for the given supplier and store.")
   @APIResponse(responseCode = "201", description = "Purchase order created")
   @APIResponse(responseCode = "404", description = "Supplier not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the store named is not one the caller is held to")
   @POST
   public Response create(CreatePurchaseOrderRequest req) {
     Validations.validate(req);
@@ -100,6 +103,9 @@ public class PurchaseOrderResource {
    */
   @Operation(summary = "Get a purchase order", description = "Returns a single purchase order.")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") UUID id) {
@@ -134,7 +140,13 @@ public class PurchaseOrderResource {
               + " as it did before the feature existed.")
   @APIResponse(responseCode = "200", description = "Submitted, or routed for approval")
   @APIResponse(responseCode = "400", description = "Only DRAFT orders can be submitted")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "409",
+      description = "PURCHASE_PO_HAS_NO_LINES: an order with nothing on it is not sent")
   @POST
   @Path("/{id}/submit")
   public Response submit(@PathParam("id") UUID id) {
@@ -152,6 +164,9 @@ public class PurchaseOrderResource {
   @APIResponse(responseCode = "200", description = "Delivered")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
   @APIResponse(responseCode = "409", description = "PURCHASE_PO_NOT_DELIVERABLE")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @POST
   @Path("/{id}/dropship-delivered")
   public Response dropshipDelivered(@PathParam("id") UUID id) {
@@ -182,9 +197,17 @@ public class PurchaseOrderResource {
               + " control entirely. The total is re-read from the order rather than taken from the"
               + " request, because a rejected order can be edited before it comes back.")
   @APIResponse(responseCode = "200", description = "Approved and submitted")
-  @APIResponse(responseCode = "403", description = "Above the approver's own authority")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Above the approver's own authority, or STORE_ACCESS_DENIED: the caller is held to"
+              + " stores that are not the order's")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
-  @APIResponse(responseCode = "409", description = "Order is not awaiting approval")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Order is not awaiting approval, or PURCHASE_PO_HAS_NO_LINES: an order with nothing on"
+              + " it is not sent")
   @POST
   @Path("/{id}/approve")
   public Response approve(@PathParam("id") UUID id, DecidePurchaseOrderRequest req) {
@@ -213,6 +236,9 @@ public class PurchaseOrderResource {
               + " would leave an order too large for anyone configured stuck in the queue for good.")
   @APIResponse(responseCode = "200", description = "Rejected and returned to DRAFT")
   @APIResponse(responseCode = "400", description = "A rejection must state a reason")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
   @APIResponse(responseCode = "409", description = "Order is not awaiting approval")
   @POST
@@ -244,6 +270,9 @@ public class PurchaseOrderResource {
               + " has changed.")
   @APIResponse(responseCode = "200", description = "The approval trail")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @GET
   @Path("/{id}/approvals")
   public Response approvals(@PathParam("id") UUID id) {
@@ -307,6 +336,9 @@ public class PurchaseOrderResource {
   @APIResponse(
       responseCode = "409",
       description = "Purchase order is already RECEIVED or CANCELLED")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @POST
   @Path("/{id}/cancel")
   public Response cancel(@PathParam("id") UUID id, CancelPurchaseOrderRequest req) {
@@ -335,6 +367,9 @@ public class PurchaseOrderResource {
               + " than by line id, because a delivery note names products, not order rows.")
   @APIResponse(responseCode = "200", description = "One row per ordered variant")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @GET
   @Path("/{id}/progress")
   public Response progress(@PathParam("id") UUID id) {
@@ -371,6 +406,9 @@ public class PurchaseOrderResource {
   @APIResponse(responseCode = "400", description = "Reason missing or blank")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
   @APIResponse(responseCode = "409", description = "Order is not PARTIALLY_RECEIVED")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @POST
   @Path("/{id}/close")
   public Response close(@PathParam("id") UUID id, CancelPurchaseOrderRequest req) {
@@ -394,6 +432,9 @@ public class PurchaseOrderResource {
   @APIResponse(responseCode = "201", description = "Line added")
   @APIResponse(responseCode = "400", description = "Purchase order is not DRAFT")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @POST
   @Path("/{id}/lines")
   public Response addLine(@PathParam("id") UUID id, AddPurchaseOrderLineRequest req) {
@@ -422,6 +463,9 @@ public class PurchaseOrderResource {
   @APIResponse(
       responseCode = "409",
       description = "PURCHASE_LINE_BELOW_ALLOCATIONS, PURCHASE_PO_LINES_FIXED (a dropship order)")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @PUT
   @Path("/{id}/lines/{lineId}")
   public Response amendLine(
@@ -450,6 +494,9 @@ public class PurchaseOrderResource {
   @APIResponse(
       responseCode = "409",
       description = "PURCHASE_LINE_HAS_ALLOCATIONS, PURCHASE_PO_LINES_FIXED (a dropship order)")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @DELETE
   @Path("/{id}/lines/{lineId}")
   public Response removeLine(@PathParam("id") UUID id, @PathParam("lineId") UUID lineId) {
@@ -468,6 +515,9 @@ public class PurchaseOrderResource {
       summary = "List a purchase order's lines",
       description = "Returns all lines on the given purchase order.")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @GET
   @Path("/{id}/lines")
   public Response listLines(@PathParam("id") UUID id) {

@@ -78,10 +78,7 @@ public class AdminResource {
           "Nets on-hand quantity against open in-transit supply lines per store/variant, to show"
               + " net available. Optionally filtered by store and/or variant. A store that is"
               + " named must be one the caller may act at; naming none reads the caller's own"
-              + " stores added together, or the whole business for an unrestricted caller. The"
-              + " window is from/to (inclusive yyyy-MM-dd, UTC); with no from it is the last 90"
-              + " days (storeql.reporting.movement-stats.default-days) and it is never longer"
-              + " than 366 days (max-days).")
+              + " stores added together, or the whole business for an unrestricted caller.")
   @APIResponse(responseCode = "200", description = "Netting rows")
   @APIResponse(responseCode = "400", description = "storeId or variantId is not a valid UUID")
   @APIResponse(
@@ -109,7 +106,10 @@ public class AdminResource {
           "Stock in/out/net movement totals per store/variant, bucketed by the given number of"
               + " days (e.g. 1 for daily, 7 for weekly, 30 for monthly-ish buckets). A store that"
               + " is named must be one the caller may act at; naming none reads the caller's own"
-              + " stores added together, or the whole business for an unrestricted caller.")
+              + " stores added together, or the whole business for an unrestricted caller. The"
+              + " window is from/to (inclusive yyyy-MM-dd, UTC); with no from it is the last 90"
+              + " days (storeql.reporting.movement-stats.default-days) and it is never longer"
+              + " than 366 days (max-days).")
   @APIResponse(responseCode = "200", description = "Movement statistic rows")
   @APIResponse(
       responseCode = "400",

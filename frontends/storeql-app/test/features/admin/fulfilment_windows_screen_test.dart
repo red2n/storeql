@@ -214,6 +214,51 @@ void main() {
     expect(find.textContaining('Capacity 20'), findsOneWidget);
   });
 
+  // The capacity and the cut-off are whole numbers. Text that is not one was
+  // saved as nought — a window of 1,000 orders taking none — and is now
+  // refused under its field with nothing saved.
+  for (final (typed, why) in [
+    ('1,000', 'Type the amount without thousands separators.'),
+    ('15.', 'Whole amounts only.'),
+    ('.', 'Whole amounts only.'),
+    ('-', 'Type the amount without a sign.'),
+    ('+5', 'Type the amount without a sign.'),
+    ('0x10', 'Only digits.'),
+  ]) {
+    testWidgets('a capacity of "$typed" is refused under the field, never saved as nought',
+        (tester) async {
+      final server = await _pump(tester, windows: []);
+      await tester.tap(find.byKey(const Key('add-window')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('window-capacity')), typed);
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(find.byKey(const Key('window-capacity'))).decoration?.errorText,
+        why,
+      );
+      await tester.tap(find.byKey(const Key('window-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+      expect(find.text('A figure cannot be read. Correct the one marked.'), findsOneWidget);
+    });
+  }
+
+  testWidgets('a cut-off of "45." is refused under the field, never saved as nought',
+      (tester) async {
+    final server = await _pump(tester, windows: []);
+    await tester.tap(find.byKey(const Key('add-window')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('window-cutoff')), '45.');
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byKey(const Key('window-cutoff'))).decoration?.errorText,
+      'Whole amounts only.',
+    );
+    await tester.tap(find.byKey(const Key('window-save')));
+    await tester.pumpAndSettle();
+    expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+  });
+
   testWidgets('a refused window is worded by its own problem', (tester) async {
     final server = await _pump(tester, windows: []);
     server.refusal = {

@@ -3,7 +3,9 @@ package com.storeql.iam.api;
 import com.storeql.iam.domain.ApiKey;
 import com.storeql.iam.dto.ApiKeyDtos;
 import com.storeql.iam.service.ApiKeyService;
+import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.ErrorCodes;
 import com.storeql.web.Parsing;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -48,10 +50,18 @@ public class ApiKeyResource {
   @APIResponse(responseCode = "201", description = "The key, shown once")
   @APIResponse(
       responseCode = "400",
-      description = "API_KEY_NAME_INVALID, API_KEY_ROLE_INVALID, API_KEY_EXPIRY_PAST, INVALID_UUID")
+      description =
+          "API_KEY_NAME_INVALID, API_KEY_ROLE_INVALID, API_KEY_EXPIRY_PAST, INVALID_UUID,"
+              + " BODY_REQUIRED")
   @POST
   public Response mint(ApiKeyDtos.CreateRequest req) {
     ctx.requireAnyRole("OWNER");
+    // The service judges every field, each refusal with a code of its own that clients name
+    // (API_KEY_NAME_INVALID, API_KEY_ROLE_INVALID, ...); bean validation here would answer them
+    // all VALIDATION_FAILED. A body that is not there has nothing to judge.
+    if (req == null) {
+      throw ApiException.badRequest(ErrorCodes.BODY_REQUIRED, "Request body required");
+    }
     ApiKeyService.Minted minted = service.mint(ctx.requireTenantId(), ctx.requireUserId(), req);
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(ApiKeyDtos.CreatedResponse.of(toDto(minted.key()), minted.secret())))

@@ -244,9 +244,10 @@ Future<Markdown> createMarkdown(
   String? batchId,
   String? batchNo,
   required String expiryDate,
-  required double qty,
-  double? percentOff,
-  double? markdownPrice,
+  // The plain decimals typed ([plainDecimal]): JSON-B reads them exactly.
+  required String qty,
+  String? percentOff,
+  String? markdownPrice,
   required String reason,
 }) async {
   final resp = await ref

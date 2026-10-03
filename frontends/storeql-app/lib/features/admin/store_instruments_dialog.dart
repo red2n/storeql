@@ -3,6 +3,7 @@ import '../../shared/util/status_labels.dart';
 import '../../core/format.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
@@ -10,6 +11,7 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../pos/weighing_instruments.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import '../../shared/widgets/empty_state.dart';
 
 // The weighing-instrument register for one store (Weights and Measures Act
@@ -206,6 +208,14 @@ class _InstrumentFormState extends ConsumerState<_InstrumentForm> {
   bool _saving = false;
   String? _error;
 
+  // The capacity and the scale interval as the plate marks them (tenant-svc
+  // keeps each as NUMERIC(18,4)) are read the way the app's language writes a
+  // number ([AmountMarks]) and sent as the decimals typed. One that cannot be
+  // read is refused under its field and nothing is registered: sent as none,
+  // Romanian's 0,005 kg interval left the register without one.
+  final _marks = AmountMarks.ofApp();
+  static const _plateShape = AmountShape(14, 4);
+
   @override
   void dispose() {
     for (final c in [_identifier, _serial, _make, _model, _capacity, _interval, _approval, _scheme]) {
@@ -215,6 +225,11 @@ class _InstrumentFormState extends ConsumerState<_InstrumentForm> {
   }
 
   Future<void> _save() async {
+    if (figureRefused(_marks, [(_capacity, _plateShape), (_interval, _plateShape)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
+    final capacity = figureOf(_capacity, _plateShape, _marks);
     setState(() {
       _saving = true;
       _error = null;
@@ -225,9 +240,10 @@ class _InstrumentFormState extends ConsumerState<_InstrumentForm> {
       'make': _make.text.trim().isEmpty ? null : _make.text.trim(),
       'model': _model.text.trim().isEmpty ? null : _model.text.trim(),
       'kind': _kind,
-      if (_capacity.text.trim().isNotEmpty) 'maxCapacity': double.tryParse(_capacity.text.trim()),
-      if (_capacity.text.trim().isNotEmpty) 'capacityUom': 'KG',
-      if (_interval.text.trim().isNotEmpty) 'scaleInterval': double.tryParse(_interval.text.trim()),
+      // The plain decimals typed (JSON-B reads them exactly); blank is left out.
+      'maxCapacity': ?capacity,
+      if (capacity != null) 'capacityUom': 'KG',
+      'scaleInterval': ?figureOf(_interval, _plateShape, _marks),
       'approvalRef': _approval.text.trim().isEmpty ? null : _approval.text.trim(),
       if (_kind == 'LABELLING' && _scheme.text.trim().isNotEmpty) 'labelScheme': _scheme.text.trim(),
     };
@@ -288,16 +304,24 @@ class _InstrumentFormState extends ConsumerState<_InstrumentForm> {
               ),
               Row(children: [
                 Expanded(
-                    child: TextField(
+                    child: FigureField(
+                        fieldKey: const Key('instrument-capacity'),
                         controller: _capacity,
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        decoration: const InputDecoration(labelText: 'Max capacity (kg)'))),
+                        shape: _plateShape,
+                        marks: _marks,
+                        label: 'Max capacity (kg)',
+                        hint: '',
+                        onChanged: (_) => setState(() {}))),
                 const SizedBox(width: 8),
                 Expanded(
-                    child: TextField(
+                    child: FigureField(
+                        fieldKey: const Key('instrument-interval'),
                         controller: _interval,
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        decoration: const InputDecoration(labelText: 'Scale interval e (kg)'))),
+                        shape: _plateShape,
+                        marks: _marks,
+                        label: 'Scale interval e (kg)',
+                        hint: '',
+                        onChanged: (_) => setState(() {}))),
               ]),
               TextField(
                   controller: _approval,

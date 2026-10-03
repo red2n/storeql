@@ -308,10 +308,16 @@ class ObligationIT {
 
   @Test
   @DisplayName("A business whose country cannot be read is told so, never matched to a law")
-  void aBusinessWithNoReadableCountryIsToldSo() {
-    // Sign-up checks only the length of the country, so two ideographic spaces are stored. The
-    // underlying gap (sign-up takes a country that is no ISO code) is not closed here.
-    String odd = onboard("\\u3000\\u3000", "GBP");
+  void aBusinessWithNoReadableCountryIsToldSo() throws Exception {
+    // Sign-up no longer takes a country that is no ISO code (OnboardingIT), so a business like this
+    // is one whose row was written before it did, or by hand: its country is overwritten here.
+    String odd = onboard("GB", "GBP");
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps = c.prepareStatement("UPDATE tenant.tenants SET country = ? WHERE id = ?::uuid")) {
+      ps.setString(1, Character.toString(0x3000).repeat(2)); // two ideographic spaces
+      ps.setString(2, odd);
+      assertThat(ps.executeUpdate(), is(1));
+    }
     Response r = read(odd, "OWNER", null, null);
     String body = r.readEntity(String.class);
     assertThat(body, r.getStatus(), is(409));

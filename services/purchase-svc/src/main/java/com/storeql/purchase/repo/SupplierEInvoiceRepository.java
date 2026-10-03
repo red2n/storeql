@@ -18,6 +18,7 @@ import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -169,33 +170,38 @@ public class SupplierEInvoiceRepository extends BaseOutboxRepository {
         .findFirst();
   }
 
-  /** Newest first, all or those with one status. */
-  public List<Document> list(UUID tenantId, String status, int limit) {
-    if (status == null) {
-      return query(
-          "SELECT "
-              + COLUMNS
-              + " FROM supplier_einvoices WHERE tenant_id = ?"
-              + " ORDER BY received_at DESC, id DESC LIMIT ?",
-          ps -> {
-            ps.setObject(1, tenantId);
-            ps.setInt(2, limit);
-          },
-          SupplierEInvoiceRepository::map,
-          "list supplier e-invoices");
-    }
+  /**
+   * Newest first, all or those with one status.
+   *
+   * <p>A document is the business's inbox until it names an order, and the order's store's from
+   * then on: a list held to stores keeps the documents that name no order yet and those billing an
+   * order at one of the stores, read through the business's own orders.
+   *
+   * @param stores the stores to read, or null for every store in the business
+   */
+  public List<Document> list(UUID tenantId, String status, Set<UUID> stores, int limit) {
     return query(
         "SELECT "
             + COLUMNS
-            + " FROM supplier_einvoices WHERE tenant_id = ? AND status = ?"
+            + " FROM supplier_einvoices WHERE tenant_id = ?"
+            + (status != null ? " AND status = ?" : "")
+            + (stores != null
+                ? " AND (po_id IS NULL OR po_id IN (SELECT po.id FROM purchase_orders po"
+                    + " WHERE po.tenant_id = ? AND po.store_id = ANY(?)))"
+                : "")
             + " ORDER BY received_at DESC, id DESC LIMIT ?",
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setString(2, status);
-          ps.setInt(3, limit);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          if (status != null) ps.setString(i++, status);
+          if (stores != null) {
+            ps.setObject(i++, tenantId);
+            ps.setArray(i++, PurchaseRepository.storeArray(ps, stores));
+          }
+          ps.setInt(i, limit);
         },
         SupplierEInvoiceRepository::map,
-        "list supplier e-invoices by status");
+        "list supplier e-invoices");
   }
 
   public List<Line> lines(UUID tenantId, UUID einvoiceId) {

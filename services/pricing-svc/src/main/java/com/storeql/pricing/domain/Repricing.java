@@ -15,9 +15,10 @@ import java.util.Optional;
  *
  * <p>A rule reacts to being undercut and to nothing else: it never proposes raising a price toward
  * a dearer rival, it never goes below its floor, and a {@code .99} ending is reached only by
- * rounding down, so a rounded proposal is never above the price the rule aimed at. The floor is a
- * share of the current price because pricing-svc holds no cost; a rule that must protect a margin
- * is a matter for the buyer's cost in purchase-svc, and the API says so.
+ * rounding down, so a rounded proposal is never above the price the rule aimed at; every figure is
+ * kept to the price list currency's own minor units. The floor is a share of the current price
+ * because pricing-svc holds no cost; a rule that must protect a margin is a matter for the buyer's
+ * cost in purchase-svc, and the API says so.
  */
 public final class Repricing {
 
@@ -37,7 +38,11 @@ public final class Repricing {
   public enum Rounding {
     /** To the currency's minor unit, half up. */
     NONE,
-    /** Down to the largest price ending in .99 (whole units less one minor unit) not above it. */
+    /**
+     * Down to the largest price ending in .99 — whole units less one hundredth — not above it: x.99
+     * in a two-decimal currency, x.990 in a three-decimal one; a currency without hundredths (the
+     * yen) has no .99 and is rounded down to its whole units.
+     */
     ENDING_99
   }
 
@@ -97,18 +102,25 @@ public final class Repricing {
   }
 
   /**
-   * The largest price not above {@code price} that ends in .99 — whole units less one minor unit. A
-   * currency without minor units has no .99 to end in and is rounded down to whole units.
+   * The largest price not above {@code price} that ends in .99 — whole units less one hundredth of
+   * a unit, at the currency's own scale: {@code 8.99} for the pound, {@code 8.990} for the dinar
+   * (the hundredths a shopper reads, the third decimal nought, as Gulf shelf prices end; a price a
+   * fils short of a whole dinar is not a .99 and cannot be paid in the coins that circulate). A
+   * currency without hundredths (the yen, no minor units) has no .99 to end in and is rounded down
+   * to its own minor unit. Never below one hundredth, as a price of nothing is no ending.
    */
   static BigDecimal endingNinetyNine(BigDecimal price, int minorUnits) {
-    if (minorUnits == 0) return price.setScale(0, RoundingMode.FLOOR);
-    BigDecimal unit = smallestUnit(minorUnits);
+    if (minorUnits < 2) return price.setScale(minorUnits, RoundingMode.FLOOR);
+    BigDecimal hundredth = new BigDecimal("0.01");
     BigDecimal whole = price.setScale(0, RoundingMode.FLOOR);
     BigDecimal candidate =
-        whole.add(BigDecimal.ONE).subtract(unit).setScale(minorUnits, RoundingMode.UNNECESSARY);
+        whole
+            .add(BigDecimal.ONE)
+            .subtract(hundredth)
+            .setScale(minorUnits, RoundingMode.UNNECESSARY);
     if (candidate.compareTo(price) > 0)
-      candidate = whole.subtract(unit).setScale(minorUnits, RoundingMode.UNNECESSARY);
-    return candidate.max(unit);
+      candidate = whole.subtract(hundredth).setScale(minorUnits, RoundingMode.UNNECESSARY);
+    return candidate.max(hundredth.setScale(minorUnits, RoundingMode.UNNECESSARY));
   }
 
   private static BigDecimal smallestUnit(int minorUnits) {

@@ -58,7 +58,7 @@ export default function ({ tenant, store, second, rival, manager, variant }) {
   truthy('[+] a key: the prefix, forty random characters, shown with its first twelve', typeof key === 'string' && key.startsWith('sqk_') && key.length === 44 && data(made).prefix === key.slice(0, 12), data(made).prefix);
   const listed = data(call('GET', KEYS, { token: manager.token })) || {};
   truthy('[+] listed for a manager to see, without the key itself', (listed.items || []).some((k) => k.id === keyId && k.prefix === key.slice(0, 12) && !('key' in k)), listed);
-  expect(mint(manager.token, { name: 'x', role: 'CASHIER' }), '[-] a manager may read keys, not mint them', 403);
+  expect(mint(manager.token, { name: 'x', role: 'CASHIER' }), '[-] a manager may read keys, not mint them', 403, 'FORBIDDEN');
   expect(mint(owner, { name: 'x', role: 'OWNER' }), '[-] never an owner\'s key', 400, 'API_KEY_ROLE_INVALID');
   expect(mint(owner, { name: 'x', role: 'PLATFORM_ADMIN' }), '[-] never the platform\'s', 400, 'API_KEY_ROLE_INVALID');
   expect(mint(owner, { name: 'x', role: 'MANAGER', expiresAt: '2020-01-01T00:00:00Z' }), '[-] a key expires on a day still to come', 400, 'API_KEY_EXPIRY_PAST');
@@ -78,9 +78,9 @@ export default function ({ tenant, store, second, rival, manager, variant }) {
   const day = new Date().toISOString().slice(0, 10);
   const tasks = (storeId) => call('GET', `/api/tenant-svc/admin/workforce/tasks/days?storeId=${storeId}&from=${day}&to=${day}`, { token: managerKey });
   expect(tasks(store), '[+] a manager\'s key reads its own store\'s task days', 200);
-  expect(tasks(second), '[-] and not another store\'s: the key is scoped to the store it was given', 403);
+  expect(tasks(second), '[-] and not another store\'s: the key is scoped to the store it was given', 403, 'STORE_ACCESS_DENIED');
   expect(asKey('GET', `/api/inventory-svc/admin/inventory/levels?store=${store}`), '[+] it reads the stock it keeps', 200);
-  expect(asKey('POST', '/api/tenant-svc/admin/stores', { name: 'Keyed', code: `KEY-${uniq()}`.slice(0, 16), country: 'GB', city: 'Leeds', line1: '1 Key St', postcode: 'LS1 1AA', timezone: 'Europe/London' }), '[-] a storekeeper\'s key cannot do a manager\'s work', 403);
+  expect(asKey('POST', '/api/tenant-svc/admin/stores', { name: 'Keyed', code: `KEY-${uniq()}`.slice(0, 16), country: 'GB', city: 'Leeds', line1: '1 Key St', postcode: 'LS1 1AA', timezone: 'Europe/London' }), '[-] a storekeeper\'s key cannot do a manager\'s work', 403, 'FORBIDDEN');
   const audit = data(call('GET', `/api/iam-svc/auth/admin/api-keys`, { token: owner })) || {};
   truthy('[+] the use is remembered on the key', ((audit.items || []).find((k) => k.id === keyId) || {}).lastUsedAt, audit);
 
@@ -90,14 +90,14 @@ export default function ({ tenant, store, second, rival, manager, variant }) {
   expect(asKey('POST', '/api/iam-svc/auth/mfa/totp/enrol'), '[-] nor set up a second factor', 403, 'API_KEY_ROUTE_FORBIDDEN');
   expect(asKey('POST', '/api/tenant-svc/onboarding/tenants', { businessName: 'Keyed Ltd', country: 'GB', currency: 'GBP' }), '[-] nor start a business', 403, 'API_KEY_ROUTE_FORBIDDEN');
   expect(asKey('GET', '/api/tenant-svc/platform/tenants'), '[-] nor act for the platform', 403, 'API_KEY_ROUTE_FORBIDDEN');
-  expect(asKey('GET', '/api/tenant-svc/admin/tenant/billing'), '[-] nor read what only an owner may', 403);
+  expect(asKey('GET', '/api/tenant-svc/admin/tenant/billing'), '[-] nor read what only an owner may', 403, 'FORBIDDEN');
   const forged = key.slice(0, 43) + (key.endsWith('A') ? 'B' : 'A');
-  expect(call('GET', `/api/inventory-svc/admin/inventory/levels?store=${store}`, { token: forged }), '[-] a key a character off opens nothing', 401);
-  expect(call('GET', `/api/inventory-svc/admin/inventory/levels?store=${store}`, { token: 'sqk_short' }), '[-] nor one the wrong length', 401);
+  expect(call('GET', `/api/inventory-svc/admin/inventory/levels?store=${store}`, { token: forged }), '[-] a key a character off opens nothing', 401, 'UNAUTHORIZED');
+  expect(call('GET', `/api/inventory-svc/admin/inventory/levels?store=${store}`, { token: 'sqk_short' }), '[-] nor one the wrong length', 401, 'UNAUTHORIZED');
   expect(call('GET', `/api/inventory-svc/admin/inventory/levels?store=${rival.stores[0].id}`, { token: key }), '[-] nor another business\'s stock: a store the key does not keep is refused before the business is even asked', 403, 'STORE_ACCESS_DENIED');
 
   // ── revoking ─────────────────────────────────────────────────────────────────────────────────
-  expect(call('DELETE', `${KEYS}/${keyId}`, { token: manager.token }), '[-] a manager cannot revoke', 403);
+  expect(call('DELETE', `${KEYS}/${keyId}`, { token: manager.token }), '[-] a manager cannot revoke', 403, 'FORBIDDEN');
   expect(call('DELETE', `${KEYS}/${keyId}`, { token: rival.owner.token }), '[-] nor another business\'s owner', 404, 'API_KEY_NOT_FOUND');
   const revoked = call('DELETE', `${KEYS}/${keyId}`, { token: owner });
   expect(revoked, '[+] the owner revokes it', 200);

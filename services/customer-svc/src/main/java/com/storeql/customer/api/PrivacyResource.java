@@ -12,9 +12,9 @@ import com.storeql.customer.service.PrivacyService.SettingsChange;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
@@ -90,8 +90,9 @@ public class PrivacyResource {
       description = "A period outside 1 to 90, or an email that is not one")
   @PUT
   @Path("/settings")
-  public Response setSettings(@Valid SetSettingsRequest req) {
+  public Response setSettings(SetSettingsRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    Validations.validate(req);
     return Response.ok(
             ApiResponse.ok(
                 PrivacyMappers.toDto(
@@ -127,8 +128,9 @@ public class PrivacyResource {
   @APIResponse(responseCode = "400", description = "A language not offered, or text out of bounds")
   @POST
   @Path("/notices")
-  public Response publish(@Valid PublishNoticeRequest req) {
+  public Response publish(PublishNoticeRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    Validations.validate(req);
     return Response.status(201)
         .entity(
             ApiResponse.ok(
@@ -167,8 +169,9 @@ public class PrivacyResource {
   @APIResponse(responseCode = "409", description = "Already settled")
   @POST
   @Path("/requests/{id}/resolve")
-  public Response resolve(@PathParam("id") UUID id, @Valid ResolveRequest req) {
+  public Response resolve(@PathParam("id") UUID id, ResolveRequest req) {
     ctx.requirePermission(Permissions.CUSTOMERS_PRIVACY);
+    Validations.validate(req);
     Request r =
         svc.resolve(ctx.requireTenantId(), id, req.status(), req.resolution(), ctx.userId());
     return Response.ok(ApiResponse.ok(PrivacyMappers.toDto(r, LocalDate.now(ZoneOffset.UTC))))
@@ -200,8 +203,9 @@ public class PrivacyResource {
   @APIResponse(responseCode = "409", description = "Nobody named can be reached")
   @POST
   @Path("/breach-intimations")
-  public Response intimate(@Valid IntimateRequest req) {
+  public Response intimate(IntimateRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    Validations.validate(req);
     List<UUID> only = new ArrayList<>();
     if (req.customerIds() != null) {
       for (String id : req.customerIds()) only.add(com.storeql.web.Parsing.uuid(id, "customerIds"));

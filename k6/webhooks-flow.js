@@ -85,7 +85,7 @@ export default function ({ tenant, store, rival, manager, variant }) {
   truthy('[+] and is shown its secret once', typeof secret === 'string' && secret.startsWith('whsec_') && secret.length > 40, data(made).secret && 'shown');
   const listed = data(hooks('GET', '/endpoints', undefined, manager.token)) || [];
   truthy('[+] listed without the secret, switched on', listed.some((e) => e.id === endpoint && e.enabled === true && !('secret' in e) && e.events.length === 2), listed);
-  expect(hooks('POST', '/endpoints', { url: `${SINK}/x`, description: 'x', events: ['OrderPlaced'] }, manager.token), '[-] a manager reads endpoints, not registers them', 403);
+  expect(hooks('POST', '/endpoints', { url: `${SINK}/x`, description: 'x', events: ['OrderPlaced'] }, manager.token), '[-] a manager reads endpoints, not registers them', 403, 'FORBIDDEN');
   expect(hooks('POST', '/endpoints', { url: `${SINK}/x`, description: 'x', events: ['OrderPlaced', 'SomethingElse'] }), '[-] an event nobody publishes', 400, 'WEBHOOK_EVENT_UNKNOWN');
   expect(hooks('POST', '/endpoints', { url: `${SINK}/x`, description: 'x', events: [] }), '[-] an endpoint asks for something', 400, 'WEBHOOK_EVENTS_EMPTY');
   expect(hooks('POST', '/endpoints', { url: 'https://10.0.0.5/hook', description: 'x', events: ['OrderPlaced'] }), '[-] an address inside the network', 400, 'WEBHOOK_URL_INVALID');
@@ -125,13 +125,13 @@ export default function ({ tenant, store, rival, manager, variant }) {
   const again = hooks('POST', `/deliveries/${darkPing}/redeliver`);
   expect(again, '[+] sent again by hand, now', 200);
   truthy('[+] ...queued at once, the try so far kept', data(again).status === 'PENDING' && data(again).attempts === 1, data(again));
-  expect(hooks('POST', `/deliveries/${darkPing}/redeliver`, undefined, rival.owner.token), '[-] not by another business', 404);
-  expect(hooks('DELETE', `/endpoints/${dark.id}`, undefined, manager.token), '[-] a manager cannot remove an endpoint', 403);
+  expect(hooks('POST', `/deliveries/${darkPing}/redeliver`, undefined, rival.owner.token), '[-] not by another business', 404, 'WEBHOOK_DELIVERY_NOT_FOUND');
+  expect(hooks('DELETE', `/endpoints/${dark.id}`, undefined, manager.token), '[-] a manager cannot remove an endpoint', 403, 'FORBIDDEN');
   expect(hooks('DELETE', `/endpoints/${dark.id}`), '[+] the owner removes it', 200);
   expect(hooks('GET', `/deliveries/${darkPing}`), '[+] ...and its log with it', 404);
 
   // ── a rotated secret, and switched off ────────────────────────────────────────────────────────
-  expect(hooks('POST', `/endpoints/${endpoint}/secret`, undefined, manager.token), '[-] a manager cannot rotate the secret', 403);
+  expect(hooks('POST', `/endpoints/${endpoint}/secret`, undefined, manager.token), '[-] a manager cannot rotate the secret', 403, 'FORBIDDEN');
   const rotated = hooks('POST', `/endpoints/${endpoint}/secret`);
   expect(rotated, '[+] the owner rotates the secret', 200);
   const fresh = data(rotated).secret;

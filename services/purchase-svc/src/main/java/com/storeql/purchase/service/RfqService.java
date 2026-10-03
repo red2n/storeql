@@ -154,7 +154,8 @@ public class RfqService {
             "status must be DRAFT, ISSUED, AWARDED or CANCELLED; got " + status);
       }
     }
-    return repo.list(ctx.requireTenantId(), code, limit);
+    // A buyer held to stores reads the requests raised for them; held to none, the business's.
+    return repo.list(ctx.requireTenantId(), code, ctx.reportStores(null), limit);
   }
 
   /**
@@ -164,7 +165,7 @@ public class RfqService {
    */
   public Detail detail(TenantContext ctx, UUID id) {
     UUID tenantId = ctx.requireTenantId();
-    Header h = require(tenantId, id);
+    Header h = require(ctx, id);
     List<Line> lines = repo.lines(tenantId, id);
     List<Bid> bids = repo.bids(tenantId, id);
     String home = tenants.requireCurrency(tenantId);
@@ -194,7 +195,7 @@ public class RfqService {
   public Detail issue(TenantContext ctx, UUID id) {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
-    Header h = require(tenantId, id);
+    Header h = require(ctx, id);
     if (!Rfq.DRAFT.equals(h.status()) || !repo.issue(tenantId, id)) {
       throw ApiException.conflict(
           "PURCHASE_RFQ_NOT_DRAFT",
@@ -211,7 +212,7 @@ public class RfqService {
   public Detail quote(TenantContext ctx, UUID id, UUID supplierId, RfqQuoteRequest req) {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
-    Header h = requireIssued(tenantId, id);
+    Header h = requireIssued(ctx, id);
     boolean late = quotedLate(tenantId, h);
     if (req.lines().isEmpty()) {
       throw ApiException.badRequest("PURCHASE_RFQ_QUOTE_EMPTY", "a quote prices at least one line");
@@ -259,7 +260,7 @@ public class RfqService {
   public Detail decline(TenantContext ctx, UUID id, UUID supplierId) {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
-    requireIssued(tenantId, id);
+    requireIssued(ctx, id);
     requireInvited(tenantId, id, supplierId);
     if (!repo.decline(tenantId, id, supplierId)) throw notInvited(supplierId);
     return detail(ctx, id);
@@ -279,7 +280,7 @@ public class RfqService {
   public Detail award(TenantContext ctx, UUID id, RfqAwardRequest req) {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
-    Header h = requireIssued(tenantId, id);
+    Header h = requireIssued(ctx, id);
     if (req.awards().isEmpty()) {
       throw ApiException.badRequest(
           "PURCHASE_RFQ_AWARDS_REQUIRED", "an award gives at least one line to a supplier");
@@ -408,7 +409,7 @@ public class RfqService {
   public Detail cancel(TenantContext ctx, UUID id, String reason) {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
-    Header h = require(tenantId, id);
+    Header h = require(ctx, id);
     if (Rfq.AWARDED.equals(h.status())
         || Rfq.CANCELLED.equals(h.status())
         || !repo.cancel(tenantId, id, reason.trim())) {
@@ -421,13 +422,23 @@ public class RfqService {
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  private Header require(UUID tenantId, UUID id) {
-    return repo.find(tenantId, id)
-        .orElseThrow(() -> ApiException.notFound("PURCHASE_RFQ_NOT_FOUND", "no request " + id));
+  /**
+   * The request, of the caller's business and of a store the caller may act at: what is asked,
+   * quoted and awarded is for the request's store, and an award raises that store's orders.
+   *
+   * @throws ApiException 404 {@code PURCHASE_RFQ_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED} for a
+   *     caller held to other stores — before anything past the request is read or written
+   */
+  private Header require(TenantContext ctx, UUID id) {
+    Header h =
+        repo.find(ctx.requireTenantId(), id)
+            .orElseThrow(() -> ApiException.notFound("PURCHASE_RFQ_NOT_FOUND", "no request " + id));
+    ctx.requireStoreAccess(h.storeId());
+    return h;
   }
 
-  private Header requireIssued(UUID tenantId, UUID id) {
-    Header h = require(tenantId, id);
+  private Header requireIssued(TenantContext ctx, UUID id) {
+    Header h = require(ctx, id);
     if (!Rfq.ISSUED.equals(h.status())) {
       throw ApiException.conflict(
           "PURCHASE_RFQ_NOT_ISSUED",

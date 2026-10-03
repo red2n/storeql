@@ -46,8 +46,47 @@ class GiftCardLoadsTest {
     assertEquals("GIFT_CARD_TOO_MANY", e.code());
   }
 
+  @Test
+  void anAbsurdlyLargeAmountIsRefusedBeforeItIsScaled() {
+    org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+        java.time.Duration.ofSeconds(2),
+        () ->
+            assertEquals(
+                "GIFT_CARD_AMOUNT_INVALID",
+                assertThrows(
+                        ApiException.class,
+                        () -> GiftCardLoads.amount(new BigDecimal("1E+80000000"), "GBP"))
+                    .code()));
+  }
+
   private static String code(BigDecimal amount, String currency) {
     var list = Collections.singletonList(amount);
     return assertThrows(ApiException.class, () -> GiftCardLoads.total(list, currency)).code();
+  }
+
+  /**
+   * A card issued, reloaded or charged by hand is held to the same rule as one sold on a sale: no
+   * finer than the currency, and kept at the currency's own scale — whole yen, fils for dinars.
+   */
+  @Test
+  void anAmountByHandIsCheckedAndKeptInTheCurrencysOwnUnits() {
+    assertEquals(new BigDecimal("1.235"), GiftCardLoads.amount(new BigDecimal("1.235"), "KWD"));
+    assertEquals(new BigDecimal("1.230"), GiftCardLoads.amount(new BigDecimal("1.23"), "KWD"));
+    assertEquals(new BigDecimal("500"), GiftCardLoads.amount(new BigDecimal("500.00"), "JPY"));
+    assertEquals(new BigDecimal("10.00"), GiftCardLoads.amount(new BigDecimal("10"), "GBP"));
+    assertEquals(
+        "GIFT_CARD_AMOUNT_INVALID",
+        assertThrows(
+                ApiException.class, () -> GiftCardLoads.amount(new BigDecimal("1.2345"), "KWD"))
+            .code());
+    assertEquals(
+        "GIFT_CARD_AMOUNT_INVALID",
+        assertThrows(ApiException.class, () -> GiftCardLoads.amount(new BigDecimal("500.5"), "JPY"))
+            .code());
+    assertEquals(
+        "GIFT_CARD_AMOUNT_INVALID",
+        assertThrows(
+                ApiException.class, () -> GiftCardLoads.amount(new BigDecimal("10.001"), "GBP"))
+            .code());
   }
 }

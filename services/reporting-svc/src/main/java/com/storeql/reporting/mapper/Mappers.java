@@ -19,6 +19,7 @@ import com.storeql.reporting.dto.Dtos.SalesDayRow;
 import com.storeql.reporting.dto.Dtos.SalesSummaryReport;
 import com.storeql.reporting.dto.Dtos.SalesSummaryRow;
 import com.storeql.reporting.service.ReportingService.NettingResult;
+import com.storeql.service.Fx;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.HashMap;
@@ -122,7 +123,12 @@ public final class Mappers {
         rows.stream()
             .map(
                 s ->
-                    new SalesSummaryRow(s.currency(), s.orders(), s.gross(), s.refunded(), s.net()))
+                    new SalesSummaryRow(
+                        s.currency(),
+                        s.orders(),
+                        money(s.gross(), s.currency()),
+                        money(s.refunded(), s.currency()),
+                        money(s.net(), s.currency())))
             .toList();
     return new SalesSummaryReport(dtoRows);
   }
@@ -152,12 +158,26 @@ public final class Mappers {
                         r.currency(),
                         r.orders(),
                         r.units(),
-                        r.gross(),
+                        money(r.gross(), r.currency()),
                         share(r.gross(), totals.get(r.currency()))))
             .toList();
     return new SalesByCategoryReport(level, dtoRows);
   }
 
+  /**
+   * Money as a report shows it: at its currency's own minor units (ISO 4217, common-service {@link
+   * Fx#minorUnits}) — {@code 12.50} pounds, {@code 1500} yen, {@code 10.125} dinars — though the
+   * columns hold four places for any currency. Never rounds: a figure held finer is shown as held.
+   * Null (an unknown labour cost) stays null.
+   */
+  static BigDecimal money(BigDecimal amount, String currency) {
+    if (amount == null) return null;
+    int units = Fx.minorUnits(currency);
+    BigDecimal plain = amount.stripTrailingZeros();
+    return plain.scale() <= units ? amount.setScale(units, RoundingMode.UNNECESSARY) : plain;
+  }
+
+  /** A percentage, to two places: fixed, because it is a share, not money. */
   private static BigDecimal share(BigDecimal part, BigDecimal total) {
     if (total == null || total.signum() == 0) {
       return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
@@ -171,7 +191,12 @@ public final class Mappers {
             .map(
                 s ->
                     new SalesDayRow(
-                        s.day(), s.currency(), s.orders(), s.gross(), s.refunded(), s.net()))
+                        s.day(),
+                        s.currency(),
+                        s.orders(),
+                        money(s.gross(), s.currency()),
+                        money(s.refunded(), s.currency()),
+                        money(s.net(), s.currency())))
             .toList();
     return new SalesByDayReport(dtoRows);
   }
@@ -188,18 +213,18 @@ public final class Mappers {
                     new com.storeql.reporting.dto.Dtos.LabourDayRow(
                         r.day(),
                         r.currency(),
-                        r.gross(),
-                        r.refunded(),
-                        r.net(),
+                        money(r.gross(), r.currency()),
+                        money(r.refunded(), r.currency()),
+                        money(r.net(), r.currency()),
                         r.hours(),
                         java.math.BigDecimal.valueOf(r.uncostedMinutes())
                             .divide(
                                 java.math.BigDecimal.valueOf(60),
                                 2,
                                 java.math.RoundingMode.HALF_UP),
-                        r.labourCost(),
+                        money(r.labourCost(), r.currency()),
                         r.labourPercent(),
-                        r.salesPerHour()))
+                        r.salesPerHour(Fx.minorUnits(r.currency()))))
             .toList());
   }
 

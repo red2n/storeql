@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -13,6 +14,7 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'providers/admin_providers.dart' show StoreInfo;
+import 'widgets/figure_field.dart';
 
 // ---------------------------------------------------------------------------
 // Delivery and collection slots (delivery-and-collection-slots): a store's
@@ -336,7 +338,16 @@ class _WindowFormDialogState extends ConsumerState<_WindowFormDialog> {
     });
   }
 
+  /// How many orders a window takes and how long before it starts it stops
+  /// taking them: whole numbers, read with the shared reader. Text that
+  /// cannot be read is refused under its field, never saved as nought.
+  final _marks = AmountMarks.ofApp();
+
   Future<void> _save() async {
+    if (figureRefused(_marks, [(_capacity, wholeNumber), (_cutoff, wholeNumber)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
     setState(() {
       _saving = true;
       _error = null;
@@ -346,8 +357,8 @@ class _WindowFormDialogState extends ConsumerState<_WindowFormDialog> {
         'weekday': _weekday,
         'startTime': _fmt(_start),
         'endTime': _fmt(_end),
-        'capacity': int.tryParse(_capacity.text.trim()) ?? 0,
-        'cutoffMinutes': int.tryParse(_cutoff.text.trim()) ?? 0,
+        'capacity': wholeOf(_capacity, _marks) ?? 0,
+        'cutoffMinutes': wholeOf(_cutoff, _marks) ?? 0,
         'active': _active,
       };
       final dio = ref.read(apiClientProvider).dio;
@@ -423,20 +434,22 @@ class _WindowFormDialogState extends ConsumerState<_WindowFormDialog> {
               ],
             ),
             const SizedBox(height: AppSpacing.sm),
-            TextField(
-              key: const Key('window-capacity'),
+            FigureField(
+              fieldKey: const Key('window-capacity'),
               controller: _capacity,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Capacity (orders)'),
+              shape: wholeNumber,
+              marks: _marks,
+              label: 'Capacity (orders)',
+              onChanged: (_) => setState(() {}),
             ),
             const SizedBox(height: AppSpacing.sm),
-            TextField(
-              key: const Key('window-cutoff'),
+            FigureField(
+              fieldKey: const Key('window-cutoff'),
               controller: _cutoff,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Cut-off (minutes before it starts)',
-              ),
+              shape: wholeNumber,
+              marks: _marks,
+              label: 'Cut-off (minutes before it starts)',
+              onChanged: (_) => setState(() {}),
             ),
             SwitchListTile.adaptive(
               key: const Key('window-active'),

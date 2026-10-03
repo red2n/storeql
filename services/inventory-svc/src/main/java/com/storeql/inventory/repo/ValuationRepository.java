@@ -4,6 +4,7 @@ import com.storeql.inventory.domain.Domain.ValuationGrouping;
 import com.storeql.inventory.domain.Domain.ValuationRow;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
@@ -44,10 +45,12 @@ public class ValuationRepository extends BaseJdbcRepository {
    * @param stores restrict to these stores, or null for every store in the tenant
    * @param grouping VARIANT for the per-line detail, STORE for the rollup
    * @param limit maximum rows, already clamped by the caller
+   * @param minorUnits the business currency's minor units: every value is rounded half up to them
+   *     (whole yen, pence, three-decimal dinars), never cast to two places
    * @return rows ordered by value, largest holding first
    */
   public List<ValuationRow> value(
-      UUID tenantId, Set<UUID> stores, ValuationGrouping grouping, int limit) {
+      UUID tenantId, Set<UUID> stores, ValuationGrouping grouping, int limit, int minorUnits) {
     // "Can this row be valued?" -- an AVERAGE row needs a non-zero average_cost; a FIFO row needs a
     // cost_price on the batch. Written once here and reused in all three aggregates below so the
     // value and the unvalued quantity can never disagree about which rows counted.
@@ -101,7 +104,7 @@ public class ValuationRepository extends BaseJdbcRepository {
                 + owned
                 + " THEN "
                 + lineValue
-                + " ELSE 0 END)::numeric(18,2) AS value,"
+                + " ELSE 0 END) AS value,"
                 + " SUM(CASE WHEN "
                 + consigned
                 + " THEN b.remaining_qty ELSE 0 END)::numeric(18,3) AS consignment_qty,"
@@ -109,13 +112,13 @@ public class ValuationRepository extends BaseJdbcRepository {
                 + consigned
                 + " THEN "
                 + lineValue
-                + " ELSE 0 END)::numeric(18,2) AS consignment_value,"
+                + " ELSE 0 END) AS consignment_value,"
                 // In bond: valued at cost without the duty, the duty it would crystallise beside
                 // it.
                 + " SUM(CASE WHEN b.duty_status = 'DUTY_SUSPENDED' THEN b.remaining_qty ELSE 0"
                 + " END)::numeric(18,3) AS duty_suspended_qty,"
                 + " SUM(CASE WHEN b.duty_status = 'DUTY_SUSPENDED' THEN b.remaining_qty *"
-                + " COALESCE(edr.duty_per_unit, 0) ELSE 0 END)::numeric(18,2) AS duty_potential"
+                + " COALESCE(edr.duty_per_unit, 0) ELSE 0 END) AS duty_potential"
                 + " FROM inventory_batches b"
                 + " LEFT JOIN costing_methods cm"
                 + "   ON cm.tenant_id = b.tenant_id"
@@ -137,20 +140,24 @@ public class ValuationRepository extends BaseJdbcRepository {
           }
           ps.setInt(i, limit);
         },
-        ValuationRepository::mapRow,
+        rs -> mapRow(rs, minorUnits),
         "value inventory");
   }
 
-  private static ValuationRow mapRow(ResultSet rs) throws SQLException {
+  private static ValuationRow mapRow(ResultSet rs, int minorUnits) throws SQLException {
     return new ValuationRow(
         rs.getString("group_key"),
         rs.getString("method"),
         rs.getBigDecimal("on_hand_qty"),
         rs.getBigDecimal("unvalued_qty"),
-        rs.getBigDecimal("value"),
+        money(rs.getBigDecimal("value"), minorUnits),
         rs.getBigDecimal("consignment_qty"),
-        rs.getBigDecimal("consignment_value"),
+        money(rs.getBigDecimal("consignment_value"), minorUnits),
         rs.getBigDecimal("duty_suspended_qty"),
-        rs.getBigDecimal("duty_potential"));
+        money(rs.getBigDecimal("duty_potential"), minorUnits));
+  }
+
+  private static BigDecimal money(BigDecimal v, int minorUnits) {
+    return v == null ? null : v.setScale(minorUnits, java.math.RoundingMode.HALF_UP);
   }
 }

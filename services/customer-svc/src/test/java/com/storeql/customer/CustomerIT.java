@@ -406,7 +406,8 @@ class CustomerIT {
             .header("X-Roles", "OWNER")
             .get(String.class);
     // 100 − 30 (once, not twice) = 70. A double redeem would show 40.
-    assertThat(credit, containsString("\"balance\":70.00"));
+    // This business trades in yen, which has no minor unit: the balance is whole yen.
+    assertThat(credit, containsString("\"balance\":70,"));
     assertThat(credit, not(containsString("\"balance\":40")));
   }
 

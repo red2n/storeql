@@ -2,6 +2,7 @@ package com.storeql.tenant.service;
 
 import com.storeql.ids.Ids;
 import com.storeql.service.Entitlements;
+import com.storeql.service.Fx;
 import com.storeql.tenant.domain.Domain.Tenant;
 import com.storeql.tenant.domain.Meters;
 import com.storeql.tenant.domain.Meters.Meter;
@@ -22,6 +23,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -201,25 +203,71 @@ public class PlanService {
    * Sets a plan's price in one currency from a date. Prices are never edited in place: an invoice
    * raised under the old price must still be explicable next year.
    *
-   * @throws ApiException 400 {@code CURRENCY_INVALID}, {@code PLAN_PRICE_DATE_INVALID}
+   * @throws ApiException 400 {@code CURRENCY_INVALID}, {@code PLAN_PRICE_DATE_INVALID}, {@code
+   *     PLAN_PRICE_INVALID}
    */
   public PlanFile setPrice(UUID id, UUID actorId, PlanDtos.PriceRequest req) {
     require(id);
     String currency = currency(req.currency());
+    BigDecimal amount = price(req.amount(), currency);
     LocalDate from = day(req.effectiveFrom());
-    repo.setPrice(new Price(Ids.newId(), id, currency, req.amount(), from, actorId, Instant.now()));
+    repo.setPrice(new Price(Ids.newId(), id, currency, amount, from, actorId, Instant.now()));
     return get(id);
+  }
+
+  /**
+   * A plan's price as an amount of its currency: no finer than that currency's smallest unit (ISO
+   * 4217 — whole yen, a dinar's third decimal), because it is billed as it stands and an invoice
+   * cannot charge 1000.5 yen. A metered unit's price may go finer ({@code 0.035} a text, 21.10):
+   * that one is a rate, and the invoice rounds the line it makes.
+   *
+   * @throws ApiException 400 {@code PLAN_PRICE_INVALID}
+   */
+  static BigDecimal price(BigDecimal amount, String currency) {
+    int places = Fx.minorUnits(currency);
+    if (amount == null || amount.signum() < 0) {
+      throw ApiException.badRequest("PLAN_PRICE_INVALID", "A price is nothing or something");
+    }
+    if (amount.stripTrailingZeros().scale() > places) {
+      throw ApiException.badRequest(
+          "PLAN_PRICE_INVALID",
+          currency
+              + " has "
+              + places
+              + " decimal places, so "
+              + amount.toPlainString()
+              + " is not a price in it");
+    }
+    return amount;
   }
 
   /**
    * Sets what a plan includes, whole: a key left out is one the plan no longer names, and a key the
    * platform does not enforce is refused rather than promised.
    *
-   * @throws ApiException 400 {@code PLAN_ENTITLEMENT_UNKNOWN}, {@code PLAN_ENTITLEMENT_SHAPE}
+   * @throws ApiException 404 {@code PLAN_NOT_FOUND}; 400 as {@link #grants(List)}
    */
   public PlanFile setGrants(UUID id, List<PlanDtos.GrantRequest> wanted) {
     require(id);
+    repo.setGrants(id, grants(wanted));
+    return get(id);
+  }
+
+  /**
+   * What a plan includes, judged grant by grant before anything is written. A key is read as the
+   * platform reads it ({@link Plans#entitlement} strips it), so {@code " stores.max"} after {@code
+   * "stores.max"} is the same key named twice: refused here, because one batch holding both broke
+   * {@code plan_entitlements}' primary key as a {@code 500 DB_ERROR} (2 Oct 2026), as {@link
+   * #meters(List)} refuses a meter named twice.
+   *
+   * @throws ApiException 400 {@code PLAN_ENTITLEMENT_UNKNOWN} for a key the platform does not know,
+   *     {@code PLAN_ENTITLEMENT_TWICE} for a key named twice, {@code PLAN_ENTITLEMENT_NOT_ENFORCED}
+   *     for one it names but nothing enforces yet, {@code PLAN_ENTITLEMENT_SHAPE} for a limit
+   *     written as a yes or no, or the reverse
+   */
+  static List<Grant> grants(List<PlanDtos.GrantRequest> wanted) {
     List<Grant> grants = new ArrayList<>(wanted.size());
+    java.util.Set<String> seen = new java.util.HashSet<>();
     for (PlanDtos.GrantRequest g : wanted) {
       Entitlement e =
           Plans.entitlement(g.key())
@@ -230,6 +278,9 @@ public class PlanService {
                           g.key()
                               + " is not something the platform enforces: "
                               + Plans.enforced().stream().map(Entitlement::key).sorted().toList()));
+      if (!seen.add(e.key())) {
+        throw ApiException.badRequest("PLAN_ENTITLEMENT_TWICE", e.key() + " is named twice");
+      }
       if (!e.enforced()) {
         throw ApiException.badRequest(
             "PLAN_ENTITLEMENT_NOT_ENFORCED",
@@ -251,8 +302,7 @@ public class PlanService {
               e.limit() ? g.limitValue() : null,
               e.limit() ? null : g.enabled() != null && g.enabled()));
     }
-    repo.setGrants(id, grants);
-    return get(id);
+    return grants;
   }
 
   // ── metered usage (21.10) ───────────────────────────────────────────────────
@@ -261,13 +311,27 @@ public class PlanService {
    * Sets what a plan includes of each meter, whole: a meter left out is one the plan does not name,
    * which leaves it unlimited and uncharged.
    *
-   * @throws ApiException 400 {@code PLAN_METER_UNKNOWN} for something the platform does not count,
-   *     {@code PLAN_METER_NOT_REFUSABLE} for a hard ceiling on a meter that must never be refused,
-   *     {@code PLAN_METER_HARD_UNLIMITED} for a hard ceiling with nothing included, {@code
-   *     PLAN_METER_TWICE} for a meter named twice
+   * @throws ApiException 404 {@code PLAN_NOT_FOUND}; 400 as {@link #meters(List)}
    */
   public PlanFile setMeters(UUID id, List<PlanDtos.PlanMeterRequest> wanted) {
     require(id);
+    repo.setMeters(id, meters(wanted));
+    return get(id);
+  }
+
+  /**
+   * What a plan includes of each meter, judged meter by meter before anything is written. An
+   * allowance below nothing is this method's to refuse, by the code the route has published since
+   * 21.10 ({@code PLAN_METER_INCLUDED_INVALID}): the request leaves {@code included} unbounded so
+   * that it arrives here (2 Oct 2026).
+   *
+   * @throws ApiException 400 {@code PLAN_METER_UNKNOWN} for something the platform does not count,
+   *     {@code PLAN_METER_TWICE} for a meter named twice, {@code PLAN_METER_NOT_REFUSABLE} for a
+   *     hard ceiling on a meter that must never be refused, {@code PLAN_METER_INCLUDED_INVALID} for
+   *     an allowance below nothing, {@code PLAN_METER_HARD_UNLIMITED} for a hard ceiling with
+   *     nothing included
+   */
+  static List<PlanMeter> meters(List<PlanDtos.PlanMeterRequest> wanted) {
     List<PlanMeter> meters = new ArrayList<>(wanted.size());
     java.util.Set<String> seen = new java.util.HashSet<>();
     for (PlanDtos.PlanMeterRequest m : wanted) {
@@ -301,8 +365,7 @@ public class PlanService {
       }
       meters.add(new PlanMeter(meter.key(), m.included(), hard));
     }
-    repo.setMeters(id, meters);
-    return get(id);
+    return meters;
   }
 
   /**
@@ -561,8 +624,11 @@ public class PlanService {
 
   private static String currency(String raw) {
     String currency = raw == null ? "" : raw.strip().toUpperCase(Locale.ROOT);
-    if (!currency.matches("[A-Z]{3}")) {
-      throw ApiException.badRequest("CURRENCY_INVALID", "A currency is a three-letter ISO code");
+    // ISO 4217 itself, not any three letters: its minor units decide how every amount in it is
+    // held, and a made-up code has none to read.
+    if (!currency.matches("[A-Z]{3}") || !Fx.isCurrency(currency)) {
+      throw ApiException.badRequest(
+          "CURRENCY_INVALID", "A currency is an ISO 4217 code such as EUR or JPY");
     }
     return currency;
   }

@@ -1122,7 +1122,11 @@ public class PricingRepository extends BaseOutboxRepository {
             ps.setObject(1, Ids.newId());
             ps.setObject(2, orderId);
             ps.setObject(3, customerId);
-            ps.setBigDecimal(4, amount);
+            // What the offer gave, in the order currency's own minor units.
+            ps.setBigDecimal(
+                4,
+                amount.setScale(
+                    com.storeql.service.Fx.minorUnits(currency), java.math.RoundingMode.HALF_UP));
             ps.setString(5, currency);
             ps.setObject(6, tenantId);
             ps.setObject(7, promotionId);
@@ -1710,7 +1714,11 @@ public class PricingRepository extends BaseOutboxRepository {
               number = rs.getLong(1);
             }
           }
-          String label = MarkdownLabel.encode(number, draft.markdownPrice());
+          String label =
+              MarkdownLabel.encode(
+                  number,
+                  draft.markdownPrice(),
+                  com.storeql.service.Fx.minorUnits(draft.currency()));
           try (var ins =
               c.prepareStatement(
                   "INSERT INTO markdowns (id, tenant_id, store_id, variant_id, batch_id, batch_no,"

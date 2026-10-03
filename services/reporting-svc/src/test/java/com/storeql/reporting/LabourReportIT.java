@@ -134,6 +134,31 @@ class LabourReportIT {
   }
 
   @Test
+  @DisplayName(
+      "Dinar takings and cost keep their third place and yen are whole, through the database")
+  void moneyIsAtTheCurrencysOwnUnits() {
+    UUID dinars = Ids.newId();
+    reporting.recordSale(dinars, Ids.newId(), STORE, "POS", null, new BigDecimal("10.125"), "KWD");
+    reporting.recordLabour(
+        dinars, Ids.newId(), null, STORE, today(), 180, new BigDecimal("3.125"), "KWD");
+    JsonObject kwd = day(report(dinars, today(), today().plusDays(1), null), today());
+    // A two-place column would have said 10.13 and 3.13.
+    assertThat(kwd.getJsonNumber("net").bigDecimalValue(), is(new BigDecimal("10.125")));
+    assertThat(kwd.getJsonNumber("labourCost").bigDecimalValue(), is(new BigDecimal("3.125")));
+    assertThat(kwd.getJsonNumber("salesPerHour").bigDecimalValue(), is(new BigDecimal("3.375")));
+
+    UUID yen = Ids.newId();
+    reporting.recordSale(yen, Ids.newId(), STORE, "POS", null, new BigDecimal("10000"), "JPY");
+    reporting.recordLabour(
+        yen, Ids.newId(), null, STORE, today(), 180, new BigDecimal("3000"), "JPY");
+    JsonObject jpy = day(report(yen, today(), today().plusDays(1), null), today());
+    assertThat(jpy.getJsonNumber("net").bigDecimalValue(), is(new BigDecimal("10000")));
+    assertThat(jpy.getJsonNumber("labourCost").bigDecimalValue(), is(new BigDecimal("3000")));
+    assertThat(jpy.getJsonNumber("salesPerHour").bigDecimalValue(), is(new BigDecimal("3333")));
+    assertThat(jpy.getJsonNumber("labourPercent").bigDecimalValue(), is(new BigDecimal("30.00")));
+  }
+
+  @Test
   @DisplayName("The same entry announced twice is one row, and a correction replaces its figure")
   void idempotentAndCorrectable() {
     UUID tenant = Ids.newId();

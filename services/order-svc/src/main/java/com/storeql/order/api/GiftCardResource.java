@@ -56,7 +56,9 @@ public class GiftCardResource {
   @APIResponse(responseCode = "201", description = "Gift card issued")
   @APIResponse(
       responseCode = "400",
-      description = "GIFT_CARD_REASON_REQUIRED, IDEMPOTENCY_KEY_REQUIRED")
+      description =
+          "GIFT_CARD_REASON_REQUIRED, IDEMPOTENCY_KEY_REQUIRED; GIFT_CARD_AMOUNT_INVALID for an"
+              + " amount with more decimals than the currency has (whole yen, fils for dinars)")
   @APIResponse(responseCode = "403", description = "GIFT_CARD_NEEDS_SALE for a cashier or keeper")
   @POST
   public Response issue(
@@ -125,6 +127,12 @@ public class GiftCardResource {
               + " up is a gift-card line on the sale; a cashier cannot reload one"
               + " (403 GIFT_CARD_NEEDS_SALE).")
   @APIResponse(responseCode = "200", description = "Gift card reloaded")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "GIFT_CARD_REASON_REQUIRED, IDEMPOTENCY_KEY_REQUIRED; GIFT_CARD_AMOUNT_INVALID for an"
+              + " amount with more decimals than the card's currency has")
+  @APIResponse(responseCode = "403", description = "GIFT_CARD_NEEDS_SALE; STORE_ACCESS_DENIED")
   @APIResponse(responseCode = "404", description = "Gift card not found")
   @POST
   @Path("/{code}/reload")
@@ -161,9 +169,18 @@ public class GiftCardResource {
               + " Staff only. Requires an Idempotency-Key: a retry under the same key answers with"
               + " the first redemption and debits nothing. One card pays towards one order once,"
               + " whatever the key: the same amount again answers with the first redemption, a"
-              + " different amount is GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER.")
+              + " different amount is GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER. The amount is what"
+              + " the till worked out (what is left to pay, or the card's balance), so it is"
+              + " charged at the order currency's own minor units, rounded half up as payment-svc"
+              + " takes the till's tenders: 3.3000000000000003 pounds is 3.30, whole yen, fils"
+              + " for dinars.")
   @APIResponse(responseCode = "200", description = "Gift card charged (or the first, on a retry)")
-  @APIResponse(responseCode = "400", description = "IDEMPOTENCY_KEY_REQUIRED or a bad body")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED or a bad body; GIFT_CARD_AMOUNT_INVALID for an amount that is"
+              + " nothing once rounded to the order currency's minor units")
+  @APIResponse(responseCode = "403", description = "STORE_ACCESS_DENIED")
   @APIResponse(responseCode = "404", description = "Gift card or order not found")
   @APIResponse(
       responseCode = "409",

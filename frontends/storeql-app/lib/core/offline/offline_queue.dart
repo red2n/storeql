@@ -172,6 +172,38 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
     }
   }
 
+  /// Replay now the sales waiting for [orderIds], whatever is ahead of them
+  /// in line — and nothing else.
+  ///
+  /// A card machine with an approval nobody has recorded takes no other card
+  /// (payment-svc's 409 TERMINAL_UNSETTLED_APPROVAL), and the sale queued here
+  /// for that order is what records it. Left to its turn it would wait behind
+  /// any sale that cannot be sent yet, and the machine with it. Each sale's
+  /// keys are its own, so sending one out of turn changes nothing for the
+  /// rest. A parked sale is not sent: a person has to say so ([retry]).
+  Future<void> syncOrders(Set<String> orderIds) async {
+    await _ready;
+    if (_syncing || orderIds.isEmpty) return;
+    _syncing = true;
+    try {
+      final ids = [
+        for (final s in state)
+          if (orderIds.contains(s.orderId) &&
+              s.status != OfflineSaleStatus.failed)
+            s.id,
+      ];
+      for (final id in ids) {
+        final sale = state.where((s) => s.id == id).firstOrNull;
+        if (sale == null || sale.status == OfflineSaleStatus.failed) continue;
+        final outcome = await _replay(sale);
+        if (outcome == _Outcome.unreachable) break;
+      }
+    } finally {
+      _syncing = false;
+      _scheduleNext();
+    }
+  }
+
   Future<_Outcome> _replay(OfflineSale sale) async {
     final dio = _ref.read(apiClientProvider).dio;
     var current = sale.copyWith(attempts: sale.attempts + 1);
@@ -227,11 +259,19 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
             await _replace(current);
           }
         } else if (!t.tenderDone) {
-          await dio.post(
-            '/${ApiConstants.payment}/payments',
-            data: {...t.body, 'orderId': current.orderId},
-            options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'pay:$i')}),
-          );
+          try {
+            await dio.post(
+              '/${ApiConstants.payment}/payments',
+              data: {...t.body, 'orderId': current.orderId},
+              options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'pay:$i')}),
+            );
+          } catch (e) {
+            // The card machine's approval this tender names is already
+            // recorded on its order, under another key: that is this tender
+            // recorded, so the sale goes on to what it still owes. Anything
+            // else is judged below.
+            if (!cardApprovalAlreadyRecorded(e, t.body)) rethrow;
+          }
           current = current.markTender(i, tenderDone: true);
           await _replace(current);
         }

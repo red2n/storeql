@@ -86,6 +86,7 @@ public class SalesPostingService {
             shares,
             sale.map(SalesOrder::total).orElse(null),
             sale.map(SalesOrder::taxAmount).orElse(null),
+            sale.map(SalesOrder::currency).orElse(null),
             sale.isPresent(),
             today(),
             sale.isPresent() ? repo.revenueRefunded(tenantId, orderId) : null);
@@ -176,8 +177,9 @@ public class SalesPostingService {
   public List<OpenClearing> openClearing(TenantContext ctx, String storeIdStr, int limit) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID storeId = Parsing.optionalUuid(storeIdStr, "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
-    return repo.findOpenClearing(ctx.requireTenantId(), storeId, Math.min(Math.max(limit, 1), 200));
+    // A store named must be the caller's; none named reads the caller's stores, or every store.
+    return repo.findOpenClearing(
+        ctx.requireTenantId(), ctx.reportStores(storeId), Math.min(Math.max(limit, 1), 200));
   }
 
   private static LocalDate today() {

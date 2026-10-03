@@ -39,7 +39,7 @@ import { check, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import encoding from 'k6/encoding';
 import exec from 'k6/execution';
-import { PASSWORD, newId, newKey } from './lib/storeql.js';
+import { PASSWORD, errorCode, newId, newKey } from './lib/storeql.js';
 
 // ── Custom metrics ─────────────────────────────────────────────────────────────
 const errors              = new Counter('errors');
@@ -310,6 +310,38 @@ function apiReceiveStock(token, storeId, variantId, qty, costPrice, batchPrefix)
   }, token);
 }
 
+// A variant of this iteration's own, on the tenant's first product (as uomManagement's and the
+// negative suite's are), named by the VU and the scenario-wide iteration. A read-back is only proof
+// on data nobody else touches: the seeded variants are shared by every scenario, and a scenario's
+// two VUs can land on one tenant and one variant (global VU ids can share parity and remainder), so
+// on a seeded variant another VU receives, sells, quarantines or re-costs the same stock between this
+// iteration's write and its read.
+function ownVariant(tenant, prefix, tag) {
+  const res = post(`/api/product-svc/admin/products/${tenant.productIds[0]}/variants`,
+    { sku: `${prefix}-${__VU}-${exec.scenario.iterationInTest}`, unit: 'EA' }, tenant.ownerToken);
+  if (!ok(res, `${tag} ${prefix} variant of this iteration's own`)) return null;
+  return body(res).id || null;
+}
+
+// One variant's level at a store, following the cursor: levels are ordered by variant id, so a
+// variant made during the run sorts after the seeded ones and is seldom on the first page. Returns
+// the last page read and the variant's level, or null when it holds no available batch there.
+function levelAt(token, storeId, variantId) {
+  let after = null;
+  let res = null;
+  for (let page = 0; page < 50; page++) {
+    res = get(`/api/inventory-svc/admin/inventory/levels?store=${storeId}&limit=100`
+      + (after ? `&after=${encodeURIComponent(after)}` : ''), token);
+    let parsed;
+    try { parsed = JSON.parse(res.body); } catch (_) { return { res, level: null }; }
+    const level = (parsed.data || []).find(l => l.variantId === variantId);
+    if (level || res.status !== 200) return { res, level: level || null };
+    after = parsed.meta && parsed.meta.nextCursor;
+    if (!after) break;
+  }
+  return { res, level: null };
+}
+
 // ── Setup helpers (called only in setup()) ─────────────────────────────────────
 
 // A shopper's sign-up by default; an owner signs up to start a business instead
@@ -464,7 +496,7 @@ function seedTenant(owner, tenantPayload, store1Payload, store2Payload, products
 
       post('/api/inventory-svc/admin/inventory/thresholds',
         { storeId: sid, variantId: vid, threshold: products.threshold, maxQty: products.maxQty },
-        tenantId, owner.userId);
+        ownerToken);
     }
   }
 
@@ -739,7 +771,11 @@ export function completeSale(d) {
 
   const rOk = check(rRes, { [`${tag} reserve 2xx`]: r => r.status >= 200 && r.status < 300 });
   isIN(d) ? saleSuccessIN.add(rOk ? 1 : 0) : saleSuccessUK.add(rOk ? 1 : 0);
-  if (!rOk) { errors.add(1); sleep(0.5); return; }
+  if (!rOk) {
+    console.warn(`[${tag}] reserve refused store=${store.storeId} variant=${vid}`
+      + ` at ${new Date().toISOString()}: ${rRes.status} ${String(rRes.body).slice(0, 300)}`);
+    errors.add(1); sleep(0.5); return;
+  }
 
   // Positive: reserved qty immediately visible in levels (before consume)
   check(get(`/api/inventory-svc/admin/inventory/levels?store=${store.storeId}`, tenant.ownerToken), {
@@ -755,10 +791,15 @@ export function completeSale(d) {
   const reservationId = body(rRes).id;
   if (!reservationId) { sleep(0.5); return; }
 
-  // Consume (complete sale)
+  // Consume (complete sale). The (store, variant) stays shared on purpose: a hold and a sale of one
+  // variant at one store landing together is what a till does all day, so a refusal here is the
+  // server's to answer for — say what it was.
   const cRes = post(`/api/inventory-svc/inventory/reservations/${reservationId}/consume`,
     {}, tenant.ownerToken);
-  ok(cRes, `${tag} consume ${store.label}`);
+  if (!ok(cRes, `${tag} consume ${store.label}`)) {
+    console.warn(`[${tag}] consume refused store=${store.storeId} variant=${vid} reservation=${reservationId}`
+      + ` at ${new Date().toISOString()}: ${cRes.status} ${String(cRes.body).slice(0, 300)}`);
+  }
 
   // consume returns { "data": "consumed" } (string, not object)
   check(cRes, {
@@ -1328,7 +1369,15 @@ export function materialControl(d) {
   const store  = storeCtx(tenant);
   if (!store || !tenant.variantIds.length) return;
   const tag = isIN(d) ? 'IN' : 'UK';
-  const vid = tenant.variantIds[__ITER % tenant.variantIds.length];
+  // A variant and a batch of this iteration's own. On a seeded variant the scenario's other VU
+  // picked the same first batch and restored it before this one listed its quarantine, and other
+  // scenarios received, adjusted and released that variant between the before and after reads.
+  const vid = ownVariant(tenant, 'MC', tag);
+  if (!vid) { sleep(1); return; }
+  const batchQty = 12;
+  const recRes = apiReceiveStock(tenant.ownerToken, store.storeId, vid, batchQty,
+    isIN(d) ? '1200.00' : '150.00', `${tag}-MC`);
+  if (!ok(recRes, `${tag} MC receive this iteration's batch`)) { sleep(1); return; }
 
   // 1. List batches — verify materialStatus field present
   const batchRes = get(
@@ -1353,14 +1402,10 @@ export function materialControl(d) {
 
   if (!batchId) { sleep(1); return; }
 
-  // 2. Capture levels before quarantine
+  // 2. Capture levels before quarantine (the variant's own level, wherever its page is)
   const levelsBefore = (() => {
-    try {
-      const r = get(`/api/inventory-svc/admin/inventory/levels?store=${store.storeId}`, tenant.ownerToken);
-      const items = JSON.parse(r.body).data || [];
-      const entry = items.find(l => l.variantId === vid);
-      return entry ? parseFloat(entry.available) : 0;
-    } catch (_) { return 0; }
+    const { level } = levelAt(tenant.ownerToken, store.storeId, vid);
+    return level ? parseFloat(level.available) : 0;
   })();
 
   // 3. Quarantine the batch
@@ -1376,17 +1421,15 @@ export function materialControl(d) {
     },
   });
 
-  // 4. Levels must drop (quarantined qty excluded from available)
-  const levelsRes = get(`/api/inventory-svc/admin/inventory/levels?store=${store.storeId}`, tenant.ownerToken);
-  ok(levelsRes, `${tag} MC levels after quarantine`);
-  check(levelsRes, {
-    [`${tag} MC quarantine excludes batch from available`]: r => {
-      try {
-        const items = JSON.parse(r.body).data || [];
-        const entry = items.find(l => l.variantId === vid);
-        const after = entry ? parseFloat(entry.available) : 0;
-        return after <= levelsBefore;
-      } catch (_) { return true; }
+  // 4. Levels must drop (quarantined qty excluded from available): by exactly the batch, now that
+  //    nothing else moves this variant between the two reads
+  const levelsAfter = levelAt(tenant.ownerToken, store.storeId, vid);
+  ok(levelsAfter.res, `${tag} MC levels after quarantine`);
+  check(levelsAfter, {
+    [`${tag} MC quarantine excludes batch from available`]: a => {
+      if (!a.res || a.res.status !== 200) return false;
+      const after = a.level ? parseFloat(a.level.available) : 0;
+      return Math.abs((levelsBefore - after) - batchQty) < 0.0005;
     },
   });
 
@@ -1424,15 +1467,22 @@ export function planningEngine(d) {
   const store  = storeCtx(tenant);
   if (!store || !tenant.variantIds.length) return;
   const tag = isIN(d) ? 'IN' : 'UK';
-  // VU-specific offset so concurrent VUs don't race on the same (store, variant) suggestion
-  const vuOffset = __VU % tenant.variantIds.length;
-  const vid = tenant.variantIds[(__ITER + vuOffset) % tenant.variantIds.length];
+  // A variant of this iteration's own. A VU offset did not keep the scenario's two VUs apart (their
+  // global ids can share parity and remainder): one resolved the (store, variant) suggestion, or
+  // purchaseReceive reset the threshold, before the other read it back.
+  const vid = ownVariant(tenant, 'PE', tag);
+  if (!vid) { sleep(1); return; }
 
   // 1. Set a very high threshold to guarantee an under-stock condition for this run
   const highThreshold = '500000.000';
   const highMax       = '600000';
   const normalThreshold = isIN(d) ? '50.000' : '25.000';
   const normalMax       = isIN(d) ? '200'    : '100';
+
+  // Stock of its own, as much as the normal max: the reset at the end then leaves the variant above
+  // its threshold, so no later run at this store raises a suggestion for it that nobody resolves.
+  ok(apiReceiveStock(tenant.ownerToken, store.storeId, vid, parseInt(normalMax, 10),
+    isIN(d) ? '1200.00' : '150.00', `${tag}-PE`), `${tag} PE receive this iteration's stock`);
 
   const tRes = post('/api/inventory-svc/admin/inventory/thresholds', {
     storeId: store.storeId, variantId: vid, threshold: highThreshold, maxQty: highMax,
@@ -1457,15 +1507,17 @@ export function planningEngine(d) {
     },
   });
 
-  // 3. List OPEN suggestions for this store
+  // 3. List OPEN suggestions for this store and take this variant's own — never whichever is first:
+  //    the store's other variants (the scenario's other VU's among them) have suggestions of their
+  //    own, newest first, so the page is wide enough to reach this one past theirs
   const listRes = get(
-    `/api/inventory-svc/admin/inventory/planning/suggestions?store=${store.storeId}&status=OPEN&limit=5`, tenant.ownerToken);
+    `/api/inventory-svc/admin/inventory/planning/suggestions?store=${store.storeId}&status=OPEN&limit=100`, tenant.ownerToken);
   ok(listRes, `${tag} PE list OPEN suggestions`);
 
   const suggestion = (() => {
     try {
       const items = JSON.parse(listRes.body).data || [];
-      return items.find(s => s.variantId === vid) || items[0] || null;
+      return items.find(s => s.variantId === vid) || null;
     } catch (_) { return null; }
   })();
 
@@ -1483,14 +1535,13 @@ export function planningEngine(d) {
     },
   });
 
-  // 4. Resolve suggestion as ORDERED
-  // Accept 404 as valid — another concurrent VU may have already resolved this suggestion
+  // 4. Resolve suggestion as ORDERED (this iteration's own, so nobody else resolves it first)
   if (suggestion) {
     const resolveRes = put(
       `/api/inventory-svc/admin/inventory/planning/suggestions/${suggestion.id}/status`,
       { status: 'ORDERED' }, tenant.ownerToken);
     check(resolveRes, {
-      [`${tag} PE resolve ORDERED 200 or 404`]: r => r.status === 200 || r.status === 404,
+      [`${tag} PE resolve ORDERED 200`]: r => r.status === 200,
     });
     if (resolveRes.status === 200) {
       check(resolveRes, {
@@ -1504,7 +1555,8 @@ export function planningEngine(d) {
     }
   }
 
-  // 5. Reset threshold back to normal so other scenarios are not disrupted
+  // 5. Reset threshold back to normal: below the stock received above, so the variant is never
+  //    suggested again by a later run at this store
   post('/api/inventory-svc/admin/inventory/thresholds', {
     storeId: store.storeId, variantId: vid,
     threshold: normalThreshold, maxQty: normalMax,
@@ -2188,9 +2240,12 @@ export function costingControl(d) {
   if (!store || !tenant.variantIds.length) return;
 
   const storeId   = store.storeId;
-  // One variant per VU: two VUs setting different methods on one variant read each other's writes.
-  const variantId = tenant.variantIds[__VU % tenant.variantIds.length];
   const tag       = `[+] costingControl(${isIN(d) ? 'IN' : 'UK'})`;
+  // A variant of this iteration's own: two VUs setting methods on one variant read each other's
+  // writes, and one variant per VU (by __VU % 4) still put both VUs on one variant whenever their
+  // global ids shared parity and remainder — AVERAGE read back as the other VU's FIFO.
+  const variantId = ownVariant(tenant, 'CM', tag);
+  if (!variantId) { sleep(1); return; }
 
   const t0 = Date.now();
 
@@ -2536,7 +2591,7 @@ export function orderPos(d) {
   const other = isIN(d) ? d.uk : d.india;
   const isoRes = get(`/api/order-svc/orders/${orderId}`, other.ownerToken);
   check(isoRes, {
-    [`${tag} cross-tenant order isolation 404`]: r => r.status === 404,
+    [`${tag} cross-tenant order isolation 404`]: r => r.status === 404 && errorCode(r) === 'ORDER_NOT_FOUND',
   });
 
   sleep(1);
@@ -2602,7 +2657,7 @@ export function layawayManagement(d) {
   const other = isIN(d) ? d.uk : d.india;
   const isoRes = get(`/api/order-svc/layaways/${layawayId}`, other.ownerToken);
   check(isoRes, {
-    [`${tag} cross-tenant layaway isolation 404`]: r => r.status === 404,
+    [`${tag} cross-tenant layaway isolation 404`]: r => r.status === 404 && errorCode(r) === 'LAYAWAY_NOT_FOUND',
   });
 
   sleep(1);
@@ -2652,7 +2707,7 @@ export function giftCardManagement(d) {
   // 3b. Money taken for a card is a sale, never a hand load
   check(post(`/api/order-svc/gift-cards/${code}/reload`,
     { amount: '20.00', reason: 'GOODWILL', paidBy: 'CARD' }, tenant.ownerToken), {
-    [`${tag} hand reload naming a tender 409`]: r => r.status === 409,
+    [`${tag} hand reload naming a tender 409`]: r => r.status === 409 && errorCode(r) === 'GIFT_CARD_NEEDS_SALE',
   });
 
   // 3c. A top-up sold at the till: a gift-card line on a sale, loaded when the sale is paid
@@ -2713,7 +2768,7 @@ export function giftCardManagement(d) {
   const other = isIN(d) ? d.uk : d.india;
   const isoRes = get(`/api/order-svc/gift-cards/${code}`, other.ownerToken);
   check(isoRes, {
-    [`${tag} cross-tenant gift card isolation 404`]: r => r.status === 404,
+    [`${tag} cross-tenant gift card isolation 404`]: r => r.status === 404 && errorCode(r) === 'GIFT_CARD_NOT_FOUND',
   });
 
   sleep(1);
@@ -2731,15 +2786,16 @@ export function negativeTests(d) {
   const fakeId = '01a090ae-611e-7007-b85c-1fbac22cb87b';
 
   // Assert 4xx; record any unexpected 2xx as a metric failure. A 5xx is an infra blip, not the
-  // validation/auth bypass this metric is tracking, so it must not be counted here either.
-  function neg(res, label, code) {
+  // validation/auth bypass this metric is tracking, so it must not be counted here either. The
+  // status and the machine code are asserted together: a 4xx for another reason is not the refusal.
+  function neg(res, label, code, errCode) {
     const is4xx = res.status >= 400 && res.status < 500;
     if (res.status >= 200 && res.status < 300) {
       negativeUnexpectedSuccess.add(1);
       console.error(`NEG UNEXPECTED SUCCESS [${label}] status=${res.status} body=${res.body.substring(0, 300)}`);
     }
     const assertions = { [`${tag} NEG [${label}] → 4xx`]: r => r.status >= 400 && r.status < 500 };
-    if (code) assertions[`${tag} NEG [${label}] → ${code}`] = r => r.status === code;
+    if (code) assertions[`${tag} NEG [${label}] → ${code} ${errCode}`] = r => r.status === code && errorCode(r) === errCode;
     check(res, assertions);
   }
 
@@ -2747,15 +2803,15 @@ export function negativeTests(d) {
 
   // Reserve with negative qty
   neg(post('/api/inventory-svc/inventory/reservations',
-    { storeId: store.storeId, variantId: vid, qty: -1, ttlSeconds: 60 }, tenant.ownerToken), 'reserve qty=-1', 400);
+    { storeId: store.storeId, variantId: vid, qty: -1, ttlSeconds: 60 }, tenant.ownerToken), 'reserve qty=-1', 400, 'VALIDATION_FAILED');
 
   // Reserve with missing required variantId field
   neg(post('/api/inventory-svc/inventory/reservations',
-    { storeId: store.storeId, qty: 1, ttlSeconds: 60 }, tenant.ownerToken), 'reserve missing variantId', 400);
+    { storeId: store.storeId, qty: 1, ttlSeconds: 60 }, tenant.ownerToken), 'reserve missing variantId', 400, 'VALIDATION_FAILED');
 
   // Stock receive with qty=0
   neg(post('/api/inventory-svc/admin/inventory/receive',
-    { storeId: store.storeId, variantId: vid, qty: '0', batchNo: `NEG-ZERO-${__ITER}` }, tenant.ownerToken), 'receive qty=0', 400);
+    { storeId: store.storeId, variantId: vid, qty: '0', batchNo: `NEG-ZERO-${__ITER}` }, tenant.ownerToken), 'receive qty=0', 400, 'VALIDATION_FAILED');
 
   // Material status with an invalid enum value
   const batchId = (() => {
@@ -2766,17 +2822,17 @@ export function negativeTests(d) {
   })();
   if (batchId) {
     neg(put(`/api/inventory-svc/admin/inventory/batches/${batchId}/material-status`,
-      { materialStatus: 'SHINY', reason: 'k6-neg' }, tenant.ownerToken), 'invalid materialStatus enum', 400);
+      { materialStatus: 'SHINY', reason: 'k6-neg' }, tenant.ownerToken), 'invalid materialStatus enum', 400, 'INVALID_MATERIAL_STATUS');
   }
 
   // UOM item conversion with factor=0 (must be >0)
   neg(http.post(`${BASE}/api/product-svc/admin/uom/item-conversions`,
     JSON.stringify({ variantId: vid, fromUom: 'CASE', toUom: 'EA', factor: '0' }),
     { headers: hdrs(tenant.ownerToken) }),
-    'UOM factor=0', 400);
+    'UOM factor=0', 400, 'VALIDATION_FAILED');
 
   // UOM convert with an unknown unit code
-  neg(get('/api/product-svc/admin/uom/convert?from=BANANA&to=EA&qty=1', tenant.ownerToken), 'UOM unknown unit code');
+  neg(get('/api/product-svc/admin/uom/convert?from=BANANA&to=EA&qty=1', tenant.ownerToken), 'UOM unknown unit code', 404, 'CONVERSION_NOT_FOUND');
 
   // ── Gap #34: manufacturer_pn — negative cases ────────────────────────────────
 
@@ -2784,16 +2840,16 @@ export function negativeTests(d) {
   if (tenant.productIds && tenant.productIds.length > 0) {
     const npPid = tenant.productIds[0];
     neg(post(`/api/product-svc/admin/products/${npPid}/variants`,
-      { sku: '', barcode: null, manufacturerPn: 'MFR-NEG-001', unit: 'PCS' }, tenant.ownerToken), 'variant blank sku with MPN → 400', 400);
+      { sku: '', barcode: null, manufacturerPn: 'MFR-NEG-001', unit: 'PCS' }, tenant.ownerToken), 'variant blank sku with MPN → 400', 400, 'VALIDATION_FAILED');
 
     // Missing sku field entirely with manufacturerPn present → 400
     neg(post(`/api/product-svc/admin/products/${npPid}/variants`,
-      { barcode: null, manufacturerPn: 'MFR-NEG-002', unit: 'PCS' }, tenant.ownerToken), 'variant missing sku with MPN → 400', 400);
+      { barcode: null, manufacturerPn: 'MFR-NEG-002', unit: 'PCS' }, tenant.ownerToken), 'variant missing sku with MPN → 400', 400, 'VALIDATION_FAILED');
 
     // Update variant: blank sku but non-null manufacturerPn → 400
     if (tenant.variantIds.length > 0) {
       neg(put(`/api/product-svc/admin/products/${npPid}/variants/${vid}`,
-        { sku: '  ', barcode: null, manufacturerPn: 'MFR-NEG-003', unit: 'PCS' }, tenant.ownerToken), 'variant update blank sku with MPN → 400', 400);
+        { sku: '  ', barcode: null, manufacturerPn: 'MFR-NEG-003', unit: 'PCS' }, tenant.ownerToken), 'variant update blank sku with MPN → 400', 400, 'VALIDATION_FAILED');
     }
   }
 
@@ -2805,29 +2861,29 @@ export function negativeTests(d) {
 
     // Invalid partyType → 400
     neg(post(`/api/product-svc/admin/products/variants/${xnVid}/cross-references`,
-      { partyType: 'BROKER', partyId: validPartyId, crossRefNumber: 'XYZ' }, tenant.ownerToken), 'cross-ref invalid partyType → 400', 400);
+      { partyType: 'BROKER', partyId: validPartyId, crossRefNumber: 'XYZ' }, tenant.ownerToken), 'cross-ref invalid partyType → 400', 400, 'INVALID_PARTY_TYPE');
 
     // Non-UUID partyId → 400
     neg(post(`/api/product-svc/admin/products/variants/${xnVid}/cross-references`,
-      { partyType: 'SUPPLIER', partyId: 'not-a-uuid', crossRefNumber: 'XYZ' }, tenant.ownerToken), 'cross-ref non-UUID partyId → 400', 400);
+      { partyType: 'SUPPLIER', partyId: 'not-a-uuid', crossRefNumber: 'XYZ' }, tenant.ownerToken), 'cross-ref non-UUID partyId → 400', 400, 'INVALID_UUID');
 
     // Missing crossRefNumber → 400
     neg(post(`/api/product-svc/admin/products/variants/${xnVid}/cross-references`,
-      { partyType: 'SUPPLIER', partyId: validPartyId }, tenant.ownerToken), 'cross-ref missing crossRefNumber → 400', 400);
+      { partyType: 'SUPPLIER', partyId: validPartyId }, tenant.ownerToken), 'cross-ref missing crossRefNumber → 400', 400, 'VALIDATION_FAILED');
 
     // Duplicate (same variant + partyType + partyId) → 409
     const dupXRef = post(`/api/product-svc/admin/products/variants/${xnVid}/cross-references`,
       { partyType: 'SUPPLIER', partyId: validPartyId, crossRefNumber: 'DUP-001' }, tenant.ownerToken);
     if (dupXRef.status === 201) {
       neg(post(`/api/product-svc/admin/products/variants/${xnVid}/cross-references`,
-        { partyType: 'SUPPLIER', partyId: validPartyId, crossRefNumber: 'DUP-002' }, tenant.ownerToken), 'duplicate cross-ref → 409', 409);
+        { partyType: 'SUPPLIER', partyId: validPartyId, crossRefNumber: 'DUP-002' }, tenant.ownerToken), 'duplicate cross-ref → 409', 409, 'DUPLICATE');
     }
 
     // Delete non-existent → 404
     neg(http.del(
       `${BASE}/api/product-svc/admin/products/variants/${xnVid}/cross-references/${fakeId}`,
       null, { headers: hdrs(tenant.ownerToken) }),
-      'delete nonexistent cross-ref → 404', 404);
+      'delete nonexistent cross-ref → 404', 404, 'CROSS_REF_NOT_FOUND');
   }
 
   // ── Gap #32: item relationships — negative cases ────────────────────────────
@@ -2838,19 +2894,19 @@ export function negativeTests(d) {
 
     // Invalid relationshipType enum → 400
     neg(post(`/api/product-svc/admin/products/variants/${rv0}/relationships`,
-      { relatedVariantId: rv1, relationshipType: 'ENEMIES' }, tenant.ownerToken), 'relationship invalid type → 400', 400);
+      { relatedVariantId: rv1, relationshipType: 'ENEMIES' }, tenant.ownerToken), 'relationship invalid type → 400', 400, 'INVALID_RELATIONSHIP_TYPE');
 
     // Self-relationship → 400
     neg(post(`/api/product-svc/admin/products/variants/${rv0}/relationships`,
-      { relatedVariantId: rv0, relationshipType: 'SUBSTITUTE' }, tenant.ownerToken), 'relationship self-ref → 400', 400);
+      { relatedVariantId: rv0, relationshipType: 'SUBSTITUTE' }, tenant.ownerToken), 'relationship self-ref → 400', 400, 'SELF_RELATIONSHIP');
 
     // Non-UUID relatedVariantId → 400
     neg(post(`/api/product-svc/admin/products/variants/${rv0}/relationships`,
-      { relatedVariantId: 'not-a-uuid', relationshipType: 'SUBSTITUTE' }, tenant.ownerToken), 'relationship invalid relatedVariantId → 400', 400);
+      { relatedVariantId: 'not-a-uuid', relationshipType: 'SUBSTITUTE' }, tenant.ownerToken), 'relationship invalid relatedVariantId → 400', 400, 'INVALID_UUID');
 
     // Missing relationshipType → 400
     neg(post(`/api/product-svc/admin/products/variants/${rv0}/relationships`,
-      { relatedVariantId: rv1 }, tenant.ownerToken), 'relationship missing type → 400', 400);
+      { relatedVariantId: rv1 }, tenant.ownerToken), 'relationship missing type → 400', 400, 'VALIDATION_FAILED');
 
     // Duplicate relationship → 409 (create, test dup, then clean up to avoid cross-iteration conflict)
     const dupType = 'COMPLEMENTARY';
@@ -2859,7 +2915,7 @@ export function negativeTests(d) {
     if (dup1.status === 201) {
       const dup1Id = (() => { try { return JSON.parse(dup1.body).data.id; } catch (_) { return null; } })();
       neg(post(`/api/product-svc/admin/products/variants/${rv0}/relationships`,
-        { relatedVariantId: rv1, relationshipType: dupType }, tenant.ownerToken), 'duplicate relationship → 409', 409);
+        { relatedVariantId: rv1, relationshipType: dupType }, tenant.ownerToken), 'duplicate relationship → 409', 409, 'DUPLICATE');
       if (dup1Id) {
         http.del(`${BASE}/api/product-svc/admin/products/variants/${rv0}/relationships/${dup1Id}`,
           null, { headers: hdrs(tenant.ownerToken) });
@@ -2869,14 +2925,14 @@ export function negativeTests(d) {
     // Cross-tenant: UK variant ID used with India token (or vice versa) — relatedVariant not found
     if (other.variantIds && other.variantIds.length > 0) {
       neg(post(`/api/product-svc/admin/products/variants/${rv0}/relationships`,
-        { relatedVariantId: other.variantIds[0], relationshipType: 'SUBSTITUTE' }, tenant.ownerToken), 'relationship cross-tenant relatedVariant → 404', 404);
+        { relatedVariantId: other.variantIds[0], relationshipType: 'SUBSTITUTE' }, tenant.ownerToken), 'relationship cross-tenant relatedVariant → 404', 404, 'VARIANT_NOT_FOUND');
     }
 
     // Delete non-existent relationship → 404
     neg(http.del(
       `${BASE}/api/product-svc/admin/products/variants/${rv0}/relationships/${fakeId}`,
       null, { headers: hdrs(tenant.ownerToken) }),
-      'delete nonexistent relationship → 404', 404);
+      'delete nonexistent relationship → 404', 404, 'RELATIONSHIP_NOT_FOUND');
   }
 
   // ── Gap #35: catalog groups — negative cases ────────────────────────────────
@@ -2894,7 +2950,7 @@ export function negativeTests(d) {
     // Blank group name → 400
     neg(post('/api/product-svc/admin/catalog-groups',
       { name: '' }, tenant.ownerToken),
-      'catalog group blank name → 400', 400);
+      'catalog group blank name → 400', 400, 'VALIDATION_FAILED');
 
     // Invalid dataType in element → 400
     // (create a group first, add invalid element, clean up)
@@ -2903,11 +2959,11 @@ export function negativeTests(d) {
     const tmpGrpId = (() => { try { return JSON.parse(tmpGrp.body).data.id; } catch (_) { return null; } })();
     if (tmpGrpId) {
       neg(post(`/api/product-svc/admin/catalog-groups/${tmpGrpId}/elements`,
-        { elementName: 'x', dataType: 'ENUM', required: false, sortOrder: 0 }, tenant.ownerToken), 'catalog element invalid dataType → 400', 400);
+        { elementName: 'x', dataType: 'ENUM', required: false, sortOrder: 0 }, tenant.ownerToken), 'catalog element invalid dataType → 400', 400, 'INVALID_DATA_TYPE');
 
       // Blank element name → 400
       neg(post(`/api/product-svc/admin/catalog-groups/${tmpGrpId}/elements`,
-        { elementName: '', dataType: 'TEXT', required: false, sortOrder: 0 }, tenant.ownerToken), 'catalog element blank name → 400', 400);
+        { elementName: '', dataType: 'TEXT', required: false, sortOrder: 0 }, tenant.ownerToken), 'catalog element blank name → 400', 400, 'VALIDATION_FAILED');
 
       // Duplicate group name within same tenant → 409
       const dupName = `DUP-CG-${slug()}`;
@@ -2916,7 +2972,7 @@ export function negativeTests(d) {
       if (dup1.status === 201) {
         neg(post('/api/product-svc/admin/catalog-groups',
           { name: dupName }, tenant.ownerToken),
-          'duplicate catalog group name → 409', 409);
+          'duplicate catalog group name → 409', 409, 'DUPLICATE');
         // Cleanup dup
         const dup1Id = (() => { try { return JSON.parse(dup1.body).data.id; } catch (_) { return null; } })();
         if (dup1Id) http.del(`${BASE}/api/product-svc/admin/catalog-groups/${dup1Id}`,
@@ -2926,11 +2982,11 @@ export function negativeTests(d) {
       // Assign to non-existent group → 404
       neg(post(`/api/product-svc/admin/products/variants/${negVid}/catalog-assignment`,
         { groupId: fakeId }, tenant.ownerToken),
-        'assign to nonexistent catalog group → 404', 404);
+        'assign to nonexistent catalog group → 404', 404, 'CATALOG_GROUP_NOT_FOUND');
 
       // GET assignment for variant with no assignment → 404
       neg(get(`/api/product-svc/admin/products/variants/${negVid}/catalog-assignment`, tenant.ownerToken),
-        'get assignment for unassigned variant → 404', 404);
+        'get assignment for unassigned variant → 404', 404, 'ASSIGNMENT_NOT_FOUND');
 
       // Duplicate assignment → 409
       const asgn1 = post(`/api/product-svc/admin/products/variants/${negVid}/catalog-assignment`,
@@ -2938,7 +2994,7 @@ export function negativeTests(d) {
       if (asgn1.status === 201) {
         neg(post(`/api/product-svc/admin/products/variants/${negVid}/catalog-assignment`,
           { groupId: tmpGrpId }, tenant.ownerToken),
-          'duplicate catalog assignment → 409', 409);
+          'duplicate catalog assignment → 409', 409, 'DUPLICATE');
         // Cleanup assignment
         http.del(`${BASE}/api/product-svc/admin/products/variants/${negVid}/catalog-assignment`,
           null, { headers: hdrs(tenant.ownerToken) });
@@ -2954,30 +3010,30 @@ export function negativeTests(d) {
 
   // Consume non-existent reservation
   neg(post(`/api/inventory-svc/inventory/reservations/${fakeId}/consume`,
-    {}, tenant.ownerToken), 'consume nonexistent reservation', 404);
+    {}, tenant.ownerToken), 'consume nonexistent reservation', 404, 'RESERVATION_NOT_FOUND');
 
   // Release non-existent reservation
   neg(post(`/api/inventory-svc/inventory/reservations/${fakeId}/release`,
-    {}, tenant.ownerToken), 'release nonexistent reservation', 404);
+    {}, tenant.ownerToken), 'release nonexistent reservation', 404, 'RESERVATION_NOT_FOUND');
 
   // GET non-existent serial by ID
-  neg(get(`/api/inventory-svc/admin/inventory/serials/${fakeId}`, tenant.ownerToken), 'get nonexistent serial', 404);
+  neg(get(`/api/inventory-svc/admin/inventory/serials/${fakeId}`, tenant.ownerToken), 'get nonexistent serial', 404, 'SERIAL_NOT_FOUND');
 
   // GET non-existent move order
-  neg(get(`/api/inventory-svc/admin/inventory/move-orders/${fakeId}`, tenant.ownerToken), 'get nonexistent move order', 404);
+  neg(get(`/api/inventory-svc/admin/inventory/move-orders/${fakeId}`, tenant.ownerToken), 'get nonexistent move order', 404, 'MOVE_ORDER_NOT_FOUND');
 
   // GET non-existent transfer order
-  neg(get(`/api/inventory-svc/admin/inventory/transfers/${fakeId}`, tenant.ownerToken), 'get nonexistent transfer', 404);
+  neg(get(`/api/inventory-svc/admin/inventory/transfers/${fakeId}`, tenant.ownerToken), 'get nonexistent transfer', 404, 'TRANSFER_ORDER_NOT_FOUND');
 
   // Resolve non-existent planning suggestion
   neg(put(`/api/inventory-svc/admin/inventory/planning/suggestions/${fakeId}/status`,
     { status: 'ORDERED' }, tenant.ownerToken),
-    'resolve nonexistent suggestion', 404);
+    'resolve nonexistent suggestion', 404, 'SUGGESTION_NOT_FOUND');
 
   // Delete non-existent UOM item conversion
   neg(http.del(`${BASE}/api/product-svc/admin/uom/item-conversions/${fakeId}`,
     null, { headers: hdrs(tenant.ownerToken) }),
-    'delete nonexistent UOM conversion', 404);
+    'delete nonexistent UOM conversion', 404, 'CONVERSION_NOT_FOUND');
 
   // ── State-machine violations ─────────────────────────────────────────────────
 
@@ -3009,11 +3065,11 @@ export function negativeTests(d) {
         // Second pick on COMPLETED order → must fail
         neg(http.post(`${BASE}/api/inventory-svc/admin/inventory/move-orders/${mo.id}/pick`,
           null, { headers: hdrs(tenant.ownerToken) }),
-          'double-pick completed MO');
+          'double-pick completed MO', 422, 'MOVE_ORDER_NOT_PICKABLE');
         // Cancel COMPLETED order → must fail (only DRAFT can be cancelled)
         neg(http.post(`${BASE}/api/inventory-svc/admin/inventory/move-orders/${mo.id}/cancel`,
           null, { headers: hdrs(tenant.ownerToken) }),
-          'cancel completed MO');
+          'cancel completed MO', 422, 'MOVE_ORDER_NOT_CANCELLABLE');
       }
     }
 
@@ -3030,7 +3086,7 @@ export function negativeTests(d) {
       // Receive before ship on a DIRECT order → must fail
       neg(http.post(`${BASE}/api/inventory-svc/admin/inventory/transfers/${tf1.id}/receive`,
         null, { headers: hdrs(tenant.ownerToken) }),
-        'receive PENDING DIRECT transfer');
+        'receive PENDING DIRECT transfer', 422, 'TRANSFER_ORDER_NOT_RECEIVABLE');
       // Now ship → atomically RECEIVED. Must actually land — a transient failure here would
       // leave the order PENDING, making the "second" ship a legitimate first success.
       const firstShip1 = http.post(`${BASE}/api/inventory-svc/admin/inventory/transfers/${tf1.id}/ship`,
@@ -3039,7 +3095,7 @@ export function negativeTests(d) {
         // Ship again on already-RECEIVED order → must fail
         neg(http.post(`${BASE}/api/inventory-svc/admin/inventory/transfers/${tf1.id}/ship`,
           null, { headers: hdrs(tenant.ownerToken) }),
-          'double-ship RECEIVED DIRECT transfer');
+          'double-ship RECEIVED DIRECT transfer', 422, 'TRANSFER_ORDER_NOT_SHIPPABLE');
       }
     }
 
@@ -3061,7 +3117,7 @@ export function negativeTests(d) {
         // Cancel SHIPPED order → must fail
         neg(http.post(`${BASE}/api/inventory-svc/admin/inventory/transfers/${tf2.id}/cancel`,
           null, { headers: hdrs(tenant.ownerToken) }),
-          'cancel SHIPPED INTRANSIT transfer');
+          'cancel SHIPPED INTRANSIT transfer', 422, 'TRANSFER_ORDER_NOT_CANCELLABLE');
       }
     }
   }
@@ -3073,7 +3129,7 @@ export function negativeTests(d) {
   if (other.brandId) {
     neg(put(`/api/product-svc/admin/brands/${other.brandId}`,
       { name: `INJECTED-${slug()}` }, tenant.ownerToken),
-      'cross-tenant brand mutation', 404);
+      'cross-tenant brand mutation', 404, 'BRAND_NOT_FOUND');
   }
 
   // Confirm the other tenant's brand is still intact (isolation not broken)
@@ -3089,19 +3145,19 @@ export function negativeTests(d) {
 
   // Invalid costing method enum → 400
   neg(put('/api/inventory-svc/admin/inventory/costing-methods',
-    { storeId: store.storeId, variantId: vid, method: 'LIFO' }, tenant.ownerToken), 'invalid costing method LIFO', 400);
+    { storeId: store.storeId, variantId: vid, method: 'LIFO' }, tenant.ownerToken), 'invalid costing method LIFO', 400, 'INVALID_COSTING_METHOD');
 
   // Missing variantId in costing method upsert → 400
   neg(put('/api/inventory-svc/admin/inventory/costing-methods',
-    { storeId: store.storeId, method: 'AVERAGE' }, tenant.ownerToken), 'costing method missing variantId', 400);
+    { storeId: store.storeId, method: 'AVERAGE' }, tenant.ownerToken), 'costing method missing variantId', 400, 'VALIDATION_FAILED');
 
   // Open period with missing storeId → 400
   neg(post('/api/inventory-svc/admin/inventory/accounting-periods',
-    { periodName: 'NEG-PERIOD', periodDate: '2025-01-01' }, tenant.ownerToken), 'open period missing storeId', 400);
+    { periodName: 'NEG-PERIOD', periodDate: '2025-01-01' }, tenant.ownerToken), 'open period missing storeId', 400, 'VALIDATION_FAILED');
 
   // Close a non-existent period → 404 PERIOD_NOT_FOUND (the period is read before anything else)
   neg(post(`/api/inventory-svc/admin/inventory/accounting-periods/${fakeId}/close`,
-    {}, tenant.ownerToken), 'close nonexistent period', 404);
+    {}, tenant.ownerToken), 'close nonexistent period', 404, 'PERIOD_NOT_FOUND');
 
   // Open two periods for the same store+date → 409
   const dupDate = '2020-06-01';
@@ -3109,7 +3165,7 @@ export function negativeTests(d) {
     { storeId: store.storeId, periodName: 'DUP-P1', periodDate: dupDate }, tenant.ownerToken);
   if (p1Res.status === 201) {
     neg(post('/api/inventory-svc/admin/inventory/accounting-periods',
-      { storeId: store.storeId, periodName: 'DUP-P2', periodDate: dupDate }, tenant.ownerToken), 'duplicate period same date 409', 409);
+      { storeId: store.storeId, periodName: 'DUP-P2', periodDate: dupDate }, tenant.ownerToken), 'duplicate period same date 409', 409, 'PERIOD_DUPLICATE_DATE');
   }
 
   // Close an already-closed period → 409 (create + close + close again)
@@ -3121,21 +3177,21 @@ export function negativeTests(d) {
     post(`/api/inventory-svc/admin/inventory/accounting-periods/${pCloseId}/close`,
       {}, tenant.ownerToken);
     neg(post(`/api/inventory-svc/admin/inventory/accounting-periods/${pCloseId}/close`,
-      {}, tenant.ownerToken), 'close already-closed period 409', 409);
+      {}, tenant.ownerToken), 'close already-closed period 409', 409, 'PERIOD_NOT_OPEN');
   }
 
   // ── Gap #18: Kanban Replenishment ─────────────────────────────────────────────
 
   // Invalid kanban type → 400
   neg(post('/api/inventory-svc/admin/inventory/kanban-cards',
-    { storeId: store.storeId, variantId: vid, kanbanType: 'INVALID', reorderQty: '10' }, tenant.ownerToken), 'invalid kanban type', 400);
+    { storeId: store.storeId, variantId: vid, kanbanType: 'INVALID', reorderQty: '10' }, tenant.ownerToken), 'invalid kanban type', 400, 'INVALID_KANBAN_TYPE');
 
   // Missing storeId → 400
   neg(post('/api/inventory-svc/admin/inventory/kanban-cards',
-    { variantId: vid, kanbanType: 'SUPPLIER', reorderQty: '10' }, tenant.ownerToken), 'kanban missing storeId', 400);
+    { variantId: vid, kanbanType: 'SUPPLIER', reorderQty: '10' }, tenant.ownerToken), 'kanban missing storeId', 400, 'VALIDATION_FAILED');
 
   // GET non-existent kanban card → 404
-  neg(get(`/api/inventory-svc/admin/inventory/kanban-cards/${fakeId}`, tenant.ownerToken), 'get nonexistent kanban card', 404);
+  neg(get(`/api/inventory-svc/admin/inventory/kanban-cards/${fakeId}`, tenant.ownerToken), 'get nonexistent kanban card', 404, 'KANBAN_NOT_FOUND');
 
   // Trigger already-TRIGGERED card → 409 (create → trigger → trigger again)
   const kTrig = post('/api/inventory-svc/admin/inventory/kanban-cards',
@@ -3148,7 +3204,7 @@ export function negativeTests(d) {
       {}, tenant.ownerToken);
     if (firstTrigger.status >= 200 && firstTrigger.status < 300) {
       neg(post(`/api/inventory-svc/admin/inventory/kanban-cards/${kTrigId}/trigger`,
-        {}, tenant.ownerToken), 'double-trigger kanban 409', 409);
+        {}, tenant.ownerToken), 'double-trigger kanban 409', 409, 'KANBAN_NOT_EMPTY');
     }
   }
 
@@ -3158,7 +3214,7 @@ export function negativeTests(d) {
   const kEmptyId = (() => { try { return JSON.parse(kEmpty.body).data.id; } catch (_) { return null; } })();
   if (kEmptyId) {
     neg(post(`/api/inventory-svc/admin/inventory/kanban-cards/${kEmptyId}/replenish`,
-      {}, tenant.ownerToken), 'replenish EMPTY kanban 409', 409);
+      {}, tenant.ownerToken), 'replenish EMPTY kanban 409', 409, 'KANBAN_NOT_TRIGGERED');
   }
 
   // ── Gap #19: Reorder Point + EOQ ─────────────────────────────────────────────
@@ -3166,38 +3222,38 @@ export function negativeTests(d) {
   // Missing storeId → 400
   neg(put('/api/inventory-svc/admin/inventory/rop-plans',
     { variantId: vid, leadTimeDays: 7, orderingCost: '25.00',
-      holdingCostPct: '0.20', unitCost: '10.00' }, tenant.ownerToken), 'ROP plan missing storeId', 400);
+      holdingCostPct: '0.20', unitCost: '10.00' }, tenant.ownerToken), 'ROP plan missing storeId', 400, 'VALIDATION_FAILED');
 
   // Missing variantId → 400
   neg(put('/api/inventory-svc/admin/inventory/rop-plans',
     { storeId: store.storeId, leadTimeDays: 7, orderingCost: '25.00',
-      holdingCostPct: '0.20', unitCost: '10.00' }, tenant.ownerToken), 'ROP plan missing variantId', 400);
+      holdingCostPct: '0.20', unitCost: '10.00' }, tenant.ownerToken), 'ROP plan missing variantId', 400, 'VALIDATION_FAILED');
 
   // Negative leadTimeDays → 400
   neg(put('/api/inventory-svc/admin/inventory/rop-plans',
     { storeId: store.storeId, variantId: vid, leadTimeDays: -1,
-      orderingCost: '25.00', holdingCostPct: '0.20', unitCost: '10.00' }, tenant.ownerToken), 'ROP plan negative leadTimeDays', 400);
+      orderingCost: '25.00', holdingCostPct: '0.20', unitCost: '10.00' }, tenant.ownerToken), 'ROP plan negative leadTimeDays', 400, 'VALIDATION_FAILED');
 
   // GET non-existent ROP plan by unknown variant → 404
-  neg(get(`/api/inventory-svc/admin/inventory/rop-plans/by-variant?store=${store.storeId}&variant=${fakeId}`, tenant.ownerToken), 'get nonexistent ROP plan by variant', 404);
+  neg(get(`/api/inventory-svc/admin/inventory/rop-plans/by-variant?store=${store.storeId}&variant=${fakeId}`, tenant.ownerToken), 'get nonexistent ROP plan by variant', 404, 'ROP_NOT_FOUND');
 
   // ── Gap #14: Orders — negative cases ─────────────────────────────────────────
 
   // Place order missing channel → 400
   neg(post('/api/order-svc/orders',
     { storeId: store.storeId,
-      items: [{ variantId: vid, qty: 1, unitPrice: '10.00' }] }, tenant.ownerToken), 'place order missing channel 400', 400);
+      items: [{ variantId: vid, qty: 1, unitPrice: '10.00' }] }, tenant.ownerToken), 'place order missing channel 400', 400, 'VALIDATION_FAILED');
 
   // Place order missing items → 400
   neg(post('/api/order-svc/orders',
-    { storeId: store.storeId, channel: 'POS', items: [] }, tenant.ownerToken), 'place order empty items 400', 400);
+    { storeId: store.storeId, channel: 'POS', items: [] }, tenant.ownerToken), 'place order empty items 400', 400, 'ORDER_NO_ITEMS');
 
   // Place order missing storeId → 400
   neg(post('/api/order-svc/orders',
-    { channel: 'POS', items: [{ variantId: vid, qty: 1, unitPrice: '10.00' }] }, tenant.ownerToken), 'place order missing storeId 400', 400);
+    { channel: 'POS', items: [{ variantId: vid, qty: 1, unitPrice: '10.00' }] }, tenant.ownerToken), 'place order missing storeId 400', 400, 'VALIDATION_FAILED');
 
   // GET non-existent order → 404
-  neg(get(`/api/order-svc/orders/${fakeId}`, tenant.ownerToken), 'get nonexistent order 404', 404);
+  neg(get(`/api/order-svc/orders/${fakeId}`, tenant.ownerToken), 'get nonexistent order 404', 404, 'ORDER_NOT_FOUND');
 
   // Void ONLINE order → 409
   const onlineOrderRes = post('/api/order-svc/orders', {
@@ -3212,7 +3268,7 @@ export function negativeTests(d) {
     if (onlineId) {
       neg(post(`/api/order-svc/orders/${onlineId}/void`,
         { reason: 'test' }, tenant.ownerToken),
-        'void ONLINE order 409', 409);
+        'void ONLINE order 409', 409, 'ORDER_VOID_ONLY_POS');
     }
   }
 
@@ -3221,20 +3277,20 @@ export function negativeTests(d) {
   // Layaway missing storeId → 400
   neg(post('/api/order-svc/layaways',
     { items: [{ variantId: vid, qty: 1, unitPrice: '50.00' }], initialDeposit: '10.00',
-      paymentMethod: 'CASH' }, tenant.ownerToken), 'layaway missing storeId 400', 400);
+      paymentMethod: 'CASH' }, tenant.ownerToken), 'layaway missing storeId 400', 400, 'VALIDATION_FAILED');
 
   // Layaway missing items → 400
   neg(post('/api/order-svc/layaways',
-    { storeId: store.storeId, items: [], initialDeposit: '10.00', paymentMethod: 'CASH' }, tenant.ownerToken), 'layaway empty items 400', 400);
+    { storeId: store.storeId, items: [], initialDeposit: '10.00', paymentMethod: 'CASH' }, tenant.ownerToken), 'layaway empty items 400', 400, 'LAYAWAY_NO_ITEMS');
 
   // Deposit exceeds total → 409
   neg(post('/api/order-svc/layaways',
     { storeId: store.storeId,
       items: [{ variantId: vid, qty: 1, unitPrice: '10.00' }],
-      initialDeposit: '999.00', paymentMethod: 'CASH' }, tenant.ownerToken), 'layaway deposit exceeds total 409', 409);
+      initialDeposit: '999.00', paymentMethod: 'CASH' }, tenant.ownerToken), 'layaway deposit exceeds total 409', 409, 'DEPOSIT_EXCEEDS_TOTAL');
 
   // GET non-existent layaway → 404
-  neg(get(`/api/order-svc/layaways/${fakeId}`, tenant.ownerToken), 'get nonexistent layaway 404', 404);
+  neg(get(`/api/order-svc/layaways/${fakeId}`, tenant.ownerToken), 'get nonexistent layaway 404', 404, 'LAYAWAY_NOT_FOUND');
 
   // Complete layaway with outstanding balance → 409
   const balLayRes = post('/api/order-svc/layaways', {
@@ -3247,7 +3303,7 @@ export function negativeTests(d) {
     const balLayId = (() => { try { return JSON.parse(balLayRes.body).data.id; } catch (_) { return null; } })();
     if (balLayId) {
       neg(post(`/api/order-svc/layaways/${balLayId}/complete`, {}, tenant.ownerToken),
-        'complete layaway with balance outstanding 409', 409);
+        'complete layaway with balance outstanding 409', 409, 'LAYAWAY_CANNOT_COMPLETE');
     }
   }
 
@@ -3256,28 +3312,28 @@ export function negativeTests(d) {
   // Issue gift card missing storeId → 400
   neg(post('/api/order-svc/gift-cards',
     { amount: '50.00', reason: 'GOODWILL' }, tenant.ownerToken),
-    'issue gift card missing storeId 400', 400);
+    'issue gift card missing storeId 400', 400, 'VALIDATION_FAILED');
 
   // Issue gift card zero amount → 400
   neg(post('/api/order-svc/gift-cards',
-    { storeId: store.storeId, amount: 0, reason: 'GOODWILL' }, tenant.ownerToken), 'issue gift card zero amount 400', 400);
+    { storeId: store.storeId, amount: 0, reason: 'GOODWILL' }, tenant.ownerToken), 'issue gift card zero amount 400', 400, 'VALIDATION_FAILED');
 
   // Issue gift card by hand with no reason → 400
   neg(post('/api/order-svc/gift-cards',
-    { storeId: store.storeId, amount: '10.00' }, tenant.ownerToken), 'issue gift card by hand without a reason 400', 400);
+    { storeId: store.storeId, amount: '10.00' }, tenant.ownerToken), 'issue gift card by hand without a reason 400', 400, 'GIFT_CARD_REASON_REQUIRED');
 
   // Issue gift card by hand naming a tender → 409 (money taken for a card is a sale)
   neg(post('/api/order-svc/gift-cards',
     { storeId: store.storeId, amount: '10.00', reason: 'GOODWILL', paidBy: 'CASH' }, tenant.ownerToken),
-    'issue gift card by hand with a tender 409', 409);
+    'issue gift card by hand with a tender 409', 409, 'GIFT_CARD_NEEDS_SALE');
 
   // Issue gift card by hand with no Idempotency-Key → 400 (sent without the helper, which adds one)
   neg(http.post(`${BASE}/api/order-svc/gift-cards`,
     JSON.stringify({ storeId: store.storeId, amount: '10.00', reason: 'GOODWILL' }), { headers: hdrs(tenant.ownerToken) }),
-    'issue gift card by hand without a key 400', 400);
+    'issue gift card by hand without a key 400', 400, 'IDEMPOTENCY_KEY_REQUIRED');
 
   // GET non-existent gift card code → 404
-  neg(get('/api/order-svc/gift-cards/XXXX-XXXX-XXXX-XXXX', tenant.ownerToken), 'get nonexistent gift card 404', 404);
+  neg(get('/api/order-svc/gift-cards/XXXX-XXXX-XXXX-XXXX', tenant.ownerToken), 'get nonexistent gift card 404', 404, 'GIFT_CARD_NOT_FOUND');
 
   // Redeem more than balance → 409
   const gcForRedeemRes = post('/api/order-svc/gift-cards',
@@ -3295,7 +3351,7 @@ export function negativeTests(d) {
     if (gcCode) {
       neg(post(`/api/order-svc/gift-cards/${gcCode}/redeem`,
         { amount: '999.00', orderId: body(gcOrderRes).id }, tenant.ownerToken),
-        'redeem gift card exceeds balance 409', 409);
+        'redeem gift card exceeds balance 409', 409, 'GIFT_CARD_INSUFFICIENT_BALANCE');
     }
   }
 
@@ -3414,14 +3470,14 @@ export function pricingVat(d) {
     JSON.stringify({ code: 'TX', name: 'Bad Rate', rate: 1.5, exempt: false,
       effectiveFrom: '2024-01-01T00:00:00Z' }),
     { headers: hdrs(tenant.ownerToken) });
-  check(res, { [`${tag} rate >1 rejected 400`]: r => r.status === 400 });
+  check(res, { [`${tag} rate >1 rejected 400`]: r => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' });
   if (res.status >= 200 && res.status < 300) negativeUnexpectedSuccess.add(1);
 
   // ── Negative: resolve price for unknown variant → 404 ────────────────────
   res = http.post(`${BASE}/api/pricing-svc/prices/resolve`,
     JSON.stringify({ variantId: '01a090ae-611e-701d-9d60-a9d7516ed03b', channel: 'ALL', qty: 1 }),
     { headers: storefrontHdrs(tenant.tenantId) });
-  check(res, { [`${tag} resolve unknown variant 404`]: r => r.status === 404 });
+  check(res, { [`${tag} resolve unknown variant 404`]: r => r.status === 404 && errorCode(r) === 'PRICING_PRICE_NOT_FOUND' });
   if (res.status >= 200 && res.status < 300) negativeUnexpectedSuccess.add(1);
 
   // ── Negative: record tax transaction missing orderId → 400 ────────────────
@@ -3430,12 +3486,12 @@ export function pricingVat(d) {
       vatRate: 0.20, netAmount: 10, vatAmount: 2, grossAmount: 12,
       exempt: false, taxPointDate: new Date().toISOString() }),
     { headers: hdrs(tenant.ownerToken) });
-  check(res, { [`${tag} tax tx missing orderId 400`]: r => r.status === 400 });
+  check(res, { [`${tag} tax tx missing orderId 400`]: r => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' });
   if (res.status >= 200 && res.status < 300) negativeUnexpectedSuccess.add(1);
 
   // ── Negative: VAT return with from >= to → 400 ───────────────────────────
   res = get('/api/pricing-svc/vat-return?from=2025-01-01T00:00:00Z&to=2024-01-01T00:00:00Z', tenant.ownerToken);
-  check(res, { [`${tag} VAT return invalid period 400`]: r => r.status === 400 });
+  check(res, { [`${tag} VAT return invalid period 400`]: r => r.status === 400 && errorCode(r) === 'PRICING_INVALID_PERIOD' });
   if (res.status >= 200 && res.status < 300) negativeUnexpectedSuccess.add(1);
 
   // ── Negative: duplicate VAT rate code → 409 ──────────────────────────────
@@ -3443,7 +3499,7 @@ export function pricingVat(d) {
     JSON.stringify({ code: 'T1', name: 'Dup', rate: 0.10, exempt: false,
       effectiveFrom: '2024-01-01T00:00:00Z' }),
     { headers: hdrs(tenant.ownerToken) });
-  check(res, { [`${tag} duplicate VAT code 409`]: r => r.status === 409 });
+  check(res, { [`${tag} duplicate VAT code 409`]: r => r.status === 409 && errorCode(r) === 'PRICING_VAT_CODE_EXISTS' });
   if (res.status >= 200 && res.status < 300) negativeUnexpectedSuccess.add(1);
 
   sleep(1);
@@ -3589,7 +3645,7 @@ export function intercompanyFlow(d) {
     // otherwise the invoice is still unsettled and a second settle legitimately succeeds.
     if (settled) {
       const settle2 = post(`/api/purchase-svc/intercompany-invoices/${arId}/settle`, {}, ownerToken);
-      check(settle2, { 'double-settle 409': res => res.status === 409 });
+      check(settle2, { 'double-settle 409': res => res.status === 409 && errorCode(res) === 'PURCHASE_INVOICE_NOT_RAISEABLE' });
     }
   }
 
@@ -3625,17 +3681,17 @@ export function intercompanyFlow(d) {
     grossAmount: 120.00,
     currency,
   }, ownerToken);
-  check(icBadSameStore, { 'same-store IC 400': res => res.status === 400 });
+  check(icBadSameStore, { 'same-store IC 400': res => res.status === 400 && errorCode(res) === 'PURCHASE_IC_SAME_STORE' });
 
   // ── Negative: unknown invoice ID → 404 ────────────────────────────────────
   r = get('/api/purchase-svc/intercompany-invoices/01a090ae-611e-7000-9e1a-0f8a9e565153', ownerToken);
-  check(r, { 'unknown IC invoice 404': res => res.status === 404 });
+  check(r, { 'unknown IC invoice 404': res => res.status === 404 && errorCode(res) === 'PURCHASE_INVOICE_NOT_FOUND' });
 
   // ── Negative: tenant isolation — other tenant cannot see invoices ──────────
   const otherTenant = tenantCtx({ india: d.uk, uk: d.india });
   if (otherTenant && arId) {
     r = get(`/api/purchase-svc/intercompany-invoices/${arId}`, otherTenant.ownerToken);
-    check(r, { 'IC invoice cross-tenant 404': res => res.status === 404 });
+    check(r, { 'IC invoice cross-tenant 404': res => res.status === 404 && errorCode(res) === 'PURCHASE_INVOICE_NOT_FOUND' });
     // Only a 2xx carrying the other tenant's actual invoice is a real leak — a 404 (correct) or
     // a transient 5xx (infra blip, not data exposure) must not be counted as a violation.
     if (r.status >= 200 && r.status < 300) {
@@ -3650,7 +3706,7 @@ export function intercompanyFlow(d) {
     storeId:    store1,
     currency,
   }, ownerToken);
-  check(badPoRes, { 'PO unknown supplier 404': res => res.status === 404 });
+  check(badPoRes, { 'PO unknown supplier 404': res => res.status === 404 && errorCode(res) === 'PURCHASE_SUPPLIER_NOT_FOUND' });
 
   sleep(1);
 }
@@ -3731,7 +3787,7 @@ export function paymentFlow(d) {
       method: 'CASH',
       reason: 'over-refund attempt',
     }, tenant.ownerToken);
-    check(overRes, { [`${tag} over-refund rejected 409`]: r => r.status === 409 });
+    check(overRes, { [`${tag} over-refund rejected 409`]: r => r.status === 409 && errorCode(r) === 'REFUND_EXCEEDS_PAYMENT' });
 
     const listRefRes = get(`/api/payment-svc/payments/by-order/${orderId}/refunds`, tenant.ownerToken);
     check(listRefRes, { [`${tag} list refunds 200`]: r => r.status === 200 });
@@ -3745,7 +3801,7 @@ export function paymentFlow(d) {
   if (paymentId) {
     const other = isIN(d) ? d.uk : d.india;
     const isoRes = get(`/api/payment-svc/payments/${paymentId}`, other.ownerToken);
-    check(isoRes, { [`${tag} payment cross-tenant isolation 404`]: r => r.status === 404 });
+    check(isoRes, { [`${tag} payment cross-tenant isolation 404`]: r => r.status === 404 && errorCode(r) === 'PAYMENT_NOT_FOUND' });
   }
 
   sleep(1);
@@ -3809,7 +3865,7 @@ export function gatewaySecurity(d) {
   // Gap #61: a URL that merely embeds a public auth suffix must NOT bypass JWT validation.
   const bypass = http.get(`${BASE}/api/product-svc/products/iam-svc/auth/login`,
     { headers: { 'Content-Type': 'application/json' } });
-  check(bypass, { [`${tag} embedded public-path suffix → 401`]: r => r.status === 401 });
+  check(bypass, { [`${tag} embedded public-path suffix → 401`]: r => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' });
   if (bypass.status >= 200 && bypass.status < 300) {
     securityViolations.add(1);
     console.error(`SECURITY VIOLATION [embedded public-path bypass] status=${bypass.status} body=${bypass.body.substring(0, 300)}`);
@@ -3846,7 +3902,7 @@ export function gatewaySecurity(d) {
 
   // Gap #66: POS session sweep is platform-admin only — an OWNER must be refused.
   const sweep = post('/api/iam-svc/auth/pos/sessions/sweep', {}, tenant.ownerToken);
-  check(sweep, { [`${tag} POS sweep with OWNER → 403`]: r => r.status === 403 });
+  check(sweep, { [`${tag} POS sweep with OWNER → 403`]: r => r.status === 403 && errorCode(r) === 'FORBIDDEN' });
   // Only a 2xx is an actual bypass — a 5xx is an infra blip, not OWNER gaining admin access.
   if (sweep.status >= 200 && sweep.status < 300) {
     securityViolations.add(1);
@@ -3898,7 +3954,7 @@ export function gatewaySecurity(d) {
     });
   }
   const badCursor = get('/api/order-svc/orders?after=%21%21bogus%21%21', tenant.ownerToken);
-  check(badCursor, { [`${tag} malformed cursor → 400`]: r => r.status === 400 });
+  check(badCursor, { [`${tag} malformed cursor → 400`]: r => r.status === 400 && errorCode(r) === 'INVALID_CURSOR' });
 
   // Gap #72 (PATCH): PATCH is proxied by the gateway end-to-end.
   const patchRes = patch(`/api/tenant-svc/admin/stores/${storeId}/status`,
@@ -3911,7 +3967,7 @@ export function gatewaySecurity(d) {
     items: [{ variantId, qty: 1, unitPrice: '10.00' }],
     taxAmount: '-5.00', currency: tenant.currency,
   }, tenant.ownerToken);
-  check(negTax, { [`${tag} negative taxAmount → 400`]: r => r.status === 400 });
+  check(negTax, { [`${tag} negative taxAmount → 400`]: r => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' });
   // Only a 2xx means the invalid input was actually accepted — a 5xx isn't validation being skipped.
   if (negTax.status >= 200 && negTax.status < 300) {
     securityViolations.add(1);
@@ -3922,7 +3978,7 @@ export function gatewaySecurity(d) {
     items: [{ variantId, qty: 1, unitPrice: '10.00' }],
     discountAmount: '999.00', currency: tenant.currency,
   }, tenant.ownerToken);
-  check(bigDisc, { [`${tag} discount > subtotal → 400`]: r => r.status === 400 });
+  check(bigDisc, { [`${tag} discount > subtotal → 400`]: r => r.status === 400 && errorCode(r) === 'ORDER_DISCOUNT_EXCEEDS_SUBTOTAL' });
   if (bigDisc.status >= 200 && bigDisc.status < 300) {
     securityViolations.add(1);
     console.error(`SECURITY VIOLATION [discount > subtotal accepted] status=${bigDisc.status} body=${bigDisc.body.substring(0, 300)}`);
@@ -3994,7 +4050,7 @@ export function customerFlow(d) {
     points: 999999,
     reason: 'k6-over-redeem',
   }, tenant.ownerToken);
-  check(overRes, { [`${tag} over-redeem rejected 422`]: r => r.status === 422 });
+  check(overRes, { [`${tag} over-redeem rejected 422`]: r => r.status === 422 && errorCode(r) === 'LOYALTY_INSUFFICIENT_POINTS' });
 
   // 8. Loyalty ledger
   const ledgerRes = get(`/api/customer-svc/customers/${customerId}/loyalty/ledger?limit=10`, tenant.ownerToken);
@@ -4019,7 +4075,7 @@ export function customerFlow(d) {
   // 11. Cross-tenant isolation
   const other  = isIN(d) ? d.uk : d.india;
   const isoRes = get(`/api/customer-svc/customers/${customerId}`, other.ownerToken);
-  check(isoRes, { [`${tag} customer cross-tenant isolation 404`]: r => r.status === 404 });
+  check(isoRes, { [`${tag} customer cross-tenant isolation 404`]: r => r.status === 404 && errorCode(r) === 'CUSTOMER_NOT_FOUND' });
 
   customerLatency.add(regRes.timings.duration);
   sleep(1);

@@ -1,6 +1,7 @@
 package com.storeql.notification;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
@@ -95,7 +96,9 @@ class WebhookIT {
           byte[] body = exchange.getRequestBody().readAllBytes();
           RECEIVED.add(
               new Received(
-                  exchange.getRequestURI().getPath(),
+                  // Raw, as it crossed the wire: a decoded path would hide a query sent escaped.
+                  exchange.getRequestURI().getRawPath(),
+                  exchange.getRequestURI().getRawQuery(),
                   exchange.getRequestHeaders().entrySet().stream()
                       .collect(
                           java.util.stream.Collectors.toMap(
@@ -128,7 +131,7 @@ class WebhookIT {
   }
 
   /** What the receiver saw. */
-  private record Received(String path, Map<String, String> headers, String body) {}
+  private record Received(String path, String query, Map<String, String> headers, String body) {}
 
   @Inject WebTarget target;
   @Inject WebhookFanout fanout;
@@ -702,6 +705,35 @@ class WebhookIT {
   }
 
   /**
+   * A receiver's URL often carries its own query (a token, a channel). The query arrives as a
+   * query, never escaped into the path, each value escaped once, not twice. Its parameters may come
+   * in another order (the client writes the query from its parameters), which no receiver may rely
+   * on.
+   */
+  @Test
+  void aReceiverUrlWithAQueryIsCalledWithThatQuery() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook?token=abc%2Fdef&channel=ops", "OrderPlaced");
+    assertThat(made.body().toString(), made.status(), is(201));
+
+    Answer ping =
+        call(
+            "POST",
+            "/admin/webhooks/endpoints/" + made.data().getString("id") + "/ping",
+            own,
+            null);
+    assertThat(ping.body().toString(), ping.status(), is(202));
+    assertThat(deliverer.tick(), is(1));
+    assertThat(RECEIVED, hasSize(1));
+    assertThat(RECEIVED.get(0).path(), is("/hook"));
+    assertThat(
+        java.util.Set.of(RECEIVED.get(0).query().split("&")),
+        is(java.util.Set.of("token=abc%2Fdef", "channel=ops")));
+    assertSigned(RECEIVED.get(0), made.data().getString("secret"), "Ping");
+  }
+
+  /**
    * Flow catalogue, mkt-notification-delivery gap 1: order-svc's OrderPlaced, payment-svc's
    * PaymentCaptured and pricing-svc's PriceChanged carry no {@code eventId}, and the fan-out used
    * to drop all three with a warning — subscribers never heard of them. The first two are queued
@@ -842,5 +874,43 @@ class WebhookIT {
     assertThat(
         fanout.accept("{\"eventType\":\"PaymentFailed\",\"tenantId\":\"" + tenant + "\"}"), is(0));
     assertThat(fanout.accept("{\"eventType\":\"SomethingNew\"}"), is(0));
+  }
+
+  /**
+   * The request's body is validated at the door like every other: no body, a body that is not JSON
+   * and a body of the wrong shape are refused 400 by name for registering and for changing, never
+   * read as a request with every field left out (a 500 on the old path) and never stored.
+   */
+  @Test
+  void aMissingOrMalformedBodyIsRefusedByNameAndNothingIsStoredOrChanged() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook", "OrderPlaced");
+    assertThat(made.body().toString(), made.status(), is(201));
+    String id = made.data().getString("id");
+    String change = "/admin/webhooks/endpoints/" + id;
+
+    for (String bad : new String[] {"{not json", "[]", "\"https://example.com/hook\""}) {
+      Answer registering = call("POST", "/admin/webhooks/endpoints", own, bad);
+      assertThat("POST " + bad, registering.status(), is(400));
+      assertThat("POST " + bad, registering.code(), is("REQUEST_BODY_INVALID"));
+      Answer changing = call("PUT", change, own, bad);
+      assertThat("PUT " + bad, changing.status(), is(400));
+      assertThat("PUT " + bad, changing.code(), is("REQUEST_BODY_INVALID"));
+    }
+    // A literal null reaches the resource as no body at all.
+    Answer registering = call("POST", "/admin/webhooks/endpoints", own, "null");
+    assertThat(registering.body().toString(), registering.status(), is(400));
+    assertThat(registering.code(), anyOf(is("BODY_REQUIRED"), is("REQUEST_BODY_INVALID")));
+    Answer changing = call("PUT", change, own, "null");
+    assertThat(changing.body().toString(), changing.status(), is(400));
+    assertThat(changing.code(), anyOf(is("BODY_REQUIRED"), is("REQUEST_BODY_INVALID")));
+
+    // Nothing was stored, and the endpoint is as it was made.
+    assertThat(call("GET", "/admin/webhooks/endpoints", own, null).items(), hasSize(1));
+    JsonObject ep = call("GET", change, own, null).data();
+    assertThat(ep.getString("description"), is("ERP"));
+    assertThat(ep.getBoolean("enabled"), is(true));
+    assertThat(ep.getJsonArray("events"), hasSize(1));
   }
 }

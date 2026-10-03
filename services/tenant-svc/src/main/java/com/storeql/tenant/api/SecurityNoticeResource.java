@@ -8,9 +8,9 @@ import com.storeql.tenant.mapper.Mappers;
 import com.storeql.tenant.service.SecurityIncidentService;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -64,9 +64,10 @@ public class SecurityNoticeResource {
   @POST
   @Path("/{id}/reports")
   @Consumes(MediaType.APPLICATION_JSON)
-  public Response report(@PathParam("id") UUID id, @Valid RecordDutyRequest req) {
+  public Response report(@PathParam("id") UUID id, RecordDutyRequest req) {
     BusinessWide.require(ctx);
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     NoticeDuties duties = service.report(tenantId, id, req, ctx.requireUserId());
     SecurityNotice notice =

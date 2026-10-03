@@ -10,6 +10,27 @@ import '../../shared/util/short_ref.dart';
 import '../storefront/storefront_providers.dart' show DepositScheme;
 import 'markdown_label.dart';
 
+/// Whether two scans are the same pack for merging into one line: the same
+/// variant, lot, expiry, sticker and scale. A pack of another lot is its own
+/// line, so a recalled lot is never hidden inside a line of a good one.
+bool samePackLine(PosLine a, PosLine b) =>
+    a.variantId == b.variantId &&
+    a.batchNo == b.batchNo &&
+    a.expiry == b.expiry &&
+    a.markdownId == b.markdownId &&
+    a.weighingInstrumentId == b.weighingInstrumentId;
+
+/// What a scanned pack declares of itself, as a till sale's line sends it
+/// (`batchNo`, `expiry` as a date, `markdownId`, `weighingInstrumentId`): one
+/// builder for every request that carries a basket the server checks like a sale.
+Map<String, dynamic> packFieldsOf(PosLine l) => {
+      if (l.weighingInstrumentId != null)
+        'weighingInstrumentId': l.weighingInstrumentId,
+      if (l.markdownId != null) 'markdownId': l.markdownId,
+      if (l.batchNo != null) 'batchNo': l.batchNo,
+      if (l.expiry != null) 'expiry': l.expiry!.toIso8601String().substring(0, 10),
+    };
+
 /// A single scanned line on the POS sale.
 class PosLine {
   final String variantId;
@@ -177,6 +198,19 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
   /// check with a cut-off passes, and cleared with the cart like the age.
   DateTime? verifiedBornBefore;
 
+  /// Which sale this basket is, apart from what is in it: a new id each time
+  /// the till starts on a new basket — cleared, emptied or replaced — and the
+  /// same while the cashier works on this one.
+  ///
+  /// A card payment held at the machine is carried on only by its own sale
+  /// (held_card_payment.dart). Its content is not enough: the next customer
+  /// buying the same coffee sends the same order, and carried on under the
+  /// held keys would be recorded as paid by the earlier customer's card. Only
+  /// the basket that was never let go, or the held sale put back
+  /// ([restoreSale]), keeps the id.
+  String get saleId => _saleId;
+  String _saleId = newId();
+
   PosCartNotifier() : super(const []);
 
   /// Whether an earlier check in this sale already covers one asking for
@@ -220,6 +254,8 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
         l.variantId == variantId && l.markdownId == markdownId;
     if (qty <= 0) {
       state = state.where((l) => !same(l)).toList();
+      // Emptied: whatever is rung up next is another sale.
+      if (state.isEmpty) _saleId = newId();
       return;
     }
     state = [
@@ -231,6 +267,7 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
   void clear() {
     ageVerifiedUpTo = 0;
     verifiedBornBefore = null;
+    _saleId = newId();
     state = const [];
   }
 
@@ -241,6 +278,16 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
   void loadLines(List<PosLine> lines) {
     ageVerifiedUpTo = 0;
     verifiedBornBefore = null;
+    _saleId = newId();
+    state = lines;
+  }
+
+  /// Puts back [lines] as the sale [saleId] they were: a sale held with its
+  /// card at the machine, so the next press carries on that same sale.
+  void restoreSale(List<PosLine> lines, String saleId) {
+    ageVerifiedUpTo = 0;
+    verifiedBornBefore = null;
+    _saleId = saleId;
     state = lines;
   }
 

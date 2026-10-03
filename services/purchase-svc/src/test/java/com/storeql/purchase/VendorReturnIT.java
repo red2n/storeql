@@ -508,6 +508,42 @@ class VendorReturnIT {
         is("CN-77"));
   }
 
+  @Test
+  @DisplayName(
+      "A credit note's amount finer than the return's currency is refused"
+          + " PURCHASE_AMOUNT_TOO_PRECISE, never rounded; the return stays open, and to the penny it"
+          + " is credited at exactly what was keyed")
+  void aCreditFinerThanItsCurrencyIsRefused() {
+    String po = receivedOrder("10", "10");
+    String id =
+        data(call("POST", "/vendor-returns", rtv(po, "DAMAGED", "4"), T, "OWNER")).getString("id");
+    assertRefused(
+        call(
+            "POST",
+            "/vendor-returns/" + id + "/credit",
+            "{\"creditNoteNumber\":\"CN-90\",\"creditNoteDate\":\"2026-09-20\","
+                + "\"amount\":9.995}",
+            T,
+            "MANAGER"),
+        400,
+        "PURCHASE_AMOUNT_TOO_PRECISE");
+    assertThat(
+        data(call("GET", "/vendor-returns/" + id, null, T, "OWNER")).getString("status"),
+        is("RAISED"));
+
+    Response ok =
+        call(
+            "POST",
+            "/vendor-returns/" + id + "/credit",
+            "{\"creditNoteNumber\":\"CN-90\",\"creditNoteDate\":\"2026-09-20\","
+                + "\"amount\":9.99}",
+            T,
+            "MANAGER");
+    assertThat(ok.getStatus(), is(200));
+    assertThat(
+        data(ok).getJsonNumber("creditAmount").bigDecimalValue().toPlainString(), is("9.99"));
+  }
+
   @org.junit.jupiter.api.Test
   @org.junit.jupiter.api.DisplayName(
       "The owner's tenant data manifest is complete: every table is exported or left out by name")

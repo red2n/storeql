@@ -18,6 +18,7 @@ import '../admin/providers/admin_providers.dart';
 import '../admin/recall_providers.dart';
 import '../admin/recall_return_choice.dart';
 import 'pos_providers.dart';
+import 'pos_recall_check.dart';
 
 // ---------------------------------------------------------------------------
 // The till's Returns screen (return-controls, slice 2): find a sale by its
@@ -283,7 +284,7 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
           _noReceiptLines.putIfAbsent(line.variantId, () => line);
           _qty[line.variantId] = (_qty[line.variantId] ?? 0) + 1;
         } else {
-          final i = _newItems.indexWhere((l) => l.variantId == line.variantId);
+          final i = _newItems.indexWhere((l) => samePackLine(l, line));
           if (i >= 0) {
             _newItems[i] = _newItems[i].copyWith(qty: _newItems[i].qty + 1);
           } else {
@@ -326,7 +327,7 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
           _noReceiptLines.putIfAbsent(line.variantId, () => line);
           _qty[line.variantId] = (_qty[line.variantId] ?? 0) + 1;
         } else {
-          final i = _newItems.indexWhere((l) => l.variantId == line.variantId);
+          final i = _newItems.indexWhere((l) => samePackLine(l, line));
           if (i >= 0) {
             _newItems[i] = _newItems[i].copyWith(qty: _newItems[i].qty + 1);
           } else {
@@ -457,8 +458,11 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       });
       return;
     }
+    // The recall check a sale runs, over the new basket, before anything is sent.
+    if (!await _newBasketPassesRecallCheck()) return;
     final newItems = [
-      for (final l in _newItems) {'variantId': l.variantId, 'qty': _qtyValue(l.qty)},
+      for (final l in _newItems)
+        {'variantId': l.variantId, 'qty': _qtyValue(l.qty), ...packFieldsOf(l)},
     ];
     final body = <String, dynamic>{
       'reason': _reason,
@@ -468,7 +472,11 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
     };
     final key = _keyForAttempt('exchange|${sale.orderId}|$_reason|'
         '${_itemsSignature(items)}|'
-        '${[for (final n in newItems) '${n['variantId']}:${n['qty']}'].join(',')}');
+        '${[
+      for (final n in newItems)
+        '${n['variantId']}:${n['qty']}:${n['batchNo']}:${n['expiry']}:'
+            '${n['markdownId']}:${n['weighingInstrumentId']}'
+    ].join(',')}');
     await _send(
       path: '/${ApiConstants.order}/orders/${sale.orderId}/exchange',
       body: body,
@@ -509,6 +517,64 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
         }
       },
     );
+  }
+
+  /// The recall check a sale runs on each line (`checkRecall`), over the
+  /// exchange's new items: a recalled pack is refused with the sale's words, a
+  /// pack that cannot be told apart from a recalled lot is shown to the cashier.
+  Future<bool> _newBasketPassesRecallCheck() async {
+    // The till's list is loaded when first asked for; wait for that first read
+    // rather than check against an empty list. A failed refresh keeps what the
+    // till knew, as on a sale.
+    if (ref.read(activeRecallsProvider).fetchedAt == null) {
+      await ref.read(activeRecallsProvider.notifier).refresh();
+    }
+    final recalls = ref.read(activeRecallsProvider).items;
+    for (final line in [..._newItems]) {
+      final result = checkRecall(line.variantId, recalls,
+          batchNo: line.batchNo, expiry: line.expiry);
+      if (result is RecallClear) continue;
+      if (!mounted) return false;
+      if (result is RecallBlocked) {
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) =>
+              RecallStopSaleDialog(itemName: line.name, item: result.item),
+        );
+        return false;
+      }
+      final sell = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => RecallCheckPackDialog(
+                itemName: line.name, items: (result as RecallCheckPack).items),
+          ) ??
+          false;
+      if (!sell) return false;
+    }
+    return true;
+  }
+
+  /// The server's refusal of a new line (recalled lot, uncertified scale) in the
+  /// server's words, naming the line its `items[i]` detail points at.
+  String? _newLineRefusal(Object e) {
+    final code = apiErrorCode(e);
+    if (code != 'ORDER_LINE_RECALLED' && code != 'ORDER_SCALE_NOT_CERTIFIED') {
+      return null;
+    }
+    final err = apiErrorOf(e)!;
+    final named = <String>[];
+    for (final d in err.details) {
+      final m = RegExp(r'^(?:new)?[iI]tems\[(\d+)\]').firstMatch(d);
+      final i = m == null ? null : int.tryParse(m.group(1)!);
+      if (i == null || i < 0 || i >= _newItems.length) continue;
+      final l = _newItems[i];
+      final label = l.batchNo == null ? l.name : '${l.name}, lot ${l.batchNo}';
+      if (!named.contains(label)) named.add(label);
+    }
+    final said = friendlyError(e, fallback: 'The server refused a new item.');
+    return named.isEmpty ? said : '$said Take off: ${named.join('; ')}.';
   }
 
   Future<void> _submitNoReceipt() async {
@@ -605,7 +671,8 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
         if (code == 'ORDER_RETURN_NEEDS_MANAGER') {
           _needsManager = _refusalReasons(e);
         } else {
-          _error = returnRefusalLabel(code) ??
+          _error = (_exchange ? _newLineRefusal(e) : null) ??
+              returnRefusalLabel(code) ??
               (e is DioException && e.response?.statusCode == 404
                   ? 'Sale or item not found.'
                   : friendlyError(e, fallback: 'Could not record this.'));
@@ -877,7 +944,9 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
               style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
         for (final l in _newItems)
           ListTile(
-            key: Key('returns-new-${l.variantId}'),
+            key: Key('returns-new-${l.variantId}'
+                '${l.batchNo != null ? '-${l.batchNo}' : ''}'
+                '${l.markdownId != null ? '-sticker-${l.markdownId}' : ''}'),
             contentPadding: EdgeInsets.zero,
             dense: true,
             title: Text(l.name),

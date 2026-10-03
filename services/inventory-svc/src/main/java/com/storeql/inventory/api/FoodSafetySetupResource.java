@@ -138,16 +138,20 @@ public class FoodSafetySetupResource {
    *
    * @param id the id (path parameter)
    * @param req the request body
-   * @throws com.storeql.web.ApiException {@code 409} already switched on
+   * @throws com.storeql.web.ApiException {@code 400} no reason, or one over 500 characters; {@code
+   *     404} no such point; {@code 409} already switched on
    */
   @Operation(
       summary = "Switch a monitoring point on",
       description = "Requires a reason, kept in a trail.")
+  @APIResponse(responseCode = "400", description = "No reason, or one over 500 characters")
+  @APIResponse(responseCode = "404", description = "No such point")
   @APIResponse(responseCode = "409", description = "Already switched on")
   @POST
   @Path("/points/{id}/activate")
   public ApiResponse<PointResponse> activatePoint(
       @PathParam("id") String id, PointStatusRequest req) {
+    Validations.validate(req);
     return switchPoint(id, true, req);
   }
 
@@ -158,17 +162,21 @@ public class FoodSafetySetupResource {
    *
    * @param id the id (path parameter)
    * @param req the request body
-   * @throws com.storeql.web.ApiException {@code 409} already switched off
+   * @throws com.storeql.web.ApiException {@code 400} no reason, or one over 500 characters; {@code
+   *     404} no such point; {@code 409} already switched off
    */
   @Operation(
       summary = "Switch a monitoring point off",
       description =
           "A decommissioned chiller stops being due. Requires a reason; its records are kept.")
+  @APIResponse(responseCode = "400", description = "No reason, or one over 500 characters")
+  @APIResponse(responseCode = "404", description = "No such point")
   @APIResponse(responseCode = "409", description = "Already switched off")
   @POST
   @Path("/points/{id}/deactivate")
   public ApiResponse<PointResponse> deactivatePoint(
       @PathParam("id") String id, PointStatusRequest req) {
+    Validations.validate(req);
     return switchPoint(id, false, req);
   }
 
@@ -290,9 +298,9 @@ public class FoodSafetySetupResource {
     return ApiResponse.ok(items, new ApiResponse.Meta(ctx.requestId(), page.nextCursor()));
   }
 
+  /** The switch itself; the caller has already validated {@code req} at the boundary. */
   private ApiResponse<PointResponse> switchPoint(
       String id, boolean active, PointStatusRequest req) {
-    Validations.validate(req);
     var point =
         service.setPointActive(
             ctx.requireTenantId(), Parsing.uuid(id, "id"), active, req.reason(), ctx.userId());

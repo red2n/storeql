@@ -41,7 +41,10 @@ class PricingIT {
             .with(PricingIT.T, "GBP", "GB")
             .with(PricingIT.YEN, "JPY", "JP")
             .with(PricingIT.YEN_BUSY, "JPY", "JP")
-            .with(PricingIT.RUPEE, "INR", "IN");
+            .with(PricingIT.RUPEE, "INR", "IN")
+            // The other business the isolation checks act as: a real business has a profile,
+            // and its tax summary is counted in its own currency.
+            .with("01a090ae-611e-701d-9d60-a9d7516ed03b", "EUR", "DE");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -1062,6 +1065,65 @@ class PricingIT {
     assertThat(hist, containsString("\"active\":true"));
   }
 
+  /**
+   * The four switch endpoints (stop and restart, for a promotion and for a price list) take a
+   * request whose reason is required. The service refuses a body without one by name, and that is
+   * where it is checked (no Validations.validate in front of it, which would answer
+   * VALIDATION_FAILED and lose the named code the screens and this module's tests know): here the
+   * restart, in both subjects and in every shape of nothing, is refused and the subject stays off,
+   * the trail does not grow, and a stated reason then restarts it.
+   */
+  @Test
+  void aRestartWithNoReasonIsRefusedAndTheTrailDoesNotGrow() {
+    String promoId =
+        createPromotion(
+            "{\"name\":\"Paused\",\"type\":\"BASKET_FLAT\",\"value\":5,"
+                + "\"startsAt\":\"2020-01-01T00:00:00Z\"}");
+    String listId = createPriceList(T, "Paused prices", "GBP");
+    assertThat(
+        post("/admin/promotions/" + promoId + "/deactivate", "{\"reason\":\"paused\"}", T)
+            .getStatus(),
+        is(200));
+    assertThat(
+        post("/admin/price-lists/" + listId + "/deactivate", "{\"reason\":\"paused\"}", T)
+            .getStatus(),
+        is(200));
+    String trailBefore = count("promotion_status_changes", T);
+    assertThat("one stop each", trailBefore, is("2"));
+
+    for (String nothing :
+        new String[] {"{}", "{\"reason\":null}", "{\"reason\":\"\"}", "{\"reason\":\"   \"}"}) {
+      assertThat(
+          "a promotion restarted with " + nothing,
+          codeOf(post("/admin/promotions/" + promoId + "/activate", nothing, T), 400),
+          is("PRICING_REASON_REQUIRED"));
+      assertThat(
+          "a price list restarted with " + nothing,
+          codeOf(post("/admin/price-lists/" + listId + "/activate", nothing, T), 400),
+          is("PRICING_REASON_REQUIRED"));
+    }
+    assertThat(
+        "the promotion is still off",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.promotions WHERE id = '" + promoId + "'"),
+        is("false"));
+    assertThat(
+        "the price list is still off",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.price_lists WHERE id = '" + listId + "'"),
+        is("false"));
+    assertThat("the trail did not grow", count("promotion_status_changes", T), is(trailBefore));
+
+    // A stated reason does restart each, once, and is recorded.
+    assertThat(
+        post("/admin/promotions/" + promoId + "/activate", "{\"reason\":\"back on\"}", T)
+            .getStatus(),
+        is(200));
+    assertThat(
+        post("/admin/price-lists/" + listId + "/activate", "{\"reason\":\"back on\"}", T)
+            .getStatus(),
+        is(200));
+    assertThat("one row for each restart", count("promotion_status_changes", T), is("4"));
+  }
+
   /** Stopping something already stopped is a conflict, not a silent success. */
   @Test
   void switchingToTheStateItIsAlreadyInIsRefused() {
@@ -1756,6 +1818,125 @@ class PricingIT {
     String result = r.readEntity(String.class);
     assertThat(result, containsString("\"upserted\":1"));
     assertThat(result, containsString(badVariant));
+  }
+
+  /** A batch body of {@code n} one-pound rows, each for a variant of its own. */
+  private static String batchOf(int n) {
+    StringBuilder body = new StringBuilder("{\"items\":[");
+    for (int i = 0; i < n; i++) {
+      if (i > 0) {
+        body.append(',');
+      }
+      body.append("{\"variantId\":\"")
+          .append(Ids.newId())
+          .append("\",\"price\":1.00,\"minQty\":1}");
+    }
+    return body.append("]}").toString();
+  }
+
+  /** The field-level details of a refused answer, as the problem body carries them. */
+  private static java.util.List<String> detailsOf(String body) {
+    var parsed = Envelopes.parse(body);
+    if (!parsed.containsKey("details") || parsed.isNull("details")) {
+      return java.util.List.of();
+    }
+    return parsed.getJsonArray("details").getValuesAs(jakarta.json.JsonString.class).stream()
+        .map(jakarta.json.JsonString::getString)
+        .toList();
+  }
+
+  /**
+   * The documented cap of 500 rows a call is enforced (it was documented on the DTO and never
+   * checked): 501 is refused as a whole with the shared VALIDATION_FAILED, naming the field, and
+   * not one row is written, not one PriceChanged announced.
+   */
+  @Test
+  void aBatchOfMoreThanFiveHundredPricesIsRefusedAndWritesNothing() {
+    String plId = createPriceList(T, "Too many rows", "GBP");
+    String itemsBefore = count("price_list_items", T);
+    String eventsBefore = count("outbox", T);
+
+    Response r = post("/admin/price-lists/" + plId + "/items/batch", batchOf(501), T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(400));
+    assertThat(Envelopes.parse(body).getString("code"), is("VALIDATION_FAILED"));
+    assertThat(
+        "the refusal names the field and the limit",
+        detailsOf(body).stream().anyMatch(d -> d.startsWith("items: ") && d.contains("500")),
+        is(true));
+
+    assertThat("no price was written", count("price_list_items", T), is(itemsBefore));
+    assertThat("no PriceChanged was announced", count("outbox", T), is(eventsBefore));
+  }
+
+  /** The cap is a ceiling, not a rounding down: exactly 500 rows are all kept. */
+  @Test
+  void aBatchOfExactlyFiveHundredPricesIsKept() {
+    String plId = createPriceList(T, "Full batch", "GBP");
+
+    Response r = post("/admin/price-lists/" + plId + "/items/batch", batchOf(500), T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(200));
+    assertThat(body, containsString("\"upserted\":500"));
+    assertThat(
+        "every row of the batch was written",
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM pricing.price_list_items WHERE tenant_id = '"
+                + T
+                + "' AND price_list_id = '"
+                + plId
+                + "'"),
+        is("500"));
+  }
+
+  /**
+   * A batch with no rows, with the rows missing or null, or from another business, is refused by
+   * name and writes nothing: the empty ones are 400, the other business's is 404 and our list is
+   * untouched. A row that breaks its own constraint still costs only itself (the test above).
+   */
+  @Test
+  void aBatchWithNoRowsOrFromAnotherBusinessIsRefusedAndWritesNothing() {
+    String plId = createPriceList(T, "Nothing to write", "GBP");
+    String path = "/admin/price-lists/" + plId + "/items/batch";
+    String itemsBefore = count("price_list_items", T);
+    String eventsBefore = count("outbox", T);
+
+    for (String empty : new String[] {"{\"items\":[]}", "{\"items\":null}", "{}"}) {
+      assertThat(empty, codeOf(post(path, empty, T), 400), is("VALIDATION_FAILED"));
+    }
+    String emptyList = post(path, "{\"items\":[]}", T).readEntity(String.class);
+    assertThat(
+        "the empty list is named by its field",
+        detailsOf(emptyList).stream().anyMatch(d -> d.startsWith("items: ")),
+        is(true));
+
+    // A row that is not there at all (a JSON null) is not a bad row to be reported against its
+    // variant: the body is not a list of rows, and is refused whole, the good row beside it
+    // included (nothing is written, which the counts below prove).
+    String goodRow = "{\"variantId\":\"" + Ids.newId() + "\",\"price\":1.00,\"minQty\":1}";
+    for (String nulled :
+        new String[] {"{\"items\":[null]}", "{\"items\":[" + goodRow + ",null]}"}) {
+      assertThat(nulled, codeOf(post(path, nulled, T), 400), is("VALIDATION_FAILED"));
+    }
+
+    // Another business's management, naming our price list: not found, and nothing written there.
+    for (String roles : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          roles + " of another business cannot batch into our list",
+          codeOf(postAs(path, batchOf(1), YEN, roles), 404),
+          is("PRICING_LIST_NOT_FOUND"));
+    }
+    // Every other role, ours or theirs, is turned away before the body is read.
+    for (String roles : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertThat(roles + " of ours", postAs(path, batchOf(1), T, roles).getStatus(), is(403));
+      assertThat(roles + " of theirs", postAs(path, batchOf(1), YEN, roles).getStatus(), is(403));
+    }
+
+    assertThat("no price was written", count("price_list_items", T), is(itemsBefore));
+    assertThat("no price was written elsewhere", count("price_list_items", YEN), is("0"));
+    assertThat("no PriceChanged was announced", count("outbox", T), is(eventsBefore));
+    assertThat("none for the other business", count("outbox", YEN), is("0"));
   }
 
   @Test

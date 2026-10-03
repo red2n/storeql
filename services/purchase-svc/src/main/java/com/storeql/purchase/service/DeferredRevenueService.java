@@ -39,9 +39,19 @@ public class DeferredRevenueService {
   @Inject DeferredRevenueRepository repo;
   @Inject TenantProfiles tenants;
 
-  /** The estimates in force, their history, and where the points and gift cards stand. */
+  /**
+   * The estimates in force, their history, and where the points and gift cards stand.
+   *
+   * <p>The points and the cards are the business's, redeemable at any of its stores, so neither the
+   * pools nor the liability can be split by store: a caller held to stores is refused rather than
+   * shown the whole business's figures.
+   *
+   * @throws ApiException {@code 403} for anyone but management; {@code 403 BUSINESS_WIDE_ONLY} for
+   *     a caller held to stores
+   */
   public DeferredRevenueView view(TenantContext ctx) {
     ctx.requireAnyRole(MANAGEMENT);
+    wholeBusiness(ctx);
     return repo.view(ctx.requireTenantId());
   }
 
@@ -50,10 +60,11 @@ public class DeferredRevenueService {
    * are kept; a change applies from now on, as a change in an accounting estimate does.
    *
    * @throws ApiException {@code 400} naming the estimate that is out of range; {@code 403} for
-   *     anyone but management
+   *     anyone but management; {@code 403 BUSINESS_WIDE_ONLY} for a caller held to stores
    */
   public DeferredRevenueView setEstimates(TenantContext ctx, DeferredRevenueSettingsRequest req) {
     ctx.requireAnyRole(MANAGEMENT);
+    wholeBusiness(ctx);
     UUID tenantId = ctx.requireTenantId();
     String refusal =
         DeferredRevenue.refusal(
@@ -147,6 +158,13 @@ public class DeferredRevenueService {
       case LoyaltyEvent.REVERSED -> DeferredRevenue.reversed(src, settings, pool, e.points().abs());
       default -> DeferredRevenue.adjusted(src, settings, pool, e.points());
     };
+  }
+
+  private static void wholeBusiness(TenantContext ctx) {
+    BusinessWide.require(
+        ctx,
+        "Loyalty points and gift cards are the whole business's, spent at any of its stores; their"
+            + " estimates and deferred revenue need a caller who is not held to stores");
   }
 
   private static LocalDate today() {

@@ -1,7 +1,9 @@
 package com.storeql.order.dto;
 
+import com.storeql.order.domain.Quantities;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -23,14 +25,31 @@ public final class Dtos {
   @Schema(name = "OrderItemRequest")
   public record OrderItemRequest(
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
       @Schema(
               description =
-                  "Optional when server-side pricing is enforced (ignored there); required and"
-                      + " trusted only in legacy mode. Zero is allowed (e.g. a price-hidden"
-                      + " storefront that never resolves a real price client-side, or a genuine"
-                      + " free/comped item) — server-side pricing enforcement re-resolves the"
-                      + " real price regardless.")
+                  "How many, or how much of a weighed or measured product: counted to three"
+                      + " decimal places and never rounded — finer is 400 VALIDATION_FAILED. A POS"
+                      + " sale's line is the till's reading: a label's net weight read to as many"
+                      + " as five places (GS1 AI 3105, 0.37512) or weighings added in floating"
+                      + " point (0.30000000000000004) is the reading it is within a billionth of,"
+                      + " at most six places, counted at the gram below (0.375, 0.300) and"
+                      + " charged, held and kept at that; finer, or under 0.001, is 400. The body"
+                      + " takes up to twenty places for a till's double.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.TILL_PLACES)
+          BigDecimal qty,
+      @Schema(
+              description =
+                  "The net unit price as the client has it. Under server-side pricing"
+                      + " enforcement the price charged is always the server's, never this — on a"
+                      + " POS sale it is read for one thing only: with the quantity, the goods as"
+                      + " the till rang them up, up to which a full-basket staff discount is capped"
+                      + " at the order's subtotal rather than refused (a discount above them is"
+                      + " still refused). Required and trusted only in legacy mode, where it is"
+                      + " money typed and refused when finer than the currency. Zero is allowed"
+                      + " (a price-hidden storefront that never resolves a real price"
+                      + " client-side, or a genuine free/comped item).")
           @PositiveOrZero
           BigDecimal unitPrice,
       String notes,
@@ -78,7 +97,10 @@ public final class Dtos {
                   "Manual staff discount off the subtotal. Honoured whether or not pricing"
                       + " enforcement is on: staff only, never above the subtotal, and never above"
                       + " the caller role's configured percentage ceiling. Requires"
-                      + " discountReason.")
+                      + " discountReason. In the order currency's minor units; on a POS sale,"
+                      + " where the till works it out in floating point, rounded half up to"
+                      + " them, and capped at the subtotal when no more than the goods as the"
+                      + " till rang them up (its lines added unrounded, then rounded once).")
           @PositiveOrZero
           BigDecimal discountAmount,
       @Schema(description = "Why the discount was given. Required whenever discountAmount is set.")
@@ -494,9 +516,13 @@ public final class Dtos {
   @Schema(name = "FulfilLine")
   public record FulfilLine(
       @NotNull String variantId,
-      @Schema(description = "Units handed over now; at most what is still outstanding.")
+      @Schema(
+              description =
+                  "Units handed over now, to three decimal places; at most what is still"
+                      + " outstanding.")
           @NotNull
           @jakarta.validation.constraints.Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
           BigDecimal qty) {}
 
   @Schema(name = "OrderResponse")
@@ -673,8 +699,12 @@ public final class Dtos {
           "Close a line short (substitutions for out-of-stock online lines): the quantity that will"
               + " never be handed over comes off the order and the money for it goes back.")
   public record ShortCloseRequest(
-      @Schema(description = "How much to close; everything still outstanding when omitted.")
+      @Schema(
+              description =
+                  "How much to close, to three decimal places; everything still outstanding when"
+                      + " omitted.")
           @DecimalMin("0.001")
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
           BigDecimal qty,
       @Schema(description = "Why, for the history.") @Size(max = 200) String reason) {}
 
@@ -685,8 +715,11 @@ public final class Dtos {
               + " more than the original, the original closed short for the quantity.")
   public record SubstituteRequest(
       @Schema(description = "The variant put in the bag.") @NotBlank String substituteVariantId,
-      @Schema(description = "How much; everything still outstanding when omitted.")
+      @Schema(
+              description =
+                  "How much, to three decimal places; everything still outstanding when omitted.")
           @DecimalMin("0.001")
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
           BigDecimal qty,
       @Schema(
               description =
@@ -786,7 +819,11 @@ public final class Dtos {
   @Schema(name = "ReturnItemRequest")
   public record ReturnItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @Schema(description = "How much comes back, to three decimal places; never rounded.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
+          BigDecimal qty,
       @Schema(
               description =
                   "Required. SEALED goes back on sale; OPENED to inspection; DAMAGED and FAULTY"
@@ -871,7 +908,7 @@ public final class Dtos {
   public record ExchangeRequest(
       @NotBlank String reason,
       @NotNull @Valid List<ReturnItemRequest> returnItems,
-      @NotNull @Valid List<ExchangeNewItemRequest> newItems,
+      @NotNull @Valid List<@NotNull ExchangeNewItemRequest> newItems,
       @Schema(
               description =
                   "The customer the new sale is for; the returned sale's customer when absent.")
@@ -879,7 +916,48 @@ public final class Dtos {
 
   @Schema(name = "ExchangeNewItemRequest")
   public record ExchangeNewItemRequest(
-      @NotBlank String variantId, @NotNull @Positive BigDecimal qty) {}
+      @NotBlank String variantId,
+      @Schema(
+              description =
+                  "As on a till sale's line, for the new sale is one: the till scans the new"
+                      + " basket, so a label's net weight read to as many as five places (GS1 AI"
+                      + " 3105, 0.37512) or weighings added in floating point"
+                      + " (0.30000000000000004) is the reading it is within a billionth of, at"
+                      + " most six places, counted at the gram below (0.375, 0.300) and charged,"
+                      + " held and kept at that; finer, or under 0.001, is 400 VALIDATION_FAILED"
+                      + " naming newItems[i].qty. The body takes up to twenty places for a till's"
+                      + " double.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.TILL_PLACES)
+          BigDecimal qty,
+      @Schema(
+              description =
+                  "As on a till sale's line: the certified weighing instrument a weighed item was"
+                      + " read on. Refused (409 ORDER_SCALE_NOT_CERTIFIED) as on a sale when the"
+                      + " store's register does not hold it or it is not certified today.")
+          String weighingInstrumentId,
+      @Schema(
+              description =
+                  "As on a till sale's line: the reduce-to-clear markdown a scanned sticker named"
+                      + " (05.4). The new sale's line is priced at the sticker, as a sale's is.")
+          String markdownId,
+      @Schema(
+              description =
+                  "As on a till sale's line: the lot the pack declared (GS1 AI 10). A pack of a"
+                      + " recalled lot is refused (409 ORDER_LINE_RECALLED), as on a sale. Not"
+                      + " stored.")
+          @Size(max = 64)
+          String batchNo,
+      @Schema(
+              description =
+                  "As on a till sale's line: the expiry the pack declared (AI 17), as an ISO"
+                      + " date, checked against open recalls with batchNo; not a date is 400"
+                      + " ORDER_LINE_EXPIRY_INVALID naming newItems[i].expiry. Not stored.")
+          String expiry) {
+    // One constructor only: JSON-B (Yasson) builds a record through its canonical constructor
+    // only when it is the record's sole one, so a second would refuse every exchange body.
+  }
 
   @Schema(name = "NoReceiptReturnRequest")
   public record NoReceiptReturnRequest(
@@ -1047,7 +1125,11 @@ public final class Dtos {
   @Schema(name = "LayawayItemRequest")
   public record LayawayItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @Schema(description = "To three decimal places; never rounded.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
+          BigDecimal qty,
       @NotNull @Positive BigDecimal unitPrice) {}
 
   @Schema(name = "CreateLayawayRequest")
@@ -1201,7 +1283,11 @@ public final class Dtos {
   @Schema(name = "SpecialOrderItemRequest")
   public record SpecialOrderItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @Schema(description = "To three decimal places; never rounded.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
+          BigDecimal qty,
       @NotNull @Positive BigDecimal unitPrice,
       String notes) {}
 
@@ -1312,7 +1398,15 @@ public final class Dtos {
   @Schema(name = "ParkedSaleItemRequest")
   public record ParkedSaleItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @Schema(
+              description =
+                  "As on a till sale: three decimal places; a label's finer weight or a"
+                      + " double's noise is the reading it stands for, counted at the gram below;"
+                      + " anything finer 400 VALIDATION_FAILED.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.TILL_PLACES)
+          BigDecimal qty,
       @NotNull @PositiveOrZero BigDecimal unitPrice,
       @PositiveOrZero BigDecimal discountAmount,
       String notes,
@@ -1324,7 +1418,7 @@ public final class Dtos {
       @NotBlank String storeId,
       String customerId,
       String customerName,
-      List<@NotNull ParkedSaleItemRequest> items,
+      List<@NotNull @Valid ParkedSaleItemRequest> items,
       String notes) {}
 
   @Schema(name = "ResumeParkedSaleRequest")

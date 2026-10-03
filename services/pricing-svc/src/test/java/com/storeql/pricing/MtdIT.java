@@ -34,8 +34,19 @@ class MtdIT {
 
   private static final PostgresSupport PG;
 
+  /**
+   * Both businesses are pound businesses, as tenant-svc would describe them: a tax line is kept to
+   * its business currency's minor units, so the currency is read (the currency minor-units sweep).
+   */
+  @SuppressWarnings("unused")
+  private static final com.storeql.test.TenantSvcStub TENANTS;
+
   static {
     PG = PostgresSupport.start();
+    TENANTS =
+        com.storeql.test.TenantSvcStub.start()
+            .with(MtdIT.T, "GBP", "GB")
+            .with(MtdIT.OTHER_T, "GBP", "GB");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());

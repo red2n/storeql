@@ -188,10 +188,49 @@ class ProcurementControlsIT {
   }
 
   @Test
+  @DisplayName(
+      "A keyed supplier invoice is held to its order's currency: VAT of a thousandth of a pound or"
+          + " a stated total finer than a penny is refused PURCHASE_AMOUNT_TOO_PRECISE, never"
+          + " rounded, and nothing is captured or posted; to the penny it is captured")
+  void aKeyedInvoiceFinerThanItsCurrencyIsRefused() {
+    String po = draftOrder(supplier("Precise Ltd"));
+    addLine(po, VARIANT, 10, "1.00");
+    assertThat(post("/purchase-orders/" + po + "/submit", "{}").getStatus(), is(200));
+    String fineVat =
+        PurchaseFixtures.invoiceJson(po, "INV-P1", java.time.LocalDate.now(), 10, "1.00", "2.005");
+    assertThat(
+        code(call("POST", "/supplier-invoices", fineVat, T, "OWNER"), 400),
+        is("PURCHASE_AMOUNT_TOO_PRECISE"));
+    String fineTotal =
+        "{\"poId\":\""
+            + po
+            + "\",\"invoiceNumber\":\"INV-P2\",\"invoiceDate\":\""
+            + java.time.LocalDate.now()
+            + "\",\"vatAmount\":2.00,\"statedGross\":12.001,\"lines\":[{\"variantId\":\""
+            + VARIANT
+            + "\",\"qty\":10,\"unitPrice\":1.00}]}";
+    assertThat(
+        code(call("POST", "/supplier-invoices", fineTotal, T, "OWNER"), 400),
+        is("PURCHASE_AMOUNT_TOO_PRECISE"));
+    assertThat(Envelopes.okArray(get("/supplier-invoices")).size(), is(0));
+    assertThat(
+        Envelopes.scalar(PG, "SELECT count(*) FROM purchase.nominal_ledger_entries"), is("0"));
+
+    String toThePenny =
+        PurchaseFixtures.invoiceJson(po, "INV-P3", java.time.LocalDate.now(), 10, "1.00", "2.00");
+    assertThat(call("POST", "/supplier-invoices", toThePenny, T, "OWNER").getStatus(), is(201));
+  }
+
+  @Test
   @DisplayName("An order with no lines has nothing to receive against")
   void anOrderWithNoLinesHasNothingToReceive() {
     String po = draftOrder(supplier("Empty Ltd"));
+    // An empty order cannot be sent any more (PurchaseApprovalIT), so the order that reaches a
+    // receipt with nothing on it is one sent with a line that is gone now: by an upgrade from the
+    // days it could be, or by hand.
+    addLine(po, VARIANT, 1, "1.00");
     assertThat(post("/purchase-orders/" + po + "/submit", "{}").getStatus(), is(200));
+    Envelopes.exec(PG, "DELETE FROM purchase.purchase_order_lines WHERE po_id = '" + po + "'");
     Response r =
         post(
             "/goods-receipts",

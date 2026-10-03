@@ -44,7 +44,8 @@ function receiveLot(tenant, storeId, variantId, qty, lot, expiry) {
 }
 
 export function setup() {
-  const gb = onboardTenant('recall-gb', { country: 'GB', currency: 'GBP' });
+  // Two shops: the lot is sold at the first; the second's staff have no business with its notices.
+  const gb = onboardTenant('recall-gb', { country: 'GB', currency: 'GBP', stores: 2 });
   const rival = onboardTenant('recall-rival', { country: 'GB', currency: 'GBP' });
   const store = gb.stores[0];
   const variantId = sellableVariant(gb, 'Crunchy peanut butter').variantId;
@@ -53,16 +54,17 @@ export function setup() {
   must(receiveLot(gb, store.id, variantId, 30, 'L-2291', new Date(Date.now() + 365 * 86400000).toISOString().slice(0, 10)), [200, 201], 'receive lot');
   const cashier = staffUser(gb, 'CASHIER', [store.id]);
   const manager = staffUser(gb, 'MANAGER', [store.id]);
+  const elsewhere = staffUser(gb, 'MANAGER', [gb.stores[1].id]);
   const shopper = register('recall-shopper');
   const bystander = register('recall-bystander');
   // A second line nobody has bought, for the recalls group 2 opens to test the offer's rules.
   const spare = sellableVariant(gb, 'Smooth peanut butter').variantId;
   const de = onboardTenant('recall-de', { country: 'DE', currency: 'EUR' });
   const deVariant = sellableVariant(de, 'Erdnussbutter').variantId;
-  return { gb, rival, store, variantId, spare, cashier, manager, shopper, bystander, de, deVariant };
+  return { gb, rival, store, variantId, spare, cashier, manager, elsewhere, shopper, bystander, de, deVariant };
 }
 
-export default function ({ gb, rival, store, variantId, spare, cashier, manager, shopper, bystander, de, deVariant }) {
+export default function ({ gb, rival, store, variantId, spare, cashier, manager, elsewhere, shopper, bystander, de, deVariant }) {
   const owner = gb.owner.token;
   const shop = { storefront: gb.tenantId };
   const onHand = () => {
@@ -126,12 +128,12 @@ export default function ({ gb, rival, store, variantId, spare, cashier, manager,
     expect(open(owner, base({ remedies: [] })), '[-] a recall with no remedy', 400, 'RECALL_REMEDIES_REQUIRED');
     expect(open(owner, base({ contactPhone: undefined })), '[-] or no contact', 400, 'RECALL_CONTACT_REQUIRED');
     expect(open(owner, base({ contactPhone: undefined, contactUrl: 'ftp://x' })), '[-] or a contact that is not a web address', 400, 'RECALL_CONTACT_URL_INVALID');
-    expect(open(owner, base({ remedies: ['CASH'] })), '[-] or a remedy the law does not name', 400);
-    expect(open(owner, base({ contactPhone: 'call me' })), '[-] or a number that is not one', 400);
-    expect(open(owner, base({ soldFrom: '31/12/2025' })), '[-] or a date not written as one', 400);
-    expect(open(cashier.token, base({})), '[-] a cashier cannot open a recall', 403);
-    expect(open(shopper.token, base({})), '[-] nor a shopper', 403);
-    expect(open(undefined, base({})), '[-] nor nobody', 401);
+    expect(open(owner, base({ remedies: ['CASH'] })), '[-] or a remedy the law does not name', 400, 'VALIDATION_FAILED');
+    expect(open(owner, base({ contactPhone: 'call me' })), '[-] or a number that is not one', 400, 'VALIDATION_FAILED');
+    expect(open(owner, base({ soldFrom: '31/12/2025' })), '[-] or a date not written as one', 400, 'INVALID_DATE');
+    expect(open(cashier.token, base({})), '[-] a cashier cannot open a recall', 403, 'FORBIDDEN');
+    expect(open(shopper.token, base({})), '[-] nor a shopper', 403, 'FORBIDDEN');
+    expect(open(undefined, base({})), '[-] nor nobody', 401, 'UNAUTHORIZED');
     // A German business: GPSR asks for two remedies or a reason, and plain words.
     const deBase = (overrides) => base({ items: [{ variantId: deVariant }], ...overrides });
     expect(open(de.owner.token, deBase({ remedies: ['REFUND'] })), '[-] one remedy with no reason, in Germany', 400, 'RECALL_REMEDIES_INSUFFICIENT');
@@ -178,7 +180,7 @@ export default function ({ gb, rival, store, variantId, spare, cashier, manager,
     expect(own, '[+] the shopper sees the recall on their orders', 200);
     truthy('[+] ...their notice, no one else\'s', (data(own) || []).length === 1 && data(own)[0].orderId === shopperOrder.id, data(own));
     truthy('[-] a bystander sees none', (data(call('GET', '/api/order-svc/orders/recall-notices/mine', { token: bystander.token, ...shop })) || []).length === 0);
-    expect(call('GET', '/api/order-svc/orders/recall-notices/mine', { ...shop }), '[-] nobody reads one without a token', 401);
+    expect(call('GET', '/api/order-svc/orders/recall-notices/mine', { ...shop }), '[-] nobody reads one without a token', 401, 'UNAUTHORIZED');
     let log = [];
     truthy(
       '[+] the shopper was written to, once',
@@ -201,18 +203,18 @@ export default function ({ gb, rival, store, variantId, spare, cashier, manager,
     const walkIn = notices.find((n) => n.orderId === tillOrder.id);
     const choose = (id, remedy, opts) => call('POST', `/api/order-svc/orders/recall-notices/${id}/remedy`, { body: { remedy }, ...opts });
     expect(choose(mine.id, 'REPAIR', { token: shopper.token, ...shop }), '[-] a remedy the recall did not offer', 409, 'RECALL_REMEDY_NOT_OFFERED');
-    expect(choose(mine.id, 'CASH', { token: shopper.token, ...shop }), '[-] or one the law does not name', 400);
-    expect(choose(mine.id, 'REFUND', { token: bystander.token, ...shop }), "[-] a bystander cannot choose on another's notice", 404);
-    expect(choose(mine.id, 'REFUND', { ...shop }), '[-] nor nobody', 401);
-    expect(choose(mine.id, 'REFUND', { token: shopper.token, storefront: rival.tenantId }), '[-] nor the shopper at another shop', 404);
+    expect(choose(mine.id, 'CASH', { token: shopper.token, ...shop }), '[-] or one the law does not name', 400, 'VALIDATION_FAILED');
+    expect(choose(mine.id, 'REFUND', { token: bystander.token, ...shop }), "[-] a bystander cannot choose on another's notice", 404, 'RECALL_NOTICE_NOT_FOUND');
+    expect(choose(mine.id, 'REFUND', { ...shop }), '[-] nor nobody', 401, 'UNAUTHORIZED');
+    expect(choose(mine.id, 'REFUND', { token: shopper.token, storefront: rival.tenantId }), '[-] nor the shopper at another shop', 404, 'RECALL_NOTICE_NOT_FOUND');
     const chosen = choose(mine.id, 'REFUND', { token: shopper.token, ...shop });
     expect(chosen, '[+] the shopper chooses a refund', 200);
     truthy('[+] ...recorded as their own choice', data(chosen).status === 'REMEDY_CHOSEN' && data(chosen).remedy === 'REFUND' && data(chosen).remedyChosenVia === 'SHOPPER', data(chosen));
     expect(choose(mine.id, 'REPLACEMENT', { token: shopper.token, ...shop }), '[-] and cannot change their mind on the record', 409, 'RECALL_REMEDY_ALREADY_CHOSEN');
 
     // Staff: the refund is a return of the goods, naming the notice.
-    expect(call('GET', `/api/order-svc/orders/recall-notices?recallId=${recall.id}`, { token: shopper.token, ...shop }), "[-] a shopper reads no recall's list", 403);
-    expect(call('POST', `/api/order-svc/orders/recall-notices/${mine.id}/resolve`, { token: shopper.token, ...shop, body: { resolution: 'DECLINED' } }), '[-] nor settles one', 403);
+    expect(call('GET', `/api/order-svc/orders/recall-notices?recallId=${recall.id}`, { token: shopper.token, ...shop }), "[-] a shopper reads no recall's list", 403, 'FORBIDDEN');
+    expect(call('POST', `/api/order-svc/orders/recall-notices/${mine.id}/resolve`, { token: shopper.token, ...shop, body: { resolution: 'DECLINED' } }), '[-] nor settles one', 403, 'FORBIDDEN');
     expect(call('POST', `/api/order-svc/orders/recall-notices/${mine.id}/resolve`, { token: cashier.token, body: { resolution: 'REFUNDED' } }), '[-] a refund is not settled by hand', 400, 'RECALL_REFUND_THROUGH_RETURN');
     expect(
       call('POST', `/api/order-svc/orders/${guestOrder.id}/returns`, { token: cashier.token, idem: true, body: { reason: 'Recall', recallNoticeId: mine.id, items: [{ variantId, qty: 1 }] } }),
@@ -247,10 +249,18 @@ export default function ({ gb, rival, store, variantId, spare, cashier, manager,
     const replaced = call('POST', `/api/order-svc/orders/recall-notices/${guest.id}/resolve`, { token: cashier.token, body: { resolution: 'REPLACED', notes: 'New jar handed over' } });
     expect(replaced, '[+] the walk-in who left a number took a new jar', 200);
     truthy('[+] ...settled with its notes', data(replaced).status === 'RESOLVED' && data(replaced).resolutionNotes === 'New jar handed over', data(replaced));
+    // Staff of the business's other shop cannot settle this shop's notice while it is open: it is
+    // still open for this shop's cashier just below.
+    expect(
+      call('POST', `/api/order-svc/orders/recall-notices/${walkIn.id}/resolve`, { token: elsewhere.token, body: { resolution: 'DECLINED' } }),
+      "[-] a manager held to the business's other shop settles nothing at this one",
+      403,
+      'STORE_ACCESS_DENIED'
+    );
     expect(call('POST', `/api/order-svc/orders/recall-notices/${walkIn.id}/resolve`, { token: cashier.token, body: { resolution: 'DECLINED' } }), '[+] the walk-in came back and wanted nothing', 200);
     expect(call('POST', `/api/order-svc/orders/recall-notices/${walkIn.id}/resolve`, { token: cashier.token, body: { resolution: 'DECLINED' } }), '[-] not twice', 409, 'RECALL_NOTICE_RESOLVED');
-    expect(call('POST', `/api/order-svc/orders/recall-notices/${walkIn.id}/resolve`, { token: cashier.token, body: { resolution: 'LOST' } }), '[-] nor with a word the record does not take', 400);
-    expect(call('POST', `/api/order-svc/orders/recall-notices/${walkIn.id}/resolve`, { token: rival.owner.token, body: { resolution: 'DECLINED' } }), "[-] another business settles nothing of ours", 404);
+    expect(call('POST', `/api/order-svc/orders/recall-notices/${walkIn.id}/resolve`, { token: cashier.token, body: { resolution: 'LOST' } }), '[-] nor with a word the record does not take', 400, 'VALIDATION_FAILED');
+    expect(call('POST', `/api/order-svc/orders/recall-notices/${walkIn.id}/resolve`, { token: rival.owner.token, body: { resolution: 'DECLINED' } }), "[-] another business settles nothing of ours", 404, 'RECALL_NOTICE_NOT_FOUND');
     truthy("[-] another business sees none of our notices", (data(call('GET', `/api/order-svc/orders/recall-notices?recallId=${recall.id}`, { token: rival.owner.token })) || []).length === 0);
     const p = data(call('GET', `/api/order-svc/orders/recall-notices/progress?recallId=${recall.id}`, { token: manager.token }));
     truthy('[+] every buyer settled, and settling the walk-in did not make them a buyer told', p.notices === 3 && p.resolved === 3 && p.remedyChosen === 2 && p.chosen.REFUND + p.chosen.REPLACEMENT === 2 && p.identified === 2 && p.unidentified === 1, p);

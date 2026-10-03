@@ -12,6 +12,8 @@ import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
 import 'providers/staff_names.dart';
 import 'post_journal_dialog.dart';
+import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../shared/util/short_ref.dart';
@@ -20,6 +22,8 @@ import '../../core/theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/scrollable_table.dart';
 import '../../core/spacing.dart';
+import '../../core/amount_entry.dart';
+import 'widgets/figure_field.dart';
 
 enum _ReportType {
   sales,
@@ -2734,6 +2738,16 @@ class _TrialBalanceReport extends ConsumerWidget {
     // Amounts in the business's home currency: the report carries none.
     final home = ref.watch(tenantInfoProvider).value?.currency;
     final cs = Theme.of(context).colorScheme;
+    // A manual journal is management's and finance's (purchase-svc: OWNER or
+    // MANAGER holding finance.journal), so it is offered only to them; a
+    // caller held to stores posts at one of theirs ([PostJournalDialog]).
+    final auth = ref.watch(authNotifierProvider).value;
+    final postsJournals = auth is AuthAuthenticated &&
+        (auth.isManager || auth.isPlatformAdmin) &&
+        auth.hasPermission('finance.journal');
+    final heldStores = auth is AuthAuthenticated && auth.heldToStores
+        ? auth.storeIds
+        : const <String>[];
     final range = ref.watch(reportDateRangeProvider);
     final async = ref.watch(trialBalanceProvider);
     return async.when(
@@ -2770,20 +2784,21 @@ class _TrialBalanceReport extends ConsumerWidget {
           Row(
             children: [
               const Expanded(child: _DateRangeBar()),
-              Padding(
-                padding: EdgeInsetsDirectional.only(end: context.pageGutter),
-                child: FilledButton.tonalIcon(
-                  key: const Key('post-journal'),
-                  onPressed: () => showDialog<bool>(
-                    context: context,
-                    builder: (_) => const PostJournalDialog(),
-                  ).then((posted) {
-                    if (posted == true) ref.invalidate(trialBalanceProvider);
-                  }),
-                  icon: const Icon(Icons.post_add_outlined, size: 18),
-                  label: const Text('Post journal'),
+              if (postsJournals)
+                Padding(
+                  padding: EdgeInsetsDirectional.only(end: context.pageGutter),
+                  child: FilledButton.tonalIcon(
+                    key: const Key('post-journal'),
+                    onPressed: () => showDialog<bool>(
+                      context: context,
+                      builder: (_) => PostJournalDialog(storeIds: heldStores),
+                    ).then((posted) {
+                      if (posted == true) ref.invalidate(trialBalanceProvider);
+                    }),
+                    icon: const Icon(Icons.post_add_outlined, size: 18),
+                    label: const Text('Post journal'),
+                  ),
                 ),
-              ),
             ],
           ),
           // Every posting the service writes balances, so two totals that
@@ -2878,9 +2893,29 @@ class _TrialBalanceReport extends ConsumerWidget {
 /// Loyalty points and gift cards on the ledger (FRS 102 section 23): the
 /// estimates the deferral rests on, where the points and the gift card liability
 /// stand, and the way to set the estimates, without which loyalty events wait.
+///
+/// Points and gift cards are spent at any of the business's stores, so
+/// purchase-svc refuses a manager held to stores both the report and the
+/// estimates (BUSINESS_WIDE_ONLY): such a manager is asked nothing and told who
+/// reads it.
 class _DeferredRevenueReport extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final auth = ref.watch(authNotifierProvider).value;
+    // Until the sign-in is known nothing is asked, so a manager held to stores
+    // is never sent for figures the server would refuse them.
+    if (auth is! AuthAuthenticated) {
+      return const LoadingView(label: 'Loading deferred revenue…');
+    }
+    if (auth.heldToStores) {
+      return const EmptyState(
+        key: Key('deferred-revenue-business-wide'),
+        icon: Icons.lock_outline,
+        title: 'Not open to you',
+        message: "Loyalty points and gift cards are the whole business's: only an owner or a "
+            'head-office manager reads their deferred revenue.',
+      );
+    }
     final async = ref.watch(deferredRevenueProvider);
     return async.when(
       loading: () => const LoadingView(label: 'Loading deferred revenue…'),
@@ -3002,13 +3037,32 @@ class _EstimatesDialog extends ConsumerStatefulWidget {
   ConsumerState<_EstimatesDialog> createState() => _EstimatesDialogState();
 }
 
+/// A point's value: what it is worth to the shopper, kept to four places
+/// (NUMERIC(14,4)) since a point is worth a fraction of the smallest coin.
+const _pointValueShape = AmountShape(10, 4);
+
+/// A breakage estimate: a percentage to two places (NUMERIC(5,2)).
+const _breakageShape = AmountShape(3, 2);
+
 class _EstimatesDialogState extends ConsumerState<_EstimatesDialog> {
-  late final _value =
-      TextEditingController(text: widget.current?.pointValue.toString() ?? '');
+  // Read the way the app's language writes a number ([AmountMarks]) and sent
+  // as the decimals typed; one that cannot be read is refused under its field
+  // and nothing is saved (parsed with a point, Romanian's 0,05 was no value).
+  // The estimates in force are written the same way, so they read back
+  // unchanged.
+  final _marks = AmountMarks.ofApp();
+  late final _value = TextEditingController(
+      text: widget.current == null ? '' : _marks.writeAt(widget.current!.pointValue, 0));
   late final _points = TextEditingController(
-      text: widget.current?.pointsBreakagePct.toString() ?? '');
+      text: widget.current == null ? '' : _marks.writeAt(widget.current!.pointsBreakagePct, 0));
   late final _cards = TextEditingController(
-      text: widget.current?.giftCardBreakagePct.toString() ?? '');
+      text: widget.current == null ? '' : _marks.writeAt(widget.current!.giftCardBreakagePct, 0));
+
+  bool get _refused => figureRefused(_marks, [
+        (_value, _pointValueShape),
+        (_points, _breakageShape),
+        (_cards, _breakageShape),
+      ]);
   final _reason = TextEditingController();
   bool _saving = false;
   String? _error;
@@ -3022,9 +3076,10 @@ class _EstimatesDialogState extends ConsumerState<_EstimatesDialog> {
   }
 
   Future<void> _save() async {
-    final value = double.tryParse(_value.text.trim());
-    final points = double.tryParse(_points.text.trim());
-    final cards = double.tryParse(_cards.text.trim());
+    if (_refused) return;
+    final value = figureOf(_value, _pointValueShape, _marks);
+    final points = figureOf(_points, _breakageShape, _marks);
+    final cards = figureOf(_cards, _breakageShape, _marks);
     if (value == null || points == null || cards == null || _reason.text.trim().isEmpty) {
       setState(() => _error =
           'Enter a point value, both breakage estimates and the reason for them.');
@@ -3037,6 +3092,7 @@ class _EstimatesDialogState extends ConsumerState<_EstimatesDialog> {
     try {
       await ref.read(apiClientProvider).dio.put(
         '/${ApiConstants.purchase}/nominal-ledger/deferred-revenue/settings',
+        // The plain decimals typed: JSON-B reads them exactly.
         data: {
           'pointValue': value,
           'pointsBreakagePct': points,
@@ -3057,12 +3113,15 @@ class _EstimatesDialogState extends ConsumerState<_EstimatesDialog> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    TextField field(String key, TextEditingController c, String label, String help) =>
-        TextField(
-          key: Key(key),
+    Widget field(String key, TextEditingController c, AmountShape shape, String label, String help) =>
+        FigureField(
+          fieldKey: Key(key),
           controller: c,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(labelText: label, helperText: help),
+          shape: shape,
+          marks: _marks,
+          label: label,
+          helper: help,
+          onChanged: (_) => setState(() {}),
         );
     return AlertDialog(
       title: const Text('Deferred revenue estimates'),
@@ -3077,12 +3136,13 @@ class _EstimatesDialogState extends ConsumerState<_EstimatesDialog> {
                 Text(_error!, style: TextStyle(color: cs.error)),
                 const SizedBox(height: 8),
               ],
-              field('estimate-point-value', _value, 'Value of one point',
+              field('estimate-point-value', _value, _pointValueShape, 'Value of one point',
                   "What a point is worth to the shopper, in the tenant's currency"),
               const SizedBox(height: 8),
-              field('estimate-points-breakage', _points, 'Points never spent (%)', '0 to 95'),
+              field('estimate-points-breakage', _points, _breakageShape,
+                  'Points never spent (%)', '0 to 95'),
               const SizedBox(height: 8),
-              field('estimate-gift-card-breakage', _cards,
+              field('estimate-gift-card-breakage', _cards, _breakageShape,
                   'Gift card value never claimed (%)', '0 to 95'),
               const SizedBox(height: 8),
               TextField(
@@ -3106,7 +3166,7 @@ class _EstimatesDialogState extends ConsumerState<_EstimatesDialog> {
         ),
         FilledButton(
           key: const Key('save-estimates'),
-          onPressed: _saving ? null : _save,
+          onPressed: _saving || _refused ? null : _save,
           child: const Text('Save'),
         ),
       ],

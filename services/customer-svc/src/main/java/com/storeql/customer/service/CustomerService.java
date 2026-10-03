@@ -48,6 +48,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.function.Supplier;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -783,10 +784,12 @@ public class CustomerService {
    *
    * @param actorId the signed-in user, kept with the award
    * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for an
+   *     erased customer, nothing written
    */
   public LoyaltyAccount earnPoints(
       UUID tenantId, UUID customerId, EarnPointsRequest req, UUID actorId, String idempotencyKey) {
-    get(tenantId, customerId);
+    requireNotErased(get(tenantId, customerId), CustomerRepository::erasedForManualPoints);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     var event =
         loyaltyEvent(
@@ -808,6 +811,21 @@ public class CustomerService {
             req.reason(),
             actorId,
             idempotencyKey));
+  }
+
+  /**
+   * Value handed out by hand — points awarded or corrected, store credit issued — goes to a person;
+   * an erased customer is no longer one, so management's grant is refused with the code every write
+   * to an erased record answers. The repository checks again on its own transaction, holding the
+   * row against an erasure that lands in between.
+   *
+   * @param refusal what an erased customer is answered with
+   * @throws ApiException {@code 409 CUSTOMER_ANONYMIZED} for an erased customer
+   */
+  private static void requireNotErased(Customer customer, Supplier<ApiException> refusal) {
+    if (Customer.STATUS_ANONYMIZED.equals(customer.status())) {
+      throw refusal.get();
+    }
   }
 
   public void accrueLoyaltyFromOrder(
@@ -1028,8 +1046,16 @@ public class CustomerService {
    * ({@code 409 IDEMPOTENCY_KEY_REUSED}). Without one, an optional Idempotency-Key gives the same
    * replay rule; with neither, every call spends.
    *
+   * <p>An erased customer spends nothing new ({@code 409 CUSTOMER_ANONYMIZED}): nobody can show any
+   * longer that the balance is theirs. That is judged on the repository's transaction, not here,
+   * because a redemption recorded before the erasure must still answer its retry as it stands — the
+   * till applies the discount from that answer — with nothing more taken.
+   *
    * @param actorId the signed-in user, kept with the redemption
    * @param idempotencyKey the request's key in canonical form, or null
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for a new
+   *     spend by an erased customer; {@code 409 IDEMPOTENCY_KEY_REUSED}; {@code 422
+   *     LOYALTY_INSUFFICIENT_POINTS}
    */
   public LoyaltyAccount redeemPoints(
       UUID tenantId,
@@ -1072,10 +1098,15 @@ public class CustomerService {
   }
 
   /**
-   * A manual correction, once per Idempotency-Key.
+   * A manual correction, once per Idempotency-Key. The event is built for the points that actually
+   * moved, which is less than was asked when a deduction would take the balance below zero.
    *
    * @param actorId the signed-in manager, kept with the correction
    * @param idempotencyKey the request's key in canonical form; a retry under it writes nothing
+   * @throws ApiException {@code 400 VALIDATION_FAILED} for a correction of no points; {@code 404}
+   *     for a customer this business does not hold; {@code 409 CUSTOMER_ANONYMIZED} for an erased
+   *     customer, up or down, nothing written; {@code 422 LOYALTY_INSUFFICIENT_POINTS} for a
+   *     deduction when there are no points to take
    */
   public LoyaltyAccount adjustPoints(
       UUID tenantId,
@@ -1083,24 +1114,30 @@ public class CustomerService {
       AdjustPointsRequest req,
       UUID actorId,
       String idempotencyKey) {
-    get(tenantId, customerId);
-    var event =
-        loyaltyEvent(
-            "LoyaltyAdjusted",
-            "storeql.customer.loyalty-adjusted",
-            tenantId,
-            customerId,
-            req.points(),
-            null,
-            null,
-            null);
+    if (req.points().signum() == 0) {
+      throw new ApiException(
+          400,
+          ErrorCodes.VALIDATION_FAILED,
+          "Request validation failed",
+          List.of("points: must not be zero"));
+    }
+    requireNotErased(get(tenantId, customerId), CustomerRepository::erasedForManualPoints);
     return repo.adjustPoints(
         tenantId,
         customerId,
         req.points(),
         req.reason(),
         programmeOf(tenantId),
-        event,
+        moved ->
+            loyaltyEvent(
+                "LoyaltyAdjusted",
+                "storeql.customer.loyalty-adjusted",
+                tenantId,
+                customerId,
+                moved,
+                null,
+                null,
+                null),
         CustomerService::tierChangedEvent,
         new ManualGrant(
             ManualGrant.KIND_LOYALTY_ADJUST,
@@ -1146,6 +1183,27 @@ public class CustomerService {
    */
   private String storeCreditCurrency(UUID tenantId, String requested) {
     return profiles.currencyOr(tenantId, requested);
+  }
+
+  /**
+   * Store credit is money in its account's currency, so an amount is no finer than that currency's
+   * minor unit (ISO 4217, through common-service {@code Fx}): whole yen, a dinar's three places, a
+   * pound's two. Judged here because a request body cannot know its currency; refused, never
+   * rounded, since the balance is somebody's money.
+   *
+   * @throws ApiException 400 {@code STORE_CREDIT_AMOUNT_INVALID}
+   */
+  private static void requireStoreCreditAmount(BigDecimal amount, String currency) {
+    BigDecimal plain = amount.stripTrailingZeros();
+    if (plain.scale() > com.storeql.service.Fx.minorUnits(currency)) {
+      throw ApiException.badRequest(
+          "STORE_CREDIT_AMOUNT_INVALID",
+          "An amount has no more decimal places than "
+              + currency
+              + " has ("
+              + com.storeql.service.Fx.minorUnits(currency)
+              + ")");
+    }
   }
 
   /**
@@ -1198,7 +1256,8 @@ public class CustomerService {
   /**
    * Issues store credit and publishes {@code StoreCreditIssued}.
    *
-   * <p>Used for refunds-to-credit and goodwill. Not idempotent — calling it twice issues twice.
+   * <p>Goodwill by hand, management's (credit for a return arrives from the refund events instead).
+   * Once per Idempotency-Key; never to an erased customer.
    *
    * @param tenantId owning tenant
    * @param customerId the customer to credit
@@ -1208,7 +1267,9 @@ public class CustomerService {
    *     reason
    * @return the account with its new balance
    * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists in this
-   *     tenant
+   *     tenant; {@code CUSTOMER_ANONYMIZED} (409) for an erased customer, judged before the amount
+   *     and with nothing written, a retry under an earlier key included; {@code
+   *     STORE_CREDIT_AMOUNT_INVALID} (400) for an amount finer than the currency's minor unit
    */
   public StoreCreditAccount issueStoreCredit(
       UUID tenantId,
@@ -1216,8 +1277,9 @@ public class CustomerService {
       IssueStoreCreditRequest req,
       UUID actorId,
       String idempotencyKey) {
-    get(tenantId, customerId);
+    requireNotErased(get(tenantId, customerId), CustomerRepository::erasedForStoreCredit);
     String cur = storeCreditCurrency(tenantId, req.currency());
+    requireStoreCreditAmount(req.amount(), cur);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     String payload =
         Jsons.object()
@@ -1263,13 +1325,20 @@ public class CustomerService {
    * @param req the amount, optional currency (the tenant's own when omitted), order being paid and
    *     reason
    * @return the account with its new balance
-   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists; a 422 when
-   *     the balance is insufficient
+   *     <p>An erased customer spends nothing new: nobody can show any longer that the balance is
+   *     theirs. That is judged on the repository's transaction, not here, because a redemption
+   *     already recorded for the order must still answer payment-svc's retry as it stands — it
+   *     records the tender from that answer — with nothing more taken.
+   * @throws ApiException {@code CUSTOMER_NOT_FOUND} (404) when no such customer exists; {@code
+   *     STORE_CREDIT_AMOUNT_INVALID} (400) for an amount finer than the currency's minor unit;
+   *     {@code CUSTOMER_ANONYMIZED} (409) for a new spend by an erased customer, nothing written; a
+   *     422 when the balance is insufficient
    */
   public StoreCreditAccount redeemStoreCredit(
       UUID tenantId, UUID customerId, RedeemStoreCreditRequest req) {
     get(tenantId, customerId);
     String cur = storeCreditCurrency(tenantId, req.currency());
+    requireStoreCreditAmount(req.amount(), cur);
     UUID orderId = req.orderId() == null ? null : Ids.parse(req.orderId());
     String payload =
         Jsons.object()

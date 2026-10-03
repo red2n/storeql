@@ -65,16 +65,19 @@ public class ItemRelationshipRepository extends BaseJdbcRepository {
    * Deletes a relationship.
    *
    * @param tenantId owning tenant; the first condition of the query
+   * @param variantId the variant it must belong to; another variant's is not found
    * @param id the relationship to act on
    * @return {@code true} when a row was removed, {@code false} when nothing matched
    */
-  public boolean deleteRelationship(UUID tenantId, UUID id) {
+  public boolean deleteRelationship(UUID tenantId, UUID variantId, UUID id) {
     Instant[] found = {null};
     query(
-        "DELETE FROM item_relationships WHERE tenant_id = ? AND id = ? RETURNING id",
+        "DELETE FROM item_relationships WHERE tenant_id = ? AND variant_id = ? AND id = ?"
+            + " RETURNING id",
         ps -> {
           ps.setObject(1, tenantId);
-          ps.setObject(2, id);
+          ps.setObject(2, variantId);
+          ps.setObject(3, id);
         },
         rs -> {
           found[0] = Instant.now();

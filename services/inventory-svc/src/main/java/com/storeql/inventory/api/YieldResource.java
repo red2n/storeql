@@ -112,6 +112,11 @@ public class YieldResource {
       responseCode = "409",
       description = "INVENTORY_YIELD_TEMPLATE_ENDED, INVENTORY_YIELD_INPUT_NOT_OWNED")
   @APIResponse(responseCode = "422", description = "INVENTORY_YIELD_INSUFFICIENT_INPUT")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, could not be read")
   @POST
   @Path("/runs")
   public Response record(YieldRunRequest req) {

@@ -241,7 +241,8 @@ class PromotionEngineTest {
             List.of(save),
             Map.of(),
             List.of("save10"),
-            Map.of());
+            Map.of(),
+            2);
     // Matched case-insensitively: a customer typing lowercase gets their discount.
     assertThat(withCode.totalDiscount(), is(bd("10.00")));
     assertThat(withCode.rejectedCoupons().isEmpty(), is(true));
@@ -261,7 +262,8 @@ class PromotionEngineTest {
             List.of(save),
             Map.of(save.id(), Set.of(MUG)),
             List.of("MUGS", "TYPO"),
-            Map.of());
+            Map.of(),
+            2);
 
     // The code exists and is live, but nothing in the basket qualifies.
     assertThat(out.rejectedCoupons(), hasEntry("MUGS", "NOT_APPLICABLE"));
@@ -279,7 +281,8 @@ class PromotionEngineTest {
             List.of(save),
             Map.of(),
             List.of("SAVE10"),
-            Map.of(save.id(), "COUPON_EXHAUSTED"));
+            Map.of(save.id(), "COUPON_EXHAUSTED"),
+            2);
 
     assertThat(out.totalDiscount(), is(ZERO));
     assertThat(out.rejectedCoupons(), hasEntry("SAVE10", "COUPON_EXHAUSTED"));
@@ -404,8 +407,45 @@ class PromotionEngineTest {
             List.of(promo),
             Map.of(),
             List.of(),
-            Map.of());
+            Map.of(),
+            2);
     assertThat(out.totalDiscount(), is(bd("3.00")));
+  }
+
+  // ── the currency's own minor units ────────────────────────────────────────
+
+  /** A percentage off a yen line is whole yen: 10% of ¥999 is ¥100, never ¥99.90. */
+  @Test
+  void aYenPercentageIsWholeYen() {
+    var out = run(List.of(line(SHIRT, 3, "333")), List.of(percent("10% off", 10)), 0);
+    assertThat(out.totalDiscount(), is(bd("100")));
+  }
+
+  /** A percentage off a dinar line keeps its fils: 10% of KWD 1.235 is 0.124, never 0.12. */
+  @Test
+  void aDinarPercentageKeepsItsThirdDecimal() {
+    var out = run(List.of(line(SHIRT, 1, "1.235")), List.of(percent("10% off", 10)), 3);
+    assertThat(out.totalDiscount(), is(bd("0.124")));
+  }
+
+  /** A basket percentage and a half-price free unit are rounded to the yen too. */
+  @Test
+  void aYenBasketPercentageAndBogoAreWholeYen() {
+    var basket = run(List.of(line(SHIRT, 1, "999")), List.of(basketPercent("15% off", 15)), 0);
+    assertThat(basket.totalDiscount(), is(bd("150")));
+    var bogo = run(List.of(line(SHIRT, 2, "125")), List.of(bogo("2nd half price", 1, 1, 50)), 0);
+    assertThat(bogo.totalDiscount(), is(bd("63")));
+  }
+
+  /** A bundle price in dinars saves to the fils: two at 3.000 for 5.005 save 0.995, not 1.00. */
+  @Test
+  void aDinarBundleSavesToTheFils() {
+    var out =
+        run(
+            List.of(line(SHIRT, 1, "3.000"), line(MUG, 1, "3.000")),
+            List.of(mixMatch("Any 2 for 5.005", 2, "5.005")),
+            3);
+    assertThat(out.totalDiscount(), is(bd("0.995")));
   }
 
   private static BigDecimal discountOn(PromotionOutcome out, UUID variant) {
@@ -425,12 +465,17 @@ class PromotionEngineTest {
   private static final BigDecimal ZERO = BigDecimal.ZERO;
 
   private PromotionOutcome run(List<BasketLine> lines, List<Promotion> promos) {
+    return run(lines, promos, 2);
+  }
+
+  /** The same, for a currency with {@code scale} minor units (0 for yen, 3 for dinars). */
+  private PromotionOutcome run(List<BasketLine> lines, List<Promotion> promos, int scale) {
     Map<UUID, Set<UUID>> scopes = new java.util.LinkedHashMap<>();
     for (Promotion p : promos) {
       Set<UUID> s = SCOPES.get(p.id());
       if (s != null) scopes.put(p.id(), s);
     }
-    return engine.apply(lines, promos, scopes, List.of(), Map.of());
+    return engine.apply(lines, promos, scopes, List.of(), Map.of(), scale);
   }
 
   /** Scopes recorded by {@link #scoped}, so a test reads as one expression. */

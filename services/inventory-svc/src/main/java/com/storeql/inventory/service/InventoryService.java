@@ -106,6 +106,7 @@ public class InventoryService {
   @Inject com.storeql.inventory.repo.ValuationRepository valuationRepo;
   @Inject com.storeql.inventory.repo.LowStockRepository lowStockRepo;
   @Inject com.storeql.inventory.repo.StockTurnRepository stockTurnRepo;
+  @Inject com.storeql.service.TenantProfiles tenantProfiles;
   @Inject LotGenealogyRepository lotGenealogyRepo;
   @Inject ThresholdRepository thresholdRepo;
   @Inject SuggestionRepository suggestionRepo;
@@ -750,7 +751,7 @@ public class InventoryService {
    */
   public List<ValuationRow> valuationReport(
       UUID tenantId, Set<UUID> stores, ValuationGrouping grouping, int limit) {
-    return valuationRepo.value(tenantId, stores, grouping, limit);
+    return valuationRepo.value(tenantId, stores, grouping, limit, minorUnits(tenantId));
   }
 
   // ---- shrinkage report ----
@@ -822,7 +823,9 @@ public class InventoryService {
     int windowDays = (int) Math.max(1, days);
 
     List<StockTurnRow> rows =
-        stockTurnRepo.stockTurn(tenantId, stores, from, to, grouping, limit).stream()
+        stockTurnRepo
+            .stockTurn(tenantId, stores, from, to, grouping, limit, minorUnits(tenantId))
+            .stream()
             .map(r -> withDaysOnHand(r, windowDays))
             .toList();
 
@@ -867,7 +870,26 @@ public class InventoryService {
   public List<DeadStockRow> deadStockReport(
       UUID tenantId, Set<UUID> stores, Instant asOf, DeadStockGrouping grouping, int limit) {
     return stockTurnRepo.deadStock(
-        tenantId, stores, asOf == null ? Instant.now() : asOf, grouping, limit);
+        tenantId,
+        stores,
+        asOf == null ? Instant.now() : asOf,
+        grouping,
+        limit,
+        minorUnits(tenantId));
+  }
+
+  /**
+   * The business currency's minor units, which a report's money is kept to: whole yen, pence,
+   * three-decimal dinars. A read-only report fails open: when tenant-svc cannot say the currency
+   * the figures are given at {@code Fx}'s documented precision for an unknown currency rather than
+   * the report refused — the stored figures are untouched either way.
+   */
+  private int minorUnits(UUID tenantId) {
+    return com.storeql.service.Fx.minorUnits(
+        tenantProfiles
+            .find(tenantId)
+            .map(com.storeql.service.TenantProfiles.Profile::currency)
+            .orElse(null));
   }
 
   // ---- adjust ----

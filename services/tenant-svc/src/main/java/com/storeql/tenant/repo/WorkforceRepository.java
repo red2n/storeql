@@ -1,5 +1,6 @@
 package com.storeql.tenant.repo;
 
+import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
 import com.storeql.tenant.domain.Workforce;
@@ -20,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -53,14 +55,20 @@ public class WorkforceRepository extends BaseOutboxRepository {
    *
    * <p>One binder, because the two reads must mean the same window: a roster and the hours worked
    * against it that disagreed about which days they covered would make every comparison wrong.
+   *
+   * <p>The stores are bound only when the read is held to some, matching the SQL that asks for
+   * them: a null bound as a uuid array is refused by the driver, so "every store" is no clause.
    */
-  private static Binder window(UUID tenantId, UUID storeId, UUID userId, Instant from, Instant to) {
+  private static Binder window(
+      UUID tenantId, Set<UUID> stores, UUID userId, Instant from, Instant to) {
     return ps -> {
       int i = 1;
       ps.setObject(i++, tenantId);
       ps.setObject(i++, to.atOffset(ZoneOffset.UTC));
       ps.setObject(i++, from.atOffset(ZoneOffset.UTC));
-      if (storeId != null) ps.setObject(i++, storeId);
+      if (stores != null) {
+        ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+      }
       if (userId != null) ps.setObject(i, userId);
     };
   }
@@ -108,20 +116,23 @@ public class WorkforceRepository extends BaseOutboxRepository {
    *
    * <p>Ordered by person and then start, because the concerns a rota raises are about one person's
    * shifts in sequence: the gap between two of somebody's own shifts, not between two people's.
+   *
+   * @param stores the stores to read, or null for every store of the business
    */
-  public List<Shift> shifts(UUID tenantId, UUID storeId, UUID userId, Instant from, Instant to) {
+  public List<Shift> shifts(
+      UUID tenantId, Set<UUID> stores, UUID userId, Instant from, Instant to) {
     StringBuilder sql =
         new StringBuilder(
             "SELECT "
                 + SHIFT_COLUMNS
                 + " FROM work_shifts WHERE tenant_id = ? AND starts_at < ?"
                 + " AND ends_at > ?");
-    if (storeId != null) sql.append(" AND store_id = ?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (userId != null) sql.append(" AND user_id = ?");
     sql.append(" ORDER BY user_id, starts_at");
     return query(
         sql.toString(),
-        window(tenantId, storeId, userId, from, to),
+        window(tenantId, stores, userId, from, to),
         WorkforceRepository::readShift,
         "shifts of a window");
   }
@@ -146,6 +157,97 @@ public class WorkforceRepository extends BaseOutboxRepository {
         "move a shift");
   }
 
+  /** What an attempt to publish a shift under a key came to. */
+  public enum Publication {
+    /** This attempt published the shift. */
+    PUBLISHED,
+    /** An earlier attempt under the same key published this very shift: answer it again. */
+    REPLAYED,
+    /** The key already published another shift; nothing moved. */
+    KEY_REUSED,
+    /**
+     * The shift was not planned (or is not the business's), and no attempt under the key moved it.
+     */
+    NOT_PLANNED
+  }
+
+  /**
+   * Publishes a planned shift under an Idempotency-Key, on one transaction: the move of its status
+   * and the {@code shift_publications} row naming the key.
+   *
+   * <p>Three races are the database's to settle. A retry sent while the first attempt is still
+   * running waits on the shift's row, finds it no longer planned, and then reads the first
+   * attempt's publication under its key: a replay, not a conflict. The same key sent for two shifts
+   * at once publishes the first and refuses the second, whose move is rolled back with it ({@code
+   * uq_shift_publications_key}). Two keys for one shift publish it once ({@code status =
+   * 'PLANNED'}); the second is told it is not planned.
+   *
+   * @param key the request's Idempotency-Key, a UUIDv7 in canonical form
+   */
+  public Publication publishShift(UUID tenantId, UUID shiftId, String key, UUID actorId) {
+    return inTx(
+        c -> {
+          Publication earlier = publishedUnderTx(c, tenantId, shiftId, key);
+          if (earlier != null) return earlier;
+          Instant now = Instant.now();
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE work_shifts SET status = ?, updated_at = ?"
+                      + " WHERE tenant_id = ? AND id = ? AND status = ?")) {
+            ps.setString(1, Workforce.PUBLISHED);
+            ps.setObject(2, now.atOffset(ZoneOffset.UTC));
+            ps.setObject(3, tenantId);
+            ps.setObject(4, shiftId);
+            ps.setString(5, Workforce.PLANNED);
+            if (ps.executeUpdate() != 1) {
+              // Not planned. Perhaps because an attempt under this very key published it while
+              // this one waited on the row: the statement below sees what it committed.
+              Publication raced = publishedUnderTx(c, tenantId, shiftId, key);
+              return raced != null ? raced : Publication.NOT_PLANNED;
+            }
+          }
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "INSERT INTO shift_publications"
+                      + " (id, tenant_id, shift_id, idempotency_key, published_by, published_at)"
+                      + " VALUES (?, ?, ?, ?, ?, ?)"
+                      + " ON CONFLICT (tenant_id, idempotency_key) DO NOTHING")) {
+            ps.setObject(1, Ids.newId());
+            ps.setObject(2, tenantId);
+            ps.setObject(3, shiftId);
+            ps.setString(4, key);
+            ps.setObject(5, actorId);
+            ps.setObject(6, now.atOffset(ZoneOffset.UTC));
+            if (ps.executeUpdate() != 1) {
+              // The key published another shift at the same moment: refuse, and roll this move
+              // back with the refusal.
+              throw ApiException.conflict(
+                  "IDEMPOTENCY_KEY_REUSED",
+                  "this Idempotency-Key published another shift; send a new one for each shift");
+            }
+          }
+          return Publication.PUBLISHED;
+        },
+        "publish a shift");
+  }
+
+  /** What an earlier attempt under the key did, on this transaction; null when there was none. */
+  private static Publication publishedUnderTx(
+      java.sql.Connection c, UUID tenantId, UUID shiftId, String key) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT shift_id FROM shift_publications WHERE tenant_id = ? AND idempotency_key = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setString(2, key);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) return null;
+        return shiftId.equals(rs.getObject("shift_id", UUID.class))
+            ? Publication.REPLAYED
+            : Publication.KEY_REUSED;
+      }
+    }
+  }
+
   /** Whether the person works at the store at all: tenant-svc's own staff assignments. */
   public boolean worksAt(UUID tenantId, UUID userId, UUID storeId) {
     return !query(
@@ -159,6 +261,33 @@ public class WorkforceRepository extends BaseOutboxRepository {
             rs -> rs.getInt("present"),
             "a staff assignment")
         .isEmpty();
+  }
+
+  /**
+   * Which of these people are assigned at one of these stores: what a caller held to stores may
+   * read of a person (their pay, their commission) turns on it. One read however many people are
+   * asked about, because a commission rating names up to hundreds.
+   *
+   * <p>A business-wide assignment (no store) is not one of anybody's stores, so it does not count —
+   * narrower than the staff list, which shows a branch manager the business-wide people as well:
+   * their names, not their pay.
+   *
+   * @param people who is asked about; never empty
+   * @param stores the caller's stores; never empty
+   * @return those of {@code people} assigned at one of {@code stores}
+   */
+  public Set<UUID> workingAt(UUID tenantId, Set<UUID> people, Set<UUID> stores) {
+    return Set.copyOf(
+        query(
+            "SELECT DISTINCT user_id FROM staff_assignments"
+                + " WHERE tenant_id = ? AND user_id = ANY(?) AND store_id = ANY(?)",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setArray(2, ps.getConnection().createArrayOf("uuid", people.toArray()));
+              ps.setArray(3, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+            },
+            rs -> rs.getObject("user_id", UUID.class),
+            "staff assignments at the caller's stores"));
   }
 
   /** A store's country and zone as roster rules read them. */
@@ -346,16 +475,57 @@ public class WorkforceRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Records a correction: the predecessor is marked and the new entry inserted, one transaction.
+   * A correction made under an Idempotency-Key: the entry it corrected and the entry that now
+   * stands for it.
+   */
+  public record Adjustment(UUID entryId, UUID correctionId) {}
+
+  /** The correction an earlier attempt made under the key, if one did. */
+  public Optional<Adjustment> adjustmentUnder(UUID tenantId, String key) {
+    return query(
+            "SELECT entry_id, correction_id FROM time_entry_adjustments"
+                + " WHERE tenant_id = ? AND idempotency_key = ?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, key);
+            },
+            rs ->
+                new Adjustment(
+                    rs.getObject("entry_id", UUID.class),
+                    rs.getObject("correction_id", UUID.class)),
+            "a correction under a key")
+        .stream()
+        .findFirst();
+  }
+
+  /**
+   * Records a correction under an Idempotency-Key: the predecessor is marked, the new entry
+   * inserted with its breaks, the {@code time_entry_adjustments} row naming the key and the
+   * correction's {@code LabourRecorded} written — one transaction.
    *
    * <p>The predecessor must be marked first or the partial unique index refuses the insert, and the
    * deferred foreign key is what makes that order legal. The same shape as an invoice, a statutory
    * filing and a planogram — and for the same reason: a record that can be edited is a record
    * nobody can be held to.
+   *
+   * <p>Two races are the database's to settle, as publishing a shift's are. A retry sent while the
+   * first attempt is still running waits on the entry's row, finds it already corrected, and then
+   * reads the first attempt's correction under its key: that is answered, not a conflict. The same
+   * key sent for two entries at once corrects the first and refuses the second, whose correction is
+   * rolled back with it ({@code uq_time_entry_adjustments_key}).
+   *
+   * @param key the request's Idempotency-Key, a UUIDv7 in canonical form
+   * @return this correction, or — when an attempt under the same key got there first — the one it
+   *     made, for the caller to answer if it is the same request
+   * @throws ApiException 409 {@code WORKFORCE_ENTRY_NOT_STANDING} when the entry was corrected by
+   *     another request; 409 {@code IDEMPOTENCY_KEY_REUSED} when the key corrected another entry at
+   *     the same moment
    */
-  public Entry adjust(Entry correction, List<Rest> breaks, OutboxRow labour) {
+  public Adjustment adjust(Entry correction, List<Rest> breaks, OutboxRow labour, String key) {
     return inTx(
         c -> {
+          Adjustment earlier = adjustmentUnderTx(c, correction.tenantId(), key);
+          if (earlier != null) return earlier;
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE time_entries SET superseded_by = ?"
@@ -364,6 +534,10 @@ public class WorkforceRepository extends BaseOutboxRepository {
             ps.setObject(2, correction.tenantId());
             ps.setObject(3, correction.supersedes());
             if (ps.executeUpdate() != 1) {
+              // Already corrected. Perhaps by an attempt under this very key that committed while
+              // this one waited on the row: the statement below sees what it committed.
+              Adjustment raced = adjustmentUnderTx(c, correction.tenantId(), key);
+              if (raced != null) return raced;
               throw ApiException.conflict(
                   "WORKFORCE_ENTRY_NOT_STANDING",
                   "that entry has already been corrected by another");
@@ -376,7 +550,7 @@ public class WorkforceRepository extends BaseOutboxRepository {
                   "INSERT INTO time_entry_breaks (id, tenant_id, time_entry_id, started_at,"
                       + " ended_at, kind, paid) VALUES (?,?,?,?,?,?,?)")) {
             for (Rest r : breaks) {
-              ps.setObject(1, com.storeql.ids.Ids.newId());
+              ps.setObject(1, Ids.newId());
               ps.setObject(2, correction.tenantId());
               ps.setObject(3, correction.id());
               ps.setObject(4, r.startedAt().atOffset(ZoneOffset.UTC));
@@ -387,12 +561,50 @@ public class WorkforceRepository extends BaseOutboxRepository {
             }
             ps.executeBatch();
           }
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "INSERT INTO time_entry_adjustments"
+                      + " (id, tenant_id, entry_id, correction_id, idempotency_key, adjusted_by,"
+                      + " adjusted_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                      + " ON CONFLICT (tenant_id, idempotency_key) DO NOTHING")) {
+            ps.setObject(1, Ids.newId());
+            ps.setObject(2, correction.tenantId());
+            ps.setObject(3, correction.supersedes());
+            ps.setObject(4, correction.id());
+            ps.setString(5, key);
+            ps.setObject(6, correction.createdBy());
+            ps.setObject(7, correction.createdAt().atOffset(ZoneOffset.UTC));
+            if (ps.executeUpdate() != 1) {
+              // The key corrected another entry at the same moment: refuse, and roll this
+              // correction back with the refusal.
+              throw ApiException.conflict(
+                  "IDEMPOTENCY_KEY_REUSED",
+                  "this Idempotency-Key corrected other hours; send a new one for each correction");
+            }
+          }
           // The correction's cost, carrying the entry it replaces so a reader can take the old
           // figure back out: a report that counted both would double the day.
           if (labour != null) insertOutbox(c, labour);
-          return correction;
+          return new Adjustment(correction.supersedes(), correction.id());
         },
         "correct a time entry");
+  }
+
+  /** What an earlier attempt under the key corrected, on this transaction; null when none did. */
+  private static Adjustment adjustmentUnderTx(java.sql.Connection c, UUID tenantId, String key)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT entry_id, correction_id FROM time_entry_adjustments"
+                + " WHERE tenant_id = ? AND idempotency_key = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setString(2, key);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) return null;
+        return new Adjustment(
+            rs.getObject("entry_id", UUID.class), rs.getObject("correction_id", UUID.class));
+      }
+    }
   }
 
   /**
@@ -444,8 +656,11 @@ public class WorkforceRepository extends BaseOutboxRepository {
    *
    * <p>Superseded entries are left out: they are the record of what was corrected, not hours
    * anybody worked, and counting them would double a day.
+   *
+   * @param stores the stores to read, or null for every store of the business
    */
-  public List<Entry> entries(UUID tenantId, UUID storeId, UUID userId, Instant from, Instant to) {
+  public List<Entry> entries(
+      UUID tenantId, Set<UUID> stores, UUID userId, Instant from, Instant to) {
     StringBuilder sql =
         new StringBuilder(
             "SELECT "
@@ -453,13 +668,13 @@ public class WorkforceRepository extends BaseOutboxRepository {
                 + " FROM time_entries WHERE tenant_id = ?"
                 + " AND superseded_by IS NULL AND clocked_in_at < ?"
                 + " AND (clocked_out_at IS NULL OR clocked_out_at > ?)");
-    if (storeId != null) sql.append(" AND store_id = ?");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     if (userId != null) sql.append(" AND user_id = ?");
     sql.append(" ORDER BY user_id, clocked_in_at");
     List<Entry> found =
         query(
             sql.toString(),
-            window(tenantId, storeId, userId, from, to),
+            window(tenantId, stores, userId, from, to),
             WorkforceRepository::readEntry,
             "entries of a window");
     if (found.isEmpty()) return found;

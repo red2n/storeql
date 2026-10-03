@@ -45,7 +45,10 @@ public class SecurityEventResource {
       responseCode = "400",
       description =
           "SECURITY_EVENT_TYPE_INVALID, SECURITY_EVENT_PERIOD_INVALID, INVALID_UUID, INVALID_DATE")
-  @APIResponse(responseCode = "403", description = "Not an owner or manager, or held to stores")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN (not an owner or manager), BUSINESS_WIDE_ONLY (a manager held to stores)")
   @GET
   public ApiResponse<SecurityEventDtos.Page> list(
       @QueryParam("type") String type,
@@ -60,8 +63,10 @@ public class SecurityEventResource {
     } else {
       ctx.requireAnyRole("OWNER", "MANAGER");
       if (!ctx.storeIds().isEmpty()) {
+        // Business-wide, not a store the caller does not keep: no store is named here.
         throw ApiException.forbidden(
-            "STORE_ACCESS_DENIED", "The security trail is business-wide; ask an owner");
+            "BUSINESS_WIDE_ONLY",
+            "The security trail is business-wide, so it needs a caller who is not held to stores");
       }
       tenant = ctx.requireTenantId();
     }

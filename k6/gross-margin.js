@@ -93,13 +93,13 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   truthy('[+] ...with its cost', cents(num(row.cogs)) === 12, row);
 
   // ── refusals ─────────────────────────────────────────────────────────────────
-  expect(report(storekeeper.token), '[-] a storekeeper cannot read margins', 403);
-  expect(report(cashier.token), '[-] nor a cashier', 403);
-  expect(call('GET', `${REPORT}?groupBy=VARIANT`, { token: owner }), '[-] a report with no window is refused', 400);
+  expect(report(storekeeper.token), '[-] a storekeeper cannot read margins', 403, 'FORBIDDEN');
+  expect(report(cashier.token), '[-] nor a cashier', 403, 'FORBIDDEN');
+  expect(call('GET', `${REPORT}?groupBy=VARIANT`, { token: owner }), '[-] a report with no window is refused', 400, 'INVALID_DATE');
   expect(call('GET', `${REPORT}?from=${encodeURIComponent(to)}&to=${encodeURIComponent(from)}`, { token: owner }), '[-] a window that ends before it starts', 400, 'INVENTORY_INVALID_PERIOD');
-  expect(call('GET', `${REPORT}?from=2026-01-01&to=2026-02-01`, { token: owner }), '[-] a bare date is not an instant', 400);
+  expect(call('GET', `${REPORT}?from=2026-01-01&to=2026-02-01`, { token: owner }), '[-] a bare date is not an instant', 400, 'INVALID_DATE');
   expect(report(owner, '&groupBy=REASON'), '[-] a grouping that is not one', 400, 'INVENTORY_INVALID_GROUPING');
-  expect(report(owner, '&storeId=not-a-store'), '[-] a store that is not an id', 400);
+  expect(report(owner, '&storeId=not-a-store'), '[-] a store that is not an id', 400, 'INVALID_UUID');
   truthy('[-] a rival tenant sees none of these sales', !rowOf(rival.owner.token));
   const ownerTenant = claims(owner).tenant;
   truthy('[-] (the owner\'s tenant id is known, so the forged header below is real)', !!ownerTenant, claims(owner));

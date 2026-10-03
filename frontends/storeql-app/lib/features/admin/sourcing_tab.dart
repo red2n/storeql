@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -17,6 +18,7 @@ import '../../shared/widgets/status_badge.dart';
 import 'procurement_providers.dart';
 import 'providers/admin_providers.dart';
 import 'supplier_scorecards.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_picker.dart';
 
 // ---------------------------------------------------------------------------
@@ -451,6 +453,13 @@ class NewRfqDialog extends ConsumerStatefulWidget {
 }
 
 class _NewRfqDialogState extends ConsumerState<NewRfqDialog> {
+  /// Each line's quantity: three places, read the way the app's language
+  /// writes a number ([AmountMarks]) and sent as the decimal typed. One that
+  /// cannot be read is refused under the line and nothing is raised: parsed
+  /// with a point, Romanian's 12,5 kg went out as a line of none.
+  final _marks = AmountMarks.ofApp();
+  bool get _refused =>
+      figureRefused(_marks, [for (final r in _rows) (r.qty, AmountShape.quantity)]);
   final _title = TextEditingController();
   final _neededBy = TextEditingController();
   String? _storeId;
@@ -470,10 +479,16 @@ class _NewRfqDialogState extends ConsumerState<NewRfqDialog> {
   }
 
   Future<void> _save() async {
+    if (_refused) return;
+    if (_rows.any((r) => r.variantId != null && figureOf(r.qty, AmountShape.quantity, _marks) == null)) {
+      setState(() => _refusal = 'Give every line a quantity.');
+      return;
+    }
     final lines = [
       for (final r in _rows)
         if (r.variantId != null)
-          {'variantId': r.variantId, 'qty': double.tryParse(r.qty.text.trim()) ?? 0},
+          // The plain decimal typed: JSON-B reads it exactly.
+          {'variantId': r.variantId, 'qty': figureOf(r.qty, AmountShape.quantity, _marks)},
     ];
     if (_title.text.trim().isEmpty || _storeId == null || lines.isEmpty || _suppliers.isEmpty) {
       setState(() => _refusal = 'Name the request, pick the store, at least one line and one supplier.');
@@ -560,11 +575,13 @@ class _NewRfqDialogState extends ConsumerState<NewRfqDialog> {
                 Row(
                   children: [
                     Expanded(
-                      child: TextField(
-                        key: Key('rfq-qty-$i'),
+                      child: FigureField(
+                        fieldKey: Key('rfq-qty-$i'),
                         controller: _rows[i].qty,
-                        decoration: const InputDecoration(labelText: 'Quantity'),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        shape: AmountShape.quantity,
+                        marks: _marks,
+                        label: 'Quantity',
+                        onChanged: (_) => setState(() {}),
                       ),
                     ),
                     if (_rows.length > 1)
@@ -613,7 +630,10 @@ class _NewRfqDialogState extends ConsumerState<NewRfqDialog> {
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('rfq-save'), onPressed: _busy ? null : _save, child: const Text('Raise')),
+        FilledButton(
+            key: const Key('rfq-save'),
+            onPressed: _busy || _refused ? null : _save,
+            child: const Text('Raise')),
       ],
     );
   }
@@ -912,6 +932,14 @@ class _RecordQuoteDialogState extends ConsumerState<RecordQuoteDialog> {
   bool _busy = false;
   String? _refusal;
 
+  /// A unit price is read the way the app's language writes it, to as many
+  /// places as a batch's cost carries (inventory_batches.unit_cost is
+  /// NUMERIC(18,6), and an award's order lands there): twelve whole digits
+  /// and six places. One it cannot read is refused where it was typed, never
+  /// recorded at 0.00, where the comparison ranked it lowest.
+  static const _priceShape = AmountShape(12, 6);
+  final _marks = AmountMarks.ofApp();
+
   @override
   void initState() {
     super.initState();
@@ -919,9 +947,27 @@ class _RecordQuoteDialogState extends ConsumerState<RecordQuoteDialog> {
     _lead = TextEditingController(text: widget.bid.leadTimeDays?.toString() ?? '');
     for (final l in widget.rfq.lines) {
       final p = widget.bid.prices[l.variantId];
-      _prices[l.variantId] = TextEditingController(text: p == null ? '' : p.toStringAsFixed(2));
+      _prices[l.variantId] = TextEditingController(text: p == null ? '' : _written(p));
     }
   }
+
+  /// A price already quoted, written the way the field reads it back: two
+  /// places at least, as many as it has up to six, never cut short.
+  String _written(double price) {
+    var text = price.toStringAsFixed(6);
+    for (var places = 2; places < 6; places++) {
+      final shorter = price.toStringAsFixed(places);
+      if (double.parse(shorter) == price) {
+        text = shorter;
+        break;
+      }
+    }
+    return _marks.write(text);
+  }
+
+  /// Why the price typed for a line cannot be recorded, or null.
+  String? _priceRefusal(TextEditingController c) =>
+      c.text.trim().isEmpty ? null : _priceShape.refusal(c.text.trim(), _marks);
 
   @override
   void dispose() {
@@ -935,10 +981,21 @@ class _RecordQuoteDialogState extends ConsumerState<RecordQuoteDialog> {
   }
 
   Future<void> _save() async {
+    if (_prices.values.any((c) => _priceRefusal(c) != null)) {
+      setState(() => _refusal = 'A price cannot be read. Correct the one marked.');
+      return;
+    }
+    // Whole days; one that cannot be read is refused under the field, never
+    // recorded as a quote with no lead time.
+    if (figureRefused(_marks, [(_lead, wholeNumber)])) {
+      setState(() => _refusal = figureRefusedMessage);
+      return;
+    }
+    // Sent as the decimal typed (JSON-B reads it into a BigDecimal exactly).
     final lines = [
       for (final e in _prices.entries)
-        if (e.value.text.trim().isNotEmpty)
-          {'variantId': e.key, 'unitPrice': double.tryParse(e.value.text.trim()) ?? 0},
+        if (_priceShape.read(e.value.text.trim(), _marks) case final price?)
+          {'variantId': e.key, 'unitPrice': price},
     ];
     if (lines.isEmpty) {
       setState(() => _refusal = 'Give a price for at least one line.');
@@ -953,7 +1010,7 @@ class _RecordQuoteDialogState extends ConsumerState<RecordQuoteDialog> {
         '/${ApiConstants.purchase}/rfqs/${widget.rfq.id}/quotes/${widget.bid.supplierId}',
         data: {
           if (_currency.text.trim().isNotEmpty) 'currency': _currency.text.trim().toUpperCase(),
-          if (_lead.text.trim().isNotEmpty) 'leadTimeDays': int.tryParse(_lead.text.trim()),
+          'leadTimeDays': ?wholeOf(_lead, _marks),
           if (_valid.text.trim().isNotEmpty) 'validUntil': _valid.text.trim(),
           'lines': lines,
         },
@@ -996,11 +1053,14 @@ class _RecordQuoteDialogState extends ConsumerState<RecordQuoteDialog> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: TextField(
-                    key: const Key('quote-lead'),
+                  child: FigureField(
+                    fieldKey: const Key('quote-lead'),
                     controller: _lead,
-                    decoration: const InputDecoration(labelText: 'Lead time (days)'),
-                    keyboardType: TextInputType.number,
+                    shape: wholeNumber,
+                    marks: _marks,
+                    label: 'Lead time (days)',
+                    hint: '',
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
               ]),
@@ -1017,9 +1077,12 @@ class _RecordQuoteDialogState extends ConsumerState<RecordQuoteDialog> {
                   child: TextField(
                     key: Key('quote-price-${l.variantId}'),
                     controller: _prices[l.variantId],
+                    onChanged: (_) => setState(() {}),
                     decoration: InputDecoration(
                       labelText: 'Unit price · ${variantDisplayName(l.variantId, labels)} × ${_qty(l.qty)}',
                       helperText: 'Blank: not priced',
+                      hintText: _marks.hint(2),
+                      errorText: _priceRefusal(_prices[l.variantId]!),
                     ),
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                   ),

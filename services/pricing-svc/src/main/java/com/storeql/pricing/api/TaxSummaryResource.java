@@ -77,6 +77,11 @@ public class TaxSummaryResource {
   @APIResponse(
       responseCode = "403",
       description = "storeId names a store the caller is not held to (STORE_ACCESS_DENIED)")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, could not be read")
   @GET
   @Path("/tax-summary")
   public Response taxSummary(

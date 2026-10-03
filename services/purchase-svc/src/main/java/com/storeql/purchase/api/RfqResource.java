@@ -53,6 +53,11 @@ public class RfqResource {
           "PURCHASE_RFQ_LINES_REQUIRED, PURCHASE_RFQ_SUPPLIERS_REQUIRED, PURCHASE_RFQ_LINE_DUPLICATE,"
               + " PURCHASE_RFQ_SUPPLIER_DUPLICATE")
   @APIResponse(responseCode = "404", description = "PURCHASE_SUPPLIER_NOT_FOUND")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the store named is not one the caller is"
+              + " held to")
   @POST
   public Response create(CreateRfqRequest req) {
     Validations.validate(req);
@@ -81,6 +86,9 @@ public class RfqResource {
               + " business's own money, and the awards.")
   @APIResponse(responseCode = "200", description = "The request")
   @APIResponse(responseCode = "404", description = "PURCHASE_RFQ_NOT_FOUND")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the request is for another store than the caller's")
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") String id) {
@@ -94,6 +102,11 @@ public class RfqResource {
       description = "It has gone to the suppliers; quotes may be recorded.")
   @APIResponse(responseCode = "200", description = "Issued")
   @APIResponse(responseCode = "409", description = "PURCHASE_RFQ_NOT_DRAFT")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the request is for another store than the"
+              + " caller's")
   @POST
   @Path("/{id}/issue")
   public Response issue(@PathParam("id") String id) {
@@ -114,6 +127,11 @@ public class RfqResource {
           "PURCHASE_RFQ_SUPPLIER_NOT_INVITED, PURCHASE_RFQ_LINE_UNKNOWN, PURCHASE_RFQ_QUOTE_EMPTY,"
               + " PURCHASE_RFQ_LINE_DUPLICATE")
   @APIResponse(responseCode = "409", description = "PURCHASE_RFQ_NOT_ISSUED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the request is for another store than the"
+              + " caller's")
   @PUT
   @Path("/{id}/quotes/{supplierId}")
   public Response quote(
@@ -130,6 +148,11 @@ public class RfqResource {
   @APIResponse(responseCode = "200", description = "Recorded")
   @APIResponse(responseCode = "400", description = "PURCHASE_RFQ_SUPPLIER_NOT_INVITED")
   @APIResponse(responseCode = "409", description = "PURCHASE_RFQ_NOT_ISSUED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the request is for another store than the"
+              + " caller's")
   @POST
   @Path("/{id}/quotes/{supplierId}/decline")
   public Response decline(@PathParam("id") String id, @PathParam("supplierId") String supplierId) {
@@ -156,6 +179,11 @@ public class RfqResource {
   @APIResponse(
       responseCode = "409",
       description = "PURCHASE_RFQ_NOT_ISSUED, PURCHASE_RFQ_NOT_QUOTED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the request is for another store than the"
+              + " caller's")
   @POST
   @Path("/{id}/award")
   public Response award(@PathParam("id") String id, RfqAwardRequest req) {
@@ -168,6 +196,11 @@ public class RfqResource {
   @Operation(summary = "Cancel a request", description = "With a reason; not once awarded.")
   @APIResponse(responseCode = "200", description = "Cancelled")
   @APIResponse(responseCode = "409", description = "PURCHASE_RFQ_CLOSED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the request is for another store than the"
+              + " caller's")
   @POST
   @Path("/{id}/cancel")
   public Response cancel(@PathParam("id") String id, CancelPurchaseOrderRequest req) {

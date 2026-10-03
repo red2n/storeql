@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -8,6 +9,7 @@ import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import 'widgets/business_wide_note.dart';
+import 'widgets/figure_field.dart';
 
 /// How long an unpaid order is held, and how long an order may wait for its
 /// price (order-svc, 30 Sep 2026). The price waits are off until set.
@@ -206,18 +208,22 @@ class _OrderLimitsDialogState extends ConsumerState<OrderLimitsDialog> {
     super.dispose();
   }
 
+  /// Each limit is a whole number, read with the shared reader: text it
+  /// cannot read is refused under its field and nothing is saved. Read as a
+  /// number literal, `0x0C` hours was saved as twelve.
+  final _marks = AmountMarks.ofApp();
+
   /// Empty is "not set" (null, true); otherwise a whole number of at least 1.
-  static (bool, int?) _whole(String text) {
-    final t = text.trim();
-    if (t.isEmpty) return (true, null);
-    final v = int.tryParse(t);
+  (bool, int?) _whole(TextEditingController field) {
+    if (field.text.trim().isEmpty) return (true, null);
+    final v = wholeOf(field, _marks);
     return v == null || v < 1 ? (false, null) : (true, v);
   }
 
   Future<void> _save() async {
-    final (hoursOk, hours) = _whole(_hours.text);
-    final (flagOk, flag) = _whole(_flag.text);
-    final (cancelOk, cancel) = _whole(_cancel.text);
+    final (hoursOk, hours) = _whole(_hours);
+    final (flagOk, flag) = _whole(_flag);
+    final (cancelOk, cancel) = _whole(_cancel);
     if (!hoursOk) {
       setState(() => _error = 'The unpaid hold is a whole number of hours, at least 1, or empty for the default.');
       return;
@@ -273,34 +279,37 @@ class _OrderLimitsDialogState extends ConsumerState<OrderLimitsDialog> {
                 style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
               ),
               const SizedBox(height: AppSpacing.md),
-              TextField(
-                key: const Key('order-limit-hours'),
+              FigureField(
+                fieldKey: const Key('order-limit-hours'),
                 controller: _hours,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Hold an unpaid order for (hours)',
-                  helperText: "Empty uses the platform's own limit.",
-                ),
+                shape: wholeNumber,
+                marks: _marks,
+                label: 'Hold an unpaid order for (hours)',
+                helper: "Empty uses the platform's own limit.",
+                hint: '',
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: AppSpacing.md),
-              TextField(
-                key: const Key('order-limit-flag'),
+              FigureField(
+                fieldKey: const Key('order-limit-flag'),
                 controller: _flag,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Tell a manager after waiting for a price (minutes)',
-                  helperText: 'Empty: nobody is told.',
-                ),
+                shape: wholeNumber,
+                marks: _marks,
+                label: 'Tell a manager after waiting for a price (minutes)',
+                helper: 'Empty: nobody is told.',
+                hint: '',
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: AppSpacing.md),
-              TextField(
-                key: const Key('order-limit-cancel'),
+              FigureField(
+                fieldKey: const Key('order-limit-cancel'),
                 controller: _cancel,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Cancel after waiting for a price (minutes)',
-                  helperText: 'Empty: never cancelled. Its stock is released when it is.',
-                ),
+                shape: wholeNumber,
+                marks: _marks,
+                label: 'Cancel after waiting for a price (minutes)',
+                helper: 'Empty: never cancelled. Its stock is released when it is.',
+                hint: '',
+                onChanged: (_) => setState(() {}),
               ),
               if (_error != null) ...[
                 const SizedBox(height: AppSpacing.md),

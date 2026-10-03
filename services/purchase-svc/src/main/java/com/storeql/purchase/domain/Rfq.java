@@ -1,7 +1,6 @@
 package com.storeql.purchase.domain;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -148,7 +147,8 @@ public final class Rfq {
         if (!QUOTED.equals(bid.status())) continue;
         BigDecimal unit = bid.prices().get(line.id());
         if (unit == null) continue;
-        BigDecimal lineTotal = unit.multiply(line.qty()).setScale(2, RoundingMode.HALF_UP);
+        // In the bid's own currency's minor units: whole yen, three decimals of a dinar.
+        BigDecimal lineTotal = Money.round(unit.multiply(line.qty()), bid.currency());
         BigDecimal homeUnit = fx.toHome(bid.currency(), unit).orElse(null);
         BigDecimal homeTotal = fx.toHome(bid.currency(), lineTotal).orElse(null);
         prices.add(

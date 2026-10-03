@@ -9,6 +9,7 @@ import com.storeql.tenant.mapper.CommissionMappers;
 import com.storeql.tenant.service.CommissionService;
 import com.storeql.tenant.service.CommissionService.Rated;
 import com.storeql.tenant.service.CommissionService.SellerDays;
+import com.storeql.tenant.service.WorkforceService;
 import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
@@ -53,6 +54,7 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 public class CommissionResource {
 
   @Inject CommissionService svc;
+  @Inject WorkforceService workforce;
   @Inject TenantContext ctx;
 
   @Operation(
@@ -90,7 +92,15 @@ public class CommissionResource {
       responseCode = "400",
       description =
           "COMMISSION_SCHEME_INVALID: an unknown basis, a per-unit scheme without a currency, a"
-              + " percentage with one, no bands, a first band above zero, or two bands at one figure")
+              + " percentage with one, no bands, a first band above zero, two bands at one figure,"
+              + " a percentage band's threshold finer than the business's currency's minor units"
+              + " (1000.5 JPY), a per-unit band's that is not a whole number of units, or a"
+              + " per-unit currency"
+              + " that is not ISO 4217; VALIDATION_FAILED: a threshold or rate beyond its column"
+              + " (16 and 4 places, 8 and 4)")
+  @APIResponse(
+      responseCode = "403",
+      description = "FORBIDDEN below management; BUSINESS_WIDE_ONLY for a caller held to stores")
   @POST
   @Path("/schemes")
   public Response create(CommissionDtos.SchemeRequest req) {
@@ -116,6 +126,14 @@ public class CommissionResource {
               + " old version is left exactly as it was, because commission already earned under it"
               + " was earned under its rates — a rate that could be edited is one nobody can be paid"
               + " on. Somebody who already has an arrangement written for that very day keeps it.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "COMMISSION_SCHEME_INVALID, as for a new arrangement; VALIDATION_FAILED; INVALID_UUID")
+  @APIResponse(
+      responseCode = "403",
+      description = "FORBIDDEN below management; BUSINESS_WIDE_ONLY for a caller held to stores")
+  @APIResponse(responseCode = "404", description = "COMMISSION_SCHEME_NOT_FOUND")
   @APIResponse(responseCode = "409", description = "COMMISSION_SCHEME_SUPERSEDED")
   @POST
   @Path("/schemes/{id}/corrections")
@@ -154,16 +172,26 @@ public class CommissionResource {
 
   @Operation(
       summary = "A person's arrangements over time",
-      description = "Newest first. A row with no scheme is the day their commission stopped.")
+      description =
+          "Newest first. A row with no scheme is the day their commission stopped. Read as a pay"
+              + " rate is: a manager held to stores reads it only for somebody assigned at one of"
+              + " them; a caller held to none reads anybody's.")
+  @APIResponse(responseCode = "400", description = "INVALID_UUID: the path is not an id")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN below management; STORE_ACCESS_DENIED for a caller held to stores asking about"
+              + " somebody who works at none of them")
   @GET
   @Path("/staff/{userId}")
   public ApiResponse<List<CommissionDtos.AssignmentResponse>> assignments(
       @PathParam("userId") UUID userId) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    UUID tenantId = ctx.requireTenantId();
+    // A term of somebody's employment, held to the caller's stores as their pay rate is.
+    workforce.requirePersonAtStores(tenantId, userId, ctx.reportStores(null));
     return ApiResponse.ok(
-        svc.assignments(ctx.requireTenantId(), userId).stream()
-            .map(CommissionMappers::toDto)
-            .toList());
+        svc.assignments(tenantId, userId).stream().map(CommissionMappers::toDto).toList());
   }
 
   @Operation(
@@ -202,10 +230,22 @@ public class CommissionResource {
               + " service that owns it — and the rule lives here, where the arrangement does, so"
               + " nobody is ever paid on a second implementation of it. A person on no arrangement"
               + " comes back with their sales and no commission rather than being left out, because"
-              + " sales that earned nothing are what a manager needs to see.")
+              + " sales that earned nothing are what a manager needs to see. The answer names each"
+              + " person's arrangement and its bands, so it is held as their arrangements are: a"
+              + " manager held to stores asks only about people assigned at one of them, and one"
+              + " person elsewhere refuses the whole call; a caller held to none — an owner, a"
+              + " business-wide manager, the service producing a statement — asks about anybody.")
   @APIResponse(
       responseCode = "400",
-      description = "COMMISSION_PERIOD_INVALID or COMMISSION_PERIOD_TOO_LARGE")
+      description =
+          "VALIDATION_FAILED or BODY_REQUIRED: the body is missing or incomplete;"
+              + " COMMISSION_ID_INVALID: a userId is not an id; COMMISSION_DATE_INVALID: a date is"
+              + " not YYYY-MM-DD; COMMISSION_PERIOD_INVALID or COMMISSION_PERIOD_TOO_LARGE")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN below management; STORE_ACCESS_DENIED for a caller held to stores naming"
+              + " somebody who works at none of them (the details list each such userId)")
   @POST
   @Path("/rate")
   public ApiResponse<List<CommissionDtos.RatedResponse>> rate(CommissionDtos.RateRequest req) {
@@ -226,8 +266,16 @@ public class CommissionResource {
                                         d.units() == null ? BigDecimal.ZERO : d.units()))
                             .toList()))
             .toList();
+    LocalDate from = date(req.from(), "from");
+    LocalDate to = date(req.to(), "to");
+    // What the request is (400) before whose sales it names (403): a malformed period is told so,
+    // never which sellers the caller may not ask about.
+    svc.requirePeriod(from, to, sellers);
     UUID tenantId = ctx.requireTenantId();
-    List<Rated> rated = svc.rate(tenantId, date(req.from(), "from"), date(req.to(), "to"), sellers);
+    // Each seller held to the caller's stores, as a pay rate is, before anything is rated.
+    workforce.requirePeopleAtStores(
+        tenantId, sellers.stream().map(SellerDays::userId).toList(), ctx.reportStores(null));
+    List<Rated> rated = svc.rate(tenantId, from, to, sellers);
     Map<String, String> names = new LinkedHashMap<>();
     for (Scheme s : svc.schemes(tenantId, false)) names.put(s.id().toString(), s.name());
     return ApiResponse.ok(rated.stream().map(r -> CommissionMappers.toDto(r, names)).toList());

@@ -58,11 +58,11 @@ public class TaxReportRepository extends BaseJdbcRepository {
             "SELECT "
                 + groupExpr
                 + " AS group_key, exempt,"
-                // Cast to the column's own scale so every row reports the same precision,
-                // whatever the group summed.
-                + " SUM(net_amount)::numeric(18,2) AS net_amount,"
-                + " SUM(vat_amount)::numeric(18,2) AS vat_amount,"
-                + " SUM(gross_amount)::numeric(18,2) AS gross_amount,"
+                // Summed as kept; the service rounds every row to the business currency's own
+                // minor units, so a yen report is whole yen and a dinar one keeps its fils.
+                + " SUM(net_amount) AS net_amount,"
+                + " SUM(vat_amount) AS vat_amount,"
+                + " SUM(gross_amount) AS gross_amount,"
                 + " COUNT(*) AS transactions"
                 + " FROM tax_transactions"
                 + " WHERE tenant_id = ? AND tax_point_date >= ? AND tax_point_date < ?");

@@ -78,16 +78,28 @@ public class NominalLedgerResource {
       summary = "Post a manual journal",
       description =
           "Management only. Two to fifty lines, each a debit or a credit and never both, that"
-              + " balance to the penny; a nominal code is one to ten letters or digits. A store,"
-              + " when named, must be one the caller may operate in and its accounting period for"
-              + " the date must be open. Returns the journal with its journalId.")
+              + " balance exactly; a nominal code is one to ten letters or digits. A store, when"
+              + " named, must be one the caller may operate in and its accounting period for the"
+              + " date must be open. With none named, a caller held to one store posts at it and a"
+              + " caller held to none posts the business's own journal; a caller held to several"
+              + " must name one. Returns the journal with its journalId and storeId.")
   @APIResponse(responseCode = "201", description = "Journal posted")
   @APIResponse(
       responseCode = "400",
-      description = "A line that is neither a debit nor a credit, or both, or a bad code or date")
-  @APIResponse(responseCode = "403", description = "Not a management role, or not the store's")
+      description =
+          "PURCHASE_JOURNAL_LINE_INVALID: a line that is neither a debit nor a credit, or both, or"
+              + " a bad code; INVALID_DATE: an entryDate that is not yyyy-MM-dd; INVALID_UUID: a"
+              + " storeId that is not a UUIDv7")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role, PERMISSION_DENIED (finance.journal), STORE_ACCESS_DENIED: a"
+              + " store the caller is not held to, or BUSINESS_WIDE_ONLY: a journal naming no"
+              + " store from a caller held to several")
   @APIResponse(responseCode = "409", description = "The period is closed (PURCHASE_PERIOD_CLOSED)")
-  @APIResponse(responseCode = "422", description = "Debits and credits disagree")
+  @APIResponse(
+      responseCode = "422",
+      description = "PURCHASE_JOURNAL_UNBALANCED: debits and credits disagree")
   @POST
   @Path("/journals")
   public Response postJournal(PostJournalRequest req) {
@@ -100,6 +112,11 @@ public class NominalLedgerResource {
   @Operation(summary = "One journal, whole", description = "Management only.")
   @APIResponse(responseCode = "200", description = "The journal and its lines")
   @APIResponse(responseCode = "404", description = "Journal not found in this tenant")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role, or STORE_ACCESS_DENIED: posted at a store the caller is not"
+              + " held to, or at none")
   @GET
   @Path("/journals/{id}")
   public Response journal(@PathParam("id") UUID id) {
@@ -118,7 +135,10 @@ public class NominalLedgerResource {
               + " only.")
   @APIResponse(responseCode = "200", description = "Open orders, oldest first")
   @APIResponse(responseCode = "400", description = "A storeId that is not a UUID")
-  @APIResponse(responseCode = "403", description = "Not a management role, or not that store's")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role, or STORE_ACCESS_DENIED: a store the caller is not held to")
   @GET
   @Path("/sales-clearing")
   public Response salesClearing(
@@ -140,6 +160,10 @@ public class NominalLedgerResource {
               + " figure to report.")
   @APIResponse(responseCode = "200", description = "The trial balance")
   @APIResponse(responseCode = "400", description = "A range that ends before it starts")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role, or STORE_ACCESS_DENIED: a store the caller is not held to")
   @GET
   @Path("/trial-balance")
   public Response trialBalance(

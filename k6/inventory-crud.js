@@ -4,7 +4,7 @@
 //   k6/run.sh inventory-crud
 import http from 'k6/http';
 import { check as k6check, sleep } from 'k6';
-import { ALL_CHECKS_PASS, BASE as baseUrl, onboardTenant, register, sellableVariant } from './lib/storeql.js';
+import { ALL_CHECKS_PASS, BASE as baseUrl, errorCode, onboardTenant, register, sellableVariant } from './lib/storeql.js';
 
 export const options = { vus: 1, iterations: 1, thresholds: ALL_CHECKS_PASS, setupTimeout: '3m' };
 
@@ -153,7 +153,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(abcBadCriteriaRes, {
-    '[-] invalid abc criteria → 400': (r) => r.status === 400,
+    '[-] invalid abc criteria → 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_ABC_CRITERIA',
   });
 
   // thresholdA >= thresholdAB
@@ -163,7 +163,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(abcBadThreshRes, {
-    '[-] thresholdA >= thresholdAB → 400': (r) => r.status === 400,
+    '[-] thresholdA >= thresholdAB → 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_ABC_THRESHOLDS',
   });
 
   // thresholdA = 0
@@ -173,7 +173,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(abcZeroThreshRes, {
-    '[-] thresholdA = 0 → 400': (r) => r.status === 400,
+    '[-] thresholdA = 0 → 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_ABC_THRESHOLDS',
   });
 
   // Invalid class filter
@@ -182,7 +182,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(abcBadClassRes, {
-    '[-] invalid abc class filter → 400': (r) => r.status === 400,
+    '[-] invalid abc class filter → 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_ABC_CLASS',
   });
 
   // Get assignment for nonexistent variant → 404
@@ -192,7 +192,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(abcNotFoundRes, {
-    '[-] get non-existent abc assignment → 404': (r) => r.status === 404,
+    '[-] get non-existent abc assignment → 404': (r) => r.status === 404 && errorCode(r) === 'ABC_ASSIGNMENT_NOT_FOUND',
   });
 
   // No tenant header → 4xx
@@ -202,7 +202,7 @@ export default function (d) {
     { headers: JSON_CT }
   );
   check(abcNoTenantRes, {
-    '[-] abc compile no token → 401': (r) => r.status === 401,
+    '[-] abc compile no token → 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED',
   });
 
   sleep(0.3);
@@ -324,7 +324,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ssMissingVariantRes, {
-    '[-] missing variantId → 400': (r) => r.status === 400,
+    '[-] missing variantId → 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED',
   });
 
   // Invalid method value
@@ -338,7 +338,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ssBadMethodRes, {
-    '[-] invalid method → 400': (r) => r.status === 400,
+    '[-] invalid method → 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_SAFETY_STOCK_METHOD',
   });
 
   // USER_DEFINED without userDefinedPct
@@ -353,7 +353,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ssMissingPctRes, {
-    '[-] USER_DEFINED without userDefinedPct → 400': (r) => r.status === 400,
+    '[-] USER_DEFINED without userDefinedPct → 400': (r) => r.status === 400 && errorCode(r) === 'USER_DEFINED_PCT_REQUIRED',
   });
 
   // Get non-existent safety stock params → 404
@@ -363,7 +363,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ssNotFoundRes, {
-    '[-] get non-existent safety stock → 404': (r) => r.status === 404,
+    '[-] get non-existent safety stock → 404': (r) => r.status === 404 && errorCode(r) === 'SAFETY_STOCK_PARAMS_NOT_FOUND',
   });
 
   // No tenant header → 401
@@ -373,7 +373,7 @@ export default function (d) {
     { headers: JSON_CT }
   );
   check(ssNoTenantRes, {
-    '[-] no token → 401': (r) => r.status === 401,
+    '[-] no token → 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED',
   });
 
   // Invalid UUID for storeId
@@ -383,7 +383,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ssBadUUIDRes, {
-    '[-] invalid storeId UUID → 400': (r) => r.status === 400,
+    '[-] invalid storeId UUID → 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_UUID',
   });
 
   // ── Gap #10: Cycle Counting — positive checks ─────────────────────────────
@@ -481,7 +481,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ccNoStoreRes, {
-    '[-] create cycle count missing storeId → 400': (r) => r.status === 400,
+    '[-] create cycle count missing storeId → 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED',
   });
 
   // Missing name
@@ -491,7 +491,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ccNoNameRes, {
-    '[-] create cycle count missing name → 400': (r) => r.status === 400,
+    '[-] create cycle count missing name → 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED',
   });
 
   // Get non-existent cycle count → 404
@@ -500,7 +500,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ccNotFoundRes, {
-    '[-] get non-existent cycle count → 404': (r) => r.status === 404,
+    '[-] get non-existent cycle count → 404': (r) => r.status === 404 && errorCode(r) === 'CYCLE_COUNT_NOT_FOUND',
   });
 
   // No tenant header → 401
@@ -510,7 +510,7 @@ export default function (d) {
     { headers: JSON_CT }
   );
   check(ccNoTenantRes, {
-    '[-] cycle count no token → 401': (r) => r.status === 401,
+    '[-] cycle count no token → 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED',
   });
 
   // Enter count on non-existent line → 404
@@ -521,7 +521,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(ccBadLineRes, {
-    '[-] enter count on non-existent line → 404': (r) => r.status === 404,
+    '[-] enter count on non-existent line → 404': (r) => r.status === 404 && errorCode(r) === 'CYCLE_COUNT_NOT_FOUND',
   });
 
   // ── Gap #11: Lot Genealogy — positive checks ──────────────────────────────
@@ -642,7 +642,7 @@ export default function (d) {
       { headers: hdrs }
     );
     check(lgDupRes, {
-      '[-] duplicate lot link refused': (r) => r.status === 409,
+      '[-] duplicate lot link refused': (r) => r.status === 409 && errorCode(r) === 'LOT_LINK_EXISTS',
     });
   }
 
@@ -656,7 +656,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(lgNoParentRes, {
-    '[-] lot link missing parentBatchId → 400': (r) => r.status === 400,
+    '[-] lot link missing parentBatchId → 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED',
   });
 
   // Missing childBatchId
@@ -667,7 +667,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(lgNoChildRes, {
-    '[-] lot link missing childBatchId → 400': (r) => r.status === 400,
+    '[-] lot link missing childBatchId → 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED',
   });
 
   // Missing qty
@@ -681,7 +681,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(lgNoQtyRes, {
-    '[-] lot link missing qty → 400': (r) => r.status === 400,
+    '[-] lot link missing qty → 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED',
   });
 
   // Invalid relationType
@@ -696,7 +696,7 @@ export default function (d) {
     { headers: hdrs }
   );
   check(lgBadTypeRes, {
-    '[-] lot link invalid relationType → 400': (r) => r.status === 400,
+    '[-] lot link invalid relationType → 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_RELATION_TYPE',
   });
 
   // No tenant header → 4xx
@@ -711,7 +711,7 @@ export default function (d) {
     { headers: JSON_CT }
   );
   check(lgNoTenantRes, {
-    '[-] lot genealogy no token → 401': (r) => r.status === 401,
+    '[-] lot genealogy no token → 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED',
   });
 
   // ── Gap #16: Physical Inventory ──────────────────────────────────────────
@@ -779,7 +779,7 @@ export default function (d) {
         null,
         { headers: hdrs }
       ),
-      { '[-] complete already-completed PI 409': (r) => r.status === 409 }
+      { '[-] complete already-completed PI 409': (r) => r.status === 409 && errorCode(r) === 'PI_ALREADY_COMPLETED' }
     );
   }
 
@@ -790,7 +790,7 @@ export default function (d) {
       JSON.stringify({ notes: 'no store' }),
       { headers: hdrs }
     ),
-    { '[-] create PI missing storeId 400': (r) => r.status === 400 }
+    { '[-] create PI missing storeId 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // [-] Add tag missing variantId → 400
@@ -801,7 +801,7 @@ export default function (d) {
         JSON.stringify({ systemQty: 10 }),
         { headers: hdrs }
       ),
-      { '[-] add tag missing variantId 400': (r) => r.status === 400 }
+      { '[-] add tag missing variantId 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
     );
   }
 
@@ -812,7 +812,7 @@ export default function (d) {
       JSON.stringify({ storeId: storeId }),
       { headers: JSON_CT }
     ),
-    { '[-] create PI no token 401': (r) => r.status === 401 }
+    { '[-] create PI no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
   );
 
   // ── Gap #17: Costing Methods ────────────────────────────────────────────────
@@ -860,7 +860,7 @@ export default function (d) {
       JSON.stringify({ storeId: storeId, variantId: variantId, method: 'LIFO' }),
       { headers: hdrs }
     ),
-    { '[-] upsert invalid costing method 400': (r) => r.status === 400 }
+    { '[-] upsert invalid costing method 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_COSTING_METHOD' }
   );
 
   // [-] Missing variantId → 400
@@ -870,7 +870,7 @@ export default function (d) {
       JSON.stringify({ storeId: storeId, method: 'AVERAGE' }),
       { headers: hdrs }
     ),
-    { '[-] upsert costing method missing variantId 400': (r) => r.status === 400 }
+    { '[-] upsert costing method missing variantId 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // ── Accounting Periods ──────────────────────────────────────────────────────
@@ -922,7 +922,7 @@ export default function (d) {
         null,
         { headers: hdrs }
       ),
-      { '[-] close already-closed period 409': (r) => r.status === 409 }
+      { '[-] close already-closed period 409': (r) => r.status === 409 && errorCode(r) === 'PERIOD_NOT_OPEN' }
     );
   }
 
@@ -933,7 +933,7 @@ export default function (d) {
       JSON.stringify({ periodName: 'July 2026', periodDate: '2026-07-01' }),
       { headers: hdrs }
     ),
-    { '[-] open period missing storeId 400': (r) => r.status === 400 }
+    { '[-] open period missing storeId 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // ── Gap #18: Kanban Replenishment ───────────────────────────────────────────
@@ -1014,7 +1014,7 @@ export default function (d) {
           JSON.stringify({ notes: 'should fail' }),
           { headers: hdrs }
         ),
-        { '[-] trigger non-EMPTY kanban 409': (r) => r.status === 409 }
+        { '[-] trigger non-EMPTY kanban 409': (r) => r.status === 409 && errorCode(r) === 'KANBAN_NOT_EMPTY' }
       );
     }
   }
@@ -1035,7 +1035,7 @@ export default function (d) {
       JSON.stringify({ variantId: variantId, kanbanType: 'SUPPLIER', reorderQty: 10 }),
       { headers: hdrs }
     ),
-    { '[-] create kanban missing storeId 400': (r) => r.status === 400 }
+    { '[-] create kanban missing storeId 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // [-] Create kanban invalid type → 400
@@ -1045,7 +1045,7 @@ export default function (d) {
       JSON.stringify({ storeId: storeId, variantId: variantId, kanbanType: 'INVALID', reorderQty: 10 }),
       { headers: hdrs }
     ),
-    { '[-] create kanban invalid type 400': (r) => r.status === 400 }
+    { '[-] create kanban invalid type 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_KANBAN_TYPE' }
   );
 
   // [-] Get non-existent kanban card → 404
@@ -1054,7 +1054,7 @@ export default function (d) {
       `${baseUrl}/api/inventory-svc/admin/inventory/kanban-cards/01a090ae-611e-7009-93d3-a36b72cdedb8`,
       { headers: hdrs }
     ),
-    { '[-] get unknown kanban card 404': (r) => r.status === 404 }
+    { '[-] get unknown kanban card 404': (r) => r.status === 404 && errorCode(r) === 'KANBAN_NOT_FOUND' }
   );
 
   // ── Gap #19: Reorder Point + EOQ ────────────────────────────────────────────
@@ -1109,7 +1109,7 @@ export default function (d) {
       JSON.stringify({ variantId: variantId, leadTimeDays: 7, orderingCost: 50, holdingCostPct: 0.2, unitCost: 10 }),
       { headers: hdrs }
     ),
-    { '[-] upsert ROP missing storeId 400': (r) => r.status === 400 }
+    { '[-] upsert ROP missing storeId 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // [-] Get unknown ROP plan → 404
@@ -1118,7 +1118,7 @@ export default function (d) {
       `${baseUrl}/api/inventory-svc/admin/inventory/rop-plans/by-variant?store=${storeId}&variant=01a090ae-611e-7008-b3d2-2b7638fc65c1`,
       { headers: hdrs }
     ),
-    { '[-] get unknown ROP plan 404': (r) => r.status === 404 }
+    { '[-] get unknown ROP plan 404': (r) => r.status === 404 && errorCode(r) === 'ROP_NOT_FOUND' }
   );
 
   // ── Picking Rules (Gap #38) ───────────────────────────────────────────────
@@ -1220,7 +1220,7 @@ export default function (d) {
       JSON.stringify({ name: 'bad', strategy: 'RANDOM' }),
       { headers: hdrs }
     ),
-    { '[-] create picking rule invalid strategy 400': (r) => r.status === 400 }
+    { '[-] create picking rule invalid strategy 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_STRATEGY' }
   );
 
   // [-] Create picking rule missing name → 400
@@ -1230,7 +1230,7 @@ export default function (d) {
       JSON.stringify({ strategy: 'FIFO' }),
       { headers: hdrs }
     ),
-    { '[-] create picking rule missing name 400': (r) => r.status === 400 }
+    { '[-] create picking rule missing name 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // [-] Assign STORE scope without scopeId → 400
@@ -1241,7 +1241,7 @@ export default function (d) {
         JSON.stringify({ ruleId: pickingRuleId, scopeType: 'STORE' }),
         { headers: hdrs }
       ),
-      { '[-] assign picking rule STORE no scopeId 400': (r) => r.status === 400 }
+      { '[-] assign picking rule STORE no scopeId 400': (r) => r.status === 400 && errorCode(r) === 'SCOPE_ID_REQUIRED' }
     );
   }
 
@@ -1251,13 +1251,13 @@ export default function (d) {
       `${baseUrl}/api/inventory-svc/admin/inventory/picking-rules/01a090ae-611e-7000-9e1a-0f8a9e565153`,
       { headers: hdrs }
     ),
-    { '[-] get unknown picking rule 404': (r) => r.status === 404 }
+    { '[-] get unknown picking rule 404': (r) => r.status === 404 && errorCode(r) === 'PICKING_RULE_NOT_FOUND' }
   );
 
   // [-] Resolve without required params → 400
   check(
     http.get(`${baseUrl}/api/inventory-svc/admin/inventory/picking-rules/resolve`, { headers: hdrs }),
-    { '[-] resolve picking rule missing params 400': (r) => r.status === 400 }
+    { '[-] resolve picking rule missing params 400': (r) => r.status === 400 && errorCode(r) === 'MISSING_PARAM' }
   );
 
   // [-] No tenant → 401
@@ -1267,7 +1267,7 @@ export default function (d) {
       JSON.stringify({ name: 'x', strategy: 'FIFO' }),
       { headers: { 'Content-Type': 'application/json' } }
     ),
-    { '[-] create picking rule no token 401': (r) => r.status === 401 }
+    { '[-] create picking rule no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
   );
 
   // ── Serial numbers: a registration stores exactly what it answers ─────────
@@ -1291,8 +1291,8 @@ export default function (d) {
     '[-] the same number again is refused whole, never dropped': (r) => r.status === 409 && String(r.body).includes('SERIAL_ALREADY_REGISTERED') && String(r.body).includes(own),
   });
   check(registerSerials({ serials: [`${own}-B`, `${own}-B`] }), { '[-] a number repeated within one request is refused': (r) => r.status === 409 && String(r.body).includes('SERIAL_ALREADY_REGISTERED') });
-  check(http.get(`${serialsUrl}/lookup?serial_no=${own}-B`, { headers: hdrs }), { '[-] ...and nothing of the refused request was stored': (r) => r.status === 404 });
+  check(http.get(`${serialsUrl}/lookup?serial_no=${own}-B`, { headers: hdrs }), { '[-] ...and nothing of the refused request was stored': (r) => r.status === 404 && errorCode(r) === 'SERIAL_NOT_FOUND' });
   const rivalHdrs = { ...JSON_CT, Authorization: `Bearer ${d.rival.owner.token}` };
-  check(registerSerials({ serials: [`${own}-R`] }, rivalHdrs), { "[-] another business cannot register serials against our batch": (r) => r.status === 403 || r.status === 404 });
-  check(http.get(`${serialsUrl}/lookup?serial_no=${own}-R`, { headers: hdrs }), { '[-] ...and nothing was stored for it': (r) => r.status === 404 });
+  check(registerSerials({ serials: [`${own}-R`] }, rivalHdrs), { "[-] another business cannot register serials against our batch": (r) => r.status === 404 && errorCode(r) === 'BATCH_NOT_FOUND' });
+  check(http.get(`${serialsUrl}/lookup?serial_no=${own}-R`, { headers: hdrs }), { '[-] ...and nothing was stored for it': (r) => r.status === 404 && errorCode(r) === 'SERIAL_NOT_FOUND' });
 }

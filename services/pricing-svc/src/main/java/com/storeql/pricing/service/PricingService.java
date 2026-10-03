@@ -369,18 +369,62 @@ public class PricingService {
   /** Sets one price, queuing its evaluation (03.12) without working it. */
   private PriceListItem setPrice(
       TenantContext ctx, UUID priceListId, UpsertPriceListItemRequest req) {
-    getPriceList(ctx, priceListId);
+    PriceList list = getPriceList(ctx, priceListId);
     PriceListItem item =
         new PriceListItem(
             Ids.newId(),
             ctx.tenantId(),
             priceListId,
             Ids.parse(req.variantId()),
-            req.price(),
+            priceIn(req.price(), list.currency()),
             req.minQty() != null ? req.minQty() : BigDecimal.ONE,
             Instant.now(),
             Instant.now());
     return repo.upsertPriceListItem(item, Events.priceChanged(ctx.tenantId(), priceListId));
+  }
+
+  /** The most whole digits typed money may have: more than any money column holds is a typo. */
+  static final int MOST_WHOLE_DIGITS = 18;
+
+  /**
+   * A list price checked against the list's currency and kept at its own minor units: no finer than
+   * the currency can be paid in (a yen price is whole yen, a dinar price has at most three
+   * decimals), and {@code 10} in pounds is kept as {@code 10.00}.
+   *
+   * @throws ApiException 400 {@code VALIDATION_FAILED} for a price with more decimals than the
+   *     currency has
+   */
+  static BigDecimal priceIn(BigDecimal price, String currency) {
+    return amountIn(price, currency, "price");
+  }
+
+  /**
+   * Money a person typed, checked against its currency and kept at its own minor units: refused by
+   * name when finer than the currency, never rounded behind the typist's back.
+   *
+   * @param field the request field, named in the refusal
+   * @return {@code amount} at the currency's scale; null in, null out
+   * @throws ApiException 400 {@code VALIDATION_FAILED} for an amount with more decimals than the
+   *     currency has, or more than {@link #MOST_WHOLE_DIGITS} whole digits
+   */
+  static BigDecimal amountIn(BigDecimal amount, String currency, String field) {
+    if (amount == null) return null;
+    // More whole digits than any money column holds is no price, refused before it is scaled:
+    // scaling 1E+80000000 to pence builds an eighty-million-digit number first.
+    if ((long) amount.precision() - amount.scale() > MOST_WHOLE_DIGITS) {
+      String why = field + " has more than " + MOST_WHOLE_DIGITS + " whole digits";
+      throw new ApiException(
+          400, com.storeql.web.ErrorCodes.VALIDATION_FAILED, why, List.of(field + ": " + why));
+    }
+    int units = com.storeql.service.Fx.minorUnits(currency);
+    if (amount.stripTrailingZeros().scale() > units) {
+      // toString, not toPlainString: 1E-80000000 written out in full is eighty million digits.
+      String why =
+          field + " " + amount + " has more decimals than " + currency + " has (" + units + ")";
+      throw new ApiException(
+          400, com.storeql.web.ErrorCodes.VALIDATION_FAILED, why, List.of(field + ": " + why));
+    }
+    return amount.setScale(units, RoundingMode.UNNECESSARY);
   }
 
   /**
@@ -617,6 +661,13 @@ public class PricingService {
 
     BigDecimal unitPrice = baseItem.price();
     String promoApplied = null;
+    // The price list's own currency; the tenant's when the list is gone — never a literal (SJ-D53).
+    // Its minor units decide every rounding below: whole yen, pence, three-decimal dinars.
+    String currency =
+        repo.findPriceList(tenantId, baseItem.priceListId())
+            .map(PriceList::currency)
+            .orElseGet(() -> profiles.requireCurrency(tenantId));
+    int scale = com.storeql.service.Fx.minorUnits(currency);
 
     // A single-variant quote runs the same engine as the basket path, on a basket of one, with
     // the basket-level promotions filtered out. They are excluded deliberately rather than for
@@ -645,12 +696,13 @@ public class PricingService {
               candidates,
               scopes,
               List.of(),
-              Map.of());
+              Map.of(),
+              scale);
       BigDecimal off = outcome.totalDiscount();
       if (off.signum() > 0) {
         BigDecimal lineTotal = unitPrice.multiply(qty);
         unitPrice =
-            lineTotal.subtract(off).max(BigDecimal.ZERO).divide(qty, 2, RoundingMode.HALF_UP);
+            lineTotal.subtract(off).max(BigDecimal.ZERO).divide(qty, scale, RoundingMode.HALF_UP);
         promoApplied =
             outcome.lineDiscounts().stream()
                 .map(com.storeql.pricing.domain.Domain.LineDiscount::promotionName)
@@ -661,14 +713,8 @@ public class PricingService {
 
     String vatCode = vatCodeFor(tenantId, variantId, asRecorded ? at : null);
     VatRate vatRate = rateFor(tenantId, vatCode, asRecorded ? at : null);
-    BigDecimal vatAmount = vatOn(unitPrice, vatRate);
+    BigDecimal vatAmount = vatOn(unitPrice, vatRate, scale);
     BigDecimal totalWithVat = unitPrice.add(vatAmount);
-
-    // The price list's own currency; the tenant's when the list is gone — never a literal (SJ-D53).
-    String currency =
-        repo.findPriceList(tenantId, baseItem.priceListId())
-            .map(PriceList::currency)
-            .orElseGet(() -> profiles.requireCurrency(tenantId));
 
     // 03.13: the unit price of what the shopper pays — VAT and any promotion in — per kilogram,
     // litre, metre, square metre or item. Shown whenever the measure is declared; whether it is
@@ -731,10 +777,14 @@ public class PricingService {
                         + " charges no VAT"));
   }
 
-  private static BigDecimal vatOn(BigDecimal net, VatRate rate) {
+  /**
+   * The VAT on a net amount, rounded half up to the currency's minor units ({@code scale}); the
+   * rate itself is kept as configured.
+   */
+  static BigDecimal vatOn(BigDecimal net, VatRate rate, int scale) {
     return rate.exempt()
         ? BigDecimal.ZERO
-        : net.multiply(rate.rate()).setScale(2, RoundingMode.HALF_UP);
+        : net.multiply(rate.rate()).setScale(scale, RoundingMode.HALF_UP);
   }
 
   /**
@@ -821,7 +871,9 @@ public class PricingService {
           null, null, PriorPrices.NO_HISTORY, true, false);
     }
     VatRate rate = rateFor(tenantId, vatCodeFor(tenantId, m.variantId(), null), null);
-    BigDecimal gross = m.markdownPrice().add(vatOn(m.markdownPrice(), rate));
+    BigDecimal gross =
+        m.markdownPrice()
+            .add(vatOn(m.markdownPrice(), rate, com.storeql.service.Fx.minorUnits(m.currency())));
     var prior =
         appliedPrices.priorPrice(
             tenantId,
@@ -973,6 +1025,7 @@ public class PricingService {
    * @param variantLineValue total value of all lines carrying each variant
    * @param lastLineOfVariant index of the final line carrying each variant
    * @param taken running total already apportioned per variant; updated here
+   * @param scale the basket currency's minor units
    * @return this line's share
    */
   private static BigDecimal shareOfVariantDiscount(
@@ -982,7 +1035,8 @@ public class PricingService {
       Map<UUID, BigDecimal> perVariantDiscount,
       Map<UUID, BigDecimal> variantLineValue,
       Map<UUID, Integer> lastLineOfVariant,
-      Map<UUID, BigDecimal> taken) {
+      Map<UUID, BigDecimal> taken,
+      int scale) {
     BigDecimal variantDiscount = perVariantDiscount.getOrDefault(variantId, BigDecimal.ZERO);
     if (variantDiscount.signum() == 0) {
       return BigDecimal.ZERO;
@@ -995,7 +1049,7 @@ public class PricingService {
       return variantDiscount.subtract(taken.getOrDefault(variantId, BigDecimal.ZERO));
     }
     BigDecimal share =
-        variantDiscount.multiply(lineTotal).divide(variantValue, 2, RoundingMode.HALF_UP);
+        variantDiscount.multiply(lineTotal).divide(variantValue, scale, RoundingMode.HALF_UP);
     taken.merge(variantId, share, BigDecimal::add);
     return share;
   }
@@ -1083,6 +1137,12 @@ public class PricingService {
               .orElse(VatRate.T1));
     }
 
+    // The basket's currency, whose minor units every amount below is rounded to: whole yen,
+    // pence, three-decimal dinars.
+    String basketCurrency =
+        currency != null ? currency : profiles.requireCurrency(ctx.requireTenantId());
+    int scale = com.storeql.service.Fx.minorUnits(basketCurrency);
+
     // 2. Promotions, over the lines a sticker did not already price.
     List<BasketLine> promotable = new java.util.ArrayList<>();
     int lastPromotable = -1;
@@ -1097,7 +1157,7 @@ public class PricingService {
     var scopes =
         repo.findPromotionVariantScopes(tenantId, candidates.stream().map(Promotion::id).toList());
     var exhausted = repo.findExhaustedPromotions(tenantId, candidates, customerId);
-    var outcome = engine.apply(promotable, candidates, scopes, req.couponCodes(), exhausted);
+    var outcome = engine.apply(promotable, candidates, scopes, req.couponCodes(), exhausted, scale);
 
     // 3. Fold the line discounts back onto their lines.
     //
@@ -1122,7 +1182,7 @@ public class PricingService {
       BasketLine b = basket.get(i);
       variantLineValue.merge(
           b.variantId(),
-          b.unitPrice().multiply(b.qty()).setScale(2, RoundingMode.HALF_UP),
+          b.unitPrice().multiply(b.qty()).setScale(scale, RoundingMode.HALF_UP),
           BigDecimal::add);
       lastLineOfVariant.put(b.variantId(), i);
     }
@@ -1132,7 +1192,7 @@ public class PricingService {
         basket.stream()
             .map(b -> b.unitPrice().multiply(b.qty()))
             .reduce(BigDecimal.ZERO, BigDecimal::add)
-            .setScale(2, RoundingMode.HALF_UP);
+            .setScale(scale, RoundingMode.HALF_UP);
     BigDecimal basketDiscount =
         outcome.basketDiscounts().stream()
             .map(com.storeql.pricing.domain.Domain.LineDiscount::amount)
@@ -1141,7 +1201,7 @@ public class PricingService {
         promotable.stream()
             .map(b -> b.unitPrice().multiply(b.qty()))
             .reduce(BigDecimal.ZERO, BigDecimal::add)
-            .setScale(2, RoundingMode.HALF_UP);
+            .setScale(scale, RoundingMode.HALF_UP);
     BigDecimal afterLine =
         promotableSubtotal.subtract(
             perLineDiscount.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add));
@@ -1152,7 +1212,7 @@ public class PricingService {
     BigDecimal apportioned = BigDecimal.ZERO;
     for (int i = 0; i < basket.size(); i++) {
       BasketLine b = basket.get(i);
-      BigDecimal lineTotal = b.unitPrice().multiply(b.qty()).setScale(2, RoundingMode.HALF_UP);
+      BigDecimal lineTotal = b.unitPrice().multiply(b.qty()).setScale(scale, RoundingMode.HALF_UP);
       boolean stickered = lineMarkdowns.get(i) != null;
       BigDecimal lineDisc =
           stickered
@@ -1164,7 +1224,8 @@ public class PricingService {
                       perLineDiscount,
                       variantLineValue,
                       lastLineOfVariant,
-                      variantDiscountTaken)
+                      variantDiscountTaken,
+                      scale)
                   .min(lineTotal);
       BigDecimal net = lineTotal.subtract(lineDisc);
 
@@ -1176,24 +1237,19 @@ public class PricingService {
       } else if (i == lastPromotable) {
         share = basketDiscount.subtract(apportioned);
       } else {
-        share = basketDiscount.multiply(net).divide(afterLine, 2, RoundingMode.HALF_UP);
+        share = basketDiscount.multiply(net).divide(afterLine, scale, RoundingMode.HALF_UP);
         apportioned = apportioned.add(share);
       }
       net = net.subtract(share).max(BigDecimal.ZERO);
 
       VatRate rate = vatRateFor(tenantId, vatCodes.get(i));
-      BigDecimal vat =
-          rate.exempt()
-              ? BigDecimal.ZERO
-              : net.multiply(rate.rate()).setScale(2, RoundingMode.HALF_UP);
+      BigDecimal vat = vatOn(net, rate, scale);
       vatTotal = vatTotal.add(vat);
 
       BigDecimal paidPerOne = net.add(vat).divide(b.qty(), 6, RoundingMode.HALF_UP);
       var unitPricing =
           UnitPricing.of(
-              paidPerOne,
-              repo.findMeasure(tenantId, b.variantId()).orElse(null),
-              currency != null ? currency : profiles.requireCurrency(tenantId));
+              paidPerOne, repo.findMeasure(tenantId, b.variantId()).orElse(null), basketCurrency);
       lineResponses.add(
           new QuoteLineResponse(
               b.variantId(),
@@ -1222,8 +1278,6 @@ public class PricingService {
               d.promotionId(), d.promotionName(), d.variantId(), d.amount()));
     }
 
-    String basketCurrency =
-        currency != null ? currency : profiles.requireCurrency(ctx.requireTenantId());
     String wanted = displayCurrency(req.displayCurrency());
     com.storeql.pricing.dto.Dtos.DisplayBasketResponse display = null;
     if (wanted != null) {
@@ -1317,7 +1371,14 @@ public class PricingService {
             req.name(),
             type,
             req.value(),
-            req.minOrderAmount(),
+            // A spend threshold is typed money in the business's own currency: no finer than it,
+            // kept at its minor units.
+            req.minOrderAmount() == null
+                ? null
+                : amountIn(
+                    req.minOrderAmount(),
+                    profiles.requireCurrency(ctx.requireTenantId()),
+                    "minOrderAmount"),
             req.channel() != null
                 ? req.channel().toUpperCase(java.util.Locale.ROOT)
                 : PriceList.CHANNEL_ALL,
@@ -1589,6 +1650,9 @@ public class PricingService {
    * @return the recorded transaction
    */
   public TaxTransaction recordTaxTransaction(RecordTaxTransactionRequest req, TenantContext ctx) {
+    // The line's money in the business's own currency's minor units (half up, as the columns kept
+    // it before V16): whole yen, three-decimal dinars.
+    int units = com.storeql.service.Fx.minorUnits(profiles.requireCurrency(ctx.requireTenantId()));
     TaxTransaction tt =
         new TaxTransaction(
             Ids.newId(),
@@ -1599,9 +1663,11 @@ public class PricingService {
             req.storeId(),
             req.vatCode().toUpperCase(java.util.Locale.ROOT),
             req.vatRate(),
-            req.netAmount(),
-            req.vatAmount(),
-            req.grossAmount(),
+            req.netAmount() == null ? null : req.netAmount().setScale(units, RoundingMode.HALF_UP),
+            req.vatAmount() == null ? null : req.vatAmount().setScale(units, RoundingMode.HALF_UP),
+            req.grossAmount() == null
+                ? null
+                : req.grossAmount().setScale(units, RoundingMode.HALF_UP),
             req.exempt(),
             Parsing.instant(req.taxPointDate(), "taxPointDate"),
             req.invoiceRef(),
@@ -1636,6 +1702,9 @@ public class PricingService {
    */
   public PriceOverride createPriceOverride(TenantContext ctx, CreatePriceOverrideRequest req) {
     UUID tenantId = ctx.requireTenantId();
+    // What was charged, in the business's own currency: no finer than it, kept at its minor units
+    // — whole yen, three-decimal dinars.
+    String currency = profiles.requireCurrency(tenantId);
     var override =
         new PriceOverride(
             Ids.newId(),
@@ -1643,8 +1712,8 @@ public class PricingService {
             req.orderId() != null ? Ids.parse(req.orderId()) : null,
             Ids.parse(req.variantId()),
             Ids.parse(req.storeId()),
-            req.originalPrice(),
-            req.overridePrice(),
+            amountIn(req.originalPrice(), currency, "originalPrice"),
+            amountIn(req.overridePrice(), currency, "overridePrice"),
             req.overrideReason(),
             req.overriddenBy() != null ? Ids.parse(req.overriddenBy()) : null,
             java.time.Instant.now());
@@ -1710,30 +1779,41 @@ public class PricingService {
 
     List<TaxSummaryRow> rows =
         taxReportRepo.aggregate(ctx.tenantId(), stores, from, to, grouping(groupByStr));
+    // The business's own currency decides the report's precision: whole yen, three-decimal dinars.
+    int scale = com.storeql.service.Fx.minorUnits(profiles.requireCurrency(ctx.tenantId()));
+    return taxSummaryOf(rows, scale, fromStr, toStr);
+  }
 
-    BigDecimal net = BigDecimal.ZERO;
-    BigDecimal vat = BigDecimal.ZERO;
-    BigDecimal outputVat = BigDecimal.ZERO;
-    BigDecimal gross = BigDecimal.ZERO;
+  /**
+   * The report from its summed rows: each row and the folded totals rounded half up to the
+   * currency's minor units ({@code scale}), the totals folded from the same rows they sit beside.
+   */
+  static TaxSummary taxSummaryOf(
+      List<TaxSummaryRow> summed, int scale, String fromStr, String toStr) {
+    List<TaxSummaryRow> rows = new java.util.ArrayList<>(summed.size());
+    BigDecimal net = BigDecimal.ZERO.setScale(scale);
+    BigDecimal vat = BigDecimal.ZERO.setScale(scale);
+    BigDecimal outputVat = BigDecimal.ZERO.setScale(scale);
+    BigDecimal gross = BigDecimal.ZERO.setScale(scale);
     long transactions = 0;
-    for (TaxSummaryRow r : rows) {
+    for (TaxSummaryRow s : summed) {
+      TaxSummaryRow r =
+          new TaxSummaryRow(
+              s.groupKey(),
+              s.exempt(),
+              s.netAmount().setScale(scale, RoundingMode.HALF_UP),
+              s.vatAmount().setScale(scale, RoundingMode.HALF_UP),
+              s.grossAmount().setScale(scale, RoundingMode.HALF_UP),
+              s.transactions());
+      rows.add(r);
       net = net.add(r.netAmount());
       vat = vat.add(r.vatAmount());
       if (!r.exempt()) outputVat = outputVat.add(r.vatAmount());
       gross = gross.add(r.grossAmount());
       transactions += r.transactions();
     }
-
     return new TaxSummary(
-        rows,
-        new TaxSummaryTotals(
-            net.setScale(2, RoundingMode.HALF_UP),
-            vat.setScale(2, RoundingMode.HALF_UP),
-            outputVat.setScale(2, RoundingMode.HALF_UP),
-            gross.setScale(2, RoundingMode.HALF_UP),
-            transactions),
-        fromStr,
-        toStr);
+        rows, new TaxSummaryTotals(net, vat, outputVat, gross, transactions), fromStr, toStr);
   }
 
   /** Defaults to CODE — "which rate bands is my VAT made of" is what this is opened for. */

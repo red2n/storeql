@@ -117,6 +117,19 @@ class AccountingIT {
             OWNER),
         400,
         "ACCOUNTING_SETTINGS_INVALID");
+    // A QuickBooks realm id is the company's digits: one no address can be made from is refused
+    // here, never claimed by the clock and left there.
+    assertError(
+        call(
+            "PUT",
+            CONNECTION,
+            "{\"provider\":\"QUICKBOOKS\",\"settings\":{\"realmId\":\"91 30%\"},\"credentials\":{\"accessToken\":\"t\"},\"syncFrom\":\"2026-01-01\"}",
+            T,
+            "OWNER",
+            OWNER),
+        400,
+        "ACCOUNTING_SETTINGS_INVALID");
+    assertError(call("GET", CONNECTION, null, T, "OWNER", OWNER), 404, "ACCOUNTING_NOT_CONNECTED");
     assertError(
         call(
             "PUT",
@@ -659,6 +672,123 @@ class AccountingIT {
         call("GET", ACCOUNTING + "/syncs?status=PENDING", null, T2, "OWNER", OWNER),
         404,
         "ACCOUNTING_NOT_CONNECTED");
+  }
+
+  @Test
+  @DisplayName(
+      "A journal is left out of the package only with a reason, by management, never once it is in"
+          + " the package, and never another business's; a decision with no outcome is refused too")
+  void aSkipNeedsAReasonAndAJournalOfOurOwn() {
+    object(call("PUT", CONNECTION, simulated(null, "9999"), T, "OWNER", OWNER), 200);
+    String stuck =
+        postJournal(LocalDate.now().toString(), "Refused by the package", "9999", "1200");
+    String taken = postJournal(LocalDate.now().toString(), "Taken by the package", "1001", "1200");
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    String stuckId = syncIdOf(stuck, "PENDING");
+    String takenId = syncIdOf(taken, "DELIVERED");
+    String skip = ACCOUNTING + "/syncs/" + stuckId + "/skip";
+
+    // The reason is the point of it: none, a blank one, a null one, or one longer than the log
+    // keeps is refused by name, and the journal waits as it was. (Both requests are read by the
+    // service, which names each refusal; the request records carry no constraint of their own.)
+    for (String body :
+        new String[] {
+          "{}",
+          "{\"reason\":null}",
+          "{\"reason\":\"   \"}",
+          "{\"reason\":\"" + "x".repeat(501) + "\"}"
+        }) {
+      assertError(call("POST", skip, body, T, "OWNER", OWNER), 400, "ACCOUNTING_REASON_REQUIRED");
+    }
+    for (String body : new String[] {"{}", "{\"outcome\":null}", "{\"outcome\":\"\"}"}) {
+      assertError(
+          call("POST", ACCOUNTING + "/syncs/" + stuckId + "/resolve", body, T, "OWNER", OWNER),
+          400,
+          "ACCOUNTING_OUTCOME_INVALID");
+    }
+    assertThat(syncOf(stuckId).getString("status"), is("PENDING"));
+
+    // Another business's management finds no such push; a shelf, a till or a shopper is turned
+    // away.
+    for (String roles : new String[] {"OWNER", "MANAGER"}) {
+      assertError(
+          call("POST", skip, "{\"reason\":\"not theirs\"}", T2, roles, OWNER),
+          404,
+          "ACCOUNTING_SYNC_NOT_FOUND");
+    }
+    for (String roles : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertThat(
+          roles,
+          call("POST", skip, "{\"reason\":\"not mine\"}", T, roles, CASHIER).getStatus(),
+          is(403));
+    }
+    assertThat("nothing moved", syncOf(stuckId).getString("status"), is("PENDING"));
+
+    // What is already in the package is not left out of it.
+    assertError(
+        call(
+            "POST",
+            ACCOUNTING + "/syncs/" + takenId + "/skip",
+            "{\"reason\":\"already there\"}",
+            T,
+            "OWNER",
+            OWNER),
+        409,
+        "ACCOUNTING_SYNC_DELIVERED");
+    assertThat(syncOf(takenId).getString("status"), is("DELIVERED"));
+
+    // With a reason, by management, it is left out.
+    assertThat(
+        object(call("POST", skip, "{\"reason\":\"entered by hand\"}", T, "MANAGER", MANAGER), 200)
+            .getString("status"),
+        is("SKIPPED"));
+  }
+
+  @Test
+  @DisplayName(
+      "QuickBooks Online's environment is PRODUCTION or SANDBOX: anything else is refused at"
+          + " connect, and a connection kept with one before the check is refused unsent at push"
+          + " time, with its reason, and its chart is not asked for")
+  void aQuickBooksEnvironmentIsOneTheDriverKnows() {
+    String quickBooks =
+        "{\"provider\":\"QUICKBOOKS\",\"settings\":{\"realmId\":\"9130\",\"environment\":\"%s\"},"
+            + "\"credentials\":{\"accessToken\":\"t\"},\"syncFrom\":\"2026-01-01\"}";
+    for (String environment : new String[] {"PROD", "Sandbx", "live"}) {
+      Response r =
+          call("PUT", CONNECTION, String.format(quickBooks, environment), T, "OWNER", OWNER);
+      String body = r.readEntity(String.class);
+      assertThat(body, r.getStatus(), is(400));
+      assertThat(body, parse(body).getString("code"), is("ACCOUNTING_SETTINGS_INVALID"));
+      assertThat(body, containsString("environment"));
+    }
+    assertError(call("GET", CONNECTION, null, T, "OWNER", OWNER), 404, "ACCOUNTING_NOT_CONNECTED");
+    object(call("PUT", CONNECTION, String.format(quickBooks, "sandbox"), T, "OWNER", OWNER), 200);
+
+    // A connection kept before the check, with an environment its driver never knew: it would have
+    // been sent to production. It is refused before anything leaves, for a person to put right.
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "UPDATE purchase.accounting_connections"
+            + " SET settings = '{\"realmId\":\"9130\",\"environment\":\"PROD\"}'"
+            + " WHERE tenant_id = '"
+            + T
+            + "'");
+    String journal = postJournal(LocalDate.now().toString(), "Kept before the check");
+    JsonObject run = object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    assertThat(run.getInt("failed"), is(1));
+    assertThat(run.getInt("delivered"), is(0));
+    JsonObject sync = syncOf(syncIdOf(journal, "FAILED"));
+    assertThat(sync.getString("lastError"), containsString("environment"));
+    JsonObject attempt = sync.getJsonArray("attemptLog").getJsonObject(0);
+    // JSON-B leaves a null out: absent and null both mean nothing answered.
+    assertThat(
+        "nothing was sent, so nothing answered",
+        !attempt.containsKey("statusCode") || attempt.isNull("statusCode"),
+        is(true));
+    assertError(
+        call("GET", CONNECTION + "/accounts", null, T, "OWNER", OWNER),
+        409,
+        "ACCOUNTING_SETTINGS_INVALID");
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

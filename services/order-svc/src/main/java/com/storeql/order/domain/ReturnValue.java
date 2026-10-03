@@ -14,9 +14,6 @@ public final class ReturnValue {
 
   private ReturnValue() {}
 
-  /** Money is kept to the minor unit of the columns it lands in. */
-  private static final int SCALE = 2;
-
   /**
    * How an exchange settles between what comes back and what is bought.
    *
@@ -55,16 +52,22 @@ public final class ReturnValue {
    * @param returnedQty how many come back
    * @param lineVat the VAT on the whole sold line, or null when none was recorded
    * @param soldQty how many the line was sold with
-   * @return the value, rounded half up to the minor unit
+   * @param scale the currency's minor units ({@code Fx.minorUnits}): 2 for the pound, 0 for the
+   *     yen, 3 for the dinar
+   * @return the value, rounded half up to the currency's minor unit
    */
   public static BigDecimal grossOf(
-      BigDecimal unitNet, BigDecimal returnedQty, BigDecimal lineVat, BigDecimal soldQty) {
+      BigDecimal unitNet,
+      BigDecimal returnedQty,
+      BigDecimal lineVat,
+      BigDecimal soldQty,
+      int scale) {
     BigDecimal net = unitNet.multiply(returnedQty);
     BigDecimal vat = BigDecimal.ZERO;
     if (lineVat != null && soldQty != null && soldQty.signum() > 0) {
       vat = lineVat.multiply(returnedQty).divide(soldQty, 10, RoundingMode.HALF_UP);
     }
-    return net.add(vat).setScale(SCALE, RoundingMode.HALF_UP);
+    return net.add(vat).setScale(scale, RoundingMode.HALF_UP);
   }
 
   /**
@@ -185,15 +188,18 @@ public final class ReturnValue {
    * @param unitNet the current price of one, net of VAT
    * @param unitVat the VAT on one
    * @param qty how many come back
+   * @param scale the currency's minor units ({@code Fx.minorUnits}); the line's VAT and value are
+   *     rounded to it, half up. The unit price keeps four decimals, as a unit price may
+   *     legitimately be finer than the currency (SJ-D25)
    * @return the line: unit price with VAT, the VAT in the line, and the line's value
    */
-  public static Line priceLine(BigDecimal unitNet, BigDecimal unitVat, BigDecimal qty) {
+  public static Line priceLine(BigDecimal unitNet, BigDecimal unitVat, BigDecimal qty, int scale) {
     BigDecimal vatEach = unitVat == null ? BigDecimal.ZERO : unitVat;
     BigDecimal grossEach = unitNet.add(vatEach);
     return new Line(
         grossEach.setScale(4, RoundingMode.HALF_UP),
-        vatEach.multiply(qty).setScale(SCALE, RoundingMode.HALF_UP),
-        grossEach.multiply(qty).setScale(SCALE, RoundingMode.HALF_UP));
+        vatEach.multiply(qty).setScale(scale, RoundingMode.HALF_UP),
+        grossEach.multiply(qty).setScale(scale, RoundingMode.HALF_UP));
   }
 
   /**

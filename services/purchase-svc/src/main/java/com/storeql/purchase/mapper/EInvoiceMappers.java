@@ -28,6 +28,14 @@ public final class EInvoiceMappers {
 
   public static SupplierEInvoiceResponse toDto(
       Document d, List<Line> lines, boolean alreadyReceived) {
+    return toDto(d, lines, alreadyReceived, null);
+  }
+
+  /**
+   * @param notRemembered on a match asked to remember: what was not kept and why; else null
+   */
+  public static SupplierEInvoiceResponse toDto(
+      Document d, List<Line> lines, boolean alreadyReceived, String notRemembered) {
     return new SupplierEInvoiceResponse(
         d.id(),
         d.receivedAt(),
@@ -64,7 +72,8 @@ public final class EInvoiceMappers {
         d.decisionReason(),
         alreadyReceived,
         violations(d.violationsJson()),
-        lines.stream().map(EInvoiceMappers::toDto).toList());
+        lines.stream().map(EInvoiceMappers::toDto).toList(),
+        notRemembered);
   }
 
   static SupplierEInvoiceLineResponse toDto(Line l) {

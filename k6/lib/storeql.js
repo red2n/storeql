@@ -134,6 +134,10 @@ export function expect(res, label, status, code) {
     const got = `${res.status}${errorCode(res) ? ` ${errorCode(res)}` : ''}`;
     const want = `${statuses.join('/')}${code ? ` ${code}` : ''}`;
     console.error(`✗ ${label}: want ${want}, got ${got} — ${String(res.body).slice(0, 400)}`);
+  } else if (__ENV.PRINT_REFUSAL_CODES && !code && res.status >= 400) {
+    // Learn mode: a refusal checked by its status alone prints the code the server answered, so the
+    // check can be made to assert it (PRINT_REFUSAL_CODES=1 k6 run ...).
+    console.log(`REFUSAL-CODE ${JSON.stringify({ label, status: res.status, code: errorCode(res) || null })}`);
   }
   return ok;
 }
@@ -350,6 +354,24 @@ export function staffUser(tenant, role, storeIds) {
     must(res, 201, `assign ${role}`);
   }
   signInUntil(user, (c) => c.tenant === tenant.tenantId && (c.roles || []).includes(role));
+  return user;
+}
+
+/**
+ * A manager of the whole business: a business-wide assignment (`businessWide: true`, no store; only
+ * an owner grants it), signed in with MANAGER in its token and no store in `storeIds`. What belongs
+ * to the business as a whole — purchase-svc's payment runs, paying accounts and accounting
+ * connection, tenant-svc's profile and rates — needs a caller held to none; a manager held to a
+ * store (`staffUser(tenant, 'MANAGER', [store.id])`) is refused there 403 BUSINESS_WIDE_ONLY.
+ */
+export function businessWideManager(tenant) {
+  const user = provisionStaff(tenant, `${tenant.label}-manager-bw`);
+  const res = call('POST', '/api/tenant-svc/admin/staff', {
+    token: tenant.owner.token,
+    body: { userId: user.userId, role: 'MANAGER', businessWide: true },
+  });
+  must(res, 201, 'assign a business-wide MANAGER');
+  signInUntil(user, (c) => c.tenant === tenant.tenantId && (c.roles || []).includes('MANAGER') && (c.storeIds || []).length === 0);
   return user;
 }
 

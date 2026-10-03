@@ -188,7 +188,10 @@ public class OidcClient {
     form.put("redirect_uri", redirectUri);
     form.put("code_verifier", verifier);
     HttpClientRequest request =
-        http.post(check(d.tokenEndpoint()).toString())
+        // URIs, never the String form, here and below: that escapes the "?" of an endpoint that
+        // carries one (a B2C policy, Entra's app-specific keys) into the path.
+        http.post()
+            .uri(check(d.tokenEndpoint()))
             .header(HeaderNames.CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(HeaderNames.ACCEPT, "application/json");
     if (Discovery.BASIC.equals(d.tokenAuthMethod())) {
@@ -235,7 +238,8 @@ public class OidcClient {
 
   private IdToken contact(String userinfo, String accessToken, IdToken proved) {
     try (HttpClientResponse res =
-        http.get(check(userinfo).toString())
+        http.get()
+            .uri(check(userinfo))
             .header(HeaderNames.AUTHORIZATION, "Bearer " + accessToken)
             .header(HeaderNames.ACCEPT, "application/json")
             .request()) {
@@ -266,7 +270,7 @@ public class OidcClient {
   private String get(String url) {
     URI checked = check(url);
     try (HttpClientResponse res =
-        http.get(checked.toString()).header(HeaderNames.ACCEPT, "application/json").request()) {
+        http.get().uri(checked).header(HeaderNames.ACCEPT, "application/json").request()) {
       int status = res.status().code();
       if (status != 200) {
         throw new SsoRefused(

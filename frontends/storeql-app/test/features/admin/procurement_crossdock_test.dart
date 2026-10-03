@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/procurement_screen.dart';
@@ -105,10 +106,56 @@ void main() {
     await tester.pumpAndSettle();
     final put = server.requests.firstWhere((r) => r.method == 'PUT' && r.path.endsWith('/lines/$_line/allocations'));
     expect(_body(put)['allocations'], [
-      {'storeId': _leeds, 'qty': 25.0},
-      {'storeId': _york, 'qty': 15.0},
+      // The plain decimals the fields hold: Leeds's 25 as it was written.
+      {'storeId': _leeds, 'qty': '25'},
+      {'storeId': _york, 'qty': '15'},
     ]);
   });
+
+  // A shop's share is a quantity, read the way the app's language writes a
+  // number: Romanian's 2,5 is two and a half, never refused to nothing; a
+  // figure the field cannot read holds Save with its reason under it.
+  for (final (locale, typed, sent) in [
+    ('ro', '2,5', '2.5'),
+    ('en_GB', '2.5', '2.5'),
+    ('en', '2.125', '2.125'),
+    ('pl', '2,5', '2.5'),
+    ('ar', '2\u066B5', '2.5'),
+  ]) {
+    testWidgets('in $locale, $typed allocated to a shop goes as $sent', (tester) async {
+      Intl.defaultLocale = locale;
+      addTearDown(() => Intl.defaultLocale = null);
+      final server = await _openOrder(tester, _dc);
+      await tester.tap(find.byKey(const Key('po-line-allocate-$_line')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('allocate-$_york')), typed);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('allocate-save')));
+      await tester.pumpAndSettle();
+      final put = server.requests.firstWhere((r) => r.method == 'PUT' && r.path.endsWith('/lines/$_line/allocations'));
+      expect(_body(put)['allocations'], [
+        {'storeId': _leeds, 'qty': '25'},
+        {'storeId': _york, 'qty': sent},
+      ]);
+    });
+  }
+
+  for (final (locale, typed) in [('ro', '2.5'), ('pl', '1.250'), ('en', '2,5'), ('en_GB', '.')]) {
+    testWidgets('in $locale, $typed allocated to a shop is refused and nothing is saved', (tester) async {
+      Intl.defaultLocale = locale;
+      addTearDown(() => Intl.defaultLocale = null);
+      final server = await _openOrder(tester, _dc);
+      await tester.tap(find.byKey(const Key('po-line-allocate-$_line')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('allocate-$_york')), typed);
+      await tester.pump();
+      expect(tester.widget<TextField>(find.byKey(const Key('allocate-$_york'))).decoration?.errorText, isNotNull);
+      expect(tester.widget<FilledButton>(find.byKey(const Key('allocate-save'))).onPressed, isNull);
+      await tester.tap(find.byKey(const Key('allocate-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+    });
+  }
 
   testWidgets('Fill from the shops\' needs posts the fill', (tester) async {
     final server = await _openOrder(tester, _dc);

@@ -71,9 +71,9 @@ class RetentionPurgeIT {
 
   @Test
   void oldMessagesGoHeldOnesStayAndTheRunIsAnnounced() {
-    String plain = message(AT_ONCE, null, "0 days");
-    String held = message(AT_ONCE, HELD_CUSTOMER, "0 days");
-    String staff = message(AT_ONCE, null, "0 days");
+    String plain = message(AT_ONCE, null, "1 hour");
+    String held = message(AT_ONCE, HELD_CUSTOMER, "1 hour");
+    String staff = message(AT_ONCE, null, "1 hour");
     JsonObject run = ok(sweep(AT_ONCE, "OWNER"));
     assertThat(run.getString("dataClass"), is("NOTIFICATION_LOG"));
     assertThat(run.getInt("rowsAffected"), is(2));
@@ -98,7 +98,7 @@ class RetentionPurgeIT {
   void aBacklogLargerThanOneBatchIsPurgedInPagesAndCountedOnce() {
     List<String> ids = new java.util.ArrayList<>();
     for (int i = 0; i < 7; i++) {
-      ids.add(message(AT_ONCE, null, "0 days"));
+      ids.add(message(AT_ONCE, null, "1 hour")); // an hour old: due whatever the clocks do
     }
     JsonObject run = ok(sweep(AT_ONCE, "OWNER"));
     assertThat(run.getInt("rowsAffected"), is(7));

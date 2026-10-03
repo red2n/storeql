@@ -198,12 +198,14 @@ public class YieldRepository extends BaseOutboxRepository {
    * the run and announces it — on one transaction.
    *
    * @param events what to announce once the run is costed
+   * @param minorUnits the business currency's minor units: the primal's cost, the loss at cost and
+   *     each cut's unit cost are kept to them
    * @return the run as recorded, with each cut's cost and batch
    * @throws ApiException 422 {@code INVENTORY_YIELD_INSUFFICIENT_INPUT} when less of the primal is
    *     on the shelf than the run takes; 409 {@code INVENTORY_YIELD_INPUT_NOT_OWNED} when the
    *     primal drawn is the supplier's consignment stock
    */
-  public YieldRun record(YieldRun run, Function<YieldRun, List<OutboxRow>> events) {
+  public YieldRun record(YieldRun run, Function<YieldRun, List<OutboxRow>> events, int minorUnits) {
     return inTx(
         c -> {
           MovementAttribution by =
@@ -221,16 +223,12 @@ public class YieldRepository extends BaseOutboxRepository {
                       + " break down");
             }
           }
-          BigDecimal inputCost = costOf(drawn);
+          BigDecimal inputCost = costOf(drawn, minorUnits);
           BigDecimal lossAtCost =
-              inputCost == null
-                  ? null
-                  : inputCost
-                      .multiply(run.lossQty())
-                      .divide(run.inputQty(), Yield.COST_SCALE, RoundingMode.HALF_UP);
+              Yield.lossAtCost(inputCost, run.lossQty(), run.inputQty(), minorUnits);
           List<Yield.Share> shares =
               run.outputs().stream().map(o -> new Yield.Share(o.qty(), o.costShare())).toList();
-          List<BigDecimal> unitCosts = Yield.apportion(inputCost, shares);
+          List<BigDecimal> unitCosts = Yield.apportion(inputCost, shares, minorUnits);
           Drawn first = drawn.get(0);
           List<YieldRunOutput> made = new ArrayList<>(run.outputs().size());
           for (int i = 0; i < run.outputs().size(); i++) {
@@ -304,14 +302,17 @@ public class YieldRepository extends BaseOutboxRepository {
     }
   }
 
-  /** The primal's cost over what was drawn; null when any batch drawn had none. */
-  private static BigDecimal costOf(List<Drawn> drawn) {
+  /**
+   * The primal's cost over what was drawn, in the currency's minor units; null when any batch drawn
+   * had none.
+   */
+  private static BigDecimal costOf(List<Drawn> drawn, int minorUnits) {
     BigDecimal total = BigDecimal.ZERO;
     for (Drawn d : drawn) {
       if (d.costPrice() == null) return null;
       total = total.add(d.qty().multiply(d.costPrice()));
     }
-    return total.setScale(Yield.COST_SCALE, RoundingMode.HALF_UP);
+    return Yield.amount(total, minorUnits);
   }
 
   /**

@@ -55,10 +55,10 @@ export default function ({ tenant, variantId, unrated, storekeeper, cashier }) {
   const approval = must(call('PUT', `${BOND}/approvals/${warehouse.id}`, { token: owner, body: { approvalNumber: `GBWK${uniq()}`, regime: 'excise' } }), 200, 'the warehouse approved');
   truthy('[+] the warehouse is approved as an excise warehouse', approval.storeId === warehouse.id && approval.regime === 'EXCISE' && approval.active === true, approval);
   expect(call('PUT', `${BOND}/approvals/${shop.id}`, { token: owner, body: { approvalNumber: 'X', regime: 'BONDED' } }), '[-] a regime nobody defined', 400, 'INVENTORY_BOND_REGIME_INVALID');
-  expect(call('PUT', `${BOND}/approvals/${shop.id}`, { token: cashier.token, body: { approvalNumber: 'X', regime: 'EXCISE' } }), '[-] a cashier does not approve warehouses', 403);
+  expect(call('PUT', `${BOND}/approvals/${shop.id}`, { token: cashier.token, body: { approvalNumber: 'X', regime: 'EXCISE' } }), '[-] a cashier does not approve warehouses', 403, 'FORBIDDEN');
   const rate = must(call('PUT', `${BOND}/duty-rates/${variantId}`, { token: owner, body: { dutyPerUnit: '2.50', note: '70cl at 40%: 0.28 lpa at GBP 31.64' } }), 200, 'a duty rate');
   truthy('[+] the duty per unit is kept in the home currency', num(rate.dutyPerUnit) === 2.5 && rate.currency === 'GBP', rate);
-  expect(call('PUT', `${BOND}/duty-rates/${variantId}`, { token: storekeeper.token, body: { dutyPerUnit: '1' } }), '[-] a storekeeper does not set duty', 403);
+  expect(call('PUT', `${BOND}/duty-rates/${variantId}`, { token: storekeeper.token, body: { dutyPerUnit: '1' } }), '[-] a storekeeper does not set duty', 403, 'FORBIDDEN');
 
   // ── 2. an order under bond, received with the duty suspended ────────────────
   const supplier = must(call('POST', `${P}/suppliers`, { token: owner, body: { name: `Distillers ${uniq()}`, vatRegistered: true, currency: 'GBP' } }), 201, 'a supplier');
@@ -72,7 +72,7 @@ export default function ({ tenant, variantId, unrated, storekeeper, cashier }) {
   truthy('[+] on hand at the warehouse, all of it in bond, none available', arrived >= 0 && num(level(warehouse.id).inBond) === 10 && num(level(warehouse.id).available) === 0, level(warehouse.id));
   const batches = data(call('GET', `${I}/admin/inventory/batches?store=${warehouse.id}&variant=${variantId}`, { token: owner })) || [];
   truthy('[+] the batch says its duty is suspended', batches.length === 1 && batches[0].dutyStatus === 'DUTY_SUSPENDED', batches);
-  expect(call('POST', `${I}/inventory/reservations`, { token: owner, idem: true, body: { storeId: warehouse.id, variantId, qty: 1 } }), '[-] nothing in bond can be held for a sale', 422);
+  expect(call('POST', `${I}/inventory/reservations`, { token: owner, idem: true, body: { storeId: warehouse.id, variantId, qty: 1 } }), '[-] nothing in bond can be held for a sale', 422, 'INSUFFICIENT_STOCK');
   expect(call('POST', `${I}/admin/inventory/receive`, { token: owner, idem: true, body: { storeId: shop.id, variantId, qty: 1, dutyStatus: 'DUTY_SUSPENDED' } }), '[-] duty-suspended stock at a shop nobody approved', 400, 'INVENTORY_STORE_NOT_BONDED');
   expect(call('POST', `${I}/admin/inventory/receive`, { token: owner, idem: true, body: { storeId: warehouse.id, variantId, qty: 1, dutyStatus: 'DUTY_FREE' } }), '[-] a duty status nobody defined, at goods-in', 400, 'INVENTORY_DUTY_STATUS_INVALID');
   const valued = (data(call('GET', `${I}/admin/inventory/reports/valuation?groupBy=VARIANT&limit=200`, { token: owner })) || []).find((r) => r.groupKey === variantId) || {};
@@ -99,7 +99,7 @@ export default function ({ tenant, variantId, unrated, storekeeper, cashier }) {
   must(call('POST', `${I}/admin/inventory/receive`, { token: owner, idem: true, body: { storeId: warehouse.id, variantId: unrated, qty: 3, dutyStatus: 'DUTY_SUSPENDED' } }), 201, 'gin into bond');
   expect(call('POST', `${BOND}/releases`, { token: owner, body: { storeId: warehouse.id, variantId: unrated, qty: 1 } }), '[-] a variant with no duty rate', 409, 'INVENTORY_DUTY_RATE_MISSING');
   expect(call('POST', `${BOND}/releases`, { token: owner, body: { storeId: shop.id, variantId, qty: 1 } }), '[-] a shop that is not bonded', 409, 'INVENTORY_STORE_NOT_BONDED');
-  expect(call('GET', `${P}/admin/duty/releases?from=2026-01-01&to=${today}`, { token: cashier.token }), '[-] a cashier reads no return', 403);
+  expect(call('GET', `${P}/admin/duty/releases?from=2026-01-01&to=${today}`, { token: cashier.token }), '[-] a cashier reads no return', 403, 'FORBIDDEN');
   must(call('POST', `${BOND}/approvals/${warehouse.id}/end`, { token: owner, body: {} }), 200, 'approval ended');
   expect(call('POST', `${I}/admin/inventory/receive`, { token: owner, idem: true, body: { storeId: warehouse.id, variantId, qty: 1, dutyStatus: 'DUTY_SUSPENDED' } }), '[-] an ended approval takes no more suspended stock', 400, 'INVENTORY_STORE_NOT_BONDED');
 }

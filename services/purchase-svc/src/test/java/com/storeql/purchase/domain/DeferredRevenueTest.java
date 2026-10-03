@@ -33,7 +33,7 @@ class DeferredRevenueTest {
   private static final UUID TENANT = Ids.newId();
   private static final UUID STORE = Ids.newId();
   private static final Settings SETTINGS =
-      new Settings(new BigDecimal("0.05"), new BigDecimal("20"), new BigDecimal("10"));
+      new Settings(new BigDecimal("0.05"), new BigDecimal("20"), new BigDecimal("10"), "GBP");
   private static final Source SRC =
       new Source(TENANT, Ids.newId(), STORE, LocalDate.of(2026, 9, 15));
 
@@ -295,7 +295,7 @@ class DeferredRevenueTest {
   @DisplayName("A release never exceeds what is deferred, however high the breakage estimate")
   void aReleaseIsCappedAtTheDeferredIncome() {
     Settings mostlyUnspent =
-        new Settings(new BigDecimal("0.05"), new BigDecimal("95"), BigDecimal.ZERO);
+        new Settings(new BigDecimal("0.05"), new BigDecimal("95"), BigDecimal.ZERO, "GBP");
     PointsPool pool = new PointsPool(new BigDecimal("10"), new BigDecimal("1.00"), BigDecimal.ZERO);
     PointsOutcome out = DeferredRevenue.redeemed(SRC, mostlyUnspent, pool, new BigDecimal("5"));
     assertThat(
@@ -479,5 +479,50 @@ class DeferredRevenueTest {
     assertThat(
         DeferredRevenue.loadReversed(pool, new BigDecimal("140.00")).loaded(),
         comparesEqualTo(BigDecimal.ZERO));
+  }
+
+  // ── the business's own currency ─────────────────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "What is deferred and recognised is in the business's currency's own minor units: whole yen,"
+          + " three decimals of a dinar")
+  void amountsAreInTheBusinesssOwnMinorUnits() {
+    // A point worth 1 yen, a fifth never spent: 200 points stand alone at 160; 10000 net.
+    Settings yen = new Settings(BigDecimal.ONE, new BigDecimal("20"), new BigDecimal("10"), "JPY");
+    PointsOutcome earnedInYen =
+        DeferredRevenue.earned(
+            SRC,
+            yen,
+            PointsPool.EMPTY,
+            new BigDecimal("200"),
+            new BigDecimal("12000"),
+            new BigDecimal("2000"));
+    // 10000 × 160 / 10160 = 157.48… → 157 yen, never 157.48.
+    assertThat(net(earnedInYen.posting(), Domain.CODE_SALES).toPlainString(), is("157"));
+    assertBalanced(earnedInYen.posting());
+
+    // A point worth 0.005 dinar: 200 points stand alone at 0.800; 10.000 net.
+    Settings dinar =
+        new Settings(new BigDecimal("0.005"), new BigDecimal("20"), new BigDecimal("10"), "KWD");
+    PointsOutcome earnedInDinar =
+        DeferredRevenue.earned(
+            SRC,
+            dinar,
+            PointsPool.EMPTY,
+            new BigDecimal("200"),
+            new BigDecimal("12.000"),
+            new BigDecimal("2.000"));
+    // 10 × 0.8 / 10.8 = 0.7407… → 0.741 dinar, never 0.74.
+    assertThat(net(earnedInDinar.posting(), Domain.CODE_SALES).toPlainString(), is("0.741"));
+    assertBalanced(earnedInDinar.posting());
+
+    // A tenth of gift card value expected never to be claimed: 1000 yen spent of 10000 loaded
+    // recognises 1000 × 0.1 / 0.9 = 111.1… → 111 yen of breakage.
+    GiftCardPool cards = DeferredRevenue.loaded(GiftCardPool.EMPTY, new BigDecimal("10000"));
+    GiftCardOutcome spent =
+        DeferredRevenue.giftCardRedeemed(SRC, yen, cards, new BigDecimal("1000"));
+    assertThat(
+        net(spent.posting(), Domain.CODE_GIFT_CARD_BREAKAGE).negate().toPlainString(), is("111"));
   }
 }

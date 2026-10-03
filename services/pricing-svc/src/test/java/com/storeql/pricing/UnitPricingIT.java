@@ -335,10 +335,12 @@ class UnitPricingIT {
     measure(jp, rice, "EACH", "KG", "0.5");
     JsonObject r = resolve(jp, rice, "ONLINE");
     assertThat(r.getBoolean("unitPriceRequired"), is(false));
+    // The VAT on ¥498 at 20% is ¥100 (99.6, whole yen — never 99.60), so half a kilo is ¥598
+    // with VAT and a kilo ¥1,196: the currency's own minor units all the way through.
     assertThat(
-        "597.60 yen with VAT for half a kilo is 1195.20 a kilo, whole yen",
+        "598 yen with VAT for half a kilo is 1196 a kilo, whole yen",
         amount(r.getJsonObject("unitPricing")),
-        is("1195"));
+        is("1196"));
     assertThat(
         data(get("/admin/unit-pricing/gaps", jp, "OWNER")).getBoolean("required"), is(false));
   }

@@ -56,7 +56,7 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   const roles = call('GET', ROLES, { token: owner });
   expect(roles, '[+] the roles read', 200);
   truthy('[+] ...the four built-in tiers first, a manager holding everything, a cashier the drawer', list(roles).slice(0, 4).map((r) => r.code).join(',') === 'OWNER,MANAGER,STOREKEEPER,CASHIER' && list(roles)[1].permissions.length === 13 && list(roles)[3].permissions.join() === 'purchasing.approve,till.no_sale', list(roles).map((r) => r.code));
-  expect(call('GET', ROLES, { token: cashier.token }), '[-] a cashier cannot read the roles', 403);
+  expect(call('GET', ROLES, { token: cashier.token }), '[-] a cashier cannot read the roles', 403, 'FORBIDDEN');
 
   // ── defining roles, and every way that is wrong ──────────────────────────────
   const shiftLead = { code: 'shift_lead', name: 'Shift lead', baseTier: 'MANAGER', permissions: ['purchasing.approve', 'purchasing.invoices.decide', 'till.manage', 'stock.adjust', 'staff.manage'], description: 'Runs the floor; the owner voids and posts' };
@@ -70,11 +70,11 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   expect(define({ code: 'GOD', name: 'x', baseTier: 'OWNER', permissions: [] }), '[-] standing on the owner', 400, 'ROLE_TIER_INVALID');
   expect(define({ code: 'GOD', name: 'x', baseTier: 'MANAGER', permissions: ['orders.everything'] }), '[-] a permission that is not one', 400, 'ROLE_PERMISSION_UNKNOWN');
   expect(define({ code: 'SUPER_CASHIER', name: 'x', baseTier: 'CASHIER', permissions: ['sales.void'] }), '[-] a cashier who voids sales is a manager, not a cashier', 400, 'ROLE_PERMISSION_OUTSIDE_TIER');
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER' }), '[-] no permissions list at all', 400);
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: Array.from({ length: 51 }, () => 'sales.void') }), '[-] fifty-one permissions', 400);
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, storekeeper.token), '[-] a storekeeper cannot define one', 403);
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, cashier.token), '[-] nor a cashier', 403);
-  expect(call('GET', `${ROLES}/SHIFT_LEAD`, { token: rival.owner.token }), '[-] the rival shop sees no such role', 404);
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER' }), '[-] no permissions list at all', 400, 'VALIDATION_FAILED');
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: Array.from({ length: 51 }, () => 'sales.void') }), '[-] fifty-one permissions', 400, 'VALIDATION_FAILED');
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, storekeeper.token), '[-] a storekeeper cannot define one', 403, 'FORBIDDEN');
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, cashier.token), '[-] nor a cashier', 403, 'FORBIDDEN');
+  expect(call('GET', `${ROLES}/SHIFT_LEAD`, { token: rival.owner.token }), '[-] the rival shop sees no such role', 404, 'ROLE_NOT_FOUND');
   truthy('[-] ...and its own list has none of ours', !list(call('GET', ROLES, { token: rival.owner.token })).some((r) => r.code === 'SHIFT_LEAD'));
 
   // ── staff take the roles and their tokens carry the permissions ─────────────
@@ -128,8 +128,8 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   truthy('[+] ...and at the next sign-in is no longer a cashier, holding no role at all (SJ-D51)', !(gone.roles || []).includes('CASHIER') && (gone.roles || []).length === 0, gone);
   expect(call('DELETE', `${ROLES}/TRAINEE`, { token: owner }), '[+] now the role can go', 204);
   expect(call('GET', `${ROLES}/TRAINEE`, { token: owner }), '[-] and is gone', 404, 'ROLE_NOT_FOUND');
-  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: storekeeper.token }), '[-] a storekeeper cannot delete a role', 403);
-  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: rival.owner.token }), '[-] nor the rival', 404);
+  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: storekeeper.token }), '[-] a storekeeper cannot delete a role', 403, 'FORBIDDEN');
+  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: rival.owner.token }), '[-] nor the rival', 404, 'ROLE_NOT_FOUND');
 
   // ── abuse ────────────────────────────────────────────────────────────────────
   const race = http.batch(Array.from({ length: 20 }, () => ['POST', `${BASE}${ROLES}`, JSON.stringify({ code: 'RACER', name: 'Racer', baseTier: 'CASHIER', permissions: [] }), { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${owner}` }, tags: { name: 'POST /api/tenant-svc/admin/roles (race)' } }]));

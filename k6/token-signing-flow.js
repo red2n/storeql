@@ -92,10 +92,10 @@ export default function ({ tenant, cashier, admin }) {
   const [h, , sig] = owner.token.split('.');
   expect(call('GET', KEYS, { token: `${h}.${b64(JSON.stringify(raised))}.${sig}` }), '[abuse] a payload raised to platform administrator after signing is refused', 401);
   const otherKid = b64(JSON.stringify({ ...header, kid: `stranger-${uniq()}` }));
-  expect(me(`${otherKid}.${owner.token.split('.')[1]}.${sig}`), '[-] a key id nobody published is refused', 401);
+  expect(me(`${otherKid}.${owner.token.split('.')[1]}.${sig}`), '[-] a key id nobody published is refused', 401, 'UNAUTHORIZED');
   const noKid = b64(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-  expect(me(`${noKid}.${owner.token.split('.')[1]}.${sig}`), '[-] as is a token that names no key', 401);
-  expect(me('not.a.token'), '[-] and one that is no token at all', 401);
+  expect(me(`${noKid}.${owner.token.split('.')[1]}.${sig}`), '[-] as is a token that names no key', 401, 'UNAUTHORIZED');
+  expect(me('not.a.token'), '[-] and one that is no token at all', 401, 'UNAUTHORIZED');
 
   let floodRefused = 0;
   for (let i = 0; i < 40; i++) {
@@ -110,9 +110,9 @@ export default function ({ tenant, cashier, admin }) {
     const res = call(method, JWKS, { body: { keys: [] } });
     truthy(`[abuse] the key set cannot be written with ${method}`, [401, 403, 404, 405].includes(res.status), { status: res.status });
   }
-  expect(call('GET', KEYS), '[-] the key register needs a token', 401);
-  expect(call('GET', KEYS, { token: owner.token }), '[-] an owner does not read the key register', 403);
-  expect(call('POST', `${KEYS}/rotate`), '[-] rotation needs a token', 401);
+  expect(call('GET', KEYS), '[-] the key register needs a token', 401, 'UNAUTHORIZED');
+  expect(call('GET', KEYS, { token: owner.token }), '[-] an owner does not read the key register', 403, 'FORBIDDEN');
+  expect(call('POST', `${KEYS}/rotate`), '[-] rotation needs a token', 401, 'UNAUTHORIZED');
   expect(call('POST', `${KEYS}/rotate`, { token: owner.token }), '[abuse] an owner does not rotate the platform’s key', 403);
   expect(call('POST', `${KEYS}/rotate`, { token: cashier.token }), '[abuse] nor does a cashier', 403);
 

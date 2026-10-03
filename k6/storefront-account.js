@@ -46,8 +46,8 @@ export default function ({ tenant, rival, shopper, other }) {
   const profile = me('PUT', '', { firstName: '  Chris ', lastName: 'Carter', phone: '07700900123' });
   expect(profile, '[+] and edits their profile', 200);
   truthy('[+] trimmed, and the email stays the login\'s', data(profile).firstName === 'Chris' && data(profile).email === shopper.email.toLowerCase(), JSON.stringify(data(profile)));
-  expect(me('PUT', '', { firstName: '', lastName: 'Carter' }), '[-] a blank name', 400);
-  expect(me('PUT', '', { firstName: 'Chris', lastName: 'Carter', phone: '1'.repeat(33) }), '[-] a phone longer than 32 characters', 400);
+  expect(me('PUT', '', { firstName: '', lastName: 'Carter' }), '[-] a blank name', 400, 'VALIDATION_FAILED');
+  expect(me('PUT', '', { firstName: 'Chris', lastName: 'Carter', phone: '1'.repeat(33) }), '[-] a phone longer than 32 characters', 400, 'VALIDATION_FAILED');
 
   // ── the address book ─────────────────────────────────────────────────────────
   truthy('[+] an empty book', list(me('GET', '/addresses')).length === 0);
@@ -62,10 +62,10 @@ export default function ({ tenant, rival, shopper, other }) {
   truthy('[+] ...and the second is no longer', (book.find((a) => a.id === home.id) || {}).isDefault === true && !(book.find((a) => a.id === work.id) || {}).isDefault, JSON.stringify(book));
   expect(me('DELETE', `/addresses/${work.id}`), '[+] the second is removed', 204);
   expect(me('DELETE', `/addresses/${work.id}`), '[-] and cannot be removed twice', 404, 'ADDRESS_NOT_FOUND');
-  expect(me('POST', '/addresses', { type: 'HOME', city: 'London', country: 'GB' }), '[-] an address without a first line', 400);
-  expect(me('POST', '/addresses', { type: 'HOME', line1: '12 High Street' }), '[-] or without a country', 400);
-  expect(me('POST', '/addresses', addr('x'.repeat(121))), '[-] a line longer than 120 characters', 400);
-  expect(me('PUT', '/addresses/not-an-id', addr('Ghost')), '[-] an id that is not one never reaches the service', 403);
+  expect(me('POST', '/addresses', { type: 'HOME', city: 'London', country: 'GB' }), '[-] an address without a first line', 400, 'VALIDATION_FAILED');
+  expect(me('POST', '/addresses', { type: 'HOME', line1: '12 High Street' }), '[-] or without a country', 400, 'VALIDATION_FAILED');
+  expect(me('POST', '/addresses', addr('x'.repeat(121))), '[-] a line longer than 120 characters', 400, 'VALIDATION_FAILED');
+  expect(me('PUT', '/addresses/not-an-id', addr('Ghost')), '[-] an id that is not one never reaches the service', 403, 'FORBIDDEN');
 
   // ── the loop closed: a delivery order with the saved address ─────────────────
   const placed = call('POST', '/api/order-svc/orders', {
@@ -80,14 +80,14 @@ export default function ({ tenant, rival, shopper, other }) {
   expect(placed, '[+] a delivery order goes to the saved address', 201);
 
   // ── the wrong caller ─────────────────────────────────────────────────────────
-  expect(call('GET', '/api/customer-svc/customers/me/addresses', { ...shop }), '[-] a guest has no book', 401);
-  expect(call('PUT', '/api/customer-svc/customers/me', { body: { firstName: 'A', lastName: 'B' }, ...shop }), '[-] nor a profile', 401);
-  expect(me('GET', '/addresses', undefined, other.token), '[-] another shopper has no record here', 404);
-  expect(me('PUT', `/addresses/${home.id}`, addr('Taken', true), other.token), '[-] and cannot touch this one\'s address', 404);
-  expect(me('DELETE', `/addresses/${home.id}`, undefined, other.token), '[-] nor remove it', 404);
+  expect(call('GET', '/api/customer-svc/customers/me/addresses', { ...shop }), '[-] a guest has no book', 401, 'UNAUTHORIZED');
+  expect(call('PUT', '/api/customer-svc/customers/me', { body: { firstName: 'A', lastName: 'B' }, ...shop }), '[-] nor a profile', 401, 'UNAUTHORIZED');
+  expect(me('GET', '/addresses', undefined, other.token), '[-] another shopper has no record here', 404, 'CUSTOMER_NOT_FOUND');
+  expect(me('PUT', `/addresses/${home.id}`, addr('Taken', true), other.token), '[-] and cannot touch this one\'s address', 404, 'CUSTOMER_NOT_FOUND');
+  expect(me('DELETE', `/addresses/${home.id}`, undefined, other.token), '[-] nor remove it', 404, 'CUSTOMER_NOT_FOUND');
   truthy('[+] it is still there', list(me('GET', '/addresses')).some((a) => a.id === home.id && a.line1 === '12 High Street'));
-  expect(call('GET', '/api/customer-svc/customers/me/addresses', { token: shopper.token, storefront: rival.tenantId }), '[-] at the rival shop the shopper has no record', 404);
-  expect(call('GET', '/api/customer-svc/customers/me/addresses', { token: shopper.token }), '[-] with no shop named there is no book to find', [401, 403, 404]);
+  expect(call('GET', '/api/customer-svc/customers/me/addresses', { token: shopper.token, storefront: rival.tenantId }), '[-] at the rival shop the shopper has no record', 404, 'CUSTOMER_NOT_FOUND');
+  expect(call('GET', '/api/customer-svc/customers/me/addresses', { token: shopper.token }), '[-] with no shop named there is no book to find', 401, 'NO_TENANT');
 
   // ── abuse: the cap, the race, the hammer ─────────────────────────────────────
   const filler = register('account-filler');

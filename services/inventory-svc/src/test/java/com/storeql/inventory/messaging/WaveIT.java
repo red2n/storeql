@@ -21,6 +21,7 @@ import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import java.sql.DriverManager;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -1285,5 +1286,320 @@ class WaveIT {
                 STORE)
             .getStatus(),
         is(200));
+  }
+
+  // ── isolation: another business, another store, a shopper, bad input ───────
+
+  /** One request to a wave route. */
+  private record Route(String method, String path, String body) {}
+
+  /** Every route of the wave surface, for our store and one wave of it. */
+  private static List<Route> routes(String waveId, String lineId) {
+    String build = "{\"storeId\":\"" + STORE + "\"}";
+    String picks = "{\"lines\":[{\"lineId\":\"" + lineId + "\",\"pickedQty\":1}]}";
+    String wave = "/admin/inventory/waves/" + waveId;
+    return List.of(
+        new Route("GET", "/admin/inventory/waves/awaiting?storeId=" + STORE, null),
+        new Route("GET", "/admin/inventory/waves?storeId=" + STORE, null),
+        new Route("GET", wave, null),
+        new Route("POST", "/admin/inventory/waves", build),
+        new Route("POST", wave + "/picks", picks),
+        new Route("POST", wave + "/complete", "{}"),
+        new Route("POST", wave + "/cancel", "{}"));
+  }
+
+  private Response send(Route route, String tenant, String roles, String storeIds) {
+    return call(route.method(), route.path(), route.body(), tenant, roles, storeIds);
+  }
+
+  /** A pick of everything directed, for every line of the wave. */
+  private static String picksOf(JsonObject wave) {
+    StringBuilder picks = new StringBuilder();
+    for (JsonValue v : wave.getJsonArray("lines")) {
+      JsonObject l = v.asJsonObject();
+      picks
+          .append(picks.length() == 0 ? "" : ",")
+          .append("{\"lineId\":\"")
+          .append(l.getString("id"))
+          .append("\",\"pickedQty\":")
+          .append(l.getJsonNumber("directedQty").toString())
+          .append("}");
+    }
+    return "{\"lines\":[" + picks + "]}";
+  }
+
+  /**
+   * Our open wave at the store, built under the key given, with every line's pick recorded: all it
+   * needs for anyone who may to complete it.
+   */
+  private JsonObject pickedWave(String buildKey) {
+    receive(APPLES, 20, ZONE_A, "A-1", null);
+    receive(PEARS, 8, ZONE_A, "P-1", null);
+    twoOrdersWaiting();
+    JsonObject wave =
+        Envelopes.created(
+            call(
+                "POST",
+                "/admin/inventory/waves",
+                "{\"storeId\":\"" + STORE + "\"}",
+                T,
+                "STOREKEEPER",
+                null,
+                buildKey));
+    String waveId = wave.getString("id");
+    Envelopes.ok(post("/admin/inventory/waves/" + waveId + "/picks", picksOf(wave)));
+    return Envelopes.ok(get("/admin/inventory/waves/" + waveId));
+  }
+
+  /** Everything a wave route could change, as one string to compare before and after. */
+  private static String fingerprint(String waveId) {
+    return Envelopes.scalar(
+        PG,
+        "SELECT (SELECT status FROM inventory.pick_waves WHERE id = '"
+            + waveId
+            + "') || '|' || (SELECT coalesce(string_agg(coalesce(picked_qty::text, '-'), ','"
+            + " ORDER BY walk_order, id), '-') FROM inventory.pick_wave_lines WHERE wave_id = '"
+            + waveId
+            + "') || '|' || (SELECT count(*) FROM inventory.stock_movements WHERE type = 'SALE')"
+            + " || '|' || (SELECT coalesce(sum(remaining_qty), 0) FROM inventory.inventory_batches)"
+            + " || '|' || (SELECT count(*) FROM inventory.awaiting_orders WHERE wave_id = '"
+            + waveId
+            + "') || '|' || (SELECT count(*) FROM inventory.reservations WHERE status = 'HELD')"
+            + " || '|' || (SELECT count(*) FROM inventory.outbox WHERE event_type = 'WavePicked')");
+  }
+
+  private static String wavesOf(String tenant) {
+    return Envelopes.scalar(
+        PG, "SELECT count(*) FROM inventory.pick_waves WHERE tenant_id = '" + tenant + "'");
+  }
+
+  @Test
+  @DisplayName("Another business, whatever the role, neither sees nor touches our waves")
+  void anotherBusinessNeitherSeesNorTouchesOurWaves() {
+    String key = Ids.newId().toString();
+    JsonObject wave = pickedWave(key);
+    String waveId = wave.getString("id");
+    String lineId = wave.getJsonArray("lines").getJsonObject(0).getString("id");
+    String before = fingerprint(waveId);
+    assertThat(before, containsString("OPEN|"));
+
+    for (String role : List.of("OWNER", "MANAGER", "STOREKEEPER", "CASHIER")) {
+      // A cashier holds no stock.transfer and is refused before any wave is looked for.
+      boolean moves = !"CASHIER".equals(role);
+      int writeStatus = moves ? 404 : 403;
+      String writeCode = moves ? "INVENTORY_WAVE_NOT_FOUND" : "PERMISSION_DENIED";
+      for (Route route : routes(waveId, lineId)) {
+        String what = "another business's " + role + ": " + route.method() + " " + route.path();
+        Response r = send(route, T2, role, null);
+        if (route.path().endsWith("/awaiting?storeId=" + STORE)
+            || route.path().endsWith("/waves?storeId=" + STORE)) {
+          assertThat(what, Envelopes.okArray(r).size(), is(0));
+        } else if ("GET".equals(route.method())) {
+          assertThat(what, code(r, 404), is("INVENTORY_WAVE_NOT_FOUND"));
+        } else if (route.path().equals("/admin/inventory/waves")) {
+          // Building at our store, naming nothing of theirs: nothing of theirs waits there.
+          assertThat(
+              what,
+              code(r, moves ? 409 : 403),
+              is(moves ? "INVENTORY_WAVE_NOTHING_TO_PICK" : "PERMISSION_DENIED"));
+        } else {
+          assertThat(what, code(r, writeStatus), is(writeCode));
+        }
+      }
+    }
+    // Naming our orders gets them nothing either.
+    String ours =
+        Envelopes.okArray(get("/admin/inventory/waves/awaiting?storeId=" + STORE))
+            .getJsonObject(0)
+            .getString("orderId");
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/admin/inventory/waves",
+                "{\"storeId\":\"" + STORE + "\",\"orderIds\":[\"" + ours + "\"]}",
+                T2,
+                "OWNER"),
+            409),
+        is("INVENTORY_WAVE_NOTHING_TO_PICK"));
+    // Nor does reusing the Idempotency-Key our build was made under give them our wave back.
+    assertThat(
+        code(
+            call(
+                "POST",
+                "/admin/inventory/waves",
+                "{\"storeId\":\"" + STORE + "\"}",
+                T2,
+                "OWNER",
+                null,
+                key),
+            409),
+        is("INVENTORY_WAVE_NOTHING_TO_PICK"));
+
+    assertThat(fingerprint(waveId), is(before));
+    assertThat(wavesOf(T2), is("0"));
+    assertThat(wavesOf(T), is("1"));
+  }
+
+  @Test
+  @DisplayName("A shopper is refused at every wave route, and a cashier may look but not touch")
+  void aShopperIsRefusedAtEveryWaveRoute() {
+    JsonObject wave = pickedWave(Ids.newId().toString());
+    String waveId = wave.getString("id");
+    String lineId = wave.getJsonArray("lines").getJsonObject(0).getString("id");
+    String before = fingerprint(waveId);
+
+    for (String tenant : List.of(T, T2)) {
+      for (Route route : routes(waveId, lineId)) {
+        assertThat(
+            "a shopper of " + tenant + ": " + route.method() + " " + route.path(),
+            code(send(route, tenant, "CUSTOMER", null), 403),
+            is("FORBIDDEN"));
+      }
+    }
+    // Our own cashier reads the waves; picking, completing and building are warehouse work.
+    for (Route route : routes(waveId, lineId)) {
+      Response r = send(route, T, "CASHIER", null);
+      if ("GET".equals(route.method())) {
+        assertThat(route.path(), r.getStatus(), is(200));
+        r.close();
+      } else {
+        assertThat(
+            "our cashier: " + route.method() + " " + route.path(),
+            code(r, 403),
+            is("PERMISSION_DENIED"));
+      }
+    }
+    assertThat(fingerprint(waveId), is(before));
+    assertThat(wavesOf(T), is("1"));
+  }
+
+  @Test
+  @DisplayName("A caller held to another store is held off this store's waves")
+  void aCallerHeldToAnotherStoreIsHeldOffTheStoresWaves() {
+    JsonObject wave = pickedWave(Ids.newId().toString());
+    String waveId = wave.getString("id");
+    String lineId = wave.getJsonArray("lines").getJsonObject(0).getString("id");
+    String before = fingerprint(waveId);
+
+    for (String role : List.of("STOREKEEPER", "MANAGER")) {
+      for (Route route : routes(waveId, lineId)) {
+        assertThat(
+            role + " held to another store: " + route.method() + " " + route.path(),
+            code(send(route, T, role, OTHER_STORE), 403),
+            is("STORE_ACCESS_DENIED"));
+      }
+    }
+    assertThat(fingerprint(waveId), is(before));
+    assertThat(wavesOf(T), is("1"));
+    // Held to this store, the same reads are answered: the refusals are about the store.
+    for (String role : List.of("STOREKEEPER", "MANAGER")) {
+      Response r = call("GET", "/admin/inventory/waves/" + waveId, null, T, role, STORE);
+      assertThat(role, r.getStatus(), is(200));
+      r.close();
+    }
+  }
+
+  @Test
+  @DisplayName("Bad input to the wave routes is refused, and nothing moves")
+  void badInputToTheWaveRoutesIsRefusedAndNothingMoves() {
+    JsonObject wave = pickedWave(Ids.newId().toString());
+    String waveId = wave.getString("id");
+    String lineId = wave.getJsonArray("lines").getJsonObject(0).getString("id");
+    String before = fingerprint(waveId);
+    String notV7 = "6f1c2d3e-4b5a-4c7d-8e9f-0a1b2c3d4e5f";
+    String picks = "{\"lines\":[{\"lineId\":\"" + lineId + "\",\"pickedQty\":1}]}";
+
+    // A wave that is not an id, or an id of another version: 400 on every route that names one.
+    for (String bad : List.of("not-an-id", notV7)) {
+      String path = "/admin/inventory/waves/" + bad;
+      assertThat(path, code(call("GET", path, null, T, "OWNER"), 400), is("INVALID_UUID"));
+      assertThat(path, code(post(path + "/picks", picks), 400), is("INVALID_UUID"));
+      assertThat(path, code(post(path + "/complete", "{}"), 400), is("INVALID_UUID"));
+      assertThat(path, code(post(path + "/cancel", "{}"), 400), is("INVALID_UUID"));
+    }
+    // A store that is not an id, on the reads and on the build.
+    for (String path :
+        List.of(
+            "/admin/inventory/waves/awaiting?storeId=not-an-id",
+            "/admin/inventory/waves?storeId=" + notV7)) {
+      assertThat(path, code(call("GET", path, null, T, "OWNER"), 400), is("INVALID_UUID"));
+    }
+    assertThat(
+        code(post("/admin/inventory/waves", "{\"storeId\":\"not-an-id\"}"), 400),
+        is("INVALID_UUID"));
+    assertThat(
+        code(
+            post(
+                "/admin/inventory/waves",
+                "{\"storeId\":\"" + STORE + "\",\"orderIds\":[\"not-an-id\"]}"),
+            400),
+        is("INVALID_UUID"));
+    // A body that breaks its constraints.
+    for (String body : List.of("{}", "{\"storeId\":\"\"}", "{\"storeId\":\"   \"}")) {
+      assertThat(body, code(post("/admin/inventory/waves", body), 400), is("VALIDATION_FAILED"));
+    }
+    String picksPath = "/admin/inventory/waves/" + waveId + "/picks";
+    for (String body :
+        List.of(
+            "{}",
+            "{\"lines\":[{\"lineId\":\"" + lineId + "\"}]}",
+            "{\"lines\":[{\"lineId\":\"" + lineId + "\",\"pickedQty\":-1}]}",
+            "{\"lines\":[{\"lineId\":\"\",\"pickedQty\":1}]}")) {
+      assertThat(body, code(post(picksPath, body), 400), is("VALIDATION_FAILED"));
+    }
+    assertThat(
+        code(post(picksPath, "{\"lines\":[{\"lineId\":\"not-an-id\",\"pickedQty\":1}]}"), 400),
+        is("INVALID_UUID"));
+
+    assertThat(fingerprint(waveId), is(before));
+    assertThat(wavesOf(T), is("1"));
+  }
+
+  @Test
+  @DisplayName("A wave that is cancelled or completed takes no more picks, completions or cancels")
+  void aWaveThatIsDoneTakesNoMoreActions() {
+    // A cancelled wave first: its orders wait again, and nothing more can be done to it.
+    JsonObject first = pickedWave(Ids.newId().toString());
+    String cancelledId = first.getString("id");
+    String firstLine = first.getJsonArray("lines").getJsonObject(0).getString("id");
+    assertThat(
+        Envelopes.ok(post("/admin/inventory/waves/" + cancelledId + "/cancel", "{}"))
+            .getString("status"),
+        is("CANCELLED"));
+    String cancelled = fingerprint(cancelledId);
+    assertThat(cancelled, containsString("CANCELLED|"));
+    assertNoMoreActions(cancelledId, firstLine);
+    assertThat(fingerprint(cancelledId), is(cancelled));
+
+    // A completed one: the stock was drawn once, and a second completion, pick or cancel changes
+    // neither the shelf nor what was announced.
+    JsonObject second =
+        Envelopes.created(post("/admin/inventory/waves", "{\"storeId\":\"" + STORE + "\"}"));
+    String doneId = second.getString("id");
+    String secondLine = second.getJsonArray("lines").getJsonObject(0).getString("id");
+    Envelopes.ok(post("/admin/inventory/waves/" + doneId + "/picks", picksOf(second)));
+    assertThat(
+        Envelopes.ok(post("/admin/inventory/waves/" + doneId + "/complete", "{}"))
+            .getString("status"),
+        is("COMPLETED"));
+    String completed = fingerprint(doneId);
+    assertThat(completed, containsString("COMPLETED|"));
+    assertNoMoreActions(doneId, secondLine);
+    assertThat(fingerprint(doneId), is(completed));
+  }
+
+  /** Picking, completing and cancelling a wave that is no longer open are all refused. */
+  private void assertNoMoreActions(String waveId, String lineId) {
+    String wave = "/admin/inventory/waves/" + waveId;
+    String picks = "{\"lines\":[{\"lineId\":\"" + lineId + "\",\"pickedQty\":1}]}";
+    assertThat(
+        wave + "/picks", code(post(wave + "/picks", picks), 409), is("INVENTORY_WAVE_NOT_OPEN"));
+    assertThat(
+        wave + "/complete",
+        code(post(wave + "/complete", "{}"), 409),
+        is("INVENTORY_WAVE_NOT_OPEN"));
+    assertThat(
+        wave + "/cancel", code(post(wave + "/cancel", "{}"), 409), is("INVENTORY_WAVE_NOT_OPEN"));
   }
 }

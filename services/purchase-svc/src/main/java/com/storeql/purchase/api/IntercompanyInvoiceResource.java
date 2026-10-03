@@ -44,7 +44,10 @@ public class IntercompanyInvoiceResource {
    *
    * @param req the sending and receiving stores, the amount and the invoice date
    * @return {@code 201} with both sides of the pair
-   * @throws com.storeql.web.ApiException {@code 400} when the two stores are the same
+   * @throws com.storeql.web.ApiException {@code 400} when the body is wrong — the two stores the
+   *     same, an amount finer than its currency, a gross that is not net plus VAT, VAT on a
+   *     VAT-group supply — whoever sends it; then {@code 403} when the caller is held to stores
+   *     that do not include both ends
    */
   @Operation(
       summary = "Raise an intercompany invoice pair",
@@ -53,7 +56,17 @@ public class IntercompanyInvoiceResource {
               + " atomically, posting the corresponding FRS 102 / UK GAAP double-entry nominal"
               + " ledger entries. Payment due date is invoice date + 30 days (BACS terms).")
   @APIResponse(responseCode = "201", description = "Invoice pair raised")
-  @APIResponse(responseCode = "400", description = "from and to store must be different")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "PURCHASE_IC_SAME_STORE: from and to store must be different; PURCHASE_AMOUNT_TOO_PRECISE:"
+              + " an amount finer than the currency's minor units; PURCHASE_IC_GROSS_MISMATCH:"
+              + " grossAmount is not netAmount plus vatAmount; PURCHASE_IC_VAT_DISREGARDED: a"
+              + " vatAmount on a supply inside one VAT group (vatDisregarded)")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "STORE_ACCESS_DENIED: the caller is held to stores that do not include both ends")
   @POST
   public Response raise(RaiseIntercompanyInvoiceRequest req) {
     Validations.validate(req);
@@ -96,6 +109,9 @@ public class IntercompanyInvoiceResource {
       summary = "Get an intercompany invoice",
       description = "Returns a single AR or AP intercompany invoice.")
   @APIResponse(responseCode = "404", description = "Invoice not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to neither end of the transfer")
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") UUID id) {
@@ -117,6 +133,11 @@ public class IntercompanyInvoiceResource {
           "Posts the settlement nominal ledger entries (bank/debtors or creditors/bank) for the"
               + " given invoice.")
   @APIResponse(responseCode = "404", description = "Invoice not found")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "STORE_ACCESS_DENIED: the caller is not held to the side's store (the sender's for"
+              + " AR, the receiver's for AP)")
   @POST
   @Path("/{id}/settle")
   public Response settle(@PathParam("id") UUID id) {

@@ -79,6 +79,7 @@ class OrderIT {
 
   @Inject WebTarget target;
   @Inject OrderService orderService;
+  @Inject com.storeql.order.repo.OrderRepository orderRepo;
   @Inject com.storeql.service.TenantStatusRepository tenantStatus;
 
   @AfterAll
@@ -1903,21 +1904,244 @@ class OrderIT {
     return scalarOf("SELECT status FROM \"order\".special_orders WHERE id = '" + id + "'");
   }
 
+  private static jakarta.json.JsonObject dataOf(String body) {
+    return com.storeql.test.Envelopes.parse(body).getJsonObject("data");
+  }
+
+  /** A special order posted under a key by a role held to the stores named, or to none if null. */
+  private Response specialAs(String json, String tenant, String role, String stores, String key) {
+    var req =
+        target
+            .path("/admin/special-orders")
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", Ids.newId().toString())
+            .header("X-Roles", role)
+            .header("Idempotency-Key", key);
+    if (stores != null) req = req.header("X-Store-Ids", stores);
+    return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  /** How many special orders, of every business, were made under a key. */
+  private static long specialOrdersUnder(String key) {
+    return countOf(
+        "SELECT count(*) FROM \"order\".special_orders WHERE idempotency_key = '" + key + "'");
+  }
+
   @Test
-  @DisplayName("A special order sent twice under one key is made once; the retry is refused")
+  @DisplayName("A special order sent twice under one key is made once; the retry answers the first")
   void aSpecialOrderSentTwiceUnderOneKeyIsMadeOnce() {
     String key = Ids.newId().toString();
     String json = specialOrderJson(ONE_SPECIAL_LINE);
     Response first = post("/admin/special-orders", json, T, key);
-    assertThat(first.readEntity(String.class), first.getStatus(), is(201));
+    String firstBody = first.readEntity(String.class);
+    assertThat(firstBody, first.getStatus(), is(201));
+    String id = extractId(firstBody);
+
+    // A client that timed out and sent it again is answered as the first send was: the same
+    // status, the same order, the same lines. The retry writes nothing.
     Response second = post("/admin/special-orders", json, T, key);
-    String body = second.readEntity(String.class);
-    assertThat(body, second.getStatus(), is(409));
-    assertThat(body, containsString("SPECIAL_ORDER_DUPLICATE_KEY"));
+    String secondBody = second.readEntity(String.class);
+    assertThat(secondBody, second.getStatus(), is(201));
+    assertThat(extractId(secondBody), is(id));
+    assertThat(dataOf(secondBody), is(dataOf(firstBody)));
+    assertThat(specialOrdersUnder(key), is(1L));
+    assertThat(
+        countOf("SELECT count(*) FROM \"order\".special_order_items WHERE so_id = '" + id + "'"),
+        is(1L));
     assertThat(
         countOf(
-            "SELECT count(*) FROM \"order\".special_orders WHERE idempotency_key = '" + key + "'"),
+            "SELECT count(*) FROM \"order\".special_order_status_history WHERE so_id = '"
+                + id
+                + "'"),
         is(1L));
+
+    // Moved on since, it is still the order the key made, answered as it stands now.
+    assertThat(post("/admin/special-orders/" + id + "/confirm", "{}", T).getStatus(), is(200));
+    Response late = post("/admin/special-orders", json, T, key);
+    String lateBody = late.readEntity(String.class);
+    assertThat(lateBody, late.getStatus(), is(201));
+    assertThat(extractId(lateBody), is(id));
+    assertThat(lateBody, containsString("CONFIRMED"));
+    assertThat(specialOrdersUnder(key), is(1L));
+  }
+
+  @Test
+  @DisplayName("The same key for a different special order is refused, and the first stands")
+  void theSameKeyForAnotherSpecialOrderIsRefused() {
+    String key = Ids.newId().toString();
+    Response first = post("/admin/special-orders", specialOrderJson(ONE_SPECIAL_LINE), T, key);
+    String firstBody = first.readEntity(String.class);
+    assertThat(firstBody, first.getStatus(), is(201));
+    String id = extractId(firstBody);
+    long ordersBefore =
+        countOf("SELECT count(*) FROM \"order\".special_orders WHERE tenant_id = '" + T + "'");
+
+    String line = "{\"variantId\":\"" + V + "\",\"qty\":1,\"unitPrice\":5.00}";
+    String[] others = {
+      specialOrderJson("[{\"variantId\":\"" + V + "\",\"qty\":2,\"unitPrice\":5.00}]"),
+      specialOrderJson("[{\"variantId\":\"" + V + "\",\"qty\":1,\"unitPrice\":6.00}]"),
+      specialOrderJson("[{\"variantId\":\"" + Ids.newId() + "\",\"qty\":1,\"unitPrice\":5.00}]"),
+      specialOrderJson(
+          "[{\"variantId\":\"" + V + "\",\"qty\":1,\"unitPrice\":5.00,\"notes\":\"gift\"}]"),
+      specialOrderJson("[" + line + "," + line + "]"),
+      "{\"storeId\":\"" + S + "\",\"customerName\":\"Sam\",\"items\":" + ONE_SPECIAL_LINE + "}",
+      specialOrderJson(ONE_SPECIAL_LINE).replace(S, Ids.newId().toString())
+    };
+    for (String other : others) {
+      Response r = post("/admin/special-orders", other, T, key);
+      String body = r.readEntity(String.class);
+      assertThat(other + ": " + body, r.getStatus(), is(409));
+      assertThat(other, body, containsString("IDEMPOTENCY_KEY_REUSED"));
+    }
+
+    // Nothing was written by any of them, and the first stands as it was made.
+    assertThat(specialOrdersUnder(key), is(1L));
+    assertThat(
+        countOf("SELECT count(*) FROM \"order\".special_orders WHERE tenant_id = '" + T + "'"),
+        is(ordersBefore));
+    assertThat(
+        scalarOf("SELECT qty FROM \"order\".special_order_items WHERE so_id = '" + id + "'"),
+        is("1.000"));
+    assertThat(
+        scalarOf("SELECT unit_price FROM \"order\".special_order_items WHERE so_id = '" + id + "'"),
+        is("5.00"));
+    // The request that made it is still answered with it.
+    Response again = post("/admin/special-orders", specialOrderJson(ONE_SPECIAL_LINE), T, key);
+    String againBody = again.readEntity(String.class);
+    assertThat(againBody, again.getStatus(), is(201));
+    assertThat(extractId(againBody), is(id));
+  }
+
+  @Test
+  @DisplayName("Six sends of one special order at once make one order, each answered with it")
+  void concurrentSendsOfOneSpecialOrderMakeOneOrder() throws Exception {
+    String key = Ids.newId().toString();
+    String json = specialOrderJson(ONE_SPECIAL_LINE);
+    int callers = 6;
+    CountDownLatch start = new CountDownLatch(1);
+    var pool = Executors.newFixedThreadPool(callers);
+    java.util.Set<String> ids = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    List<Integer> statuses = new ArrayList<>();
+    try {
+      List<Future<Integer>> results = new ArrayList<>();
+      for (int i = 0; i < callers; i++) {
+        results.add(
+            pool.submit(
+                () -> {
+                  start.await();
+                  Response r = post("/admin/special-orders", json, T, key);
+                  String body = r.readEntity(String.class);
+                  if (r.getStatus() == 201) ids.add(extractId(body));
+                  return r.getStatus();
+                }));
+      }
+      start.countDown();
+      for (Future<Integer> f : results) statuses.add(f.get(30, TimeUnit.SECONDS));
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(
+        statuses.toString(), statuses.stream().filter(s -> s == 201).count(), is((long) callers));
+    assertThat(ids.toString(), ids.size(), is(1));
+    assertThat(specialOrdersUnder(key), is(1L));
+    assertThat(
+        countOf(
+            "SELECT count(*) FROM \"order\".special_order_items WHERE so_id = '"
+                + ids.iterator().next()
+                + "'"),
+        is(1L));
+  }
+
+  @Test
+  @DisplayName("A special order's key reads nothing across stores, roles or businesses")
+  void aSpecialOrdersKeyReadsNothingOfAnotherStoreOrBusiness() {
+    String key = Ids.newId().toString();
+    String json = specialOrderJson(ONE_SPECIAL_LINE);
+    Response first = specialAs(json, T, "MANAGER", S, key);
+    String firstBody = first.readEntity(String.class);
+    assertThat(firstBody, first.getStatus(), is(201));
+    String id = extractId(firstBody);
+
+    // A manager held to other stores is refused before the key is looked at, so the first order is
+    // not read back to them.
+    Response held = specialAs(json, T, "MANAGER", Ids.newId() + "," + Ids.newId(), key);
+    String heldBody = held.readEntity(String.class);
+    assertThat(heldBody, held.getStatus(), is(403));
+    assertThat(heldBody, containsString("STORE_ACCESS_DENIED"));
+    assertThat(heldBody, not(containsString(id)));
+    // Below management, and shoppers, are refused by role at their own store as anywhere.
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      Response r = specialAs(json, T, role, S, key);
+      String body = r.readEntity(String.class);
+      assertThat(role + ": " + body, r.getStatus(), is(403));
+      assertThat(role, body, not(containsString(id)));
+    }
+    assertThat(specialOrdersUnder(key), is(1L));
+
+    // Another business uses keys of its own: the same key there is an order of theirs, never ours,
+    // and below management they are refused too.
+    String rival = "01a090ae-611e-7014-8cd5-baf0862fa319";
+    String theirJson = specialOrderJson(ONE_SPECIAL_LINE).replace(S, Ids.newId().toString());
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      Response r = specialAs(theirJson, rival, role, null, key);
+      assertThat(role, r.getStatus(), is(403));
+      r.close();
+    }
+    assertThat("nothing yet for them", specialOrdersUnder(key), is(1L));
+    Response theirs = specialAs(theirJson, rival, "OWNER", null, key);
+    String theirBody = theirs.readEntity(String.class);
+    assertThat(theirBody, theirs.getStatus(), is(201));
+    String theirId = extractId(theirBody);
+    assertThat(theirId, not(is(id)));
+    assertThat(
+        scalarOf("SELECT tenant_id FROM \"order\".special_orders WHERE id = '" + theirId + "'"),
+        is(rival));
+    assertThat(specialOrdersUnder(key), is(2L));
+
+    // Each is answered with its own on a retry, and the ones refused above changed neither.
+    assertThat(
+        extractId(specialAs(theirJson, rival, "MANAGER", null, key).readEntity(String.class)),
+        is(theirId));
+    assertThat(extractId(specialAs(json, T, "MANAGER", S, key).readEntity(String.class)), is(id));
+    assertThat(specialOrdersUnder(key), is(2L));
+  }
+
+  @Test
+  @DisplayName("A special order's key must be a UUIDv7, in the header or the body")
+  void aSpecialOrderKeyThatIsNotAUuidV7IsRefused() {
+    long before =
+        countOf("SELECT count(*) FROM \"order\".special_orders WHERE tenant_id = '" + T + "'");
+    String json = specialOrderJson(ONE_SPECIAL_LINE);
+    // A version 4 id, and a key made from a clock reading: neither is a UUIDv7.
+    for (String bad :
+        new String[] {"7c9e6679-7425-40de-944b-e07fc1f90ae7", "pos-1760000000000-order"}) {
+      Response r = post("/admin/special-orders", json, T, bad);
+      String body = r.readEntity(String.class);
+      assertThat(bad + ": " + body, r.getStatus(), is(400));
+      assertThat(bad, body, containsString("IDEMPOTENCY_KEY_INVALID"));
+    }
+    String inBody = json.substring(0, json.length() - 1) + ",\"idempotencyKey\":\"not-a-key\"}";
+    Response r = post("/admin/special-orders", inBody, T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(400));
+    assertThat(body, containsString("IDEMPOTENCY_KEY_INVALID"));
+    assertThat(
+        "nothing was written",
+        countOf("SELECT count(*) FROM \"order\".special_orders WHERE tenant_id = '" + T + "'"),
+        is(before));
+
+    // A good key in the body is the key as the header is: the retry answers the first order.
+    String key = Ids.newId().toString();
+    String keyed = json.substring(0, json.length() - 1) + ",\"idempotencyKey\":\"" + key + "\"}";
+    Response made = post("/admin/special-orders", keyed, T);
+    String madeBody = made.readEntity(String.class);
+    assertThat(madeBody, made.getStatus(), is(201));
+    Response retry = post("/admin/special-orders", keyed, T);
+    String retryBody = retry.readEntity(String.class);
+    assertThat(retryBody, retry.getStatus(), is(201));
+    assertThat(extractId(retryBody), is(extractId(madeBody)));
+    assertThat(specialOrdersUnder(key), is(1L));
   }
 
   @Test
@@ -1982,6 +2206,54 @@ class OrderIT {
     }
     assertThat(specialStatus(id), is("PENDING"));
     assertThat(get("/admin/special-orders/" + id, T).getStatus(), is(200));
+  }
+
+  @Test
+  @DisplayName("A special order is moved only by staff at its store; another business finds none")
+  void aSpecialOrderIsMovedOnlyByStaffAtItsStore() {
+    String id = newSpecialOrder();
+    String path = "/admin/special-orders/" + id;
+    String history =
+        "SELECT count(*) FROM \"order\".special_order_status_history WHERE so_id = '" + id + "'";
+    long historyBefore = countOf(history);
+
+    // A manager held to other stores moves nothing, whatever the action: refused by store.
+    for (String action : new String[] {"confirm", "fulfil", "cancel"}) {
+      Response elsewhere =
+          postHeld(path + "/" + action, "{}", T, "MANAGER", Ids.newId().toString());
+      String body = elsewhere.readEntity(String.class);
+      assertThat(action + ": " + body, elsewhere.getStatus(), is(403));
+      assertThat(action, body, containsString("STORE_ACCESS_DENIED"));
+    }
+    // Below management, and shoppers, are refused by role before anything is looked at.
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      Response r = postHeld(path + "/confirm", "{}", T, role, S);
+      assertThat(role, r.getStatus(), is(403));
+      r.close();
+    }
+    // Another business's management, even held to our store's id, finds no such special order.
+    String rival = "01a090ae-611e-7014-8cd5-baf0862fa319";
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response r = postHeld(path + "/confirm", "{}", rival, role, S);
+      String body = r.readEntity(String.class);
+      assertThat(role + ": " + body, r.getStatus(), is(404));
+      assertThat(role, body, containsString("SPECIAL_ORDER_NOT_FOUND"));
+    }
+    assertThat("nothing moved", specialStatus(id), is("PENDING"));
+    assertThat("nothing was written", countOf(history), is(historyBefore));
+
+    // Held to its own store, a manager moves it through its life.
+    assertThat(postHeld(path + "/confirm", "{}", T, "MANAGER", S).getStatus(), is(200));
+    assertThat(specialStatus(id), is("CONFIRMED"));
+    assertThat(postHeld(path + "/fulfil", "{}", T, "MANAGER", S).getStatus(), is(200));
+    assertThat(specialStatus(id), is("FULFILLED"));
+
+    // The store is judged before the status, so a manager held elsewhere learns nothing of it.
+    Response late = postHeld(path + "/cancel", "{}", T, "MANAGER", Ids.newId().toString());
+    String lateBody = late.readEntity(String.class);
+    assertThat(lateBody, late.getStatus(), is(403));
+    assertThat(lateBody, containsString("STORE_ACCESS_DENIED"));
+    assertThat(specialStatus(id), is("FULFILLED"));
   }
 
   private static String layawayJson(String items, String deposit) {
@@ -2523,6 +2795,38 @@ class OrderIT {
 
   @Test
   @DisplayName(
+      "A wave that picked nothing of a line is refused, remembers nothing and moves nothing")
+  void aWaveHandoverOfNothingIsRefused() {
+    // The button's body is checked at the boundary; a WavePicked event is not, so the service
+    // itself refuses a quantity that is not above zero.
+    UUID order = placeOnlinePickup(5);
+    assertThat(post("/orders/" + order + "/confirm", "{}", T).getStatus(), is(200));
+    UUID dedupe = Ids.newId();
+    for (String qty : List.of("0", "-1")) {
+      var none =
+          new com.storeql.order.dto.Dtos.FulfilRequest(
+              List.of(new com.storeql.order.dto.Dtos.FulfilLine(V, new BigDecimal(qty))));
+      var refused =
+          org.junit.jupiter.api.Assertions.assertThrows(
+              com.storeql.web.ApiException.class,
+              () -> orderService.fulfilOrderOnce(dedupe, "test/wave", Ids.parse(T), order, none));
+      assertThat(refused.status(), is(400));
+      assertThat(refused.code(), is("ORDER_FULFIL_QTY_INVALID"));
+    }
+    String still = get("/orders/" + order, T).readEntity(String.class);
+    assertThat(still, containsString("\"status\":\"CONFIRMED\""));
+    assertThat(fulfilledQtyOf(still).signum(), is(0));
+    assertThat(outboxCount(order, "OrderFulfilled"), is(0L));
+    // Nothing was marked as done, so the same event told again with the real quantity is applied.
+    var two =
+        new com.storeql.order.dto.Dtos.FulfilRequest(
+            List.of(new com.storeql.order.dto.Dtos.FulfilLine(V, new BigDecimal("2"))));
+    assertThat(
+        orderService.fulfilOrderOnce(dedupe, "test/wave", Ids.parse(T), order, two), is(true));
+  }
+
+  @Test
+  @DisplayName(
       "A part-fulfilled order cannot be cancelled, and returns are capped by what was handed over")
   void partFulfilledOrderKeepsItsGoodsHonest() {
     UUID order = placeOnlinePickup(5);
@@ -2670,6 +2974,13 @@ class OrderIT {
             null);
     assertThat(unknown.getStatus(), is(400));
     assertThat(unknown.readEntity(String.class), containsString("ORDER_PRICE_LINE"));
+    // A line that is not a line at all is refused by its place, not a server error.
+    Response nullLine =
+        postAs("/orders/" + order + "/price", "{\"lines\":[null]}", T, USER, "MANAGER", null);
+    assertThat(nullLine.getStatus(), is(400));
+    String nullBody = nullLine.readEntity(String.class);
+    assertThat(nullBody, containsString("VALIDATION_FAILED"));
+    assertThat(nullBody, containsString("lines[0]: must not be null"));
     Response empty =
         postAs("/orders/" + order + "/price", "{\"lines\":[]}", T, USER, "MANAGER", null);
     assertThat(empty.getStatus(), is(400));
@@ -2908,5 +3219,119 @@ class OrderIT {
             null);
     assertThat(atTheLimit.getStatus(), is(200));
     assertThat(voidLogRows(orderId), is(1L));
+  }
+
+  /** An outbox row of the probe, created long ago, published when {@code published} says. */
+  private static void outboxProbe(String marker, String published) {
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "INSERT INTO \"order\".outbox (id, event_type, topic, tenant_id, aggregate_id, payload,"
+            + " created_at, published_at) VALUES ('"
+            + Ids.newId()
+            + "', 'PurgeProbe', '"
+            + marker
+            + "', '"
+            + T
+            + "', '"
+            + Ids.newId()
+            + "', '{}', now() - interval '11 days', "
+            + published
+            + ")");
+  }
+
+  /** A dedupe row of a consumer, seen {@code age} ago. */
+  private static void dedupeProbe(String marker, String age) {
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "INSERT INTO \"order\".processed_events (event_id, consumer, created_at) VALUES ('"
+            + Ids.newId()
+            + "', '"
+            + marker
+            + "', now() - interval '"
+            + age
+            + "')");
+  }
+
+  /**
+   * The hourly purge, run against this schema: published outbox rows older than the cutoff go, in
+   * batches, oldest first; a row recent enough, or not yet published, stays whatever its age; and
+   * the same for dedupe rows, whose timestamp here is created_at (the purge asks for processed_at
+   * first and falls back).
+   */
+  @Test
+  @DisplayName("The purge trims published outbox rows and old dedupe rows in batches, and no more")
+  void thePurgeTrimsOnlyWhatIsPublishedAndOld() {
+    String tail = Ids.newId().toString();
+    String marker = "purge-" + tail.substring(tail.length() - 12);
+    for (int i = 0; i < 3; i++) outboxProbe(marker, "now() - interval '10 days'");
+    for (int i = 0; i < 2; i++) outboxProbe(marker, "now() - interval '1 hour'");
+    outboxProbe(marker, "NULL");
+    java.time.Instant cutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(7));
+
+    assertThat("a batch of two", orderRepo.purgePublished(cutoff, 2), is(2));
+    assertThat("then the rest", orderRepo.purgePublished(cutoff, 2), is(1));
+    assertThat("and no more", orderRepo.purgePublished(cutoff, 2), is(0));
+    assertThat(
+        "the recent and the unpublished stay",
+        countOf("SELECT count(*) FROM \"order\".outbox WHERE topic = '" + marker + "'"),
+        is(3L));
+    assertThat(
+        "published and old is gone",
+        countOf(
+            "SELECT count(*) FROM \"order\".outbox WHERE topic = '"
+                + marker
+                + "' AND published_at < now() - interval '7 days'"),
+        is(0L));
+
+    for (int i = 0; i < 2; i++) dedupeProbe(marker, "40 days");
+    dedupeProbe(marker, "1 hour");
+    java.time.Instant dedupeCutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(30));
+    assertThat(orderRepo.purgeProcessedEvents(dedupeCutoff, 100), is(2));
+    assertThat(orderRepo.purgeProcessedEvents(dedupeCutoff, 100), is(0));
+    assertThat(
+        "the recent one stays",
+        countOf(
+            "SELECT count(*) FROM \"order\".processed_events WHERE consumer = '" + marker + "'"),
+        is(1L));
+  }
+
+  /**
+   * The hourly purge (common-service) deletes published outbox rows and old dedupe rows in batches,
+   * oldest first, and each batch needs an index on the timestamp it orders by or it scans the whole
+   * table. With sequential scans switched off the planner takes an index only when one can serve
+   * the statement, so the plan names it.
+   */
+  @Test
+  @DisplayName("The purge of published outbox rows and old dedupe rows is served by indexes")
+  void thePurgeOfPublishedOutboxRowsAndOldDedupeRowsIsServedByIndexes() throws Exception {
+    try (var conn =
+            java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      assertThat(
+          planOf(
+              st,
+              "SELECT id FROM \"order\".outbox WHERE published_at IS NOT NULL"
+                  + " AND published_at < now() ORDER BY published_at ASC LIMIT 1000"
+                  + " FOR UPDATE SKIP LOCKED"),
+          containsString("idx_outbox_published"));
+      assertThat(
+          planOf(
+              st,
+              "SELECT event_id FROM \"order\".processed_events WHERE created_at < now()"
+                  + " ORDER BY created_at ASC LIMIT 1000 FOR UPDATE SKIP LOCKED"),
+          containsString("idx_processed_events_created_at"));
+    }
+  }
+
+  /** The plan Postgres would use for the statement, one line per node. */
+  private static String planOf(java.sql.Statement st, String sql) throws java.sql.SQLException {
+    StringBuilder plan = new StringBuilder();
+    try (var rs = st.executeQuery("EXPLAIN " + sql)) {
+      while (rs.next()) {
+        plan.append(rs.getString(1)).append('\n');
+      }
+    }
+    return plan.toString();
   }
 }

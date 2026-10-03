@@ -539,6 +539,38 @@ class PurchaseIT {
     assertRefused(rBad, 400, "PURCHASE_IC_SAME_STORE");
   }
 
+  @Test
+  void intercompanyInvoiceMustAddUp() {
+    // Gross is net plus VAT, or nothing is raised and nothing is posted.
+    for (String[] c :
+        new String[][] {
+          {"1000.00", "200.00", "1000.00", "false", "PURCHASE_IC_GROSS_MISMATCH"},
+          {"1000.00", "200.00", "1200.01", "false", "PURCHASE_IC_GROSS_MISMATCH"},
+          {"500.00", "100.00", "600.00", "true", "PURCHASE_IC_VAT_DISREGARDED"}
+        }) {
+      Response r =
+          post(
+              "/intercompany-invoices",
+              "{\"fromStoreId\":\""
+                  + STORE_A
+                  + "\",\"toStoreId\":\""
+                  + STORE_B
+                  + "\",\"netAmount\":"
+                  + c[0]
+                  + ",\"vatAmount\":"
+                  + c[1]
+                  + ",\"grossAmount\":"
+                  + c[2]
+                  + ",\"vatDisregarded\":"
+                  + c[3]
+                  + ",\"currency\":\"GBP\"}",
+              T);
+      assertRefused(r, 400, c[4]);
+    }
+    assertThat(get("/intercompany-invoices", T).readEntity(String.class), containsString("[]"));
+    assertThat(get("/nominal-ledger", T).readEntity(String.class), containsString("[]"));
+  }
+
   // ── SJ-D3: CANCELLED was an unreachable state ────────────────────────────────
 
   /** A DRAFT purchase order raised in error can be cancelled, with its reason recorded. */

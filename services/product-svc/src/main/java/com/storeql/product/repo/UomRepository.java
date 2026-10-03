@@ -146,11 +146,35 @@ public class UomRepository extends BaseJdbcRepository {
   }
 
   /**
+   * The variant an item conversion belongs to.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param id the item conversion
+   * @return its variant, or empty when it is not the tenant's
+   */
+  public java.util.Optional<UUID> variantOfItemConversion(UUID tenantId, UUID id) {
+    try (var c = dataSource.getConnection();
+        var ps =
+            c.prepareStatement(
+                "SELECT variant_id FROM uom_item_conversions WHERE tenant_id = ? AND id = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, id);
+      try (var rs = ps.executeQuery()) {
+        return rs.next()
+            ? java.util.Optional.of(rs.getObject("variant_id", UUID.class))
+            : java.util.Optional.empty();
+      }
+    } catch (SQLException e) {
+      throw dbError("find item conversion", e);
+    }
+  }
+
+  /**
    * Deletes an item conversion.
    *
    * @param tenantId owning tenant; the first condition of the query
-   * @param id the item conversion to act on
-   * @return {@code true} when a row was removed, {@code false} when nothing matched
+   * @param id the conversion
+   * @return whether a row was removed
    */
   public boolean deleteItemConversion(UUID tenantId, UUID id) {
     try (var c = dataSource.getConnection();

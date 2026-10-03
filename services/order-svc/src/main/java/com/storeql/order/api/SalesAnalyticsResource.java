@@ -83,6 +83,11 @@ public class SalesAnalyticsResource {
       responseCode = "400",
       description = "Unknown tz or channel, unparseable timestamp, or from is not before to")
   @APIResponse(responseCode = "403", description = "Caller is not OWNER or MANAGER")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, is neither projected here nor readable from tenant-svc")
   @GET
   @Path("/sales-by-hour")
   public Response salesByHour(
@@ -140,6 +145,11 @@ public class SalesAnalyticsResource {
       responseCode = "400",
       description = "Unparseable timestamp or storeId, or from is not before to")
   @APIResponse(responseCode = "403", description = "Caller is not OWNER or MANAGER")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, is neither projected here nor readable from tenant-svc")
   @GET
   @Path("/sales-by-staff")
   public Response salesByStaff(

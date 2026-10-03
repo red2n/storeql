@@ -88,30 +88,37 @@ public class DepositRepository extends BaseOutboxRepository {
    * A line closed short or substituted (substitutions for out-of-stock online lines) carries a
    * smaller deposit: the container deposit on the line shrinks to what stands of it, the qty first
    * and the amount from the qty, so the deposit stays qty × deposit_each as charged.
+   *
+   * @param scale the order currency's minor units ({@code Fx.minorUnits})
    */
   static void shrinkDepositTx(
       Connection c,
       UUID tenantId,
       UUID orderItemId,
       BigDecimal standingAfter,
-      BigDecimal standingBefore)
+      BigDecimal standingBefore,
+      int scale)
       throws SQLException {
     if (standingBefore.signum() <= 0) return;
+    // Quantities keep their three decimals; money is rounded to the order currency's own minor
+    // units ({@code scale}): whole yen, three-decimal dinars.
     try (PreparedStatement ps =
         c.prepareStatement(
             "UPDATE order_deposits SET"
                 + " qty = ROUND(qty * ? / ?, 3),"
-                + " amount = ROUND(ROUND(qty * ? / ?, 3) * deposit_each, 2),"
-                + " vat_amount = ROUND(vat_amount * ? / ?, 2)"
+                + " amount = ROUND(ROUND(qty * ? / ?, 3) * deposit_each, ?),"
+                + " vat_amount = ROUND(vat_amount * ? / ?, ?)"
                 + " WHERE tenant_id = ? AND order_item_id = ?")) {
       ps.setBigDecimal(1, standingAfter);
       ps.setBigDecimal(2, standingBefore);
       ps.setBigDecimal(3, standingAfter);
       ps.setBigDecimal(4, standingBefore);
-      ps.setBigDecimal(5, standingAfter);
-      ps.setBigDecimal(6, standingBefore);
-      ps.setObject(7, tenantId);
-      ps.setObject(8, orderItemId);
+      ps.setInt(5, scale);
+      ps.setBigDecimal(6, standingAfter);
+      ps.setBigDecimal(7, standingBefore);
+      ps.setInt(8, scale);
+      ps.setObject(9, tenantId);
+      ps.setObject(10, orderItemId);
       ps.executeUpdate();
     }
   }

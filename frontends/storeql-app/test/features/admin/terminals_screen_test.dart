@@ -128,6 +128,17 @@ void main() {
     expect(find.byIcon(Icons.delete), findsNothing);
   });
 
+  testWidgets('the retire reason takes at most 300 characters, what payment-svc accepts', (tester) async {
+    await _pump(tester);
+    await tester.tap(find.byKey(const Key('terminal-retire-t-1')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('terminal-retire-reason')), 'x' * 400);
+    await tester.pump();
+    final field = tester.widget<TextField>(find.byKey(const Key('terminal-retire-reason')));
+    expect(field.maxLength, 300);
+    expect(field.controller!.text.length, 300);
+  });
+
   testWidgets('a machine is added at a store picked by name, and the store id is what is sent',
       (tester) async {
     final server = await _pump(tester);

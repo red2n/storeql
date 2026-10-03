@@ -183,10 +183,10 @@ export default function ({ gb, cafe, shopper, nowhere, india, noHsn, bengaluru }
   expect(issue(privately.id), '[-] a customer not recorded as a registered business gets a receipt, not an invoice', 409, 'ORDER_INVOICE_BUYER_NOT_REGISTERED');
   const homeless = sell(gb, { customerId: nowhere });
   expect(issue(homeless.id), '[-] a registered business with no address cannot be invoiced yet', 409, 'ORDER_INVOICE_BUYER_ADDRESS_MISSING');
-  expect(issue('01990000-0000-7000-8000-000000000000'), '[-] an unknown sale is not found', 404);
-  expect(inv('/sales-invoices/01990000-0000-7000-8000-000000000000'), '[-] nor an unknown document', 404);
-  expect(inv('/sales-invoices?after=not-a-cursor'), '[-] a cursor that is not a document is refused', 400);
-  expect(call('POST', `${O}/admin/returns/01990000-0000-7000-8000-000000000000/credit-note`, { token: t, body: {} }), '[-] an unknown return cannot be credited', 404);
+  expect(issue('01990000-0000-7000-8000-000000000000'), '[-] an unknown sale is not found', 404, 'ORDER_NOT_FOUND');
+  expect(inv('/sales-invoices/01990000-0000-7000-8000-000000000000'), '[-] nor an unknown document', 404, 'ORDER_INVOICE_NOT_FOUND');
+  expect(inv('/sales-invoices?after=not-a-cursor'), '[-] a cursor that is not a document is refused', 400, 'INVALID_UUID');
+  expect(call('POST', `${O}/admin/returns/01990000-0000-7000-8000-000000000000/credit-note`, { token: t, body: {} }), '[-] an unknown return cannot be credited', 404, 'ORDER_RETURN_NOT_FOUND');
   const uninvoicedReturn = must(call('POST', `${O}/orders/${privately.id}/returns`, { token: t, idem: true, body: { reason: 'changed mind', items: [{ variantId: gb.variantId, qty: 1, condition: 'SEALED' }] } }), 201, 'return on a receipted sale');
   expect(call('POST', `${O}/admin/returns/${uninvoicedReturn.id}/credit-note`, { token: t, body: {} }), '[-] a return on a sale that was never invoiced has nothing to credit', 409, 'ORDER_CREDIT_NOTE_NO_INVOICE');
   truthy('[-] ...and none of those took a document', [unpaid, anonymous, privately, homeless].every((o) => documentsOf(o.id).length === 0), 'documents');

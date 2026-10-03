@@ -8,6 +8,7 @@ import com.storeql.pricing.domain.Domain.RepricingRule;
 import com.storeql.pricing.domain.Repricing;
 import com.storeql.pricing.domain.Repricing.Observation;
 import com.storeql.service.BaseOutboxRepository;
+import com.storeql.service.Fx;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -465,6 +466,7 @@ public class RepricingRepository extends BaseOutboxRepository {
 
   private static RepricingProposal mapProposal(ResultSet rs) throws SQLException {
     OffsetDateTime decidedAt = rs.getObject("decided_at", OffsetDateTime.class);
+    String currency = rs.getString("currency");
     return new RepricingProposal(
         rs.getObject("id", UUID.class),
         rs.getObject("tenant_id", UUID.class),
@@ -472,16 +474,29 @@ public class RepricingRepository extends BaseOutboxRepository {
         rs.getObject("price_list_id", UUID.class),
         rs.getObject("zone_id", UUID.class),
         rs.getObject("variant_id", UUID.class),
-        rs.getBigDecimal("current_price"),
+        shown(rs.getBigDecimal("current_price"), currency),
         rs.getString("competitor"),
-        rs.getBigDecimal("competitor_price"),
+        shown(rs.getBigDecimal("competitor_price"), currency),
         rs.getObject("observed_on", LocalDate.class),
-        rs.getBigDecimal("proposed_price"),
-        rs.getString("currency"),
+        shown(rs.getBigDecimal("proposed_price"), currency),
+        currency,
         rs.getString("status"),
         rs.getObject("proposed_at", OffsetDateTime.class).toInstant(),
         decidedAt == null ? null : decidedAt.toInstant(),
         rs.getObject("decided_by", UUID.class));
+  }
+
+  /**
+   * A figure from the proposal columns (four places, NUMERIC(19,4)) at its currency's own minor
+   * units — {@code 7.99} pounds, {@code 1250} yen, {@code 8.990} dinars — or, when it is finer than
+   * that (a rival's price seen to a tenth of a penny), as it was kept, so reading never rounds.
+   */
+  private static BigDecimal shown(BigDecimal amount, String currency) {
+    if (amount == null || currency == null || !Fx.isCurrency(currency)) return amount;
+    int units = Fx.minorUnits(currency);
+    return amount.stripTrailingZeros().scale() <= units
+        ? amount.setScale(units, java.math.RoundingMode.UNNECESSARY)
+        : amount.stripTrailingZeros();
   }
 
   private static RepricingProposal withId(RepricingProposal p, UUID id) {

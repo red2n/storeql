@@ -49,7 +49,8 @@ class OrderSplitTest {
             plan(LEEDS, APPLES, "3", YORK, PEARS, "2"),
             d("2.00"),
             BigDecimal.ZERO,
-            d("1.00"));
+            d("1.00"),
+            2);
     assertThat(parts, hasSize(2));
     OrderSplit.Part leeds = parts.get(0);
     assertThat(leeds.subtotal(), comparesEqualTo(d("6.00")));
@@ -69,7 +70,8 @@ class OrderSplitTest {
             plan(LEEDS, APPLES, "2", YORK, APPLES, "1"),
             d("1.00"),
             BigDecimal.ZERO,
-            d("1.00"));
+            d("1.00"),
+            2);
     assertThat(parts.get(0).lines().get(0).lineTotal(), comparesEqualTo(d("6.67")));
     assertThat(parts.get(1).lines().get(0).lineTotal(), comparesEqualTo(d("3.33")));
     assertThat(parts.get(0).tax().add(parts.get(1).tax()), comparesEqualTo(d("1.00")));
@@ -87,7 +89,8 @@ class OrderSplitTest {
             plan(LEEDS, APPLES, "1", YORK, PEARS, "1"),
             d("0.30"),
             d("0.03"),
-            BigDecimal.ZERO);
+            BigDecimal.ZERO,
+            2);
     assertThat(parts.get(0).tax(), comparesEqualTo(d("0.10")));
     assertThat(parts.get(1).tax(), comparesEqualTo(d("0.20")));
     assertThat(parts.get(0).discount().add(parts.get(1).discount()), comparesEqualTo(d("0.03")));
@@ -96,10 +99,64 @@ class OrderSplitTest {
   @Test
   void anAmountIsSharedByWeightTheLastTakingTheCent() {
     var shares =
-        OrderSplit.share(new BigDecimal("1.00"), java.util.List.of(d("1"), d("0"), d("1"), d("1")));
+        OrderSplit.share(
+            new BigDecimal("1.00"), java.util.List.of(d("1"), d("0"), d("1"), d("1")), 2);
     assertThat(shares.get(0), comparesEqualTo(d("0.33")));
     assertThat(shares.get(1), comparesEqualTo(d("0")));
     assertThat(shares.get(2), comparesEqualTo(d("0.33")));
     assertThat(shares.get(3), comparesEqualTo(d("0.34")));
+  }
+
+  @Test
+  void aDinarOrderIsSharedToTheFils() {
+    // KWD has three minor units: three units of a 10.000 line split 2 and 1 are 6.667 and 3.333,
+    // VAT 0.500 shares 0.333 and 0.167, and the parts still add up to exactly the quote.
+    var parts =
+        OrderSplit.split(
+            List.of(new OrderSplit.Line(APPLES, d("3"), d("10.000"), d("0.500"))),
+            plan(LEEDS, APPLES, "2", YORK, APPLES, "1"),
+            d("0.500"),
+            BigDecimal.ZERO,
+            d("1.000"),
+            3);
+    assertThat(parts.get(0).lines().get(0).lineTotal(), comparesEqualTo(d("6.667")));
+    assertThat(parts.get(1).lines().get(0).lineTotal(), comparesEqualTo(d("3.333")));
+    assertThat(parts.get(0).tax(), comparesEqualTo(d("0.333")));
+    assertThat(parts.get(1).tax(), comparesEqualTo(d("0.167")));
+    assertThat(parts.get(0).promotion(), comparesEqualTo(d("0.667")));
+    assertThat(parts.get(0).promotion().add(parts.get(1).promotion()), comparesEqualTo(d("1.000")));
+  }
+
+  @Test
+  void aYenOrderIsSharedInWholeYen() {
+    // JPY has no minor unit: ¥1,000 split 2 and 1 is ¥667 and ¥333, never ¥666.67; tax ¥100 is
+    // ¥67 and ¥33.
+    var parts =
+        OrderSplit.split(
+            List.of(new OrderSplit.Line(APPLES, d("3"), d("1000"), d("100"))),
+            plan(LEEDS, APPLES, "2", YORK, APPLES, "1"),
+            d("100"),
+            BigDecimal.ZERO,
+            d("10"),
+            0);
+    assertThat(parts.get(0).lines().get(0).lineTotal(), comparesEqualTo(d("667")));
+    assertThat(parts.get(0).lines().get(0).lineTotal().scale(), org.hamcrest.Matchers.is(0));
+    assertThat(parts.get(1).lines().get(0).lineTotal(), comparesEqualTo(d("333")));
+    assertThat(parts.get(0).tax(), comparesEqualTo(d("67")));
+    assertThat(parts.get(0).tax().scale(), org.hamcrest.Matchers.is(0));
+    assertThat(parts.get(1).tax(), comparesEqualTo(d("33")));
+    assertThat(parts.get(0).promotion(), comparesEqualTo(d("7")));
+    assertThat(parts.get(1).promotion(), comparesEqualTo(d("3")));
+  }
+
+  @Test
+  void anAmountIsSharedToTheCurrencysOwnUnit() {
+    var yen = OrderSplit.share(d("100"), List.of(d("1"), d("1"), d("1")), 0);
+    assertThat(yen.get(0), comparesEqualTo(d("33")));
+    assertThat(yen.get(0).scale(), org.hamcrest.Matchers.is(0));
+    assertThat(yen.get(2), comparesEqualTo(d("34")));
+    var dinar = OrderSplit.share(d("1.000"), List.of(d("1"), d("1"), d("1")), 3);
+    assertThat(dinar.get(0), comparesEqualTo(d("0.333")));
+    assertThat(dinar.get(2), comparesEqualTo(d("0.334")));
   }
 }

@@ -94,6 +94,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CARD", d("6.00"))),
             d("12.00"),
             d("2.00"),
+            "GBP",
             true,
             DAY);
     var taken = SalesPosting.chargebackWithdrawn(TENANT, ORDER, STORE, d("12.00"), d("15"), DAY);
@@ -131,7 +132,8 @@ class SalesPostingTest {
     var tooMuchVat = SalesPosting.sale(TENANT, ORDER, STORE, d("10.00"), d("15"), DAY);
     same(balance(tooMuchVat, Domain.CODE_VAT_OUTPUT), "-10.00");
     assertThat(
-        SalesPosting.refund(TENANT, ORDER, STORE, List.of(), d("10"), d("0"), true, DAY).isEmpty(),
+        SalesPosting.refund(TENANT, ORDER, STORE, List.of(), d("10"), d("0"), "GBP", true, DAY)
+            .isEmpty(),
         is(true));
   }
 
@@ -146,6 +148,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CARD", d("30.00"))),
             d("120.00"),
             d("20.00"),
+            "GBP",
             true,
             DAY);
     same(balance(lines, Domain.CODE_SALES), "25.00");
@@ -161,10 +164,49 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CASH", d("10.00"))),
             d("30.00"),
             d("5.00"),
+            "GBP",
             true,
             DAY);
     same(balance(rounded, Domain.CODE_VAT_OUTPUT), "1.67");
     same(balance(rounded, Domain.CODE_SALES), "8.33");
+  }
+
+  @Test
+  @DisplayName(
+      "A refund's VAT share is rounded to the sale's own currency: whole yen, thousandths of a dinar")
+  void aRefundsVatShareIsRoundedInTheSalesOwnCurrency() {
+    // ¥1,000 back of a ¥1,100 sale carrying ¥100 VAT: 90.909… is ¥91, never 90.91 — a ledger
+    // counted in whole yen (and the package it is pushed to) cannot carry a fraction of one.
+    var yen =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CARD", d("1000"))),
+            d("1100"),
+            d("100"),
+            "JPY",
+            true,
+            DAY);
+    assertThat(balance(yen, Domain.CODE_VAT_OUTPUT).toPlainString(), is("91"));
+    assertThat(balance(yen, Domain.CODE_SALES).toPlainString(), is("909"));
+    same(balance(yen, Domain.CODE_CARD_CLEARING), "-1000");
+
+    // BHD 1.000 back of a BHD 1.100 sale carrying BHD 0.100 VAT: the third decimal is kept.
+    var dinar =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CASH", d("1.000"))),
+            d("1.100"),
+            d("0.100"),
+            "BHD",
+            true,
+            DAY);
+    assertThat(balance(dinar, Domain.CODE_VAT_OUTPUT).toPlainString(), is("0.091"));
+    assertThat(balance(dinar, Domain.CODE_SALES).toPlainString(), is("0.909"));
+    same(balance(dinar, Domain.CODE_CASH_IN_TILLS), "-1.000");
   }
 
   @Test
@@ -182,6 +224,7 @@ class SalesPostingTest {
                 new SalesPosting.Allocation("STORE_CREDIT", d("0"))),
             d("100.00"),
             d("0"),
+            "GBP",
             true,
             DAY);
     same(balance(split, Domain.CODE_CASH_IN_TILLS), "-6.00");
@@ -196,6 +239,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("GIFT_CARD", d("12.00"))),
             null,
             null,
+            "GBP",
             false,
             DAY);
     same(balance(unseen, Domain.CODE_SALES_CLEARING), "12.00");
@@ -347,6 +391,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("EXCHANGE", d("30.00"))),
             d("120.00"),
             d("20.00"),
+            "GBP",
             true,
             DAY));
     lines.addAll(SalesPosting.tender(TENANT, newOrder, STORE, "EXCHANGE", d("30.00"), DAY));
@@ -389,6 +434,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CASH", d("100.00"))),
             d("60.00"),
             d("10.00"),
+            "GBP",
             true,
             DAY);
     same(balance(lines, "4010"), "50.00");
@@ -405,6 +451,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CASH", d("80.00"))),
             d("60.00"),
             d("10.00"),
+            "GBP",
             true,
             DAY,
             d("20.00"));

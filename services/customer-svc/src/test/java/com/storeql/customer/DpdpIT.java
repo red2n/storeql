@@ -843,4 +843,128 @@ class DpdpIT {
   private static boolean granted(JsonObject view, String purpose) {
     return consent(view, purpose).getBoolean("granted");
   }
+
+  // ── the boundary of every privacy write ──────────────────────────────────────
+
+  /** What the privacy tables hold for the Indian business, as one comparable line. */
+  private static String privacyRows() {
+    StringBuilder rows = new StringBuilder();
+    for (String table :
+        new String[] {
+          "privacy_settings",
+          "privacy_notices",
+          "purpose_consents",
+          "purpose_consent_log",
+          "guardian_consents",
+          "privacy_requests",
+          "breach_intimations"
+        }) {
+      rows.append(table)
+          .append('=')
+          .append(
+              com.storeql.test.Envelopes.scalar(
+                  PG, "SELECT count(*) FROM customer." + table + " WHERE tenant_id = '" + T + "'"))
+          .append(' ');
+    }
+    return rows.toString();
+  }
+
+  /** A 400 whose problem names one of the codes. */
+  private static void assertRefusedWithAny(String what, Response r, String... codes) {
+    String body = r.readEntity(String.class);
+    assertThat(what + ": " + body, r.getStatus(), is(400));
+    List<org.hamcrest.Matcher<? super String>> any = new ArrayList<>();
+    for (String code : codes) any.add(containsString("\"code\":\"" + code + "\""));
+    assertThat(what + ": " + body, body, org.hamcrest.Matchers.anyOf(any));
+  }
+
+  @Test
+  @DisplayName(
+      "A missing, unreadable or rule-breaking body is refused 400 by name on every privacy write, and nothing is recorded")
+  void everyPrivacyWriteRefusesABadBodyByNameAndRecordsNothing() {
+    String login = Ids.newId().toString();
+    claim(T, login, "boundary@example.in");
+    String customerId = data(shopper(T, login, "/customers/me").get(), 200).getString("id");
+    String request = Ids.newId().toString();
+
+    record Write(
+        String label,
+        java.util.function.Supplier<Invocation.Builder> who,
+        String method,
+        String violation) {}
+    List<Write> writes =
+        List.of(
+            new Write(
+                "settings",
+                () -> staff(T, "OWNER", "/customers/privacy/settings"),
+                "PUT",
+                "{\"grievanceName\":\"" + "n".repeat(121) + "\"}"),
+            new Write(
+                "notice",
+                () -> staff(T, "OWNER", "/customers/privacy/notices"),
+                "POST",
+                "{\"language\":\"en\",\"body\":\"What we do with your data.\"}"),
+            new Write(
+                "resolve",
+                () -> staff(T, "OWNER", "/customers/privacy/requests/" + request + "/resolve"),
+                "POST",
+                "{\"status\":\"RESOLVED\"}"),
+            new Write(
+                "breach",
+                () -> staff(T, "OWNER", "/customers/privacy/breach-intimations"),
+                "POST",
+                "{\"body\":\"What happened.\"}"),
+            new Write(
+                "my consents",
+                () -> shopper(T, login, "/customers/me/privacy/consents"),
+                "PUT",
+                "{\"choices\":[{\"purpose\":\"MARKETING\"}]}"),
+            new Write(
+                "my request",
+                () -> shopper(T, login, "/customers/me/privacy/requests"),
+                "POST",
+                "{\"detail\":\"no kind\"}"),
+            new Write(
+                "consents at the counter",
+                () -> staff(T, "CASHIER", "/customers/" + customerId + "/privacy/consents"),
+                "PUT",
+                "{\"choices\":[null]}"),
+            new Write(
+                "guardian",
+                () -> staff(T, "OWNER", "/customers/" + customerId + "/privacy/guardian"),
+                "POST",
+                "{\"verification\":\"DOCUMENT_SEEN\"}"));
+
+    String before = privacyRows();
+    for (Write w : writes) {
+      assertRefusedWithAny(
+          w.label() + " breaking its rules",
+          w.who().get().build(w.method(), json(w.violation())).invoke(),
+          "VALIDATION_FAILED");
+      // A literal null reaches the resource as no body at all; it is not read as an empty request.
+      assertRefusedWithAny(
+          w.label() + " with no body",
+          w.who().get().build(w.method(), json("null")).invoke(),
+          "BODY_REQUIRED",
+          "REQUEST_BODY_INVALID");
+      assertRefusedWithAny(
+          w.label() + " that is not JSON",
+          w.who().get().build(w.method(), json("{not json")).invoke(),
+          "REQUEST_BODY_INVALID");
+    }
+    assertThat("nothing was recorded", privacyRows(), is(before));
+
+    // The caller is asked before the body is: a cashier is told no, not what is wrong with it.
+    assertThat(
+        staff(T, "CASHIER", "/customers/privacy/settings")
+            .put(json("{\"grievanceName\":\"" + "n".repeat(121) + "\"}"))
+            .getStatus(),
+        is(403));
+    assertThat(
+        staff(T, "CASHIER", "/customers/privacy/notices")
+            .post(json("{\"language\":\"en\"}"))
+            .getStatus(),
+        is(403));
+    assertThat(privacyRows(), is(before));
+  }
 }

@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/ids.dart';
 import '../../core/format.dart';
@@ -902,7 +903,7 @@ class _CustomerDetailDialog extends ConsumerWidget {
   Future<void> _points(BuildContext context, WidgetRef ref, String action) async {
     final res = await _amountReason(context,
         action == 'earn' ? 'Add points' : 'Redeem points', 'Points',
-        reasonRequired: action == 'earn');
+        shape: _GrantShape.points, reasonRequired: action == 'earn');
     if (res == null) return;
     // Adding points is retried safely: the same request keeps its key, a
     // changed one gets a new one, and a success lets it go.
@@ -928,8 +929,15 @@ class _CustomerDetailDialog extends ConsumerWidget {
 
   Future<void> _storeCredit(
       BuildContext context, WidgetRef ref, String action) async {
+    // Credit is kept, issued and redeemed in the business's own currency —
+    // the one this balance is read in, and the one customer-svc judges the
+    // amount by when none is named. Unread, the field takes what the request
+    // itself allows and the server says in words if the currency does not.
+    final currency =
+        ref.read(customerStoreCreditProvider(customer.id)).value?.currency;
     final res = await _amountReason(context,
         action == 'issue' ? 'Issue store credit' : 'Redeem store credit', 'Amount',
+        shape: _GrantShape.storeCredit(currency),
         reasonRequired: action == 'issue');
     if (res == null) return;
     // Issuing credit is retried safely, like adding points: same request,
@@ -1003,9 +1011,31 @@ class _StatCard extends StatelessWidget {
 }
 
 class _AmountReason {
-  final double amount;
+  /// The amount as the plain decimal typed ([plainDecimal]), sent as it is.
+  final String amount;
   final String reason;
   const _AmountReason(this.amount, this.reason);
+}
+
+/// How many whole digits and decimals a manual grant's amount may have:
+/// customer-svc's own limits, so the field never refuses what the server
+/// takes. The amount is sent as the decimal typed (JSON-B reads it into a
+/// BigDecimal exactly), because a double cannot carry fourteen whole digits
+/// and their places: 99999999999999.99 comes back as .98.
+abstract final class _GrantShape {
+  /// Points: sixteen whole digits and two places (EarnPointsRequest,
+  /// RedeemPointsRequest), whatever the business's money.
+  static const points = AmountShape(16, 2);
+
+  /// Store credit: fourteen whole digits (IssueStoreCreditRequest,
+  /// RedeemStoreCreditRequest) and the [currency]'s ISO 4217 minor unit,
+  /// which is what customer-svc refuses anything finer than
+  /// (STORE_CREDIT_AMOUNT_INVALID): three for a dinar, none for the yen or
+  /// the dong. With no currency known, the request's own four places.
+  static AmountShape storeCredit(String? currency) =>
+      AmountShape(14, (currency == null || currency.trim().isEmpty)
+          ? 4
+          : AppFormat.minorUnits(currency));
 }
 
 /// The Idempotency-Key of each manual grant not yet known to have landed: a
@@ -1014,12 +1044,13 @@ class _AmountReason {
 final Map<String, String> _sentKeys = {};
 String _keyFor(String memo) => _sentKeys.putIfAbsent(memo, newId);
 
-/// Asks for an amount and a reason. When [reasonRequired] (adding points,
-/// issuing credit: the server refuses a blank one), the form says so and does
-/// not send without it.
+/// Asks for an amount shaped as [shape] says and a reason. When
+/// [reasonRequired] (adding points, issuing credit: the server refuses a blank
+/// one), the form says so and does not send without it.
 Future<_AmountReason?> _amountReason(
     BuildContext context, String title, String amountLabel,
-    {bool reasonRequired = false}) {
+    {required AmountShape shape, bool reasonRequired = false}) {
+  final marks = AmountMarks.ofApp();
   final amountCtrl = TextEditingController();
   final reasonCtrl = TextEditingController();
   return showDialog<_AmountReason>(
@@ -1032,13 +1063,32 @@ Future<_AmountReason?> _amountReason(
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
-                key: const Key('grant-amount'),
-                controller: amountCtrl,
-                autofocus: true,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: InputDecoration(labelText: amountLabel),
+              // Within the server's own limits ([_GrantShape]: points two
+              // places, credit its currency's), written the way the app's
+              // language writes a number ([AmountMarks]). Every key is kept
+              // where it was typed: a place too many, a digit past the limit,
+              // a letter, a sign, a mark it cannot read. While any of it
+              // cannot be read the field says why under it, and Apply waits
+              // until it is deleted or the field cleared. Dropped, the keys
+              // after it were taken and the figure sent was not the one
+              // typed: 12.50 in Romanian (12,50 in English, 12٫50 anywhere)
+              // went as 1250, 12.505 as 12.50, -3 as 3.
+              ListenableBuilder(
+                listenable: amountCtrl,
+                builder: (_, _) => TextField(
+                  key: const Key('grant-amount'),
+                  controller: amountCtrl,
+                  autofocus: true,
+                  keyboardType: TextInputType.numberWithOptions(
+                      decimal: shape.decimals > 0),
+                  decoration: InputDecoration(
+                    labelText: amountLabel,
+                    hintText: marks.hint(shape.decimals),
+                    // Trimmed, as every figure field reads one: a space
+                    // around it is no thousands separator.
+                    errorText: shape.refusal(amountCtrl.text.trim(), marks),
+                  ),
+                ),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -1055,18 +1105,27 @@ Future<_AmountReason?> _amountReason(
             TextButton(
                 onPressed: () => Navigator.pop(ctx),
                 child: const Text('Cancel')),
-            FilledButton(
-              key: const Key('grant-apply'),
-              onPressed: () {
-                final amt = double.tryParse(amountCtrl.text.trim());
-                if (amt == null || amt <= 0) return;
-                if (reasonRequired && reasonCtrl.text.trim().isEmpty) {
-                  setState(() => reasonError = 'Say why. It is kept with your name.');
-                  return;
-                }
-                Navigator.pop(ctx, _AmountReason(amt, reasonCtrl.text.trim()));
+            // Offered only for an amount the field reads whole: never while
+            // a refusal stands on it, nothing typed, or zero.
+            ListenableBuilder(
+              listenable: amountCtrl,
+              builder: (_, _) {
+                final read = shape.read(amountCtrl.text.trim(), marks);
+                final amt = read == '0' ? null : read;
+                return FilledButton(
+                  key: const Key('grant-apply'),
+                  onPressed: amt == null
+                      ? null
+                      : () {
+                          if (reasonRequired && reasonCtrl.text.trim().isEmpty) {
+                            setState(() => reasonError = 'Say why. It is kept with your name.');
+                            return;
+                          }
+                          Navigator.pop(ctx, _AmountReason(amt, reasonCtrl.text.trim()));
+                        },
+                  child: const Text('Apply'),
+                );
               },
-              child: const Text('Apply'),
             ),
           ],
         ),

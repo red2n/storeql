@@ -732,16 +732,23 @@ public class CustomerResource {
    * @return the account with its new balance
    * @throws com.storeql.web.ApiException {@code 400 IDEMPOTENCY_KEY_REQUIRED} without a key; {@code
    *     404} when the customer does not exist; {@code 409 IDEMPOTENCY_KEY_REUSED} when the key
-   *     already carried out a different request
+   *     already carried out a different request; {@code 409 CUSTOMER_ANONYMIZED} for an erased
+   *     customer, nothing awarded
    */
   @Operation(
       summary = "Earn loyalty points",
-      description = "Manually awards points to the customer's loyalty ledger (append-only).")
+      description =
+          "Manually awards points to the customer's loyalty ledger (append-only). Never to an"
+              + " erased customer.")
   @APIResponse(responseCode = "200", description = "Points awarded")
   @APIResponse(responseCode = "400", description = "IDEMPOTENCY_KEY_REQUIRED or a bad body")
   @APIResponse(responseCode = "403", description = "Caller is not a manager or owner")
   @APIResponse(responseCode = "404", description = "Customer not found")
-  @APIResponse(responseCode = "409", description = "IDEMPOTENCY_KEY_REUSED")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "IDEMPOTENCY_KEY_REUSED; CUSTOMER_ANONYMIZED: the customer has been erased, nothing"
+              + " awarded")
   @Tag(name = "Loyalty")
   @POST
   @Path("/{id}/loyalty/earn")
@@ -770,17 +777,23 @@ public class CustomerResource {
    * @param customerId the customer to debit
    * @param req the points, an optional order being paid towards and a reason for the ledger
    * @return the account with its new balance
-   * @throws com.storeql.web.ApiException {@code 404} when the customer does not exist; {@code 422}
-   *     when the balance is insufficient
+   * @throws com.storeql.web.ApiException {@code 404} when the customer does not exist; {@code 409
+   *     CUSTOMER_ANONYMIZED} for a new spend by an erased customer (a redemption recorded before
+   *     the erasure answers its retry as it stands, nothing more taken); {@code 422} when the
+   *     balance is insufficient
    */
   @Operation(
       summary = "Redeem loyalty points",
-      description = "Deducts points from the customer's balance and records a ledger entry.")
+      description =
+          "Deducts points from the customer's balance and records a ledger entry. An erased"
+              + " customer spends nothing new.")
   @APIResponse(responseCode = "200", description = "Points redeemed")
   @APIResponse(responseCode = "404", description = "Customer not found")
   @APIResponse(
       responseCode = "409",
-      description = "IDEMPOTENCY_KEY_REUSED (same order, other points)")
+      description =
+          "IDEMPOTENCY_KEY_REUSED (same order, other points); CUSTOMER_ANONYMIZED: the customer"
+              + " has been erased, nothing spent")
   @APIResponse(responseCode = "422", description = "Insufficient loyalty points")
   @Tag(name = "Loyalty")
   @POST
@@ -802,28 +815,46 @@ public class CustomerResource {
   /**
    * Applies a signed manual correction to the customer's points balance.
    *
-   * <p>Negative values remove points. This is the goodwill/correction path, distinct from earn and
+   * <p>Negative values remove points, never taking the balance below zero: a deduction larger than
+   * the balance takes the balance, and the ledger and the {@code LoyaltyAdjusted} event record the
+   * points that actually came off. This is the goodwill/correction path, distinct from earn and
    * redeem, and it is management's: OWNER or MANAGER only, kept with who did it and why. Idempotent
    * per {@code Idempotency-Key}.
    *
    * @param customerId the customer whose balance to correct
    * @param key the request's Idempotency-Key, a UUIDv7
-   * @param req the signed point delta and a reason for the ledger
+   * @param req the signed point delta (two decimal places at most, never zero) and a reason for the
+   *     ledger
    * @return the account with its new balance
    * @throws com.storeql.web.ApiException {@code 403} for any role below a manager; {@code 400
-   *     IDEMPOTENCY_KEY_REQUIRED} without a key; {@code 404} when the customer does not exist;
-   *     {@code 409 IDEMPOTENCY_KEY_REUSED} when the key already carried out a different request
+   *     IDEMPOTENCY_KEY_REQUIRED} without a key, {@code 400 VALIDATION_FAILED} for a body that
+   *     breaks its rules; {@code 404} when the customer does not exist; {@code 409
+   *     IDEMPOTENCY_KEY_REUSED} when the key already carried out a different request; {@code 409
+   *     CUSTOMER_ANONYMIZED} for an erased customer, up or down, nothing moved; {@code 422
+   *     LOYALTY_INSUFFICIENT_POINTS} for a deduction when there are no points to take
    */
   @Operation(
       summary = "Adjust loyalty points",
       description =
           "Manual correction (positive or negative) to the customer's points balance; recorded"
-              + " in the ledger.")
+              + " in the ledger. A deduction never takes the balance below zero and is recorded as"
+              + " the points that actually came off.")
   @APIResponse(responseCode = "200", description = "Points adjusted")
-  @APIResponse(responseCode = "400", description = "IDEMPOTENCY_KEY_REQUIRED or a bad body")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED: no reason, no points, zero points, more"
+              + " than two decimal places")
   @APIResponse(responseCode = "403", description = "Caller is not a manager or owner")
   @APIResponse(responseCode = "404", description = "Customer not found")
-  @APIResponse(responseCode = "409", description = "IDEMPOTENCY_KEY_REUSED")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "IDEMPOTENCY_KEY_REUSED; CUSTOMER_ANONYMIZED: the customer has been erased, nothing"
+              + " moved")
+  @APIResponse(
+      responseCode = "422",
+      description = "LOYALTY_INSUFFICIENT_POINTS: a deduction with no points to take")
   @Tag(name = "Loyalty")
   @POST
   @Path("/{id}/loyalty/adjust")
@@ -909,16 +940,28 @@ public class CustomerResource {
    *     reason
    * @return the account with its new balance
    * @throws com.storeql.web.ApiException {@code 403} for any role below a manager; {@code 404} when
-   *     the customer does not exist
+   *     the customer does not exist; {@code 409 CUSTOMER_ANONYMIZED} for an erased customer, a
+   *     retry under an earlier key included, nothing issued
    */
   @Operation(
       summary = "Issue store credit",
-      description = "Adds to the customer's store-credit balance; recorded in the ledger.")
+      description =
+          "Adds to the customer's store-credit balance; recorded in the ledger. Never to an"
+              + " erased customer.")
   @APIResponse(responseCode = "200", description = "Store credit issued")
-  @APIResponse(responseCode = "400", description = "IDEMPOTENCY_KEY_REQUIRED or a bad body")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "IDEMPOTENCY_KEY_REQUIRED, STORE_CREDIT_AMOUNT_INVALID (finer than the currency's minor"
+              + " unit: whole yen, a dinar's three places — refused, never rounded),"
+              + " CURRENCY_INVALID, or VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller is not a manager or owner")
   @APIResponse(responseCode = "404", description = "Customer not found")
-  @APIResponse(responseCode = "409", description = "IDEMPOTENCY_KEY_REUSED")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "IDEMPOTENCY_KEY_REUSED; CUSTOMER_ANONYMIZED: the customer has been erased, nothing"
+              + " issued")
   @Tag(name = "Store Credit")
   @POST
   @Path("/{id}/store-credit/issue")
@@ -946,16 +989,27 @@ public class CustomerResource {
    * @param req the amount, optional currency (the tenant's own when omitted), order being paid and
    *     reason
    * @return the account with its new balance
-   * @throws com.storeql.web.ApiException {@code 404} when the customer does not exist; {@code 422}
-   *     when the balance is insufficient
+   * @throws com.storeql.web.ApiException {@code 404} when the customer does not exist; {@code 409
+   *     CUSTOMER_ANONYMIZED} for a new spend by an erased customer (a redemption already recorded
+   *     for the order answers its retry as it stands, nothing more taken); {@code 422} when the
+   *     balance is insufficient
    */
   @Operation(
       summary = "Redeem store credit",
       description =
           "Deducts from the customer's store-credit balance; idempotent per order when an"
-              + " orderId is supplied. Recorded in the ledger.")
+              + " orderId is supplied. Recorded in the ledger. An erased customer spends nothing"
+              + " new.")
   @APIResponse(responseCode = "200", description = "Store credit redeemed")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "STORE_CREDIT_AMOUNT_INVALID (finer than the currency's minor unit), CURRENCY_INVALID,"
+              + " or VALIDATION_FAILED")
   @APIResponse(responseCode = "404", description = "Customer not found")
+  @APIResponse(
+      responseCode = "409",
+      description = "CUSTOMER_ANONYMIZED: the customer has been erased, nothing spent")
   @APIResponse(responseCode = "422", description = "Insufficient store credit")
   @Tag(name = "Store Credit")
   @POST

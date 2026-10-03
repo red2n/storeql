@@ -68,7 +68,7 @@ export default function ({ admin, india, shopper, kid }) {
   truthy('[+] ...read back', data(settings).hasGrievanceContact === true && data(settings).responseDays === 15, data(settings));
   expect(staff(owner, '/settings', 'PUT', { responseDays: 91 }), '[-] longer than ninety days is refused (r.14(3))', 400, 'PRIVACY_RESPONSE_DAYS_INVALID');
   expect(staff(owner, '/settings', 'PUT', { grievanceEmail: 'not an address' }), '[-] an email that is not one is refused', 400, 'PRIVACY_GRIEVANCE_CONTACT_INVALID');
-  expect(staff(cashier, '/settings', 'PUT', { responseDays: 5 }), '[-] a cashier does not set it', 403);
+  expect(staff(cashier, '/settings', 'PUT', { responseDays: 5 }), '[-] a cashier does not set it', 403, 'FORBIDDEN');
 
   // ── the notice per language ──────────────────────────────────────────────────────────────────────
   const en = staff(owner, '/notices', 'POST', { language: 'en', title: 'How we use your data', body: 'We keep your orders and, if you agree, tell you about offers.' });
@@ -79,7 +79,7 @@ export default function ({ admin, india, shopper, kid }) {
   truthy('[+] ...named as Hindi', data(hi).languageName === 'Hindi', data(hi));
   const en2 = staff(owner, '/notices', 'POST', { language: 'en', title: 'How we use your data', body: 'Second wording.' });
   truthy('[+] publishing again is a new version, never a rewrite', en2.status === 201 && data(en2).version === 2, data(en2));
-  expect(staff(cashier, '/notices', 'POST', { language: 'en', title: 't', body: 'b' }), '[-] a cashier does not publish', 403);
+  expect(staff(cashier, '/notices', 'POST', { language: 'en', title: 't', body: 'b' }), '[-] a cashier does not publish', 403, 'FORBIDDEN');
   expect(staff(owner, '/notices', 'POST', { language: 'fr', title: 't', body: 'b' }), '[-] nor anyone in a language not offered', 400, 'PRIVACY_LANGUAGE_UNKNOWN');
   expect(staff(owner, '/notices', 'POST', { language: 'en', title: '', body: 'b' }), '[-] nor without a title', 400, 'PRIVACY_NOTICE_TEXT_INVALID');
   const served = data(pub('?language=hi'));
@@ -102,13 +102,13 @@ export default function ({ admin, india, shopper, kid }) {
   expect(withdrawn, '[+] every consent withdrawn in one call: as easy as giving it (s.6(4))', 200);
   truthy('[+] ...all off', data(withdrawn).consents.every((c) => !c.granted), data(withdrawn));
   expect(me(shopper.token, '/consents', 'PUT', { choices: [{ purpose: 'SURVEILLANCE', granted: true }] }), '[-] a purpose that does not exist is refused', 400, 'PRIVACY_PURPOSE_UNKNOWN');
-  expect(me(shopper.token, '/consents', 'PUT', { choices: [] }), '[-] no purpose at all is refused', 400);
+  expect(me(shopper.token, '/consents', 'PUT', { choices: [] }), '[-] no purpose at all is refused', 400, 'VALIDATION_FAILED');
   const shopperId = data(call('GET', `${C}/customers/me`, { token: shopper.token, storefront: sf })).id;
   const log = call('GET', `${C}/customers/${shopperId}/privacy/log`, { token: owner });
   expect(log, '[+] the owner reads the evidence: every grant and withdrawal', 200);
   truthy('[+] ...four entries, the withdrawals last', data(log).length === 4 && data(log)[0].source === 'WITHDRAW_ALL' && data(log)[3].source === 'PREFERENCE_CENTRE', data(log));
-  expect(call('GET', `${C}/customers/${shopperId}/privacy/log`, { token: cashier }), '[-] a cashier does not read it', 403);
-  expect(call('GET', `${C}/customers/${shopperId}/privacy/log`, { token: rival }), '[abuse] nor another business', 404);
+  expect(call('GET', `${C}/customers/${shopperId}/privacy/log`, { token: cashier }), '[-] a cashier does not read it', 403, 'PERMISSION_DENIED');
+  expect(call('GET', `${C}/customers/${shopperId}/privacy/log`, { token: rival }), '[abuse] nor another business', 404, 'CUSTOMER_NOT_FOUND');
 
   // ── a child ──────────────────────────────────────────────────────────────────────────────────────
   const dob = new Date(Date.now() - 14 * 365.25 * 86400 * 1000).toISOString().slice(0, 10);
@@ -121,7 +121,7 @@ export default function ({ admin, india, shopper, kid }) {
   const guardian = (token, body) => call('POST', `${C}/customers/${kidId}/privacy/guardian`, { token, body });
   expect(guardian(owner, { guardianName: 'R. Kumar', verification: 'DOCUMENT_SEEN', reference: 'passport 12345678' }), '[-] a reference that is a document number is refused', 400, 'PRIVACY_REFERENCE_IS_A_NUMBER');
   expect(guardian(owner, { guardianName: 'R. Kumar', verification: 'HEARSAY' }), '[-] a verification the Rules do not know is refused (r.10)', 400, 'PRIVACY_VERIFICATION_UNKNOWN');
-  expect(guardian(cashier, { guardianName: 'R. Kumar', verification: 'DOCUMENT_SEEN' }), '[-] a cashier does not record it', 403);
+  expect(guardian(cashier, { guardianName: 'R. Kumar', verification: 'DOCUMENT_SEEN' }), '[-] a cashier does not record it', 403, 'FORBIDDEN');
   const g = guardian(owner, { guardianName: 'R. Kumar', verification: 'DOCUMENT_SEEN', reference: 'passport seen at the counter' });
   expect(g, '[+] a manager records the parent\'s consent and how the parent was verified', 200);
   truthy('[+] ...standing', data(g).standing === true, data(g));
@@ -151,7 +151,7 @@ export default function ({ admin, india, shopper, kid }) {
   truthy('[+] ...and holds the grievance', data(queue).some((r) => r.id === data(grievance).id), data(queue).map((r) => r.id));
   expect(staff(owner, '/requests?status=LOST'), '[-] a status that does not exist is refused', 400, 'PRIVACY_REQUEST_STATUS_UNKNOWN');
   const id = data(grievance).id;
-  expect(staff(cashier, `/requests/${id}/resolve`, 'POST', { status: 'RESOLVED', resolution: 'Stopped.' }), '[-] a cashier does not answer it', 403);
+  expect(staff(cashier, `/requests/${id}/resolve`, 'POST', { status: 'RESOLVED', resolution: 'Stopped.' }), '[-] a cashier does not answer it', 403, 'PERMISSION_DENIED');
   const resolved = staff(owner, `/requests/${id}/resolve`, 'POST', { status: 'RESOLVED', resolution: 'Stopped, and the log corrected.' });
   expect(resolved, '[+] the owner answers it', 200);
   truthy('[+] ...settled, with when', data(resolved).status === 'RESOLVED' && Boolean(data(resolved).resolvedAt), data(resolved));
@@ -176,7 +176,7 @@ export default function ({ admin, india, shopper, kid }) {
   truthy('[+] ...done', duty(data(told), 'BOARD_INTIMATED').state === 'DONE' && duty(data(told), 'BOARD_INTIMATED').reference === 'DPB-K6-0042', data(told));
   expect(report({ duty: 'BOARD_INTIMATED' }), '[-] recorded twice is refused', 409, 'SECURITY_NOTICE_DUTY_DONE');
   expect(report({ duty: 'AUTHORITY_NOTIFIED' }), '[-] a GDPR duty is not an Indian business\'s', 400, 'SECURITY_NOTICE_DUTY_UNKNOWN');
-  expect(report({ duty: 'PRINCIPALS_TOLD' }, cashier), '[-] a cashier does not record one', 403);
+  expect(report({ duty: 'PRINCIPALS_TOLD' }, cashier), '[-] a cashier does not record one', 403, 'FORBIDDEN');
   expect(report({ duty: 'SUBJECTS_TOLD' }, rival), '[abuse] another business has no such notice', 404, 'SECURITY_NOTICE_NOT_FOUND');
   const intimation = staff(owner, '/breach-intimations', 'POST', { noticeId: notice.id, subject: 'About your data', body: 'On 15 September names and emails were read. We closed the hole. Change any password you reused. Write to privacy@dpdp.k6.test.' });
   expect(intimation, '[+] the owner tells every reachable customer, in plain words (r.7(1))', 201);
@@ -186,11 +186,11 @@ export default function ({ admin, india, shopper, kid }) {
   truthy('[+] ...two of three duties done, the report to the Board still due', duty(data(principals), 'PRINCIPALS_TOLD').state === 'DONE' && duty(data(principals), 'BOARD_REPORTED').state === 'DUE', data(principals).duties);
   truthy('[+] the intimation is kept', (data(staff(owner, '/breach-intimations')) || []).some((i) => i.id === data(intimation).id), 'intimations');
   expect(staff(owner, '/breach-intimations', 'POST', { subject: '', body: 'x' }), '[-] an intimation needs words', 400, 'PRIVACY_INTIMATION_TEXT_INVALID');
-  expect(staff(cashier, '/breach-intimations', 'POST', { subject: 's', body: 'b' }), '[-] a cashier does not send one', 403);
+  expect(staff(cashier, '/breach-intimations', 'POST', { subject: 's', body: 'b' }), '[-] a cashier does not send one', 403, 'FORBIDDEN');
   truthy('[abuse] another business sees no notice of it', !(data(call('GET', NOTICES, { token: rival })) || []).some((n) => n.incidentId === incident.id), 'rival notices');
-  expect(call('GET', `${C}/customers/${shopperId}/privacy`, { token: shopper.token, storefront: sf }), '[abuse] a shopper cannot read a record by id: that is the staff route', 403);
+  expect(call('GET', `${C}/customers/${shopperId}/privacy`, { token: shopper.token, storefront: sf }), '[abuse] a shopper cannot read a record by id: that is the staff route', 403, 'FORBIDDEN');
   truthy('[abuse] another business has no notice published', data(call('GET', `${PRIVACY}/notice`, { storefront: india.rival.tenantId })).notice == null, 'rival notice');
-  expect(http.get(`${BASE}${MINE}`, { headers: { 'X-Storefront-Tenant': sf } }), '[abuse] my consents need a signed-in shopper', 401);
+  expect(http.get(`${BASE}${MINE}`, { headers: { 'X-Storefront-Tenant': sf } }), '[abuse] my consents need a signed-in shopper', 401, 'UNAUTHORIZED');
 
   completed.add(1);
 }

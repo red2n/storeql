@@ -52,11 +52,11 @@ export default function ({ tenant, store, variantId, storekeeper, cashier }) {
   expect(setRate('USD', { rate: 0, reason: 'x' }), '[-] a rate of nothing', 400, 'FX_RATE_INVALID');
   expect(setRate('USD', { rate: 0.79, effectiveFrom: '1999-12-31', reason: 'x' }), '[-] a day before 2000', 400, 'FX_DATE_INVALID');
   expect(setRate('USD', { rate: 0.79, effectiveFrom: 'next week', reason: 'x' }), '[-] a day that is not a date', 400, 'FX_DATE_INVALID');
-  expect(setRate('USD', { rate: 0.79 }), '[-] no reason', 400);
-  expect(setRate('USD', { rate: 0.79, reason: 'x' }, storekeeper.token), '[-] a storekeeper cannot set a rate', 403);
-  expect(setRate('USD', { rate: 0.79, reason: 'x' }, cashier.token), '[-] nor a cashier', 403);
-  expect(call('GET', `${RATES}/USD/history`, { token: storekeeper.token }), '[-] the history is management\'s', 403);
-  expect(call('GET', RATES), '[-] no token', 401);
+  expect(setRate('USD', { rate: 0.79 }), '[-] no reason', 400, 'VALIDATION_FAILED');
+  expect(setRate('USD', { rate: 0.79, reason: 'x' }, storekeeper.token), '[-] a storekeeper cannot set a rate', 403, 'FORBIDDEN');
+  expect(setRate('USD', { rate: 0.79, reason: 'x' }, cashier.token), '[-] nor a cashier', 403, 'FORBIDDEN');
+  expect(call('GET', `${RATES}/USD/history`, { token: storekeeper.token }), '[-] the history is management\'s', 403, 'FORBIDDEN');
+  expect(call('GET', RATES), '[-] no token', 401, 'UNAUTHORIZED');
 
   // ── 3. prices shown in dollars, charged in sterling ─────────────────────────
   const currencies = data(call('GET', `${PRICES}/currencies`, { token: owner }));

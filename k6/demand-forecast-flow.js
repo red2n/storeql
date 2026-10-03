@@ -100,14 +100,14 @@ export default function ({ tenant, variantId, keeper, rival }) {
   // ── refusals ────────────────────────────────────────────────────────────────
   expect(call('POST', `${INV}/forecasts/run`, { token: owner, body: { storeId: a.id, horizonDays: 0 } }), '[-] a horizon of no days', 400, 'FORECAST_HORIZON_INVALID');
   expect(call('POST', `${INV}/forecasts/run`, { token: owner, body: { storeId: a.id, horizonDays: 400 } }), '[-] a horizon past a year', 400, 'FORECAST_HORIZON_INVALID');
-  expect(call('POST', `${INV}/forecasts/run`, { token: owner, body: { storeId: 'the shop' } }), '[-] a store is an id', 400);
-  expect(call('POST', `${INV}/forecasts/run`, { token: owner, body: {} }), '[-] a store is required', 400);
+  expect(call('POST', `${INV}/forecasts/run`, { token: owner, body: { storeId: 'the shop' } }), '[-] a store is an id', 400, 'INVALID_UUID');
+  expect(call('POST', `${INV}/forecasts/run`, { token: owner, body: {} }), '[-] a store is required', 400, 'VALIDATION_FAILED');
   expect(call('POST', `${INV}/forecasts/run`, { token: keeper.token, body: { storeId: a.id } }), '[-] a keeper of B does not forecast A', 403, 'STORE_ACCESS_DENIED');
   expect(call('GET', `${INV}/forecasts?store=${a.id}`, { token: keeper.token }), "[-] nor read A's forecasts", 403, 'STORE_ACCESS_DENIED');
   expect(call('GET', `${INV}/forecasts/${a.id}/${variantId}`, { token: keeper.token }), '[-] not even one at a time', 403, 'STORE_ACCESS_DENIED');
   expect(call('GET', `${INV}/forecasts`, { token: keeper.token }), '[+] a keeper of one store reads it without naming it', 200);
   expect(call('POST', `${INV}/forecasts/run`, { token: keeper.token, body: { storeId: b.id } }), '[+] and forecasts their own store', 200);
   expect(call('GET', `${INV}/forecasts`, { token: owner }), '[-] an owner of two stores names the one to read', 400, 'STORE_REQUIRED');
-  expect(call('GET', `${INV}/forecasts/${a.id}/${variantId}`, { token: rival.owner.token }), "[-] another business's store has nothing of ours to read", 404);
-  expect(call('GET', `${INV}/forecasts?store=${a.id}`), '[-] no token', 401);
+  expect(call('GET', `${INV}/forecasts/${a.id}/${variantId}`, { token: rival.owner.token }), "[-] another business's store has nothing of ours to read", 404, 'FORECAST_NOT_FOUND');
+  expect(call('GET', `${INV}/forecasts?store=${a.id}`), '[-] no token', 401, 'UNAUTHORIZED');
 }

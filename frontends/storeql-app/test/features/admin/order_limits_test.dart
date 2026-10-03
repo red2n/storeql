@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/order_limits_card.dart';
@@ -168,6 +169,36 @@ void main() {
     expect(find.textContaining('not shorter than the first'), findsOneWidget);
     expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
   });
+
+  // Each limit is the whole number typed, or it is refused under its field
+  // and nothing is saved. Read as a number literal, 0x0C hours was saved as
+  // twelve and +0x1E minutes as thirty.
+  for (final (locale, key, typed) in const [
+    ('en_GB', 'order-limit-hours', '0x0C'),
+    ('ro', 'order-limit-flag', '+0x1E'),
+    ('pl', 'order-limit-cancel', '0X5A'),
+    ('ar', 'order-limit-hours', '0xc'),
+    ('en', 'order-limit-flag', '30.'),
+  ]) {
+    testWidgets('in $locale, "$typed" in $key is refused, never saved as another figure',
+        (tester) async {
+      Intl.defaultLocale = locale;
+      addTearDown(() => Intl.defaultLocale = null);
+      final server = await _pump(tester);
+      await tester.ensureVisible(find.byKey(const Key('order-limits-edit')));
+      await tester.tap(find.byKey(const Key('order-limits-edit')));
+      await tester.pumpAndSettle();
+      final field = find.byKey(Key(key));
+      for (var i = 1; i <= typed.length; i++) {
+        await tester.enterText(field, typed.substring(0, i));
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(const Key('order-limits-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+      expect(tester.widget<TextField>(field).decoration?.errorText, isNotNull);
+    });
+  }
 
   testWidgets("a refusal reads in words and keeps the dialog open", (tester) async {
     await _pump(tester, server: _Server()..refusePriceWait = true);

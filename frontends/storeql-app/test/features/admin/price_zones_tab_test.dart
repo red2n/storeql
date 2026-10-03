@@ -45,6 +45,16 @@ class _Server implements HttpClientAdapter {
     if (path.endsWith('/variants/resolve')) {
       return _json('{"data":[{"variantId":"$_variant","productName":"Oat milk 1L","sku":"OAT-1"}]}', 200);
     }
+    if (path.endsWith('/admin/products')) {
+      return _json('{"data":[{"id":"p-oat","name":"Oat milk"}],"meta":{"nextCursor":null}}', 200);
+    }
+    if (path.endsWith('/admin/products/p-oat/variants')) {
+      return _json('{"data":[{"id":"$_variant","productId":"p-oat","sku":"OAT-1"}]}', 200);
+    }
+    if (o.method == 'POST' &&
+        (path.endsWith('/admin/repricing/rules') || path.endsWith('/admin/competitor-prices'))) {
+      return _json('{"data":{}}', 201);
+    }
     if (path.endsWith('/admin/stores')) {
       return _json(
           '{"data":[{"id":"$_store1","name":"Leeds","code":"LDS","type":"STORE","status":"ACTIVE"},'
@@ -174,5 +184,111 @@ void main() {
     await tester.tap(find.byKey(const Key('proposal-apply-$_proposal')));
     await tester.pumpAndSettle();
     expect(find.textContaining('already applied'), findsOneWidget);
+  });
+
+  // A rule's percentage, amount and floor, and a rival's price, are read the
+  // way the app's language writes a number, with the shared amount reader.
+  // One the dialog cannot read is refused under its field and nothing is
+  // sent: read as 0, Romanian's floor of 80,5 went as no floor at all, and a
+  // rival's 1.250 lei as 1,25.
+  group('figures are read as typed, or refused', () {
+    Map<String, dynamic> body(RequestOptions o) =>
+        (o.data is String ? jsonDecode(o.data as String) : o.data) as Map<String, dynamic>;
+
+    String? says(WidgetTester tester, String key) =>
+        tester.widget<TextField>(find.byKey(Key(key))).decoration?.errorText;
+
+    Future<void> newRule(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('rule-new')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('rule-name')), 'North undercut');
+      await tester.tap(find.byKey(const Key('rule-list')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('North prices').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('rule-strategy')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Undercut it by a percentage').last);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('in Romanian, 2,5 off with a floor of 80,5 is sent as typed', (tester) async {
+      Intl.defaultLocale = 'ro';
+      final server = await _pump(tester);
+      await newRule(tester);
+      await tester.enterText(find.byKey(const Key('rule-value')), '2,5');
+      await tester.enterText(find.byKey(const Key('rule-floor')), '80,5');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('rule-save')));
+      await tester.pumpAndSettle();
+      final sent = body(server.requests.singleWhere(
+          (r) => r.method == 'POST' && r.path.endsWith('/admin/repricing/rules')));
+      expect(sent['value'], '2.5');
+      expect(sent['floorPercent'], '80.5', reason: 'never 0, which is no floor');
+      expect(sent['maxAgeDays'], 14);
+    });
+
+    testWidgets('in English, a floor of 80,5 is refused in words and the rule is not made',
+        (tester) async {
+      final server = await _pump(tester);
+      await newRule(tester);
+      await tester.enterText(find.byKey(const Key('rule-value')), '2.5');
+      await tester.enterText(find.byKey(const Key('rule-floor')), '80,5');
+      await tester.enterText(find.byKey(const Key('rule-max-age')), '1,000');
+      await tester.pump();
+      expect(says(tester, 'rule-floor'),
+          'Type the amount without thousands separators. Decimals go after a point.');
+      expect(says(tester, 'rule-max-age'), 'Type the amount without thousands separators.');
+      expect(
+          tester.widget<FilledButton>(find.byKey(const Key('rule-save'))).onPressed, isNull);
+      await tester.tap(find.byKey(const Key('rule-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+
+      await tester.enterText(find.byKey(const Key('rule-floor')), '');
+      await tester.enterText(find.byKey(const Key('rule-max-age')), '');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('rule-save')));
+      await tester.pumpAndSettle();
+      expect(find.text('Give the floor: a share of the current price, more than 0 and at most 100.'),
+          findsOneWidget);
+      expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+    });
+
+    Future<void> newSighting(WidgetTester tester, String price) async {
+      await tester.tap(find.byKey(const Key('competitor-record')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Product *'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Oat milk').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Variant *'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('OAT-1').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('competitor-name')), 'Rival B');
+      await tester.enterText(find.byKey(const Key('competitor-price')), price);
+      await tester.pump();
+    }
+
+    testWidgets('in Romanian, a rival\'s 1.250 is refused, never recorded as 1,25', (tester) async {
+      Intl.defaultLocale = 'ro';
+      final server = await _pump(tester);
+      await newSighting(tester, '1.250');
+      expect(says(tester, 'competitor-price'),
+          'Type the amount without thousands separators. Decimals go after a comma.');
+      expect(tester.widget<FilledButton>(find.byKey(const Key('competitor-save'))).onPressed,
+          isNull);
+      await tester.tap(find.byKey(const Key('competitor-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+
+      await tester.enterText(find.byKey(const Key('competitor-price')), '1250');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('competitor-save')));
+      await tester.pumpAndSettle();
+      final sent = body(server.requests.singleWhere((r) => r.method == 'POST'));
+      expect(sent['price'], '1250');
+    });
   });
 }

@@ -1,6 +1,8 @@
 package com.storeql.notification.template;
 
+import com.storeql.service.Fx;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.NumberFormat;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -183,18 +185,23 @@ public final class Values {
     return f;
   }
 
+  /**
+   * Money in the reader's language, at its currency's own minor units (ISO 4217, through
+   * common-service {@code Fx.minorUnits}): whole yen, a dinar's three places, a pound's two. A
+   * figure that arrives finer is rounded half up, as {@code Fx} rounds every figure on the platform
+   * — not the formatter's own half-even, which says £2.34 for 2.345.
+   */
   static String money(BigDecimal amount, String currency, Locale locale) {
-    NumberFormat f = NumberFormat.getCurrencyInstance(locale);
-    try {
-      Currency c = Currency.getInstance(currency);
-      f.setCurrency(c);
-      int digits = Math.max(c.getDefaultFractionDigits(), 0);
-      f.setMinimumFractionDigits(digits);
-      f.setMaximumFractionDigits(digits);
-    } catch (IllegalArgumentException e) {
+    if (!Fx.isCurrency(currency)) {
       // Not an ISO 4217 code: say the amount and the code as they came.
       return amount.toPlainString() + " " + currency;
     }
+    NumberFormat f = NumberFormat.getCurrencyInstance(locale);
+    f.setCurrency(Currency.getInstance(currency.trim().toUpperCase(Locale.ROOT)));
+    int digits = Fx.minorUnits(currency);
+    f.setMinimumFractionDigits(digits);
+    f.setMaximumFractionDigits(digits);
+    f.setRoundingMode(RoundingMode.HALF_UP);
     return f.format(amount);
   }
 

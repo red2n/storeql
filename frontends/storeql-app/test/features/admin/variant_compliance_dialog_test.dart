@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
 import 'package:storeql_app/features/admin/variant_compliance_dialog.dart';
@@ -223,6 +224,117 @@ void main() {
     final sent = _json(p.puts['compliance']);
     expect(sent['depositMaterial'], isNull);
     expect(sent['depositVolumeMl'], isNull);
+  });
+
+  // ── Net content, tare and volume: read as typed, or refused ─────────────
+  //
+  // This save replaces every detail, so a figure the dialog could not read
+  // was sent as none and wiped: Romanian's 0,5 kg of net content, and the unit
+  // price a shelf edge must show with it. Each is read the way the app's
+  // language writes a number and sent as the figure typed, or refused under
+  // its field with nothing saved.
+  group('net content, tare and volume are read as typed, or refused', () {
+    tearDown(() => Intl.defaultLocale = null);
+
+    String? says(WidgetTester tester, String key) =>
+        tester.widget<TextField>(find.byKey(Key(key))).decoration?.errorText;
+
+    Future<void> type(WidgetTester tester, String key, String text) async {
+      for (var i = 1; i <= text.length; i++) {
+        await tester.enterText(find.byKey(Key(key)), text.substring(0, i));
+        await tester.pump();
+      }
+    }
+
+    for (final (locale, net, tare, sentNet, sentTare) in [
+      ('ro', '0,5', '0,025', '0.5', '0.025'),
+      ('en_GB', '0.5', '0.025', '0.5', '0.025'),
+      ('en', '1.125', '0.025', '1.125', '0.025'),
+      ('pl', '1,125', '0.025', '1.125', '0.025'),
+      ('ar', '0\u066B5', '0\u066B025', '0.5', '0.025'),
+    ]) {
+      testWidgets('in $locale, $net net and $tare tare are saved as $sentNet and $sentTare',
+          (tester) async {
+        Intl.defaultLocale = locale;
+        final p = await _open(tester);
+        await type(tester, 'net-content', net);
+        await type(tester, 'tare-weight', tare);
+        await type(tester, 'deposit-volume', '330');
+        for (final f in ['net-content', 'tare-weight', 'deposit-volume']) {
+          expect(says(tester, f), isNull, reason: f);
+        }
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+        final sent = _json(p.puts['compliance']);
+        expect(sent['netContent'], sentNet);
+        expect(sent['tareWeight'], sentTare);
+        expect(sent['depositVolumeMl'], 330);
+      });
+    }
+
+    // What the item already holds is written the way the language writes a
+    // number, so saving something else leaves it as it was.
+    for (final (locale, shownNet, shownTare) in [
+      ('ro', '0,5', '0,025'),
+      ('pl', '0,5', '0,025'),
+      ('en', '0.5', '0.025'),
+    ]) {
+      testWidgets('in $locale, a held 0.5 net and 0.025 tare show as $shownNet and $shownTare and are kept',
+          (tester) async {
+        Intl.defaultLocale = locale;
+        final p = await _open(
+            tester,
+            product: _Product()
+              ..compliance = '{"soldBy":"WEIGHT","netContent":0.5,"netContentUom":"KG",'
+                  '"tareWeight":0.025,"catchWeight":false,"depositMaterial":"GLASS","depositVolumeMl":330}');
+        expect(tester.widget<TextField>(find.byKey(const Key('net-content'))).controller!.text, shownNet);
+        expect(tester.widget<TextField>(find.byKey(const Key('tare-weight'))).controller!.text, shownTare);
+        for (final f in ['net-content', 'tare-weight', 'deposit-volume']) {
+          expect(says(tester, f), isNull, reason: f);
+        }
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+        final sent = _json(p.puts['compliance']);
+        expect(sent['netContent'], '0.5');
+        expect(sent['tareWeight'], '0.025');
+        expect(sent['depositVolumeMl'], 330);
+      });
+    }
+
+    for (final (locale, field, typed, why) in [
+      ('ro', 'net-content', '1.250',
+          'Type the amount without thousands separators. Decimals go after a comma.'),
+      ('en_GB', 'net-content', '0,5',
+          'Type the amount without thousands separators. Decimals go after a point.'),
+      ('en', 'tare-weight', '0,025',
+          'Type the amount without thousands separators. Decimals go after a point.'),
+      ('pl', 'net-content', '1.250',
+          'A point may group thousands here. Type the figure without grouping, with any decimals after a comma.'),
+      ('ar', 'tare-weight', '-1', 'Type the amount without a sign.'),
+      ('en_GB', 'net-content', '.', 'Type the amount in digits.'),
+      ('ro', 'tare-weight', ',', 'Type the amount in digits.'),
+      ('ar', 'net-content', '\u066B', 'Type the amount in digits.'),
+      ('en', 'deposit-volume', '330.', 'Whole amounts only.'),
+      ('en', 'deposit-volume', '-', 'Type the amount without a sign.'),
+      ('en', 'net-content', '5e2', 'Only digits and a decimal point.'),
+    ]) {
+      testWidgets('in $locale, "$typed" in $field is refused under it and nothing is saved',
+          (tester) async {
+        Intl.defaultLocale = locale;
+        final p = await _open(
+            tester,
+            product: _Product()
+              ..compliance = '{"soldBy":"WEIGHT","netContent":0.5,"netContentUom":"KG",'
+                  '"tareWeight":0.025,"catchWeight":false}');
+        await tester.enterText(find.byKey(Key(field)), typed);
+        await tester.pump();
+        expect(says(tester, field), why);
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+        expect(p.puts, isEmpty, reason: 'never sent as none, which wipes what the item holds');
+        expect(find.text('A figure cannot be read. Correct the one marked.'), findsOneWidget);
+      });
+    }
   });
 
   // ── Origin country: a hint, never a default (SJ-D67) ────────────────────

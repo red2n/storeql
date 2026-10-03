@@ -1,8 +1,10 @@
 import 'widgets/business_wide_note.dart';
+import 'widgets/figure_field.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -197,7 +199,15 @@ class SetFxRateDialog extends ConsumerStatefulWidget {
 
 class _SetFxRateDialogState extends ConsumerState<SetFxRateDialog> {
   final _currency = TextEditingController();
+
+  /// Home units one unit buys: a rate at its own scale (NUMERIC(24,10)), read
+  /// the way the app's language writes a number ([AmountMarks]) and sent as
+  /// the decimal typed. One that cannot be read is refused under the field
+  /// and nothing is set: read with a point, Romanian's 0,86 went as -1.
+  static const _rateShape = AmountShape(14, 10);
+  final _marks = AmountMarks.ofApp();
   final _rate = TextEditingController();
+  bool get _refused => figureRefused(_marks, [(_rate, _rateShape)]);
   final _from = TextEditingController();
   final _reason = TextEditingController();
   bool _busy = false;
@@ -213,6 +223,12 @@ class _SetFxRateDialogState extends ConsumerState<SetFxRateDialog> {
   }
 
   Future<void> _save() async {
+    if (_refused) return;
+    final rate = figureOf(_rate, _rateShape, _marks);
+    if (rate == null || rate == '0') {
+      setState(() => _refusal = 'Give the rate: how many ${widget.home} one unit buys.');
+      return;
+    }
     setState(() {
       _busy = true;
       _refusal = null;
@@ -222,7 +238,8 @@ class _SetFxRateDialogState extends ConsumerState<SetFxRateDialog> {
       await ref.read(apiClientProvider).dio.put(
         '/${ApiConstants.tenant}/admin/tenant/fx-rates/$code',
         data: {
-          'rate': double.tryParse(_rate.text.trim()) ?? -1,
+          // The plain decimal typed: JSON-B reads it exactly.
+          'rate': rate,
           if (_from.text.trim().isNotEmpty) 'effectiveFrom': _from.text.trim(),
           'reason': _reason.text.trim(),
         },
@@ -264,11 +281,14 @@ class _SetFxRateDialogState extends ConsumerState<SetFxRateDialog> {
               textCapitalization: TextCapitalization.characters,
             ),
             const SizedBox(height: 8),
-            TextField(
-              key: const Key('fx-rate'),
+            FigureField(
+              fieldKey: const Key('fx-rate'),
               controller: _rate,
-              decoration: InputDecoration(labelText: '${widget.home} per one unit'),
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              shape: _rateShape,
+              marks: _marks,
+              label: '${widget.home} per one unit',
+              hint: _marks.hint(2),
+              onChanged: (_) => setState(() {}),
             ),
             const SizedBox(height: 8),
             TextField(
@@ -294,7 +314,7 @@ class _SetFxRateDialogState extends ConsumerState<SetFxRateDialog> {
         TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
         FilledButton(
           key: const Key('fx-save'),
-          onPressed: _busy ? null : _save,
+          onPressed: _busy || _refused ? null : _save,
           child: const Text('Save'),
         ),
       ],

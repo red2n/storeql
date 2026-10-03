@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -15,6 +16,8 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'procurement_providers.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/business_wide_note.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_picker.dart';
 
 // ---------------------------------------------------------------------------
@@ -172,7 +175,10 @@ class ConsignmentTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authNotifierProvider).value;
-    final management = auth is AuthAuthenticated && auth.isManager;
+    // Arranging dropship, ending an arrangement and settling a supplier belong to the whole
+    // business: a manager held to stores is refused them (BUSINESS_WIDE_ONLY), so is not offered them.
+    final management = auth is AuthAuthenticated && auth.isManager && !auth.heldToStores;
+    final heldManager = auth is AuthAuthenticated && auth.isManager && auth.heldToStores;
     final sales = ref.watch(unsettledConsignmentSalesProvider);
     final settlements = ref.watch(consignmentSettlementsProvider);
     final arrangements = ref.watch(dropshipArrangementsProvider);
@@ -185,6 +191,16 @@ class ConsignmentTab extends ConsumerWidget {
     return ListView(
       padding: context.pagePadding,
       children: [
+        if (heldManager) ...[
+          const Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: BusinessWideNote(
+              key: Key('consignment-business-wide-note'),
+              message: 'Only an owner or a head-office manager arranges dropship or settles with a supplier.',
+            ),
+          ),
+          const SizedBox(height: AppSpacing.md),
+        ],
         // ── Dropship: stock the business never holds ──
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -551,7 +567,16 @@ class _NewDropshipArrangementDialogState extends ConsumerState<NewDropshipArrang
   String? _productId;
   String? _variantId;
   String? _supplierId;
+
+  /// What the supplier charges per unit: a purchase unit cost, to six places
+  /// as an order line carries it (1,000 screws at 0.0125), read the way the
+  /// app's language writes a number ([AmountMarks]) and sent as the decimal
+  /// typed. One that cannot be read is refused under the field and nothing is
+  /// arranged: read with a point, Romanian's 80,50 went as -1.
+  static const _costShape = AmountShape(12, 6);
+  final _marks = AmountMarks.ofApp();
   final _cost = TextEditingController();
+  bool get _refused => figureRefused(_marks, [(_cost, _costShape)]);
   bool _busy = false;
   String? _refusal;
 
@@ -562,8 +587,14 @@ class _NewDropshipArrangementDialogState extends ConsumerState<NewDropshipArrang
   }
 
   Future<void> _save() async {
+    if (_refused) return;
+    final cost = figureOf(_cost, _costShape, _marks);
     if (_variantId == null || _supplierId == null) {
       setState(() => _refusal = 'Pick the product, its variant and the supplier that ships it.');
+      return;
+    }
+    if (cost == null) {
+      setState(() => _refusal = 'Say what the supplier charges per unit.');
       return;
     }
     setState(() {
@@ -576,7 +607,8 @@ class _NewDropshipArrangementDialogState extends ConsumerState<NewDropshipArrang
         data: {
           'variantId': _variantId,
           'supplierId': _supplierId,
-          'unitCost': double.tryParse(_cost.text.trim()) ?? -1,
+          // The plain decimal typed: JSON-B reads it exactly.
+          'unitCost': cost,
         },
       );
       ref.invalidate(dropshipArrangementsProvider);
@@ -625,14 +657,15 @@ class _NewDropshipArrangementDialogState extends ConsumerState<NewDropshipArrang
                 onChanged: (v) => setState(() => _supplierId = v),
               ),
               const SizedBox(height: 8),
-              TextField(
-                key: const Key('dropship-cost'),
+              FigureField(
+                fieldKey: const Key('dropship-cost'),
                 controller: _cost,
-                decoration: const InputDecoration(
-                  labelText: 'What the supplier charges per unit *',
-                  helperText: "In the supplier's currency",
-                ),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                shape: _costShape,
+                marks: _marks,
+                label: 'What the supplier charges per unit *',
+                helper: "In the supplier's currency",
+                hint: _marks.hint(2),
+                onChanged: (_) => setState(() {}),
               ),
               if (_refusal != null) ...[
                 const SizedBox(height: 12),
@@ -644,7 +677,10 @@ class _NewDropshipArrangementDialogState extends ConsumerState<NewDropshipArrang
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-        FilledButton(key: const Key('dropship-save'), onPressed: _busy ? null : _save, child: const Text('Arrange')),
+        FilledButton(
+            key: const Key('dropship-save'),
+            onPressed: _busy || _refused ? null : _save,
+            child: const Text('Arrange')),
       ],
     );
   }

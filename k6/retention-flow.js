@@ -79,8 +79,8 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     truthy('[+] a German shop brings Germany\'s longer floor with it', s.countries.includes('DE') && cls(s, 'TRANSACTIONS').floorDays === 2920 && cls(s, 'TRANSACTIONS').floorScope === 'DE', s);
     expect(call('GET', SHEET, { token: storekeeper.token }), '[+] a storekeeper reads the schedule', 200);
     expect(call('GET', SHEET, { token: cashier.token }), '[+] so does a cashier', 200);
-    expect(call('GET', SHEET, { token: shopper.token }), '[-] a shopper does not', [401, 403]);
-    expect(call('GET', SHEET), '[-] nor does nobody', 401);
+    expect(call('GET', SHEET, { token: shopper.token }), '[-] a shopper does not', 403, 'FORBIDDEN');
+    expect(call('GET', SHEET), '[-] nor does nobody', 401, 'UNAUTHORIZED');
     truthy('[-] a rival business sees its own schedule, not ours', JSON.stringify(sheet(rival.owner.token).countries) === '["GB"]');
 
     const under = setPeriod('TRANSACTIONS', 2190);
@@ -89,15 +89,15 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     expect(setPeriod('TRANSACTIONS', 2919), '[-] one day under is still under', 400, 'RETENTION_BELOW_LEGAL_MINIMUM');
     expect(setPeriod('TRANSACTIONS', 2920), '[+] the floor itself is allowed', 200);
     expect(setPeriod('TRANSACTIONS', 3650), '[+] and longer', 200);
-    expect(setPeriod('TRANSACTIONS', -1), '[-] a negative period', 400);
-    expect(setPeriod('TRANSACTIONS', 36501), '[-] more than a hundred years', 400);
-    expect(call('PUT', `${SHEET}/TRANSACTIONS`, { token: owner, body: { periodDays: 'six years' } }), '[-] words for a number', 400);
-    expect(call('PUT', `${SHEET}/TRANSACTIONS`, { token: owner, body: {} }), '[-] no period at all', 400);
+    expect(setPeriod('TRANSACTIONS', -1), '[-] a negative period', 400, 'VALIDATION_FAILED');
+    expect(setPeriod('TRANSACTIONS', 36501), '[-] more than a hundred years', 400, 'VALIDATION_FAILED');
+    expect(call('PUT', `${SHEET}/TRANSACTIONS`, { token: owner, body: { periodDays: 'six years' } }), '[-] words for a number', 400, 'REQUEST_BODY_INVALID');
+    expect(call('PUT', `${SHEET}/TRANSACTIONS`, { token: owner, body: {} }), '[-] no period at all', 400, 'VALIDATION_FAILED');
     expect(setPeriod('DIARIES', 30), '[-] a class that does not exist', 400, 'RETENTION_CLASS_UNKNOWN');
-    expect(setPeriod(encodeURIComponent("TRANSACTIONS';DROP TABLE retention_schedules;--"), 30), '[-] SQL in the class', [400, 404]);
-    expect(setPeriod('TRANSACTIONS', 3650, cashier.token), '[-] a cashier cannot set a period', 403);
-    expect(setPeriod('TRANSACTIONS', 3650, storekeeper.token), '[-] nor a storekeeper', 403);
-    expect(setPeriod('TRANSACTIONS', 3650, shopper.token), '[-] nor a shopper', [401, 403]);
+    expect(setPeriod(encodeURIComponent("TRANSACTIONS';DROP TABLE retention_schedules;--"), 30), '[-] SQL in the class', 400, 'RETENTION_CLASS_UNKNOWN');
+    expect(setPeriod('TRANSACTIONS', 3650, cashier.token), '[-] a cashier cannot set a period', 403, 'FORBIDDEN');
+    expect(setPeriod('TRANSACTIONS', 3650, storekeeper.token), '[-] nor a storekeeper', 403, 'FORBIDDEN');
+    expect(setPeriod('TRANSACTIONS', 3650, shopper.token), '[-] nor a shopper', 403, 'FORBIDDEN');
     truthy('[+] the latest decision is in force', cls(sheet(), 'TRANSACTIONS').periodDays === 3650);
     truthy('[-] and the rival\'s is untouched', cls(sheet(rival.owner.token), 'TRANSACTIONS').periodDays === undefined);
 
@@ -145,11 +145,11 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     const place = (body, token = owner) => call('POST', `${SHEET}/holds`, { token, body });
     expect(place({ subjectKind: 'ALL', subjectId: kept.id, reason: 'x' }), '[-] a hold on everything names no one', 400, 'RETENTION_HOLD_SUBJECT');
     expect(place({ subjectKind: 'CUSTOMER', reason: 'x' }), '[-] a hold on a customer names one', 400, 'RETENTION_HOLD_SUBJECT');
-    expect(place({ subjectKind: 'ORDER', subjectId: 'not-an-id', reason: 'x' }), '[-] an order id that is not one', 400);
-    expect(place({ subjectKind: 'LOTS', reason: 'x' }), '[-] a kind that does not exist', 400);
+    expect(place({ subjectKind: 'ORDER', subjectId: 'not-an-id', reason: 'x' }), '[-] an order id that is not one', 400, 'INVALID_UUID');
+    expect(place({ subjectKind: 'LOTS', reason: 'x' }), '[-] a kind that does not exist', 400, 'VALIDATION_FAILED');
     expect(place({ subjectKind: 'ALL', dataClass: 'DIARIES', reason: 'x' }), '[-] a class that does not exist', 400, 'RETENTION_CLASS_UNKNOWN');
-    expect(place({ subjectKind: 'ALL' }), '[-] a hold with no reason', 400);
-    expect(place({ subjectKind: 'ALL', reason: 'x' }, cashier.token), '[-] a cashier cannot place a hold', 403);
+    expect(place({ subjectKind: 'ALL' }), '[-] a hold with no reason', 400, 'VALIDATION_FAILED');
+    expect(place({ subjectKind: 'ALL', reason: 'x' }, cashier.token), '[-] a cashier cannot place a hold', 403, 'FORBIDDEN');
     expect(place({ subjectKind: 'CUSTOMER', subjectId: kept.id, reason: 'Open complaint' }), '[+] a hold on a customer, every class', 201);
     expect(place({ subjectKind: 'ORDER', subjectId: saleHeld.id, dataClass: 'ORDER_PERSONAL_DATA', reason: 'Chargeback' }), '[+] a hold on one order', 201);
     classHold = data(place({ subjectKind: 'ALL', dataClass: 'NOTIFICATION_LOG', reason: 'Regulator enquiry' }));
@@ -157,7 +157,7 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     truthy('[+] three holds in force', (sheet().holds || []).length === 3, sheet().holds);
     expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: rival.owner.token, body: { reason: 'x' } }), "[-] a rival cannot release our hold", 404, 'RETENTION_HOLD_NOT_FOUND');
     truthy('[-] and sees none of ours', (data(call('GET', `${SHEET}/holds`, { token: rival.owner.token })) || []).length === 0);
-    expect(call('GET', `${SHEET}/holds`, { token: storekeeper.token }), '[-] a storekeeper does not read the holds', 403);
+    expect(call('GET', `${SHEET}/holds`, { token: storekeeper.token }), '[-] a storekeeper does not read the holds', 403, 'FORBIDDEN');
   });
 
   // ── personal details off settled orders ───────────────────────────────────────
@@ -181,9 +181,9 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     truthy('[+] the held customer\'s order kept its phone', orderOf(saleKept.id).contactPhone === '+447400900222' && orderOf(saleKept.id).contactPhoneE164 === '+447400900222');
     truthy('[+] the held order kept its phone', orderOf(saleHeld.id).contactPhone === '+447400900333');
     truthy('[+] the open order kept its phone', orderOf(saleOpen.id).contactPhone === '+447400900444');
-    expect(sweep('order', cashier.token), '[-] a cashier cannot run a purge', 403);
-    expect(sweep('order', storekeeper.token), '[-] nor a storekeeper', 403);
-    expect(sweep('order', shopper.token), '[-] nor a shopper', [401, 403]);
+    expect(sweep('order', cashier.token), '[-] a cashier cannot run a purge', 403, 'FORBIDDEN');
+    expect(sweep('order', storekeeper.token), '[-] nor a storekeeper', 403, 'FORBIDDEN');
+    expect(sweep('order', shopper.token), '[-] nor a shopper', 403, 'FORBIDDEN');
     expect(sweep('order', rival.owner.token), "[-] a rival's owner purges only their own business, which has no period", 409, 'RETENTION_PERIOD_NOT_SET');
     truthy('[+] our orders are untouched by the rival\'s attempt', orderOf(saleKept.id).contactPhone === '+447400900222');
   });
@@ -193,8 +193,8 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     expect(setPeriod('NOTIFICATION_LOG', 0), '[+] messages go as soon as sent', 200);
     const held = data(sweep('notification'));
     truthy('[+] a hold on the class stops the purge', held.rowsAffected === 0 && held.heldSkipped >= 2 && logFor(gone.email).length > 0, held);
-    expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: owner, body: {} }), '[-] a release needs a reason', 400);
-    expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: cashier.token, body: { reason: 'x' } }), '[-] a cashier cannot release a hold', 403);
+    expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: owner, body: {} }), '[-] a release needs a reason', 400, 'VALIDATION_FAILED');
+    expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: cashier.token, body: { reason: 'x' } }), '[-] a cashier cannot release a hold', 403, 'FORBIDDEN');
     expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: owner, body: { reason: 'Enquiry closed' } }), '[+] the class hold is released', 200);
     expect(call('POST', `${SHEET}/holds/${classHold.id}/release`, { token: owner, body: { reason: 'Again' } }), '[-] not twice', 409, 'RETENTION_HOLD_RELEASED');
     const run = data(sweep('notification'));
@@ -211,7 +211,7 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     truthy('[+] ...erased as the customer could have asked', customer(gone.id).status === 'ANONYMIZED' && !String(customer(gone.id).email).includes('retention-gone'), customer(gone.id));
     truthy('[+] ...and the held customer is still themselves', customer(kept.id).status === 'ACTIVE' && customer(kept.id).email === kept.email, customer(kept.id));
     truthy('[+] a second run finds nothing more', data(sweep('customer')).rowsAffected === 0);
-    expect(sweep('customer', cashier.token), '[-] a cashier cannot erase customers by purge', 403);
+    expect(sweep('customer', cashier.token), '[-] a cashier cannot erase customers by purge', 403, 'FORBIDDEN');
   });
 
   // ── the register ──────────────────────────────────────────────────────────────
@@ -230,7 +230,7 @@ export default function ({ gb, rival, store, variantId, cashier, storekeeper, sh
     );
     truthy('[+] ...each order-svc sweep once, one of them the redaction', orderRuns().length === 20 && orderRuns().some((r) => r.rowsAffected === 1), orderRuns().length);
     truthy('[-] a rival\'s register is empty', (data(call('GET', `${SHEET}/runs`, { token: rival.owner.token })) || []).length === 0);
-    expect(call('GET', `${SHEET}/runs`, { token: storekeeper.token }), '[-] a storekeeper does not read the register', 403);
+    expect(call('GET', `${SHEET}/runs`, { token: storekeeper.token }), '[-] a storekeeper does not read the register', 403, 'FORBIDDEN');
     truthy('[+] the transactions themselves are never purged', Number(orderOf(saleGone.id).total) > 0 && orderOf(saleGone.id).items.length === 1, orderOf(saleGone.id));
     truthy('[+] a reply error names no stack or SQL', errorCode(setPeriod('DIARIES', 1)) === 'RETENTION_CLASS_UNKNOWN');
   });

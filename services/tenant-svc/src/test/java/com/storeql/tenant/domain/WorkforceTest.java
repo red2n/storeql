@@ -6,9 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.storeql.ids.Ids;
+import com.storeql.service.Fx;
 import com.storeql.tenant.domain.Workforce.Entry;
 import com.storeql.tenant.domain.Workforce.Rest;
 import com.storeql.tenant.domain.Workforce.Shift;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -132,6 +135,64 @@ class WorkforceTest {
     assertEquals(Duration.ZERO, odd.worked());
   }
 
+  /** A correction of {@code supersedes}, as the service builds it from a request. */
+  private static Entry correction(UUID supersedes, Instant in, Instant out, String reason) {
+    return new Entry(
+        Ids.newId(),
+        T,
+        STORE,
+        WHO,
+        null,
+        in,
+        out,
+        Workforce.SOURCE_MANAGER,
+        null,
+        reason,
+        supersedes,
+        null,
+        in,
+        Ids.newId(),
+        List.of());
+  }
+
+  @Test
+  @DisplayName(
+      "A retried correction is the same one only for the same entry, times and reason; to the"
+          + " microsecond the record keeps")
+  void sameCorrection() {
+    UUID entry = Ids.newId();
+    Instant in = at("2026-09-14T08:00:00Z");
+    Instant out = at("2026-09-14T17:00:00.123456Z");
+    Entry first = correction(entry, in, out, "terminal was down");
+
+    // Built again from the same request: another id, another moment, the same correction.
+    assertTrue(Workforce.sameCorrection(first, correction(entry, in, out, "terminal was down")));
+    // A request may name a nanosecond the record never held; it is still the same correction.
+    assertTrue(
+        Workforce.sameCorrection(
+            first, correction(entry, in, out.plusNanos(789), "terminal was down")));
+    // Still open both times is the same; closed one time and open the other is not.
+    Entry open = correction(entry, in, null, "clocked in late");
+    assertTrue(Workforce.sameCorrection(open, correction(entry, in, null, "clocked in late")));
+    assertFalse(Workforce.sameCorrection(open, correction(entry, in, out, "clocked in late")));
+    assertFalse(Workforce.sameCorrection(first, correction(entry, in, null, "terminal was down")));
+
+    assertFalse(
+        Workforce.sameCorrection(first, correction(Ids.newId(), in, out, "terminal was down")),
+        "another entry");
+    assertFalse(
+        Workforce.sameCorrection(
+            first, correction(entry, in.minusSeconds(60), out, "terminal was down")),
+        "another start");
+    assertFalse(
+        Workforce.sameCorrection(
+            first, correction(entry, in, out.plusSeconds(1), "terminal was down")),
+        "another end");
+    assertFalse(
+        Workforce.sameCorrection(first, correction(entry, in, out, "forgot to clock out")),
+        "another reason");
+  }
+
   @Test
   @DisplayName(
       "A correction raises paid minutes only when it lengthens the hours net of unpaid breaks")
@@ -230,10 +291,11 @@ class WorkforceTest {
     var rates = List.of(april, january); // newest first, as the repository reads them
 
     Entry inJanuary = entry("2026-01-20T09:00:00Z", "2026-01-20T17:00:00Z", List.of());
-    assertEquals(new java.math.BigDecimal("96.00"), Workforce.cost(inJanuary, rates));
+    assertEquals(
+        new java.math.BigDecimal("96.00"), Workforce.cost(inJanuary, rates, Fx::minorUnits));
 
     Entry inMay = entry("2026-05-20T09:00:00Z", "2026-05-20T17:00:00Z", List.of());
-    assertEquals(new java.math.BigDecimal("108.00"), Workforce.cost(inMay, rates));
+    assertEquals(new java.math.BigDecimal("108.00"), Workforce.cost(inMay, rates, Fx::minorUnits));
   }
 
   @Test
@@ -255,14 +317,119 @@ class WorkforceTest {
             "2026-02-02T08:00:00Z",
             "2026-02-02T16:30:00Z",
             List.of(rest("2026-02-02T12:00:00Z", "2026-02-02T12:30:00Z", false)));
-    assertEquals(new java.math.BigDecimal("96.00"), Workforce.cost(withLunch, List.of(rate)));
+    assertEquals(
+        new java.math.BigDecimal("96.00"),
+        Workforce.cost(withLunch, List.of(rate), Fx::minorUnits));
 
     // No rate in force yet: unknown, not free. Zero is a rate somebody may be on, and a day shown
     // as
     // free labour is worse than one that says it does not know.
     Entry before = entry("2025-12-31T09:00:00Z", "2025-12-31T17:00:00Z", List.of());
-    assertNull(Workforce.cost(before, List.of(rate)));
+    assertNull(Workforce.cost(before, List.of(rate), Fx::minorUnits));
     // And an open entry has no cost, because it has no hours.
-    assertNull(Workforce.cost(entry("2026-02-03T09:00:00Z", null, List.of()), List.of(rate)));
+    assertNull(
+        Workforce.cost(
+            entry("2026-02-03T09:00:00Z", null, List.of()), List.of(rate), Fx::minorUnits));
+  }
+
+  private static Workforce.PayRate rateIn(String amount, String currency) {
+    return new Workforce.PayRate(
+        Ids.newId(),
+        T,
+        WHO,
+        java.time.LocalDate.of(2026, 1, 1),
+        new java.math.BigDecimal(amount),
+        currency,
+        null,
+        at("2026-01-01T00:00:00Z"),
+        WHO);
+  }
+
+  @Test
+  @DisplayName("An hour's cost is rounded to the rate's own currency: whole yen, a dinar's third")
+  void costIsRoundedToTheCurrencysOwnMinorUnits() {
+    // 7h20m: 440 minutes, a third of an hour that never divides evenly.
+    Entry day = entry("2026-02-02T09:00:00Z", "2026-02-02T16:20:00Z", List.of());
+    assertEquals(
+        new java.math.BigDecimal("8067"),
+        Workforce.cost(day, List.of(rateIn("1100", "JPY")), Fx::minorUnits),
+        "1100 yen an hour for 7h20m is 8066.67 yen, paid as whole yen");
+    assertEquals(
+        new java.math.BigDecimal("12.833"),
+        Workforce.cost(day, List.of(rateIn("1.750", "KWD")), Fx::minorUnits),
+        "a dinar keeps its third decimal: 1.750 an hour for 7h20m is 12.8333");
+    assertEquals(
+        new java.math.BigDecimal("91.67"),
+        Workforce.cost(day, List.of(rateIn("12.50", "EUR")), Fx::minorUnits),
+        "a euro keeps two");
+  }
+
+  // ── what an hour costs, as it is sent ──────────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "An hourly rate is read only written out: an exponent, a word or a digit of another script"
+          + " is no rate, and nothing is built from it")
+  void anHourlyRateIsReadOnlyWrittenOut() {
+    for (String text :
+        List.of(
+            "1E+999999999",
+            "1E+2147483647",
+            "0E+2147483647",
+            "1E-2147483647",
+            "1e5",
+            "12.5E1",
+            "Infinity",
+            "NaN",
+            "0x10",
+            "",
+            "   ",
+            "12,50",
+            "1_000",
+            "\u0661\u0662",
+            "12.5.0",
+            ".",
+            "+",
+            "-",
+            "1 2",
+            "12.50 GBP",
+            "--1",
+            "9".repeat(10_000))) {
+      assertTrue(Workforce.writtenRate(text).isEmpty(), text);
+    }
+    assertTrue(Workforce.writtenRate(null).isEmpty());
+    assertEquals(new BigDecimal("12.50"), Workforce.writtenRate(" 12.50 ").orElseThrow());
+    assertEquals(new BigDecimal("10.4167"), Workforce.writtenRate("10.4167").orElseThrow());
+    assertEquals(new BigDecimal("12"), Workforce.writtenRate("+12").orElseThrow());
+    assertEquals(new BigDecimal("0.5"), Workforce.writtenRate(".5").orElseThrow());
+    assertEquals(new BigDecimal("12"), Workforce.writtenRate("12.").orElseThrow());
+    assertEquals(
+        new BigDecimal("-1.00"),
+        Workforce.writtenRate("-1.00").orElseThrow(),
+        "read as sent; less than nothing is the service's refusal, not the reader's");
+  }
+
+  @Test
+  @DisplayName(
+      "Whether a rate fits pay_rates.hourly_rate is judged at constant cost, never by an int"
+          + " subtraction that wraps round and lets 1E+2147483647 through")
+  void aRateFitsItsColumnWhateverItsSize() {
+    for (String fits :
+        List.of("0", "0.0000", "0.00000000", "12.50000000", "99999999.9999", "10.4167", "-1")) {
+      assertTrue(Workforce.rateFits(new BigDecimal(fits)), fits);
+    }
+    for (String refused : List.of("123456789", "12.34567", "0.00001", "100000000.0000")) {
+      assertFalse(Workforce.rateFits(new BigDecimal(refused)), refused);
+    }
+    for (BigDecimal wraps :
+        List.of(
+            new BigDecimal("1E+2147483647"),
+            new BigDecimal("0E+2147483647"),
+            new BigDecimal("9E+2147483647"),
+            new BigDecimal(BigInteger.ONE, Integer.MIN_VALUE),
+            new BigDecimal(BigInteger.ONE, Integer.MAX_VALUE),
+            new BigDecimal(BigInteger.TEN.pow(400), 400))) {
+      assertFalse(Workforce.rateFits(wraps), wraps::toString);
+    }
   }
 }

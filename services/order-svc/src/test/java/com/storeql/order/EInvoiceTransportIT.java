@@ -134,7 +134,7 @@ class EInvoiceTransportIT {
             .withLegalName(T_RDY, "Readiness Ltd")
             .withStore(T_RDY, S_RDY, "GB", "9 Dock Road", "Hull", "HU1 2AA")
             .with(T_PL, "PLN", "PL")
-            .withIdentity(T_PL, "PL5260250991", null, null)
+            .withIdentity(T_PL, "PL5260250274", null, null)
             .withLegalName(T_PL, "Sklep Portowy sp. z o.o.")
             .withStore(T_PL, S_PL, "PL", "ul. Portowa 1", "Gdańsk", "80-001")
             // As if the mandate were in force: what the settings suggest.
@@ -178,7 +178,7 @@ class EInvoiceTransportIT {
         SERVICES,
         C_PL,
         "Kawiarnia Molo sp. z o.o.",
-        "PL7010001455",
+        "PL7740001454",
         "PL",
         null,
         null,
@@ -186,7 +186,7 @@ class EInvoiceTransportIT {
     // India's portal, doing its own cryptography; France's platform, answering by the buyer;
     // Poland's system, opening what the client sealed.
     PORTAL = IrpPortalStub.on(SERVICES, "user1", "pass1");
-    KSEF = KsefStub.on(SERVICES, "5260250991", "ksef-token-1");
+    KSEF = KsefStub.on(SERVICES, "5260250274", "ksef-token-1");
     System.setProperty("storeql.einvoice.ksef.base-url", SERVICES.baseUrl() + KsefStub.PREFIX);
     SERVICES.on("POST", "/pdp/invoices", EInvoiceTransportIT::platformDeposit);
     SERVICES.on(
@@ -512,6 +512,9 @@ class EInvoiceTransportIT {
                 + "x".repeat(121)
                 + "\"}");
     assertThat(longAccount.getStatus(), is(400));
+    // The request's own limit (120) answers first; the service's check after stripping is its
+    // second line and cannot be reached by a longer value.
+    assertThat(code(longAccount), is("VALIDATION_FAILED"));
 
     // KSeF with the simulated provider needs no address: the network takes the sender's own.
     Response ksef = setTransport(T_NOADDR, transport("KSEF", "SIMULATED"));
@@ -900,11 +903,11 @@ class EInvoiceTransportIT {
     JsonObject numbered =
         transmissionIn(T_PL, inv.getString("id"), "ACCEPTED", "REJECTED", "FAILED");
     assertThat(numbered.toString(), numbered.getString("status"), is("ACCEPTED"));
-    assertThat(numbered.getString("providerRef"), is("5260250991-20260916-010203ABCDEF-01"));
+    assertThat(numbered.getString("providerRef"), is("5260250274-20260916-010203ABCDEF-01"));
     assertThat(numbered.getString("detail"), startsWith("KSeF number "));
     assertThat("taken, then asked after", numbered.getInt("attempts"), greaterThanOrEqualTo(2));
-    assertThat(KSEF.lastInvoice(), containsString("<NIP>5260250991</NIP>"));
-    assertThat(KSEF.lastInvoice(), containsString("<NIP>7010001455</NIP>"));
+    assertThat(KSEF.lastInvoice(), containsString("<NIP>5260250274</NIP>"));
+    assertThat(KSEF.lastInvoice(), containsString("<NIP>7740001454</NIP>"));
     assertThat(
         KSEF.lastInvoice(), containsString("<P_2>" + inv.getString("fullNumber") + "</P_2>"));
 

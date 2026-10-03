@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
 import '../../core/format.dart';
 import '../../core/spacing.dart';
 import '../../core/theme.dart';
@@ -13,6 +15,7 @@ import '../../shared/widgets/loading_view.dart';
 import 'accounting_api.dart';
 import 'providers/admin_providers.dart' show tenantInfoProvider;
 import 'providers/staff_names.dart';
+import 'widgets/business_wide_note.dart';
 
 // ---------------------------------------------------------------------------
 // Accounting (17.9), on the Integrations screen: the package the business keeps
@@ -21,14 +24,49 @@ import 'providers/staff_names.dart';
 // package's accounts, pushes now or lets the clock, and reads every journal's
 // journey: delivered with the package's own id, waiting with the reason, or
 // needing a person, who tries again or leaves it out with a reason.
+//
+// The books are the whole business's: purchase-svc refuses a manager held to
+// stores every accounting route, reads included (BUSINESS_WIDE_ONLY), so such a
+// manager is asked nothing and told who keeps them. Mapping, pushing and putting
+// a push right are finance's (finance.journal) and offered only to its holders.
 // ---------------------------------------------------------------------------
 class AccountingSection extends ConsumerWidget {
   final bool owner;
   const AccountingSection({super.key, required this.owner});
 
+  static const heldNote =
+      'Only an owner or a head-office manager reads or changes the accounting connection.';
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
+    final auth = ref.watch(authNotifierProvider).value;
+    final description = Text(
+      'Every journal the ledger posts is pushed to the package you keep your books in — Xero, QuickBooks Online or '
+      'Sage — once, as that package\'s journal. Map your nominal codes onto its accounts first.',
+      style: theme.textTheme.bodyMedium,
+    );
+    // Until the sign-in is known nothing is asked, so a manager held to stores
+    // is never sent for books the server would refuse them.
+    if (auth is! AuthAuthenticated || auth.heldToStores) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SectionHeading(title: 'Accounting'),
+          const SizedBox(height: 4),
+          description,
+          const SizedBox(height: 12),
+          if (auth is AuthAuthenticated)
+            const Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: BusinessWideNote(key: Key('accounting-business-wide-note'), message: heldNote),
+            )
+          else
+            const LoadingView(label: 'Loading the accounting connection…'),
+        ],
+      );
+    }
+    final finance = auth.hasPermission('finance.journal');
     final connection = ref.watch(accountingConnectionProvider);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -67,11 +105,7 @@ class AccountingSection extends ConsumerWidget {
           ],
         ),
         const SizedBox(height: 4),
-        Text(
-          'Every journal the ledger posts is pushed to the package you keep your books in — Xero, QuickBooks Online or '
-          'Sage — once, as that package\'s journal. Map your nominal codes onto its accounts first.',
-          style: theme.textTheme.bodyMedium,
-        ),
+        description,
         const SizedBox(height: 12),
         connection.when(
           loading: () => const LoadingView(label: 'Loading the accounting connection…'),
@@ -85,10 +119,10 @@ class AccountingSection extends ConsumerWidget {
                   padding: EdgeInsets.symmetric(vertical: 12),
                   child: Text('No package connected. Journals stay in the ledger here until one is.'),
                 )
-              : _ConnectionCard(c: c),
+              : _ConnectionCard(c: c, finance: finance),
         ),
         connection.maybeWhen(
-          data: (c) => c == null ? const SizedBox.shrink() : const _SyncList(),
+          data: (c) => c == null ? const SizedBox.shrink() : _SyncList(finance: finance),
           orElse: () => const SizedBox.shrink(),
         ),
       ],
@@ -185,7 +219,10 @@ String _ref(String id) => id.length <= 8 ? id : '…${shortRef(id)}';
 
 class _ConnectionCard extends ConsumerWidget {
   final AccountingConnection c;
-  const _ConnectionCard({required this.c});
+
+  /// Whether the caller holds finance.journal: mapping and pushing are finance's.
+  final bool finance;
+  const _ConnectionCard({required this.c, required this.finance});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -244,18 +281,20 @@ class _ConnectionCard extends ConsumerWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                FilledButton.tonalIcon(
-                  key: const Key('accounting-sync'),
-                  onPressed: c.active ? () => _syncNow(context, ref) : null,
-                  icon: const Icon(Icons.sync),
-                  label: const Text('Push now'),
-                ),
-                OutlinedButton.icon(
-                  key: const Key('accounting-map'),
-                  onPressed: () => showDialog<void>(context: context, builder: (_) => const AccountMappingsDialog()),
-                  icon: const Icon(Icons.compare_arrows),
-                  label: const Text('Map accounts'),
-                ),
+                if (finance) ...[
+                  FilledButton.tonalIcon(
+                    key: const Key('accounting-sync'),
+                    onPressed: c.active ? () => _syncNow(context, ref) : null,
+                    icon: const Icon(Icons.sync),
+                    label: const Text('Push now'),
+                  ),
+                  OutlinedButton.icon(
+                    key: const Key('accounting-map'),
+                    onPressed: () => showDialog<void>(context: context, builder: (_) => const AccountMappingsDialog()),
+                    icon: const Icon(Icons.compare_arrows),
+                    label: const Text('Map accounts'),
+                  ),
+                ],
                 OutlinedButton.icon(
                   key: const Key('accounting-check'),
                   onPressed: () => _check(context, ref),
@@ -299,7 +338,10 @@ class _ConnectionCard extends ConsumerWidget {
 }
 
 class _SyncList extends ConsumerWidget {
-  const _SyncList();
+  const _SyncList({required this.finance});
+
+  /// Whether the caller holds finance.journal: putting a push right is finance's.
+  final bool finance;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -321,13 +363,17 @@ class _SyncList extends ConsumerWidget {
               message: friendlyError(e, fallback: 'Could not load the pushes.'),
               onRetry: () => ref.invalidate(accountingSyncsProvider),
             ),
+            // Worded for what the reader can do: posting a journal and
+            // pushing are finance's, and only offered to its holders.
             data: (list) => list.isEmpty
-                ? const Padding(
-                    key: Key('accounting-syncs-none'),
-                    padding: EdgeInsets.symmetric(vertical: 8),
-                    child: Text('Nothing pushed yet. Post a journal, or press Push now.'),
+                ? Padding(
+                    key: const Key('accounting-syncs-none'),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Text(finance
+                        ? 'Nothing pushed yet. Post a journal, or press Push now.'
+                        : 'Nothing pushed yet. Each journal the ledger posts is listed here as it is pushed.'),
                   )
-                : Column(children: [for (final s in list) _SyncTile(s: s, currency: currency)]),
+                : Column(children: [for (final s in list) _SyncTile(s: s, currency: currency, finance: finance)]),
           ),
         ],
       ),
@@ -338,9 +384,13 @@ class _SyncList extends ConsumerWidget {
 class _SyncTile extends ConsumerWidget {
   final AccountingSync s;
 
+  /// Whether the caller holds finance.journal: trying again, saying where a push
+  /// landed and leaving one out are finance's.
+  final bool finance;
+
   /// The business's home currency, or null while it is unknown.
   final String? currency;
-  const _SyncTile({required this.s, required this.currency});
+  const _SyncTile({required this.s, required this.currency, required this.finance});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -378,7 +428,7 @@ class _SyncTile extends ConsumerWidget {
             StatusBadge(_statusLabel(s.status), tone: tone),
           ],
         ),
-        trailing: !s.retryable
+        trailing: !s.retryable || !finance
             ? null
             : context.isCompact
                 ? PopupMenuButton<String>(

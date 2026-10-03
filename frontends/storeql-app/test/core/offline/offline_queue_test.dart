@@ -68,6 +68,9 @@ class _ScriptedAdapter implements HttpClientAdapter {
   String rejectCode = 'ORDER_BAD';
   String rejectMessage = 'rejected';
 
+  /// When set, [rejectWith] refuses only the requests this says yes to.
+  bool Function(RequestOptions)? rejectOnly;
+
   /// Fails only the Nth matching request, then behaves normally — used to cut
   /// the line partway through a sale.
   String? failAfterPath;
@@ -92,7 +95,8 @@ class _ScriptedAdapter implements HttpClientAdapter {
           requestOptions: options, type: DioExceptionType.connectionError);
     }
     for (final entry in rejectWith.entries) {
-      if (options.path.contains(entry.key)) {
+      if (options.path.contains(entry.key) &&
+          (rejectOnly?.call(options) ?? true)) {
         return ResponseBody.fromString(
           '{"data":null,"error":{"code":"$rejectCode","message":"$rejectMessage"}}',
           entry.value,
@@ -374,6 +378,164 @@ void main() {
         reason: 'a 409 would otherwise loop forever and hold up the queue');
     expect(parked.lastError, 'That gift card has expired.');
     expect(h.adapter.countOf('/pos/log/orders/'), 0);
+  });
+
+  group('a card tender that names the payment its card machine took', () {
+    // A sale queued after its card was approved records that approval by name
+    // (terminalPaymentId). payment-svc refuses such a record in ways no retry
+    // changes; a 409 the queue took for "try again" would stop the run at that
+    // sale on every sync, and nothing queued behind it would ever be sent.
+
+    const card = OfflineTender(
+        body: {'method': 'CARD', 'amount': 3.0, 'terminalPaymentId': 'att-1'},
+        amount: 3.0);
+    const cash =
+        OfflineTender(body: {'method': 'CASH', 'amount': 2.0}, amount: 2.0);
+    const first = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d01';
+    const second = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d02';
+
+    bool namesTheApproval(RequestOptions o) =>
+        o.data is Map && (o.data as Map)['terminalPaymentId'] == 'att-1';
+
+    test(
+        'an approval already recorded on its order — the sale finished from '
+        'the card machine\'s refusal, under a key of its own — is that tender '
+        'recorded: the tenders after it and the journal still go, and the sale '
+        'leaves the queue', () async {
+      final h = _harness();
+      final notifier = h.container.read(offlineQueueProvider.notifier);
+      h.adapter
+        ..rejectWith['/payments'] = 409
+        ..rejectCode = 'TERMINAL_ATTEMPT_ALREADY_RECORDED'
+        ..rejectOnly = namesTheApproval;
+      await notifier.enqueue(
+          _sale(id: first, orderId: 'order-1', tenders: const [card, cash]));
+      await notifier.enqueue(_sale(id: second, orderId: 'order-2'));
+      await notifier.sync();
+
+      expect(h.container.read(offlineQueueProvider), isEmpty,
+          reason: 'neither the sale nor the one behind it is held up');
+      expect(h.adapter.calls.map((c) => c.idempotencyKey), [
+        derivedId(first, 'pay:0'),
+        derivedId(first, 'pay:1'),
+        null,
+        derivedId(second, 'pay:0'),
+        null,
+      ]);
+      expect(h.container.read(offlineSyncedProvider).map((s) => s.id),
+          containsAll([first, second]));
+    });
+
+    for (final code in [
+      'PAYMENT_ORDER_GIVEN_UP',
+      'TERMINAL_ATTEMPT_REFUNDED',
+      'TERMINAL_AMOUNT_MISMATCH',
+      'TERMINAL_WRONG_STORE',
+      'TERMINAL_NOT_APPROVED',
+      'TERMINAL_ATTEMPT_OTHER_ORDER',
+    ]) {
+      test(
+          'refused $code, the sale is parked for a manager in words, never '
+          'retried by itself, and the sale behind it reaches the server',
+          () async {
+        final h = _harness();
+        final notifier = h.container.read(offlineQueueProvider.notifier);
+        h.adapter
+          ..rejectWith['/payments'] = 409
+          ..rejectCode = code
+          ..rejectOnly = namesTheApproval;
+        await notifier.enqueue(
+            _sale(id: first, orderId: 'order-1', tenders: const [card, cash]));
+        await notifier.enqueue(_sale(id: second, orderId: 'order-2'));
+        await notifier.sync();
+
+        final parked = h.container.read(offlineQueueProvider).single;
+        expect(parked.id, first, reason: 'the one behind it went through');
+        expect(parked.status, OfflineSaleStatus.failed);
+        expect(parked.lastError, isNotEmpty);
+        expect(parked.lastError, isNot(contains(code)),
+            reason: 'words, not a code');
+        expect(parked.tenders.map((t) => t.tenderDone), [false, false],
+            reason: 'nothing after the refused card was recorded');
+        expect(h.adapter.calls.map((c) => c.idempotencyKey), [
+          derivedId(first, 'pay:0'),
+          derivedId(second, 'pay:0'),
+          null,
+        ]);
+
+        await notifier.sync();
+        expect(h.adapter.calls, hasLength(3),
+            reason: 'not sent again until a person says so');
+      });
+    }
+
+    test(
+        'a sale cancelled or voided before its card was recorded says what '
+        'happens to the money: it goes back on the card', () async {
+      final h = _harness();
+      final notifier = h.container.read(offlineQueueProvider.notifier);
+      h.adapter
+        ..rejectWith['/payments'] = 409
+        ..rejectCode = 'PAYMENT_ORDER_GIVEN_UP'
+        ..rejectOnly = namesTheApproval;
+      await notifier
+          .enqueue(_sale(id: first, orderId: 'order-1', tenders: const [card]));
+      await notifier.sync();
+
+      final parked = h.container.read(offlineQueueProvider).single;
+      expect(parked.status, OfflineSaleStatus.failed);
+      expect(parked.lastError, contains('cancelled or voided'));
+      expect(parked.lastError, contains('goes back on the card'));
+    });
+  });
+
+  group('the sales for named orders, sent out of turn', () {
+    // A card machine held by an approval nobody recorded takes no other card,
+    // and the sale queued for that order is what records it: it must not wait
+    // behind a sale that cannot be sent yet.
+    const head = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d01';
+    const wanted = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d02';
+    const other = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d03';
+
+    test('go past a sale ahead of them that cannot be sent, and nothing else '
+        'is sent', () async {
+      final h = _harness();
+      final notifier = h.container.read(offlineQueueProvider.notifier);
+      h.adapter
+        ..rejectWith['/payments'] = 503
+        ..rejectOnly =
+            (o) => o.data is Map && (o.data as Map)['orderId'] == 'order-head';
+      await notifier.enqueue(_sale(id: head, orderId: 'order-head'));
+      await notifier.enqueue(_sale(id: wanted, orderId: 'order-9'));
+      await notifier.enqueue(_sale(id: other, orderId: 'order-other'));
+
+      await notifier.syncOrders({'order-9'});
+
+      expect(h.container.read(offlineQueueProvider).map((s) => s.id),
+          [head, other]);
+      expect(h.adapter.calls.map((c) => c.idempotencyKey),
+          [derivedId(wanted, 'pay:0'), null],
+          reason: 'only the named order\'s sale: its tender and its journal');
+
+      // Its turn in the line is unchanged for the rest: the head still stops
+      // an ordinary run.
+      await notifier.sync();
+      expect(h.container.read(offlineQueueProvider).map((s) => s.id),
+          [head, other]);
+    });
+
+    test('never a parked sale, which waits for a person; and no order named '
+        'sends nothing', () async {
+      final h = _harness();
+      final notifier = h.container.read(offlineQueueProvider.notifier);
+      await notifier.enqueue(_sale(id: wanted, orderId: 'order-9')
+          .copyWith(status: OfflineSaleStatus.failed));
+      await notifier.syncOrders({'order-9'});
+      await notifier.syncOrders({});
+      expect(h.adapter.calls, isEmpty);
+      expect(h.container.read(offlineQueueProvider).single.status,
+          OfflineSaleStatus.failed);
+    });
   });
 
   test('a sale that only owes its journal replays just that', () async {

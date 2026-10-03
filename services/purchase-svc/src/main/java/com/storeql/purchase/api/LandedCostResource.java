@@ -52,7 +52,9 @@ public class LandedCostResource {
   @APIResponse(
       responseCode = "400",
       description =
-          "PURCHASE_LANDED_INVALID (charge type, basis or amount), PURCHASE_LANDED_CURRENCY_MISMATCH")
+          "PURCHASE_LANDED_INVALID (charge type, basis or amount), PURCHASE_LANDED_CURRENCY_MISMATCH,"
+              + " PURCHASE_AMOUNT_TOO_PRECISE (an amount finer than the order's currency's minor"
+              + " units)")
   @APIResponse(
       responseCode = "404",
       description = "PURCHASE_GRN_NOT_FOUND, PURCHASE_SUPPLIER_NOT_FOUND")
@@ -60,6 +62,11 @@ public class LandedCostResource {
   @APIResponse(
       responseCode = "422",
       description = "PURCHASE_LANDED_NOTHING_RECEIVED, PURCHASE_LANDED_NO_BASIS")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the receipt is another store's than the"
+              + " caller's")
   @POST
   public Response apply(
       @HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
@@ -76,6 +83,10 @@ public class LandedCostResource {
       description =
           "By receipt (?grId=), by order (?poId=), or every charge in the business; newest first.")
   @APIResponse(responseCode = "404", description = "The receipt or order is not this business's")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "STORE_ACCESS_DENIED: the receipt or order named is another store's than the caller's")
   @GET
   public Response list(@QueryParam("grId") UUID grId, @QueryParam("poId") UUID poId) {
     List<LandedCostResponse> out =
@@ -85,6 +96,9 @@ public class LandedCostResource {
 
   @Operation(summary = "One landed charge, with its lines")
   @APIResponse(responseCode = "404", description = "PURCHASE_LANDED_NOT_FOUND")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the charge landed at another store than the caller's")
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") UUID id) {
@@ -103,6 +117,11 @@ public class LandedCostResource {
   @APIResponse(
       responseCode = "409",
       description = "PURCHASE_LANDED_REVERSED, PURCHASE_PERIOD_CLOSED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a buying role, or STORE_ACCESS_DENIED: the charge landed at another store than"
+              + " the caller's")
   @POST
   @Path("/{id}/reversal")
   public Response reverse(@PathParam("id") UUID id, ReverseLandedCostRequest req) {

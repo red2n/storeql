@@ -161,6 +161,10 @@ Future<_Server> _open(WidgetTester tester,
 Map<String, dynamic> _body(RequestOptions r) =>
     (r.data is String ? jsonDecode(r.data as String) : r.data) as Map<String, dynamic>;
 
+/// What the field keyed [key] says under it, or null.
+String? _says(WidgetTester tester, String key) =>
+    tester.widget<TextField>(find.byKey(Key(key))).decoration?.errorText;
+
 /// The last *Handed over today* read for [store].
 RequestOptions _handedToday(_Server server, String store) => server.requests.lastWhere((r) =>
     r.method == 'GET' &&
@@ -271,7 +275,7 @@ void main() {
     await tester.pumpAndSettle();
     final post = server.requests.singleWhere(
         (r) => r.method == 'POST' && r.path.endsWith('/orders/$_owing/lines/$_apples/substitute'));
-    expect(_body(post), {'substituteVariantId': _pears, 'qty': 2});
+    expect(_body(post), {'substituteVariantId': _pears, 'qty': '2'});
     expect(post.headers['Idempotency-Key'], isNotNull);
     expect(find.text('Substituted. The shopper is told and pays no more.'), findsOneWidget);
   });
@@ -291,8 +295,140 @@ void main() {
     await tester.pumpAndSettle();
     final post = server.requests.singleWhere(
         (r) => r.method == 'POST' && r.path.endsWith('/orders/$_owing/lines/$_apples/short'));
-    expect(_body(post), {'qty': 1, 'reason': 'last one bruised'});
+    expect(_body(post), {'qty': '1', 'reason': 'last one bruised'});
     expect(find.text('Closed short. The shopper is told and refunded.'), findsOneWidget);
+  });
+
+  // What a line is closed short by, or how many stand-ins went in the bag, is
+  // a quantity to three places: read the way the app's language writes a
+  // number and sent as the decimal typed, or refused under its field with
+  // nothing sent. The shopper is refunded for a short, so parsed with a point
+  // Romanian's 1.250 closed a kilo and a quarter short, and its 1,5 was
+  // refused as if it were more than the line owes.
+  group('a short or substituted quantity is read as typed, or refused', () {
+    for (final (locale, typed, sent) in [
+      ('ro', '1,5', '1.5'),
+      ('en_GB', '1.5', '1.5'),
+      ('en', '1.125', '1.125'),
+      ('pl', '1,125', '1.125'),
+      ('ar', '1\u066B5', '1.5'),
+    ]) {
+      testWidgets('in $locale, $typed short is sent as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _open(tester);
+        await tester.tap(find.byKey(const Key('short-$_owing-$_apples')));
+        await tester.pumpAndSettle();
+        for (var i = 1; i <= typed.length; i++) {
+          await tester.enterText(find.byKey(const Key('short-qty')), typed.substring(0, i));
+          await tester.pump();
+        }
+        expect(_says(tester, 'short-qty'), isNull);
+        await tester.tap(find.byKey(const Key('short-save')));
+        await tester.pumpAndSettle();
+        final post = server.requests.singleWhere(
+            (r) => r.method == 'POST' && r.path.endsWith('/orders/$_owing/lines/$_apples/short'));
+        expect(_body(post), {'qty': sent});
+      });
+
+      testWidgets('in $locale, $typed substituted is sent as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _open(tester);
+        await tester.tap(find.byKey(const Key('substitute-$_owing-$_apples')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('suggestion-$_pears')));
+        await tester.pumpAndSettle();
+        for (var i = 1; i <= typed.length; i++) {
+          await tester.enterText(find.byKey(const Key('substitute-qty')), typed.substring(0, i));
+          await tester.pump();
+        }
+        expect(_says(tester, 'substitute-qty'), isNull);
+        await tester.tap(find.byKey(const Key('substitute-save')));
+        await tester.pumpAndSettle();
+        final post = server.requests.singleWhere(
+            (r) => r.method == 'POST' && r.path.endsWith('/orders/$_owing/lines/$_apples/substitute'));
+        expect(_body(post), {'substituteVariantId': _pears, 'qty': sent});
+      });
+    }
+
+    for (final (locale, typed, says) in [
+      ('ro', '1.250', 'Type the amount without thousands separators. Decimals go after a comma.'),
+      ('en_GB', '1,5', 'Type the amount without thousands separators. Decimals go after a point.'),
+      ('en', '1,5', 'Type the amount without thousands separators. Decimals go after a point.'),
+      ('pl', '1.250',
+          'A point may group thousands here. Type the figure without grouping, with any decimals after a comma.'),
+      ('ar', '-1', 'Type the amount without a sign.'),
+      ('en_GB', '.', 'Type the amount in digits.'),
+      ('ro', ',', 'Type the amount in digits.'),
+      ('en', '1e0', 'Only digits and a decimal point.'),
+    ]) {
+      testWidgets('in $locale, "$typed" is refused under the field: nothing closes short, nothing is substituted',
+          (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _open(tester);
+        await tester.tap(find.byKey(const Key('short-$_owing-$_apples')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byKey(const Key('short-qty')), typed);
+        await tester.pump();
+        expect(_says(tester, 'short-qty'), says);
+        await tester.tap(find.byKey(const Key('short-save')));
+        await tester.pumpAndSettle();
+        expect(find.text('A figure cannot be read. Correct the one marked.'), findsOneWidget);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(const Key('substitute-$_owing-$_apples')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('suggestion-$_pears')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byKey(const Key('substitute-qty')), typed);
+        await tester.pump();
+        expect(_says(tester, 'substitute-qty'), says);
+        await tester.tap(find.byKey(const Key('substitute-save')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+      });
+    }
+
+    testWidgets('a blank quantity is refused in words, never sent', (tester) async {
+      final server = await _open(tester);
+      await tester.tap(find.byKey(const Key('short-$_owing-$_apples')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('short-qty')), '');
+      await tester.tap(find.byKey(const Key('short-save')));
+      await tester.pumpAndSettle();
+      expect(find.text('Between 0 and 2, what the line still owes.'), findsOneWidget);
+      expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+    });
+
+    // The parcel count is optional: blank is not counted, but text that is
+    // not a count is refused, never recorded as not counted.
+    for (final typed in ['2.', '.', '-', '1,000', '2e1', '1000']) {
+      testWidgets('"$typed" parcels is refused under the field and nothing is dispatched',
+          (tester) async {
+        final server = await _open(tester);
+        await tester.tap(find.byKey(const Key('dispatch-$_packed')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byKey(const Key('dispatch-carrier')), 'DPD');
+        await tester.enterText(find.byKey(const Key('dispatch-parcels')), typed);
+        await tester.pump();
+        expect(_says(tester, 'dispatch-parcels'), isNotNull);
+        await tester.tap(find.byKey(const Key('dispatch-save')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+      });
+    }
+
+    testWidgets('no parcel count is sent when the field is left blank', (tester) async {
+      final server = await _open(tester);
+      await tester.tap(find.byKey(const Key('dispatch-$_packed')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('dispatch-carrier')), 'DPD');
+      await tester.enterText(find.byKey(const Key('dispatch-parcels')), ' ');
+      await tester.tap(find.byKey(const Key('dispatch-save')));
+      await tester.pumpAndSettle();
+      final post = server.requests.singleWhere((r) => r.method == 'POST');
+      expect(_body(post).containsKey('parcels'), isFalse);
+    });
   });
 
   // ── the page frame ─────────────────────────────────────────────────────────
@@ -369,7 +505,7 @@ void main() {
     await tester.pumpAndSettle();
     final post = server.requests.singleWhere(
         (r) => r.method == 'POST' && r.path.endsWith('/orders/$_owing/lines/$_bread/substitute'));
-    expect(_body(post), {'substituteVariantId': _rye, 'qty': 2});
+    expect(_body(post), {'substituteVariantId': _rye, 'qty': '2'});
   });
 
   // ── handed over today, on the store's clock ────────────────────────────────

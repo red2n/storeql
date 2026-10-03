@@ -17,6 +17,7 @@ import 'pos_printer_settings_dialog.dart';
 import 'container_return_dialog.dart';
 import 'customer_display.dart';
 import 'customer_display_channel.dart';
+import 'held_card_payment.dart';
 
 /// [pending] badges the Pending destination so unsynced sales are visible from
 /// anywhere in the terminal, not only once the cashier goes looking.
@@ -79,6 +80,9 @@ class _PosShellState extends ConsumerState<PosShell> {
   @override
   void initState() {
     super.initState();
+    // A card payment the till held when the app last closed is read back from
+    // the device now, at start-up, so it is in hand before any sale is pressed.
+    ref.read(heldCardPaymentProvider.notifier);
     // Keep the open session off the server's idle sweep while the terminal is up.
     _heartbeat = Timer.periodic(const Duration(minutes: 4), (_) {
       if (ref.read(posSessionProvider) != null) {

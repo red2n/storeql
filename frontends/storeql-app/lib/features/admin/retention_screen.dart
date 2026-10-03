@@ -1,6 +1,7 @@
 import 'widgets/business_wide_note.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/format.dart';
@@ -13,6 +14,7 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/page_header.dart';
 import 'retention_providers.dart';
+import 'widgets/figure_field.dart';
 
 // ---------------------------------------------------------------------------
 // Data retention (21.16).
@@ -351,6 +353,11 @@ class _SetPeriodDialogState extends ConsumerState<_SetPeriodDialog> {
   String? _error;
   bool _saving = false;
 
+  /// The period is a whole number of days, read with the shared reader: text
+  /// it cannot read is refused under the field and nothing is saved. Read as
+  /// a number literal, `0x10` was saved as sixteen days.
+  final _marks = AmountMarks.ofApp();
+
   @override
   void dispose() {
     _days.dispose();
@@ -359,8 +366,8 @@ class _SetPeriodDialogState extends ConsumerState<_SetPeriodDialog> {
 
   Future<void> _save() async {
     final c = widget.retentionClass;
-    final days = int.tryParse(_days.text.trim());
-    if (days == null || days < 0 || days > 36500) {
+    final days = wholeOf(_days, _marks);
+    if (days == null || days > 36500) {
       setState(() => _error = 'Enter a number of days from 0 to 36500.');
       return;
     }
@@ -412,17 +419,18 @@ class _SetPeriodDialogState extends ConsumerState<_SetPeriodDialog> {
             ),
           Text(c.description, style: TextStyle(color: cs.outline)),
           const SizedBox(height: AppSpacing.md),
-          TextField(
-            key: const Key('retention-period'),
+          FigureField(
+            fieldKey: const Key('retention-period'),
             controller: _days,
-            keyboardType: TextInputType.number,
-            decoration: InputDecoration(
-              labelText: 'Days',
-              helperText: c.floorDays == null
-                  ? '0 means at once'
-                  : 'At least ${c.floorDays} (${describeDays(c.floorDays!)}): ${c.floorCitation}',
-              helperMaxLines: 3,
-            ),
+            shape: wholeNumber,
+            marks: _marks,
+            label: 'Days',
+            helper: c.floorDays == null
+                ? '0 means at once'
+                : 'At least ${c.floorDays} (${describeDays(c.floorDays!)}): ${c.floorCitation}',
+            helperMaxLines: 3,
+            hint: '',
+            onChanged: (_) => setState(() {}),
           ),
         ],
       ),

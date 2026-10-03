@@ -388,4 +388,168 @@ class VatRateIT {
     assertThat(
         send("GET", "/product-vat-categories/" + other, null, rival, "OWNER").getStatus(), is(200));
   }
+
+  // ── the currency's own minor units (the currency minor-units sweep) ─────────
+
+  private static java.math.BigDecimal number(JsonObject o, String field) {
+    return o.getJsonNumber(field).bigDecimalValue();
+  }
+
+  private String listOf(Shop s) {
+    Response list =
+        send(
+            "POST",
+            "/admin/price-lists",
+            "{\"name\":\"Minor units "
+                + Ids.newId()
+                + "\",\"channel\":\"ALL\",\"currency\":\""
+                + s.currency()
+                + "\",\"effectiveFrom\":\"2020-01-01T00:00:00Z\"}",
+            s,
+            "OWNER");
+    assertThat(list.getStatus(), is(201));
+    return body(list).getJsonObject("data").getString("id");
+  }
+
+  private static String item(String variant, String price) {
+    return "{\"variantId\":\"" + variant + "\",\"price\":" + price + ",\"minQty\":1}";
+  }
+
+  private String scalar(String sql) {
+    return com.storeql.test.Envelopes.scalar(PG, sql);
+  }
+
+  @Test
+  @DisplayName("A price, its VAT, a basket and a sticker are in the currency's own minor units")
+  void moneyIsInTheCurrencysOwnMinorUnits() {
+    // A dinar price keeps its fils, in the answer and in the table; 5% of 1.235 is 0.062.
+    Shop kw = shop("KWD", "KW");
+    String v = Ids.newId().toString();
+    assertThat(
+        send("POST", "/vat-rates", rate("T1", "0.05", false), kw, "OWNER").getStatus(), is(201));
+    priced(kw, v, "1.235");
+    JsonObject dinar = body(resolve(kw, v)).getJsonObject("data");
+    assertThat(number(dinar, "unitPrice"), is(new java.math.BigDecimal("1.235")));
+    assertThat(number(dinar, "vatAmount"), is(new java.math.BigDecimal("0.062")));
+    assertThat(number(dinar, "totalWithVat"), is(new java.math.BigDecimal("1.297")));
+    assertThat(
+        scalar(
+            "SELECT price::text FROM pricing.price_list_items WHERE tenant_id = '"
+                + kw.tenant()
+                + "'"),
+        is("1.235"));
+
+    // A yen price is whole yen: 10% of ¥1,234 is ¥123, never 123.40.
+    Shop jp = shop("JPY", "JP");
+    assertThat(
+        send("POST", "/vat-rates", rate("T1", "0.10", false), jp, "OWNER").getStatus(), is(201));
+    priced(jp, v, "1234");
+    JsonObject yen = body(resolve(jp, v)).getJsonObject("data");
+    assertThat(number(yen, "vatAmount"), is(new java.math.BigDecimal("123")));
+    assertThat(number(yen, "totalWithVat"), is(new java.math.BigDecimal("1357")));
+    // Three in a basket: ¥3,702, VAT ¥370 (370.2), ¥4,072.
+    JsonObject basket =
+        body(send(
+                "POST",
+                "/prices/quote",
+                "{\"channel\":\"POS\",\"lines\":[{\"variantId\":\"" + v + "\",\"qty\":3}]}",
+                jp,
+                "OWNER"))
+            .getJsonObject("data");
+    assertThat(number(basket, "subtotal"), is(new java.math.BigDecimal("3702")));
+    assertThat(number(basket, "vatAmount"), is(new java.math.BigDecimal("370")));
+    assertThat(number(basket, "total"), is(new java.math.BigDecimal("4072")));
+
+    // A sticker in yen carries whole yen in its five price digits: ¥1,980 fits (it did not when
+    // the digits were read as pence).
+    String sv = Ids.newId().toString();
+    priced(jp, sv, "2480");
+    Response sticker =
+        send(
+            "POST",
+            "/markdowns",
+            "{\"storeId\":\""
+                + Ids.newId()
+                + "\",\"variantId\":\""
+                + sv
+                + "\",\"batchNo\":\"B-1\",\"expiryDate\":\""
+                + java.time.LocalDate.now().plusDays(2)
+                + "\",\"qty\":1,\"markdownPrice\":1980,\"reason\":\"SHORT_DATED\"}",
+            jp,
+            "STOREKEEPER");
+    String stickerBody = sticker.readEntity(String.class);
+    assertThat(stickerBody, sticker.getStatus(), is(201));
+    JsonObject md =
+        Json.createReader(new StringReader(stickerBody)).readObject().getJsonObject("data");
+    assertThat(md.getString("labelCode").substring(7, 12), is("01980"));
+    assertThat(number(md, "markdownPrice"), is(new java.math.BigDecimal("1980")));
+  }
+
+  @Test
+  @DisplayName("A list price finer than its currency is refused, nothing written, ours or theirs")
+  void aListPriceFinerThanItsCurrencyIsRefused() {
+    Shop jp = shop("JPY", "JP");
+    Shop kw = shop("KWD", "KW");
+    Shop gb = shop("GBP", "GB");
+    String v = Ids.newId().toString();
+    for (Object[] c : new Object[][] {{jp, "1234.5"}, {kw, "1.2345"}, {gb, "9.999"}}) {
+      Shop s = (Shop) c[0];
+      String list = listOf(s);
+      Response r =
+          send("POST", "/admin/price-lists/" + list + "/items", item(v, (String) c[1]), s, "OWNER");
+      assertThat(s.currency(), r.getStatus(), is(400));
+      assertThat(s.currency(), errorCode(r), is("VALIDATION_FAILED"));
+      assertThat(
+          s.currency(),
+          scalar(
+              "SELECT count(*) FROM pricing.price_list_items WHERE tenant_id = '"
+                  + s.tenant()
+                  + "'"),
+          is("0"));
+      // In a batch the row is reported against its variant and the good row beside it written.
+      String good = Ids.newId().toString();
+      JsonObject batch =
+          body(send(
+                  "POST",
+                  "/admin/price-lists/" + list + "/items/batch",
+                  "{\"items\":[" + item(v, (String) c[1]) + "," + item(good, "100") + "]}",
+                  s,
+                  "OWNER"))
+              .getJsonObject("data");
+      assertThat(s.currency(), batch.getInt("upserted"), is(1));
+      assertThat(s.currency(), batch.getJsonArray("errors").size(), is(1));
+    }
+
+    // Another business's management naming our list, with a price we would refuse: no such list,
+    // never the precision; a shopper is turned away; nothing written to our list.
+    String ours = listOf(kw);
+    String before =
+        scalar(
+            "SELECT count(*) FROM pricing.price_list_items WHERE tenant_id = '"
+                + kw.tenant()
+                + "'");
+    Shop rival = shop("KWD", "KW");
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response r =
+          send("POST", "/admin/price-lists/" + ours + "/items", item(v, "1.2345"), rival, role);
+      assertThat(role, r.getStatus(), is(404));
+      assertThat(role, errorCode(r), is("PRICING_LIST_NOT_FOUND"));
+    }
+    assertThat(
+        send("POST", "/admin/price-lists/" + ours + "/items", item(v, "1.235"), kw, "CUSTOMER")
+            .getStatus(),
+        is(403));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM pricing.price_list_items WHERE tenant_id = '"
+                + kw.tenant()
+                + "'"),
+        is(before));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM pricing.price_list_items WHERE tenant_id = '"
+                + rival.tenant()
+                + "'"),
+        is("0"));
+  }
 }

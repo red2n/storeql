@@ -18,7 +18,14 @@ import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -467,6 +474,51 @@ class ManualGrantsIT {
         "nothing was written under the other business",
         sql("SELECT COUNT(*) FROM customer.store_credit_ledger WHERE tenant_id = ?", other),
         is("0"));
+  }
+
+  @Test
+  @DisplayName(
+      "Store credit is issued in its currency's own minor units: a dinar's third place stands,"
+          + " half a yen or a fourth fils is refused with nothing written")
+  void storeCreditIsInTheCurrencysUnits() throws SQLException {
+    TENANTS.with(tenant.toString(), "KWD", "KW");
+    String id = customer();
+    Response ok =
+        post(
+            "/customers/" + id + "/store-credit/issue",
+            "OWNER",
+            key(),
+            "{\"amount\":1.125,\"reason\":\"goodwill\"}");
+    String okBody = ok.readEntity(String.class);
+    assertThat(okBody, ok.getStatus(), is(200));
+    assertThat(okBody, containsString("\"balance\":1.125"));
+    assertThat(okBody, containsString("\"currency\":\"KWD\""));
+    assertThat(credit(id).compareTo(new BigDecimal("1.125")), is(0));
+
+    for (String body :
+        new String[] {
+          "{\"amount\":1.1255,\"reason\":\"goodwill\"}",
+          "{\"amount\":500.5,\"currency\":\"JPY\",\"reason\":\"goodwill\"}",
+          "{\"amount\":10.005,\"currency\":\"GBP\",\"reason\":\"goodwill\"}"
+        }) {
+      Response r = post("/customers/" + id + "/store-credit/issue", "OWNER", key(), body);
+      String answer = r.readEntity(String.class);
+      assertThat(body + " " + answer, r.getStatus(), is(400));
+      assertThat(body + " " + answer, answer, containsString("STORE_CREDIT_AMOUNT_INVALID"));
+    }
+    Response yen =
+        post(
+            "/customers/" + id + "/store-credit/issue",
+            "OWNER",
+            key(),
+            "{\"amount\":500,\"currency\":\"JPY\",\"reason\":\"goodwill\"}");
+    String yenBody = yen.readEntity(String.class);
+    assertThat(yenBody, yen.getStatus(), is(200));
+    assertThat(yenBody, containsString("\"balance\":500"));
+    assertThat(
+        "one issue per currency, nothing for the refusals",
+        count("store_credit_ledger", id),
+        is(2L));
   }
 
   @Test
@@ -990,5 +1042,586 @@ class ManualGrantsIT {
     assertThat(
         post("/customers/" + id + "/store-credit/issue", "MANAGER", k, ISSUE).getStatus(), is(200));
     assertThat(credit(id).compareTo(new BigDecimal("15")), is(0));
+  }
+
+  // ── a manual adjustment's refusals: each by name, each writing nothing ───────
+
+  private static final String V4_ID = "123e4567-e89b-42d3-a456-426614174000";
+
+  /** Everything an adjustment writes for one customer, as one comparable line. */
+  private String written(String customerId) throws SQLException {
+    return points(customerId).toPlainString()
+        + " ledger="
+        + count("loyalty_ledger", customerId)
+        + " grants="
+        + count("manual_grants", customerId)
+        + " events="
+        + sql(
+            "SELECT COUNT(*) FROM customer.outbox WHERE tenant_id = ? AND aggregate_id = ?",
+            tenant,
+            Ids.parse(customerId));
+  }
+
+  /** The stable code of a refusal: the problem's own member, or the legacy envelope's. */
+  private static String codeOf(String body) {
+    jakarta.json.JsonObject problem = Json.createReader(new StringReader(body)).readObject();
+    return problem.containsKey("code")
+        ? problem.getString("code")
+        : problem.getJsonObject("error").getString("code");
+  }
+
+  private static void assertRefused(String what, Response r, int status, String code) {
+    String body = r.readEntity(String.class);
+    assertThat(what + ": " + body, r.getStatus(), is(status));
+    assertThat(what + ": " + body, codeOf(body), is(code));
+  }
+
+  private static String pointsBody(String figure) {
+    return "{\"points\":" + figure + ",\"reason\":\"a correction\"}";
+  }
+
+  @Test
+  @DisplayName(
+      "An adjustment refused for its role, business, id, key or body says why by code and writes nothing")
+  void adjustRefusalsNameTheirCodeAndWriteNothing() throws SQLException {
+    String id = customer();
+    String path = "/customers/" + id + "/loyalty/adjust";
+    assertThat(
+        post("/customers/" + id + "/loyalty/earn", "OWNER", key(), EARN).getStatus(), is(200));
+    String before = written(id);
+
+    // The role: a till is not management, and nor is a shopper.
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertRefused(role, post(path, tenant, role, key(), ADJUST, manager), 403, "FORBIDDEN");
+    }
+    // The business: another one's management finds no such customer, the rest are turned back.
+    for (String role : STAFF) {
+      boolean management = role.equals("OWNER") || role.equals("MANAGER");
+      assertRefused(
+          "another business's " + role,
+          post(path, other, role, key(), ADJUST, Ids.newId()),
+          management ? 404 : 403,
+          management ? "CUSTOMER_NOT_FOUND" : "FORBIDDEN");
+    }
+    assertRefused(
+        "another business's shopper",
+        post(path, other, "CUSTOMER", key(), ADJUST, Ids.newId()),
+        403,
+        "FORBIDDEN");
+    // The id: one nobody holds here, and two that are not ids of ours at all.
+    assertRefused(
+        "a customer nobody holds",
+        post(
+            "/customers/" + Ids.newId() + "/loyalty/adjust",
+            tenant,
+            "OWNER",
+            key(),
+            ADJUST,
+            manager),
+        404,
+        "CUSTOMER_NOT_FOUND");
+    assertRefused(
+        "an id that is not an id",
+        post("/customers/not-a-uuid/loyalty/adjust", tenant, "OWNER", key(), ADJUST, manager),
+        400,
+        "INVALID_UUID");
+    assertRefused(
+        "a version-4 id",
+        post("/customers/" + V4_ID + "/loyalty/adjust", tenant, "OWNER", key(), ADJUST, manager),
+        400,
+        "INVALID_UUID");
+    // The key: absent, not a UUID, and a UUID of the wrong version.
+    assertRefused(
+        "no key",
+        post(path, tenant, "MANAGER", null, ADJUST, manager),
+        400,
+        "IDEMPOTENCY_KEY_REQUIRED");
+    assertRefused(
+        "a key that is not a UUID",
+        post(path, tenant, "MANAGER", "nope", ADJUST, manager),
+        400,
+        "IDEMPOTENCY_KEY_INVALID");
+    assertRefused(
+        "a version-4 key",
+        post(path, tenant, "MANAGER", V4_ID, ADJUST, manager),
+        400,
+        "IDEMPOTENCY_KEY_INVALID");
+    // The body: what a constraint refuses, what is no figure at all, what cannot be read.
+    String[][] badBodies = {
+      {"{}", "VALIDATION_FAILED"},
+      {"{\"reason\":\"no points\"}", "VALIDATION_FAILED"},
+      {"{\"points\":5}", "VALIDATION_FAILED"},
+      {"{\"points\":5,\"reason\":\"  \"}", "VALIDATION_FAILED"},
+      {pointsBody("5").replace("a correction", "r".repeat(501)), "VALIDATION_FAILED"},
+      {pointsBody("0"), "VALIDATION_FAILED"},
+      {pointsBody("0.00"), "VALIDATION_FAILED"},
+      {pointsBody("0.004"), "VALIDATION_FAILED"},
+      {pointsBody("-0.001"), "VALIDATION_FAILED"},
+      {pointsBody("100000000000000000"), "VALIDATION_FAILED"},
+      {pointsBody("-100000000000000000"), "VALIDATION_FAILED"},
+      {pointsBody("\"lots\""), "REQUEST_BODY_INVALID"},
+      {"{\"points\":5,\"reason\":", "REQUEST_BODY_INVALID"},
+    };
+    for (String[] bad : badBodies) {
+      assertRefused(bad[0], post(path, tenant, "MANAGER", key(), bad[0], manager), 400, bad[1]);
+    }
+    Response nothing = post(path, tenant, "MANAGER", key(), "null", manager);
+    String nothingBody = nothing.readEntity(String.class);
+    assertThat(nothingBody, nothing.getStatus(), is(400));
+    assertThat(
+        nothingBody,
+        codeOf(nothingBody),
+        org.hamcrest.Matchers.anyOf(is("BODY_REQUIRED"), is("REQUEST_BODY_INVALID")));
+
+    assertThat("nothing moved for our customer", written(id), is(before));
+    assertThat(
+        "nothing was written under the other business",
+        sql("SELECT COUNT(*) FROM customer.manual_grants WHERE tenant_id = ?", other),
+        is("0"));
+
+    // A key already carried out for one correction refuses another, and the first stands.
+    String k = key();
+    assertThat(post(path, tenant, "MANAGER", k, ADJUST, manager).getStatus(), is(200));
+    assertRefused(
+        "the same key for another correction",
+        post(path, tenant, "MANAGER", k, pointsBody("999"), manager),
+        409,
+        "IDEMPOTENCY_KEY_REUSED");
+    assertThat(points(id).compareTo(new BigDecimal("65")), is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "A deduction larger than the balance takes the balance, and the ledger and the event say what came off")
+  void aDeductionLargerThanTheBalanceRecordsWhatCameOff() throws SQLException {
+    String id = customer();
+    assertThat(
+        post(
+                "/customers/" + id + "/loyalty/earn",
+                "OWNER",
+                key(),
+                "{\"points\":20,\"reason\":\"seed\"}")
+            .getStatus(),
+        is(200));
+    var d =
+        data(
+            post(
+                "/customers/" + id + "/loyalty/adjust",
+                "MANAGER",
+                key(),
+                "{\"points\":-50,\"reason\":\"zeroing out\"}"));
+    assertThat(d.getJsonNumber("pointsBalance").bigDecimalValue().signum(), is(0));
+
+    // The ledger and the event say the 20 that came off, not the 50 that was asked for.
+    String where = " WHERE tenant_id = ? AND customer_id = ? AND type = 'ADJUST'";
+    assertThat(
+        sql("SELECT points FROM customer.loyalty_ledger" + where, tenant, Ids.parse(id)),
+        is("-20.00"));
+    assertThat(
+        sql("SELECT balance_after FROM customer.loyalty_ledger" + where, tenant, Ids.parse(id)),
+        is("0.00"));
+    var event =
+        Json.createReader(
+                new StringReader(
+                    sql(
+                        "SELECT payload FROM customer.outbox WHERE tenant_id = ?"
+                            + " AND aggregate_id = ? AND event_type = 'LoyaltyAdjusted'",
+                        tenant,
+                        Ids.parse(id))))
+            .readObject();
+    assertThat(
+        event.getJsonNumber("points").bigDecimalValue().compareTo(new BigDecimal("-20")), is(0));
+    // The grant keeps what was asked, and who asked.
+    // The column holds points or store credit, so it is as wide as any currency's minor units
+    // (V15); the value is what counts.
+    assertThat(
+        new BigDecimal(
+                sql(
+                    "SELECT amount FROM customer.manual_grants WHERE tenant_id = ? AND customer_id = ?"
+                        + " AND kind = 'LOYALTY_ADJUST'",
+                    tenant,
+                    Ids.parse(id)))
+            .compareTo(new BigDecimal("-50")),
+        is(0));
+    // And no lot has anything left to spend.
+    assertThat(
+        new BigDecimal(
+                sql(
+                    "SELECT COALESCE(SUM(remaining), 0) FROM customer.loyalty_point_lots"
+                        + " WHERE tenant_id = ? AND customer_id = ?",
+                    tenant,
+                    Ids.parse(id)))
+            .signum(),
+        is(0));
+  }
+
+  @Test
+  @DisplayName("A deduction with no points to take is refused 422 and its key is not spent")
+  void aDeductionWithNothingToTakeIsRefusedAndTheKeyIsNotSpent() throws SQLException {
+    String id = customer();
+    String path = "/customers/" + id + "/loyalty/adjust";
+    String k = key();
+    String deduction = "{\"points\":-5,\"reason\":\"a mistaken award\"}";
+    String before = written(id);
+
+    assertRefused(
+        "a balance of nothing",
+        post(path, tenant, "MANAGER", k, deduction, manager),
+        422,
+        "LOYALTY_INSUFFICIENT_POINTS");
+    assertThat("nothing was written", written(id), is(before));
+
+    // Points arrive; the same attempt under the same key now stands: the refusal spent nothing.
+    assertThat(
+        post("/customers/" + id + "/loyalty/earn", "OWNER", key(), pointsBody("10")).getStatus(),
+        is(200));
+    var d = data(post(path, tenant, "MANAGER", k, deduction, manager));
+    assertThat(
+        d.getJsonNumber("pointsBalance").bigDecimalValue().compareTo(new BigDecimal("5")), is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "Points the ledger cannot hold are refused 400 on earn, redeem and adjust, and move nothing")
+  void pointsTheLedgerCannotHoldAreRefused() throws SQLException {
+    String id = seeded("10");
+    String before = written(id);
+    for (String figure : new String[] {"0.004", "1.005", "100000000000000000"}) {
+      assertRefused(
+          "earn " + figure,
+          post("/customers/" + id + "/loyalty/earn", "MANAGER", key(), pointsBody(figure)),
+          400,
+          "VALIDATION_FAILED");
+      assertRefused(
+          "redeem " + figure,
+          post("/customers/" + id + "/loyalty/redeem", "CASHIER", null, pointsBody(figure)),
+          400,
+          "VALIDATION_FAILED");
+      assertRefused(
+          "adjust " + figure,
+          post("/customers/" + id + "/loyalty/adjust", "MANAGER", key(), pointsBody(figure)),
+          400,
+          "VALIDATION_FAILED");
+    }
+    assertThat(written(id), is(before));
+  }
+
+  // ── an erased customer is given nothing by hand ─────────────────────────────
+
+  @Test
+  @DisplayName(
+      "A manual earn or adjustment, up or down, for an erased customer is refused 409 by owner and manager alike, a retry too, and writes nothing")
+  void anErasedCustomerIsGivenNothingByHand() throws SQLException {
+    String id = seeded("40");
+    String firstEarn = key();
+    assertThat(
+        post("/customers/" + id + "/loyalty/earn", "MANAGER", firstEarn, EARN).getStatus(),
+        is(200));
+    Response erased = as("/customers/" + id, tenant, manager, "OWNER").delete();
+    assertThat(erased.readEntity(String.class), erased.getStatus(), is(204));
+    String before = written(id);
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(
+          role + " earning",
+          post("/customers/" + id + "/loyalty/earn", role, key(), EARN),
+          409,
+          "CUSTOMER_ANONYMIZED");
+      assertRefused(
+          role + " adjusting up",
+          post("/customers/" + id + "/loyalty/adjust", role, key(), ADJUST),
+          409,
+          "CUSTOMER_ANONYMIZED");
+      assertRefused(
+          role + " adjusting down",
+          post("/customers/" + id + "/loyalty/adjust", role, key(), pointsBody("-5")),
+          409,
+          "CUSTOMER_ANONYMIZED");
+    }
+    // A retry of an award made before the erasure gives nothing more either.
+    assertRefused(
+        "a retried earlier award",
+        post("/customers/" + id + "/loyalty/earn", "MANAGER", firstEarn, EARN),
+        409,
+        "CUSTOMER_ANONYMIZED");
+    // Below management it is still the role that is refused, before the record is looked at.
+    assertRefused(
+        "a cashier earning",
+        post("/customers/" + id + "/loyalty/earn", "CASHIER", key(), EARN),
+        403,
+        "FORBIDDEN");
+    // Another business's management still finds no such customer.
+    assertRefused(
+        "another business's owner",
+        post("/customers/" + id + "/loyalty/earn", other, "OWNER", key(), EARN, Ids.newId()),
+        404,
+        "CUSTOMER_NOT_FOUND");
+
+    // Nothing moved: no points, no ledger entry, no grant, no event.
+    assertThat(written(id), is(before));
+    assertThat(points(id).compareTo(new BigDecimal("80")), is(0));
+  }
+
+  private void erase(String customerId) {
+    Response erased = as("/customers/" + customerId, tenant, manager, "OWNER").delete();
+    assertThat(erased.readEntity(String.class), erased.getStatus(), is(204));
+  }
+
+  /** Everything a grant or a spend could move: points, store credit, their ledgers, events. */
+  private String held(String customerId) throws SQLException {
+    return written(customerId)
+        + " credit="
+        + credit(customerId).toPlainString()
+        + " creditLedger="
+        + count("store_credit_ledger", customerId)
+        + " creditAccounts="
+        + count("store_credit_accounts", customerId);
+  }
+
+  private static String creditRedeem(String amount, UUID order) {
+    return "{\"amount\":"
+        + amount
+        + (order == null ? "" : ",\"orderId\":\"" + order + "\"")
+        + ",\"reason\":\"tender\"}";
+  }
+
+  @Test
+  @DisplayName(
+      "Store credit issued by hand to an erased customer is refused 409 by owner and manager"
+          + " alike, in any currency, a retry of an earlier issue too, and writes nothing")
+  void anErasedCustomerIsIssuedNoStoreCredit() throws SQLException {
+    String id = customer();
+    String issuePath = "/customers/" + id + "/store-credit/issue";
+    String firstIssue = key();
+    assertThat(post(issuePath, "MANAGER", firstIssue, ISSUE).getStatus(), is(200));
+    erase(id);
+    String before = held(id);
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertRefused(
+          role + " issuing", post(issuePath, role, key(), ISSUE), 409, "CUSTOMER_ANONYMIZED");
+      assertRefused(
+          role + " issuing in another currency",
+          post(
+              issuePath,
+              role,
+              key(),
+              "{\"amount\":500,\"currency\":\"JPY\",\"reason\":\"goodwill\"}"),
+          409,
+          "CUSTOMER_ANONYMIZED");
+    }
+    // A retry of an issue made before the erasure gives nothing more either.
+    assertRefused(
+        "a retried earlier issue",
+        post(issuePath, "MANAGER", firstIssue, ISSUE),
+        409,
+        "CUSTOMER_ANONYMIZED");
+    // Below management it is still the role that is refused, before the record is looked at.
+    assertRefused("a cashier issuing", post(issuePath, "CASHIER", key(), ISSUE), 403, "FORBIDDEN");
+    // Another business's management still finds no such customer.
+    assertRefused(
+        "another business's owner",
+        post(issuePath, other, "OWNER", key(), ISSUE, Ids.newId()),
+        404,
+        "CUSTOMER_NOT_FOUND");
+
+    // Nothing moved: no credit, no ledger entry, no account in another currency, no grant, no
+    // event.
+    assertThat(held(id), is(before));
+    assertThat(credit(id).compareTo(new BigDecimal("15")), is(0));
+    assertThat(count("store_credit_accounts", id), is(1L));
+  }
+
+  @Test
+  @DisplayName(
+      "An erased customer's points and store credit are not spent: a new spend is refused 409"
+          + " whoever asks, a spend made before the erasure answers its retry with nothing more"
+          + " taken, and nothing moves")
+  void anErasedCustomerSpendsNothingNew() throws SQLException {
+    String id = seeded("100");
+    String pointsPath = "/customers/" + id + "/loyalty/redeem";
+    String creditPath = "/customers/" + id + "/store-credit/redeem";
+    assertThat(
+        post("/customers/" + id + "/store-credit/issue", "OWNER", key(), ISSUE).getStatus(),
+        is(200));
+    UUID pointsOrder = Ids.newId();
+    UUID creditOrder = Ids.newId();
+    String pointsKey = key();
+    assertThat(post(pointsPath, "CASHIER", null, redeem("30", pointsOrder)).getStatus(), is(200));
+    assertThat(post(pointsPath, "CASHIER", pointsKey, pointsBody("10")).getStatus(), is(200));
+    assertThat(
+        post(creditPath, "CASHIER", null, creditRedeem("5.00", creditOrder)).getStatus(), is(200));
+    erase(id);
+    String before = held(id);
+
+    for (String role : new String[] {"CASHIER", "MANAGER", "OWNER"}) {
+      assertRefused(
+          role + " spending points for a new order",
+          post(pointsPath, role, null, redeem("10", Ids.newId())),
+          409,
+          "CUSTOMER_ANONYMIZED");
+      assertRefused(
+          role + " spending points under a new key",
+          post(pointsPath, role, key(), pointsBody("10")),
+          409,
+          "CUSTOMER_ANONYMIZED");
+      assertRefused(
+          role + " spending points with neither an order nor a key",
+          post(pointsPath, role, null, pointsBody("10")),
+          409,
+          "CUSTOMER_ANONYMIZED");
+      assertRefused(
+          role + " spending store credit for a new order",
+          post(creditPath, role, null, creditRedeem("5.00", Ids.newId())),
+          409,
+          "CUSTOMER_ANONYMIZED");
+      assertRefused(
+          role + " spending store credit with no order",
+          post(creditPath, role, null, creditRedeem("5.00", null)),
+          409,
+          "CUSTOMER_ANONYMIZED");
+    }
+
+    // A spend recorded before the erasure answers its retry as it stands: the tender it paid is
+    // recorded from that answer, and nothing more is taken.
+    assertThat(
+        data(post(pointsPath, "CASHIER", null, redeem("30", pointsOrder)))
+            .getJsonNumber("pointsBalance")
+            .bigDecimalValue()
+            .compareTo(new BigDecimal("60")),
+        is(0));
+    assertThat(
+        data(post(pointsPath, "CASHIER", pointsKey, pointsBody("10")))
+            .getJsonNumber("pointsBalance")
+            .bigDecimalValue()
+            .compareTo(new BigDecimal("60")),
+        is(0));
+    assertThat(
+        data(post(creditPath, "CASHIER", null, creditRedeem("5.00", creditOrder)))
+            .getJsonNumber("balance")
+            .bigDecimalValue()
+            .compareTo(BigDecimal.TEN),
+        is(0));
+    // Another business's till still finds no such customer.
+    assertRefused(
+        "another business's cashier",
+        post(creditPath, other, "CASHIER", null, creditRedeem("5.00", Ids.newId()), Ids.newId()),
+        404,
+        "CUSTOMER_NOT_FOUND");
+
+    assertThat(held(id), is(before));
+  }
+
+  // ── a store-credit spend is once per order, when the calls race too ───────────
+
+  /** Fires every call at once and gives back each one's status and body, in no order. */
+  private List<String[]> race(int calls, java.util.function.Supplier<Response> call)
+      throws Exception {
+    ExecutorService pool = Executors.newFixedThreadPool(calls);
+    try {
+      CountDownLatch ready = new CountDownLatch(calls);
+      CountDownLatch go = new CountDownLatch(1);
+      List<Future<String[]>> answers = new ArrayList<>();
+      for (int i = 0; i < calls; i++) {
+        answers.add(
+            pool.submit(
+                () -> {
+                  ready.countDown();
+                  go.await();
+                  Response r = call.get();
+                  return new String[] {String.valueOf(r.getStatus()), r.readEntity(String.class)};
+                }));
+      }
+      ready.await();
+      go.countDown();
+      List<String[]> out = new ArrayList<>();
+      for (Future<String[]> a : answers) out.add(a.get(60, TimeUnit.SECONDS));
+      return out;
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  private long redeemsFor(String customerId, UUID order) throws SQLException {
+    return Long.parseLong(
+        sql(
+            "SELECT COUNT(*) FROM customer.store_credit_ledger WHERE tenant_id = ?"
+                + " AND customer_id = ? AND order_id = ? AND type = 'REDEEM'",
+            tenant,
+            Ids.parse(customerId),
+            order));
+  }
+
+  private static BigDecimal balanceIn(String body) {
+    return Json.createReader(new StringReader(body))
+        .readObject()
+        .getJsonObject("data")
+        .getJsonNumber("balance")
+        .bigDecimalValue();
+  }
+
+  @Test
+  @DisplayName(
+      "Store-credit spends for one order fired at once take the credit once: every call answers"
+          + " 200 with the balance after the one spend, and one REDEEM is recorded")
+  void racingSpendsForOneOrderTakeOnce() throws Exception {
+    String id = customer();
+    assertThat(
+        post("/customers/" + id + "/store-credit/issue", "OWNER", key(), ISSUE).getStatus(),
+        is(200));
+    UUID order = Ids.newId();
+    String body = creditRedeem("5.00", order);
+
+    List<String[]> answers =
+        race(8, () -> post("/customers/" + id + "/store-credit/redeem", "CASHIER", null, body));
+
+    for (String[] a : answers) {
+      assertThat(a[1], a[0], is("200"));
+      // 15 − 5 once. A second deduction would answer 5, a third 0.
+      assertThat(a[1], balanceIn(a[1]).compareTo(BigDecimal.TEN), is(0));
+    }
+    assertThat(credit(id).compareTo(BigDecimal.TEN), is(0));
+    assertThat(redeemsFor(id, order), is(1L));
+    // The seed's ISSUE and the one REDEEM: nothing else in the ledger.
+    assertThat(count("store_credit_ledger", id), is(2L));
+  }
+
+  @Test
+  @DisplayName(
+      "After an erasure, retries of a spend made before it fired at once all answer it as it"
+          + " stands, while new spends fired with them are refused 409: nothing more is taken")
+  void racingRetriesForAnErasedCustomerTakeNothingMore() throws Exception {
+    String id = customer();
+    assertThat(
+        post("/customers/" + id + "/store-credit/issue", "OWNER", key(), ISSUE).getStatus(),
+        is(200));
+    UUID order = Ids.newId();
+    String creditPath = "/customers/" + id + "/store-credit/redeem";
+    assertThat(post(creditPath, "CASHIER", null, creditRedeem("5.00", order)).getStatus(), is(200));
+    erase(id);
+    String before = held(id);
+
+    java.util.concurrent.atomic.AtomicInteger n = new java.util.concurrent.atomic.AtomicInteger();
+    List<String[]> answers =
+        race(
+            8,
+            () ->
+                n.getAndIncrement() % 2 == 0
+                    ? post(creditPath, "CASHIER", null, creditRedeem("5.00", order))
+                    : post(creditPath, "CASHIER", null, creditRedeem("5.00", Ids.newId())));
+
+    int replays = 0;
+    for (String[] a : answers) {
+      if ("200".equals(a[0])) {
+        replays++;
+        assertThat(a[1], balanceIn(a[1]).compareTo(BigDecimal.TEN), is(0));
+      } else {
+        assertThat(a[1], a[0], is("409"));
+        assertThat(a[1], codeOf(a[1]), is("CUSTOMER_ANONYMIZED"));
+      }
+    }
+    assertThat(replays, is(4));
+    assertThat(redeemsFor(id, order), is(1L));
+    assertThat(held(id), is(before));
   }
 }

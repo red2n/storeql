@@ -242,9 +242,11 @@ class UsageIT {
         platform(
             "PUT", path, "{\"meters\":[{\"meter\":\"SMS\",\"included\":1},{\"meter\":\"sms\"}]}");
     assertThat(twice.code(), is("PLAN_METER_TWICE"));
-    assertThat(
-        platform("PUT", path, "{\"meters\":[{\"meter\":\"SMS\",\"included\":-1}]}").code(),
-        is("PLAN_METER_INCLUDED_INVALID"));
+    // The published code for an allowance below nothing (k6 usage-metering-flow, the API guide):
+    // the service's to name, not the request's VALIDATION_FAILED (PlanMeterRulesTest).
+    Answer negative = platform("PUT", path, "{\"meters\":[{\"meter\":\"SMS\",\"included\":-1}]}");
+    assertThat(negative.text(), negative.status(), is(400));
+    assertThat(negative.code(), is("PLAN_METER_INCLUDED_INVALID"));
     Answer badCurrency =
         platform(
             "POST",

@@ -1,5 +1,8 @@
 package com.storeql.tenant.dto;
 
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -63,8 +66,22 @@ public final class Dtos {
       String state,
       String country,
       String pincode,
-      @Schema(description = "Store latitude, for geo/delivery-area features.") BigDecimal geoLat,
-      @Schema(description = "Store longitude, for geo/delivery-area features.") BigDecimal geoLng,
+      // Degrees as the store keeps them (NUMERIC(9,6), a tenth of a metre): within the globe, and
+      // no finer, so a point past it is refused rather than a 500, and none is moved unasked.
+      @Schema(
+              description =
+                  "Store latitude, for geo/delivery-area features: -90 to 90, six places.")
+          @DecimalMin("-90")
+          @DecimalMax("90")
+          @Fits(integer = 2, fraction = 6)
+          BigDecimal geoLat,
+      @Schema(
+              description =
+                  "Store longitude, for geo/delivery-area features: -180 to 180, six places.")
+          @DecimalMin("-180")
+          @DecimalMax("180")
+          @Fits(integer = 3, fraction = 6)
+          BigDecimal geoLng,
       @Schema(
               description =
                   "Required: the IANA zone the store trades in, such as Europe/London. Never"
@@ -93,8 +110,22 @@ public final class Dtos {
       String state,
       String country,
       String pincode,
-      @Schema(description = "Store latitude, for geo/delivery-area features.") BigDecimal geoLat,
-      @Schema(description = "Store longitude, for geo/delivery-area features.") BigDecimal geoLng,
+      // Degrees as the store keeps them (NUMERIC(9,6), a tenth of a metre): within the globe, and
+      // no finer, so a point past it is refused rather than a 500, and none is moved unasked.
+      @Schema(
+              description =
+                  "Store latitude, for geo/delivery-area features: -90 to 90, six places.")
+          @DecimalMin("-90")
+          @DecimalMax("90")
+          @Fits(integer = 2, fraction = 6)
+          BigDecimal geoLat,
+      @Schema(
+              description =
+                  "Store longitude, for geo/delivery-area features: -180 to 180, six places.")
+          @DecimalMin("-180")
+          @DecimalMax("180")
+          @Fits(integer = 3, fraction = 6)
+          BigDecimal geoLng,
       @Schema(description = "IANA zone; null keeps the store's current zone.") String timezone,
       String businessHours,
       Boolean showPrices,
@@ -406,6 +437,7 @@ public final class Dtos {
   public record CreateDeliveryAreaRequest(
       @NotBlank @Size(max = 32) String pincode,
       @Schema(description = "Lower number = higher priority when multiple stores cover a pincode.")
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer priority) {}
 
   @Schema(name = "DeliveryAreaResponse")
@@ -442,9 +474,16 @@ public final class Dtos {
       String make,
       String model,
       @Schema(description = "COUNTER (default), LABELLING, PLATFORM or HANGING.") String kind,
-      @Schema(description = "Max capacity as marked on the plate.") BigDecimal maxCapacity,
+      // As the plate marks them and the instrument keeps them (NUMERIC(18,4)): above nothing, as
+      // the table requires, fourteen whole digits and four places.
+      @Schema(description = "Max capacity as marked on the plate.")
+          @DecimalMin(value = "0", inclusive = false)
+          @Fits(integer = 14, fraction = 4)
+          BigDecimal maxCapacity,
       @Schema(description = "UOM for maxCapacity, e.g. KG.") String capacityUom,
       @Schema(description = "The verification scale interval e, as marked.")
+          @DecimalMin(value = "0", inclusive = false)
+          @Fits(integer = 14, fraction = 4)
           BigDecimal scaleInterval,
       @Schema(description = "Type-approval / conformity certificate reference.") String approvalRef,
       @Schema(description = "The zone it stands in, if any.") String zoneId,
@@ -462,9 +501,11 @@ public final class Dtos {
       String make,
       String model,
       String kind,
-      BigDecimal maxCapacity,
+      @DecimalMin(value = "0", inclusive = false) @Fits(integer = 14, fraction = 4)
+          BigDecimal maxCapacity,
       String capacityUom,
-      BigDecimal scaleInterval,
+      @DecimalMin(value = "0", inclusive = false) @Fits(integer = 14, fraction = 4)
+          BigDecimal scaleInterval,
       String approvalRef,
       String zoneId,
       String labelScheme) {}

@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -10,6 +11,7 @@ import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/adaptive_sheet.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../../core/reference/iso_reference.dart';
 import '../../shared/widgets/reference_fields.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
@@ -21,6 +23,7 @@ import 'providers/admin_providers.dart';
 import 'return_policy_card.dart';
 import 'store_instruments_dialog.dart';
 import 'widgets/business_wide_note.dart';
+import 'widgets/figure_field.dart';
 
 /// A store's status in words: *Open* while it trades, *Closed* when switched
 /// off; a status this screen does not know yet reads as words too.
@@ -634,6 +637,11 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
   bool _adding = false;
   String? _error;
 
+  /// The priority is a whole number, read with the shared reader. Blank is
+  /// tenant-svc's own 100; text that cannot be read is refused under the
+  /// field, never added at 100 as if nothing had been typed.
+  final _marks = AmountMarks.ofApp();
+
   @override
   void dispose() {
     _pincodeCtrl.dispose();
@@ -647,6 +655,10 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
       setState(() => _error = 'Enter a pincode.');
       return;
     }
+    if (figureRefused(_marks, [(_priorityCtrl, wholeNumber)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
     setState(() {
       _adding = true;
       _error = null;
@@ -656,7 +668,7 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
         '/${ApiConstants.tenant}/admin/stores/${widget.store.id}/delivery-areas',
         data: {
           'pincode': pincode,
-          'priority': int.tryParse(_priorityCtrl.text.trim()) ?? 100,
+          'priority': wholeOf(_priorityCtrl, _marks) ?? 100,
         },
       );
       if (!mounted) return;
@@ -732,13 +744,15 @@ class _DeliveryAreasDialogState extends ConsumerState<_DeliveryAreasDialog> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: TextField(
+                  child: FigureField(
+                    fieldKey: const Key('delivery-area-priority'),
                     controller: _priorityCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Priority',
-                      isDense: true,
-                    ),
+                    shape: wholeNumber,
+                    marks: _marks,
+                    label: 'Priority',
+                    hint: '100',
+                    dense: true,
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -888,11 +902,11 @@ class _ZoneFormDialogState extends ConsumerState<_ZoneFormDialog> {
       setState(() {
         _loading = false;
         final status = e is DioException ? e.response?.statusCode : null;
+        // A 400 reads as its own refusal; a request that broke a field's rule asks for the
+        // fields to be checked (friendlyError's words for VALIDATION_FAILED).
         _error = status == 409
             ? 'A zone with this code already exists in this store.'
-            : status == 400
-                ? 'Please check the fields and try again.'
-                : friendlyError(e, fallback: 'Could not save zone.');
+            : friendlyError(e, fallback: 'Could not save zone.');
       });
     }
   }
@@ -989,7 +1003,11 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
   late final TextEditingController _line1Ctrl;
   late final TextEditingController _cityCtrl;
   late final TextEditingController _stateCtrl;
-  late final TextEditingController _countryCtrl;
+  // The store's ISO 3166-1 alpha-2 code as saved; null or '' is none, which
+  // tenant-svc accepts (Countries.optional). A saved code no service takes
+  // ("UK", "JX") stays here only until the person chooses: CountryField shows it
+  // as needing a country and never sends it.
+  String? _country;
   late final TextEditingController _pincodeCtrl;
   // The store's own zone; never a default (SJ-D54).
   String? _timezone;
@@ -1007,7 +1025,8 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
     _line1Ctrl = TextEditingController(text: s.line1 ?? '');
     _cityCtrl = TextEditingController(text: s.city ?? '');
     _stateCtrl = TextEditingController(text: s.state ?? '');
-    _countryCtrl = TextEditingController(text: s.country ?? '');
+    final held = (s.country ?? '').trim().toUpperCase();
+    _country = held.isEmpty ? null : held;
     _pincodeCtrl = TextEditingController(text: s.pincode ?? '');
     _timezone = s.timezone;
     _showPrices = s.showPrices;
@@ -1021,7 +1040,6 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
     _line1Ctrl.dispose();
     _cityCtrl.dispose();
     _stateCtrl.dispose();
-    _countryCtrl.dispose();
     _pincodeCtrl.dispose();
     super.dispose();
   }
@@ -1045,7 +1063,8 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
           'line2': s.line2,
           'city': _orNull(_cityCtrl.text),
           'state': _orNull(_stateCtrl.text),
-          'country': _orNull(_countryCtrl.text),
+          // Validated above: a code on the list, or none.
+          'country': isCountryCode(_country ?? '') ? _country : null,
           'pincode': _orNull(_pincodeCtrl.text),
           'geoLat': s.geoLat,
           'geoLng': s.geoLng,
@@ -1066,9 +1085,9 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
     } catch (e) {
       setState(() {
         _loading = false;
-        _error = (e is DioException && e.response?.statusCode == 400)
-            ? 'Please check the fields and try again.'
-            : friendlyError(e, fallback: 'Could not update store.');
+        // A 400 reads as its own refusal (a country no service takes, a till phone rule);
+        // a request that broke a field's rule asks for the fields to be checked.
+        _error = friendlyError(e, fallback: 'Could not update store.');
       });
     }
   }
@@ -1149,10 +1168,14 @@ class _EditStoreDialogState extends ConsumerState<_EditStoreDialog> {
                 Row(
                   children: [
                     Expanded(
-                      child: TextFormField(
-                        controller: _countryCtrl,
-                        decoration:
-                            const InputDecoration(labelText: 'Country (code)'),
+                      // Optional, as tenant-svc has it: a store may have no
+                      // country on record.
+                      child: CountryField(
+                        key: const Key('store-edit-country'),
+                        value: _country,
+                        optional: true,
+                        noneLabel: 'Not set',
+                        onChanged: (v) => setState(() => _country = v),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1396,7 +1419,6 @@ class _AddStoreDialogState extends ConsumerState<_AddStoreDialog> {
     if (e is DioException) {
       final status = e.response?.statusCode;
       if (status == 409) return 'A store with this code already exists.';
-      if (status == 400) return 'Please check the fields and try again.';
     }
     return friendlyError(e, fallback: 'Could not create store.');
   }

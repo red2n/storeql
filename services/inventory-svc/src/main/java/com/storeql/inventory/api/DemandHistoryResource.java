@@ -7,6 +7,7 @@ import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -51,6 +52,8 @@ public class DemandHistoryResource {
   @POST
   @Path("/demand/aggregate")
   public ApiResponse<AggregateResult> aggregateDemand(AggregateRequest req) {
+    // The body is optional (every store, by week); one that is sent is held to the rules.
+    if (req != null) Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId =
         req != null && req.storeId() != null && !req.storeId().isBlank()

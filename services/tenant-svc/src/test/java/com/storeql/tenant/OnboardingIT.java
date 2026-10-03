@@ -10,10 +10,13 @@ import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
+import jakarta.json.Json;
+import jakarta.json.JsonObject;
 import jakarta.ws.rs.client.Entity;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.io.StringReader;
 import java.sql.DriverManager;
 import java.util.ArrayList;
 import java.util.List;
@@ -997,5 +1000,257 @@ class OnboardingIT {
             .header("X-Roles", "OWNER")
             .get(String.class);
     assertThat(stores, containsString("\"data\":[]"));
+  }
+
+  // ── a country is an ISO 3166-1 alpha-2 code, wherever it is set ──────────────
+
+  private static int count(String sql, String bind) throws Exception {
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps = c.prepareStatement(sql)) {
+      ps.setString(1, bind);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    }
+  }
+
+  private static String storeRow(String tenant, String store) throws Exception {
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "SELECT name || '|' || coalesce(country, '-') FROM tenant.stores"
+                    + " WHERE tenant_id = ?::uuid AND id = ?::uuid")) {
+      ps.setString(1, tenant);
+      ps.setString(2, store);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getString(1);
+      }
+    }
+  }
+
+  private static int tenantsOwnedBy(String owner) throws Exception {
+    return count("SELECT count(*) FROM tenant.tenants WHERE owner_user_id = ?::uuid", owner);
+  }
+
+  private static JsonObject dataOf(String body) {
+    return Json.createReader(new StringReader(body)).readObject().getJsonObject("data");
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A country that is no ISO code is refused at sign-up, and no business is left behind")
+  void aCountryThatIsNoCountryIsRefusedAtSignUp() throws Exception {
+    String who = Ids.newId().toString();
+    // Two ideographic spaces and UK are each two characters, and neither is a country (the United
+    // Kingdom is GB); a dotless i upper-cases to an I and must not make one of IN.
+    for (String bad : new String[] {"\\u3000\\u3000", "UK", "ZZ", "XX", "EU", "G1", "\\u0131n"}) {
+      Response r =
+          post(
+              "/onboarding/tenants",
+              "{\"businessName\":\"Nowhere Ltd\",\"country\":\"" + bad + "\",\"currency\":\"gbp\"}",
+              "X-User-Id",
+              who);
+      String body = r.readEntity(String.class);
+      assertThat(bad + " -> " + body, r.getStatus(), is(400));
+      assertThat(bad + " -> " + body, body, containsString("COUNTRY_INVALID"));
+    }
+    // The wrong length is the request's own constraint, refused before the country is looked at.
+    Response three =
+        post(
+            "/onboarding/tenants",
+            "{\"businessName\":\"Nowhere Ltd\",\"country\":\"GBR\",\"currency\":\"gbp\"}",
+            "X-User-Id",
+            who);
+    assertThat(three.getStatus(), is(400));
+    assertThat(three.readEntity(String.class), containsString("VALIDATION_FAILED"));
+    assertThat("no business was made for this login", tenantsOwnedBy(who), is(0));
+
+    // The same login signs up once it names a country: it was never owner of a refused one.
+    Response fine =
+        post(
+            "/onboarding/tenants",
+            "{\"businessName\":\"Somewhere Ltd\",\"country\":\"gb\",\"currency\":\"gbp\"}",
+            "X-User-Id",
+            who);
+    String fineBody = fine.readEntity(String.class);
+    assertThat(fineBody, fine.getStatus(), is(201));
+    assertThat("the code is stored in capitals", dataOf(fineBody).getString("country"), is("GB"));
+    assertThat(tenantsOwnedBy(who), is(1));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "One-shot onboarding refuses a country that is no ISO code, the business's or the store's, and creates nothing")
+  void onboardingRefusesACountryThatIsNoCountry() throws Exception {
+    String who = Ids.newId().toString();
+    String shop = ",\"storeName\":\"HQ\",\"storeCode\":\"HQ1\",\"storeTimezone\":\"Europe/London\"";
+    Response badBusiness =
+        post(
+            "/onboarding",
+            "{\"businessName\":\"One Shot\",\"country\":\"UK\",\"currency\":\"gbp\",\"storeCountry\":\"gb\""
+                + shop
+                + "}",
+            "X-User-Id",
+            who);
+    String badBusinessBody = badBusiness.readEntity(String.class);
+    assertThat(badBusinessBody, badBusiness.getStatus(), is(400));
+    assertThat(badBusinessBody, containsString("COUNTRY_INVALID"));
+    Response badStore =
+        post(
+            "/onboarding",
+            "{\"businessName\":\"One Shot\",\"country\":\"gb\",\"currency\":\"gbp\",\"storeCountry\":\"UK\""
+                + shop
+                + "}",
+            "X-User-Id",
+            who);
+    String badStoreBody = badStore.readEntity(String.class);
+    assertThat(badStoreBody, badStore.getStatus(), is(400));
+    assertThat(badStoreBody, containsString("COUNTRY_INVALID"));
+    assertThat(
+        "a refused store country leaves no business with no store", tenantsOwnedBy(who), is(0));
+
+    Response made =
+        post(
+            "/onboarding",
+            "{\"businessName\":\"One Shot\",\"country\":\"gb\",\"currency\":\"gbp\",\"storeCountry\":\"gb\""
+                + shop
+                + "}",
+            "X-User-Id",
+            who);
+    String madeBody = made.readEntity(String.class);
+    assertThat(madeBody, made.getStatus(), is(201));
+    JsonObject data = dataOf(madeBody);
+    assertThat(data.getJsonObject("tenant").getString("country"), is("GB"));
+    assertThat(data.getJsonObject("store").getString("country"), is("GB"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A store's country is an ISO code or nothing: refused when added or changed, and the store is untouched")
+  void aStoreCountryIsACountryOrNothing() throws Exception {
+    String who = Ids.newId().toString();
+    String tenant = tenantFor(who, "gb", "gbp");
+    String store =
+        "{\"name\":\"Main\",\"code\":\"%s\",\"timezone\":\"Europe/London\",\"country\":%s}";
+
+    for (String bad : new String[] {"\"UK\"", "\"ZZ\"", "\"G1\"", "\"United Kingdom\""}) {
+      Response r =
+          post(
+              "/onboarding/stores",
+              String.format(store, "FIRST", bad),
+              "X-User-Id",
+              who,
+              "X-Tenant-Id",
+              tenant);
+      String body = r.readEntity(String.class);
+      assertThat(bad + " -> " + body, r.getStatus(), is(400));
+      assertThat(bad + " -> " + body, body, containsString("COUNTRY_INVALID"));
+      Response added =
+          target
+              .path("/admin/stores")
+              .request()
+              .header("X-Tenant-Id", tenant)
+              .header("X-Roles", "OWNER")
+              .post(Entity.entity(String.format(store, "SECOND", bad), MediaType.APPLICATION_JSON));
+      assertThat(bad, added.getStatus(), is(400));
+      assertThat(bad, added.readEntity(String.class), containsString("COUNTRY_INVALID"));
+    }
+    assertThat(
+        "neither route made a store",
+        count("SELECT count(*) FROM tenant.stores WHERE tenant_id = ?::uuid", tenant),
+        is(0));
+
+    // Typed as people type it: capitals or not, with a space, or left out altogether.
+    Response lower =
+        target
+            .path("/admin/stores")
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-Roles", "OWNER")
+            .post(
+                Entity.entity(
+                    String.format(store, "LOWER", "\" de \""), MediaType.APPLICATION_JSON));
+    String lowerBody = lower.readEntity(String.class);
+    assertThat(lowerBody, lower.getStatus(), is(201));
+    assertThat(dataOf(lowerBody).getString("country"), is("DE"));
+    String id = dataOf(lowerBody).getString("id");
+    Response none =
+        target
+            .path("/admin/stores")
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-Roles", "OWNER")
+            .post(
+                Entity.entity(
+                    "{\"name\":\"Bare\",\"code\":\"BARE\",\"timezone\":\"Europe/London\"}",
+                    MediaType.APPLICATION_JSON));
+    assertThat(none.readEntity(String.class), none.getStatus(), is(201));
+
+    // Changing it: a country that is none leaves the store as it was; blank means none.
+    java.util.function.Function<String, Response> put =
+        json ->
+            target
+                .path("/admin/stores/" + id)
+                .request()
+                .header("X-Tenant-Id", tenant)
+                .header("X-Roles", "OWNER")
+                .put(Entity.entity(json, MediaType.APPLICATION_JSON));
+    for (String bad : new String[] {"UK", "ZZ", "Deutschland"}) {
+      Response r = put.apply("{\"name\":\"Renamed\",\"country\":\"" + bad + "\"}");
+      String body = r.readEntity(String.class);
+      assertThat(bad + " -> " + body, r.getStatus(), is(400));
+      assertThat(bad + " -> " + body, body, containsString("COUNTRY_INVALID"));
+    }
+    assertThat(
+        "the refused changes renamed nothing and moved nothing",
+        storeRow(tenant, id),
+        is("Main|DE"));
+
+    // Another business naming this store's id finds no store, whatever country it sends (the store
+    // is looked for before the country is judged), and a shopper of this business is no manager.
+    String stranger = tenantFor(Ids.newId().toString(), "gb", "gbp");
+    for (String country : new String[] {"fr", "UK"}) {
+      for (String role : new String[] {"OWNER", "MANAGER"}) {
+        Response theirs =
+            target
+                .path("/admin/stores/" + id)
+                .request()
+                .header("X-Tenant-Id", stranger)
+                .header("X-Roles", role)
+                .put(
+                    Entity.entity(
+                        "{\"name\":\"Taken\",\"country\":\"" + country + "\"}",
+                        MediaType.APPLICATION_JSON));
+        String theirsBody = theirs.readEntity(String.class);
+        assertThat(role + " " + country + " -> " + theirsBody, theirs.getStatus(), is(404));
+        assertThat(theirsBody, containsString("STORE_NOT_FOUND"));
+      }
+    }
+    Response shopper =
+        target
+            .path("/admin/stores/" + id)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-Roles", "CUSTOMER")
+            .put(
+                Entity.entity(
+                    "{\"name\":\"Taken\",\"country\":\"fr\"}", MediaType.APPLICATION_JSON));
+    assertThat(shopper.getStatus(), is(403));
+    assertThat("nobody else's change landed", storeRow(tenant, id), is("Main|DE"));
+    Response moved = put.apply("{\"name\":\"Renamed\",\"country\":\"fr\"}");
+    String movedBody = moved.readEntity(String.class);
+    assertThat(movedBody, moved.getStatus(), is(200));
+    assertThat(dataOf(movedBody).getString("country"), is("FR"));
+    assertThat(storeRow(tenant, id), is("Renamed|FR"));
+    Response cleared = put.apply("{\"name\":\"Renamed\",\"country\":\"  \"}");
+    String clearedBody = cleared.readEntity(String.class);
+    assertThat(clearedBody, cleared.getStatus(), is(200));
+    assertThat(
+        "blank is none, never a country of spaces",
+        dataOf(clearedBody).containsKey("country"),
+        is(false));
+    assertThat(storeRow(tenant, id), is("Renamed|-"));
   }
 }

@@ -46,6 +46,9 @@ class CatalogGuardsIT {
   private static final String RIVAL = Ids.newId().toString();
   private static final String CAPPED = Ids.newId().toString();
 
+  /** One of T's stores, as tenant-svc lists them. */
+  private static final String T_STORE = Ids.newId().toString();
+
   private static final PostgresSupport PG;
   private static final RedisSupport REDIS;
   private static final AtomicLong COUNTER = new AtomicLong(system());
@@ -71,7 +74,9 @@ class CatalogGuardsIT {
         .with(T, "GBP", "GB")
         .with(RIVAL, "GBP", "GB")
         .with(CAPPED, "GBP", "GB")
-        .withLimit(CAPPED, "products.max", 1);
+        .withLimit(CAPPED, "products.max", 1)
+        // An import row ranges a product only to a store of the business's own.
+        .withStore(T, T_STORE, "GB");
   }
 
   @Inject WebTarget target;
@@ -657,15 +662,152 @@ class CatalogGuardsIT {
         send("POST", path, "{\"csv\":\"SKU,Quantity\\nA1,3\"}", T, "OWNER"),
         400,
         "CSV_MISSING_COLUMNS");
-    assertRefused(send("POST", path, "{\"csv\":\"  \"}", T, "OWNER"), 400, "INVALID_BODY");
-    assertRefused(send("POST", path, "{\"csv\":\"\"}", T, "OWNER"), 400, "INVALID_BODY");
+    // The body is validated as a whole before the sheet is read: a blank or absent csv is the
+    // platform's own VALIDATION_FAILED, and was a hand-made INVALID_BODY before.
+    assertRefused(send("POST", path, "{\"csv\":\"  \"}", T, "OWNER"), 400, "VALIDATION_FAILED");
+    assertRefused(send("POST", path, "{\"csv\":\"\"}", T, "OWNER"), 400, "VALIDATION_FAILED");
+    assertRefused(send("POST", path, "{}", T, "OWNER"), 400, "VALIDATION_FAILED");
 
     String readable = "{\"csv\":\"Product Description,Category\\nTea " + Ids.newId() + ",Drinks\"}";
-    for (String role : new String[] {"CASHIER", "CUSTOMER"}) {
+    // Catalogue imports are management's: a storekeeper, who may receive stock, may not import.
+    for (String role : LOWER_ROLES) {
       assertRefused(send("POST", path, readable, T, role), 403, "FORBIDDEN");
     }
     assertThat(count(products, T), is(productsBefore));
     assertThat(count(categories, T), is(categoriesBefore));
+  }
+
+  @Test
+  @DisplayName("An import that is wrong in a way no row can be blamed for imports nothing")
+  void aWrongImportRequestImportsNothing() {
+    String products = "SELECT count(*) FROM product.products WHERE tenant_id = ?::uuid";
+    String categories = "SELECT count(*) FROM product.categories WHERE tenant_id = ?::uuid";
+    String outbox = "SELECT count(*) FROM product.outbox WHERE tenant_id = ?::uuid";
+    int productsBefore = count(products, T);
+    int categoriesBefore = count(categories, T);
+    int outboxBefore = count(outbox, T);
+
+    // A typo of REPLACE used to be read as ADD, and created the duplicates it was meant to
+    // overwrite. The JSON import and the sheet import read the mode the same way.
+    String json =
+        "{\"categories\":[{\"name\":\"Cat "
+            + Ids.newId()
+            + "\"}],\"products\":[{\"name\":\"Typo "
+            + Ids.newId()
+            + "\",\"variants\":[{\"sku\":\""
+            + sku()
+            + "\"}]}],\"mode\":\"REPLCE\"}";
+    assertRefused(send("POST", "/admin/import", json, T, "OWNER"), 400, "IMPORT_MODE_INVALID");
+
+    // Quantities and prices, so that the sheet would ask a store, a currency and two services.
+    String sheet =
+        "Product Description,Category,Quantity,Price\\nTea " + Ids.newId() + ",Drinks,5,2.50";
+    String path = "/admin/import/supplier-csv";
+    assertRefused(
+        send("POST", path, "{\"csv\":\"" + sheet + "\",\"mode\":\"REPLCE\"}", T, "OWNER"),
+        400,
+        "IMPORT_MODE_INVALID");
+    // The destination store is read as an id before the sheet is imported, not after it.
+    assertRefused(
+        send(
+            "POST",
+            path,
+            "{\"csv\":\"" + sheet + "\",\"storeId\":\"store-1\",\"currency\":\"EUR\"}",
+            T,
+            "OWNER"),
+        400,
+        "INVALID_UUID");
+    // So is the currency of the price list the prices would go into.
+    assertRefused(
+        send(
+            "POST",
+            path,
+            "{\"csv\":\"" + sheet + "\",\"storeId\":\"" + Ids.newId() + "\",\"currency\":\"ZZZ9\"}",
+            T,
+            "OWNER"),
+        400,
+        "CURRENCY_INVALID");
+
+    // The JSON import is as closed to a lower role as the sheet import is.
+    String readable =
+        "{\"products\":[{\"name\":\"Roles "
+            + Ids.newId()
+            + "\",\"variants\":[{\"sku\":\""
+            + sku()
+            + "\"}]}]}";
+    for (String role : LOWER_ROLES) {
+      assertRefused(send("POST", "/admin/import", readable, T, role), 403, "FORBIDDEN");
+    }
+
+    assertThat("no product", count(products, T), is(productsBefore));
+    assertThat("no category", count(categories, T), is(categoriesBefore));
+    assertThat("and no event", count(outbox, T), is(outboxBefore));
+  }
+
+  @Test
+  @DisplayName(
+      "A product row naming a store that is not an id is that row's error and creates nothing")
+  void aProductRowNamingAStoreThatIsNotAnIdCreatesNothing() {
+    String bad = "Bad row " + Ids.newId();
+    String versionFour = "Version four row " + Ids.newId();
+    String good = "Good row " + Ids.newId();
+    String stored = "Stored row " + Ids.newId();
+    String badSku = sku();
+    String goodSku = sku();
+    String store = T_STORE;
+    String sheet =
+        "{\"products\":["
+            + "{\"name\":\""
+            + bad
+            + "\",\"storeIds\":[\"not-an-id\"],\"variants\":[{\"sku\":\""
+            + badSku
+            + "\"}]},"
+            // A well-formed UUID of another version names nothing StoreQL made.
+            + "{\"name\":\""
+            + versionFour
+            + "\",\"storeIds\":[\"123e4567-e89b-42d3-a456-426614174000\"],\"variants\":[{\"sku\":\""
+            + sku()
+            + "\"}]},"
+            + "{\"name\":\""
+            + good
+            + "\",\"variants\":[{\"sku\":\""
+            + goodSku
+            + "\"}]},"
+            + "{\"name\":\""
+            + stored
+            + "\",\"storeIds\":[\""
+            + store
+            + "\"],\"variants\":[{\"sku\":\""
+            + sku()
+            + "\"}]}]}";
+
+    String answer = body(send("POST", "/admin/import", sheet, T, "OWNER"), 200);
+
+    assertThat("the other two rows were imported", answer, containsString("\"productsCreated\":2"));
+    assertThat("the bad row is named", answer, containsString("product:" + bad));
+    assertThat("and so is the one with another version", answer, containsString(versionFour));
+    assertThat(answer, containsString("storeIds must be a UUIDv7"));
+    String named = "SELECT count(*) FROM product.products WHERE tenant_id = ?::uuid AND name = ?";
+    assertThat("the bad row left no product behind", count(named, T, bad), is(0));
+    assertThat("nor did the other", count(named, T, versionFour), is(0));
+    assertThat(
+        "and no variant",
+        count(
+            "SELECT count(*) FROM product.product_variants WHERE tenant_id = ?::uuid AND sku = ?",
+            T,
+            badSku),
+        is(0));
+    assertThat("a row with no stores is imported", count(named, T, good), is(1));
+    assertThat(
+        "a row with a store is assigned to it",
+        count(
+            "SELECT count(*) FROM product.product_stores s JOIN product.products p"
+                + " ON p.id = s.product_id WHERE s.tenant_id = ?::uuid AND p.name = ?"
+                + " AND s.store_id = ?::uuid",
+            T,
+            stored,
+            store),
+        is(1));
   }
 
   // ── attribute groups ─────────────────────────────────────────────────────────
@@ -696,8 +838,7 @@ class CatalogGuardsIT {
     assertThat(count(held, v), is(1));
     for (String role : OTHER_MANAGEMENT) {
       assertRefused(send("GET", base + "WEB", null, RIVAL, role), 404, "VARIANT_NOT_FOUND");
-      assertRefused(
-          send("DELETE", base + "WEB", null, RIVAL, role), 404, "ATTRIBUTE_GROUP_VALUES_NOT_FOUND");
+      assertRefused(send("DELETE", base + "WEB", null, RIVAL, role), 404, "VARIANT_NOT_FOUND");
     }
     assertThat("the other business removed nothing", count(held, v), is(1));
   }
@@ -921,7 +1062,7 @@ class CatalogGuardsIT {
               RIVAL,
               role),
           404,
-          "CONTAINER_LINK_NOT_FOUND");
+          "VARIANT_NOT_FOUND");
     }
     assertThat("the link stays", count(links, v), is(1));
   }
@@ -1009,8 +1150,7 @@ class CatalogGuardsIT {
     assertRefused(
         send("DELETE", base + "/" + Ids.newId(), null, T, "OWNER"), 404, "CROSS_REF_NOT_FOUND");
     for (String role : OTHER_MANAGEMENT) {
-      assertRefused(
-          send("DELETE", base + "/" + ref, null, RIVAL, role), 404, "CROSS_REF_NOT_FOUND");
+      assertRefused(send("DELETE", base + "/" + ref, null, RIVAL, role), 404, "VARIANT_NOT_FOUND");
     }
     assertThat("the reference stays", count(held, v), is(1));
   }
@@ -1066,8 +1206,7 @@ class CatalogGuardsIT {
     assertRefused(
         send("DELETE", base + "/" + Ids.newId(), null, T, "OWNER"), 404, "RELATIONSHIP_NOT_FOUND");
     for (String role : OTHER_MANAGEMENT) {
-      assertRefused(
-          send("DELETE", base + "/" + made, null, RIVAL, role), 404, "RELATIONSHIP_NOT_FOUND");
+      assertRefused(send("DELETE", base + "/" + made, null, RIVAL, role), 404, "VARIANT_NOT_FOUND");
     }
     assertThat("the link stays", count(held, v0), is(1));
   }

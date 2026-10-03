@@ -51,14 +51,26 @@ public class QuickBooksPackage implements AccountingPackage {
     return new QuickBooksPackage(baseUrl, tokenUrl, Duration.ofSeconds(5));
   }
 
-  /** The sandbox company lives at Intuit's sandbox host; anything else is production. */
+  /**
+   * The sandbox company lives at Intuit's sandbox host; production, or no environment named, at the
+   * production host. Any other value never reaches here: {@link #baseUrl} refuses it first.
+   */
   static String baseUrlFor(String environment) {
-    return "SANDBOX".equalsIgnoreCase(environment == null ? "" : environment.trim())
-        ? SANDBOX_URL
-        : PRODUCTION_URL;
+    return Accounting.quickBooksSandbox(environment) ? SANDBOX_URL : PRODUCTION_URL;
   }
 
+  /**
+   * The company's address. The connection's settings are read again with the rule it was made
+   * under, so one kept before that rule — an environment that is neither, a realm id that is not
+   * the company's digits — is refused here, before anything is sent, rather than sent to production
+   * or to an address it cannot be.
+   */
   private String baseUrl(Accounting.Connection c) {
+    Accounting.settingsProblem(provider(), c.settings())
+        .ifPresent(
+            problem -> {
+              throw Refused.unsent(problem + "; correct the settings and connect again");
+            });
     return baseUrlOverride != null ? baseUrlOverride : baseUrlFor(c.setting("environment"));
   }
 

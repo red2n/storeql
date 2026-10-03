@@ -14,6 +14,7 @@ import {
   BASE,
   call,
   data,
+  errorCode,
   expect,
   must,
   nextCursor,
@@ -120,20 +121,20 @@ export default function ({ tenant, rival }) {
   truthy('[+] the stock adjustment names the owner too', writtenOff.actorId === owner, JSON.stringify(adjustments).slice(0, 400));
 
   // ── refusals ─────────────────────────────────────────────────────────────────
-  expect(trail(cashier.token), '[-] a cashier cannot read the trail', 403);
-  expect(trail(tenant.keeper.token), '[-] nor a storekeeper', 403);
-  expect(call('GET', '/api/order-svc/admin/audit/events'), '[-] nor a guest', 401);
+  expect(trail(cashier.token), '[-] a cashier cannot read the trail', 403, 'FORBIDDEN');
+  expect(trail(tenant.keeper.token), '[-] nor a storekeeper', 403, 'FORBIDDEN');
+  expect(call('GET', '/api/order-svc/admin/audit/events'), '[-] nor a guest', 401, 'UNAUTHORIZED');
   truthy('[-] another tenant sees none of it', data(call('GET', '/api/order-svc/admin/audit/events', { token: rival.owner.token })).length === 0);
   expect(trail(t, '&type=WEATHER'), '[-] an unknown type', 400, 'AUDIT_TYPE_UNKNOWN');
   expect(trail(t, '&after=@@@'), '[-] a malformed cursor', 400, 'INVALID_CURSOR');
-  expect(call('GET', '/api/order-svc/admin/audit/events?store=abc', { token: t }), '[-] a store that is not an id', 400);
-  expect(trail(t, '&actor=abc'), '[-] an actor that is not an id', 400);
+  expect(call('GET', '/api/order-svc/admin/audit/events?store=abc', { token: t }), '[-] a store that is not an id', 400, 'INVALID_UUID');
+  expect(trail(t, '&actor=abc'), '[-] an actor that is not an id', 400, 'INVALID_UUID');
   expect(trail(t, '&from=2026-02-01T00:00:00Z&to=2026-01-01T00:00:00Z'), '[-] a period that ends before it starts', 400, 'AUDIT_RANGE_EMPTY');
   expect(call('POST', '/api/order-svc/admin/audit/events', { token: t, body: {} }), '[-] the trail cannot be written to', [404, 405]);
 
   // ── abuse ────────────────────────────────────────────────────────────────────
   const hammer = http.batch(Array.from({ length: 20 }, () => ['GET', `${BASE}/api/order-svc/admin/audit/events?store=${storeId}`, null, { headers: { Authorization: `Bearer ${cashier.token}` }, tags: { name: 'GET /api/order-svc/admin/audit/events (hammer)' } }]));
-  truthy('[-] twenty cashier reads at once: every one refused', hammer.every((r) => r.status === 403 || r.status === 429), hammer.map((r) => r.status).join(','));
+  truthy('[-] twenty cashier reads at once: every one refused', hammer.every((r) => (r.status === 403 && errorCode(r) === 'FORBIDDEN') || r.status === 429), hammer.map((r) => `${r.status} ${errorCode(r)}`).join(','));
   const lifted = nextCursor(trail(t, '&limit=2'));
   truthy('[-] a cursor lifted from this tenant gives the rival nothing', !!lifted && data(call('GET', `/api/order-svc/admin/audit/events?after=${lifted}`, { token: rival.owner.token })).length === 0);
   const huge = trail(t, '&limit=100000');
@@ -195,7 +196,7 @@ export default function ({ tenant, rival }) {
   const rivals = data(call('GET', '/api/order-svc/admin/audit/events?type=OFFLINE_SALE_OF_RECALLED_ITEM', { token: rival.manager.token }));
   truthy('[-] another business\'s manager sees none of it', Array.isArray(rivals) && rivals.every((e) => e.orderId !== data(flagged).id && e.orderId !== data(stranger).id), rivals);
   const named = call('GET', `/api/order-svc/admin/audit/events?store=${storeId}&type=OFFLINE_SALE_OF_RECALLED_ITEM`, { token: rival.manager.token });
-  truthy('[-] ...not even naming this store', named.status === 403 || (Array.isArray(data(named)) && data(named).length === 0), named.status);
+  expect(named, '[-] ...not even naming this store', 403, 'STORE_ACCESS_DENIED');
 
   // Closed, so no later sale of the product — here or in a later suite — meets it.
   expect(

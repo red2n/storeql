@@ -105,9 +105,17 @@ public class AdminResource {
   @Operation(summary = "Create a brand")
   @APIResponse(responseCode = "201", description = "Brand created")
   @Tag(name = "Brands")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining brands is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/brands")
   public Response createBrand(CreateBrandRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining brands");
     Validations.validate(req);
     return created(Mappers.toBrand(service.createBrand(ctx.requireTenantId(), req)));
   }
@@ -148,9 +156,17 @@ public class AdminResource {
   @Operation(summary = "Rename a brand")
   @APIResponse(responseCode = "404", description = "Brand not found")
   @Tag(name = "Brands")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining brands is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @PUT
   @Path("/brands/{id}")
   public ApiResponse<BrandResponse> updateBrand(@PathParam("id") UUID id, UpdateBrandRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining brands");
     Validations.validate(req);
     return ApiResponse.ok(Mappers.toBrand(service.renameBrand(ctx.requireTenantId(), id, req)));
   }
@@ -168,9 +184,17 @@ public class AdminResource {
       description = "Soft delete: sets the brand's status to inactive.")
   @APIResponse(responseCode = "404", description = "Brand not found")
   @Tag(name = "Brands")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining brands is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/brands/{id}")
   public ApiResponse<BrandResponse> deactivateBrand(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining brands");
     return ApiResponse.ok(Mappers.toBrand(service.deactivateBrand(ctx.requireTenantId(), id)));
   }
 
@@ -185,9 +209,17 @@ public class AdminResource {
   @Operation(summary = "Create a category")
   @APIResponse(responseCode = "201", description = "Category created")
   @Tag(name = "Categories")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining categories is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/categories")
   public Response createCategory(CreateCategoryRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining categories");
     Validations.validate(req);
     return created(Mappers.toCategory(service.createCategory(ctx.requireTenantId(), req)));
   }
@@ -228,10 +260,18 @@ public class AdminResource {
   @Operation(summary = "Update a category")
   @APIResponse(responseCode = "404", description = "Category not found")
   @Tag(name = "Categories")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining categories is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @PUT
   @Path("/categories/{id}")
   public ApiResponse<CategoryResponse> updateCategory(
       @PathParam("id") UUID id, UpdateCategoryRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining categories");
     Validations.validate(req);
     return ApiResponse.ok(
         Mappers.toCategory(service.updateCategory(ctx.requireTenantId(), id, req)));
@@ -250,9 +290,17 @@ public class AdminResource {
       description = "Soft delete: sets the category's status to inactive.")
   @APIResponse(responseCode = "404", description = "Category not found")
   @Tag(name = "Categories")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining categories is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/categories/{id}")
   public ApiResponse<CategoryResponse> deactivateCategory(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining categories");
     return ApiResponse.ok(
         Mappers.toCategory(service.deactivateCategory(ctx.requireTenantId(), id)));
   }
@@ -262,17 +310,52 @@ public class AdminResource {
   /**
    * Creates a product.
    *
+   * <p>Each store id is read as a UUIDv7 here ({@code 400 INVALID_UUID}), before the service is
+   * asked; whether each store is the business's, and the caller's, and where a product naming none
+   * is sold, is the service's: see {@code ProductService.createProduct}.
+   *
    * @param req the request body
    * @return product created ({@code 201})
    */
-  @Operation(summary = "Create a product")
+  @Operation(
+      summary = "Create a product",
+      description =
+          "Sold at the stores storeIds names, or at every store when it names none. Every store"
+              + " named must be one of this business's and, for a manager held to stores, one of"
+              + " theirs. A manager held to stores never creates one sold at every store, on"
+              + " shelves they do not keep: naming none, theirs is sold at the stores they are held"
+              + " to, all of them (GET /admin/products/{id}/stores says which). An owner or a manager of"
+              + " the whole business creates one sold everywhere. Nothing is written by a refusal.")
   @APIResponse(responseCode = "201", description = "Product created")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "A required field missing or a null entry in storeIds (VALIDATION_FAILED), a store or"
+              + " brand or category id that is not a UUIDv7 (INVALID_UUID), or a listing rule"
+              + " (PRODUCT_SAFETY_INFORMATION_REQUIRED, …)")
+  @APIResponse(
+      responseCode = "403",
+      description = "A store of this business the caller is not held to (STORE_ACCESS_DENIED)")
+  @APIResponse(
+      responseCode = "404",
+      description = "A store that is not one of this business's (PRODUCT_STORE_NOT_FOUND)")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "Stores are named and tenant-svc cannot say which are the business's"
+              + " (TENANT_STORES_UNAVAILABLE)")
   @Tag(name = "Products")
   @POST
   @Path("/products")
   public Response createProduct(CreateProductRequest req) {
-    Validations.validate(req);
-    return created(Mappers.toProduct(service.createProduct(ctx.requireTenantId(), req)));
+    Validations.validate(req); // a hole in storeIds is named, not read as an id
+    List<UUID> storeIds =
+        req.storeIds() == null
+            ? List.of()
+            : req.storeIds().stream()
+                .map(s -> com.storeql.web.Parsing.uuid(s.strip(), "storeIds"))
+                .toList();
+    return created(Mappers.toProduct(service.createProduct(ctx, req, storeIds)));
   }
 
   /**
@@ -289,9 +372,17 @@ public class AdminResource {
               + " Returns how many products were announced.")
   @APIResponse(responseCode = "200", description = "Announced")
   @Tag(name = "Products")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Re-announcing the catalogue is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/products/republish-catalogue")
   public ApiResponse<com.storeql.product.dto.Dtos.CatalogueRepublishResponse> republishCatalogue() {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Re-announcing the catalogue");
     int announced = service.republishCatalogue(ctx.requireTenantId());
     return ApiResponse.ok(new com.storeql.product.dto.Dtos.CatalogueRepublishResponse(announced));
   }
@@ -343,93 +434,158 @@ public class AdminResource {
    */
   @Operation(summary = "Update a product")
   @APIResponse(responseCode = "404", description = "No such product")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @Tag(name = "Products")
   @PUT
   @Path("/products/{id}")
   public ApiResponse<ProductResponse> updateProduct(
       @PathParam("id") UUID id, UpdateProductRequest req) {
     Validations.validate(req);
-    return ApiResponse.ok(Mappers.toProduct(service.updateProduct(ctx.requireTenantId(), id, req)));
+    return ApiResponse.ok(Mappers.toProduct(service.updateProduct(ctx, id, req)));
   }
 
   /**
    * Delists a product.
    *
-   * <p>Soft delete: sets status DELISTED and publishes ProductDelisted.
+   * <p>Soft delete: sets status DELISTED and publishes ProductDelisted. The line goes from the shop
+   * and the till at every store, so it is management's, and of the whole business, as discontinuing
+   * is: an owner, or a manager held to no store. Who may is asked before the line is looked up.
    *
    * @param id the id (path parameter)
-   * @throws com.storeql.web.ApiException {@code 404} no such product
+   * @throws com.storeql.web.ApiException {@code 403 FORBIDDEN} below management; {@code 403
+   *     BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404} no such product in this
+   *     business
    */
   @Operation(
       summary = "Delist a product",
-      description = "Soft delete: sets status DELISTED and publishes ProductDelisted.")
-  @APIResponse(responseCode = "404", description = "No such product")
+      description =
+          "Soft delete: sets status DELISTED and publishes ProductDelisted. The line leaves the shop"
+              + " and the till, and inventory-svc takes its variants out of the low-stock report"
+              + " and the planning run, at every store. For an owner or a manager of the whole"
+              + " business, whatever the line's range: who may is judged before the line is looked"
+              + " up.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY),"
+              + " a line of their own included: the line is taken off sale at every store, which is"
+              + " the whole business's to decide. Nothing changes.")
+  @APIResponse(responseCode = "404", description = "No such product in this business")
   @Tag(name = "Products")
   @DELETE
   @Path("/products/{id}")
   public ApiResponse<ProductResponse> delistProduct(@PathParam("id") UUID id) {
-    return ApiResponse.ok(Mappers.toProduct(service.delistProduct(ctx.requireTenantId(), id)));
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    return ApiResponse.ok(Mappers.toProduct(service.delistProduct(ctx, id)));
   }
 
   /**
    * Puts a new line on sale (item lifecycle: NEW_LINE → ACTIVE).
    *
+   * <p>The line goes on sale at every store it is sold at, so it is management's, and of the whole
+   * business, as the other moves of its lifecycle are: an owner, or a manager held to no store. Who
+   * may is asked before the line is looked up.
+   *
    * @param id the product
-   * @throws com.storeql.web.ApiException {@code 409} unless the product is a NEW_LINE
+   * @throws com.storeql.web.ApiException {@code 403 FORBIDDEN} below management; {@code 403
+   *     BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404} no such product in this
+   *     business; {@code 409} unless the product is a NEW_LINE
    */
   @Operation(
       summary = "Launch a new line",
       description =
-          "NEW_LINE → ACTIVE: the shop lists it and the till sells it from now. Publishes"
-              + " ProductLaunched with the variants it covers.")
-  @APIResponse(responseCode = "404", description = "No such product")
+          "NEW_LINE → ACTIVE: the shop lists it and the till sells it from now, at every store it"
+              + " is sold at. Publishes ProductLaunched with the variants it covers. For an owner"
+              + " or a manager of the whole business, whatever the line's range: who may is judged"
+              + " before the line is looked up.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY),"
+              + " a new line of their own included: the line goes on sale at every store it is"
+              + " sold at, which is the whole business's to decide. Nothing changes.")
+  @APIResponse(responseCode = "404", description = "No such product in this business")
   @APIResponse(responseCode = "409", description = "Not a NEW_LINE")
   @Tag(name = "Products")
   @POST
   @Path("/products/{id}/launch")
   public ApiResponse<ProductResponse> launchProduct(@PathParam("id") UUID id) {
-    return ApiResponse.ok(Mappers.toProduct(service.launchProduct(ctx.requireTenantId(), id)));
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    return ApiResponse.ok(Mappers.toProduct(service.launchProduct(ctx, id)));
   }
 
   /**
    * Marks a line for run-down (item lifecycle: ACTIVE → DISCONTINUED).
    *
+   * <p>A change to the line at every store, so it is management's, and of the whole business: an
+   * owner, or a manager held to no store. Who may is asked before the line is looked up, so the
+   * answer is the same whatever the id names.
+   *
    * @param id the product
-   * @throws com.storeql.web.ApiException {@code 409} unless the product is ACTIVE
+   * @throws com.storeql.web.ApiException {@code 403 FORBIDDEN} below management; {@code 403
+   *     BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404} no such product in this
+   *     business; {@code 409} unless the product is ACTIVE
    */
   @Operation(
       summary = "Discontinue a line",
       description =
           "ACTIVE → DISCONTINUED: sold while stock lasts, never reordered — inventory-svc takes its"
-              + " variants out of the low-stock report and the planning run. Publishes"
-              + " ProductDiscontinued with the variants it covers.")
-  @APIResponse(responseCode = "404", description = "No such product")
+              + " variants out of the low-stock report and the planning run, at every store."
+              + " Publishes ProductDiscontinued with the variants it covers. For an owner or a"
+              + " manager of the whole business: who may is judged before the line is looked up.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " the line stops being reordered at every store, which is the whole business's"
+              + " to decide. Nothing changes.")
+  @APIResponse(responseCode = "404", description = "No such product in this business")
   @APIResponse(responseCode = "409", description = "Not ACTIVE")
   @Tag(name = "Products")
   @POST
   @Path("/products/{id}/discontinue")
   public ApiResponse<ProductResponse> discontinueProduct(@PathParam("id") UUID id) {
-    return ApiResponse.ok(Mappers.toProduct(service.discontinueProduct(ctx.requireTenantId(), id)));
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    return ApiResponse.ok(Mappers.toProduct(service.discontinueProduct(ctx, id)));
   }
 
   /**
    * Brings a discontinued line back (item lifecycle: DISCONTINUED → ACTIVE).
    *
+   * <p>It undoes a discontinue, the whole business's decision, and puts the line back into
+   * replenishment at every store, so it is the whole business's too: an owner, or a manager held to
+   * no store. Who may is asked before the line is looked up.
+   *
    * @param id the product
-   * @throws com.storeql.web.ApiException {@code 409} unless the product is DISCONTINUED
+   * @throws com.storeql.web.ApiException {@code 403 FORBIDDEN} below management; {@code 403
+   *     BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404} no such product in this
+   *     business; {@code 409} unless the product is DISCONTINUED
    */
   @Operation(
       summary = "Reinstate a discontinued line",
       description =
-          "DISCONTINUED → ACTIVE: back on sale and back into replenishment. Publishes"
-              + " ProductReinstated.")
-  @APIResponse(responseCode = "404", description = "No such product")
+          "DISCONTINUED → ACTIVE: back on sale and back into replenishment at every store."
+              + " Publishes ProductReinstated. For an owner or a manager of the whole business,"
+              + " whatever the line's range: who may is judged before the line is looked up.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " it undoes a discontinue, which is the whole business's to decide. Nothing"
+              + " changes.")
+  @APIResponse(responseCode = "404", description = "No such product in this business")
   @APIResponse(responseCode = "409", description = "Not DISCONTINUED")
   @Tag(name = "Products")
   @POST
   @Path("/products/{id}/reinstate")
   public ApiResponse<ProductResponse> reinstateProduct(@PathParam("id") UUID id) {
-    return ApiResponse.ok(Mappers.toProduct(service.reinstateProduct(ctx.requireTenantId(), id)));
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    return ApiResponse.ok(Mappers.toProduct(service.reinstateProduct(ctx, id)));
   }
 
   // ── product image ──────────────────────────────────────────────────────────
@@ -450,6 +606,12 @@ public class AdminResource {
       description = "Content-Type not an accepted image type, body empty, or 256 KB or larger")
   @APIResponse(responseCode = "404", description = "No such product")
   @Tag(name = "Product Images")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @PUT
   @Path("/products/{id}/image")
   @Consumes({"image/jpeg", "image/png", "image/webp"})
@@ -457,6 +619,7 @@ public class AdminResource {
       @PathParam("id") UUID id,
       @jakarta.ws.rs.HeaderParam("Content-Type") String contentType,
       byte[] body) {
+    service.requireLineHeld(ctx, id);
     service.uploadProductImage(ctx.requireTenantId(), id, contentType, body);
     return ApiResponse.ok("uploaded");
   }
@@ -469,9 +632,16 @@ public class AdminResource {
   @Operation(summary = "Remove a product's primary image")
   @Tag(name = "Product Images")
   @APIResponse(responseCode = "200", description = "Remove a product's primary image")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @DELETE
   @Path("/products/{id}/image")
   public ApiResponse<String> deleteProductImage(@PathParam("id") UUID id) {
+    service.requireLineHeld(ctx, id);
     service.deleteProductImage(ctx.requireTenantId(), id);
     return ApiResponse.ok("deleted");
   }
@@ -491,22 +661,57 @@ public class AdminResource {
         service.getProductStores(ctx.requireTenantId(), id).stream().map(UUID::toString).toList());
   }
 
-  /** Replace the product's store assortment. Empty/absent list = sold at all stores. */
+  /**
+   * Replace the product's store assortment. Empty/absent list = sold at all stores.
+   *
+   * <p>Each id is read as a UUIDv7 here ({@code 400 INVALID_UUID}), before the service is asked;
+   * whether each store is the business's, and the caller's to change, is the service's: see {@code
+   * ProductService.setProductStores}.
+   */
   @Operation(
       summary = "Replace a product's store assortment",
-      description = "Empty/absent list means sold at all stores.")
-  @APIResponse(responseCode = "404", description = "No such product")
+      description =
+          "Empty/absent list means sold at all stores. Every store named must be one of this"
+              + " business's. A manager held to stores may add or take away only their own"
+              + " stores (stores left as they were are not asked about), and may not move a"
+              + " product to or from \"sold at all stores\". Nothing is changed by a refusal. A"
+              + " store named twice is kept once; the answer is the stores now held.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "A store id that is not a UUIDv7 (INVALID_UUID), or a null entry in storeIds"
+              + " (VALIDATION_FAILED)")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "The change adds or takes away a store the caller is not held to (STORE_ACCESS_DENIED),"
+              + " or moves the product to or from every store, by a caller held to stores, which"
+              + " is the whole business's to decide (BUSINESS_WIDE_ONLY)")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "No such product (PRODUCT_NOT_FOUND), or a store that is not one of this business's"
+              + " (PRODUCT_STORE_NOT_FOUND)")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "Stores are named and tenant-svc cannot say which are the business's"
+              + " (TENANT_STORES_UNAVAILABLE)")
   @Tag(name = "Store Assortment")
   @PUT
   @Path("/products/{id}/stores")
   public ApiResponse<List<String>> setProductStores(
       @PathParam("id") UUID id, ProductStoresRequest req) {
-    List<UUID> ids =
-        (req == null || req.storeIds() == null)
-            ? List.of()
-            : req.storeIds().stream().map(UUID::fromString).toList();
-    service.setProductStores(ctx.requireTenantId(), id, ids);
-    return ApiResponse.ok(ids.stream().map(UUID::toString).toList());
+    List<UUID> ids = List.of();
+    if (req != null && req.storeIds() != null) {
+      Validations.validate(req); // a hole in the list is named, not read as an id
+      ids =
+          req.storeIds().stream()
+              .map(s -> com.storeql.web.Parsing.uuid(s.strip(), "storeIds"))
+              .toList();
+    }
+    return ApiResponse.ok(
+        service.setProductStores(ctx, id, ids).stream().map(UUID::toString).toList());
   }
 
   // ── variants ─────────────────────────────────────────────────────────────
@@ -521,11 +726,18 @@ public class AdminResource {
   @Operation(summary = "Create a variant under a product")
   @APIResponse(responseCode = "201", description = "Variant created")
   @Tag(name = "Variants")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/products/{id}/variants")
   public Response createVariant(@PathParam("id") UUID productId, CreateVariantRequest req) {
+    service.requireLineHeld(ctx, productId);
     Validations.validate(req);
-    return created(Mappers.toVariant(service.createVariant(ctx.requireTenantId(), productId, req)));
+    return created(Mappers.toVariant(service.createVariant(ctx, productId, req)));
   }
 
   /**
@@ -594,13 +806,14 @@ public class AdminResource {
    * @throws com.storeql.web.ApiException {@code 404} variant not found
    */
   @Operation(summary = "Get a variant by id")
-  @APIResponse(responseCode = "404", description = "Variant not found")
+  @APIResponse(responseCode = "404", description = "Variant not found, or it is not this product's")
   @Tag(name = "Variants")
   @GET
   @Path("/products/{id}/variants/{variantId}")
   public ApiResponse<VariantResponse> getVariant(
       @PathParam("id") UUID productId, @PathParam("variantId") UUID variantId) {
-    return ApiResponse.ok(Mappers.toVariant(service.getVariant(ctx.requireTenantId(), variantId)));
+    return ApiResponse.ok(
+        Mappers.toVariant(service.getVariantOf(ctx.requireTenantId(), productId, variantId)));
   }
 
   /**
@@ -614,37 +827,105 @@ public class AdminResource {
   @Operation(summary = "Update a variant")
   @APIResponse(responseCode = "404", description = "Variant not found")
   @Tag(name = "Variants")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @PUT
   @Path("/products/{id}/variants/{variantId}")
   public ApiResponse<VariantResponse> updateVariant(
       @PathParam("id") UUID productId,
       @PathParam("variantId") UUID variantId,
       UpdateVariantRequest req) {
+    service.requireLineHeld(ctx, productId);
     Validations.validate(req);
-    return ApiResponse.ok(
-        Mappers.toVariant(service.updateVariant(ctx.requireTenantId(), productId, variantId, req)));
+    return ApiResponse.ok(Mappers.toVariant(service.updateVariant(ctx, productId, variantId, req)));
   }
 
   /**
    * Delists a variant.
    *
-   * <p>Soft delete: sets the variant's status to DELISTED.
+   * <p>Soft delete: sets the variant's status to INACTIVE. The variant leaves the shop and the till
+   * at every store its line is sold at, so it is management's, and of the whole business, as
+   * delisting the line is: an owner, or a manager held to no store. Who may is asked before the
+   * variant is looked up.
    *
    * @param productId the product id (path parameter)
    * @param variantId the variant id (path parameter)
-   * @throws com.storeql.web.ApiException {@code 404} variant not found
+   * @throws com.storeql.web.ApiException {@code 403 FORBIDDEN} below management; {@code 403
+   *     BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404} no such variant in this
+   *     business
    */
   @Operation(
       summary = "Delist a variant",
-      description = "Soft delete: sets the variant's status to DELISTED.")
-  @APIResponse(responseCode = "404", description = "Variant not found")
+      description =
+          "Soft delete: sets the variant's status to INACTIVE. It no longer scans at the till or"
+              + " lists in the shop, at every store its line is sold at; the row and its history"
+              + " stay. For an owner or a manager of the whole business, whatever the line's range:"
+              + " who may is judged before the variant is looked up.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY),"
+              + " a variant of a line of their own included: the variant is taken off sale at every"
+              + " store its line is sold at, which is the whole business's to decide. Nothing"
+              + " changes.")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "No such variant in this business, or it is not this product's (VARIANT_NOT_FOUND)")
   @Tag(name = "Variants")
   @DELETE
   @Path("/products/{id}/variants/{variantId}")
   public ApiResponse<VariantResponse> delistVariant(
       @PathParam("id") UUID productId, @PathParam("variantId") UUID variantId) {
-    return ApiResponse.ok(
-        Mappers.toVariant(service.delistVariant(ctx.requireTenantId(), productId, variantId)));
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    return ApiResponse.ok(Mappers.toVariant(service.delistVariant(ctx, productId, variantId)));
+  }
+
+  /**
+   * Puts a delisted variant back on sale.
+   *
+   * <p>The undo of {@link #delistVariant}, with the same door: management's, and of the whole
+   * business, asked before the variant is looked up.
+   *
+   * @param productId the product id (path parameter)
+   * @param variantId the variant id (path parameter)
+   * @throws com.storeql.web.ApiException {@code 403 FORBIDDEN} below management; {@code 403
+   *     BUSINESS_WIDE_ONLY} for a manager held to stores; {@code 404} no such variant of this
+   *     product in this business; {@code 409} not delisted, or its product is delisted
+   */
+  @Operation(
+      summary = "Relist a delisted variant",
+      description =
+          "INACTIVE -> ACTIVE: the variant scans at the till and lists in the shop again, at every"
+              + " store its line is sold at. For an owner or a manager of the whole business,"
+              + " whatever the line's range: who may is judged before the variant is looked up.")
+  @APIResponse(responseCode = "200", description = "Variant relisted")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " it puts the variant back on sale at every store its line is sold at. Nothing"
+              + " changes.")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "No such variant in this business, or it is not this product's (VARIANT_NOT_FOUND)")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "The variant is on sale already (VARIANT_NOT_DELISTED), or its product is delisted"
+              + " (VARIANT_PRODUCT_NOT_ON_SALE)")
+  @Tag(name = "Variants")
+  @POST
+  @Path("/products/{id}/variants/{variantId}/relist")
+  public ApiResponse<VariantResponse> relistVariant(
+      @PathParam("id") UUID productId, @PathParam("variantId") UUID variantId) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    return ApiResponse.ok(Mappers.toVariant(service.relistVariant(ctx, productId, variantId)));
   }
 
   // ── UOM ──────────────────────────────────────────────────────────────────
@@ -736,12 +1017,19 @@ public class AdminResource {
   @APIResponse(
       responseCode = "200",
       description = "Upsert a variant-specific UOM conversion factor")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/uom/item-conversions")
   public Response upsertItemConversion(UomItemConversionRequest req) {
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID variantId = Ids.parse(req.variantId());
+    service.requireVariantLineHeld(ctx, variantId);
     return Response.status(Response.Status.OK)
         .entity(
             ApiResponse.ok(
@@ -791,7 +1079,7 @@ public class AdminResource {
   @DELETE
   @Path("/uom/item-conversions/{id}")
   public Response deleteItemConversion(@PathParam("id") UUID id) {
-    boolean deleted = service.deleteItemConversion(ctx.requireTenantId(), id);
+    boolean deleted = service.deleteItemConversion(ctx, id);
     if (!deleted) {
       throw new com.storeql.web.ApiException(
           404, "CONVERSION_NOT_FOUND", "Item conversion not found", List.of(), null);
@@ -810,9 +1098,17 @@ public class AdminResource {
   @Operation(summary = "Create an item attribute template")
   @APIResponse(responseCode = "201", description = "Template created")
   @Tag(name = "Item Templates")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining item templates is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/item-templates")
   public Response createTemplate(CreateItemTemplateRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining item templates");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return created(
@@ -856,9 +1152,17 @@ public class AdminResource {
   @Operation(summary = "Deactivate an item template")
   @APIResponse(responseCode = "404", description = "Template not found")
   @Tag(name = "Item Templates")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining item templates is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/item-templates/{id}")
   public ApiResponse<ItemTemplateResponse> deactivateTemplate(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining item templates");
     return ApiResponse.ok(
         Mappers.toTemplate(service.deactivateTemplate(ctx.requireTenantId(), id)));
   }
@@ -876,10 +1180,17 @@ public class AdminResource {
       description = "Publishes ItemTemplateApplied.")
   @Tag(name = "Item Templates")
   @APIResponse(responseCode = "200", description = "Apply a template's attributes to a variant")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/item-templates/{id}/apply/{variantId}")
   public ApiResponse<ItemTemplateApplicationResponse> applyTemplate(
       @PathParam("id") UUID templateId, @PathParam("variantId") UUID variantId) {
+    service.requireVariantLineHeld(ctx, variantId);
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
         Mappers.toTemplateApplication(service.applyTemplate(tenantId, variantId, templateId)));
@@ -907,10 +1218,17 @@ public class AdminResource {
       description = "partyType is not SUPPLIER or CUSTOMER, or partyId is not a UUID")
   @APIResponse(responseCode = "404", description = "Variant not found")
   @Tag(name = "Cross-References")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/products/variants/{variantId}/cross-references")
   public Response createCrossReference(
       @PathParam("variantId") UUID variantId, CreateItemCrossReferenceRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     return created(
         Mappers.toCrossReference(
@@ -951,11 +1269,18 @@ public class AdminResource {
   @Operation(summary = "Delete a cross-reference")
   @APIResponse(responseCode = "404", description = "Cross reference not found")
   @Tag(name = "Cross-References")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @DELETE
   @Path("/products/variants/{variantId}/cross-references/{id}")
   public Response deleteCrossReference(
       @PathParam("variantId") UUID variantId, @PathParam("id") UUID id) {
-    service.deleteCrossReference(ctx.requireTenantId(), id);
+    service.requireVariantLineHeld(ctx, variantId);
+    service.deleteCrossReference(ctx.requireTenantId(), variantId, id);
     return Response.noContent().build();
   }
 
@@ -983,10 +1308,17 @@ public class AdminResource {
       description = "relationshipType invalid, or relatedVariantId equals variantId")
   @APIResponse(responseCode = "404", description = "Either variant not found")
   @Tag(name = "Item Relationships")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/products/variants/{variantId}/relationships")
   public Response createRelationship(
       @PathParam("variantId") UUID variantId, CreateItemRelationshipRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return created(Mappers.toRelationship(service.createRelationship(tenantId, variantId, req)));
@@ -1022,11 +1354,18 @@ public class AdminResource {
   @Operation(summary = "Delete an item relationship")
   @APIResponse(responseCode = "404", description = "Item relationship not found")
   @Tag(name = "Item Relationships")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @DELETE
   @Path("/products/variants/{variantId}/relationships/{id}")
   public Response deleteRelationship(
       @PathParam("variantId") UUID variantId, @PathParam("id") UUID id) {
-    service.deleteRelationship(ctx.requireTenantId(), id);
+    service.requireVariantLineHeld(ctx, variantId);
+    service.deleteRelationship(ctx.requireTenantId(), variantId, id);
     return Response.noContent().build();
   }
 
@@ -1048,10 +1387,17 @@ public class AdminResource {
   @APIResponse(responseCode = "201", description = "Revision created")
   @APIResponse(responseCode = "400", description = "effectiveDate is not a valid date")
   @Tag(name = "Item Revisions")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/products/variants/{variantId}/revisions")
   public Response createRevision(
       @PathParam("variantId") UUID variantId, CreateRevisionRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     java.time.LocalDate effectiveDate =
@@ -1126,52 +1472,145 @@ public class AdminResource {
    *
    * <p>Duplicate categories are skipped. Duplicate SKUs return an error entry but the rest
    * continue. Always returns 200 with a result summary and any per-row errors.
+   *
+   * <p>The body is deliberately not passed to {@code Validations.validate} as a whole: every
+   * category, product and variant carries constraints, and {@code ProductService.bulkImport} checks
+   * them row by row, so that a row that breaks one is that row's error and the rest of the sheet is
+   * still imported. Validating first would turn one blank name into a {@code 400} for everything.
+   * What no row can be blamed for (a missing body, an unknown {@code mode}, a hole in a list such
+   * as {@code "products":[{…}, null]}) is refused before anything is written; the hole by the
+   * platform's own {@code Validations}, which the service hands the rows without their rules.
    */
   @Operation(
       summary = "Bulk-import categories and products/variants",
       description =
           "Imports categories then products+variants from a JSON payload. Never hard-fails the"
-              + " batch: duplicate categories are skipped, duplicate SKUs return a per-row error"
-              + " but the rest continue, and this always returns 200 with a result summary plus"
-              + " any per-row errors.")
-  @APIResponse(responseCode = "400", description = "Request body is missing")
+              + " batch: duplicate categories are skipped, a row that breaks a constraint or"
+              + " names a store that is not an id is that row's error, duplicate SKUs return a"
+              + " per-row error but the rest continue, and this always returns 200 with a result"
+              + " summary plus any per-row errors. Only a missing body (BODY_REQUIRED), a mode"
+              + " that is neither ADD nor REPLACE (IMPORT_MODE_INVALID) or a null entry in a list"
+              + " (VALIDATION_FAILED, naming it: \"products[1]: must not be null\") is a 400, and"
+              + " nothing is written then. Every store a row names (storeIds) is checked for the"
+              + " whole sheet before its first row is written: one that is not the business's"
+              + " is a 404 (PRODUCT_STORE_NOT_FOUND), one a manager held to stores does not keep"
+              + " a 403 (STORE_ACCESS_DENIED), and stores tenant-svc cannot vouch for a 503"
+              + " (TENANT_STORES_UNAVAILABLE); nothing is imported then. Where a row's product is"
+              + " sold is then judged row by row, as the catalogue stands: a new product naming no"
+              + " store is sold at every store, or, imported by a manager held to stores, at"
+              + " theirs, as POST /admin/products does; and in REPLACE a row's stores are added to"
+              + " the product it finds only as PUT /admin/products/{id}/stores would allow them, so"
+              + " a product sold at every store is never narrowed to a held manager's stores — a"
+              + " row refused so is that row's error (\"BUSINESS_WIDE_ONLY: …\"), nothing of it"
+              + " written. REPLACE drops the variant already holding a row's SKU and writes the"
+              + " row's own in its place, for an owner or a manager of the whole business only: a"
+              + " manager held to stores never drops a variant, so a SKU of theirs that is already"
+              + " held is that variant's error (\"BUSINESS_WIDE_ONLY: …\"), the variant there left"
+              + " as it is, while the row's other variants are imported.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "Request body is missing, mode is neither ADD nor REPLACE, or a list has a null entry;"
+              + " nothing written")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A row names a store the caller is not held to (STORE_ACCESS_DENIED); nothing written")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "A row names a store that is not one of this business's (PRODUCT_STORE_NOT_FOUND);"
+              + " nothing written")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "Rows name stores and tenant-svc cannot say which stores are the business's"
+              + " (TENANT_STORES_UNAVAILABLE); nothing written")
   @Tag(name = "Bulk Import")
   @POST
   @Path("/import")
   public ApiResponse<BulkImportResult> bulkImport(BulkImportRequest req) {
     if (req == null) {
-      throw new com.storeql.web.ApiException(
-          400, "INVALID_BODY", "request body required", List.of(), null);
+      throw com.storeql.web.ApiException.badRequest(
+          com.storeql.web.ErrorCodes.BODY_REQUIRED, "Request body required");
     }
-    return ApiResponse.ok(service.bulkImport(ctx.requireTenantId(), req));
+    return ApiResponse.ok(service.bulkImport(ctx, req));
   }
 
   /**
    * Import a supplier catalogue CSV (GTBJ format). Body: JSON with {@code csv} (raw CSV text),
    * optional {@code mode} (ADD|REPLACE), optional {@code storeNameToId} map (store name → UUID
-   * string, resolved client-side so this service never calls tenant-svc synchronously).
+   * string, resolved client-side; each store the sheet uses is then checked against the business's
+   * own, as tenant-svc lists them).
+   *
+   * <p>Validated as a whole before anything is written, and everything the sheet will ask of other
+   * services is settled first too: see {@code ProductService.importSupplierCsv}.
    */
   @Operation(
       summary = "Import a supplier catalogue CSV",
       description =
           "Parses a raw CSV (GTBJ format) into categories/products/variants, then optionally"
               + " receives stock and/or sets prices for the imported variants via inventory-svc"
-              + " and pricing-svc. storeNameToId is resolved client-side so this service never"
-              + " calls tenant-svc synchronously.")
+              + " and pricing-svc. storeNameToId is resolved client-side. Everything that can be"
+              + " refused is refused before anything is written: a destination store, or a store"
+              + " the sheet's Store column is mapped to, that is not the business's is a 404 and"
+              + " one the caller is not held to a 403; prices without pricing.write are a 403;"
+              + " and stores tenant-svc cannot vouch for, or a stock or price service that is not"
+              + " available, are a 503; nothing is imported then. Stock and prices are then asked"
+              + " as the caller (their stores, permissions and login), so inventory-svc and"
+              + " pricing-svc judge the person, not the role tier; stock goes in calls of at most"
+              + " storeql.product.inventory.receive-max-lines lines. Once the catalogue is"
+              + " written, a stock or price step that fails is reported in stockErrors or"
+              + " priceErrors beside the result, with a 200, and is not thrown. Once inventory-svc"
+              + " or pricing-svc gives no answer no further call is made to it, and every line or"
+              + " price not done is reported with the reason, in plain words. A quantity or price"
+              + " that is not a plain number (digits and a decimal point: no comma, currency sign"
+              + " or exponent) is not received or set, and is reported in stockErrors or"
+              + " priceErrors by SKU; the variant keeps the supplier's case size and trade price"
+              + " as written. A quantity stock is not kept in (not above zero, more than three"
+              + " decimal places or fifteen whole digits) is reported in stockErrors by SKU and is"
+              + " not sent, so it never stops the sheet's other lines being received. A price is money in the sheet's currency: one with"
+              + " more decimal places than that currency has (ISO 4217: two for EUR, none for"
+              + " JPY, three for KWD) or below zero is not set, and is reported in priceErrors by"
+              + " SKU. A product row is held to the same store rules as POST /admin/import: a new"
+              + " product with no Store is sold at every store, or, imported by a manager held to"
+              + " stores, at theirs. And to the same REPLACE rule: a manager held to stores never"
+              + " drops a variant already there, so a SKU of theirs that is already held is that"
+              + " variant's error (\"BUSINESS_WIDE_ONLY: …\") and receives no stock and no price"
+              + " from the sheet.")
   @APIResponse(
       responseCode = "400",
-      description = "csv field missing/blank, CSV empty, or missing required columns")
+      description =
+          "csv missing or blank (VALIDATION_FAILED), no body (BODY_REQUIRED), mode neither ADD"
+              + " nor REPLACE (IMPORT_MODE_INVALID), storeId not an id (INVALID_UUID), currency"
+              + " not ISO 4217 (CURRENCY_INVALID), CSV empty (CSV_EMPTY) or missing its"
+              + " description column (CSV_MISSING_COLUMNS)")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "The destination store, or a store the Store column is mapped to, is not one the"
+              + " caller is held to (STORE_ACCESS_DENIED), or the sheet carries prices and the"
+              + " caller lacks pricing.write (PERMISSION_DENIED). Nothing was imported")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "The destination store, or a store the Store column is mapped to, is not one of this"
+              + " business's (PRODUCT_STORE_NOT_FOUND). Nothing was imported")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "The request names stores and tenant-svc cannot say which are the business's"
+              + " (TENANT_STORES_UNAVAILABLE), the sheet carries quantities for a store and"
+              + " inventory-svc is not available (INVENTORY_UNAVAILABLE), or it carries prices and"
+              + " pricing-svc is not available (PRICING_UNAVAILABLE), or the business's currency"
+              + " cannot be read (TENANT_PROFILE_UNAVAILABLE). Nothing was imported")
   @Tag(name = "Bulk Import")
   @POST
   @Path("/import/supplier-csv")
   public ApiResponse<BulkImportResult> importSupplierCsv(
       com.storeql.product.dto.Dtos.SupplierCsvImportRequest req) {
-    if (req == null || req.csv() == null || req.csv().isBlank()) {
-      throw new com.storeql.web.ApiException(
-          400, "INVALID_BODY", "csv field is required", List.of(), null);
-    }
-    return ApiResponse.ok(
-        service.importSupplierCsv(ctx.requireTenantId(), String.join(",", ctx.roles()), req));
+    Validations.validate(req);
+    return ApiResponse.ok(service.importSupplierCsv(ctx, req));
   }
 
   // ── Catalog Groups (Gap #35) ─────────────────────────────────────────────
@@ -1185,9 +1624,17 @@ public class AdminResource {
   @Operation(summary = "Create a merchandising catalog group")
   @APIResponse(responseCode = "201", description = "Catalog group created")
   @Tag(name = "Catalog Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining catalog groups is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/catalog-groups")
   public Response createCatalogGroup(CreateCatalogGroupRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining catalog groups");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     var group = service.createCatalogGroup(tenantId, req);
@@ -1250,9 +1697,17 @@ public class AdminResource {
   @Operation(summary = "Deactivate a catalog group")
   @APIResponse(responseCode = "404", description = "Catalog group not found")
   @Tag(name = "Catalog Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining catalog groups is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/catalog-groups/{id}")
   public Response deactivateCatalogGroup(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining catalog groups");
     service.deactivateCatalogGroup(ctx.requireTenantId(), id);
     return Response.noContent().build();
   }
@@ -1275,10 +1730,18 @@ public class AdminResource {
   @APIResponse(responseCode = "400", description = "dataType is not TEXT, NUMBER, BOOLEAN, or DATE")
   @APIResponse(responseCode = "404", description = "Catalog group not found")
   @Tag(name = "Catalog Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining catalog groups is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/catalog-groups/{groupId}/elements")
   public Response createCatalogGroupElement(
       @PathParam("groupId") UUID groupId, CreateCatalogGroupElementRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining catalog groups");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return created(
@@ -1295,10 +1758,18 @@ public class AdminResource {
   @Operation(summary = "Delete a catalog group element")
   @APIResponse(responseCode = "404", description = "Catalog group element not found")
   @Tag(name = "Catalog Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining catalog groups is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/catalog-groups/{groupId}/elements/{elementId}")
   public Response deleteCatalogGroupElement(
       @PathParam("groupId") UUID groupId, @PathParam("elementId") UUID elementId) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining catalog groups");
     service.deleteCatalogGroupElement(ctx.requireTenantId(), elementId);
     return Response.noContent().build();
   }
@@ -1317,10 +1788,17 @@ public class AdminResource {
   @APIResponse(responseCode = "400", description = "groupId missing or malformed")
   @APIResponse(responseCode = "404", description = "Variant or catalog group not found")
   @Tag(name = "Catalog Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/products/variants/{variantId}/catalog-assignment")
   public Response assignCatalogGroup(
       @PathParam("variantId") UUID variantId, AssignCatalogGroupRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return created(
@@ -1356,10 +1834,17 @@ public class AdminResource {
   @APIResponse(
       responseCode = "200",
       description = "Update a variant's catalog group element values")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @PUT
   @Path("/products/variants/{variantId}/catalog-assignment")
   public ApiResponse<CatalogAssignmentResponse> updateCatalogAssignment(
       @PathParam("variantId") UUID variantId, UpdateCatalogAssignmentRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
         Mappers.toCatalogAssignment(service.updateCatalogAssignment(tenantId, variantId, req)));
@@ -1374,9 +1859,16 @@ public class AdminResource {
   @Operation(summary = "Remove a variant's catalog group assignment")
   @APIResponse(responseCode = "404", description = "No catalog assignment for this variant")
   @Tag(name = "Catalog Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @DELETE
   @Path("/products/variants/{variantId}/catalog-assignment")
   public Response deleteCatalogAssignment(@PathParam("variantId") UUID variantId) {
+    service.requireVariantLineHeld(ctx, variantId);
     service.deleteCatalogAssignment(ctx.requireTenantId(), variantId);
     return Response.noContent().build();
   }
@@ -1396,9 +1888,17 @@ public class AdminResource {
       description = "Packaging/container type used for variant packing hierarchy.")
   @APIResponse(responseCode = "201", description = "Container type created")
   @Tag(name = "Container Types")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining container types is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/container-types")
   public Response createContainerType(CreateContainerTypeRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining container types");
     Validations.validate(req);
     return created(
         Mappers.toContainerType(service.createContainerType(ctx.requireTenantId(), req)));
@@ -1443,10 +1943,18 @@ public class AdminResource {
   @Operation(summary = "Update a container type")
   @APIResponse(responseCode = "404", description = "Container type not found")
   @Tag(name = "Container Types")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining container types is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @PUT
   @Path("/container-types/{id}")
   public ApiResponse<ContainerTypeResponse> updateContainerType(
       @PathParam("id") UUID id, UpdateContainerTypeRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining container types");
     Validations.validate(req);
     return ApiResponse.ok(
         Mappers.toContainerType(service.updateContainerType(ctx.requireTenantId(), id, req)));
@@ -1461,9 +1969,17 @@ public class AdminResource {
   @Operation(summary = "Deactivate a container type")
   @APIResponse(responseCode = "404", description = "Container type not found")
   @Tag(name = "Container Types")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining container types is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/container-types/{id}")
   public ApiResponse<ContainerTypeResponse> deactivateContainerType(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining container types");
     return ApiResponse.ok(
         Mappers.toContainerType(service.deactivateContainerType(ctx.requireTenantId(), id)));
   }
@@ -1480,10 +1996,17 @@ public class AdminResource {
   @APIResponse(responseCode = "201", description = "Container link created")
   @APIResponse(responseCode = "404", description = "Variant or container type not found")
   @Tag(name = "Container Types")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/products/variants/{variantId}/container-links")
   public Response createVariantContainerLink(
       @PathParam("variantId") UUID variantId, CreateVariantContainerLinkRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     var link = service.createVariantContainerLink(tenantId, variantId, req);
@@ -1525,11 +2048,18 @@ public class AdminResource {
   @Operation(summary = "Delete a variant-to-container-type link")
   @APIResponse(responseCode = "404", description = "Container link not found")
   @Tag(name = "Container Types")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @DELETE
   @Path("/products/variants/{variantId}/container-links/{id}")
   public Response deleteVariantContainerLink(
       @PathParam("variantId") UUID variantId, @PathParam("id") UUID id) {
-    service.deleteVariantContainerLink(ctx.requireTenantId(), id);
+    service.requireVariantLineHeld(ctx, variantId);
+    service.deleteVariantContainerLink(ctx.requireTenantId(), variantId, id);
     return Response.noContent().build();
   }
 
@@ -1596,12 +2126,19 @@ public class AdminResource {
   @Operation(summary = "Set a variant's values for an attribute group")
   @APIResponse(responseCode = "404", description = "Attribute group or variant not found")
   @Tag(name = "Attribute Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @PUT
   @Path("/products/variants/{variantId}/attribute-groups/{groupCode}")
   public ApiResponse<VariantAttributeGroupValuesResponse> upsertVariantAttributeGroupValues(
       @PathParam("variantId") UUID variantId,
       @PathParam("groupCode") String groupCode,
       UpsertVariantAttributeGroupRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
@@ -1666,10 +2203,17 @@ public class AdminResource {
       responseCode = "404",
       description = "No attribute group values for this group on this variant")
   @Tag(name = "Attribute Groups")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @DELETE
   @Path("/products/variants/{variantId}/attribute-groups/{groupCode}")
   public Response deleteVariantAttributeGroupValues(
       @PathParam("variantId") UUID variantId, @PathParam("groupCode") String groupCode) {
+    service.requireVariantLineHeld(ctx, variantId);
     service.deleteVariantAttributeGroupValues(ctx.requireTenantId(), variantId, groupCode);
     return Response.noContent().build();
   }
@@ -1689,9 +2233,17 @@ public class AdminResource {
       description = "An alternate category hierarchy independent of the main category tree.")
   @APIResponse(responseCode = "201", description = "Category set created")
   @Tag(name = "Category Sets")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining category sets is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/category-sets")
   public Response createCategorySet(CreateCategorySetRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining category sets");
     Validations.validate(req);
     var cs = service.createCategorySet(ctx.requireTenantId(), req);
     return created(Mappers.toCategorySet(cs));
@@ -1734,10 +2286,18 @@ public class AdminResource {
   @Operation(summary = "Update a category set")
   @APIResponse(responseCode = "404", description = "Category set not found")
   @Tag(name = "Category Sets")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining category sets is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @PUT
   @Path("/category-sets/{id}")
   public ApiResponse<CategorySetResponse> updateCategorySet(
       @PathParam("id") UUID id, UpdateCategorySetRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining category sets");
     return ApiResponse.ok(
         Mappers.toCategorySet(service.updateCategorySet(ctx.requireTenantId(), id, req)));
   }
@@ -1751,9 +2311,17 @@ public class AdminResource {
   @Operation(summary = "Delete a category set")
   @APIResponse(responseCode = "404", description = "Category set not found")
   @Tag(name = "Category Sets")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining category sets is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/category-sets/{id}")
   public Response deleteCategorySet(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining category sets");
     service.deleteCategorySet(ctx.requireTenantId(), id);
     return Response.noContent().build();
   }
@@ -1770,10 +2338,18 @@ public class AdminResource {
   @APIResponse(responseCode = "201", description = "Member added")
   @APIResponse(responseCode = "404", description = "Category set or category not found")
   @Tag(name = "Category Sets")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining category sets is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @POST
   @Path("/category-sets/{id}/members")
   public Response addCategorySetMember(
       @PathParam("id") UUID setId, AddCategorySetMemberRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining category sets");
     Validations.validate(req);
     var m = service.addCategorySetMember(ctx.requireTenantId(), setId, req);
     return created(Mappers.toCategorySetMember(m));
@@ -1809,10 +2385,18 @@ public class AdminResource {
   @Operation(summary = "Remove a category from a category set")
   @APIResponse(responseCode = "404", description = "Category not a member of this set")
   @Tag(name = "Category Sets")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Maintaining category sets is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @DELETE
   @Path("/category-sets/{id}/members/{categoryId}")
   public Response deleteCategorySetMember(
       @PathParam("id") UUID setId, @PathParam("categoryId") UUID categoryId) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Maintaining category sets");
     service.deleteCategorySetMember(ctx.requireTenantId(), setId, categoryId);
     return Response.noContent().build();
   }
@@ -1829,10 +2413,17 @@ public class AdminResource {
   @APIResponse(responseCode = "201", description = "Assignment created")
   @APIResponse(responseCode = "404", description = "Variant or category set not found")
   @Tag(name = "Category Sets")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @POST
   @Path("/products/variants/{variantId}/category-set-assignments")
   public Response assignVariantCategorySet(
       @PathParam("variantId") UUID variantId, AssignVariantCategorySetRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     var a = service.assignVariantCategorySet(ctx.requireTenantId(), variantId, req);
     return created(Mappers.toVariantCategorySetAssignment(a));
@@ -1868,10 +2459,17 @@ public class AdminResource {
   @Operation(summary = "Remove a variant's category set assignment")
   @APIResponse(responseCode = "404", description = "Category set assignment not found")
   @Tag(name = "Category Sets")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @DELETE
   @Path("/products/variants/{variantId}/category-set-assignments/{setId}")
   public Response deleteVariantCategorySetAssignment(
       @PathParam("variantId") UUID variantId, @PathParam("setId") UUID setId) {
+    service.requireVariantLineHeld(ctx, variantId);
     service.deleteVariantCategorySetAssignment(ctx.requireTenantId(), variantId, setId);
     return Response.noContent().build();
   }
@@ -1921,10 +2519,17 @@ public class AdminResource {
       description = "Not one of the fourteen, presence not CONTAINS/MAY_CONTAIN, or declared twice")
   @APIResponse(responseCode = "404", description = "Variant not found")
   @Tag(name = "Food safety")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @PUT
   @Path("/products/variants/{variantId}/allergens")
   public ApiResponse<VariantComplianceResponse> declareAllergens(
       @PathParam("variantId") UUID variantId, AllergenDeclarationRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
     return ApiResponse.ok(
         Mappers.toCompliance(
@@ -1957,10 +2562,17 @@ public class AdminResource {
       description = "Bad country code, unknown UOM, negative tare, or sold by weight with no unit")
   @APIResponse(responseCode = "404", description = "Variant not found")
   @Tag(name = "Food safety")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @PUT
   @Path("/products/variants/{variantId}/compliance")
   public ApiResponse<VariantComplianceResponse> setCompliance(
       @PathParam("variantId") UUID variantId, VariantComplianceRequest req) {
+    service.requireVariantLineHeld(ctx, variantId);
     return ApiResponse.ok(
         Mappers.toCompliance(service.updateCompliance(ctx.requireTenantId(), variantId, req)));
   }
@@ -2063,9 +2675,17 @@ public class AdminResource {
   @APIResponse(responseCode = "200", description = "Rule set")
   @APIResponse(responseCode = "400", description = "Below the statutory minimum for that country")
   @Tag(name = "Age restriction")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); or a manager held to stores (BUSINESS_WIDE_ONLY):"
+              + " Setting age-restriction rules is the whole business's, as it changes the catalogue at every store. Nothing"
+              + " changes.")
   @PUT
   @Path("/age-restriction-rules")
   public ApiResponse<AgeRestrictionRuleResponse> setAgeRule(SetAgeRestrictionRuleRequest req) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    service.requireBusinessWideCatalogue(ctx, "Setting age-restriction rules");
     Validations.validate(req);
     return ApiResponse.ok(
         Mappers.toAgeRule(service.setAgeRule(ctx.requireTenantId(), req, ctx.userId())));
@@ -2098,10 +2718,17 @@ public class AdminResource {
   @APIResponse(responseCode = "400", description = "Malformed, or not enough for an online offer")
   @APIResponse(responseCode = "404", description = "No such product")
   @Tag(name = "Products")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "A manager held to stores, and the line is sold at every store or at a store beyond"
+              + " theirs (BUSINESS_WIDE_ONLY): item master data is kept centrally, a branch edits"
+              + " only a line local to its own stores. Nothing changes.")
   @PUT
   @Path("/products/{id}/safety-information")
   public ApiResponse<com.storeql.product.dto.Dtos.SafetyInformationResponse> setSafetyInformation(
       @PathParam("id") UUID id, com.storeql.product.dto.Dtos.SafetyInformationRequest req) {
+    service.requireLineHeld(ctx, id);
     if (req == null) {
       throw com.storeql.web.ApiException.badRequest(
           "SAFETY_INFORMATION_REQUIRED", "a body is required");

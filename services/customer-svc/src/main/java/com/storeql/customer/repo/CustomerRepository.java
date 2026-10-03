@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Persistence for customers, addresses, loyalty, and store credit. Every query on tenant-owned data
@@ -1227,6 +1228,7 @@ public class CustomerRepository extends BaseOutboxRepository {
       ManualGrant grant) {
     return inTx(
         conn -> {
+          requireNotErasedTx(conn, tenantId, customerId, CustomerRepository::erasedForManualPoints);
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
           if (!recordGrant(conn, tenantId, grant)) {
             // a retry under the same key: the first answer, nothing written
@@ -1300,6 +1302,92 @@ public class CustomerRepository extends BaseOutboxRepository {
         "accrue loyalty from order");
   }
 
+  /**
+   * The refusal of points awarded or corrected by hand to an erased customer: the code every write
+   * to an erased record answers with.
+   */
+  public static ApiException erasedForManualPoints() {
+    return erased("points can no longer be awarded or adjusted by hand");
+  }
+
+  /** The refusal of store credit issued by hand to an erased customer. */
+  public static ApiException erasedForStoreCredit() {
+    return erased("store credit can no longer be issued to it");
+  }
+
+  /**
+   * The refusal of a new spend of an erased customer's points or store credit: nobody can show any
+   * longer that they are the person whose balance it is.
+   */
+  public static ApiException erasedForSpending() {
+    return erased("its points and store credit can no longer be spent");
+  }
+
+  /** One state, one stable code, whatever was attempted: {@code 409 CUSTOMER_ANONYMIZED}. */
+  private static ApiException erased(String what) {
+    return ApiException.conflict("CUSTOMER_ANONYMIZED", "Customer has been erased; " + what);
+  }
+
+  /**
+   * Holds the customer's row for the rest of the transaction and refuses an erased one, so an
+   * erasure cannot land between the check and a manual grant (it waits for this transaction, or
+   * this one sees it).
+   *
+   * @param refusal what an erased customer is answered with
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED}
+   */
+  private static void requireNotErasedTx(
+      Connection c, UUID tenantId, UUID customerId, Supplier<ApiException> refusal)
+      throws SQLException {
+    if (erasedTx(c, tenantId, customerId)) {
+      throw refusal.get();
+    }
+  }
+
+  /**
+   * Whether the customer is erased, with their row held {@code FOR SHARE} for the rest of the
+   * transaction, so an erasure that has not committed yet waits for it rather than landing between
+   * this answer and the write it decides.
+   *
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND} when the business holds no such customer
+   */
+  private static boolean erasedTx(Connection c, UUID tenantId, UUID customerId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT status FROM customers WHERE tenant_id = ? AND id = ? FOR SHARE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, customerId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw ApiException.notFound("CUSTOMER_NOT_FOUND", "Customer not found");
+        }
+        return Customer.STATUS_ANONYMIZED.equals(rs.getString(1));
+      }
+    }
+  }
+
+  /**
+   * Whether this business has already acted under the key: for an erased customer, only a request
+   * already carried out may be answered again (as {@link #recordGrant} answers it), never a new
+   * one.
+   */
+  private static boolean keyUsedTx(Connection c, UUID tenantId, String idempotencyKey)
+      throws SQLException {
+    if (idempotencyKey == null) {
+      return false;
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT 1 FROM manual_grants WHERE tenant_id = ? AND idempotency_key = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setString(2, idempotencyKey);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
+  }
+
   private static boolean customerExists(Connection c, UUID tenantId, UUID customerId)
       throws SQLException {
     try (PreparedStatement ps =
@@ -1313,7 +1401,15 @@ public class CustomerRepository extends BaseOutboxRepository {
     }
   }
 
-  /** Spends points from the lot that dies first; refused when the balance is short. */
+  /**
+   * Spends points from the lot that dies first; refused when the balance is short. An erased
+   * customer spends nothing new: only a redemption already recorded under the grant's key (the
+   * order's, or the request's) answers again, as it stands, with nothing more taken.
+   *
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for a new
+   *     spend by an erased customer, nothing written; {@code 409 IDEMPOTENCY_KEY_REUSED}; {@code
+   *     422 LOYALTY_INSUFFICIENT_POINTS}
+   */
   public LoyaltyAccount redeemPoints(
       UUID tenantId,
       UUID customerId,
@@ -1325,6 +1421,10 @@ public class CustomerRepository extends BaseOutboxRepository {
       ManualGrant grant) {
     return inTx(
         conn -> {
+          if (erasedTx(conn, tenantId, customerId)
+              && !keyUsedTx(conn, tenantId, grant.idempotencyKey())) {
+            throw erasedForSpending();
+          }
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
           if (!recordGrant(conn, tenantId, grant)) {
             // the same order or key already took these points: nothing more
@@ -1371,7 +1471,14 @@ public class CustomerRepository extends BaseOutboxRepository {
 
   /**
    * A correction: an award is a lot like any earning and may move the tier; a deduction comes out
-   * of the lots that die first, and never below zero.
+   * of the lots that die first and never takes the balance below zero. What is written — the ledger
+   * entry and the event the deferred revenue is booked from — is the points that actually moved, so
+   * a deduction larger than the balance records the balance, not the figure that was asked for; one
+   * that finds nothing to take is refused, and the grant with it.
+   *
+   * @param eventFor the event for the signed points that actually moved
+   * @throws ApiException 422 {@code LOYALTY_INSUFFICIENT_POINTS} when a deduction finds no points
+   *     to take (the balance is zero or in debt); nothing is written
    */
   public LoyaltyAccount adjustPoints(
       UUID tenantId,
@@ -1379,18 +1486,21 @@ public class CustomerRepository extends BaseOutboxRepository {
       BigDecimal points,
       String reason,
       LoyaltyProgramme programme,
-      OutboxRow event,
+      Function<BigDecimal, OutboxRow> eventFor,
       Function<TierChange, OutboxRow> tierEvent,
       ManualGrant grant) {
     return inTx(
         conn -> {
+          requireNotErasedTx(conn, tenantId, customerId, CustomerRepository::erasedForManualPoints);
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
           if (!recordGrant(conn, tenantId, grant)) {
             // a retry under the same key: the first answer, nothing written
             return getOrCreateLoyaltyAccount(conn, tenantId, customerId);
           }
           LoyaltyAccount updated;
+          BigDecimal moved;
           if (points.signum() > 0) {
+            moved = points;
             updated =
                 credit(
                     conn,
@@ -1404,6 +1514,15 @@ public class CustomerRepository extends BaseOutboxRepository {
           } else {
             Instant now = Instant.now();
             BigDecimal taken = points.negate().min(account.pointsBalance()).max(BigDecimal.ZERO);
+            if (taken.signum() == 0) {
+              // Nothing to take: a ledger entry and an event for no points would only mislead.
+              throw new ApiException(
+                  422,
+                  "LOYALTY_INSUFFICIENT_POINTS",
+                  "There are no loyalty points to take off",
+                  java.util.List.of());
+            }
+            moved = taken.negate();
             LoyaltyLots.consume(
                 conn, tenantId, LoyaltyLots.openLots(conn, account, programme, now), taken);
             BigDecimal newBalance = account.pointsBalance().subtract(taken);
@@ -1424,13 +1543,13 @@ public class CustomerRepository extends BaseOutboxRepository {
                     tenantId,
                     customerId,
                     LoyaltyLedgerEntry.TYPE_ADJUST,
-                    points,
+                    moved,
                     newBalance,
                     null,
                     reason,
                     now));
           }
-          insertOutbox(conn, event);
+          insertOutbox(conn, eventFor.apply(moved));
           return updated;
         },
         "adjust loyalty points");
@@ -1571,6 +1690,9 @@ public class CustomerRepository extends BaseOutboxRepository {
    * @param reason free-text reason recorded on the ledger entry
    * @param event the outbox row to commit alongside
    * @return the account with its new balance
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for an
+   *     erased customer, a retry under an earlier key included, nothing written (no account, grant,
+   *     ledger entry or event); {@code 409 IDEMPOTENCY_KEY_REUSED}
    */
   public StoreCreditAccount issueStoreCredit(
       UUID tenantId,
@@ -1583,6 +1705,7 @@ public class CustomerRepository extends BaseOutboxRepository {
       ManualGrant grant) {
     return inTx(
         conn -> {
+          requireNotErasedTx(conn, tenantId, customerId, CustomerRepository::erasedForStoreCredit);
           StoreCreditAccount account =
               getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
           if (!recordGrant(conn, tenantId, grant)) {
@@ -1780,7 +1903,8 @@ public class CustomerRepository extends BaseOutboxRepository {
    * Debits store credit, appends the ledger entry and writes the event — atomically.
    *
    * <p>The balance check happens inside the transaction, so concurrent redemptions cannot together
-   * overdraw the account.
+   * overdraw the account; and the order's earlier redemption is looked for only while the account
+   * is locked, so two for the same order fired at once take once.
    *
    * @param tenantId owning tenant
    * @param customerId the customer to debit
@@ -1790,6 +1914,9 @@ public class CustomerRepository extends BaseOutboxRepository {
    * @param reason free-text reason recorded on the ledger entry
    * @param event the outbox row to commit alongside
    * @return the account with its new balance
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for a new
+   *     spend by an erased customer (only a redemption already recorded for the order answers
+   *     again, as it stands), nothing written; {@code 422 STORE_CREDIT_INSUFFICIENT}
    */
   public StoreCreditAccount redeemStoreCredit(
       UUID tenantId,
@@ -1801,13 +1928,27 @@ public class CustomerRepository extends BaseOutboxRepository {
       OutboxRow event) {
     return inTx(
         conn -> {
+          // The order of these three steps is the idempotency. The customer's row first (FOR
+          // SHARE: an erasure waits for this spend, or this spend sees it), then the account's
+          // FOR UPDATE — the same order of locks as a manual issue — and only then the order's
+          // earlier REDEEM. A second spend for the same order (a retry after a timeout, a second
+          // press) waits on the account lock and, let in once the first commits, reads in a new
+          // snapshot and finds the first's REDEEM: a no-op, not a second deduction. Looked for
+          // before the lock, both would find nothing and both would take; no unique key on the
+          // ledger stands behind it.
+          boolean erased = erasedTx(conn, tenantId, customerId);
           StoreCreditAccount account =
               getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
-          // Idempotent per order: a store-credit tender against an order may be retried by
-          // payment-svc; a REDEEM already recorded for this order is a no-op, not a second
-          // deduction.
-          if (orderId != null && storeCreditRedeemExistsTx(conn, tenantId, customerId, orderId)) {
+          boolean replay =
+              orderId != null && storeCreditRedeemExistsTx(conn, tenantId, customerId, orderId);
+          if (replay) {
+            // That answer stands after an erasure too: payment-svc records the tender from it.
             return account;
+          }
+          if (erased) {
+            // Anything new for an erased customer is refused; the throw rolls back the account
+            // row the lock may have created, so nothing is written.
+            throw erasedForSpending();
           }
           if (account.balance().compareTo(amount) < 0) {
             throw new ApiException(

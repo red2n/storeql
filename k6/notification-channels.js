@@ -11,6 +11,7 @@ import {
   BASE,
   call,
   data,
+  errorCode,
   expect,
   newId,
   onboardTenant,
@@ -40,7 +41,7 @@ export default function ({ tenant, rival, shopper, other }) {
   const channels = call('GET', `${LOG}/channels`, { token: t });
   expect(channels, '[+] the shop reads its channels', 200);
   truthy('[+] EMAIL, SMS and PUSH, the last two simulated here', ['EMAIL', 'SMS', 'PUSH'].every((c) => list(channels).some((r) => r.channel === c)) && list(channels).filter((r) => r.channel !== 'EMAIL').every((r) => r.provider === 'SIMULATED' && r.configured), JSON.stringify(list(channels)));
-  expect(call('GET', `${LOG}/channels`, { token: shopper.token, ...shop }), '[-] a shopper cannot', [401, 403]);
+  expect(call('GET', `${LOG}/channels`, { token: shopper.token, ...shop }), '[-] a shopper cannot', 403, 'FORBIDDEN');
 
   // ── SMS ──────────────────────────────────────────────────────────────────────
   const number = '+447700900123';
@@ -54,12 +55,12 @@ export default function ({ tenant, rival, shopper, other }) {
   expect(call('POST', SEND, { token: t, body: { channel: 'SMS', recipient: number, subject: 's', body: 'x'.repeat(1601) } }), '[-] a body over 1600 characters', 400, 'SMS_BODY_TOO_LONG');
   expect(call('POST', SEND, { token: t, body: { channel: 'PIGEON', recipient: number, subject: 's', body: 'b' } }), '[-] an unknown channel', 400, 'CHANNEL_UNKNOWN');
   expect(call('POST', SEND, { token: t, body: { channel: 'SMS', recipient: number, subject: 's', body: '20% off', category: 'MARKETING', customerId: newId() } }), '[-] marketing by SMS with no consent on record', 409, 'MARKETING_CONSENT_MISSING');
-  expect(call('POST', SEND, { token: shopper.token, ...shop, body: { channel: 'SMS', recipient: number, subject: 's', body: 'b' } }), '[-] a shopper cannot send', 403);
+  expect(call('POST', SEND, { token: shopper.token, ...shop, body: { channel: 'SMS', recipient: number, subject: 's', body: 'b' } }), '[-] a shopper cannot send', 403, 'FORBIDDEN');
 
   // ── push: the shopper registers a device from the storefront ─────────────────
-  expect(call('POST', DEVICES, { ...shop, body: { platform: 'ANDROID', token: token('guest') } }), '[-] a guest cannot register a device', 401);
+  expect(call('POST', DEVICES, { ...shop, body: { platform: 'ANDROID', token: token('guest') } }), '[-] a guest cannot register a device', 401, 'UNAUTHORIZED');
   expect(call('POST', DEVICES, { token: shopper.token, ...shop, body: { platform: 'PALM', token: token('a') } }), '[-] an unknown platform', 400, 'DEVICE_PLATFORM_UNKNOWN');
-  expect(call('POST', DEVICES, { token: shopper.token, ...shop, body: { platform: 'ANDROID', token: 'short' } }), '[-] a token that is too short', 400);
+  expect(call('POST', DEVICES, { token: shopper.token, ...shop, body: { platform: 'ANDROID', token: 'short' } }), '[-] a token that is too short', 400, 'VALIDATION_FAILED');
   expect(call('POST', SEND, { token: t, body: { channel: 'PUSH', recipient: shopper.userId, subject: 'Ready', body: 'Collect it.' } }), '[-] a push to a login with no device', 409, 'PUSH_NO_DEVICE');
   const reg = call('POST', DEVICES, { token: shopper.token, ...shop, body: { platform: 'android', token: token('phone') } });
   expect(reg, '[+] the shopper registers their phone', 201);
@@ -72,7 +73,7 @@ export default function ({ tenant, rival, shopper, other }) {
   truthy('[+] ...on the PUSH channel', data(pushed).channel === 'PUSH');
   truthy('[+] the log shows it', list(call('GET', `${LOG}?channel=PUSH&recipient=${shopper.userId}`, { token: t })).length >= 1);
   expect(call('POST', SEND, { token: t, body: { channel: 'PUSH', recipient: shopper.userId, subject: 'Offers', body: '20% off', category: 'MARKETING', customerId: newId() } }), '[-] marketing cannot go by push', 409, 'MARKETING_CHANNEL_UNSUPPORTED');
-  expect(call('DELETE', `${DEVICES}/${deviceId}`, { token: other.token, ...shop }), '[-] another shopper cannot remove it', 404);
+  expect(call('DELETE', `${DEVICES}/${deviceId}`, { token: other.token, ...shop }), '[-] another shopper cannot remove it', 404, 'DEVICE_NOT_FOUND');
   truthy('[-] another shopper does not see it', list(call('GET', DEVICES, { token: other.token, ...shop })).length === 0);
   truthy('[-] the rival shop sees no such device either', list(call('GET', DEVICES, { token: shopper.token, storefront: rival.tenantId })).length === 0);
   expect(call('POST', SEND, { token: rival.owner.token, body: { channel: 'PUSH', recipient: shopper.userId, subject: 'x', body: 'y' } }), '[-] and cannot push to it', 409, 'PUSH_NO_DEVICE');
@@ -85,6 +86,10 @@ export default function ({ tenant, rival, shopper, other }) {
   const same = http.batch(Array.from({ length: 20 }, () => ['POST', `${BASE}${DEVICES}`, JSON.stringify({ platform: 'WEB', token: token('d3') }), { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${other.token}`, 'X-Storefront-Tenant': tenant.tenantId }, tags: { name: 'POST /api/notification-svc/notifications/devices (same token)' } }]));
   truthy('[+] the same token twenty times at once is still one device, and still ten in all', same.every((r) => r.status === 201) && list(call('GET', DEVICES, { token: other.token, ...shop })).length === 10, same.map((r) => r.status).join(','));
   const hammer = http.batch(Array.from({ length: 30 }, (_, i) => ['POST', `${BASE}${SEND}`, JSON.stringify({ channel: 'SMS', recipient: '+0', subject: 's', body: `spam ${i}` }), { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` }, tags: { name: 'POST /api/notification-svc/notifications/send (hammer)' } }]));
-  truthy('[-] thirty texts to a bad number: every one refused', hammer.every((r) => r.status === 400 || r.status === 429), hammer.map((r) => r.status).join(','));
+  truthy(
+    '[-] thirty texts to a bad number: every one refused',
+    hammer.every((r) => (r.status === 400 && errorCode(r) === 'SMS_RECIPIENT_INVALID') || r.status === 429),
+    hammer.map((r) => `${r.status} ${errorCode(r)}`).join(','),
+  );
   truthy('[-] ...and none on the log', list(call('GET', `${LOG}?channel=SMS&recipient=%2B0`, { token: t })).length === 0);
 }

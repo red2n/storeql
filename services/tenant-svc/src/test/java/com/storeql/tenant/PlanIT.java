@@ -8,6 +8,7 @@ import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.Concurrency;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -367,6 +368,30 @@ class PlanIT {
                 "{\"currency\":\"GBP\",\"amount\":1,\"effectiveFrom\":\"soon\"}")
             .code(),
         is("PLAN_PRICE_DATE_INVALID"));
+    // A price is an amount of its currency, held to that currency's minor units (ISO 4217).
+    assertThat(
+        "three letters that are no currency",
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"XYZ\",\"amount\":1}")
+            .code(),
+        is("CURRENCY_INVALID"));
+    assertThat(
+        "half a yen is no price",
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"JPY\",\"amount\":1000.5}")
+            .code(),
+        is("PLAN_PRICE_INVALID"));
+    assertThat(
+        "a tenth of a fils is no price",
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"KWD\",\"amount\":9.9995}")
+            .code(),
+        is("PLAN_PRICE_INVALID"));
+    assertThat(
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"JPY\",\"amount\":1000}")
+            .status(),
+        is(200));
+    assertThat(
+        platform("POST", PLANS + "/" + id + "/prices", "{\"currency\":\"KWD\",\"amount\":9.995}")
+            .status(),
+        is(200));
 
     assertThat(
         "a key nobody enforces is a promise nobody keeps",
@@ -402,6 +427,114 @@ class PlanIT {
               .code(),
           is("PLAN_ENTITLEMENT_NOT_ENFORCED"));
     }
+
+    // Each grant and meter is checked: a limit of -1 broke ck_plan_entitlements_limit as a 500.
+    // The plan holds a grant and a meter first, so a refusal that wrote anything to either table —
+    // an empty list included — shows.
+    assertThat(
+        platform(
+                "PUT",
+                PLANS + "/" + id + "/includes",
+                "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":2}]}")
+            .status(),
+        is(200));
+    assertThat(
+        platform(
+                "PUT",
+                PLANS + "/" + id + "/meters",
+                "{\"meters\":[{\"meter\":\"ORDERS\",\"included\":5}]}")
+            .status(),
+        is(200));
+    String includes = "SELECT count(*) FROM tenant.plan_entitlements WHERE plan_id = '" + id + "'";
+    String meters = "SELECT count(*) FROM tenant.plan_meters WHERE plan_id = '" + id + "'";
+    String before = Envelopes.scalar(PG, includes);
+    String metersBefore = Envelopes.scalar(PG, meters);
+    assertThat(before, is("1"));
+    assertThat(metersBefore, is("1"));
+    Answer belowNothing =
+        platform(
+            "PUT",
+            PLANS + "/" + id + "/includes",
+            "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":-1}]}");
+    assertThat(belowNothing.body().toString(), belowNothing.status(), is(400));
+    assertThat(belowNothing.code(), is("VALIDATION_FAILED"));
+    assertThat(
+        belowNothing.body().getJsonArray("details").getString(0),
+        is("limitValue: must be greater than or equal to 0"));
+    Answer noKey =
+        platform("PUT", PLANS + "/" + id + "/includes", "{\"grants\":[{\"limitValue\":3}]}");
+    assertThat(noKey.body().toString(), noKey.status(), is(400));
+    assertThat(noKey.code(), is("VALIDATION_FAILED"));
+    Answer noMeter =
+        platform("PUT", PLANS + "/" + id + "/meters", "{\"meters\":[{\"included\":5}]}");
+    assertThat(noMeter.body().toString(), noMeter.status(), is(400));
+    assertThat(noMeter.code(), is("VALIDATION_FAILED"));
+    assertThat(noMeter.body().getJsonArray("details").getString(0), is("meter: must not be blank"));
+    // A key named twice, or a padded copy the platform reads as the same key, is the body's fault:
+    // one batch holding both broke plan_entitlements' primary key as a 500 DB_ERROR (2 Oct 2026).
+    for (String twice :
+        List.of(
+            "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":1},"
+                + "{\"key\":\"stores.max\",\"limitValue\":2}]}",
+            "{\"grants\":[{\"key\":\"stores.max\",\"limitValue\":1},"
+                + "{\"key\":\" stores.max \",\"limitValue\":2}]}",
+            "{\"grants\":[{\"key\":\"feature.storefront\",\"enabled\":true},"
+                + "{\"key\":\"feature.storefront\",\"enabled\":false}]}")) {
+      Answer repeated = platform("PUT", PLANS + "/" + id + "/includes", twice);
+      assertThat(twice + " " + repeated.body(), repeated.status(), is(400));
+      assertThat(twice, repeated.code(), is("PLAN_ENTITLEMENT_TWICE"));
+    }
+    // A meter named twice was already refused; it stays so, and writes nothing either.
+    Answer meterTwice =
+        platform(
+            "PUT",
+            PLANS + "/" + id + "/meters",
+            "{\"meters\":[{\"meter\":\"SMS\",\"included\":1},{\"meter\":\"sms\",\"included\":2}]}");
+    assertThat(meterTwice.body().toString(), meterTwice.status(), is(400));
+    assertThat(meterTwice.code(), is("PLAN_METER_TWICE"));
+    // An allowance below nothing keeps the code the route has published since 21.10 (UsageIT, k6
+    // usage-metering-flow, the API guide), however far below, and writes nothing.
+    for (String included : List.of("-1", String.valueOf(Long.MIN_VALUE))) {
+      Answer negative =
+          platform(
+              "PUT",
+              PLANS + "/" + id + "/meters",
+              "{\"meters\":[{\"meter\":\"SMS\",\"included\":" + included + "}]}");
+      assertThat(included + " " + negative.body(), negative.status(), is(400));
+      assertThat(included, negative.code(), is("PLAN_METER_INCLUDED_INVALID"));
+    }
+    // A body that leaves the list out is refused, not read as an empty list: a PUT of {} emptied
+    // the plan's includes or meters with a 200 (2 Oct 2026). An explicit [] stays a deliberate
+    // empty (UsageIT, the owner's refusal; PlanBodyValidationTest).
+    for (String[] missing :
+        List.of(
+            new String[] {"includes", "{}", "grants: must not be null"},
+            new String[] {"includes", "{\"grants\":null}", "grants: must not be null"},
+            new String[] {"includes", "{\"grants\":[null]}", "grants[0]: must not be null"},
+            new String[] {"meters", "{}", "meters: must not be null"},
+            new String[] {"meters", "{\"meters\":null}", "meters: must not be null"},
+            new String[] {"meters", "{\"meters\":[null]}", "meters[0]: must not be null"})) {
+      Answer refused = platform("PUT", PLANS + "/" + id + "/" + missing[0], missing[1]);
+      assertThat(missing[1] + " " + refused.body(), refused.status(), is(400));
+      assertThat(missing[1], refused.code(), is("VALIDATION_FAILED"));
+      assertThat(missing[1], refused.body().getJsonArray("details").getString(0), is(missing[2]));
+    }
+    assertThat("nothing was written", Envelopes.scalar(PG, includes), is(before));
+    assertThat("no meter was written", Envelopes.scalar(PG, meters), is(metersBefore));
+    assertThat(
+        "the plan still includes what it did",
+        Envelopes.scalar(
+            PG,
+            "SELECT key || '=' || limit_value FROM tenant.plan_entitlements WHERE plan_id = '"
+                + id
+                + "'"),
+        is("stores.max=2"));
+    assertThat(
+        "and still counts what it did",
+        Envelopes.scalar(
+            PG,
+            "SELECT meter || '=' || included FROM tenant.plan_meters WHERE plan_id = '" + id + "'"),
+        is("ORDERS=5"));
 
     assertThat(platform("GET", PLANS + "/" + Ids.newId()).code(), is("PLAN_NOT_FOUND"));
     assertThat(

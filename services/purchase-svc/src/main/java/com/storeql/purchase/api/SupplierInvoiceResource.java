@@ -76,14 +76,22 @@ public class SupplierInvoiceResource {
               + " the invoice date plus the supplier's terms. statedGross, when keyed, is checked"
               + " against the lines plus VAT and a difference flags TOTAL_MISMATCH.")
   @APIResponse(responseCode = "201", description = "Invoice captured; status MATCHED or FLAGGED")
-  @APIResponse(responseCode = "400", description = "No lines, or a currency the order was not in")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "No lines, a currency the order was not in, or PURCHASE_AMOUNT_TOO_PRECISE: a vatAmount"
+              + " or statedGross finer than the currency's minor units (refused, never rounded)")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
   @APIResponse(
       responseCode = "409",
       description =
           "This supplier's invoice number has already been captured, or the accounting period"
               + " covering the invoice date is closed (PURCHASE_PERIOD_CLOSED)")
-  @APIResponse(responseCode = "403", description = "Not owner, manager or storekeeper")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not owner, manager or storekeeper, or STORE_ACCESS_DENIED: the caller is held to stores"
+              + " that are not the order's")
   @POST
   public Response capture(CaptureSupplierInvoiceRequest req) {
     // Capturing posts to the ledger: back-office work, not the till's.
@@ -157,6 +165,9 @@ public class SupplierInvoiceResource {
               + " flagged for.")
   @APIResponse(responseCode = "200", description = "The invoice and its match")
   @APIResponse(responseCode = "404", description = "Invoice not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the invoice's order is another store's than the caller's")
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") UUID id) {
@@ -181,7 +192,11 @@ public class SupplierInvoiceResource {
               + " one decision and one 409.")
   @APIResponse(responseCode = "200", description = "The invoice, decided")
   @APIResponse(responseCode = "400", description = "An action that is neither, or no reason")
-  @APIResponse(responseCode = "403", description = "Not a management role")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role or without purchasing.invoices.decide, or STORE_ACCESS_DENIED:"
+              + " the invoice's order is another store's than the caller's")
   @APIResponse(responseCode = "404", description = "Invoice not found")
   @APIResponse(
       responseCode = "409",

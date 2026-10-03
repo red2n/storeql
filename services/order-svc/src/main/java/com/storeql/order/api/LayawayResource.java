@@ -49,8 +49,17 @@ public class LayawayResource {
       description =
           "Opens a layaway with an initial deposit; the balance is the total minus the deposit.")
   @APIResponse(responseCode = "201", description = "Layaway created")
-  @APIResponse(responseCode = "400", description = "No items in the layaway")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "No items in the layaway; VALIDATION_FAILED for a unitPrice or initialDeposit with"
+              + " more decimals than the business's currency has")
   @APIResponse(responseCode = "409", description = "Initial deposit exceeds the total amount")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, is neither projected here nor readable from tenant-svc")
   @POST
   public Response create(CreateLayawayRequest req) {
     Validations.validate(req);
@@ -95,7 +104,16 @@ public class LayawayResource {
       summary = "Add a deposit to a layaway",
       description = "Records an additional deposit payment toward the layaway's balance.")
   @APIResponse(responseCode = "200", description = "Deposit recorded")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED for an amount with more decimals than the business's currency has")
   @APIResponse(responseCode = "404", description = "Layaway not found")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, is neither projected here nor readable from tenant-svc")
   @POST
   @Path("/{id}/deposits")
   public Response addDeposit(@PathParam("id") String id, AddDepositRequest req) {

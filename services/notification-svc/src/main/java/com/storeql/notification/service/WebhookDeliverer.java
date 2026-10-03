@@ -21,6 +21,7 @@ import jakarta.json.JsonObjectBuilder;
 import java.io.StringReader;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -242,7 +243,10 @@ public class WebhookDeliverer {
       String secret = secrets.open(e.secretSealed());
       String signature = WebhookSigner.sign(secret, d.id().toString(), at.getEpochSecond(), body);
       try (HttpClientResponse resp =
-          http.post(e.url())
+          // A URI, never the String form: that escapes a receiver's own query ("?token=…") into
+          // the path, and any "%" in it twice.
+          http.post()
+              .uri(URI.create(e.url()))
               .header(HeaderNames.CONTENT_TYPE, "application/json")
               .header(HeaderNames.USER_AGENT, USER_AGENT)
               // Standard Webhooks: the delivery, the second and the signature over all three.

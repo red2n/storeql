@@ -1,6 +1,8 @@
 package com.storeql.tenant.mapper;
 
+import com.storeql.service.Fx;
 import com.storeql.tenant.domain.BillingTax;
+import com.storeql.tenant.domain.Countries;
 import com.storeql.tenant.domain.Subscriptions;
 import com.storeql.tenant.domain.Subscriptions.BillingProfile;
 import com.storeql.tenant.domain.Subscriptions.Buyer;
@@ -128,19 +130,24 @@ public final class BillingMappers {
         text(i.periodStart()),
         text(i.periodEnd()),
         i.currency(),
-        money(i.netAmount()),
+        money(i.netAmount(), i.currency()),
         i.taxTreatment(),
         i.taxRate(),
-        money(i.taxAmount()),
-        money(i.totalAmount()),
-        money(i.amountPaid()),
-        money(i.outstanding()),
+        money(i.taxAmount(), i.currency()),
+        money(i.totalAmount(), i.currency()),
+        money(i.amountPaid(), i.currency()),
+        money(i.outstanding(), i.currency()),
         i.voidedReason());
   }
 
-  /** To the penny, as a document prints it. */
-  private static java.math.BigDecimal money(java.math.BigDecimal amount) {
-    return amount == null ? null : amount.setScale(2, java.math.RoundingMode.HALF_UP);
+  /**
+   * To the currency's smallest unit, as a document prints it: whole yen, two places of a euro, a
+   * dinar's three (ISO 4217, through {@link Fx#minorUnits}) — never an assumed two.
+   */
+  private static java.math.BigDecimal money(java.math.BigDecimal amount, String currency) {
+    return amount == null
+        ? null
+        : amount.setScale(Fx.minorUnits(currency), java.math.RoundingMode.HALF_UP);
   }
 
   /**
@@ -154,7 +161,7 @@ public final class BillingMappers {
     Invoice i = f.invoice();
     return new BillingDtos.InvoiceFileResponse(
         toDto(i),
-        f.lines().stream().map(BillingMappers::toDto).toList(),
+        f.lines().stream().map(l -> toDto(l, i.currency())).toList(),
         f.payments().stream().map(BillingMappers::toDto).toList(),
         i.sellerSnapshot(),
         i.buyerSnapshot(),
@@ -164,30 +171,39 @@ public final class BillingMappers {
             : null);
   }
 
-  public static BillingDtos.LineResponse toDto(InvoiceLine l) {
+  /**
+   * One line of an invoice in its currency.
+   *
+   * @param currency the invoice's currency, whose minor units the line is read at
+   */
+  public static BillingDtos.LineResponse toDto(InvoiceLine l, String currency) {
+    int places = Fx.minorUnits(currency);
     return new BillingDtos.LineResponse(
         l.lineNo(),
         l.kind(),
         l.description(),
         l.quantity(),
-        exact(l.unitAmount()),
-        exact(l.amount()));
+        exact(l.unitAmount(), places),
+        exact(l.amount(), places));
   }
 
   /**
-   * A line's price as it was set, at least to pence: 10.00 stays 10.00, and a text part at 0.0350
-   * reads 0.035 rather than a 0.04 nobody charged (21.10). The invoice's total is what is rounded.
+   * A line's price as it was set, at least to the currency's smallest unit: 10.00 euros stays
+   * 10.00, 1000 yen stays 1000, and a text part at 0.0350 reads 0.035 rather than a 0.04 nobody
+   * charged (21.10). The invoice's total is what is rounded.
+   *
+   * @param places the minor units of the invoice's currency
    */
-  private static BigDecimal exact(BigDecimal amount) {
+  private static BigDecimal exact(BigDecimal amount, int places) {
     if (amount == null) return null;
     BigDecimal stripped = amount.stripTrailingZeros();
-    return stripped.scale() < 2 ? amount.setScale(2, RoundingMode.UNNECESSARY) : stripped;
+    return stripped.scale() < places ? amount.setScale(places, RoundingMode.UNNECESSARY) : stripped;
   }
 
   public static BillingDtos.PaymentResponse toDto(Payment p) {
     return new BillingDtos.PaymentResponse(
         p.id().toString(),
-        money(p.amount()),
+        money(p.amount(), p.currency()),
         p.currency(),
         p.method(),
         p.provider(),
@@ -224,7 +240,7 @@ public final class BillingMappers {
         req.line2(),
         req.city(),
         req.postcode(),
-        req.country().strip().toUpperCase(LOCALE),
+        Countries.require(req.country()),
         wanted,
         sameNumber ? current.vatCheckedAt() : null,
         sameNumber ? current.vatCheckedBy() : null,

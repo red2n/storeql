@@ -60,16 +60,16 @@ class KsefInboxIT {
   private static final String USER = Ids.newId().toString();
 
   /** The buyer: a Polish business, by NIP. */
-  private static final String OUR_NIP = "5260250991";
+  private static final String OUR_NIP = "5260250274";
 
   private static final String OUR_VAT = "PL" + OUR_NIP;
 
   /** The business's own KSeF token, which the stub expects to read back out of the seal. */
   private static final String KSEF_TOKEN = "ksef-token-buyer-1";
 
-  private static final String KSEF_NUMBER = "5260250991-20260914-ABCDEF-01";
+  private static final String KSEF_NUMBER = "5260250274-20260914-ABCDEF-01";
 
-  private static final String SECOND_NUMBER = "5260250991-20260915-ABCDEF-02";
+  private static final String SECOND_NUMBER = "5260250274-20260915-ABCDEF-02";
 
   private static final JsonStub KSEF;
   private static final KeyPair MINISTRY;
@@ -118,7 +118,7 @@ class KsefInboxIT {
         .with(T, "PLN", "PL")
         .withIdentity(T, OUR_VAT, null, null)
         .with(T_OTHER, "PLN", "PL")
-        .withIdentity(T_OTHER, "PL7010001455", null, null);
+        .withIdentity(T_OTHER, "PL7740001454", null, null);
   }
 
   @Inject WebTarget target;

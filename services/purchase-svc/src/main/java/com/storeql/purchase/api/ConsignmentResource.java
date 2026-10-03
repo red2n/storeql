@@ -69,6 +69,11 @@ public class ConsignmentResource {
   @APIResponse(responseCode = "400", description = "PURCHASE_CONSIGNMENT_PERIOD_INVALID")
   @APIResponse(responseCode = "404", description = "PURCHASE_SUPPLIER_NOT_FOUND")
   @APIResponse(responseCode = "409", description = "PURCHASE_CONSIGNMENT_NOTHING_TO_SETTLE")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "BUSINESS_WIDE_ONLY: a statement covers every store's sales; a caller held to stores"
+              + " cannot make one")
   @POST
   @Path("/settlements")
   public Response settle(CreateConsignmentSettlementRequest req) {
@@ -80,7 +85,11 @@ public class ConsignmentResource {
         .build();
   }
 
-  @Operation(summary = "List consignment settlements", description = "Newest first.")
+  @Operation(
+      summary = "List consignment settlements",
+      description =
+          "Newest first. A caller held to stores lists the statements whose sales were all made"
+              + " at their stores; held to none, every one.")
   @APIResponse(responseCode = "200", description = "The settlements")
   @GET
   @Path("/settlements")
@@ -94,9 +103,19 @@ public class ConsignmentResource {
         .build();
   }
 
-  @Operation(summary = "Read a settlement", description = "With the sales it gathered.")
+  @Operation(
+      summary = "Read a settlement",
+      description =
+          "With the sales it gathered. Read by a caller held to no store, or to every store whose"
+              + " sales it gathered.")
   @APIResponse(responseCode = "200", description = "The settlement and its sales")
   @APIResponse(responseCode = "404", description = "PURCHASE_CONSIGNMENT_SETTLEMENT_NOT_FOUND")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "STORE_ACCESS_DENIED: the statement took a sale at a store the caller is not held to"
+              + " (or a sale that named no store); it is read by a caller held to every store it"
+              + " covers, or to none")
   @GET
   @Path("/settlements/{id}")
   public Response settlement(@PathParam("id") String id) {

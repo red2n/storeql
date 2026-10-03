@@ -723,14 +723,16 @@ class RecallIT {
   }
 
   @Test
-  @DisplayName("A store action with a negative or over-precise quantity is refused; none is kept")
+  @DisplayName(
+      "A store action with a negative or over-precise quantity, or one past fifteen whole digits"
+          + " (a 500 from qty_found NUMERIC(18,3)), is refused; none is kept")
   void aStoreActionWithANegativeOrOverPreciseQuantityIsRefused() {
     String store = uuid();
     String variant = uuid();
     receive(store, variant, "3", "L1", null);
     String recallId = created(open("QTY-1", "WITHDRAWAL", lotLine(variant, "L1"))).getString("id");
 
-    for (String qty : new String[] {"-1", "1.2345"}) {
+    for (String qty : new String[] {"-1", "1.2345", "1000000000000000", "1E+20"}) {
       assertThat(
           qty,
           codeOf(action(recallId, store, qty, "DESTROYED", null), 400),

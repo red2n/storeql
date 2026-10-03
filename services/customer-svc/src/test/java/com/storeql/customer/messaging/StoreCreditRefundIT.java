@@ -88,12 +88,17 @@ class StoreCreditRefundIT {
   private String balance(UUID tenantId, String customerId, String currency) throws SQLException {
     String v =
         sql(
-            "SELECT balance::text FROM customer.store_credit_accounts"
+            "SELECT balance FROM customer.store_credit_accounts"
                 + " WHERE tenant_id = ? AND customer_id = ? AND currency = ?",
             tenantId,
             Ids.parse(customerId),
             currency);
-    return v == null ? "none" : v;
+    // The column holds four places for any currency; the balance is read as it is written, at
+    // the currency's own minor units.
+    return v == null
+        ? "none"
+        : com.storeql.customer.mapper.Mappers.money(new java.math.BigDecimal(v), currency)
+            .toPlainString();
   }
 
   private static String refund(
@@ -173,6 +178,27 @@ class StoreCreditRefundIT {
         refund(Ids.newId(), tenant, Ids.newId(), "STORE_CREDIT", c, "4.00", null));
     assertThat(balance(tenant, c, "EUR"), is("3.00"));
     assertThat(balance(tenant, c, "GBP"), is("4.00"));
+  }
+
+  @Test
+  @DisplayName("A dinar credit keeps its third place and a yen credit is whole: nothing is rounded")
+  void minorUnitsAreTheCurrencysOwn() throws SQLException {
+    String c = customer("units@example.com");
+    handler.handleRefunded(
+        refund(Ids.newId(), tenant, Ids.newId(), "STORE_CREDIT", c, "1.125", "KWD"));
+    handler.handleRefunded(
+        refund(Ids.newId(), tenant, Ids.newId(), "STORE_CREDIT", c, "500", "JPY"));
+    // A two-place column would have kept KWD 1.13: five fils of credit out of nothing.
+    assertThat(
+        sql(
+            "SELECT (balance = 1.125)::text FROM customer.store_credit_accounts"
+                + " WHERE tenant_id = ? AND customer_id = ? AND currency = 'KWD'",
+            tenant,
+            Ids.parse(c)),
+        is("true"));
+    assertThat(balance(tenant, c, "KWD"), is("1.125"));
+    assertThat(balance(tenant, c, "JPY"), is("500"));
+    assertThat(balance(tenant, c, "GBP"), is("none"));
   }
 
   @Test

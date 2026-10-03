@@ -120,3 +120,4 @@ Today's rule is right and half finished. Expired stock stays on hand and is neve
 ## Decisions
 
 - 2026-09-30: settled by industry standard as above; nothing built yet.
+- (2026-10-02, money at the currency's own minor units, industry standard) **A reduced-price sticker's five price digits are the currency's own minor units**, as GS1 price-embedded store codes carry a price: up to 999.99 in pounds or euros, ¥99,999, KWD 99.999 (`PRICING_MARKDOWN_LABEL_RANGE` past them; a yen sticker over ¥999 is no longer refused). A reduced price from a percentage is rounded half up at those units; a typed `markdownPrice` finer than the currency is refused (`400 VALIDATION_FAILED`). The ladder's percentages keep their two places.

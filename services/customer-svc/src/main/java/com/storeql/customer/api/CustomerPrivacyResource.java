@@ -10,9 +10,9 @@ import com.storeql.customer.service.PrivacyService.Choice;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -77,7 +77,8 @@ public class CustomerPrivacyResource {
       description = "A child without a guardian's consent; no notice where the Act binds")
   @PUT
   @Path("/consents")
-  public Response choose(@PathParam("customerId") UUID customerId, @Valid ChooseRequest req) {
+  public Response choose(@PathParam("customerId") UUID customerId, ChooseRequest req) {
+    Validations.validate(req);
     List<Choice> choices =
         req.choices().stream()
             .map((ChoiceRequest c) -> new Choice(c.purpose(), c.granted()))
@@ -108,8 +109,9 @@ public class CustomerPrivacyResource {
   @POST
   @Path("/guardian")
   public Response recordGuardian(
-      @PathParam("customerId") UUID customerId, @Valid RecordGuardianRequest req) {
+      @PathParam("customerId") UUID customerId, RecordGuardianRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    Validations.validate(req);
     return Response.ok(
             ApiResponse.ok(
                 PrivacyMappers.toDto(

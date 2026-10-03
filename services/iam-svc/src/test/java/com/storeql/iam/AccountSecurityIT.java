@@ -474,7 +474,7 @@ class AccountSecurityIT {
 
   @Test
   @DisplayName("Only an owner or manager reads, and a manager held to stores does not")
-  void onlyOwnersAndUnrestrictedManagersRead() {
+  void onlyOwnersAndUnrestrictedManagersRead() throws Exception {
     UUID tenant = Ids.newId();
     for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER", "GOD", "owner"}) {
       Answer a = events(tenant, role, null, null);
@@ -482,9 +482,24 @@ class AccountSecurityIT {
       assertThat(role, a.code(), is("FORBIDDEN"));
     }
     assertThat(events(tenant, null, null, null).status(), is(403));
-    Answer held = events(tenant, "MANAGER", Ids.newId().toString(), null);
-    assertThat(held.status(), is(403));
-    assertThat(held.code(), is("STORE_ACCESS_DENIED"));
+    // The trail is business-wide; no store is named, so a manager held to stores is told that
+    // (BUSINESS_WIDE_ONLY), never "not one of your stores" (STORE_ACCESS_DENIED), and reads
+    // nothing: not this business's events, and not another business's either.
+    UUID other = Ids.newId();
+    UUID login = staff("held-" + Ids.newId() + "@example.com", other, "MANAGER");
+    audit(null, login, "MFA_LOCKED", null);
+    String twoStores = Ids.newId() + "," + Ids.newId();
+    for (UUID business : new UUID[] {tenant, other}) {
+      for (String stores : new String[] {Ids.newId().toString(), twoStores}) {
+        Answer held = events(business, "MANAGER", stores, "limit=100");
+        assertThat(held.text(), held.status(), is(403));
+        assertThat(held.text(), held.code(), is("BUSINESS_WIDE_ONLY"));
+        assertThat(held.text(), not(containsString(login.toString())));
+        assertThat(held.text(), not(containsString("MFA_LOCKED")));
+      }
+    }
+    // The same business's owner, held to none, still reads its own trail.
+    assertThat(userIds(events(other, "OWNER", null, "limit=100")), is(Set.of(login.toString())));
     // An owner or manager of a business with no events reads an empty page, not an error.
     Answer empty = events(tenant, "OWNER", null, null);
     assertThat(empty.status(), is(200));

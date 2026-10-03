@@ -40,6 +40,8 @@ class PriceZonesIT {
 
   private static final String T = "01a090ae-611e-702c-a97b-d1b8025478f1";
   private static final String RIVAL_TENANT = "01a090ae-611e-702c-a97b-d1b8025478f2";
+  private static final String YEN_TENANT = "01a090ae-611e-702c-a97b-d1b8025478f3";
+  private static final String DINAR_TENANT = "01a090ae-611e-702c-a97b-d1b8025478f4";
   private static final String NORTH_STORE = "01a090ae-611e-703c-a378-a4972ea461d1";
   private static final String SOUTH_STORE = "01a090ae-611e-703c-a378-a4972ea461d2";
   private static final String RIVALS_STORE = "01a090ae-611e-703c-a378-a4972ea461d3";
@@ -53,7 +55,9 @@ class PriceZonesIT {
             .withStore(T, NORTH_STORE, "GB")
             .withStore(T, SOUTH_STORE, "GB")
             .with(RIVAL_TENANT, "GBP", "GB")
-            .withStore(RIVAL_TENANT, RIVALS_STORE, "GB");
+            .withStore(RIVAL_TENANT, RIVALS_STORE, "GB")
+            .with(YEN_TENANT, "JPY", "JP")
+            .with(DINAR_TENANT, "KWD", "KW");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -272,7 +276,7 @@ class PriceZonesIT {
   // ── competitor prices and repricing ────────────────────────────────────────
 
   @Test
-  void aRivalsPriceBecomesAProposalThatAppliesIntoTheZonesListOnly() {
+  void aRivalsPriceBecomesAProposalThatAppliesIntoTheZonesListOnly() throws Exception {
     standardVat();
     priceList("Everywhere", null, "10.00");
     String north = zone("North", NORTH_STORE);
@@ -347,6 +351,10 @@ class PriceZonesIT {
         Envelopes.ok(
             post("/admin/repricing/proposals/" + proposal.getString("id") + "/apply", "{}"));
     assertThat(applied.getString("status"), is("APPLIED"));
+    // At the pound's two places as stored, never the proposal column's four (7.9900).
+    assertThat(
+        applied.getJsonNumber("proposedPrice").bigDecimalValue(), is(new BigDecimal("7.99")));
+    assertThat(storedPrices(T, northList), is("7.99|9.00,7.99"));
     assertThat(resolvedAt(NORTH_STORE), comparesEqualTo(new BigDecimal("7.99")));
     assertThat(resolvedAt(SOUTH_STORE), comparesEqualTo(new BigDecimal("10.00")));
     // Decided once.
@@ -358,6 +366,113 @@ class PriceZonesIT {
     run = Envelopes.ok(post("/admin/repricing/rules/" + rule.getString("id") + "/run", "{}"));
     assertThat(run.getInt("proposed"), is(0));
     assertThat(Envelopes.okArray(get("/admin/repricing/proposals?status=APPLIED")).size(), is(1));
+  }
+
+  /** The list price and its history row as the tables keep them: {@code price|history,in,order}. */
+  private static String storedPrices(String tenant, String list) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            conn.prepareStatement(
+                "SELECT pli.price::text || '|' || (SELECT string_agg(v.price::text, ','"
+                    + " ORDER BY v.valid_from, v.id) FROM pricing.price_list_item_prices v"
+                    + " WHERE v.tenant_id = pli.tenant_id AND v.price_list_item_id = pli.id)"
+                    + " FROM pricing.price_list_items pli"
+                    + " WHERE pli.tenant_id = ?::uuid AND pli.price_list_id = ?::uuid")) {
+      ps.setString(1, tenant);
+      ps.setString(2, list);
+      try (var rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
+    }
+  }
+
+  /** A business's own list, in its own currency, with V priced on it. */
+  private String listIn(String tenant, String currency, String price) {
+    JsonObject pl =
+        Envelopes.created(
+            call(
+                "POST",
+                "/admin/price-lists",
+                "{\"name\":\"Home\",\"channel\":\"ALL\",\"currency\":\""
+                    + currency
+                    + "\",\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
+                tenant,
+                "OWNER"));
+    assertThat(
+        call(
+                "POST",
+                "/admin/price-lists/" + pl.getString("id") + "/items",
+                "{\"variantId\":\"" + V + "\",\"price\":" + price + ",\"minQty\":1}",
+                tenant,
+                "OWNER")
+            .getStatus(),
+        is(200));
+    return pl.getString("id");
+  }
+
+  /** A rival seen today, a match-the-lowest rule on the list run, and its one proposal applied. */
+  private JsonObject matchAndApply(String tenant, String list, String rival, String rounding) {
+    Envelopes.created(
+        call(
+            "POST",
+            "/admin/competitor-prices",
+            "{\"variantId\":\""
+                + V
+                + "\",\"competitor\":\"Rival A\",\"price\":"
+                + rival
+                + ",\"observedOn\":\""
+                + LocalDate.now()
+                + "\"}",
+            tenant,
+            "OWNER"));
+    JsonObject rule =
+        Envelopes.created(
+            call(
+                "POST",
+                "/admin/repricing/rules",
+                "{\"name\":\"Match\",\"priceListId\":\""
+                    + list
+                    + "\",\"strategy\":\"MATCH_LOWEST\",\"value\":0,\"floorPercent\":50,"
+                    + "\"rounding\":\""
+                    + rounding
+                    + "\",\"maxAgeDays\":14}",
+                tenant,
+                "OWNER"));
+    JsonObject run =
+        Envelopes.ok(
+            call(
+                "POST",
+                "/admin/repricing/rules/" + rule.getString("id") + "/run",
+                "{}",
+                tenant,
+                "OWNER"));
+    assertThat(run.getInt("proposed"), is(1));
+    String proposal = run.getJsonArray("proposals").getJsonObject(0).getString("id");
+    return Envelopes.ok(
+        call("POST", "/admin/repricing/proposals/" + proposal + "/apply", "{}", tenant, "OWNER"));
+  }
+
+  @Test
+  void anAppliedProposalIsWholeYenAndKeepsTheDinarsFilsAsStored() throws Exception {
+    // The proposal column holds four places; the list price it becomes holds the currency's own.
+    String yen = listIn(YEN_TENANT, "JPY", "1300");
+    JsonObject applied = matchAndApply(YEN_TENANT, yen, "1250", "NONE");
+    assertThat(applied.getString("status"), is("APPLIED"));
+    assertThat(
+        applied.getJsonNumber("proposedPrice").bigDecimalValue(), is(new BigDecimal("1250")));
+    assertThat(applied.getJsonNumber("currentPrice").bigDecimalValue(), is(new BigDecimal("1300")));
+    assertThat(storedPrices(YEN_TENANT, yen), is("1250|1300,1250"));
+
+    // A dinar .99 is 8.990 — the hundredths a shopper reads, the third place nought.
+    String dinar = listIn(DINAR_TENANT, "KWD", "9.500");
+    applied = matchAndApply(DINAR_TENANT, dinar, "9.000", "ENDING_99");
+    assertThat(
+        applied.getJsonNumber("proposedPrice").bigDecimalValue(), is(new BigDecimal("8.990")));
+    assertThat(storedPrices(DINAR_TENANT, dinar), is("8.990|9.500,8.990"));
+
+    // Nothing reached another business.
+    assertThat(count("price_list_items", T), is(0));
+    assertThat(count("price_list_items", RIVAL_TENANT), is(0));
   }
 
   @Test

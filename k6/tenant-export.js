@@ -142,7 +142,7 @@ export default function ({ leaving, rival, manager, platform }) {
   expect(importPage('tenant-svc', 'tenants', []), '[abuse] ...nor the business record', 409, 'TENANT_DATA_IMPORT_SKIPPED');
   expect(importPage('product-svc', 'products', [1, 2]), '[-] rows that are not objects are refused', 400, 'TENANT_DATA_IMPORT_INVALID');
   const managerImport = importPage('product-svc', 'products', [{ id: 'x' }], manager.token);
-  truthy('[-] the erased business\'s manager cannot import either', managerImport.status === 401 || managerImport.status === 403, `${managerImport.status} ${errorCode(managerImport)}`);
+  expect(managerImport, '[-] the erased business\'s manager cannot import either', [401, 403]);
 
   const refusals = [];
   let imported = 0;

@@ -137,6 +137,8 @@ public class SafetyStockResource {
   @Path("/safety-stock/compute")
   public ApiResponse<ComputeSafetyStockResult> computeSafetyStock(ComputeSafetyStockRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    // The body is optional (the whole business, or the caller's stores); one sent is checked.
+    if (req != null) Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     UUID storeId =
         ctx.scopeStore(

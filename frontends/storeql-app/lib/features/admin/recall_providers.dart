@@ -613,7 +613,9 @@ Future<void> recordRecallStoreAction(
   Dio dio, {
   required String recallId,
   required String storeId,
-  required double qtyFound,
+
+  /// What was found, as the plain decimal typed: JSON-B reads it exactly.
+  required String qtyFound,
   required String disposition,
   required bool noticeDisplayed,
   String? notes,

@@ -111,6 +111,28 @@ void main() {
           isTrue);
     });
 
+    test('and so is a card tender payment-svc will not link to the payment its '
+        'card machine took: the sale given up, the approval recorded already, '
+        'put back, or not that sale\'s — no retry changes the answer, and '
+        'taken for "try again" it would hold up every sale queued behind it',
+        () {
+      for (final code in [
+        'PAYMENT_ORDER_GIVEN_UP',
+        'TERMINAL_ATTEMPT_ALREADY_RECORDED',
+        'TERMINAL_ATTEMPT_REFUNDED',
+        'TERMINAL_AMOUNT_MISMATCH',
+        'TERMINAL_WRONG_STORE',
+        'TERMINAL_NOT_APPROVED',
+        'TERMINAL_ATTEMPT_OTHER_ORDER',
+        'TERMINAL_NOT_A_SALE',
+      ]) {
+        expect(isPermanentRejection(_refused(409, code)), isTrue, reason: code);
+      }
+      // A press of the same key still going is asked again.
+      expect(isPermanentRejection(_refused(409, 'TERMINAL_REQUEST_IN_FLIGHT')),
+          isFalse);
+    });
+
     test('rate limiting and server faults stay retryable', () {
       expect(isPermanentRejection(_answered(429)), isFalse);
       expect(isPermanentRejection(_answered(503)), isFalse);

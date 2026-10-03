@@ -112,7 +112,7 @@ void main() {
     expect(server.posts.single.data, {
       'storeId': 's-1',
       'variantId': 'v-1',
-      'delta': -2.0,
+      'delta': '-2',
       'reasonCode': 'THEFT',
       'reason': 'left at the door',
     });
@@ -128,7 +128,7 @@ void main() {
     expect(server.posts.single.data, {
       'storeId': 's-1',
       'variantId': 'v-1',
-      'delta': 3.0,
+      'delta': '3',
       'reason': 'found stock',
     });
   });

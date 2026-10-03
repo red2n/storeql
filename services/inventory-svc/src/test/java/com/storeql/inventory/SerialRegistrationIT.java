@@ -6,11 +6,17 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.oneOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.domain.Domain.SerialNumber;
+import com.storeql.inventory.domain.SerialNumbers;
+import com.storeql.inventory.repo.SerialRepository;
+import com.storeql.service.OutboxRow;
 import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.WebTargets;
+import com.storeql.web.ApiException;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.json.JsonArray;
@@ -19,6 +25,7 @@ import jakarta.ws.rs.client.Entity;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +35,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -50,6 +58,7 @@ class SerialRegistrationIT {
   private static final String BASE = "/admin/inventory";
 
   @Inject WebTarget target;
+  @Inject SerialRepository serialRepo;
 
   @AfterAll
   static void stopDb() {
@@ -332,5 +341,190 @@ class SerialRegistrationIT {
             "SELECT count(*) FROM inventory.serial_numbers WHERE tenant_id = ?",
             Ids.parse(OTHER_T)),
         is(0L));
+  }
+
+  // ── refusals the call makes before or while it stores ──────────────────────
+
+  private static String codeOf(String text) {
+    return Envelopes.parse(text).getString("code");
+  }
+
+  /** A request that names the store and variant as given, not as the fixture's batch has them. */
+  private static String bodyAt(Fixture f, String store, String variant, String serialsJson) {
+    return "{\"batchId\":\""
+        + f.batchId()
+        + "\",\"storeId\":\""
+        + store
+        + "\",\"variantId\":\""
+        + variant
+        + "\",\"serials\":"
+        + serialsJson
+        + "}";
+  }
+
+  private boolean lookupFinds(String serialNo) {
+    try (Response r =
+        send("GET", BASE + "/serials/lookup?serial_no=" + serialNo, null, T, "OWNER", null)) {
+      r.readEntity(String.class);
+      return r.getStatus() == 200;
+    }
+  }
+
+  /** A serial of the fixture's batch, as the service builds one before it is stored. */
+  private static SerialNumber serialOf(Fixture f, String serialNo) {
+    return new SerialNumber(
+        Ids.newId(),
+        Ids.parse(T),
+        Ids.parse(STORE),
+        Ids.parse(f.variantId()),
+        Ids.parse(f.batchId()),
+        serialNo,
+        SerialNumber.IN_STOCK,
+        Instant.now(),
+        null);
+  }
+
+  /** The row a registration writes with its serials. */
+  private static OutboxRow registeredEvent(Fixture f) {
+    return new OutboxRow(
+        "SerialsRegistered",
+        "storeql.inventory.serials-registered",
+        Ids.parse(T),
+        Ids.parse(f.batchId()),
+        "{\"eventId\":\""
+            + Ids.newId()
+            + "\",\"eventType\":\"SerialsRegistered\",\"tenantId\":\""
+            + T
+            + "\",\"batchId\":\""
+            + f.batchId()
+            + "\",\"count\":1}");
+  }
+
+  @Test
+  @DisplayName("A blank serial number refuses the whole call, nothing is written")
+  void aBlankSerialNumberIsRefused() throws Exception {
+    Fixture f = batch();
+    String fine = "FINE-" + tail();
+    // Empty, spaces, a tab: none is a number, and the good one beside it is not registered either.
+    for (String blank : List.of("", " ", "\\t")) {
+      Response r = register(f, json(List.of(fine, blank)), 0, null);
+      String text = r.readEntity(String.class);
+      assertThat(text, r.getStatus(), is(400));
+      assertThat(text, codeOf(text), is("SERIAL_NO_BLANK"));
+    }
+    assertThat(serials(f), is(0L));
+    assertThat(movements(f), is(0L));
+    assertThat(events(f), is(0L));
+    assertThat(lookupFinds(fine), is(false));
+  }
+
+  @Test
+  @DisplayName("A batch that is not that variant's stock at that store refuses the call")
+  void aBatchOfAnotherStoreOrVariantIsRefused() throws Exception {
+    Fixture f = batch();
+    String elsewhere = Ids.newId().toString();
+    String otherVariant = Ids.newId().toString();
+    String no = "MM-" + tail();
+    List<Response> answers = new ArrayList<>();
+    // The right variant at another store; the right store with another variant.
+    answers.add(
+        send(
+            "POST",
+            BASE + "/serials/register",
+            bodyAt(f, elsewhere, f.variantId(), json(List.of(no))),
+            T,
+            "OWNER",
+            null));
+    answers.add(
+        send(
+            "POST",
+            BASE + "/serials/register",
+            bodyAt(f, STORE, otherVariant, json(List.of(no))),
+            T,
+            "OWNER",
+            null));
+    // A keeper of that other store names it as their own, against the batch of ours.
+    answers.add(
+        send(
+            "POST",
+            BASE + "/serials/register",
+            bodyAt(f, elsewhere, f.variantId(), json(List.of(no))),
+            T,
+            "STOREKEEPER",
+            elsewhere));
+    for (Response r : answers) {
+      String text = r.readEntity(String.class);
+      assertThat(text, r.getStatus(), is(400));
+      assertThat(text, codeOf(text), is("SERIAL_BATCH_MISMATCH"));
+    }
+    assertThat(serials(f), is(0L));
+    assertThat(movements(f), is(0L));
+    assertThat(events(f), is(0L));
+    assertThat(lookupFinds(no), is(false));
+  }
+
+  @Test
+  @DisplayName("A generated number that keeps clashing is given up on and nothing is written")
+  void aGeneratedNumberThatKeepsClashingIsGivenUpOn() throws Exception {
+    Fixture f = batch();
+    String taken = "TAKEN-" + tail();
+    assertThat(register(f, json(List.of(taken)), 0, null).getStatus(), is(201));
+    long s = serials(f);
+    long m = movements(f);
+    long e = events(f);
+
+    // Two numbers: the first is free and is stored; the second clashes with the one taken, and so
+    // does every number it is made again as. The call must not keep the first one.
+    String free = "FREE-" + tail();
+    List<SerialNumber> wanted = List.of(serialOf(f, free), serialOf(f, taken));
+    AtomicInteger remade = new AtomicInteger();
+    ApiException refused =
+        assertThrows(
+            ApiException.class,
+            () ->
+                serialRepo.registerSerials(
+                    wanted,
+                    () -> {
+                      remade.incrementAndGet();
+                      return taken;
+                    },
+                    registeredEvent(f)));
+    assertThat(refused.status(), is(409));
+    assertThat(refused.code(), is("SERIAL_GENERATION_EXHAUSTED"));
+    assertThat(remade.get(), is(SerialNumbers.MAX_GENERATION_ATTEMPTS - 1));
+    assertThat(serials(f), is(s));
+    assertThat(movements(f), is(m));
+    assertThat(events(f), is(e));
+    assertThat(lookupFinds(free), is(false));
+    assertThat(lookupFinds(taken), is(true));
+  }
+
+  @Test
+  @DisplayName("A generated number that clashes once is made again; what is stored is what is said")
+  void aGeneratedNumberThatClashesIsMadeAgain() throws Exception {
+    Fixture f = batch();
+    String taken = "TAKEN-" + tail();
+    assertThat(register(f, json(List.of(taken)), 0, null).getStatus(), is(201));
+    long s = serials(f);
+    long m = movements(f);
+    long e = events(f);
+
+    String replacement = "REMADE-" + tail();
+    AtomicInteger remade = new AtomicInteger();
+    List<SerialNumber> stored =
+        serialRepo.registerSerials(
+            List.of(serialOf(f, taken)),
+            () -> {
+              remade.incrementAndGet();
+              return replacement;
+            },
+            registeredEvent(f));
+    assertThat(stored, hasSize(1));
+    assertThat(stored.get(0).serialNo(), is(replacement));
+    assertThat(remade.get(), is(1));
+    assertThat(serials(f), is(s + 1));
+    assertThat(movements(f), is(m + 1));
+    assertThat(events(f), is(e + 1));
+    assertThat(lookupFinds(replacement), is(true));
   }
 }

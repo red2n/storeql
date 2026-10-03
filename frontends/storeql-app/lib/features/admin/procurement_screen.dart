@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -26,6 +27,8 @@ import 'widgets/variant_names.dart';
 import 'widgets/variant_picker.dart';
 import 'bank_details_validators.dart';
 import 'consignment_tab.dart';
+import 'widgets/business_wide_note.dart';
+import 'widgets/figure_field.dart';
 
 class ProcurementScreen extends ConsumerWidget {
   const ProcurementScreen({super.key});
@@ -147,6 +150,10 @@ class _SuppliersTab extends ConsumerWidget {
     final async = ref.watch(suppliersProvider);
     final auth = ref.watch(authNotifierProvider).value;
     final isManager = auth is AuthAuthenticated && auth.isManager;
+    // A supplier's terms and bank details are every store's: purchase-svc
+    // refuses a manager held to stores the correction (BUSINESS_WIDE_ONLY), so
+    // it is not offered to one, who is told who makes it instead.
+    final heldManager = isManager && heldToStores(auth);
     final cs = Theme.of(context).colorScheme;
     final gutter = context.pageGutter;
     return Column(
@@ -154,6 +161,17 @@ class _SuppliersTab extends ConsumerWidget {
         const SizedBox(height: AppSpacing.md),
         // Who delivers on time and in full: management's reading of the period.
         if (isManager) const SupplierScorecardsCard(),
+        if (heldManager)
+          Padding(
+            padding: EdgeInsetsDirectional.fromSTEB(gutter, 0, gutter, AppSpacing.sm),
+            child: const Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: BusinessWideNote(
+                key: Key('suppliers-business-wide-note'),
+                message: 'Only an owner or a head-office manager corrects a supplier.',
+              ),
+            ),
+          ),
         Expanded(
           child: async.when(
             loading: () => const LoadingView(label: 'Loading suppliers…'),
@@ -206,7 +224,7 @@ class _SuppliersTab extends ConsumerWidget {
                                 : 'no bank details',
                         ].whereType<String>().join(' · '),
                       ),
-                      trailing: isManager
+                      trailing: isManager && !heldManager
                           ? IconButton(
                               tooltip: 'Edit supplier',
                               icon: const Icon(Icons.edit_outlined),
@@ -620,6 +638,11 @@ class _SupplierDialogState extends ConsumerState<_SupplierDialog> {
   final _vatCtrl = TextEditingController();
   final _termsCtrl = TextEditingController(text: '30');
   final _leadCtrl = TextEditingController();
+
+  /// The terms and the quoted lead time are whole days, read with the shared
+  /// reader. Blank is the default (30 days; the lead time as it was); text
+  /// that cannot be read is refused under its field, never saved as blank.
+  final _marks = AmountMarks.ofApp();
   final _emailCtrl = TextEditingController();
   final _bankNameCtrl = TextEditingController();
   final _sortCtrl = TextEditingController();
@@ -706,7 +729,7 @@ class _SupplierDialogState extends ConsumerState<_SupplierDialog> {
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    final canBank = canRunPayments(ref.read(authNotifierProvider).value);
+    final canBank = canKeepBankDetails(ref.read(authNotifierProvider).value);
     final bank = canBank && _bankKeyed;
     if (bank && _text(_ibanCtrl) == null && _text(_sortCtrl) == null) {
       setState(
@@ -727,10 +750,9 @@ class _SupplierDialogState extends ConsumerState<_SupplierDialog> {
         // Omitted, purchase-svc takes the tenant's own (SJ-D53).
         if (_country != null) 'countryCode': _country,
         if (_currency != null) 'currency': _currency,
-        'paymentTermsDays': int.tryParse(_termsCtrl.text.trim()) ?? 30,
+        'paymentTermsDays': wholeOf(_termsCtrl, _marks) ?? 30,
         // The quoted lead time: unsaid leaves it as it was.
-        if (_leadCtrl.text.trim().isNotEmpty)
-          'leadTimeDays': int.tryParse(_leadCtrl.text.trim()),
+        'leadTimeDays': ?wholeOf(_leadCtrl, _marks),
         // On an edit an empty email clears it; on a create it is just absent.
         'remittanceEmail': _editing
             ? _emailCtrl.text.trim()
@@ -784,7 +806,7 @@ class _SupplierDialogState extends ConsumerState<_SupplierDialog> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final canBank = canRunPayments(ref.watch(authNotifierProvider).value);
+    final canBank = canKeepBankDetails(ref.watch(authNotifierProvider).value);
     final onFile = widget.existing?.hasBankDetails == true;
     return AlertDialog(
       title: Text(_editing ? 'Edit supplier' : 'Add supplier'),
@@ -851,12 +873,15 @@ class _SupplierDialogState extends ConsumerState<_SupplierDialog> {
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
+                  key: const Key('supplier-terms'),
                   controller: _termsCtrl,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
                     labelText: 'Payment terms (days)',
                     prefixIcon: Icon(Icons.calendar_today_outlined),
+                    errorMaxLines: 4,
                   ),
+                  validator: figureValidator(wholeNumber, _marks),
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
@@ -867,7 +892,9 @@ class _SupplierDialogState extends ConsumerState<_SupplierDialog> {
                     labelText: 'Quoted lead time (days)',
                     helperText: 'What a delivery is measured against when an order names no date',
                     prefixIcon: Icon(Icons.timer_outlined),
+                    errorMaxLines: 4,
                   ),
+                  validator: figureValidator(wholeNumber, _marks),
                 ),
                 const SizedBox(height: 8),
                 SwitchListTile.adaptive(
@@ -1965,6 +1992,17 @@ class _AddPoLineDialogState extends ConsumerState<_AddPoLineDialog> {
   bool _loading = false;
   String? _error;
 
+  // The quantity (NUMERIC(14,3)) and the unit cost (to six places, as a
+  // batch's cost carries: 1,000 screws at 0.0125) are read the way the app's
+  // language writes a number ([AmountMarks]) and sent as the decimals they
+  // are. One that cannot be read is refused under its field and nothing is
+  // sent: read with a point, 1.250 lei a unit was ordered at 1,25.
+  static const _qtyShape = AmountShape(11, 3);
+  static const _costShape = AmountShape(12, 6);
+  final _marks = AmountMarks.ofApp();
+  String? get _qtyRefusal => _qtyShape.refusal(_qtyCtrl.text.trim(), _marks);
+  String? get _costRefusal => _costShape.refusal(_priceCtrl.text.trim(), _marks);
+
   @override
   void dispose() {
     _qtyCtrl.dispose();
@@ -1973,13 +2011,17 @@ class _AddPoLineDialogState extends ConsumerState<_AddPoLineDialog> {
   }
 
   Future<void> _submit() async {
-    final qty = double.tryParse(_qtyCtrl.text.trim());
-    final price = double.tryParse(_priceCtrl.text.trim());
+    if (_qtyRefusal != null || _costRefusal != null) {
+      setState(() => _error = 'A figure cannot be read. Correct the one marked.');
+      return;
+    }
+    final qty = _qtyShape.read(_qtyCtrl.text.trim(), _marks);
+    final price = _costShape.read(_priceCtrl.text.trim(), _marks);
     if (_variantId == null ||
         qty == null ||
-        qty <= 0 ||
+        qty == '0' ||
         price == null ||
-        price <= 0) {
+        price == '0') {
       setState(() => _error = 'Pick a variant and enter qty + unit price.');
       return;
     }
@@ -1995,6 +2037,7 @@ class _AddPoLineDialogState extends ConsumerState<_AddPoLineDialog> {
             '/${ApiConstants.purchase}/purchase-orders/${widget.poId}/lines',
             data: {
               'variantId': _variantId,
+              // The plain decimals typed: JSON-B reads them exactly.
               'qty': qty,
               'unitPrice': price,
               'vatCode': _vatCode,
@@ -2082,8 +2125,15 @@ class _AddPoLineDialogState extends ConsumerState<_AddPoLineDialog> {
                       Expanded(
                         child: TextField(
                           controller: _qtyCtrl,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(labelText: 'Qty'),
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: 'Qty',
+                            errorText: _qtyRefusal,
+                            errorMaxLines: 4,
+                          ),
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -2093,9 +2143,13 @@ class _AddPoLineDialogState extends ConsumerState<_AddPoLineDialog> {
                           keyboardType: const TextInputType.numberWithOptions(
                             decimal: true,
                           ),
-                          decoration: const InputDecoration(
+                          decoration: InputDecoration(
                             labelText: 'Unit cost',
+                            hintText: _marks.hint(2),
+                            errorText: _costRefusal,
+                            errorMaxLines: 4,
                           ),
+                          onChanged: (_) => setState(() {}),
                         ),
                       ),
                     ],
@@ -2227,22 +2281,39 @@ class _ReturnToVendorDialog extends ConsumerStatefulWidget {
 }
 
 class _ReturnToVendorDialogState extends ConsumerState<_ReturnToVendorDialog> {
-  final Map<String, double> _qty = {};
+  /// What goes back of each variant: a quantity, read the way the app's
+  /// language writes a number ([AmountMarks]) to three places. One that
+  /// cannot be read is refused under it and nothing is raised: read with a
+  /// point, Romanian's 1,5 went back as nothing.
+  final Map<String, TextEditingController> _qty = {};
+  final _marks = AmountMarks.ofApp();
   String _reason = 'DAMAGED';
   final _notes = TextEditingController();
   bool _loading = false;
   String? _error;
 
+  TextEditingController _qtyOf(String variantId) =>
+      _qty.putIfAbsent(variantId, TextEditingController.new);
+
   @override
   void dispose() {
     _notes.dispose();
+    for (final c in _qty.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
   Future<void> _submit() async {
+    if (figureRefused(_marks, [for (final c in _qty.values) (c, AmountShape.quantity)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
     final lines = [
       for (final e in _qty.entries)
-        if (e.value > 0) {'variantId': e.key, 'qty': e.value},
+        if (figureOf(e.value, AmountShape.quantity, _marks) case final q? when q != '0')
+          // The plain decimal typed: JSON-B reads it exactly.
+          {'variantId': e.key, 'qty': q},
     ];
     if (lines.isEmpty) {
       setState(() => _error = 'Enter at least one quantity to send back.');
@@ -2376,20 +2447,16 @@ class _ReturnToVendorDialogState extends ConsumerState<_ReturnToVendorDialog> {
                               ),
                             ),
                             SizedBox(
-                              width: 90,
-                              child: TextField(
-                                key: Key('rtv-qty-${p.variantId}'),
+                              width: 120,
+                              child: FigureField(
+                                fieldKey: Key('rtv-qty-${p.variantId}'),
+                                controller: _qtyOf(p.variantId),
+                                shape: AmountShape.quantity,
+                                marks: _marks,
                                 enabled: p.qtyReturnable > 0,
-                                keyboardType:
-                                    const TextInputType.numberWithOptions(
-                                      decimal: true,
-                                    ),
-                                decoration: const InputDecoration(
-                                  isDense: true,
-                                  hintText: '0',
-                                ),
-                                onChanged: (v) =>
-                                    _qty[p.variantId] = double.tryParse(v) ?? 0,
+                                dense: true,
+                                hint: '0',
+                                onChanged: (_) => setState(() {}),
                               ),
                             ),
                           ],
@@ -2448,11 +2515,29 @@ class _RecordCreditNoteDialogState
   final _date = TextEditingController(
     text: DateTime.now().toIso8601String().split('T').first,
   );
+  /// What was credited is money in the return's currency: twelve whole
+  /// digits (the ledger's NUMERIC(14,2)) and that currency's minor units,
+  /// which purchase-svc refuses anything finer than.
+  late final AmountShape _shape = AmountShape(
+    12,
+    AppFormat.minorUnits(
+      widget.ret.currency.isNotEmpty ? widget.ret.currency : widget.currency,
+    ),
+  );
+  final _marks = AmountMarks.ofApp();
+
+  /// Starts at the debit note's gross, written the way the app's language
+  /// writes a number, so it reads back unchanged (9,00 in Romanian).
   late final TextEditingController _amount = TextEditingController(
-    text: widget.ret.grossAmount.toStringAsFixed(2),
+    text: _marks.writeAt(widget.ret.grossAmount, _shape.decimals),
   );
   bool _loading = false;
   String? _error;
+
+  /// Why the amount typed cannot be recorded, in words, or null. Blank is no
+  /// refusal: purchase-svc then records the debit note's gross, the figure
+  /// the field started at.
+  String? get _refusal => _shape.refusal(_amount.text.trim(), _marks);
 
   @override
   void dispose() {
@@ -2463,6 +2548,8 @@ class _RecordCreditNoteDialogState
   }
 
   Future<void> _submit() async {
+    // Never sent unread: as null it recorded the whole gross as credited.
+    if (_refusal != null) return;
     setState(() {
       _loading = true;
       _error = null;
@@ -2476,8 +2563,8 @@ class _RecordCreditNoteDialogState
             data: {
               'creditNoteNumber': _number.text.trim(),
               'creditNoteDate': _date.text.trim(),
-              if (_amount.text.trim().isNotEmpty)
-                'amount': double.tryParse(_amount.text.trim()),
+              // The plain decimal typed: JSON-B reads it exactly.
+              'amount': ?_shape.read(_amount.text.trim(), _marks),
             },
           );
       if (!mounted) return;
@@ -2528,14 +2615,18 @@ class _RecordCreditNoteDialogState
             TextField(
               key: const Key('credit-amount'),
               controller: _amount,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
+              keyboardType: TextInputType.numberWithOptions(
+                decimal: _shape.decimals > 0,
               ),
               decoration: InputDecoration(
                 labelText: 'Amount credited',
+                hintText: _marks.hint(_shape.decimals),
                 helperText:
                     'The debit note asked for ${AppFormat.money(widget.ret.grossAmount, currencyCode: widget.currency)}',
+                errorText: _refusal,
+                errorMaxLines: 3,
               ),
+              onChanged: (_) => setState(() {}),
             ),
             if (_error != null) ...[
               const SizedBox(height: 8),
@@ -2555,7 +2646,7 @@ class _RecordCreditNoteDialogState
         ),
         FilledButton(
           key: const Key('credit-submit'),
-          onPressed: _loading ? null : _submit,
+          onPressed: _loading || _refusal != null ? null : _submit,
           child: const Text('Record'),
         ),
       ],
@@ -2574,18 +2665,39 @@ class _ReceiveGoodsDialog extends ConsumerStatefulWidget {
 }
 
 class _ReceiveGoodsDialogState extends ConsumerState<_ReceiveGoodsDialog> {
-  final Map<String, double> _received = {};
+  /// What arrived of each line: a quantity, read the way the app's language
+  /// writes a number ([AmountMarks]) to three places, starting at what was
+  /// ordered written the same way (never rounded: 2,5 kg stays 2,5). Blank is
+  /// nothing received; one that cannot be read is refused under it and
+  /// nothing is recorded.
+  final Map<String, TextEditingController> _received = {};
+  final _marks = AmountMarks.ofApp();
   bool _loading = false;
   String? _error;
 
+  TextEditingController _receivedOf(PurchaseOrderLine l) => _received.putIfAbsent(
+        l.variantId,
+        () => TextEditingController(text: _marks.writeAt(l.qty, 0)),
+      );
+
+  @override
+  void dispose() {
+    for (final c in _received.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
   Future<void> _submit(List<PurchaseOrderLine> lines) async {
+    if (figureRefused(_marks, [for (final l in lines) (_receivedOf(l), AmountShape.quantity)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
     final received = [
       for (final l in lines)
-        if ((_received[l.variantId] ?? l.qty) > 0)
-          {
-            'variantId': l.variantId,
-            'qtyReceived': _received[l.variantId] ?? l.qty,
-          },
+        if (figureOf(_receivedOf(l), AmountShape.quantity, _marks) case final q? when q != '0')
+          // The plain decimal typed: JSON-B reads it exactly.
+          {'variantId': l.variantId, 'qtyReceived': q},
     ];
     if (received.isEmpty) {
       setState(() => _error = 'Enter at least one received quantity.');
@@ -2699,16 +2811,16 @@ class _ReceiveGoodsDialogState extends ConsumerState<_ReceiveGoodsDialog> {
                               ),
                             ),
                             SizedBox(
-                              width: 90,
-                              child: TextFormField(
-                                initialValue: l.qty.toStringAsFixed(0),
-                                keyboardType: TextInputType.number,
-                                decoration: const InputDecoration(
-                                  labelText: 'Received',
-                                  isDense: true,
-                                ),
-                                onChanged: (v) => _received[l.variantId] =
-                                    double.tryParse(v) ?? 0,
+                              width: 120,
+                              child: FigureField(
+                                fieldKey: Key('receive-qty-${l.variantId}'),
+                                controller: _receivedOf(l),
+                                shape: AmountShape.quantity,
+                                marks: _marks,
+                                label: 'Received',
+                                hint: '0',
+                                dense: true,
+                                onChanged: (_) => setState(() {}),
                               ),
                             ),
                           ],
@@ -2806,6 +2918,12 @@ class _ProposeOrdersDialogState extends ConsumerState<_ProposeOrdersDialog> {
   final _coverCtrl = TextEditingController(text: '28');
   bool _running = false;
 
+  /// The cover is whole days, read with the shared reader. Blank is
+  /// purchase-svc's own 28; text that cannot be read is refused under the
+  /// field, never run at 28 as if nothing had been typed.
+  final _marks = AmountMarks.ofApp();
+  bool get _refused => figureRefused(_marks, [(_coverCtrl, wholeNumber)]);
+
   @override
   void dispose() {
     _coverCtrl.dispose();
@@ -2813,6 +2931,7 @@ class _ProposeOrdersDialogState extends ConsumerState<_ProposeOrdersDialog> {
   }
 
   Future<void> _run(String storeId) async {
+    if (_refused) return;
     setState(() => _running = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
@@ -2821,7 +2940,7 @@ class _ProposeOrdersDialogState extends ConsumerState<_ProposeOrdersDialog> {
             '/${ApiConstants.purchase}/purchase-orders/proposals/run',
             data: {
               'storeId': storeId,
-              'coverDays': int.tryParse(_coverCtrl.text.trim()) ?? 28,
+              'coverDays': wholeOf(_coverCtrl, _marks) ?? 28,
             },
           );
       final d = (resp.data['data'] as Map<String, dynamic>?) ?? {};
@@ -2871,15 +2990,16 @@ class _ProposeOrdersDialogState extends ConsumerState<_ProposeOrdersDialog> {
               onChanged: (v) => setState(() => _storeId = v),
             ),
             const SizedBox(height: 12),
-            TextField(
-              key: const Key('propose-cover'),
+            FigureField(
+              fieldKey: const Key('propose-cover'),
               controller: _coverCtrl,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Cover (days)',
-                helperText:
-                    'An item with no EOQ is ordered back to its reorder point plus this many days of forecast.',
-              ),
+              shape: wholeNumber,
+              marks: _marks,
+              label: 'Cover (days)',
+              helper:
+                  'An item with no EOQ is ordered back to its reorder point plus this many days of forecast.',
+              hint: '28',
+              onChanged: (_) => setState(() {}),
             ),
             const SizedBox(height: 8),
             Text(
@@ -2924,13 +3044,21 @@ class _AllocateLineDialog extends ConsumerStatefulWidget {
 }
 
 class _AllocateLineDialogState extends ConsumerState<_AllocateLineDialog> {
+  /// Each shop's share of the line: a quantity, read the way the app's
+  /// language writes a number ([AmountMarks]) to three places, starting at
+  /// what is allocated now written the same way (never rounded). One that
+  /// cannot be read is refused under it and nothing is saved.
   final Map<String, TextEditingController> _qty = {};
+  final _marks = AmountMarks.ofApp();
   bool _busy = false;
 
   TextEditingController _ctrl(String storeId) => _qty.putIfAbsent(storeId, () {
         final had = widget.current.where((a) => a.storeId == storeId).firstOrNull;
-        return TextEditingController(text: had == null ? '' : had.qty.toStringAsFixed(0));
+        return TextEditingController(text: had == null ? '' : _marks.writeAt(had.qty, 0));
       });
+
+  bool get _refused =>
+      figureRefused(_marks, [for (final c in _qty.values) (c, AmountShape.quantity)]);
 
   @override
   void dispose() {
@@ -2983,11 +3111,14 @@ class _AllocateLineDialogState extends ConsumerState<_AllocateLineDialog> {
                   children: [
                     Text('Of ${widget.lineQty.toStringAsFixed(0)} on the line. What is allocated crosses the dock on arrival; the rest is put away.'),
                     for (final shop in shops)
-                      TextField(
-                        key: Key('allocate-$shop'),
+                      FigureField(
+                        fieldKey: Key('allocate-$shop'),
                         controller: _ctrl(shop),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        decoration: InputDecoration(labelText: names[shop] ?? shortRef(shop)),
+                        shape: AmountShape.quantity,
+                        marks: _marks,
+                        label: names[shop] ?? shortRef(shop),
+                        hint: '0',
+                        onChanged: (_) => setState(() {}),
                       ),
                   ],
                 ),
@@ -3008,13 +3139,14 @@ class _AllocateLineDialogState extends ConsumerState<_AllocateLineDialog> {
         ),
         FilledButton(
           key: const Key('allocate-save'),
-          onPressed: _busy
+          onPressed: _busy || _refused
               ? null
               : () {
                   final rows = [
                     for (final e in _qty.entries)
-                      if ((double.tryParse(e.value.text.trim()) ?? 0) > 0)
-                        {'storeId': e.key, 'qty': double.parse(e.value.text.trim())},
+                      if (figureOf(e.value, AmountShape.quantity, _marks) case final q? when q != '0')
+                        // The plain decimal typed: JSON-B reads it exactly.
+                        {'storeId': e.key, 'qty': q},
                   ];
                   _send(
                     () => ref.read(apiClientProvider).dio.put(_path, data: {'allocations': rows}),

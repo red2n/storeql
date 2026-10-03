@@ -18,8 +18,10 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -46,6 +48,11 @@ public class TimeClockResource {
   @Inject WorkforceService svc;
   @Inject TenantContext ctx;
 
+  /** The longest window a roster read may span, the same for staff and management. */
+  @Inject
+  @ConfigProperty(name = "storeql.workforce.window.max-days", defaultValue = "62")
+  int maxWindowDays;
+
   @Operation(
       summary = "Clock in",
       description =
@@ -55,23 +62,45 @@ public class TimeClockResource {
               + " lets an attendance report say who was late rather than only who was in.")
   @APIResponse(responseCode = "201", description = "On the clock")
   @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED or BODY_REQUIRED; WORKFORCE_ID_REQUIRED or WORKFORCE_ID_INVALID;"
+              + " WORKFORCE_SHIFT_NOT_THEIRS: the shift is rostered for somebody else;"
+              + " WORKFORCE_SHIFT_AT_ANOTHER_STORE: the shift is at another store than the one"
+              + " clocked in at")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN for a caller who is not staff; STORE_ACCESS_DENIED for a store of the"
+              + " business the caller is not held to")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "STORE_NOT_FOUND: no such store in this business; WORKFORCE_SHIFT_NOT_FOUND: no such"
+              + " shift in it")
+  @APIResponse(
       responseCode = "409",
-      description = "Already on the clock, or not assigned to that store")
+      description =
+          "WORKFORCE_ALREADY_CLOCKED_IN; WORKFORCE_NOT_ASSIGNED: not assigned to that store;"
+              + " WORKFORCE_SHIFT_CANCELLED: the shift was called off")
   @POST
   @Path("/in")
   public Response clockIn(WorkforceDtos.ClockInRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
     Validations.validate(req);
     UUID storeId = uuid(req.storeId(), "storeId");
-    ctx.requireStoreAccess(storeId);
+    UUID shiftId = optionalUuid(req.shiftId(), "shiftId");
+    UUID tenantId = ctx.requireTenantId();
+    // The store must be the business's (404) — another business's staff naming our store, even
+    // with it among their own store ids, are told it does not exist — then one the caller is held
+    // to (403), before anything is written; as the manual clock-in judges it.
+    ctx.requireStoreAccess(svc.requireStore(tenantId, storeId));
     var entry =
         svc.clockIn(
-            ctx.requireTenantId(),
+            tenantId,
             ctx.requireUserId(),
             storeId,
-            req.shiftId() == null || req.shiftId().isBlank()
-                ? null
-                : uuid(req.shiftId(), "shiftId"),
+            shiftId,
             Workforce.SOURCE_CLOCK,
             ctx.requireUserId());
     return Response.status(201).entity(ApiResponse.ok(WorkforceMappers.toDto(entry))).build();
@@ -120,6 +149,8 @@ public class TimeClockResource {
   @Path("/breaks/start")
   public ApiResponse<WorkforceDtos.EntryResponse> startBreak(WorkforceDtos.StartBreakRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
+    // The body is optional (a REST break, unpaid); one that is sent is held to its constraints.
+    if (req != null) Validations.validate(req);
     return ApiResponse.ok(
         WorkforceMappers.toDto(
             svc.startBreak(
@@ -141,20 +172,32 @@ public class TimeClockResource {
 
   @Operation(
       summary = "The shifts I am rostered for",
-      description = "The caller's own roster over a window, with nobody else's.")
+      description =
+          "The caller's own roster over a window, with nobody else's. A week either side of now when"
+              + " from and to are left out; a window that ends before it begins, or runs longer than"
+              + " 62 days, is refused.")
+  @APIResponse(
+      responseCode = "400",
+      description = "WORKFORCE_DATE_INVALID, WORKFORCE_WINDOW_INVALID")
   @GET
   @Path("/shifts")
   public ApiResponse<WorkforceDtos.RosterResponse> myShifts(
       @jakarta.ws.rs.QueryParam("from") String from, @jakarta.ws.rs.QueryParam("to") String to) {
     ctx.requireAnyRole("OWNER", "MANAGER", "STOREKEEPER", "CASHIER");
+    // The same window every other roster read is held to, however small the roster is.
+    Instant[] w =
+        WorkforceResource.window(
+            WorkforceResource.instant(from, "from"),
+            WorkforceResource.instant(to, "to"),
+            maxWindowDays);
     return ApiResponse.ok(
         WorkforceMappers.toDto(
-            svc.roster(
-                ctx.requireTenantId(),
-                null,
-                ctx.requireUserId(),
-                WorkforceResource.instant(from, "from"),
-                WorkforceResource.instant(to, "to"))));
+            svc.roster(ctx.requireTenantId(), null, ctx.requireUserId(), w[0], w[1])));
+  }
+
+  /** An id that may be left out: null when it is, else held to the same rule as {@link #uuid}. */
+  static UUID optionalUuid(String value, String field) {
+    return value == null || value.isBlank() ? null : uuid(value, field);
   }
 
   static UUID uuid(String value, String field) {

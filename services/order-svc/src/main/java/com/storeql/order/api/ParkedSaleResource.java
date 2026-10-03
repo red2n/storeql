@@ -53,7 +53,17 @@ public class ParkedSaleResource {
           "Holds an in-progress cashier sale so the next customer can be served. Requires CASHIER,"
               + " MANAGER, or OWNER.")
   @APIResponse(responseCode = "201", description = "Sale parked")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "PARK_EMPTY; VALIDATION_FAILED for a unitPrice or discountAmount with more decimals"
+              + " than the business's currency has")
   @APIResponse(responseCode = "403", description = "Caller lacks a POS-eligible role")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, is neither projected here nor readable from tenant-svc")
   @POST
   @Path("/parked-sales")
   public Response park(ParkSaleRequest req) {

@@ -3,6 +3,7 @@ package com.storeql.tenant.service;
 import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
 import com.storeql.tenant.domain.Audit;
+import com.storeql.tenant.domain.Countries;
 import com.storeql.tenant.domain.Domain;
 import com.storeql.tenant.domain.Domain.DeliveryArea;
 import com.storeql.tenant.domain.Domain.StaffAssignment;
@@ -79,6 +80,9 @@ public class TenantService {
    *     where the business's billing notices go until it names another (21.12)
    */
   public Tenant createTenant(UUID ownerUserId, String ownerEmail, CreateTenantRequest req) {
+    // Judged before anything about the owner or the plan: a country that is no ISO code would be
+    // stored as the one every law and every phone number of the business is read by.
+    String country = Countries.require(req.country());
     // One login, one business (21.13): a token carries one tenant, and a second signup on the same
     // login would be a second trial as much as a second shop. A second site is a store of the one.
     repo.findByOwner(ownerUserId)
@@ -105,7 +109,7 @@ public class TenantService {
             Tenant.STATUS_ACTIVE,
             null,
             ownerUserId,
-            req.country().toUpperCase(Locale.ROOT),
+            country,
             req.currency().toUpperCase(Locale.ROOT),
             nowTenant,
             nowTenant,
@@ -166,12 +170,14 @@ public class TenantService {
    * the store call never needs it from the JWT — avoids the Kafka async race entirely.
    */
   public TenantWithStore onboard(UUID ownerUserId, String ownerEmail, OnboardRequest req) {
-    // Checked before the tenant exists: a refused zone must not leave a business with no store.
+    // Before the tenant exists: a refused zone or country must not leave a business with no store.
+    String country = Countries.require(req.country());
+    String storeCountry = Countries.optional(req.storeCountry());
     requireTimezone(req.storeTimezone());
     // 1. create tenant (generates tenantId internally)
     CreateTenantRequest tenantReq =
         new CreateTenantRequest(
-            req.businessName(), req.legalName(), req.country(), req.currency(), req.planId());
+            req.businessName(), req.legalName(), country, req.currency(), req.planId());
     Tenant tenant = createTenant(ownerUserId, ownerEmail, tenantReq);
 
     // 2. create the first store using the freshly generated tenantId — no JWT needed
@@ -184,7 +190,7 @@ public class TenantService {
             null,
             req.storeCity(),
             null,
-            req.storeCountry(),
+            storeCountry,
             req.storePincode(),
             null,
             null,
@@ -283,6 +289,7 @@ public class TenantService {
     // A shop or a warehouse, nothing else: depot / DC replenishment reads the type to know which
     // stores may serve shops.
     String type = storeType(req.type());
+    String country = Countries.optional(req.country());
     // What the business is sold decides how many stores it may open (21.8).
     plans.requireRoomForAnotherStore(tenantId);
     UUID storeId = Ids.newId();
@@ -298,7 +305,7 @@ public class TenantService {
             req.line2(),
             req.city(),
             req.state(),
-            req.country(),
+            country,
             req.pincode(),
             req.geoLat(),
             req.geoLng(),
@@ -1013,7 +1020,7 @@ public class TenantService {
         req.line2(),
         req.city(),
         req.state(),
-        req.country(),
+        Countries.optional(req.country()),
         req.pincode(),
         req.geoLat(),
         req.geoLng(),

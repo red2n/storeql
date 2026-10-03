@@ -18,6 +18,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -190,22 +191,28 @@ public class LandedCostRepository extends BaseOutboxRepository {
    *
    * @param grId a receipt, or null
    * @param poId an order, or null
+   * @param stores the stores the charges landed at, or null for every store in the business
    */
-  public List<Charge> list(UUID tenantId, UUID grId, UUID poId, int limit) {
+  public List<Charge> list(UUID tenantId, UUID grId, UUID poId, Set<UUID> stores, int limit) {
     return query(
         "SELECT "
             + COLUMNS
             + " FROM landed_costs WHERE tenant_id = ?"
             + " AND (CAST(? AS uuid) IS NULL OR gr_id = CAST(? AS uuid))"
             + " AND (CAST(? AS uuid) IS NULL OR po_id = CAST(? AS uuid))"
+            + (stores != null ? " AND store_id = ANY(?)" : "")
             + " ORDER BY applied_at DESC, id DESC LIMIT ?",
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setObject(2, grId);
-          ps.setObject(3, grId);
-          ps.setObject(4, poId);
-          ps.setObject(5, poId);
-          ps.setInt(6, limit);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          ps.setObject(i++, grId);
+          ps.setObject(i++, grId);
+          ps.setObject(i++, poId);
+          ps.setObject(i++, poId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
+          ps.setInt(i, limit);
         },
         LandedCostRepository::map,
         "list landed costs");

@@ -79,7 +79,7 @@ export default function ({ shop, rival }) {
   );
   truthy('[+] a tiered arrangement keeps its bands in order', tiered && tiered.bands.map((b) => b.thresholdFrom).join() === '0.00,1000.00', tiered && tiered.bands);
 
-  expect(post(`${C}/schemes`, { name: 'No bands', basis: 'PERCENT_OF_NET', bands: [] }), '[-] a scheme with no bands earns nothing and is refused', 400);
+  expect(post(`${C}/schemes`, { name: 'No bands', basis: 'PERCENT_OF_NET', bands: [] }), '[-] a scheme with no bands earns nothing and is refused', 400, 'VALIDATION_FAILED');
   expect(
     post(`${C}/schemes`, { name: 'Starts high', basis: 'PERCENT_OF_NET', bands: [{ thresholdFrom: 500, rate: 2 }] }),
     '[-] a first band above zero would leave the first sales of every period earning nothing',
@@ -230,7 +230,7 @@ export default function ({ shop, rival }) {
   truthy('[+] the history reads newest first', Array.isArray(changes) && changes.length === 1 && changes[0].reason === 'the storekeeper served them', changes);
   // A well-formed id nobody holds, written out rather than generated: a random digit run in a request
   // can be a Luhn-valid card number, and the gateway would refuse it for that instead.
-  expect(get(`${O}/sales/01900000-0000-7000-8000-0000000000ab/seller`), '[-] a sale nobody holds is not there', 404);
+  expect(get(`${O}/sales/01900000-0000-7000-8000-0000000000ab/seller`), '[-] a sale nobody holds is not there', 404, 'ORDER_NOT_FOUND');
 
   // ── the statement ────────────────────────────────────────────────────────────────────────────────
   expect(post(`${O}/statements`, { from: day(3), to: day(0) }), '[-] a period still trading cannot be stated: it would be paid and then contradicted', 400, 'COMMISSION_PERIOD_INVALID');
@@ -251,21 +251,21 @@ export default function ({ shop, rival }) {
   truthy('[+] ...which is superseded, pointing at what replaced it', data(get(`${O}/statements/${statement.id}`)).supersededBy === restated.id, 'superseded');
   const drafts = data(post(`${O}/statements`, { from: day(380), to: day(375) }));
   expect(del(`${O}/statements/${drafts.id}`), '[+] a draft is a working document and can be thrown away', 204);
-  expect(get(`${O}/statements/${drafts.id}`), '[-] ...and is then gone', 404);
+  expect(get(`${O}/statements/${drafts.id}`), '[-] ...and is then gone', 404, 'COMMISSION_STATEMENT_NOT_FOUND');
   expect(get(`${O}/statements?status=PAID`), '[-] a status that does not exist is refused', 400, 'COMMISSION_STATEMENT_STATUS_UNKNOWN');
 
   // ── who may see what anybody is owed ─────────────────────────────────────────────────────────────
-  expect(get(`${C}/schemes`, cashier.token), '[-] a cashier does not read the arrangements', 403);
-  expect(post(`${C}/schemes`, { name: 'Mine', basis: 'PERCENT_OF_NET', bands: [{ thresholdFrom: 0, rate: 50 }] }, cashier.token), '[-] nor writes one', 403);
-  expect(post(`${C}/rate`, { from: day(400), to: day(390), sellers: [] }, cashier.token), '[-] nor asks what sales earn', 403);
-  expect(get(`${O}/statements`, cashier.token), '[-] nor reads the statements', 403);
-  expect(put(`${O}/sales/${sale.id}/seller`, { sellerUserId: cashier.userId, reason: 'crediting myself' }, cashier.token), '[abuse] nor credits a sale to themselves', 403);
+  expect(get(`${C}/schemes`, cashier.token), '[-] a cashier does not read the arrangements', 403, 'FORBIDDEN');
+  expect(post(`${C}/schemes`, { name: 'Mine', basis: 'PERCENT_OF_NET', bands: [{ thresholdFrom: 0, rate: 50 }] }, cashier.token), '[-] nor writes one', 403, 'FORBIDDEN');
+  expect(post(`${C}/rate`, { from: day(400), to: day(390), sellers: [] }, cashier.token), '[-] nor asks what sales earn', 403, 'FORBIDDEN');
+  expect(get(`${O}/statements`, cashier.token), '[-] nor reads the statements', 403, 'FORBIDDEN');
+  expect(put(`${O}/sales/${sale.id}/seller`, { sellerUserId: cashier.userId, reason: 'crediting myself' }, cashier.token), '[abuse] nor credits a sale to themselves', 403, 'FORBIDDEN');
 
   const rivalToken = rival.owner.token;
   truthy('[abuse] another business sees none of these arrangements', (data(get(`${C}/schemes?all=true`, rivalToken)) || []).length === 0, 'rival schemes');
   expect(get(`${C}/schemes/${corrected.id}`, rivalToken), '[abuse] nor reads one by id', 404, 'COMMISSION_SCHEME_NOT_FOUND');
-  expect(get(`${O}/statements/${statement.id}`, rivalToken), '[abuse] nor a statement', 404);
-  expect(put(`${O}/sales/${sale.id}/seller`, { sellerUserId: keeper.userId, reason: 'not theirs to credit' }, rivalToken), '[abuse] nor credits this business sale', 404);
+  expect(get(`${O}/statements/${statement.id}`, rivalToken), '[abuse] nor a statement', 404, 'COMMISSION_STATEMENT_NOT_FOUND');
+  expect(put(`${O}/sales/${sale.id}/seller`, { sellerUserId: keeper.userId, reason: 'not theirs to credit' }, rivalToken), '[abuse] nor credits this business sale', 404, 'ORDER_NOT_FOUND');
   const rivalRated = data(post(`${C}/rate`, { from: day(400), to: day(390), sellers: [{ userId: cashier.userId, days: [{ day: day(395), net: '1000.00' }] }] }, rivalToken));
   truthy('[abuse] and rating another business person under their own arrangements earns nothing', rivalRated[0].commission === '0.00', rivalRated[0]);
 

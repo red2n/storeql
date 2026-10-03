@@ -170,16 +170,24 @@ public class PurchaseService {
    * no purchase order against the supplier is open, because each open order is a commitment in that
    * currency and the orders already raised keep theirs either way.
    *
-   * @param ctx caller context; supplies the tenant
+   * <p>A supplier is the business's: every store's orders and every payment run read its terms and
+   * bank details, so only a caller held to no store corrects one.
+   *
+   * @param ctx caller context; supplies the tenant and the stores the caller is held to
    * @param id the supplier to correct
    * @param req the master data as it should now read; currency, country and terms unchanged when
    *     omitted
    * @return the supplier as it now stands
-   * @throws ApiException {@code PURCHASE_SUPPLIER_NOT_FOUND} (404); {@code
+   * @throws ApiException {@code BUSINESS_WIDE_ONLY} (403) for a caller held to stores, before the
+   *     supplier is read; {@code PURCHASE_SUPPLIER_NOT_FOUND} (404); {@code
    *     PURCHASE_SUPPLIER_CURRENCY_IN_USE} (409) when the currency would change under an open
    *     order; {@code PURCHASE_SUPPLIER_DUPLICATE} (409) when the name is taken
    */
   public Supplier updateSupplier(TenantContext ctx, UUID id, UpdateSupplierRequest req) {
+    BusinessWide.require(
+        ctx,
+        "A supplier's master data — its terms and bank details — is every store's; correcting it"
+            + " needs a caller who is not held to stores");
     Supplier existing = getSupplier(ctx, id);
     String currency =
         req.currency() != null ? Money.requireIso4217(req.currency()) : existing.currency();
@@ -334,6 +342,9 @@ public class PurchaseService {
    */
   public PurchaseOrder createPurchaseOrder(CreatePurchaseOrderRequest req, TenantContext ctx) {
     Supplier supplier = getSupplier(ctx, req.supplierId());
+    // The store the order is raised for must be one the caller may act at (403
+    // STORE_ACCESS_DENIED).
+    ctx.requireStoreAccess(req.storeId());
     String ownership = ownershipOf(req.ownership());
     String dutyStatus = dutyStatusOf(req.dutyStatus());
     String currency = supplier.currency();
@@ -383,32 +394,40 @@ public class PurchaseService {
   }
 
   /**
-   * Lists the tenant's purchase orders.
+   * Lists the tenant's purchase orders: a caller held to stores reads the orders raised for those
+   * stores, added together; a caller held to none reads the whole business's.
    *
-   * @param ctx caller context; supplies the tenant
+   * @param ctx caller context; supplies the tenant and the stores the caller is held to
    * @param limit maximum rows; the caller is expected to have clamped this
    * @return the purchase orders
    */
   public List<PurchaseOrder> listPurchaseOrders(TenantContext ctx, int limit) {
-    return repo.findPurchaseOrders(ctx.requireTenantId(), limit);
+    return repo.findPurchaseOrders(ctx.requireTenantId(), ctx.reportStores(null), limit);
   }
 
   /**
    * Reads one purchase order.
    *
-   * <p>Also the tenant-scoping guard the other purchase-order methods lean on: they call this first
-   * so an order from another tenant reads as absent rather than being operated on.
+   * <p>Also the scoping guard the other purchase-order methods lean on: they call this first so an
+   * order from another tenant reads as absent rather than being operated on, and an order raised
+   * for a store the caller is not held to is refused before anything on it is read or changed — its
+   * lines, trail, receipts, invoices, returns and landed costs are the order's store's too.
    *
-   * @param ctx caller context; supplies the tenant
+   * @param ctx caller context; supplies the tenant and the caller's stores
    * @param id the purchase order to read
    * @return the purchase order
-   * @throws ApiException {@code PURCHASE_PO_NOT_FOUND} (404) when it does not exist in this tenant
+   * @throws ApiException {@code PURCHASE_PO_NOT_FOUND} (404) when it does not exist in this tenant;
+   *     {@code STORE_ACCESS_DENIED} (403) when the caller is held to stores that are not its store
    */
   public PurchaseOrder getPurchaseOrder(TenantContext ctx, UUID id) {
-    return repo.findPurchaseOrder(ctx.requireTenantId(), id)
-        .orElseThrow(
-            () ->
-                ApiException.notFound("PURCHASE_PO_NOT_FOUND", "Purchase order not found: " + id));
+    PurchaseOrder po =
+        repo.findPurchaseOrder(ctx.requireTenantId(), id)
+            .orElseThrow(
+                () ->
+                    ApiException.notFound(
+                        "PURCHASE_PO_NOT_FOUND", "Purchase order not found: " + id));
+    ctx.requireStoreAccess(po.storeId());
+    return po;
   }
 
   /**
@@ -519,27 +538,6 @@ public class PurchaseService {
   }
 
   /**
-   * Submits a draft purchase order, routing it for approval when it is above the submitter's own
-   * spend authority.
-   *
-   * <p>Before this, any staff role could commit the business to any amount: {@code
-   * /purchase-orders} is not under {@code /admin/}, so the authorisation filter asked only for
-   * "some staff role", and a cashier could submit an order for a million pounds. The order now
-   * lands in {@code SUBMITTED} if the submitter's authority covers it and {@code PENDING_APPROVAL}
-   * if it does not — and either way the submission is recorded in the append-only trail, so a
-   * question about who committed what has an answer.
-   *
-   * <p><b>Separation of duties falls out of this rather than being bolted on.</b> An order only
-   * reaches PENDING_APPROVAL because it exceeded the submitter's ceiling — so by construction that
-   * same person cannot approve it, because {@link #approvePurchaseOrder} applies the identical
-   * check. There is deliberately no separate "you may not approve your own order" rule: it would be
-   * redundant here, and it would deadlock a single-owner shop where one person legitimately raises
-   * and approves everything within their unlimited authority.
-   *
-   * @throws ApiException 400 {@code PURCHASE_PO_NOT_DRAFT} if the order is not DRAFT; 409 if it
-   *     stopped being DRAFT between the read and the write
-   */
-  /**
    * Cross-docking: an order on its way announces its allocations to inventory-svc as they stand, so
    * the shops count them on their way and the delivery goes straight across the dock.
    */
@@ -560,6 +558,30 @@ public class PurchaseService {
             Events.crossDockAllocationsSet(po.tenantId(), po.id(), po.storeId(), List.of()));
   }
 
+  /**
+   * Submits a draft purchase order, routing it for approval when it is above the submitter's own
+   * spend authority.
+   *
+   * <p>Before this, any staff role could commit the business to any amount: {@code
+   * /purchase-orders} is not under {@code /admin/}, so the authorisation filter asked only for
+   * "some staff role", and a cashier could submit an order for a million pounds. The order now
+   * lands in {@code SUBMITTED} if the submitter's authority covers it and {@code PENDING_APPROVAL}
+   * if it does not — and either way the submission is recorded in the append-only trail, so a
+   * question about who committed what has an answer.
+   *
+   * <p><b>Separation of duties falls out of this rather than being bolted on.</b> An order only
+   * reaches PENDING_APPROVAL because it exceeded the submitter's ceiling — so by construction that
+   * same person cannot approve it, because {@link #approvePurchaseOrder} applies the identical
+   * check. There is deliberately no separate "you may not approve your own order" rule: it would be
+   * redundant here, and it would deadlock a single-owner shop where one person legitimately raises
+   * and approves everything within their unlimited authority.
+   *
+   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND} for another business's order; 403 {@code
+   *     STORE_ACCESS_DENIED} when the caller is held to stores that do not include the order's; 400
+   *     {@code PURCHASE_PO_NOT_DRAFT} if the order is not DRAFT; 409 {@code
+   *     PURCHASE_PO_HAS_NO_LINES} if it has no lines (an order with nothing on it is not sent), or
+   *     if it stopped being DRAFT between the read and the write
+   */
   public PurchaseOrder submitPurchaseOrder(TenantContext ctx, UUID poId) {
     UUID tenantId = ctx.requireTenantId();
     PurchaseOrder po = getPurchaseOrder(ctx, poId);
@@ -613,9 +635,11 @@ public class PurchaseService {
    * trail row: an order can be edited after a rejection, so approving against a figure the caller
    * supplied would let the amount change between the review and the decision.
    *
-   * @throws ApiException 404 if no such order; 409 {@code PURCHASE_PO_NOT_PENDING_APPROVAL} if it
-   *     is not awaiting a decision; 403 {@code PURCHASE_APPROVAL_EXCEEDS_AUTHORITY} if the
-   *     approver's own ceiling does not cover it
+   * @throws ApiException 404 if no such order; 403 {@code STORE_ACCESS_DENIED} when the caller is
+   *     held to stores that do not include the order's; 409 {@code
+   *     PURCHASE_PO_NOT_PENDING_APPROVAL} if it is not awaiting a decision; 403 {@code
+   *     PURCHASE_APPROVAL_EXCEEDS_AUTHORITY} if the approver's own ceiling does not cover it; 409
+   *     {@code PURCHASE_PO_HAS_NO_LINES} if the order has no lines
    */
   public PurchaseOrder approvePurchaseOrder(
       TenantContext ctx, UUID poId, DecidePurchaseOrderRequest req) {
@@ -659,8 +683,9 @@ public class PurchaseService {
    * requiring authority to say no would mean an order too large for anyone configured could never
    * be cleared out of the queue at all.
    *
-   * @throws ApiException 404 if no such order; 409 if it is not awaiting a decision; 400 {@code
-   *     PURCHASE_APPROVAL_REASON_REQUIRED} if no reason is given
+   * @throws ApiException 404 if no such order; 403 {@code STORE_ACCESS_DENIED} when the caller is
+   *     held to stores that do not include the order's; 409 if it is not awaiting a decision; 400
+   *     {@code PURCHASE_APPROVAL_REASON_REQUIRED} if no reason is given
    */
   public PurchaseOrder rejectPurchaseOrder(
       TenantContext ctx, UUID poId, DecidePurchaseOrderRequest req) {
@@ -727,6 +752,7 @@ public class PurchaseService {
   }
 
   private PurchaseOrder requirePendingApproval(TenantContext ctx, UUID poId) {
+    // An order of the business (404), then of a store the caller may act at (403).
     PurchaseOrder po = getPurchaseOrder(ctx, poId);
     if (!Domain.PO_PENDING_APPROVAL.equals(po.status()))
       throw ApiException.conflict(
@@ -865,13 +891,17 @@ public class PurchaseService {
    * not a variance to flag; it is a different document, and matching a JPY invoice against a GBP
    * order would compare two numbers that share nothing but a decimal point (SJ-D24, SJ-D25).
    *
-   * @throws ApiException 404 if the order does not exist for this tenant; 400 {@code
-   *     PURCHASE_CURRENCY_MISMATCH} for the wrong currency; 409 {@code PURCHASE_INVOICE_DUPLICATE}
-   *     if this supplier's invoice number was already captured
+   * @throws ApiException 404 if the order does not exist for this tenant; 403 {@code
+   *     STORE_ACCESS_DENIED} for a caller held to another store; 400 {@code
+   *     PURCHASE_CURRENCY_MISMATCH} for the wrong currency; 400 {@code PURCHASE_AMOUNT_TOO_PRECISE}
+   *     for a VAT amount or stated gross finer than the currency's minor units; 409 {@code
+   *     PURCHASE_INVOICE_DUPLICATE} if this supplier's invoice number was already captured
    */
   public Domain.SupplierInvoice captureSupplierInvoice(
       TenantContext ctx, CaptureSupplierInvoiceRequest req) {
     UUID tenantId = ctx.requireTenantId();
+    // Capturing posts to the ledger against the order's store: a caller held to another one is
+    // refused (by getPurchaseOrder) before anything is matched or kept.
     PurchaseOrder po = getPurchaseOrder(ctx, req.poId());
     if (po.consigned()) {
       throw ApiException.conflict(
@@ -892,6 +922,13 @@ public class PurchaseService {
             "PURCHASE_CURRENCY_MISMATCH",
             "invoice currency " + asked + " does not match the order's " + currency);
     }
+    // What the supplier's document says in money is held to the currency's own minor units
+    // before anything is matched or kept: a VAT figure or a total finer than the currency is no
+    // amount an invoice can carry, so it is refused rather than rounded into one nobody printed.
+    BigDecimal vat =
+        Money.requireMinorUnits(
+            req.vatAmount() == null ? BigDecimal.ZERO : req.vatAmount(), currency, "vatAmount");
+    BigDecimal statedGross = Money.requireMinorUnits(req.statedGross(), currency, "statedGross");
 
     // Matched against the order and every receipt AND every earlier invoice on it — see
     // findMatchPositions for why the invoiced leg has to be cumulative.
@@ -908,8 +945,6 @@ public class PurchaseService {
       net = net.add(Money.round(l.qty().multiply(l.unitPrice()), currency));
     }
     net = Money.round(net, currency);
-    BigDecimal vat =
-        Money.round(req.vatAmount() == null ? BigDecimal.ZERO : req.vatAmount(), currency);
 
     boolean allMatched = matched.stream().allMatch(ThreeWayMatch.MatchLine::matched);
     BigDecimal gross = net.add(vat);
@@ -917,8 +952,6 @@ public class PurchaseService {
 
     // The header check: the supplier's own total against the sum of the supplier's own lines.
     // An invoice that does not add up is wrong before any line is compared with anything.
-    BigDecimal statedGross =
-        req.statedGross() == null ? null : Money.round(req.statedGross(), currency);
     List<String> headerVariances = new ArrayList<>();
     if (statedGross != null && config.matchTolerance().totalMismatch(statedGross, gross)) {
       headerVariances.add(ThreeWayMatch.TOTAL_MISMATCH);
@@ -986,9 +1019,10 @@ public class PurchaseService {
   }
 
   /**
-   * Lists the supplier invoices captured against a purchase order.
+   * Lists the supplier invoices captured against a purchase order, or every one the caller may
+   * read: a caller held to stores reads the invoices on orders raised for those stores.
    *
-   * @param ctx caller context; supplies the tenant
+   * @param ctx caller context; supplies the tenant and the caller's stores
    * @param poId the purchase order whose invoices to list
    * @param limit maximum rows; the caller is expected to have clamped this
    * @return the supplier invoices
@@ -1004,7 +1038,8 @@ public class PurchaseService {
             "status must be one of " + INVOICE_STATUSES + ", not " + status);
       }
     }
-    return repo.findSupplierInvoices(ctx.requireTenantId(), poId, wanted, limit);
+    return repo.findSupplierInvoices(
+        ctx.requireTenantId(), poId, wanted, ctx.reportStores(null), limit);
   }
 
   private static final java.util.Set<String> INVOICE_STATUSES =
@@ -1017,18 +1052,25 @@ public class PurchaseService {
   /**
    * Reads one supplier invoice.
    *
-   * @param ctx caller context; supplies the tenant
+   * <p>An invoice is its order's, so a caller held to stores reads it only at the order's store.
+   *
+   * @param ctx caller context; supplies the tenant and the caller's stores
    * @param id the invoice to read
    * @return the supplier invoice
    * @throws ApiException {@code PURCHASE_INVOICE_NOT_FOUND} (404) when it does not exist in this
-   *     tenant
+   *     tenant; {@code STORE_ACCESS_DENIED} (403) when its order is another store's than the
+   *     caller's
    */
   public Domain.SupplierInvoice getSupplierInvoice(TenantContext ctx, UUID id) {
-    return repo.findSupplierInvoice(ctx.requireTenantId(), id)
-        .orElseThrow(
-            () ->
-                ApiException.notFound(
-                    "PURCHASE_INVOICE_NOT_FOUND", "Supplier invoice not found: " + id));
+    Domain.SupplierInvoice inv =
+        repo.findSupplierInvoice(ctx.requireTenantId(), id)
+            .orElseThrow(
+                () ->
+                    ApiException.notFound(
+                        "PURCHASE_INVOICE_NOT_FOUND", "Supplier invoice not found: " + id));
+    // A caller held to no store may read every store's: the order need not be read for that.
+    if (!ctx.storeIds().isEmpty()) getPurchaseOrder(ctx, inv.poId());
+    return inv;
   }
 
   /**
@@ -1080,7 +1122,10 @@ public class PurchaseService {
    */
   public GoodsReceipt receiveGoods(
       CreateGoodsReceiptRequest req, TenantContext ctx, String idempotencyKey) {
+    // Both the order's store (getPurchaseOrder) and the store the goods land in must be the
+    // caller's.
     PurchaseOrder po = getPurchaseOrder(ctx, req.poId());
+    if (req.storeId() != null) ctx.requireStoreAccess(req.storeId());
     if (po.dropship()) {
       throw ApiException.conflict(
           "PURCHASE_DROPSHIP_NOT_RECEIVED",
@@ -1246,7 +1291,6 @@ public class PurchaseService {
           "PURCHASE_RTV_EMPTY", "a return must send at least one line back");
     }
     PurchaseOrder po = getPurchaseOrder(ctx, req.poId());
-    ctx.requireStoreAccess(po.storeId());
     if (!Domain.PO_PARTIALLY_RECEIVED.equals(po.status())
         && !Domain.PO_RECEIVED.equals(po.status())
         && !Domain.PO_CLOSED.equals(po.status())) {
@@ -1362,24 +1406,33 @@ public class PurchaseService {
 
   /**
    * @param ctx the caller
-   * @param poId an order, or null for every return in the tenant
+   * @param poId an order, or null for every return in the tenant the caller may read (a caller held
+   *     to stores reads the returns from those stores)
    * @return the returns, newest first
-   * @throws ApiException {@code PURCHASE_PO_NOT_FOUND} (404) when the order is not this tenant's
+   * @throws ApiException {@code PURCHASE_PO_NOT_FOUND} (404) when the order is not this tenant's;
+   *     {@code STORE_ACCESS_DENIED} (403) when it is another store's than the caller's
    */
   public List<Domain.VendorReturn> listVendorReturns(TenantContext ctx, UUID poId) {
     if (poId != null) {
       getPurchaseOrder(ctx, poId);
+      return repo.findVendorReturns(ctx.requireTenantId(), poId, null);
     }
-    return repo.findVendorReturns(ctx.requireTenantId(), poId);
+    return repo.findVendorReturns(ctx.requireTenantId(), null, ctx.reportStores(null));
   }
 
   /**
-   * @throws ApiException {@code PURCHASE_RTV_NOT_FOUND} (404) when the return is not this tenant's
+   * Reads one return, at the store the goods went back from.
+   *
+   * @throws ApiException {@code PURCHASE_RTV_NOT_FOUND} (404) when the return is not this tenant's;
+   *     {@code STORE_ACCESS_DENIED} (403) when it is another store's than the caller's
    */
   public Domain.VendorReturn getVendorReturn(TenantContext ctx, UUID id) {
-    return repo.findVendorReturn(ctx.requireTenantId(), id)
-        .orElseThrow(
-            () -> ApiException.notFound("PURCHASE_RTV_NOT_FOUND", "No such return to vendor"));
+    Domain.VendorReturn ret =
+        repo.findVendorReturn(ctx.requireTenantId(), id)
+            .orElseThrow(
+                () -> ApiException.notFound("PURCHASE_RTV_NOT_FOUND", "No such return to vendor"));
+    ctx.requireStoreAccess(ret.storeId());
+    return ret;
   }
 
   /**
@@ -1402,16 +1455,23 @@ public class PurchaseService {
    * Records the supplier's credit note against a return, closing it. Management only: matching
    * money received to money owed is a finance decision, not a warehouse one.
    *
-   * @throws ApiException {@code PURCHASE_RTV_NOT_FOUND} (404); {@code
-   *     PURCHASE_RTV_ALREADY_CREDITED} (409); {@code PURCHASE_CREDIT_DATE_INVALID} (400)
+   * @throws ApiException {@code PURCHASE_RTV_NOT_FOUND} (404); {@code STORE_ACCESS_DENIED} (403)
+   *     for a caller held to another store than the return's; {@code PURCHASE_RTV_ALREADY_CREDITED}
+   *     (409); {@code PURCHASE_CREDIT_DATE_INVALID} (400); {@code PURCHASE_AMOUNT_TOO_PRECISE}
+   *     (400) for an amount finer than the return's currency
    */
   public Domain.VendorReturn recordCreditNote(
       TenantContext ctx, UUID id, RecordCreditNoteRequest req) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    // The return's own store (403 before anything is posted): the credit is booked to its stock.
     Domain.VendorReturn ret = getVendorReturn(ctx, id);
     LocalDate date = Parsing.date(req.creditNoteDate(), "creditNoteDate");
+    // What the supplier credited is money in the return's currency: a keyed amount finer than its
+    // minor units is refused, never rounded; the debit note's own gross is already at that scale.
     BigDecimal amount =
-        Money.round(req.amount() == null ? ret.grossAmount() : req.amount(), ret.currency());
+        req.amount() == null
+            ? Money.round(ret.grossAmount(), ret.currency())
+            : Money.requireMinorUnits(req.amount(), ret.currency(), "amount");
     requireOpenPeriod(ctx.requireTenantId(), ret.storeId(), date);
     boolean credited =
         repo.creditVendorReturn(
@@ -1472,6 +1532,18 @@ public class PurchaseService {
    *
    * <p>Transfer pricing: caller provides net_amount which should reflect arm's length pricing per
    * HMRC INTM (typically: cost price of the transferred goods).
+   *
+   * <p>The pair writes both stores' books — a receivable at the sender and a payable at the
+   * receiver — so a caller held to stores must be held to both ends. The body is judged whole first
+   * — its two stores, its currency, its minor units, its totals — and the caller's stores after, so
+   * a body that is wrong is answered for what is wrong with it (400) whoever sends it, and a caller
+   * held elsewhere is refused (403) before anything is written.
+   *
+   * @throws ApiException 400 {@code PURCHASE_IC_SAME_STORE}; 400 {@code
+   *     PURCHASE_AMOUNT_TOO_PRECISE} for an amount finer than the currency's minor units; 400
+   *     {@code PURCHASE_IC_GROSS_MISMATCH} when gross is not net plus VAT, {@code
+   *     PURCHASE_IC_VAT_DISREGARDED} for VAT on a VAT-group supply; 403 {@code STORE_ACCESS_DENIED}
+   *     when the caller is held to stores that do not include both ends; nothing is written
    */
   public List<IntercompanyInvoice> raiseIntercompanyInvoices(
       RaiseIntercompanyInvoiceRequest req, TenantContext ctx) {
@@ -1481,7 +1553,6 @@ public class PurchaseService {
     if (fromStore.equals(toStore))
       throw ApiException.badRequest(
           "PURCHASE_IC_SAME_STORE", "from and to store must be different");
-
     UUID transferRef = req.transferRef() != null ? Ids.parse(req.transferRef()) : null;
     String vatCode =
         req.vatCode() != null ? req.vatCode().toUpperCase(java.util.Locale.ROOT) : "T1";
@@ -1492,6 +1563,15 @@ public class PurchaseService {
         req.currency() != null
             ? Money.requireIso4217(req.currency())
             : resolveTenantCurrency(tenantId);
+    // Each amount is money in that currency, held to its own minor units before anything is
+    // written: whole yen, cents of a pound, thousandths of a dinar.
+    Money.requireMinorUnits(req.netAmount(), currency, "netAmount");
+    Money.requireMinorUnits(req.vatAmount(), currency, "vatAmount");
+    Money.requireMinorUnits(req.grossAmount(), currency, "grossAmount");
+    requireIntercompanyTotals(req);
+    // Only then the caller's stores: both ends, before anything is written.
+    ctx.requireStoreAccess(fromStore);
+    ctx.requireStoreAccess(toStore);
     LocalDate today = LocalDate.now();
     LocalDate dueDate = today.plusDays(BACS_TERMS_DAYS);
 
@@ -1548,6 +1628,38 @@ public class PurchaseService {
         ap,
         apEntries,
         Events.intercompanyInvoiceRaised(tenantId, apId));
+  }
+
+  /**
+   * An intercompany invoice adds up before it is posted: its gross is its net plus its VAT, and a
+   * supply inside one VAT group (HMRC VAT Notice 700/2) carries no VAT. Both sides of the pair post
+   * from these three figures — the receivable and the payable at the gross, the sale and the
+   * purchase at the net, the VAT between — so a gross that is not net plus VAT would post books
+   * that do not balance, or a VAT figure that is not on them.
+   *
+   * @throws ApiException 400 {@code PURCHASE_IC_GROSS_MISMATCH} when gross is not net plus VAT; 400
+   *     {@code PURCHASE_IC_VAT_DISREGARDED} for VAT on a supply disregarded for VAT
+   */
+  static void requireIntercompanyTotals(RaiseIntercompanyInvoiceRequest req) {
+    BigDecimal net = req.netAmount();
+    BigDecimal vat = req.vatAmount();
+    BigDecimal gross = req.grossAmount();
+    if (req.vatDisregarded() && vat.signum() != 0) {
+      throw ApiException.badRequest(
+          "PURCHASE_IC_VAT_DISREGARDED",
+          "a supply between stores in one VAT group carries no VAT: vatAmount must be zero when"
+              + " vatDisregarded is true");
+    }
+    if (net.add(vat).compareTo(gross) != 0) {
+      throw ApiException.badRequest(
+          "PURCHASE_IC_GROSS_MISMATCH",
+          "grossAmount "
+              + gross.toPlainString()
+              + " is not netAmount "
+              + net.toPlainString()
+              + " plus vatAmount "
+              + vat.toPlainString());
+    }
   }
 
   private List<NominalLedgerEntry> buildArEntries(
@@ -1669,27 +1781,35 @@ public class PurchaseService {
   /**
    * Reads one intercompany invoice.
    *
-   * @param ctx caller context; supplies the tenant
+   * <p>Either end of the transfer reads it, as either end of a stock transfer reads the transfer.
+   *
+   * @param ctx caller context; supplies the tenant and the caller's stores
    * @param id the invoice to read
    * @return the invoice, either the AR or the AP side of a pair
    * @throws ApiException {@code PURCHASE_INVOICE_NOT_FOUND} (404) when it does not exist in this
-   *     tenant
+   *     tenant; {@code STORE_ACCESS_DENIED} (403) when the caller is held to neither end
    */
   public IntercompanyInvoice getIntercompanyInvoice(TenantContext ctx, UUID id) {
-    return repo.findIntercompanyInvoice(ctx.requireTenantId(), id)
-        .orElseThrow(
-            () -> ApiException.notFound("PURCHASE_INVOICE_NOT_FOUND", "Invoice not found: " + id));
+    IntercompanyInvoice inv =
+        repo.findIntercompanyInvoice(ctx.requireTenantId(), id)
+            .orElseThrow(
+                () ->
+                    ApiException.notFound(
+                        "PURCHASE_INVOICE_NOT_FOUND", "Invoice not found: " + id));
+    ctx.requireAnyStoreAccess(inv.fromStoreId(), inv.toStoreId());
+    return inv;
   }
 
   /**
-   * Lists the tenant's intercompany invoices, both AR and AP sides.
+   * Lists the tenant's intercompany invoices, both AR and AP sides: a caller held to stores reads
+   * those with either end at one of them.
    *
-   * @param ctx caller context; supplies the tenant
+   * @param ctx caller context; supplies the tenant and the caller's stores
    * @param limit maximum rows; the caller is expected to have clamped this
    * @return the invoices
    */
   public List<IntercompanyInvoice> listIntercompanyInvoices(TenantContext ctx, int limit) {
-    return repo.findIntercompanyInvoices(ctx.requireTenantId(), limit);
+    return repo.findIntercompanyInvoices(ctx.requireTenantId(), ctx.reportStores(null), limit);
   }
 
   /**
@@ -1698,13 +1818,19 @@ public class PurchaseService {
    * <p>Which entries depends on the side: an AR invoice debits Bank and credits Debtors, an AP one
    * the mirror image, so the two books stay in agreement.
    *
-   * @param ctx caller context; supplies the tenant
+   * <p>Each side is settled at its own store: the receivable at the sending store, the payable at
+   * the receiving one.
+   *
+   * @param ctx caller context; supplies the tenant and the caller's stores
    * @param id the invoice to settle
    * @throws ApiException {@code PURCHASE_INVOICE_NOT_FOUND} (404) when it does not exist in this
-   *     tenant
+   *     tenant; {@code STORE_ACCESS_DENIED} (403) when the caller is held to stores that do not
+   *     include its side's store; nothing is posted
    */
   public void settleIntercompanyInvoice(TenantContext ctx, UUID id) {
     IntercompanyInvoice inv = getIntercompanyInvoice(ctx, id);
+    ctx.requireStoreAccess(
+        Domain.INV_AR.equals(inv.invoiceType()) ? inv.fromStoreId() : inv.toStoreId());
     LocalDate today = LocalDate.now();
     String desc = "Settlement of intercompany invoice " + Handle.of(id);
     List<NominalLedgerEntry> settlements = new ArrayList<>();
@@ -1760,7 +1886,10 @@ public class PurchaseService {
 
   // ── Nominal Ledger ────────────────────────────────────────────────────────────
 
-  /** Cursor-paginated nominal ledger. Cursor wraps {@code entryDate|createdAt|id}. */
+  /**
+   * Cursor-paginated nominal ledger. Cursor wraps {@code entryDate|createdAt|id}. A caller held to
+   * stores reads the lines posted at those stores; held to none, every line of the business.
+   */
   public com.storeql.web.Cursor.Page<NominalLedgerEntry> getNominalLedger(
       TenantContext ctx,
       String nominalCode,
@@ -1797,6 +1926,7 @@ public class PurchaseService {
             afterEntryDate,
             afterCreatedAt,
             afterId,
+            ctx.reportStores(null),
             limit + 1);
     return com.storeql.web.Cursor.page(
         rows, limit, e -> e.entryDate() + "|" + e.createdAt() + "|" + e.id());
@@ -1938,11 +2068,15 @@ public class PurchaseService {
    * invoice matches cleanly. Management only, and the reason is kept — a decision about money with
    * no reason is the thing an auditor asks about first.
    *
+   * <p>The decision is the invoice's order's store's: a caller held to other stores is refused
+   * before the invoice's state is looked at, and long before a reversal is posted.
+   *
    * @throws ApiException 400 {@code PURCHASE_RESOLUTION_UNKNOWN} for an action that is neither; 404
-   *     when the invoice does not exist in this tenant; 409 {@code PURCHASE_INVOICE_NOT_FLAGGED}
-   *     when it is not awaiting a decision; 409 {@code PURCHASE_INVOICE_ALREADY_RESOLVED} when
-   *     another decision landed first; 409 {@code PURCHASE_PERIOD_CLOSED} when the reversal would
-   *     land in a closed month
+   *     when the invoice does not exist in this tenant; 403 {@code STORE_ACCESS_DENIED} when its
+   *     order is another store's than the caller's; 409 {@code PURCHASE_INVOICE_NOT_FLAGGED} when
+   *     it is not awaiting a decision; 409 {@code PURCHASE_INVOICE_ALREADY_RESOLVED} when another
+   *     decision landed first; 409 {@code PURCHASE_PERIOD_CLOSED} when the reversal would land in a
+   *     closed month
    */
   public Domain.SupplierInvoice resolveSupplierInvoice(
       TenantContext ctx, UUID id, ResolveSupplierInvoiceRequest req) {
@@ -1956,6 +2090,8 @@ public class PurchaseService {
           "PURCHASE_RESOLUTION_UNKNOWN", "action must be APPROVE or REJECT, not " + req.action());
     }
     Domain.SupplierInvoice inv = getSupplierInvoice(ctx, id);
+    // The order's store, for every caller and either decision: refused before anything is decided.
+    PurchaseOrder po = getPurchaseOrder(ctx, inv.poId());
     if (!Domain.INVOICE_FLAGGED.equals(inv.status())) {
       throw ApiException.conflict(
           "PURCHASE_INVOICE_NOT_FLAGGED",
@@ -1964,7 +2100,6 @@ public class PurchaseService {
     List<NominalLedgerEntry> reversal = List.of();
     com.storeql.service.OutboxRow event = null;
     if (!approve) {
-      PurchaseOrder po = getPurchaseOrder(ctx, inv.poId());
       requireOpenPeriod(tenantId, po.storeId(), today());
       List<NominalLedgerEntry> posted =
           repo.findPostingFor(tenantId, Domain.SOURCE_SUPPLIER_INVOICE, inv.id());
@@ -1998,10 +2133,15 @@ public class PurchaseService {
   /**
    * Posts a manual journal (17.1). Management only. The lines must balance and each must carry a
    * debit or a credit, never both; a store, when named, must be one the caller may operate in and
-   * its period for the date must be open.
+   * its period for the date must be open. With none named, the store is the caller's as a read
+   * scopes one (SJ-D74): a caller held to one store posts at it, a caller held to none posts the
+   * business's own journal. A journal at no store is the business's — a caller held to stores could
+   * post it but never read it back ({@link #getJournal}) — so a caller held to several who names
+   * none is refused rather than given one of theirs by guess.
    *
    * @throws ApiException 400 {@code PURCHASE_JOURNAL_LINE_INVALID}; 422 {@code
-   *     PURCHASE_JOURNAL_UNBALANCED}; 403 {@code STORE_ACCESS_DENIED}; 409 {@code
+   *     PURCHASE_JOURNAL_UNBALANCED}; 403 {@code STORE_ACCESS_DENIED}; 403 {@code
+   *     BUSINESS_WIDE_ONLY} for a journal naming no store from a caller held to several; 409 {@code
    *     PURCHASE_PERIOD_CLOSED}
    */
   public Domain.Journal postJournal(TenantContext ctx, PostJournalRequest req) {
@@ -2009,8 +2149,7 @@ public class PurchaseService {
     ctx.requirePermission(Permissions.FINANCE_JOURNAL);
     UUID tenantId = ctx.requireTenantId();
     LocalDate date = Parsing.date(req.entryDate(), "entryDate");
-    UUID storeId = Parsing.optionalUuid(req.storeId(), "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
+    UUID storeId = journalStore(ctx, Parsing.optionalUuid(req.storeId(), "storeId"));
     LedgerPosting posting;
     try {
       posting =
@@ -2040,10 +2179,34 @@ public class PurchaseService {
   }
 
   /**
-   * Reads one journal whole. Management only: the ledger's lines are readable by any member of
-   * staff, but a journal is a finance document and its reader is finance.
+   * The store a manual journal is posted at: the one named (the caller's to act at), else the
+   * caller's only store, else none for a caller held to none (the business's own).
    *
-   * @throws ApiException 404 {@code PURCHASE_JOURNAL_NOT_FOUND}
+   * @throws ApiException 403 {@code STORE_ACCESS_DENIED} for a named store not the caller's; 403
+   *     {@code BUSINESS_WIDE_ONLY} when a caller held to several stores names none
+   */
+  private static UUID journalStore(TenantContext ctx, UUID named) {
+    if (named != null) {
+      ctx.requireStoreAccess(named);
+      return named;
+    }
+    if (ctx.storeIds().size() == 1) {
+      return ctx.storeIds().iterator().next();
+    }
+    BusinessWide.require(
+        ctx,
+        "A journal at no store is the whole business's; name one of your stores, or post it as a"
+            + " caller who is not held to stores");
+    return null;
+  }
+
+  /**
+   * Reads one journal whole. Management only: the ledger's lines are readable by any member of
+   * staff, but a journal is a finance document and its reader is finance. A journal is posted at
+   * one store or at none (the business's own); a caller held to stores reads only their stores'.
+   *
+   * @throws ApiException 404 {@code PURCHASE_JOURNAL_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}
+   *     for a caller held to stores the journal was not posted at
    */
   public Domain.Journal getJournal(TenantContext ctx, UUID journalId) {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
@@ -2051,7 +2214,15 @@ public class PurchaseService {
     if (lines.isEmpty()) {
       throw ApiException.notFound("PURCHASE_JOURNAL_NOT_FOUND", "Journal not found: " + journalId);
     }
-    return journalOf(lines);
+    Domain.Journal journal = journalOf(lines);
+    // A journal posted at no store is the business's own: a caller held to stores reads none.
+    // (Asked directly, never as requireStoreAccess(null): a held caller's set holds no null.)
+    if (!ctx.storeIds().isEmpty()
+        && (journal.storeId() == null || !ctx.hasStoreAccess(journal.storeId()))) {
+      throw ApiException.forbidden(
+          "STORE_ACCESS_DENIED", "Caller is not assigned to the store this journal was posted at");
+    }
+    return journal;
   }
 
   private static Domain.Journal journalOf(List<NominalLedgerEntry> lines) {
@@ -2068,9 +2239,11 @@ public class PurchaseService {
 
   /**
    * The trial balance: every code's debits, credits and balance over a range (17.1). Management
-   * only.
+   * only. A store named must be one the caller may read; with none named, a caller held to stores
+   * reads theirs added together, and a caller held to none the whole business.
    *
-   * @throws ApiException 400 {@code PURCHASE_INVALID_PERIOD} when the range ends before it starts
+   * @throws ApiException 400 {@code PURCHASE_INVALID_PERIOD} when the range ends before it starts;
+   *     403 {@code STORE_ACCESS_DENIED} for a store the caller is not held to
    */
   public List<Domain.TrialBalanceRow> trialBalance(
       TenantContext ctx, String fromStr, String toStr, String storeIdStr) {
@@ -2081,6 +2254,6 @@ public class PurchaseService {
       throw ApiException.badRequest("PURCHASE_INVALID_PERIOD", "to must not be before from");
     }
     UUID storeId = Parsing.optionalUuid(storeIdStr, "storeId");
-    return repo.findTrialBalance(ctx.requireTenantId(), from, to, storeId);
+    return repo.findTrialBalance(ctx.requireTenantId(), from, to, ctx.reportStores(storeId));
   }
 }

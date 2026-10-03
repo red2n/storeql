@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/fx_rates_card.dart';
@@ -101,7 +102,7 @@ void main() {
     final put = server.requests.lastWhere((r) => r.method == 'PUT');
     expect(put.path, endsWith('/admin/tenant/fx-rates/EUR'));
     final body = put.data is String ? jsonDecode(put.data as String) : put.data;
-    expect(body, {'rate': 0.86, 'effectiveFrom': '2026-09-25', 'reason': 'ECB reference'});
+    expect(body, {'rate': '0.86', 'effectiveFrom': '2026-09-25', 'reason': 'ECB reference'});
     expect(find.text('1 EUR = 0.86 GBP from 2026-09-25.'), findsOneWidget);
   });
 
@@ -116,5 +117,63 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('fx-refusal')), findsOneWidget);
     expect(find.textContaining('no rate against itself'), findsOneWidget);
+  });
+
+  // A rate is read the way the app's language writes a number, to the ten
+  // places a rate is kept at, and sent as the decimal typed: read with a
+  // point, Romanian's 0,86 went as -1, and a rate the field cannot read is
+  // refused under it with nothing set.
+  group('a rate is read as typed, or refused', () {
+    tearDown(() => Intl.defaultLocale = null);
+
+    Future<_Server> openSet(WidgetTester tester) async {
+      final server = await _pump(tester);
+      await tester.tap(find.byKey(const Key('fx-set-rate')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('fx-currency')), 'EUR');
+      await tester.enterText(find.byKey(const Key('fx-reason')), 'ECB reference');
+      return server;
+    }
+
+    Future<void> press(WidgetTester tester, String text) async {
+      for (var i = 1; i <= text.length; i++) {
+        await tester.enterText(find.byKey(const Key('fx-rate')), text.substring(0, i));
+        await tester.pump();
+      }
+    }
+
+    String? says(WidgetTester tester) =>
+        tester.widget<TextField>(find.byKey(const Key('fx-rate'))).decoration?.errorText;
+
+    for (final (locale, typed, sent) in [
+      ('ro', '0,86', '0.86'),
+      ('en_GB', '0.0053125', '0.0053125'),
+      ('en', '1.5', '1.5'),
+      ('pl', '4,2915', '4.2915'),
+      ('ar', '0٫8625', '0.8625'),
+    ]) {
+      testWidgets('in $locale, $typed is set as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await openSet(tester);
+        await press(tester, typed);
+        expect(says(tester), isNull);
+        await tester.tap(find.byKey(const Key('fx-save')));
+        await tester.pumpAndSettle();
+        final put = server.requests.lastWhere((r) => r.method == 'PUT');
+        final body = put.data is String ? jsonDecode(put.data as String) : put.data;
+        expect(body['rate'], sent);
+      });
+    }
+
+    for (final (locale, typed) in [('ro', '0.86'), ('en', '0,86'), ('pl', '1.250'), ('en_GB', '.'), ('ar', '-1'), ('en_GB', '')]) {
+      testWidgets('in $locale, "$typed" is refused and no rate is set', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await openSet(tester);
+        await press(tester, typed);
+        await tester.tap(find.byKey(const Key('fx-save')));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+      });
+    }
   });
 }

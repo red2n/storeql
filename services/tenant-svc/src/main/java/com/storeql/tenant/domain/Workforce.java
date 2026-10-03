@@ -4,9 +4,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * The roster and the time clock (store operations & workforce).
@@ -188,6 +192,28 @@ public final class Workforce {
     return was == null || now.compareTo(was) > 0;
   }
 
+  /**
+   * Whether a correction asked for again is the one already made under the same Idempotency-Key:
+   * the same entry corrected, to the same clock times, for the same reason. Times are compared to
+   * the microsecond, which is what the record keeps, so a request naming nanoseconds is still the
+   * request that was made. Anything else under that key is another request, and is refused rather
+   * than answered with a correction it did not ask for.
+   *
+   * @param first the correction the key made, as it was recorded
+   * @param wanted the correction this request would make, built as it would be written
+   */
+  public static boolean sameCorrection(Entry first, Entry wanted) {
+    return Objects.equals(first.supersedes(), wanted.supersedes())
+        && sameMoment(first.clockedInAt(), wanted.clockedInAt())
+        && sameMoment(first.clockedOutAt(), wanted.clockedOutAt())
+        && Objects.equals(first.adjustedReason(), wanted.adjustedReason());
+  }
+
+  private static boolean sameMoment(Instant a, Instant b) {
+    if (a == null || b == null) return a == null && b == null;
+    return a.truncatedTo(ChronoUnit.MICROS).equals(b.truncatedTo(ChronoUnit.MICROS));
+  }
+
   /** Hours to one decimal place, which is how a rota is read and discussed. */
   public static String hours(Duration d) {
     long minutes = Math.max(0, d.toMinutes());
@@ -229,6 +255,69 @@ public final class Workforce {
     }
   }
 
+  /** The places an hourly rate is kept to ({@code pay_rates.hourly_rate NUMERIC(12,4)}). */
+  public static final int RATE_PLACES = 4;
+
+  /** The whole digits an hourly rate may have in the same column. */
+  public static final int RATE_WHOLE_DIGITS = 8;
+
+  /**
+   * The longest rate read as text. Twice what the column can hold written plainly (a sign, eight
+   * digits, a point, four places): room for leading and trailing zeros, and a bound on the work
+   * whatever is sent.
+   */
+  static final int RATE_TEXT_MAX = 32;
+
+  /** A figure written out: a sign, digits, at most one point; ASCII digits only, no exponent. */
+  private static final Pattern WRITTEN_OUT =
+      Pattern.compile("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)");
+
+  /** Above this an unscaled value has more than 77 digits: refused without being stripped. */
+  private static final int MOST_UNSCALED_BITS = 256;
+
+  /**
+   * An hourly rate as it was sent, when it is written out as a figure.
+   *
+   * <p>Only a sign, digits and one point are read: an exponent ({@code 1E+2147483647} is thirteen
+   * characters and a figure with more than two thousand million whole digits), a word ({@code NaN},
+   * {@code Infinity}), a digit of another script and a grouping mark are no rate, and nothing is
+   * built from them. Common-web's guard judges the numbers a body carries; a rate sent as text
+   * never meets it, so it is judged here. The text is bounded ({@link #RATE_TEXT_MAX}) before it is
+   * read, so the work is the same whatever is sent. Less than nothing is read as sent: that is the
+   * service's refusal to give, not the reader's.
+   *
+   * @param text the rate as sent; surrounding blanks are ignored
+   * @return the figure, or empty when the text is not one written out
+   */
+  public static Optional<java.math.BigDecimal> writtenRate(String text) {
+    if (text == null) return Optional.empty();
+    String written = text.strip();
+    if (written.length() > RATE_TEXT_MAX || !WRITTEN_OUT.matcher(written).matches()) {
+      return Optional.empty();
+    }
+    return Optional.of(new java.math.BigDecimal(written));
+  }
+
+  /**
+   * Whether an hourly rate fits where it is kept: at most {@link #RATE_WHOLE_DIGITS} whole digits
+   * and {@link #RATE_PLACES} places once trailing zeros are dropped, as the column keeps {@code
+   * 12.50000000} unchanged and would round {@code 12.34567}.
+   *
+   * <p>Judged at a bounded cost whatever the figure: the whole digits are worked in a {@code long},
+   * where an {@code int} subtraction of the scale from the precision wraps round on {@code
+   * 1E+2147483647} and lets it through to the insert, and a figure written in more than {@link
+   * #MOST_UNSCALED_BITS} bits is refused without being stripped, since stripping costs time with
+   * the square of its length.
+   *
+   * @param rate the rate; its sign is not judged here
+   * @return whether the column holds it exactly
+   */
+  public static boolean rateFits(java.math.BigDecimal rate) {
+    if (rate.unscaledValue().bitLength() > MOST_UNSCALED_BITS) return false;
+    if ((long) rate.precision() - rate.scale() > RATE_WHOLE_DIGITS) return false;
+    return rate.scale() <= RATE_PLACES || rate.stripTrailingZeros().scale() <= RATE_PLACES;
+  }
+
   /**
    * What an hour of somebody's time costs, from a date.
    *
@@ -254,11 +343,16 @@ public final class Workforce {
    * figure that moved when somebody got a pay rise would make last quarter's report disagree with
    * itself.
    *
+   * <p><b>Rounded once, to the rate's own currency.</b> A yen figure is whole yen and a dinar keeps
+   * its third decimal: the minor units are the currency's (ISO 4217), never an assumed two.
+   *
    * @param rates the person's rates, newest first
+   * @param minorUnits the minor units of a currency, as {@code Fx.minorUnits} gives them
    * @return the cost, or null when no rate was in force then — which is reported as unknown rather
    *     than as zero, because zero is a real rate somebody may be on
    */
-  public static java.math.BigDecimal cost(Entry entry, List<PayRate> rates) {
+  public static java.math.BigDecimal cost(
+      Entry entry, List<PayRate> rates, java.util.function.ToIntFunction<String> minorUnits) {
     Duration worked = entry.worked();
     if (worked == null) return null;
     LocalDate day = entry.day();
@@ -266,7 +360,10 @@ public final class Workforce {
       if (!r.effectiveFrom().isAfter(day)) {
         return r.hourlyRate()
             .multiply(java.math.BigDecimal.valueOf(worked.toMinutes()))
-            .divide(java.math.BigDecimal.valueOf(60), 2, java.math.RoundingMode.HALF_UP);
+            .divide(
+                java.math.BigDecimal.valueOf(60),
+                minorUnits.applyAsInt(r.currency()),
+                java.math.RoundingMode.HALF_UP);
       }
     }
     return null;

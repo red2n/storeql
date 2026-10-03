@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
+import '../../core/auth/auth_notifier.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import 'fx_rates_card.dart';
+import 'widgets/business_wide_note.dart';
+import 'widgets/figure_field.dart';
 
 /// The business's return policy (return-controls): how many days a sale can
 /// come back, what a cashier may refund without a manager, and whether a
@@ -42,13 +46,18 @@ final returnPolicyProvider = FutureProvider.autoDispose<ReturnPolicy>((ref) asyn
 
 /// The Return policy card on the Stores screen, for management only (the
 /// caller decides who sees it; the server refuses anyone else). It reads the
-/// policy in force and offers **Edit**.
+/// policy in force and offers **Edit** — except to a manager held to stores,
+/// whom order-svc refuses the whole business's policy (BUSINESS_WIDE_ONLY) and
+/// who is told who changes it instead.
 class ReturnPolicyCard extends ConsumerWidget {
   const ReturnPolicyCard({super.key});
+
+  static const heldNote = 'Only an owner or a head-office manager changes the return policy.';
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
+    final canEdit = !heldToStores(ref.watch(authNotifierProvider).value);
     final policy = ref.watch(returnPolicyProvider);
     final home = ref.watch(fxRatesProvider).value?.home ?? '';
     final gutter = context.pageGutter;
@@ -100,14 +109,15 @@ class ReturnPolicyCard extends ConsumerWidget {
                             style: Theme.of(context).textTheme.titleMedium),
                       ),
                     ]),
-                    FilledButton.tonalIcon(
-                      key: const Key('return-policy-edit'),
-                      onPressed: () => showDialog<void>(
-                          context: context,
-                          builder: (_) => ReturnPolicyDialog(policy: p, home: home)),
-                      icon: const Icon(Icons.edit_outlined, size: 18),
-                      label: const Text('Edit'),
-                    ),
+                    if (canEdit)
+                      FilledButton.tonalIcon(
+                        key: const Key('return-policy-edit'),
+                        onPressed: () => showDialog<void>(
+                            context: context,
+                            builder: (_) => ReturnPolicyDialog(policy: p, home: home)),
+                        icon: const Icon(Icons.edit_outlined, size: 18),
+                        label: const Text('Edit'),
+                      ),
                   ],
                 ),
                 const SizedBox(height: AppSpacing.xs),
@@ -116,6 +126,11 @@ class ReturnPolicyCard extends ConsumerWidget {
                   key: const Key('return-policy-summary'),
                   style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
                 ),
+                if (!canEdit) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  const BusinessWideNote(
+                      key: Key('return-policy-business-wide-note'), message: heldNote),
+                ],
               ],
             ),
           ),
@@ -162,16 +177,32 @@ class _ReturnPolicyDialogState extends ConsumerState<ReturnPolicyDialog> {
   bool _busy = false;
   String? _error;
 
-  static String _num(double? v) =>
-      v == null ? '' : (v == v.roundToDouble() ? v.toInt().toString() : v.toString());
+  // The limits are money in the home currency, to its places, read the way
+  // the app's language writes a number ([AmountMarks]) and sent as the
+  // decimals typed. Blank is no limit; anything else that cannot be read is
+  // refused under its field and nothing is saved. The window is a whole
+  // number of days read the same way: read as a number literal, `0x1e` was
+  // saved as thirty days.
+  final _marks = AmountMarks.ofApp();
+  late final _money = AmountShape.money(widget.home);
+
+  /// [v] written at the currency's places the way the app's language writes
+  /// a number, so it reads back unchanged; empty for no limit.
+  String _written(double? v) => v == null ? '' : _marks.writeAt(v, _money.decimals);
+
+  bool get _refused => figureRefused(_marks, [
+        (_window, wholeNumber),
+        (_ceiling, _money),
+        if (_noReceipt) (_noReceiptCeiling, _money),
+      ]);
 
   @override
   void initState() {
     super.initState();
     final p = widget.policy;
     _window = TextEditingController(text: '${p.windowDays}');
-    _ceiling = TextEditingController(text: _num(p.cashierCeiling));
-    _noReceiptCeiling = TextEditingController(text: _num(p.noReceiptCeiling));
+    _ceiling = TextEditingController(text: _written(p.cashierCeiling));
+    _noReceiptCeiling = TextEditingController(text: _written(p.noReceiptCeiling));
     _noReceipt = p.noReceiptAllowed;
   }
 
@@ -183,36 +214,16 @@ class _ReturnPolicyDialogState extends ConsumerState<ReturnPolicyDialog> {
     super.dispose();
   }
 
-  /// Blank is "no limit" (null); anything else must be a number of at least 0.
-  /// Returns false when the text is not usable.
-  bool _limit(String text, void Function(double?) set) {
-    final t = text.trim();
-    if (t.isEmpty) {
-      set(null);
-      return true;
-    }
-    final v = double.tryParse(t);
-    if (v == null || v < 0) return false;
-    set(v);
-    return true;
-  }
-
   Future<void> _save() async {
-    final days = int.tryParse(_window.text.trim());
-    if (days == null || days < 0) {
+    if (_refused) return;
+    final days = wholeOf(_window, _marks);
+    if (days == null) {
       setState(() => _error = 'The window is a whole number of days.');
       return;
     }
-    double? cashier;
-    double? noReceipt;
-    if (!_limit(_ceiling.text, (v) => cashier = v)) {
-      setState(() => _error = "The cashier's limit is an amount of 0 or more, or empty for none.");
-      return;
-    }
-    if (_noReceipt && !_limit(_noReceiptCeiling.text, (v) => noReceipt = v)) {
-      setState(() => _error = 'The no-receipt limit is an amount of 0 or more, or empty for none.');
-      return;
-    }
+    // The plain decimals typed (JSON-B reads them exactly); blank is no limit.
+    final cashier = figureOf(_ceiling, _money, _marks);
+    final noReceipt = figureOf(_noReceiptCeiling, _money, _marks);
     setState(() {
       _busy = true;
       _error = null;
@@ -260,22 +271,25 @@ class _ReturnPolicyDialogState extends ConsumerState<ReturnPolicyDialog> {
                 style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
               ),
               const SizedBox(height: AppSpacing.md),
-              TextField(
-                key: const Key('policy-window'),
+              FigureField(
+                fieldKey: const Key('policy-window'),
                 controller: _window,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                    labelText: 'Return window (days)',
-                    helperText: 'Counted from the day the goods were handed over'),
+                shape: wholeNumber,
+                marks: _marks,
+                label: 'Return window (days)',
+                helper: 'Counted from the day the goods were handed over',
+                hint: '',
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: AppSpacing.sm),
-              TextField(
-                key: const Key('policy-ceiling'),
+              FigureField(
+                fieldKey: const Key('policy-ceiling'),
                 controller: _ceiling,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: InputDecoration(
-                    labelText: "Cashier's refund limit$unit",
-                    helperText: 'Empty for no limit'),
+                shape: _money,
+                marks: _marks,
+                label: "Cashier's refund limit$unit",
+                helper: 'Empty for no limit',
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: AppSpacing.sm),
               SwitchListTile(
@@ -287,12 +301,14 @@ class _ReturnPolicyDialogState extends ConsumerState<ReturnPolicyDialog> {
                 onChanged: (v) => setState(() => _noReceipt = v),
               ),
               if (_noReceipt)
-                TextField(
-                  key: const Key('policy-no-receipt-ceiling'),
+                FigureField(
+                  fieldKey: const Key('policy-no-receipt-ceiling'),
                   controller: _noReceiptCeiling,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: InputDecoration(
-                      labelText: 'No-receipt limit$unit', helperText: 'Empty for no limit'),
+                  shape: _money,
+                  marks: _marks,
+                  label: 'No-receipt limit$unit',
+                  helper: 'Empty for no limit',
+                  onChanged: (_) => setState(() {}),
                 ),
               if (_error != null) ...[
                 const SizedBox(height: AppSpacing.md),
@@ -308,7 +324,7 @@ class _ReturnPolicyDialogState extends ConsumerState<ReturnPolicyDialog> {
             child: const Text('Cancel')),
         FilledButton(
           key: const Key('policy-save'),
-          onPressed: _busy ? null : _save,
+          onPressed: _busy || _refused ? null : _save,
           child: const Text('Save'),
         ),
       ],

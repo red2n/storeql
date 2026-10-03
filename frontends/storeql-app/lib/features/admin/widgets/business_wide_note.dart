@@ -11,11 +11,14 @@ import '../../../core/spacing.dart';
 bool heldToStores(AuthState? auth) => auth is AuthAuthenticated && auth.heldToStores;
 
 /// The line shown in place of a business-wide setting's write controls to a
-/// manager held to stores.
+/// manager held to stores. [message] names the thing where "this" would not be
+/// clear (a screen that keeps other controls, a section that is not read).
 class BusinessWideNote extends StatelessWidget {
-  const BusinessWideNote({super.key = const Key('business-wide-note')});
+  const BusinessWideNote({super.key = const Key('business-wide-note'), this.message = text});
 
   static const text = 'Only an owner or a head-office manager changes this.';
+
+  final String message;
 
   @override
   Widget build(BuildContext context) {
@@ -26,7 +29,7 @@ class BusinessWideNote extends StatelessWidget {
         Icon(Icons.lock_outline, size: 16, color: cs.onSurfaceVariant),
         const SizedBox(width: AppSpacing.xs),
         Flexible(
-          child: Text(text,
+          child: Text(message,
               style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
         ),
       ],

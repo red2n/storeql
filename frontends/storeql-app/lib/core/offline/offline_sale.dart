@@ -279,6 +279,15 @@ bool isOfflineError(Object error) {
 /// charged a different amount for this sale stays that way however often the
 /// till asks, so the sale is parked with the server's words for a manager to
 /// settle another way.
+///
+/// So is a card tender payment-svc will not link to the payment its card
+/// machine took (`terminalPaymentId`): the sale cancelled or voided since
+/// (PAYMENT_ORDER_GIVEN_UP — nothing is recorded for it, and what the machine
+/// took goes back on the card), the approval put back on the card, not that
+/// amount, not that sale's, not at that store, or not an approval at all. An
+/// approval already recorded on its order is not among the refusals of a
+/// replay: it is that tender, recorded ([cardApprovalAlreadyRecorded]); it is
+/// here only so that no other request can loop on it.
 const _permanentConflicts = {
   'ORDER_LINE_RECALLED',
   'ORDER_SCALE_NOT_CERTIFIED',
@@ -287,7 +296,31 @@ const _permanentConflicts = {
   'GIFT_CARD_CURRENCY_MISMATCH',
   'GIFT_CARD_INSUFFICIENT_BALANCE',
   'GIFT_CARD_ALREADY_REDEEMED_FOR_ORDER',
+  'PAYMENT_ORDER_GIVEN_UP',
+  'TERMINAL_ATTEMPT_ALREADY_RECORDED',
+  'TERMINAL_ATTEMPT_REFUNDED',
+  'TERMINAL_AMOUNT_MISMATCH',
+  'TERMINAL_WRONG_STORE',
+  'TERMINAL_NOT_APPROVED',
+  'TERMINAL_ATTEMPT_OTHER_ORDER',
+  'TERMINAL_NOT_A_SALE',
 };
+
+/// Whether [error] is payment-svc saying that the card machine's approval a
+/// tender [body] names (`terminalPaymentId`) is already recorded on its order
+/// (409 TERMINAL_ATTEMPT_ALREADY_RECORDED).
+///
+/// That is this tender, recorded: payment-svc records an approval once, on its
+/// own order, at exactly what the machine took, and says this only of an
+/// approval of the same order (another order's it refuses first). It was
+/// recorded under another key — the sale finished from the card machine's
+/// refusal, by this till or another on the same machine — so the tender's own
+/// key meets the refusal on every press and every replay: taken for a
+/// refusal, the sale could never finish, and in the offline queue every sale
+/// behind it would wait for ever.
+bool cardApprovalAlreadyRecorded(Object error, Map<String, dynamic> body) =>
+    body['terminalPaymentId'] != null &&
+    apiErrorCode(error) == 'TERMINAL_ATTEMPT_ALREADY_RECORDED';
 
 /// Whether a server *response* to a replay is permanent — retrying will not help,
 /// so the sale is parked for a human instead of looping forever.
@@ -296,7 +329,8 @@ const _permanentConflicts = {
 /// and the auth interceptor refreshes on the next attempt. 409 is retryable
 /// because payment-svc returns `IDEMPOTENCY_CONFLICT` for a concurrent same-key
 /// request and explicitly asks the caller to retry into the replay path — all
-/// but the refusals of the sale itself in [_permanentConflicts].
+/// but the refusals of the sale itself, or of a card tender's link to its
+/// card machine payment, in [_permanentConflicts].
 bool isPermanentRejection(Object error) {
   if (error is! DioException) return false;
   final status = error.response?.statusCode;

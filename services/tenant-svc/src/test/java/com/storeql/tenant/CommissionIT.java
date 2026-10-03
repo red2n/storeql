@@ -66,6 +66,17 @@ class CommissionIT {
 
   private Answer call(
       String method, String path, String json, String tenant, String user, String roles) {
+    return call(method, path, json, tenant, user, roles, null);
+  }
+
+  private Answer call(
+      String method,
+      String path,
+      String json,
+      String tenant,
+      String user,
+      String roles,
+      String stores) {
     WebTarget t = target;
     int q = path.indexOf('?');
     if (q < 0) {
@@ -84,6 +95,7 @@ class CommissionIT {
     if (user != null) b = b.header("X-User-Id", user);
     if (tenant != null) b = b.header("X-Tenant-Id", tenant);
     if (roles != null) b = b.header("X-Roles", roles);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
     Entity<String> body = Entity.entity(json == null ? "{}" : json, MediaType.APPLICATION_JSON);
     Response r =
         switch (method) {
@@ -109,7 +121,12 @@ class CommissionIT {
   private record Shop(String tenant, String store, String person, String manager) {}
 
   private Shop shop() {
-    String tenant = TenantOnboarding.onboard(target, "commission", "GB", "GBP");
+    return shop("GB", "GBP", "London", "E1 6AN", "Europe/London");
+  }
+
+  /** A business in a country and currency of the test's choosing, with one store and one person. */
+  private Shop shop(String country, String currency, String city, String pincode, String zone) {
+    String tenant = TenantOnboarding.onboard(target, "commission", country, currency);
     String manager = Ids.newId().toString();
     Answer store =
         call(
@@ -117,8 +134,15 @@ class CommissionIT {
             "/admin/stores",
             "{\"name\":\"High Street\",\"code\":\"HS-"
                 + Ids.newId().toString().substring(0, 8)
-                + "\",\"line1\":\"1 High Street\",\"city\":\"London\",\"country\":\"GB\","
-                + "\"pincode\":\"E1 6AN\",\"timezone\":\"Europe/London\"}",
+                + "\",\"line1\":\"1 High Street\",\"city\":\""
+                + city
+                + "\",\"country\":\""
+                + country
+                + "\",\"pincode\":\""
+                + pincode
+                + "\",\"timezone\":\""
+                + zone
+                + "\"}",
             tenant,
             manager,
             "OWNER");
@@ -442,6 +466,42 @@ class CommissionIT {
   }
 
   @Test
+  @DisplayName(
+      "A per-unit band starts at a whole number of units, so no statement currency rounds it")
+  void aPerUnitBandStartsAtAWholeUnit() {
+    // order-svc keeps a statement line's threshold at the statement currency's minor units: a
+    // band at 2.125 units would read 2.13 on a pound statement and a band at 0.5 would read 1 on a
+    // yen one. Refused here, in every business, before anything is written.
+    for (Shop shop : List.of(shop(), shop("JP", "JPY", "Tokyo", "10001", "Asia/Tokyo"))) {
+      for (String fractional : List.of("2.125", "0.5")) {
+        Answer refused =
+            scheme(
+                shop,
+                "{\"name\":\"Deli\",\"basis\":\"PER_UNIT\",\"currency\":\"GBP\","
+                    + "\"bands\":[{\"thresholdFrom\":0,\"rate\":0.50},{\"thresholdFrom\":"
+                    + fractional
+                    + ",\"rate\":0.75}]}");
+        assertThat(refused.text(), refused.status(), is(400));
+        assertThat(refused.code(), is("COMMISSION_SCHEME_INVALID"));
+      }
+      Answer schemes = call("GET", C + "/schemes", null, shop.tenant(), shop.manager(), "OWNER");
+      assertThat("nothing was written", schemes.list(), hasSize(0));
+
+      Answer whole =
+          scheme(
+              shop,
+              "{\"name\":\"Deli\",\"basis\":\"PER_UNIT\",\"currency\":\"GBP\","
+                  + "\"bands\":[{\"thresholdFrom\":0,\"rate\":0.50},{\"thresholdFrom\":100.000,"
+                  + "\"rate\":0.75}]}");
+      assertThat(whole.text(), whole.status(), is(201));
+      assertThat(
+          "a count, shown at a quantity's scale",
+          whole.data().getJsonArray("bands").getJsonObject(1).getString("thresholdFrom"),
+          is("100.000"));
+    }
+  }
+
+  @Test
   @DisplayName("A withdrawn arrangement stops being offered once nobody is on it")
   void withdrawal() {
     Shop shop = shop();
@@ -527,5 +587,349 @@ class CommissionIT {
         "the arrangements are as they were",
         call("GET", C + "/schemes", null, shop.tenant(), shop.manager(), "OWNER").list(),
         hasSize(1));
+  }
+
+  /** A person's arrangements, read as a caller of some roles held to some stores. */
+  private Answer arrangementsOf(Shop shop, String person, String roles, String heldTo) {
+    return call("GET", C + "/staff/" + person, null, shop.tenant(), shop.manager(), roles, heldTo);
+  }
+
+  @Test
+  @DisplayName(
+      "A person's arrangements are read only for somebody at a store the caller is held to")
+  void arrangementsAreReadOnlyForPeopleAtTheCallersStores() {
+    Shop a = shop();
+    Answer second =
+        call(
+            "POST",
+            "/admin/stores",
+            "{\"name\":\"Low Street\",\"code\":\"LS-"
+                + Ids.newId().toString().substring(28)
+                + "\",\"line1\":\"2 Low Street\",\"city\":\"London\",\"country\":\"GB\","
+                + "\"pincode\":\"E1 6AN\",\"timezone\":\"Europe/London\"}",
+            a.tenant(),
+            a.manager(),
+            "OWNER");
+    assertThat(second.text(), second.status(), is(201));
+    String storeB = second.data().getString("id");
+    String atB = Ids.newId().toString();
+    Answer assigned =
+        call(
+            "POST",
+            "/admin/staff",
+            "{\"userId\":\"" + atB + "\",\"storeId\":\"" + storeB + "\",\"role\":\"CASHIER\"}",
+            a.tenant(),
+            a.manager(),
+            "OWNER");
+    assertThat(assigned.text(), assigned.status(), is(201));
+    String scheme = scheme(a, flat("Counter", "2")).data().getString("id");
+    for (String person : List.of(a.person(), atB)) {
+      Answer on =
+          call(
+              "PUT",
+              C + "/staff/" + person,
+              "{\"schemeId\":\"" + scheme + "\",\"effectiveFrom\":\"2026-01-01\"}",
+              a.tenant(),
+              a.manager(),
+              "OWNER");
+      assertThat(on.text(), on.status(), is(201));
+    }
+
+    // Held to A: A's person, never B's or a stranger, and nothing of theirs leaks.
+    Answer own = arrangementsOf(a, a.person(), "MANAGER", a.store());
+    assertThat(own.text(), own.status(), is(200));
+    assertThat(own.list(), hasSize(1));
+    for (String other : List.of(atB, Ids.newId().toString())) {
+      Answer refused = arrangementsOf(a, other, "MANAGER", a.store());
+      assertThat(refused.text(), refused.status(), is(403));
+      assertThat(refused.code(), is("STORE_ACCESS_DENIED"));
+      assertThat(refused.text(), not(containsString(scheme)));
+    }
+    // A manager of both branches, and a caller held to none: B's person too.
+    assertThat(arrangementsOf(a, atB, "MANAGER", a.store() + "," + storeB).list(), hasSize(1));
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer whole = arrangementsOf(a, atB, role, null);
+      assertThat(role + " -> " + whole.text(), whole.status(), is(200));
+      assertThat(whole.list(), hasSize(1));
+    }
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, arrangementsOf(a, a.person(), role, a.store()).status(), is(403));
+    }
+
+    // Another business: management held to none reads nothing of ours; held to its own store it is
+    // refused; its staff and shoppers are refused outright.
+    Shop rival = shop();
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer theirs = arrangementsOf(rival, a.person(), role, null);
+      assertThat(theirs.text(), theirs.status(), is(200));
+      assertThat(theirs.list(), hasSize(0));
+    }
+    Answer held = arrangementsOf(rival, a.person(), "MANAGER", rival.store());
+    assertThat(held.status(), is(403));
+    assertThat(held.code(), is("STORE_ACCESS_DENIED"));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, arrangementsOf(rival, a.person(), role, null).status(), is(403));
+    }
+    assertThat("reading moved nothing", arrangementsOf(a, atB, "OWNER", null).list(), hasSize(1));
+  }
+
+  /** A second store of the business, with one person assigned at it. */
+  private record Branch(String store, String person) {}
+
+  private Branch secondStore(Shop a) {
+    Answer store =
+        call(
+            "POST",
+            "/admin/stores",
+            "{\"name\":\"Low Street\",\"code\":\"LS-"
+                + Ids.newId().toString().substring(28)
+                + "\",\"line1\":\"2 Low Street\",\"city\":\"London\",\"country\":\"GB\","
+                + "\"pincode\":\"E1 6AN\",\"timezone\":\"Europe/London\"}",
+            a.tenant(),
+            a.manager(),
+            "OWNER");
+    assertThat(store.text(), store.status(), is(201));
+    String storeId = store.data().getString("id");
+    String person = Ids.newId().toString();
+    Answer assigned =
+        call(
+            "POST",
+            "/admin/staff",
+            "{\"userId\":\"" + person + "\",\"storeId\":\"" + storeId + "\",\"role\":\"CASHIER\"}",
+            a.tenant(),
+            a.manager(),
+            "OWNER");
+    assertThat(assigned.text(), assigned.status(), is(201));
+    return new Branch(storeId, person);
+  }
+
+  /** What these people's September sales earn, asked as a caller of some roles at some stores. */
+  private Answer rateAs(Shop shop, String roles, String heldTo, String... people) {
+    StringBuilder sellers = new StringBuilder();
+    for (String p : people) {
+      if (sellers.length() > 0) sellers.append(',');
+      sellers
+          .append("{\"userId\":\"")
+          .append(p)
+          .append("\",\"days\":[{\"day\":\"2026-09-10\",\"net\":100.00}]}");
+    }
+    return call(
+        "POST",
+        C + "/rate",
+        "{\"from\":\"2026-09-01\",\"to\":\"2026-09-30\",\"sellers\":[" + sellers + "]}",
+        shop.tenant(),
+        shop.manager(),
+        roles,
+        heldTo);
+  }
+
+  @Test
+  @DisplayName(
+      "What somebody's sales earn is worked out for a caller held to stores only for people at"
+          + " those stores")
+  void ratingIsHeldToTheCallersStores() {
+    Shop a = shop();
+    Branch b = secondStore(a);
+    String head = Ids.newId().toString();
+    Answer headOffice =
+        call(
+            "POST",
+            "/admin/staff",
+            "{\"userId\":\"" + head + "\",\"businessWide\":true,\"role\":\"MANAGER\"}",
+            a.tenant(),
+            a.manager(),
+            "OWNER");
+    assertThat(headOffice.text(), headOffice.status(), is(201));
+    String scheme = scheme(a, flat("Head office plan", "2")).data().getString("id");
+    for (String person : List.of(a.person(), b.person(), head)) {
+      Answer on =
+          call(
+              "PUT",
+              C + "/staff/" + person,
+              "{\"schemeId\":\"" + scheme + "\",\"effectiveFrom\":\"2026-01-01\"}",
+              a.tenant(),
+              a.manager(),
+              "OWNER");
+      assertThat(on.text(), on.status(), is(201));
+    }
+
+    // Held to A: A's person is rated under their arrangement.
+    Answer own = rateAs(a, "MANAGER", a.store(), a.person());
+    assertThat(own.text(), own.status(), is(200));
+    assertThat(own.list(), hasSize(1));
+    assertThat(own.list().get(0).getString("commission"), is("2.00"));
+
+    // Anybody else — B's person, the business-wide manager above them, a stranger — refuses the
+    // whole call, alone or beside A's person, and names no scheme, rate or band.
+    String stranger = Ids.newId().toString();
+    for (List<String> sellers :
+        List.of(
+            List.of(b.person()),
+            List.of(head),
+            List.of(stranger),
+            List.of(a.person(), b.person()),
+            List.of(a.person(), head))) {
+      Answer refused = rateAs(a, "MANAGER", a.store(), sellers.toArray(String[]::new));
+      assertThat(sellers + " -> " + refused.text(), refused.status(), is(403));
+      assertThat(refused.code(), is("STORE_ACCESS_DENIED"));
+      assertThat("no arrangement leaks", refused.text(), not(containsString(scheme)));
+      assertThat(refused.text(), not(containsString("Head office plan")));
+      assertThat(
+          "only the people refused are named", refused.text(), not(containsString(a.person())));
+    }
+
+    // A manager of both branches: both branches' people, still not head office.
+    String both = a.store() + "," + b.store();
+    Answer branches = rateAs(a, "MANAGER", both, a.person(), b.person());
+    assertThat(branches.text(), branches.status(), is(200));
+    assertThat(branches.list(), hasSize(2));
+    Answer above = rateAs(a, "MANAGER", both, head);
+    assertThat(above.status(), is(403));
+    assertThat(above.code(), is("STORE_ACCESS_DENIED"));
+
+    // Held to no store — an owner, a business-wide manager, and order-svc producing a statement,
+    // which forwards no stores: anybody in the business.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer whole = rateAs(a, role, null, a.person(), b.person(), head);
+      assertThat(role + " -> " + whole.text(), whole.status(), is(200));
+      assertThat(whole.list(), hasSize(3));
+      for (JsonObject rated : whole.list()) {
+        assertThat(rated.getString("commission"), is("2.00"));
+      }
+    }
+
+    // Below management, and a shopper: refused outright.
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      Answer refused = rateAs(a, role, a.store(), a.person());
+      assertThat(role, refused.status(), is(403));
+      assertThat(refused.text(), not(containsString(scheme)));
+    }
+
+    // Another business: its management held to none finds none of our arrangements; held to its
+    // own store it is refused; its staff and shoppers are refused outright.
+    Shop rival = shop();
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer theirs = rateAs(rival, role, null, a.person(), b.person(), head);
+      assertThat(theirs.text(), theirs.status(), is(200));
+      assertThat(theirs.text(), not(containsString(scheme)));
+      for (JsonObject rated : theirs.list()) {
+        assertThat(
+            role + " earns nothing across the boundary", rated.getString("commission"), is("0.00"));
+      }
+    }
+    Answer held = rateAs(rival, "MANAGER", rival.store(), a.person());
+    assertThat(held.text(), held.status(), is(403));
+    assertThat(held.code(), is("STORE_ACCESS_DENIED"));
+    assertThat(held.text(), not(containsString(scheme)));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, rateAs(rival, role, null, a.person()).status(), is(403));
+    }
+
+    // Asking moved nothing: the arrangements stand as they were.
+    for (String person : List.of(a.person(), b.person(), head)) {
+      assertThat(
+          call("GET", C + "/staff/" + person, null, a.tenant(), a.manager(), "OWNER").list(),
+          hasSize(1));
+    }
+    assertThat(
+        call("GET", C + "/schemes", null, a.tenant(), a.manager(), "OWNER").list(), hasSize(1));
+  }
+
+  @Test
+  @DisplayName("Rating sales: a period that is not one is 400 before a seller elsewhere is 403")
+  void aPeriodIsJudgedBeforeTheSellers() {
+    Shop a = shop();
+    Branch b = secondStore(a);
+    Shop rival = shop();
+    String backwards =
+        "{\"from\":\"2026-09-30\",\"to\":\"2026-09-01\",\"sellers\":[{\"userId\":\""
+            + b.person()
+            + "\",\"days\":[{\"day\":\"2026-09-10\",\"net\":100.00}]}]}";
+    // Our branch manager of A, and another business's manager naming our store among its own.
+    for (String[] who :
+        new String[][] {
+          {a.tenant(), a.manager(), a.store()}, {rival.tenant(), rival.manager(), a.store()}
+        }) {
+      Answer refused = call("POST", C + "/rate", backwards, who[0], who[1], "MANAGER", who[2]);
+      assertThat(refused.text(), refused.status(), is(400));
+      assertThat(refused.code(), is("COMMISSION_PERIOD_INVALID"));
+      assertThat("nothing about the seller leaks", refused.text(), not(containsString(b.person())));
+    }
+    // With a period that is one, the seller elsewhere is the refusal.
+    Answer held = rateAs(a, "MANAGER", a.store(), b.person());
+    assertThat(held.text(), held.status(), is(403));
+    assertThat(held.code(), is("STORE_ACCESS_DENIED"));
+  }
+
+  @Test
+  @DisplayName(
+      "Commission and its bands are in the business's own currency's minor units: whole yen, a"
+          + " dinar's third decimal, two places of a pound")
+  void commissionIsInTheBusinesssOwnMinorUnits() {
+    // Yen: none.
+    Shop tokyo = shop("JP", "JPY", "Tokyo", "10001", "Asia/Tokyo");
+    Answer half =
+        scheme(
+            tokyo,
+            "{\"name\":\"Half a yen\",\"basis\":\"PERCENT_OF_NET\","
+                + "\"bands\":[{\"thresholdFrom\":0,\"rate\":2},{\"thresholdFrom\":1000.5,\"rate\":3}]}");
+    assertThat(half.text(), half.status(), is(400));
+    assertThat(half.code(), is("COMMISSION_SCHEME_INVALID"));
+    Answer yen =
+        scheme(
+            tokyo,
+            "{\"name\":\"Counter\",\"basis\":\"PERCENT_OF_NET\","
+                + "\"bands\":[{\"thresholdFrom\":0,\"rate\":2.5},{\"thresholdFrom\":100000,\"rate\":3}]}");
+    assertThat(yen.text(), yen.status(), is(201));
+    var bands = yen.data().getJsonArray("bands");
+    assertThat(bands.getJsonObject(0).getString("thresholdFrom"), is("0"));
+    assertThat(bands.getJsonObject(1).getString("thresholdFrom"), is("100000"));
+    assertThat(assign(tokyo, yen.data().getString("id"), "2026-09-01").status(), is(201));
+    Answer rated =
+        rate(tokyo, "2026-09-01", "2026-09-30", "[{\"day\":\"2026-09-10\",\"net\":12345}]");
+    assertThat(rated.text(), rated.status(), is(200));
+    JsonObject person = rated.list().get(0);
+    // 2.5% of 12 345 yen is 308.625: paid as whole yen.
+    assertThat(rated.text(), person.getString("commission"), is("309"));
+    assertThat(person.getJsonArray("segments").getJsonObject(0).getString("amount"), is("12345"));
+
+    // A Kuwaiti dinar: three.
+    Shop kuwait = shop("KW", "KWD", "Kuwait City", "10001", "Asia/Kuwait");
+    Answer dinar =
+        scheme(
+            kuwait,
+            "{\"name\":\"Counter\",\"basis\":\"PERCENT_OF_NET\","
+                + "\"bands\":[{\"thresholdFrom\":0,\"rate\":2.5},{\"thresholdFrom\":250.125,\"rate\":3}]}");
+    assertThat(dinar.text(), dinar.status(), is(201));
+    assertThat(
+        "a dinar's third decimal is kept, not rounded away by the column",
+        dinar.data().getJsonArray("bands").getJsonObject(1).getString("thresholdFrom"),
+        is("250.125"));
+    assertThat(assign(kuwait, dinar.data().getString("id"), "2026-09-01").status(), is(201));
+    Answer fils =
+        rate(kuwait, "2026-09-01", "2026-09-30", "[{\"day\":\"2026-09-10\",\"net\":200.500}]");
+    assertThat(fils.text(), fils.status(), is(200));
+    // 2.5% of 200.500 is 5.0125: 5.013 dinars, never 5.01.
+    assertThat(fils.text(), fils.list().get(0).getString("commission"), is("5.013"));
+
+    // A pound: two, as before.
+    Shop london = shop();
+    Answer pounds =
+        scheme(
+            london,
+            "{\"name\":\"Tiered\",\"basis\":\"PERCENT_OF_NET\","
+                + "\"bands\":[{\"thresholdFrom\":0,\"rate\":1},{\"thresholdFrom\":1000,\"rate\":5}]}");
+    assertThat(pounds.text(), pounds.status(), is(201));
+    assertThat(
+        pounds.data().getJsonArray("bands").getJsonObject(1).getString("thresholdFrom"),
+        is("1000.00"));
+    // A per-unit amount is in a currency ISO 4217 knows.
+    Answer made =
+        scheme(
+            london,
+            "{\"name\":\"Made up\",\"basis\":\"PER_UNIT\",\"currency\":\"XYZ\","
+                + "\"bands\":[{\"thresholdFrom\":0,\"rate\":1}]}");
+    assertThat(made.text(), made.status(), is(400));
+    assertThat(made.code(), is("COMMISSION_SCHEME_INVALID"));
   }
 }

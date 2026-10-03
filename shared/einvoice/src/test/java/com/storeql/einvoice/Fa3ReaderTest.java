@@ -33,7 +33,7 @@ class Fa3ReaderTest {
         null,
         List.of(),
         null,
-        "PL5260250991",
+        "PL5260250274",
         null,
         null,
         null,
@@ -146,7 +146,7 @@ class Fa3ReaderTest {
             List.of(vat("100.00", "23.00", "S", "23")),
             "123.00",
             List.of(),
-            buyer("PL7010001455", "Kawiarnia Molo sp. z o.o."));
+            buyer("PL7740001454", "Kawiarnia Molo sp. z o.o."));
     String xml = Fa3.write(out, Instant.parse("2026-09-14T09:00:00Z"), "storeql");
 
     EInvoices.Received received = readBack(xml);
@@ -156,9 +156,9 @@ class Fa3ReaderTest {
     assertEquals(LocalDate.of(2026, 9, 14), back.issueDate());
     assertEquals("PLN", back.currency());
     assertEquals("380", back.typeCode());
-    assertEquals("PL5260250991", back.seller().vatId());
+    assertEquals("PL5260250274", back.seller().vatId());
     assertEquals("Sklep Portowy sp. z o.o.", back.seller().name());
-    assertEquals("PL7010001455", back.buyer().vatId());
+    assertEquals("PL7740001454", back.buyer().vatId());
     assertEquals("80-001", back.seller().address().postcode(), "a Polish postcode is read out");
     assertEquals("Gdańsk", back.seller().address().city());
 
@@ -191,7 +191,7 @@ class Fa3ReaderTest {
             List.of(vat("50.00", "11.50", "S", "23")),
             "61.50",
             List.of(new Invoice.PrecedingInvoice("FV/2026/0001", LocalDate.of(2026, 9, 14))),
-            buyer("PL7010001455", "Kawiarnia Molo sp. z o.o."));
+            buyer("PL7740001454", "Kawiarnia Molo sp. z o.o."));
     String xml = Fa3.write(out, Instant.parse("2026-09-20T09:00:00Z"), "storeql");
     assertTrue(xml.contains("<P_11>-50.00</P_11>"), "the document itself is negative");
 
@@ -222,7 +222,7 @@ class Fa3ReaderTest {
                     null)),
             "200.00",
             List.of(),
-            buyer("PL7010001455", "Przychodnia sp. z o.o."));
+            buyer("PL7740001454", "Przychodnia sp. z o.o."));
     String xml = Fa3.write(out, Instant.parse("2026-09-14T09:00:00Z"), "storeql");
     assertTrue(xml.contains("<P_12>zw</P_12>"));
 
@@ -261,7 +261,7 @@ class Fa3ReaderTest {
             + Fa3.NAMESPACE
             + "\"><Naglowek><KodFormularza kodSystemowy=\"FA (3)\" wersjaSchemy=\"1-0E\">FA"
             + "</KodFormularza><WariantFormularza>3</WariantFormularza></Naglowek>"
-            + "<Podmiot1><DaneIdentyfikacyjne><NIP>5260250991</NIP><Nazwa>Sklep</Nazwa>"
+            + "<Podmiot1><DaneIdentyfikacyjne><NIP>5260250274</NIP><Nazwa>Sklep</Nazwa>"
             + "</DaneIdentyfikacyjne><Adres><KodKraju>PL</KodKraju>"
             + "<AdresL1>ul. Portowa 1</AdresL1><AdresL2>Warszawa Śródmieście</AdresL2></Adres>"
             + "</Podmiot1><Podmiot2><DaneIdentyfikacyjne><BrakID>1</BrakID><Nazwa>Klient</Nazwa>"

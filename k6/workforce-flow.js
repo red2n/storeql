@@ -15,13 +15,13 @@
 // than as zero, and a correction that supersedes rather than edits.
 //
 // Refused: a shift or a clock-in at a store somebody is not assigned to, a shift rostered for somebody
-// else, a second break, clocking out twice, a correction with no reason, correcting an entry already
-// corrected, a cashier reading the management roster, another business touching these hours, and an
+// else, a second break, clocking out twice, a correction with no reason or no Idempotency-Key, a key
+// sent again with another reason, correcting an entry already corrected, a cashier reading the management roster, another business touching these hours, and an
 // anonymous caller.
 //
 //   k6/run.sh workforce-flow
 import { Counter } from 'k6/metrics';
-import { ALL_CHECKS_PASS, addStore, call, data, expect, poll, sellingTenant, staffUser, truthy, uniq } from './lib/storeql.js';
+import { ALL_CHECKS_PASS, addStore, call, data, expect, newKey, poll, sellingTenant, staffUser, truthy, uniq } from './lib/storeql.js';
 
 const completed = new Counter('flow_completed');
 export const options = {
@@ -86,9 +86,15 @@ export default function ({ shop, rival }) {
     roster.concerns,
   );
 
-  expect(post(`${W}/shifts/${late.id}/publish`, {}), '[+] published, and staff may rely on it', 200);
+  // Publishing is a retryable write (intent/workforce-rules.md): each call carries its own fresh
+  // Idempotency-Key, so the second is a new attempt and meets the shift already published.
   expect(
-    post(`${W}/shifts/${late.id}/publish`, {}),
+    call('POST', `${W}/shifts/${late.id}/publish`, { token: owner, body: {}, idem: true }),
+    '[+] published, and staff may rely on it',
+    200,
+  );
+  expect(
+    call('POST', `${W}/shifts/${late.id}/publish`, { token: owner, body: {}, idem: true }),
     '[-] only a planned shift is published',
     409,
     'WORKFORCE_SHIFT_NOT_PLANNED',
@@ -155,18 +161,29 @@ export default function ({ shop, rival }) {
   );
 
   // ── a correction, which supersedes ───────────────────────────────────────────────────────────────
+  // Correcting hours is a retryable write (intent/workforce-rules.md): every attempt carries an
+  // Idempotency-Key, and the same request sent again under its key is answered with the correction it
+  // made rather than with "already corrected".
+  const adjust = (id, body, idem = true) => call('POST', `${W}/time-entries/${id}/adjust`, { token: owner, body, idem });
+  const correction = {
+    clockedInAt: at(0, 9),
+    clockedOutAt: at(0, 17),
+    reason: 'the terminal was down at the end of the shift',
+  };
   expect(
-    post(`${W}/time-entries/${inEntry.id}/adjust`, { clockedOutAt: at(0, 17), reason: '' }),
+    call('POST', `${W}/time-entries/${inEntry.id}/adjust`, { token: owner, body: correction }),
+    '[-] a correction is a retryable write, so it carries a key',
+    400,
+    'IDEMPOTENCY_KEY_REQUIRED',
+  );
+  expect(
+    adjust(inEntry.id, { clockedOutAt: at(0, 17), reason: '' }),
     '[-] a correction without a reason is an edit with extra steps',
     400,
+    'VALIDATION_FAILED',
   );
-  const fixed = data(
-    post(`${W}/time-entries/${inEntry.id}/adjust`, {
-      clockedInAt: at(0, 9),
-      clockedOutAt: at(0, 17),
-      reason: 'the terminal was down at the end of the shift',
-    }),
-  );
+  const fixKey = newKey();
+  const fixed = data(adjust(inEntry.id, correction, fixKey));
   truthy('[+] a correction supersedes the entry it replaces', fixed && fixed.supersedes === inEntry.id, fixed);
   truthy('[+] ...is recorded as the manager\'s act, not the person\'s', fixed && fixed.source === 'MANAGER', fixed);
   // The corrected clock times, and the break carried across with them — which is why the hours are a
@@ -181,8 +198,19 @@ export default function ({ shop, rival }) {
     fixed && fixed.hoursWorked !== undefined && Number(fixed.hoursWorked) > 7.8 && Number(fixed.hoursWorked) <= 8,
     fixed,
   );
+  const retried = adjust(inEntry.id, correction, fixKey);
+  expect(retried, '[+] the same correction sent again under its key is answered with the one it made', 200);
+  truthy('[+] ...the same entry, not a second correction', data(retried).id === fixed.id, data(retried));
   expect(
-    post(`${W}/time-entries/${inEntry.id}/adjust`, { clockedOutAt: at(0, 18), reason: 'again' }),
+    adjust(inEntry.id, { ...correction, reason: 'something else' }, fixKey),
+    '[-] the key sent with another reason is not a replay',
+    409,
+    'IDEMPOTENCY_KEY_REUSED',
+  );
+  // A whole window: it is judged before whether the entry stands, and a clock-out alone would be read
+  // against the real clock-in (the moment this ran), so from 18:00 UTC it would be refused as a window.
+  expect(
+    adjust(inEntry.id, { clockedInAt: at(0, 9), clockedOutAt: at(0, 18), reason: 'again' }),
     '[-] an entry already corrected is not corrected twice',
     409,
     'WORKFORCE_ENTRY_NOT_STANDING',
@@ -273,7 +301,7 @@ export default function ({ shop, rival }) {
   const worked = data(post(`${CLOCK}/out`, {}, keeper.token));
   truthy('[+] the storekeeper\'s hours are recorded', worked && worked.hoursWorked !== undefined, worked);
   const fullShift = data(
-    post(`${W}/time-entries/${keeperEntry}/adjust`, {
+    adjust(keeperEntry, {
       clockedInAt: at(0, 9),
       clockedOutAt: at(0, 17),
       reason: 'the back-store terminal was down all morning',
@@ -305,7 +333,10 @@ export default function ({ shop, rival }) {
   const seconds = poll(90, () => {
     const report = data(call('GET', `/api/reporting-svc/admin/reports/sales/labour?from=${reportFrom}&to=${reportTo}`, { token: owner }));
     row = ((report || {}).rows || []).find((r) => r.day === reportFrom);
-    return !!row && Number(row.hours) > 0 && Number(row.net) > 0;
+    // Wait for the storekeeper's costed shift too, not only the first row of the day: the cashier's
+    // corrected (uncosted) shift and the storekeeper's are two events, and the report may show the
+    // first a few seconds before the second. A cost that never arrives still fails the checks below.
+    return !!row && Number(row.hours) > 0 && Number(row.net) > 0 && row.labourCost != null && Number(row.labourCost) >= 96;
   });
   truthy(`[+] the day's hours and its takings meet in one report, ${seconds}s after the clock`, seconds >= 0, row);
   truthy(

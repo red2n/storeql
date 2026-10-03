@@ -708,6 +708,58 @@ class FoodSafetyIT {
   }
 
   @Test
+  @DisplayName("A point switched with no reason, a blank one or an overlong one is not switched")
+  void aPointSwitchedWithoutAGoodReasonIsRefused() {
+    String store = Ids.newId().toString();
+    String pointId =
+        created(createPoint(store, "Reasonless freezer", CHILLED, "", 4)).getString("id");
+    String switchOff = "/admin/food-safety/points/" + pointId + "/deactivate";
+    String switchOn = "/admin/food-safety/points/" + pointId + "/activate";
+    String[] bad = {
+      "{}", "{\"reason\":\"\"}", "{\"reason\":\"   \"}", "{\"reason\":\"" + "x".repeat(501) + "\"}"
+    };
+
+    // Switched on: no body that breaks a constraint switches it off, and none leaves a trail.
+    for (String body : bad) {
+      assertThat(
+          "deactivate " + body.length(),
+          codeOf(asOwner("POST", switchOff, body), 400),
+          is("VALIDATION_FAILED"));
+    }
+    assertThat(pointActive(pointId), is("true"));
+    assertThat(statusChanges(pointId), is("0"));
+
+    // Switched off for a good reason, the same bodies do not switch it back on.
+    assertThat(asOwner("POST", switchOff, "{\"reason\":\"decommissioned\"}").getStatus(), is(200));
+    for (String body : bad) {
+      assertThat(
+          "activate " + body.length(),
+          codeOf(asOwner("POST", switchOn, body), 400),
+          is("VALIDATION_FAILED"));
+    }
+    assertThat(pointActive(pointId), is("false"));
+    assertThat(statusChanges(pointId), is("1"));
+  }
+
+  private static String pointActive(String pointId) {
+    return scalar(
+        "SELECT active::text FROM inventory.fs_monitoring_points WHERE tenant_id = '"
+            + T
+            + "' AND id = '"
+            + pointId
+            + "'");
+  }
+
+  private static String statusChanges(String pointId) {
+    return scalar(
+        "SELECT count(*) FROM inventory.fs_point_status_changes WHERE tenant_id = '"
+            + T
+            + "' AND point_id = '"
+            + pointId
+            + "'");
+  }
+
+  @Test
   @DisplayName("Checks sent at once with one Idempotency-Key are recorded once")
   void twoChecksSentAtOnceWithOneKeyAreRecordedOnce() throws Exception {
     String store = Ids.newId().toString();

@@ -77,6 +77,15 @@ public class SupplierInvoiceEventHandler {
       vat = vat.negate();
       gross = gross.negate();
     }
+    // In the invoice currency's own minor units (half up, as the columns kept it before V16); an
+    // event that does not name its currency is kept as it came.
+    String currency = obj.getString("currency", null);
+    if (currency != null && !currency.isBlank()) {
+      int units = com.storeql.service.Fx.minorUnits(currency);
+      net = net.setScale(units, java.math.RoundingMode.HALF_UP);
+      vat = vat.setScale(units, java.math.RoundingMode.HALF_UP);
+      gross = gross.setScale(units, java.math.RoundingMode.HALF_UP);
+    }
     var row =
         new InputTaxTransaction(
             Ids.newId(),

@@ -249,9 +249,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
         );
       } catch (_) {}
     }
-    // Everything except the POS offline queue: unreplayed sales are money the
-    // server has not been told about, and they outlive the cashier's shift.
-    await _storage.deleteAll(keep: const {StorageKeys.posOfflineSales});
+    // Everything except what the till owes: the POS offline queue (unreplayed
+    // sales are money the server has not been told about) and a card payment
+    // held at the machine. Both outlive the cashier's shift.
+    await _storage.deleteAll(keep: StorageKeys.keptOnSignOut);
     state = const AsyncValue.data(AuthUnauthenticated());
   }
 
@@ -291,7 +292,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
         liveAccess.isEmpty ||
         liveRefresh == null ||
         liveRefresh.isEmpty) {
-      await _storage.deleteAll(keep: const {StorageKeys.posOfflineSales});
+      await _storage.deleteAll(keep: StorageKeys.keptOnSignOut);
       state = const AsyncValue.data(AuthUnauthenticated());
       return;
     }

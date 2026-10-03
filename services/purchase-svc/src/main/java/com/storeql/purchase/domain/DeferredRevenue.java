@@ -53,9 +53,17 @@ public final class DeferredRevenue {
 
   private DeferredRevenue() {}
 
-  /** The tenant accountant's estimates. Percentages are 0 to {@link #MAX_BREAKAGE_PCT}. */
+  /**
+   * The tenant accountant's estimates. Percentages are 0 to {@link #MAX_BREAKAGE_PCT}.
+   *
+   * @param currency the business's currency the estimates were set in (ISO 4217): what is deferred
+   *     and recognised is rounded to its own minor units — whole yen, three decimals of a dinar
+   */
   public record Settings(
-      BigDecimal pointValue, BigDecimal pointsBreakagePct, BigDecimal giftCardBreakagePct) {
+      BigDecimal pointValue,
+      BigDecimal pointsBreakagePct,
+      BigDecimal giftCardBreakagePct,
+      String currency) {
 
     /** The share of points the business expects to be spent. Never zero. */
     BigDecimal pointsSpentShare() {
@@ -108,6 +116,9 @@ public final class DeferredRevenue {
     if (pointValue == null
         || pointValue.signum() <= 0
         || pointValue.compareTo(MAX_POINT_VALUE) > 0
+        // Four places is the precision of a rate, not of money: a point is worth a fraction of
+        // the currency's minor unit (0.0125 of a pound, 0.5 yen), and what it multiplies into is
+        // rounded to the currency's own minor units where it is posted.
         || pointValue.stripTrailingZeros().scale() > 4) {
       return CODE_POINT_VALUE_INVALID;
     }
@@ -121,6 +132,7 @@ public final class DeferredRevenue {
     return pct != null
         && pct.signum() >= 0
         && pct.compareTo(MAX_BREAKAGE_PCT) <= 0
+        // A percentage, not money: two places (12.25%) whatever the currency.
         && pct.stripTrailingZeros().scale() <= 2;
   }
 
@@ -151,15 +163,17 @@ public final class DeferredRevenue {
               ? BigDecimal.ZERO
               : money(
                   net.multiply(standalone)
-                      .divide(net.add(standalone), WORKING_SCALE, RoundingMode.HALF_UP));
+                      .divide(net.add(standalone), WORKING_SCALE, RoundingMode.HALF_UP),
+                  s);
     } else {
-      deferral = money(standalone);
+      deferral = money(standalone, s);
     }
     BigDecimal matched = points.min(pool.unmatched());
     BigDecimal releasedNow =
         matched.signum() == 0
             ? BigDecimal.ZERO
-            : money(deferral.multiply(matched).divide(points, WORKING_SCALE, RoundingMode.HALF_UP));
+            : money(
+                deferral.multiply(matched).divide(points, WORKING_SCALE, RoundingMode.HALF_UP), s);
     PointsPool next =
         new PointsPool(
             pool.outstanding().add(points).subtract(matched),
@@ -205,7 +219,8 @@ public final class DeferredRevenue {
           money(
                   pool.deferred()
                       .multiply(matched)
-                      .divide(expected, WORKING_SCALE, RoundingMode.HALF_UP))
+                      .divide(expected, WORKING_SCALE, RoundingMode.HALF_UP),
+                  s)
               .min(pool.deferred());
     }
     return close(
@@ -250,7 +265,8 @@ public final class DeferredRevenue {
             : money(
                     pool.deferred()
                         .multiply(matched)
-                        .divide(pool.outstanding(), WORKING_SCALE, RoundingMode.HALF_UP))
+                        .divide(pool.outstanding(), WORKING_SCALE, RoundingMode.HALF_UP),
+                    s)
                 .min(pool.deferred());
     PointsPool next =
         new PointsPool(
@@ -452,8 +468,9 @@ public final class DeferredRevenue {
         money(
             amount
                 .multiply(b)
-                .divide(BigDecimal.ONE.subtract(b), WORKING_SCALE, RoundingMode.HALF_UP));
-    BigDecimal ceiling = money(pool.loaded().multiply(b)).subtract(pool.breakage());
+                .divide(BigDecimal.ONE.subtract(b), WORKING_SCALE, RoundingMode.HALF_UP),
+            s);
+    BigDecimal ceiling = money(pool.loaded().multiply(b), s).subtract(pool.breakage());
     BigDecimal recognised = due.min(ceiling).min(spent.liability()).max(BigDecimal.ZERO);
     return new GiftCardOutcome(
         new GiftCardPool(spent.loaded(), spent.redeemed(), spent.breakage().add(recognised)),
@@ -483,7 +500,8 @@ public final class DeferredRevenue {
     return p.build();
   }
 
-  private static BigDecimal money(BigDecimal v) {
-    return v.setScale(2, RoundingMode.HALF_UP);
+  /** An amount in the business's currency, at that currency's own minor units. */
+  private static BigDecimal money(BigDecimal v, Settings s) {
+    return Money.round(v, s.currency());
   }
 }

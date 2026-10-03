@@ -4,7 +4,7 @@
 //   k6/run.sh product-crud
 import http from 'k6/http';
 import { check as k6check, sleep } from 'k6';
-import { ALL_CHECKS_PASS, BASE as baseUrl, onboardTenant, register, sellableVariant } from './lib/storeql.js';
+import { ALL_CHECKS_PASS, BASE as baseUrl, errorCode, onboardTenant, register, sellableVariant } from './lib/storeql.js';
 
 export const options = { vus: 1, iterations: 1, thresholds: ALL_CHECKS_PASS, setupTimeout: '3m' };
 
@@ -48,7 +48,7 @@ export default function (d) {
       JSON.stringify({}),
       { headers: hdrs }
     ),
-    { '[-] create brand missing name 400': (r) => r.status === 400 }
+    { '[-] create brand missing name 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   check(
@@ -57,7 +57,7 @@ export default function (d) {
       JSON.stringify({ name: 'no-tenant-brand' }),
       { headers: noTenant }
     ),
-    { '[-] create brand no token 401': (r) => r.status === 401 }
+    { '[-] create brand no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
   );
 
   // ── Categories ────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ export default function (d) {
       JSON.stringify({}),
       { headers: hdrs }
     ),
-    { '[-] create category missing name 400': (r) => r.status === 400 }
+    { '[-] create category missing name 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // ── Products ──────────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ export default function (d) {
       JSON.stringify({ description: 'no name' }),
       { headers: hdrs }
     ),
-    { '[-] create product missing name 400': (r) => r.status === 400 }
+    { '[-] create product missing name 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   check(
@@ -125,7 +125,7 @@ export default function (d) {
       `${baseUrl}/api/product-svc/catalog/products/01a090ae-611e-7000-9e1a-0f8a9e565153`,
       { headers: hdrs }
     ),
-    { '[-] get product unknown 404': (r) => r.status === 404 }
+    { '[-] get product unknown 404': (r) => r.status === 404 && errorCode(r) === 'PRODUCT_NOT_FOUND' }
   );
 
   // ── Variants ──────────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ export default function (d) {
         JSON.stringify({ unit: 'EA' }),
         { headers: hdrs }
       ),
-      { '[-] create variant missing sku 400': (r) => r.status === 400 }
+      { '[-] create variant missing sku 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
     );
   }
 
@@ -195,7 +195,7 @@ export default function (d) {
       JSON.stringify({ variantId: '01a090ae-611e-7000-9e1a-0f8a9e565153', toUom: 'EA', factor: 12 }),
       { headers: hdrs }
     ),
-    { '[-] item conversion missing fromUom 400': (r) => r.status === 400 }
+    { '[-] item conversion missing fromUom 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // ── Item Templates (Gap #13) ─────────────────────────────────────────────
@@ -252,7 +252,7 @@ export default function (d) {
       JSON.stringify({ name: tplName2 }),
       { headers: hdrs }
     ),
-    { '[-] duplicate template name 409': (r) => r.status === 409 }
+    { '[-] duplicate template name 409': (r) => r.status === 409 && errorCode(r) === 'DUPLICATE' }
   );
 
   // [-] Create template missing name → 400
@@ -262,7 +262,7 @@ export default function (d) {
       JSON.stringify({ description: 'no name' }),
       { headers: hdrs }
     ),
-    { '[-] create template missing name 400': (r) => r.status === 400 }
+    { '[-] create template missing name 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // [-] Get unknown template → 404
@@ -271,7 +271,7 @@ export default function (d) {
       `${baseUrl}/api/product-svc/admin/item-templates/01a090ae-611e-7000-9e1a-0f8a9e565153`,
       { headers: hdrs }
     ),
-    { '[-] get unknown template 404': (r) => r.status === 404 }
+    { '[-] get unknown template 404': (r) => r.status === 404 && errorCode(r) === 'TEMPLATE_NOT_FOUND' }
   );
 
   // [-] Apply unknown template to variant → 404
@@ -282,7 +282,7 @@ export default function (d) {
         null,
         { headers: hdrs }
       ),
-      { '[-] apply unknown template 404': (r) => r.status === 404 }
+      { '[-] apply unknown template 404': (r) => r.status === 404 && errorCode(r) === 'TEMPLATE_NOT_FOUND' }
     );
   }
 
@@ -293,7 +293,7 @@ export default function (d) {
       JSON.stringify({ name: 'no-tenant-tpl' }),
       { headers: noTenant }
     ),
-    { '[-] create template no token 401': (r) => r.status === 401 }
+    { '[-] create template no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
   );
 
   // ── Item Revisions (Gap #12) ──────────────────────────────────────────────
@@ -352,7 +352,7 @@ export default function (d) {
         JSON.stringify({ revision: 'B', description: 'Duplicate', effectiveDate: '2025-01-01' }),
         { headers: hdrs }
       ),
-      { '[-] duplicate revision 409': (r) => r.status === 409 }
+      { '[-] duplicate revision 409': (r) => r.status === 409 && errorCode(r) === 'DUPLICATE' }
     );
 
     // [-] Missing revision field → 400
@@ -362,7 +362,7 @@ export default function (d) {
         JSON.stringify({ description: 'no revision label', effectiveDate: '2025-01-01' }),
         { headers: hdrs }
       ),
-      { '[-] create revision missing revision 400': (r) => r.status === 400 }
+      { '[-] create revision missing revision 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
     );
 
     // [-] Missing effectiveDate → 400
@@ -372,7 +372,7 @@ export default function (d) {
         JSON.stringify({ revision: 'C', description: 'no date' }),
         { headers: hdrs }
       ),
-      { '[-] create revision missing effectiveDate 400': (r) => r.status === 400 }
+      { '[-] create revision missing effectiveDate 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
     );
 
     // [-] Invalid date format → 400
@@ -382,7 +382,7 @@ export default function (d) {
         JSON.stringify({ revision: 'D', effectiveDate: 'not-a-date' }),
         { headers: hdrs }
       ),
-      { '[-] create revision invalid date 400': (r) => r.status === 400 }
+      { '[-] create revision invalid date 400': (r) => r.status === 400 && errorCode(r) === 'INVALID_DATE' }
     );
   }
 
@@ -401,7 +401,7 @@ export default function (d) {
       `${baseUrl}/api/product-svc/admin/products/variants/01a090ae-611e-7000-9e1a-0f8a9e565153/revisions/current`,
       { headers: hdrs }
     ),
-    { '[-] current revision unknown variant 404': (r) => r.status === 404 }
+    { '[-] current revision unknown variant 404': (r) => r.status === 404 && errorCode(r) === 'REVISION_NOT_FOUND' }
   );
 
   // [-] No tenant header on revisions endpoint
@@ -412,7 +412,7 @@ export default function (d) {
         JSON.stringify({ revision: 'Z', effectiveDate: '2025-01-01' }),
         { headers: noTenant }
       ),
-      { '[-] create revision no token 401': (r) => r.status === 401 }
+      { '[-] create revision no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
     );
   }
 
@@ -474,7 +474,7 @@ export default function (d) {
         JSON.stringify({ containerTypeId, qtyPerContainer: 12, isPrimary: false }),
         { headers: hdrs }
       ),
-      { '[-] duplicate container link rejected': (r) => r.status >= 400 }
+      { '[-] duplicate container link rejected': (r) => r.status === 409 && errorCode(r) === 'DUPLICATE' }
     );
 
     if (linkId) {
@@ -493,7 +493,7 @@ export default function (d) {
       JSON.stringify({ name: 'No Code' }),
       { headers: hdrs }
     ),
-    { '[-] create container type missing code 400': (r) => r.status === 400 }
+    { '[-] create container type missing code 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // [-] Create container type missing name → 400
@@ -503,7 +503,7 @@ export default function (d) {
       JSON.stringify({ code: 'PALLET' }),
       { headers: hdrs }
     ),
-    { '[-] create container type missing name 400': (r) => r.status === 400 }
+    { '[-] create container type missing name 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
   );
 
   // [-] Get unknown container type → 404
@@ -512,7 +512,7 @@ export default function (d) {
       `${baseUrl}/api/product-svc/admin/container-types/01a090ae-611e-7000-9e1a-0f8a9e565153`,
       { headers: hdrs }
     ),
-    { '[-] get unknown container type 404': (r) => r.status === 404 }
+    { '[-] get unknown container type 404': (r) => r.status === 404 && errorCode(r) === 'CONTAINER_TYPE_NOT_FOUND' }
   );
 
   // [-] No tenant → 401
@@ -522,7 +522,7 @@ export default function (d) {
       JSON.stringify({ code: 'BOX', name: 'Box' }),
       { headers: noTenant }
     ),
-    { '[-] create container type no token 401': (r) => r.status === 401 }
+    { '[-] create container type no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
   );
 
   // ── Item Attribute Groups (Gap #36) ──────────────────────────────────────
@@ -607,7 +607,7 @@ export default function (d) {
         `${baseUrl}/api/product-svc/admin/products/variants/${variantId}/attribute-groups/WEB`,
         { headers: hdrs }
       ),
-      { '[-] get deleted attribute group values 404': (r) => r.status === 404 }
+      { '[-] get deleted attribute group values 404': (r) => r.status === 404 && errorCode(r) === 'ATTRIBUTE_GROUP_VALUES_NOT_FOUND' }
     );
 
     // [-] Upsert with unknown group code → 404
@@ -617,7 +617,7 @@ export default function (d) {
         JSON.stringify({ values: '{}' }),
         { headers: hdrs }
       ),
-      { '[-] upsert unknown attribute group 404': (r) => r.status === 404 }
+      { '[-] upsert unknown attribute group 404': (r) => r.status === 404 && errorCode(r) === 'ATTRIBUTE_GROUP_NOT_FOUND' }
     );
 
     // [-] Upsert with missing values field → 400
@@ -627,7 +627,7 @@ export default function (d) {
         JSON.stringify({}),
         { headers: hdrs }
       ),
-      { '[-] upsert attribute group missing values 400': (r) => r.status === 400 }
+      { '[-] upsert attribute group missing values 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
     );
 
     // [-] No tenant on attribute group upsert → 401
@@ -637,7 +637,7 @@ export default function (d) {
         JSON.stringify({ values: '{}' }),
         { headers: noTenant }
       ),
-      { '[-] upsert attribute group no token 401': (r) => r.status === 401 }
+      { '[-] upsert attribute group no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
     );
   }
 
@@ -647,7 +647,7 @@ export default function (d) {
       `${baseUrl}/api/product-svc/admin/products/variants/01a090ae-611e-7000-9e1a-0f8a9e565153/attribute-groups`,
       { headers: hdrs }
     ),
-    { '[-] list attribute group values unknown variant 404': (r) => r.status === 404 }
+    { '[-] list attribute group values unknown variant 404': (r) => r.status === 404 && errorCode(r) === 'VARIANT_NOT_FOUND' }
   );
 
   // [-] Unknown group code on list → 404
@@ -656,7 +656,7 @@ export default function (d) {
       `${baseUrl}/api/product-svc/admin/attribute-groups/BOGUS_GROUP`,
       { headers: hdrs }
     ),
-    { '[-] get unknown attribute group 404': (r) => r.status === 404 }
+    { '[-] get unknown attribute group 404': (r) => r.status === 404 && errorCode(r) === 'ATTRIBUTE_GROUP_NOT_FOUND' }
   );
 
   // ── Gap #39: Category Sets ────────────────────────────────────────────────
@@ -748,7 +748,7 @@ export default function (d) {
         `${baseUrl}/api/product-svc/admin/category-sets/01a090ae-611e-7000-9e1a-0f8a9e565153`,
         { headers: hdrs }
       ),
-      { '[-] get unknown category set 404': (r) => r.status === 404 }
+      { '[-] get unknown category set 404': (r) => r.status === 404 && errorCode(r) === 'CATEGORY_SET_NOT_FOUND' }
     );
 
     // [-] Create set missing name → 400
@@ -758,7 +758,7 @@ export default function (d) {
         JSON.stringify({ purpose: 'GENERAL', controlled: false }),
         { headers: hdrs }
       ),
-      { '[-] create category set missing name 400': (r) => r.status === 400 }
+      { '[-] create category set missing name 400': (r) => r.status === 400 && errorCode(r) === 'VALIDATION_FAILED' }
     );
 
     // [-] Create set without tenant → 401
@@ -768,7 +768,7 @@ export default function (d) {
         JSON.stringify({ name: 'k6-no-tenant', purpose: 'GENERAL', controlled: false }),
         { headers: noTenant }
       ),
-      { '[-] create category set no token 401': (r) => r.status === 401 }
+      { '[-] create category set no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
     );
 
     // Cleanup
@@ -844,6 +844,6 @@ export default function (d) {
       JSON.stringify({ categories: [], products: [] }),
       { headers: noTenant }
     ),
-    { '[-] bulk import no token 401': (r) => r.status === 401 }
+    { '[-] bulk import no token 401': (r) => r.status === 401 && errorCode(r) === 'UNAUTHORIZED' }
   );
 }

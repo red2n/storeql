@@ -20,13 +20,21 @@ import '../../core/theme.dart';
 import '../../core/spacing.dart';
 import 'providers/admin_providers.dart' show tenantInfoProvider;
 
-/// Whether the signed-in user may run supplier payments (17.10): a manager
-/// holding finance.payments. The server refuses anyone else with 403, so the
-/// tab does not offer controls that can only fail.
-bool canRunPayments(AuthState? auth) =>
+/// Whether the signed-in user may keep a supplier's bank details (17.10): a
+/// manager holding finance.payments, wherever they work. purchase-svc asks no
+/// more of the bank details on a new supplier.
+bool canKeepBankDetails(AuthState? auth) =>
     auth is AuthAuthenticated &&
     auth.isManager &&
     auth.hasPermission('finance.payments');
+
+/// Whether the signed-in user may run supplier payments (17.10): a manager
+/// holding finance.payments and held to no store, since a run pays from the
+/// business's own accounts. purchase-svc refuses anyone else with 403 (the
+/// role, then finance.payments, then BUSINESS_WIDE_ONLY), reads included, so
+/// the tab does not offer controls that can only fail.
+bool canRunPayments(AuthState? auth) =>
+    auth is AuthAuthenticated && canKeepBankDetails(auth) && !auth.heldToStores;
 
 /// What a warning on a supplier in a run means, in words.
 String paymentWarningText(String code) => switch (code) {
@@ -100,6 +108,12 @@ class PaymentRunsTab extends ConsumerWidget {
     final auth = ref.watch(authNotifierProvider).value;
     final cs = Theme.of(context).colorScheme;
     if (!canRunPayments(auth)) {
+      // In the order the server refuses: the role and its permission first;
+      // a finance manager held to stores is refused because the runs are the
+      // whole business's.
+      final why = canKeepBankDetails(auth)
+          ? 'Only an owner or a head-office manager pays suppliers.'
+          : 'Paying suppliers is not part of your role. Ask an owner to allow it.';
       return Center(
         child: Padding(
           padding: context.pagePadding,
@@ -108,10 +122,7 @@ class PaymentRunsTab extends ConsumerWidget {
             children: [
               Icon(Icons.lock_outline, size: 48, color: cs.outlineVariant),
               const SizedBox(height: 12),
-              const Text(
-                'Supplier payments need the finance.payments permission.',
-                textAlign: TextAlign.center,
-              ),
+              Text(why, textAlign: TextAlign.center),
             ],
           ),
         ),

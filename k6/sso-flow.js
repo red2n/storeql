@@ -141,20 +141,20 @@ export default function ({ tenant, cashier, manager, newcomer, elsewhere, other,
 
   // ── an owner connects the provider ───────────────────────────────────────────────────────────────
   expect(call('GET', `${AUTH}/admin/sso`, { token: owner.token }), '[+] none connected yet', 404, 'SSO_NOT_CONFIGURED');
-  expect(put(manager.token, connection()), '[-] a manager does not connect the provider', 403);
-  expect(put(cashier.token, connection()), '[-] a cashier does not connect the provider', 403);
-  expect(put(shopper.token, connection()), '[-] a shopper does not connect the provider', 403);
+  expect(put(manager.token, connection()), '[-] a manager does not connect the provider', 403, 'FORBIDDEN');
+  expect(put(cashier.token, connection()), '[-] a cashier does not connect the provider', 403, 'FORBIDDEN');
+  expect(put(shopper.token, connection()), '[-] a shopper does not connect the provider', 403, 'FORBIDDEN');
   expect(put(owner.token, connection({ requiredTiers: ['OWNER'] })), '[-] an owner is never made to use the provider', 400, 'SSO_OWNER_NOT_REQUIRABLE');
   expect(put(owner.token, connection({ requiredTiers: ['JANITOR'] })), '[-] a tier that does not exist', 400, 'SSO_TIER_UNKNOWN');
   expect(put(owner.token, connection({ clientSecret: null })), '[-] the first connection needs its secret', 400, 'SSO_SECRET_REQUIRED');
   expect(put(owner.token, connection({ issuer: 'http://idp.example.com' })), '[-] a provider is HTTPS', 400, 'SSO_ISSUER_INVALID');
-  expect(put(owner.token, connection({ slug: 'Not A Name' })), '[-] a sign-in name is lower-case letters, digits and hyphens', 400);
+  expect(put(owner.token, connection({ slug: 'Not A Name' })), '[-] a sign-in name is lower-case letters, digits and hyphens', 400, 'VALIDATION_FAILED');
   const saved = put(owner.token, connection());
   expect(saved, '[+] the owner connects the provider', 200);
   truthy('[+] the secret is held and never shown', data(saved).clientSecretSet === true && !String(saved.body).includes('k6 client secret'), saved.body);
   truthy('[+] the redirect URI to register is given', String(data(saved).callbackUrl || '').endsWith('/api/iam-svc/auth/sso/callback'), data(saved));
   expect(call('GET', `${AUTH}/admin/sso`, { token: manager.token }), '[+] a manager can read it', 200);
-  expect(call('GET', `${AUTH}/admin/sso`, { token: cashier.token }), '[-] a cashier cannot', 403);
+  expect(call('GET', `${AUTH}/admin/sso`, { token: cashier.token }), '[-] a cashier cannot', 403, 'FORBIDDEN');
   expect(call('GET', `${AUTH}/admin/sso`, { token: other.owner.token }), '[-] another business sees none of it', 404, 'SSO_NOT_CONFIGURED');
   expect(put(other.owner.token, { ...connection(), slug }), '[-] another business cannot take the name', 409, 'SSO_SLUG_TAKEN');
 
@@ -174,7 +174,7 @@ export default function ({ tenant, cashier, manager, newcomer, elsewhere, other,
   expect(start('nobody-signs-in-as-this').res, '[-] a name nobody signs in with', 404, 'SSO_NOT_FOUND');
   expect(start(slug, { returnTo: 'https://evil.example.com/' }).res, '[-] a return to anywhere but the app', 400, 'SSO_RETURN_REFUSED');
   expect(start(slug, { returnTo: `${APP}/#/steal` }).res, '[-] a return with a fragment of its own', 400, 'SSO_RETURN_REFUSED');
-  expect(call('POST', `${AUTH}/sso/start`, { body: { slug, codeChallenge: 'plain' } }), '[-] a challenge that is not S256', 400);
+  expect(call('POST', `${AUTH}/sso/start`, { body: { slug, codeChallenge: 'plain' } }), '[-] a challenge that is not S256', 400, 'VALIDATION_FAILED');
   const s1 = start(slug.toUpperCase());
   expect(s1.res, '[+] started, the name in any case', 200);
   const q = queryOf(s1.url || '');
@@ -232,8 +232,8 @@ export default function ({ tenant, cashier, manager, newcomer, elsewhere, other,
 
   const links = must(call('GET', `${AUTH}/admin/sso/identities`, { token: manager.token }), 200, 'links');
   truthy('[+] the owner and manager see who is linked', links.items.length === 1 && links.items[0].loginEmail === cashier.email && links.items[0].subject === 'cashier-at-idp', links);
-  expect(call('GET', `${AUTH}/admin/sso/identities`, { token: cashier.token }), '[-] a cashier does not', 403);
-  expect(call('DELETE', `${AUTH}/admin/sso/identities/${links.items[0].id}`, { token: other.owner.token }), '[-] another business cannot unlink it', 404);
+  expect(call('GET', `${AUTH}/admin/sso/identities`, { token: cashier.token }), '[-] a cashier does not', 403, 'FORBIDDEN');
+  expect(call('DELETE', `${AUTH}/admin/sso/identities/${links.items[0].id}`, { token: other.owner.token }), '[-] another business cannot unlink it', 404, 'SSO_LINK_NOT_FOUND');
 
   // ── the provider required of cashiers ────────────────────────────────────────────────────────────
   breather();
@@ -275,7 +275,7 @@ export default function ({ tenant, cashier, manager, newcomer, elsewhere, other,
 
   // ── undone ───────────────────────────────────────────────────────────────────────────────────────
   expect(call('DELETE', `${AUTH}/admin/sso/identities/${links.items[0].id}`, { token: owner.token }), '[+] the owner unlinks a login', 200);
-  expect(call('DELETE', `${AUTH}/admin/sso`, { token: manager.token }), '[-] a manager does not disconnect', 403);
+  expect(call('DELETE', `${AUTH}/admin/sso`, { token: manager.token }), '[-] a manager does not disconnect', 403, 'FORBIDDEN');
   expect(call('DELETE', `${AUTH}/admin/sso`, { token: owner.token }), '[+] the owner disconnects', 200);
   expect(start(slug).res, '[+] and nobody signs in with the name', 404, 'SSO_NOT_FOUND');
   breather();
