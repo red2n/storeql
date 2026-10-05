@@ -286,7 +286,7 @@ public abstract class BaseJdbcRepository {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO processed_events (event_id, consumer) VALUES (?,?)"
-                + " ON CONFLICT (event_id) DO NOTHING")) {
+                + " ON CONFLICT (event_id, consumer) DO NOTHING")) {
       ps.setObject(1, eventId);
       ps.setString(2, consumer);
       return ps.executeUpdate() > 0;

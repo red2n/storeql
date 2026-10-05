@@ -1,6 +1,5 @@
 package com.storeql.reporting.service;
 
-import com.storeql.ids.Ids;
 import com.storeql.reporting.domain.Domain.InventoryProjection;
 import com.storeql.reporting.domain.Domain.MovementStat;
 import com.storeql.reporting.domain.Domain.OpenSupplyLine;
@@ -140,31 +139,28 @@ public class ReportingService {
    * <p>The lines are keyed by {@code eventId} so {@link #applyTransferReceived} can retire exactly
    * this shipment's lines when the goods land.
    *
+   * <p>Deduped on the event for this consumer, in the same transaction as the lines (see {@link
+   * ReportingRepository#applyTransferShippedOnce}).
+   *
    * @param tenantId owning tenant
    * @param eventId the {@code TransferShipped} event id, retained as the retirement key
+   * @param consumerName this consumer's dedupe name
    * @param fromStoreId store the stock left
    * @param toStoreId store the stock is bound for
    * @param variantIds variants shipped, positionally paired with {@code qtys}
    * @param qtys quantities shipped, positionally paired with {@code variantIds}
+   * @return {@code true} when applied; {@code false} when the event was already processed
    */
-  public void applyTransferShipped(
+  public boolean applyTransferShippedOnce(
       UUID tenantId,
       UUID eventId,
+      String consumerName,
       UUID fromStoreId,
       UUID toStoreId,
       List<UUID> variantIds,
       List<BigDecimal> qtys) {
-    for (int i = 0; i < variantIds.size(); i++) {
-      repo.insertSupplyLine(
-          new com.storeql.reporting.domain.Domain.OpenSupplyLine(
-              Ids.newId(),
-              tenantId,
-              fromStoreId,
-              toStoreId,
-              variantIds.get(i),
-              qtys.get(i),
-              eventId));
-    }
+    return repo.applyTransferShippedOnce(
+        tenantId, eventId, consumerName, fromStoreId, toStoreId, variantIds, qtys);
   }
 
   /**

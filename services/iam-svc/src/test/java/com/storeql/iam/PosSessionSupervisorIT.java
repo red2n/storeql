@@ -190,7 +190,11 @@ class PosSessionSupervisorIT {
     String s3 = startFor(cashier, STORE_A);
     assertThat(end(s3, TENANT, cashier, "CASHIER", null), is(204));
     assertThat(
-        scalar("SELECT ended_by IS NULL FROM iam.pos_sessions WHERE id = '" + s3 + "'"), is("t"));
+        scalar(
+            "SELECT CASE WHEN ended_by IS NULL THEN 1 ELSE 0 END FROM iam.pos_sessions WHERE id = '"
+                + s3
+                + "'"),
+        is("1"));
   }
 
   @Test

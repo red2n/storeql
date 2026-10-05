@@ -44,8 +44,9 @@ class OutboxPurgeIT {
           + " ORDER BY published_at ASC LIMIT 1000 FOR UPDATE SKIP LOCKED)";
 
   private static final String PURGE_PROCESSED =
-      "DELETE FROM notification.processed_events WHERE event_id IN (SELECT event_id"
-          + " FROM notification.processed_events WHERE processed_at < now() - interval '30 days'"
+      "DELETE FROM notification.processed_events WHERE (event_id, consumer) IN"
+          + " (SELECT event_id, consumer FROM notification.processed_events"
+          + " WHERE processed_at < now() - interval '30 days'"
           + " ORDER BY processed_at ASC LIMIT 1000 FOR UPDATE SKIP LOCKED)";
 
   @Inject RetentionRunRepository repo;

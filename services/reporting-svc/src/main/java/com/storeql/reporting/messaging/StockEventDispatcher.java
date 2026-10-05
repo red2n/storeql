@@ -1,7 +1,6 @@
 package com.storeql.reporting.messaging;
 
 import com.storeql.ids.Ids;
-import com.storeql.reporting.repo.ReportingRepository;
 import com.storeql.reporting.service.ReportingService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -27,7 +26,6 @@ class StockEventDispatcher extends JsonEventDispatcher {
   private static final String CONSUMER = "reporting-svc/stock-events";
 
   @Inject ReportingService service;
-  @Inject ReportingRepository repo;
 
   StockEventDispatcher() {
     super("stock");
@@ -73,13 +71,11 @@ class StockEventDispatcher extends JsonEventDispatcher {
     UUID tenantId = Ids.parse(obj.getString("tenantId"));
     UUID fromStoreId = Ids.parse(obj.getString("fromStoreId"));
     UUID toStoreId = Ids.parse(obj.getString("toStoreId"));
-    // Dedupe BEFORE inserting: supply-line ids are random, so a redelivered event would
-    // otherwise add duplicate rows. (Currently the event carries no line details and the
-    // lists are empty placeholders — see applyTransferShipped.)
-    if (!repo.markProcessedIfNew(eventId, CONSUMER)) {
-      return;
-    }
-    service.applyTransferShipped(tenantId, eventId, fromStoreId, toStoreId, List.of(), List.of());
+    // The dedupe mark and the supply lines commit together (see applyTransferShippedOnce), so a
+    // redelivery adds nothing twice and a failed write is retried rather than swallowed. The event
+    // carries no line details yet, so the lists are empty placeholders.
+    service.applyTransferShippedOnce(
+        tenantId, eventId, CONSUMER, fromStoreId, toStoreId, List.of(), List.of());
   }
 
   private static BigDecimal qty(JsonObject obj) {

@@ -265,37 +265,74 @@ public class PurchaseRepository extends BaseOutboxRepository {
    * @return the purchase order as stored
    */
   public PurchaseOrder createPurchaseOrder(PurchaseOrder po, OutboxRow event) {
+    return inTx(c -> createPurchaseOrderTx(c, po, event), "create purchase order");
+  }
+
+  /** {@link #createPurchaseOrder} on the caller's transaction connection. */
+  private PurchaseOrder createPurchaseOrderTx(Connection c, PurchaseOrder po, OutboxRow event)
+      throws SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO purchase_orders"
+                + " (id,tenant_id,supplier_id,store_id,status,currency,"
+                + "  total_net,total_vat,total_gross,expected_delivery,created_by,source,"
+                + "  ownership,sales_order_id,ship_to,duty_status)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, po.id());
+      ps.setObject(2, po.tenantId());
+      ps.setObject(3, po.supplierId());
+      ps.setObject(4, po.storeId());
+      ps.setString(5, po.status());
+      ps.setString(6, po.currency());
+      ps.setBigDecimal(7, po.totalNet());
+      ps.setBigDecimal(8, po.totalVat());
+      ps.setBigDecimal(9, po.totalGross());
+      ps.setObject(10, po.expectedDelivery());
+      ps.setObject(11, po.createdBy());
+      ps.setString(12, po.source() == null ? Domain.PO_SOURCE_MANUAL : po.source());
+      ps.setString(13, po.ownership() == null ? Domain.PO_OWNERSHIP_OWNED : po.ownership());
+      ps.setObject(14, po.salesOrderId());
+      ps.setString(15, po.shipTo());
+      ps.setString(16, po.dutyStatus() == null ? Domain.PO_DUTY_PAID : po.dutyStatus());
+      ps.executeUpdate();
+    }
+    insertOutbox(c, event);
+    return po;
+  }
+
+  /** A draft order an event raises: the order, its lines, and the event that announces it. */
+  public record RaisedOrder(PurchaseOrder order, OutboxRow event, List<PurchaseOrderLine> lines) {}
+
+  /**
+   * Raises the draft orders of one event, once. The dedupe mark, every order, each order's lines
+   * and each order's announcement commit in ONE transaction: a failure anywhere leaves no mark and
+   * no order, so the redelivery raises them all; a redelivery after success raises nothing.
+   *
+   * @param eventId the event that caused the orders
+   * @param consumer this consumer's dedupe name
+   * @param orders the orders to raise, lines included
+   * @param vatRates VAT code to rate, resolved by the caller
+   * @return {@code true} when raised; {@code false} when this consumer already handled the event
+   */
+  public boolean raiseOnce(
+      UUID eventId,
+      String consumer,
+      List<RaisedOrder> orders,
+      java.util.Map<String, BigDecimal> vatRates) {
     return inTx(
         c -> {
-          try (var ps =
-              c.prepareStatement(
-                  "INSERT INTO purchase_orders"
-                      + " (id,tenant_id,supplier_id,store_id,status,currency,"
-                      + "  total_net,total_vat,total_gross,expected_delivery,created_by,source,"
-                      + "  ownership,sales_order_id,ship_to,duty_status)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
-            ps.setObject(1, po.id());
-            ps.setObject(2, po.tenantId());
-            ps.setObject(3, po.supplierId());
-            ps.setObject(4, po.storeId());
-            ps.setString(5, po.status());
-            ps.setString(6, po.currency());
-            ps.setBigDecimal(7, po.totalNet());
-            ps.setBigDecimal(8, po.totalVat());
-            ps.setBigDecimal(9, po.totalGross());
-            ps.setObject(10, po.expectedDelivery());
-            ps.setObject(11, po.createdBy());
-            ps.setString(12, po.source() == null ? Domain.PO_SOURCE_MANUAL : po.source());
-            ps.setString(13, po.ownership() == null ? Domain.PO_OWNERSHIP_OWNED : po.ownership());
-            ps.setObject(14, po.salesOrderId());
-            ps.setString(15, po.shipTo());
-            ps.setString(16, po.dutyStatus() == null ? Domain.PO_DUTY_PAID : po.dutyStatus());
-            ps.executeUpdate();
+          if (!markProcessedIfNewTx(c, eventId, consumer)) {
+            return false;
           }
-          insertOutbox(c, event);
-          return po;
+          for (RaisedOrder r : orders) {
+            createPurchaseOrderTx(c, r.order(), r.event());
+            for (PurchaseOrderLine line : r.lines()) {
+              addPurchaseOrderLineTx(c, line, r.order().currency(), vatRates);
+            }
+          }
+          return true;
         },
-        "create purchase order");
+        "raise draft purchase orders");
   }
 
   /**
@@ -732,27 +769,33 @@ public class PurchaseRepository extends BaseOutboxRepository {
    */
   public PurchaseOrderLine addPurchaseOrderLine(
       PurchaseOrderLine line, String currency, java.util.Map<String, BigDecimal> vatRates) {
-    return inTx(
-        c -> {
-          try (var ps =
-              c.prepareStatement(
-                  "INSERT INTO purchase_order_lines"
-                      + " (id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,proposal_reason)"
-                      + " VALUES (?,?,?,?,?,?,?,?)")) {
-            ps.setObject(1, line.id());
-            ps.setObject(2, line.tenantId());
-            ps.setObject(3, line.poId());
-            ps.setObject(4, line.variantId());
-            ps.setBigDecimal(5, line.qty());
-            ps.setBigDecimal(6, line.unitPrice());
-            ps.setString(7, line.vatCode());
-            ps.setString(8, line.proposalReason());
-            ps.executeUpdate();
-          }
-          restateTotals(c, line.tenantId(), line.poId(), currency, vatRates);
-          return line;
-        },
-        "add po line");
+    return inTx(c -> addPurchaseOrderLineTx(c, line, currency, vatRates), "add po line");
+  }
+
+  /** {@link #addPurchaseOrderLine} on the caller's transaction connection. */
+  private PurchaseOrderLine addPurchaseOrderLineTx(
+      Connection c,
+      PurchaseOrderLine line,
+      String currency,
+      java.util.Map<String, BigDecimal> vatRates)
+      throws SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO purchase_order_lines"
+                + " (id,tenant_id,po_id,variant_id,qty,unit_price,vat_code,proposal_reason)"
+                + " VALUES (?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, line.id());
+      ps.setObject(2, line.tenantId());
+      ps.setObject(3, line.poId());
+      ps.setObject(4, line.variantId());
+      ps.setBigDecimal(5, line.qty());
+      ps.setBigDecimal(6, line.unitPrice());
+      ps.setString(7, line.vatCode());
+      ps.setString(8, line.proposalReason());
+      ps.executeUpdate();
+    }
+    restateTotals(c, line.tenantId(), line.poId(), currency, vatRates);
+    return line;
   }
 
   /**

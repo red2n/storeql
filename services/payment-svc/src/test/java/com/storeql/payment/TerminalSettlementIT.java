@@ -1319,10 +1319,11 @@ class TerminalSettlementIT {
     assertThat(tendersOn(order), is("0"));
     assertThat(
         scalar(
-            "SELECT payment_id IS NULL FROM payment.terminal_payments WHERE id = '"
+            "SELECT CASE WHEN payment_id IS NULL THEN 1 ELSE 0 END"
+                + " FROM payment.terminal_payments WHERE id = '"
                 + attempt
                 + "'"),
-        is("t"));
+        is("1"));
   }
 
   // ── who may put money back ──────────────────────────────────────────────────
@@ -1498,7 +1499,10 @@ class TerminalSettlementIT {
     // Another business's manager cannot say what our machine shows.
     for (Caller rival : rivals()) {
       Answer theirs = settle(rival, refundAttempt, "NOT_TAKEN", "not ours", Ids.newId().toString());
-      assertThat(theirs.body().toString(), theirs.status(), is(404));
+      assertThat(
+          theirs.body().toString(),
+          theirs.status(),
+          is(rival.roles().equals("CASHIER") ? 403 : 404));
     }
     assertThat(decisions(refundAttempt), is("0"));
 

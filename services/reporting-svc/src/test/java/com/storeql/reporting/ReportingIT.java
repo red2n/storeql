@@ -3,6 +3,7 @@ package com.storeql.reporting;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.ids.Ids;
 import com.storeql.reporting.service.ReportingService;
@@ -22,6 +23,8 @@ import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -241,6 +244,59 @@ class ReportingIT {
                 + " WHERE processed_at < now() - interval '30 days'"
                 + " ORDER BY processed_at ASC LIMIT 1000 FOR UPDATE SKIP LOCKED"),
         containsString("idx_processed_events_processed_at"));
+  }
+
+  /**
+   * One event, two consumers: each applies it once. The dedupe key is (event, consumer), so the
+   * second consumer's mark is not refused because the first consumer already marked the event.
+   */
+  @Test
+  void aSecondConsumerOfTheSameEventStillAppliesIt() {
+    UUID event = Ids.newId();
+    UUID tenant = Ids.newId();
+    UUID store = Ids.newId();
+    UUID variant = Ids.newId();
+
+    assertThat(
+        reporting.applyStockDeltaOnce(
+            event, "test/consumer-a", tenant, store, variant, BigDecimal.ONE, "StockReceived"),
+        is(true));
+    assertThat(
+        "a different consumer of the same event applies it",
+        reporting.applyStockDeltaOnce(
+            event, "test/consumer-b", tenant, store, variant, BigDecimal.ONE, "StockReceived"),
+        is(true));
+    assertThat(
+        "the same consumer again is a duplicate",
+        reporting.applyStockDeltaOnce(
+            event, "test/consumer-a", tenant, store, variant, BigDecimal.ONE, "StockReceived"),
+        is(false));
+  }
+
+  /**
+   * The dedupe mark and the supply lines of one transfer commit together. A line that cannot be
+   * written takes the mark with it, so the redelivered event is applied rather than swallowed.
+   */
+  @Test
+  void aFailedTransferShipmentLeavesNoDedupeMarkBehind() throws SQLException {
+    UUID event = Ids.newId();
+    UUID tenant = Ids.newId();
+    List<UUID> noVariant = Arrays.asList((UUID) null); // variant_id is NOT NULL: the write fails
+
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            reporting.applyTransferShippedOnce(
+                tenant,
+                event,
+                "test/transfers",
+                Ids.newId(),
+                Ids.newId(),
+                noVariant,
+                List.of(BigDecimal.ONE)));
+
+    assertThat("no mark for the failed event", rows("processed_events", "event_id", event), is(0));
+    assertThat("no supply line either", rows("open_supply_lines", "event_id", event), is(0));
   }
 
   private static void outboxRow(UUID id, UUID tenant, Instant createdAt, Instant publishedAt)

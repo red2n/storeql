@@ -5,9 +5,14 @@ import static org.hamcrest.Matchers.comparesEqualTo;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.ids.Ids;
+import com.storeql.purchase.domain.Domain;
+import com.storeql.purchase.domain.Domain.PurchaseOrder;
+import com.storeql.purchase.domain.Domain.PurchaseOrderLine;
 import com.storeql.purchase.messaging.SalesEventHandler;
+import com.storeql.purchase.repo.PurchaseRepository;
 import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
@@ -21,8 +26,12 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,6 +64,8 @@ class DropshipIT {
 
   @Inject WebTarget target;
   @Inject SalesEventHandler sales;
+  @Inject PurchaseRepository purchases;
+  private static final String CONSUMER = "purchase-svc/dropship-order";
 
   @AfterAll
   static void stopDb() {
@@ -150,6 +161,99 @@ class DropshipIT {
   }
 
   /** How people see an id: "#" and its last eight characters, as every screen shows it. */
+  /**
+   * A raise that fails part-way leaves nothing behind: the first order is rolled back with the
+   * failing one, and so is the dedupe mark. The redelivered event then raises both, and a third
+   * delivery raises nothing.
+   */
+  @Test
+  void aFailedRaiseRollsBackEveryOrderAndTheMarkSoTheRedeliveryRaisesThem() throws Exception {
+    java.util.UUID tenant = Ids.parse(T);
+    java.util.UUID supplier = Ids.parse(supplier("All or nothing Ltd"));
+    java.util.UUID event = Ids.newId();
+    java.util.UUID sale = Ids.newId();
+    PurchaseOrder good = draftFor(tenant, supplier, sale);
+    PurchaseOrder bad = draftFor(tenant, supplier, sale);
+    PurchaseRepository.RaisedOrder goodRaise =
+        new PurchaseRepository.RaisedOrder(
+            good, null, List.of(lineFor(tenant, good, Ids.parse(VARIANT), "4.00")));
+    // variant_id is NOT NULL, so this line makes the second order's write fail
+    PurchaseRepository.RaisedOrder badRaise =
+        new PurchaseRepository.RaisedOrder(bad, null, List.of(lineFor(tenant, bad, null, "4.00")));
+    Map<String, BigDecimal> vat = Map.of("T1", new BigDecimal("0.20"));
+
+    assertThrows(
+        RuntimeException.class,
+        () -> purchases.raiseOnce(event, CONSUMER, List.of(goodRaise, badRaise), vat));
+    assertThat("the first order went with it", ordersFor(sale), is(0));
+    assertThat("and so did the mark", marksFor(event), is(0));
+
+    assertThat(
+        "the redelivery raises the lot",
+        purchases.raiseOnce(event, CONSUMER, List.of(goodRaise), vat),
+        is(true));
+    assertThat(ordersFor(sale), is(1));
+    assertThat(
+        "a further delivery raises nothing",
+        purchases.raiseOnce(event, CONSUMER, List.of(goodRaise), vat),
+        is(false));
+    assertThat(ordersFor(sale), is(1));
+  }
+
+  private static PurchaseOrder draftFor(
+      java.util.UUID tenant, java.util.UUID supplier, java.util.UUID sale) {
+    Instant now = Instant.now();
+    return new PurchaseOrder(
+            Ids.newId(),
+            tenant,
+            supplier,
+            Ids.parse(STORE),
+            Domain.PO_DRAFT,
+            "GBP",
+            BigDecimal.ZERO,
+            BigDecimal.ZERO,
+            BigDecimal.ZERO,
+            LocalDate.now(ZoneOffset.UTC).plusDays(3),
+            now,
+            now,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            Domain.PO_SOURCE_DROPSHIP)
+        .withDropship(sale, null);
+  }
+
+  private static PurchaseOrderLine lineFor(
+      java.util.UUID tenant, PurchaseOrder po, java.util.UUID variant, String cost) {
+    return new PurchaseOrderLine(
+        Ids.newId(),
+        tenant,
+        po.id(),
+        variant,
+        BigDecimal.ONE,
+        new BigDecimal(cost),
+        "T1",
+        Instant.now(),
+        "test");
+  }
+
+  private int ordersFor(java.util.UUID sale) throws Exception {
+    return Integer.parseInt(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM purchase.purchase_orders WHERE sales_order_id = '" + sale + "'"));
+  }
+
+  private int marksFor(java.util.UUID event) throws Exception {
+    return Integer.parseInt(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM purchase.processed_events WHERE event_id = '" + event + "'"));
+  }
+
   private static String handle(String id) {
     return "#" + id.substring(id.length() - 8);
   }

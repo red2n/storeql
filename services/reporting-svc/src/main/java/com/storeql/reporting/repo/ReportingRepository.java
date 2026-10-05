@@ -98,22 +98,67 @@ public class ReportingRepository extends BaseJdbcRepository {
    *
    * @param line the supply line to open, keyed by the shipping event's id
    */
-  public void insertSupplyLine(OpenSupplyLine line) {
-    exec(
-        "INSERT INTO open_supply_lines"
-            + " (id, tenant_id, from_store_id, to_store_id, variant_id, qty, event_id)"
-            + " VALUES (?,?,?,?,?,?,?)"
-            + " ON CONFLICT (id) DO NOTHING",
-        ps -> {
-          ps.setObject(1, line.id());
-          ps.setObject(2, line.tenantId());
-          ps.setObject(3, line.fromStoreId());
-          ps.setObject(4, line.toStoreId());
-          ps.setObject(5, line.variantId());
-          ps.setBigDecimal(6, line.qty());
-          ps.setObject(7, line.eventId());
+  private static void insertSupplyLineTx(Connection c, OpenSupplyLine line) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO open_supply_lines"
+                + " (id, tenant_id, from_store_id, to_store_id, variant_id, qty, event_id)"
+                + " VALUES (?,?,?,?,?,?,?)"
+                + " ON CONFLICT (id) DO NOTHING")) {
+      ps.setObject(1, line.id());
+      ps.setObject(2, line.tenantId());
+      ps.setObject(3, line.fromStoreId());
+      ps.setObject(4, line.toStoreId());
+      ps.setObject(5, line.variantId());
+      ps.setBigDecimal(6, line.qty());
+      ps.setObject(7, line.eventId());
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Opens the in-transit supply lines of one shipment, deduped on the shipping event for this
+   * consumer. The mark and every line commit in ONE transaction: a line that cannot be written
+   * takes the mark with it, so the redelivered event is applied rather than swallowed. Returns
+   * false if this consumer already processed the event.
+   *
+   * @param tenantId owning tenant
+   * @param eventId the {@code TransferShipped} event id, retained as the retirement key
+   * @param consumerName this consumer's dedupe name
+   * @param fromStoreId the shipping store
+   * @param toStoreId the receiving store
+   * @param variantIds one entry per supply line
+   * @param qtys the quantity of each line, same order as {@code variantIds}
+   * @return {@code true} when applied; {@code false} when the event was already processed
+   */
+  public boolean applyTransferShippedOnce(
+      UUID tenantId,
+      UUID eventId,
+      String consumerName,
+      UUID fromStoreId,
+      UUID toStoreId,
+      List<UUID> variantIds,
+      List<BigDecimal> qtys) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, eventId, consumerName)) {
+            return false;
+          }
+          for (int i = 0; i < variantIds.size(); i++) {
+            insertSupplyLineTx(
+                c,
+                new OpenSupplyLine(
+                    Ids.newId(),
+                    tenantId,
+                    fromStoreId,
+                    toStoreId,
+                    variantIds.get(i),
+                    qtys.get(i),
+                    eventId));
+          }
+          return true;
         },
-        "insert open supply line");
+        "apply transfer shipped");
   }
 
   /**

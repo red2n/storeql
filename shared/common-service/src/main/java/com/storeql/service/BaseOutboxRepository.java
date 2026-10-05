@@ -142,9 +142,10 @@ public abstract class BaseOutboxRepository extends BaseJdbcRepository implements
 
   private int deleteProcessed(String column, Instant cutoff, int batch) {
     // column is one of two literals above, never caller input
+    // The key is (event_id, consumer), so the batch is chosen by that pair.
     String sql =
-        "DELETE FROM processed_events WHERE event_id IN (SELECT event_id FROM processed_events"
-            + " WHERE "
+        "DELETE FROM processed_events WHERE (event_id, consumer) IN"
+            + " (SELECT event_id, consumer FROM processed_events WHERE "
             + column
             + " < ? ORDER BY "
             + column

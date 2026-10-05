@@ -149,9 +149,6 @@ public class DropshipService {
     if (wanted.isEmpty()) return;
     List<DropshipArrangement> live = repo.activeFor(tenantId, wanted.keySet());
     if (live.isEmpty()) return;
-    // Idempotent on the event: a redelivered confirmation raises nothing twice.
-    if (!purchases.markProcessedIfNew(Ids.derived(eventId, "dropship"), ORDER_CONSUMER)) return;
-
     String shipTo = shipTo(o);
     Map<String, BigDecimal> vatRates = pricing.findVatRates(tenantId);
     Map<UUID, List<DropshipArrangement>> bySupplier = new LinkedHashMap<>();
@@ -159,6 +156,7 @@ public class DropshipService {
       bySupplier.computeIfAbsent(a.supplierId(), k -> new java.util.ArrayList<>()).add(a);
     }
     Instant now = Instant.now();
+    List<PurchaseRepository.RaisedOrder> raises = new java.util.ArrayList<>();
     for (Map.Entry<UUID, List<DropshipArrangement>> e : bySupplier.entrySet()) {
       Optional<Supplier> supplier = purchases.findSupplier(tenantId, e.getKey());
       if (supplier.isEmpty()) {
@@ -194,9 +192,9 @@ public class DropshipService {
                   null,
                   Domain.PO_SOURCE_DROPSHIP)
               .withDropship(orderId, shipTo);
-      purchases.createPurchaseOrder(po, Events.purchaseOrderCreated(tenantId, po.id()));
+      List<PurchaseOrderLine> lines = new java.util.ArrayList<>();
       for (DropshipArrangement a : e.getValue()) {
-        purchases.addPurchaseOrderLine(
+        lines.add(
             new PurchaseOrderLine(
                 Ids.newId(),
                 tenantId,
@@ -206,14 +204,20 @@ public class DropshipService {
                 a.unitCost(),
                 a.vatCode(),
                 now,
-                "dropship for sale " + Handle.of(orderId) + ", shipped to the customer"),
-            currency,
-            vatRates);
+                "dropship for sale " + Handle.of(orderId) + ", shipped to the customer"));
       }
+      raises.add(
+          new PurchaseRepository.RaisedOrder(
+              po, Events.purchaseOrderCreated(tenantId, po.id()), lines));
+    }
+    // One transaction with the dedupe mark (see raiseOnce): a failure part-way raises nothing and
+    // leaves no mark, so the redelivery raises the lot; a redelivery after success raises nothing.
+    if (!purchases.raiseOnce(eventId, ORDER_CONSUMER, raises, vatRates)) return;
+    for (PurchaseRepository.RaisedOrder r : raises) {
       LOG.log(
           Level.INFO,
           "dropship order {0} raised for sale {1} of tenant {2}",
-          po.id(),
+          r.order().id(),
           orderId,
           tenantId);
     }
