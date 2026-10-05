@@ -31,7 +31,7 @@
         <graalvm.native.maven.plugin.version>0.9.24</graalvm.native.maven.plugin.version>
 
         <!-- Versions for libraries NOT managed by the Helidon BOM -->
-        <flyway.version>13.7.0</flyway.version>
+        <flyway.version>13.9.0</flyway.version>
         <postgresql.version>42.7.13</postgresql.version>
         <hikaricp.version>7.1.0</hikaricp.version>
         <!-- Must match the version Helidon's own BOM pins org.testcontainers:testcontainers/jdbc
@@ -63,7 +63,7 @@
         <version.lib.micrometer>1.15.12</version.lib.micrometer>
         <version.lib.micrometer-prometheus>1.15.12</version.lib.micrometer-prometheus>
         <!-- GHSA-xx22-p4ch-683r — kafka-clients 3.9.2 brings the maintained fork at 1.10.1 -->
-        <lz4-java.version>1.11.3</lz4-java.version>
+        <lz4-java.version>1.12.0</lz4-java.version>
         <!-- GHSA-rcgg-9c38-7xpx: unbounded memory from a W3C baggage header, and the gateway reads
              headers from the internet -->
         <version.lib.opentelemetry>1.62.0</version.lib.opentelemetry>
@@ -72,15 +72,15 @@
 
         <!-- Google's phone number metadata (customer-svc reads a phone in the business's own
              country and keeps it in E.164). No advisory; raise it with the metadata releases. -->
-        <libphonenumber.version>9.0.32</libphonenumber.version>
+        <libphonenumber.version>9.0.40</libphonenumber.version>
 
         <!-- Quality tooling versions -->
-        <archunit.version>1.5.0</archunit.version>
+        <archunit.version>1.5.1</archunit.version>
         <spotbugs-plugin.version>4.10.4.1</spotbugs-plugin.version>
         <pmd-plugin.version>3.28.0</pmd-plugin.version>
         <fmt-plugin.version>2.29</fmt-plugin.version>
         <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
-        <checkstyle.version>14.1.0</checkstyle.version>
+        <checkstyle.version>14.3.0</checkstyle.version>
         <cyclonedx-plugin.version>2.9.3</cyclonedx-plugin.version>
 
         <!-- Quality gate skip flags (override per-module or on CLI with -Dspotbugs.skip=true etc.) -->
