@@ -42,7 +42,6 @@ public class RedisCache {
 
   @Inject Instance<RedisCommands<String, String>> commandsSource;
 
-  private volatile RedisCommands<String, String> commands;
   private volatile long nextAttemptAtMillis;
 
   /**
@@ -52,25 +51,12 @@ public class RedisCache {
    *     miss so the caller falls through to its own source of truth
    */
   public String get(String key) {
-    RedisCommands<String, String> redis = commands();
-    if (redis == null) return null;
-    try {
-      return redis.get(key);
-    } catch (RedisException e) {
-      degraded("read", key, e);
-      return null;
-    }
+    return call("read", key, redis -> redis.get(key));
   }
 
   /** Caches {@code value} under {@code key} for {@code ttlSeconds}. A failure is not fatal. */
   public void put(String key, String value, long ttlSeconds) {
-    RedisCommands<String, String> redis = commands();
-    if (redis == null) return;
-    try {
-      redis.set(key, value, SetArgs.Builder.ex(ttlSeconds));
-    } catch (RedisException e) {
-      degraded("write", key, e);
-    }
+    call("write", key, redis -> redis.set(key, value, SetArgs.Builder.ex(ttlSeconds)));
   }
 
   /**
@@ -81,45 +67,45 @@ public class RedisCache {
    * entries are what bound the damage, so cache-aside entries must always carry one.
    */
   public void evict(String... keys) {
-    RedisCommands<String, String> redis = commands();
-    if (redis == null) return;
-    try {
-      redis.del(keys);
-    } catch (RedisException e) {
-      degraded("evict", String.join(",", keys), e);
-    }
+    call("evict", String.join(",", keys), redis -> redis.del(keys));
   }
 
   /**
-   * The live commands handle, or null when Redis cannot currently be reached.
+   * Runs one command, and is the only place a Redis failure is caught.
    *
-   * <p>Once obtained the handle is kept: Lettuce reconnects transparently underneath it, so a later
-   * outage surfaces as a thrown command rather than a null here.
+   * <p>The connection is resolved and first used inside the guarded block. Under CDI, resolving the
+   * client returns a proxy and does not connect; the connect runs on the first command, so a
+   * connect failure surfaces here, where it starts the backoff. Catching only at resolution (as
+   * before) left that failure uncaught and every later call re-ran the connect.
+   *
+   * <p>Any failure on the path starts the backoff, including a command that fails on a connection
+   * that was up: the handle cannot tell the two apart, and both mean "serve uncached for now".
+   *
+   * @return the command's result, or null when Redis is in backoff or the command failed
    */
-  private RedisCommands<String, String> commands() {
-    RedisCommands<String, String> existing = commands;
-    if (existing != null) return existing;
-
+  private <T> T call(String operation, String key, Command<T> command) {
     long now = System.currentTimeMillis();
     if (now < nextAttemptAtMillis) return null;
-
     try {
-      RedisCommands<String, String> resolved = commandsSource.get();
-      commands = resolved;
-      LOG.log(Level.INFO, "Redis cache connected");
-      return resolved;
+      T result = command.run(commandsSource.get());
+      nextAttemptAtMillis = 0;
+      return result;
     } catch (RuntimeException e) {
       nextAttemptAtMillis = now + RECONNECT_BACKOFF_MS;
       LOG.log(
           Level.WARNING,
-          "Redis unreachable — serving uncached for the next {0}ms: {1}",
+          "Redis {0} failed for key {1}; serving uncached for the next {2}ms: {3}",
+          operation,
+          key,
           RECONNECT_BACKOFF_MS,
           e.toString());
       return null;
     }
   }
 
-  private static void degraded(String operation, String key, RedisException e) {
-    LOG.log(Level.WARNING, "Redis {0} failed for key {1}: {2}", operation, key, e.toString());
+  /** One Redis command, run against a resolved handle. */
+  @FunctionalInterface
+  private interface Command<T> {
+    T run(RedisCommands<String, String> redis);
   }
 }
