@@ -92,7 +92,10 @@ class TerminalReplayWhileAtDeviceTest {
                 return first[0];
               }
             });
-    when(repo.settle(any(), any(), any())).thenReturn(true);
+    when(repo.settle(any(), any(), any()))
+        .thenReturn(
+            new com.storeql.payment.domain.CardSettlement.Answered(
+                com.storeql.payment.domain.Terminals.REQUESTED, true, false));
     when(repo.attempt(any(), any())).thenAnswer(inv -> java.util.Optional.ofNullable(first[0]));
 
     TerminalService svc = new TerminalService();

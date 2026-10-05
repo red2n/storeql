@@ -427,9 +427,12 @@ class RefundStoreIT {
   }
 
   private void runBackfill() throws Exception {
+    runBackfill("V12__backfill_refund_tender_store.sql");
+  }
+
+  private void runBackfill(String migration) throws Exception {
     String sql;
-    try (var in =
-        getClass().getResourceAsStream("/db/migration/V12__backfill_refund_tender_store.sql")) {
+    try (var in = getClass().getResourceAsStream("/db/migration/" + migration)) {
       sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);
     }
     try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
@@ -475,5 +478,74 @@ class RefundStoreIT {
                 + orderD
                 + "'"),
         nullValue());
+  }
+
+  @Test
+  @DisplayName(
+      "V20 fills, once more, a store a refund was written without (a rolling deploy's older build),"
+          + " so the store-held reads that no longer fall back to the payment still count it")
+  void theSecondBackfillLetsTheReadsTakeTheRefundsOwnStore() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID other = Ids.newId();
+    UUID storeA = Ids.newId();
+    UUID storeB = Ids.newId();
+    UUID orderA = Ids.newId();
+    UUID orderB = Ids.newId();
+    UUID orderC = Ids.newId();
+    UUID paidA = tender(tenant, orderA, storeA, "9.00", PaymentTender.METHOD_CARD);
+    UUID paidNoStore = tender(tenant, orderB, null, "9.00", PaymentTender.METHOD_CARD);
+    UUID paidB = tender(tenant, orderC, storeB, "9.00", PaymentTender.METHOD_CARD);
+    insertRefund(tenant, orderA, paidA, null); // written without one: gets its payment's
+    insertRefund(tenant, orderB, paidNoStore, null); // its payment had none: stays store-less
+    insertRefund(tenant, orderC, paidB, storeA); // set (an exchange at another store): kept
+    insertRefund(other, orderA, paidA, null); // another business's row naming our payment
+
+    runBackfill("V20__refund_store_written_everywhere.sql");
+    runBackfill("V20__refund_store_written_everywhere.sql"); // once or twice, the same
+
+    assertThat(stores(tenant, orderA), contains(storeA.toString()));
+    assertThat(stores(tenant, orderB), contains("null"));
+    assertThat(stores(tenant, orderC), contains(storeA.toString()));
+    assertThat(stores(other, orderA), contains("null"));
+
+    // A manager held to store A reads the refund now on A, and the exchange's written at A; one
+    // held to B reads neither (the exchange was A's, though its payment was B's).
+    Answer atA =
+        ItCalls.get(
+            target,
+            "/admin/reports/tender-mix",
+            new Caller(tenant, Ids.newId(), "MANAGER", storeA));
+    assertThat(atA.body().toString(), atA.status(), is(200));
+    assertThat(
+        atA.list()
+            .getJsonObject(0)
+            .getJsonNumber("refundedAmount")
+            .bigDecimalValue()
+            .compareTo(new BigDecimal("2.00")),
+        is(0));
+    Answer atB =
+        ItCalls.get(
+            target,
+            "/admin/reports/tender-mix",
+            new Caller(tenant, Ids.newId(), "MANAGER", storeB));
+    assertThat(
+        atB.list().getJsonObject(0).getJsonNumber("refundedAmount").bigDecimalValue().signum(),
+        is(0));
+    // Another business's manager naming our store reads none of ours.
+    Answer stranger =
+        ItCalls.get(
+            target,
+            "/admin/reports/tender-mix?storeId=" + storeA,
+            new Caller(other, Ids.newId(), "OWNER"));
+    for (int i = 0; stranger.status() == 200 && i < stranger.list().size(); i++) {
+      assertThat(
+          stranger
+              .list()
+              .getJsonObject(i)
+              .getJsonNumber("capturedAmount")
+              .bigDecimalValue()
+              .signum(),
+          is(0));
+    }
   }
 }

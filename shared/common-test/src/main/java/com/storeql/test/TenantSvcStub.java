@@ -1,6 +1,10 @@
 package com.storeql.test;
 
+import com.sun.net.httpserver.Filter;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -56,6 +60,37 @@ public final class TenantSvcStub implements AutoCloseable {
     this.server = server;
   }
 
+  /**
+   * A query escaped into the path ("…/schemes%3Fall=true") is what Helidon's WebClient sends for a
+   * "?" written into a path string. The JDK server routes by the decoded path's prefix, which would
+   * still answer it and so hide the bug; here it is not found, so a client that does it fails its
+   * test rather than passing it.
+   */
+  private static final Filter NO_ESCAPED_QUERY =
+      new Filter() {
+        @Override
+        public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+          if (exchange.getRequestURI().getRawPath().contains("%3F")) {
+            JsonStub.reply(
+                exchange,
+                404,
+                "{\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"a query escaped into the path\"}}");
+            return;
+          }
+          chain.doFilter(exchange);
+        }
+
+        @Override
+        public String description() {
+          return "refuses a query escaped into the path";
+        }
+      };
+
+  /** Every route goes through {@link #NO_ESCAPED_QUERY}. */
+  private static void route(HttpServer server, String path, HttpHandler handler) {
+    server.createContext(path, handler).getFilters().add(NO_ESCAPED_QUERY);
+  }
+
   /** Starts the stub on a free local port and points the client property at it. */
   public static TenantSvcStub start() {
     HttpServer server = JsonStub.serve("tenant-svc-stub");
@@ -63,7 +98,8 @@ public final class TenantSvcStub implements AutoCloseable {
     // What a plan allows the business (21.8, 21.11), as Entitlements reads it: the grants of the
     // limits given with withLimit, and an empty list — unrestricted — for a business given none.
     // The JDK server routes by the longest matching context, so this wins over /admin/tenant.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/plan/limits",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -84,7 +120,8 @@ public final class TenantSvcStub implements AutoCloseable {
           }
           JsonStub.reply(exchange, 200, "{\"data\":{\"grants\":[" + grants + "]}}");
         });
-    server.createContext(
+    route(
+        server,
         "/admin/tenant",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -103,7 +140,8 @@ public final class TenantSvcStub implements AutoCloseable {
     // What a period of sales earns, as tenant-svc answers it (store operations & workforce). A flat
     // percentage per business here: the marginal-band rule is tenant-svc's own to prove, and what a
     // caller's test needs is a deterministic answer and the figures it was asked about.
-    server.createContext(
+    route(
+        server,
         "/admin/workforce/commission/rate",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -117,7 +155,8 @@ public final class TenantSvcStub implements AutoCloseable {
           String percent = tenant == null ? null : stub.commissionPercent.get(tenant);
           JsonStub.reply(exchange, 200, rated(body, percent));
         });
-    server.createContext(
+    route(
+        server,
         "/platform/tenants/by-einvoice-address",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -151,7 +190,8 @@ public final class TenantSvcStub implements AutoCloseable {
           }
         });
     // The longer context wins, so the obligations route is not answered as a profile.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/obligations",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -175,7 +215,8 @@ public final class TenantSvcStub implements AutoCloseable {
         });
     // A tenant's exchange rates (03.x): the home currency from its profile and the rates given
     // with withFxRate; a tenant with none keeps only its home currency.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/fx-rates",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -201,7 +242,8 @@ public final class TenantSvcStub implements AutoCloseable {
                   + "]}}");
         });
     // A tenant's retention schedule (21.16), as registered; a tenant with none has an empty one.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/retention",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -217,7 +259,8 @@ public final class TenantSvcStub implements AutoCloseable {
         });
     // A tenant's stores, one page; a tenant with none registered has none. Under it, one of them
     // by id, and 404 for a store that is not the tenant's.
-    server.createContext(
+    route(
+        server,
         STORES,
         exchange -> {
           String tenant = exchange.getRequestHeaders().getFirst("X-Tenant-Id");

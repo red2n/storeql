@@ -72,7 +72,8 @@ public class CatalogResource {
   @Operation(
       summary = "Browse or search the public catalog",
       description =
-          "Lists ACTIVE products; the online channel further filters to sellable_online, POS"
+          "Lists ACTIVE and DISCONTINUED products (each carries its status; delisted ones are"
+              + " left out); the online channel further filters to sellable_online, POS"
               + " channel to sellable_pos. At least one of q/sku/barcode routes to the search"
               + " path; otherwise the standard filtered list is returned. Tenant comes from"
               + " X-Tenant-Id.")

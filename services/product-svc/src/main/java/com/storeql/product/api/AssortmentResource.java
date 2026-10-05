@@ -132,10 +132,10 @@ public class AssortmentResource {
   @APIResponse(
       responseCode = "400",
       description =
-          "Unknown action (ASSORTMENT_ACTION_UNKNOWN), neither or both targets given"
-              + " (ASSORTMENT_TARGET_REQUIRED), no reason (ASSORTMENT_REASON_REQUIRED), an id that"
-              + " is not one (ASSORTMENT_ID_REQUIRED, ASSORTMENT_ID_INVALID) or a day that is not"
-              + " one (ASSORTMENT_DATE_INVALID)")
+          "No product, action or reason, or a reason past 500 characters (VALIDATION_FAILED);"
+              + " unknown action (ASSORTMENT_ACTION_UNKNOWN), neither or both targets given"
+              + " (ASSORTMENT_TARGET_REQUIRED), an id that is not one (ASSORTMENT_ID_INVALID) or a"
+              + " day that is not one (ASSORTMENT_DATE_INVALID)")
   @APIResponse(
       responseCode = "403",
       description =
@@ -290,7 +290,8 @@ public class AssortmentResource {
           "Money without a currency, a currency without money, or a code ISO 4217 does not know"
               + " (REVIEW_LINE_CURRENCY); negative units or revenue, revenue or margin with more"
               + " decimal places than its currency has (two for GBP, none for JPY, three for KWD),"
-              + " or a figure too large to keep (REVIEW_LINE_FIGURES)")
+              + " units sold with more than three decimal places, or a figure too large to keep"
+              + " (REVIEW_LINE_FIGURES)")
   @APIResponse(responseCode = "409", description = "The review is already closed")
   @POST
   @Path("/reviews/{id}/lines")
@@ -390,6 +391,9 @@ public class AssortmentResource {
   public ApiResponse<AssortmentDtos.ReviewResultResponse> close(
       @PathParam("id") UUID id, AssortmentDtos.CloseReviewRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    if (req != null) { // the body is optional: a bare close applies to the whole business
+      Validations.validate(req);
+    }
     return ApiResponse.ok(
         AssortmentMappers.toDto(
             svc.close(

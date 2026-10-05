@@ -53,11 +53,17 @@ class BulkImportHolesTest {
   private static final TenantContext OWNER = CatalogueStoresTest.caller(TENANT, "OWNER", Set.of());
 
   private final List<String> writes = new ArrayList<>();
+  private final List<String> announced = new ArrayList<>();
 
   private final class Categories extends CategoryRepository {
     @Override
     public Optional<Category> findCategoryByName(UUID tenantId, String name) {
       return Optional.empty();
+    }
+
+    @Override
+    public Optional<Category> findCategory(UUID tenantId, UUID id) {
+      return Optional.empty(); // the walk up the tree ends at the category itself
     }
 
     @Override
@@ -87,6 +93,7 @@ class BulkImportHolesTest {
     public Product createProductWithOutbox(
         Product p, List<OutboxRow> events, ProductSafety safety, List<UUID> storeIds) {
       writes.add("product:" + p.name());
+      for (OutboxRow e : events) announced.add(e.eventType() + ":" + p.name());
       return p;
     }
 
@@ -223,5 +230,34 @@ class BulkImportHolesTest {
     assertThat(result.errors().size(), is(2));
     assertThat(
         writes, contains("category:Drinks", "brand:Acme", "product:Green tea", "variant:TEA-1"));
+  }
+
+  @Test
+  @DisplayName("An imported product with a category announces ProductCategorised; one without, not")
+  void anImportedProductAnnouncesItsCategory() {
+    ImportProductRequest bare =
+        new ImportProductRequest(
+            "Loose item",
+            null,
+            null,
+            null,
+            false,
+            true,
+            null,
+            List.of(new ImportVariantRequest("LOOSE-1", null, null, "EA", null)));
+
+    svc.bulkImport(
+        OWNER,
+        new BulkImportRequest(
+            categories(new ImportCategoryRequest("Drinks", null)),
+            products(product("Green tea", "TEA-1"), bare),
+            null));
+
+    assertThat(
+        announced,
+        contains(
+            "ProductCreated:Green tea",
+            "ProductCategorised:Green tea",
+            "ProductCreated:Loose item"));
   }
 }

@@ -97,6 +97,22 @@ final class ItCalls {
       Caller who,
       String json,
       String idempotencyKey) {
+    return call(target, method, pathAndQuery, who, json, idempotencyKey, null);
+  }
+
+  /**
+   * As {@link #call}, for a caller whose role names its permissions (20.10): {@code permissions} is
+   * the {@code X-Permissions} header the gateway stamps from the token, comma-separated ({@code -}
+   * for none); null sends none, so the tier's defaults apply.
+   */
+  static Answer call(
+      WebTarget target,
+      String method,
+      String pathAndQuery,
+      Caller who,
+      String json,
+      String idempotencyKey,
+      String permissions) {
     Invocation.Builder b =
         WebTargets.at(target, pathAndQuery)
             .request()
@@ -106,6 +122,7 @@ final class ItCalls {
     String storeIds = who.storeIdsHeader();
     if (storeIds != null) b = b.header("X-Store-Ids", storeIds);
     if (idempotencyKey != null) b = b.header("Idempotency-Key", idempotencyKey);
+    if (permissions != null) b = b.header("X-Permissions", permissions);
     Response r =
         "GET".equals(method)
             ? b.get()

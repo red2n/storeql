@@ -54,10 +54,84 @@ class StripeDisputeParsingTest {
         parse(
             "charge.dispute.funds_withdrawn",
             "needs_response",
-            ",\"balance_transactions\":[{\"amount\":-4599,\"fee\":1500,\"net\":-6099},"
-                + "{\"amount\":0,\"fee\":500,\"net\":-500}]");
+            ",\"balance_transactions\":[{\"amount\":-4599,\"currency\":\"gbp\",\"fee\":1500,"
+                + "\"net\":-6099},{\"amount\":0,\"currency\":\"gbp\",\"fee\":500,\"net\":-500}]");
     assertEquals(DisputeNotice.PHASE_FUNDS_WITHDRAWN, e.dispute().phase());
     assertEquals(0, new BigDecimal("20.00").compareTo(e.dispute().fee()), "the fees, summed");
+    assertEquals("GBP", e.dispute().feeCurrency());
+  }
+
+  // ── the fee, in the currency Stripe charged it in ───────────────────────────
+
+  private static final String SECRET = "whsec_" + com.storeql.ids.Ids.newId();
+
+  /** A delivery signed as Stripe signs one, read through the public webhook's own check. */
+  private static WebhookEvent delivered(String payload) {
+    StripePaymentProvider p = new StripePaymentProvider();
+    p.webhookSecret = SECRET;
+    p.secretKey = "sk_" + com.storeql.ids.Ids.newId();
+    p.apiBase = "https://api.stripe.example";
+    long now = Instant.now().getEpochSecond();
+    String signed = StripePaymentProvider.hmacSha256Hex(SECRET, now + "." + payload);
+    return p.verifyWebhook(payload.getBytes(StandardCharsets.UTF_8), "t=" + now + ",v1=" + signed);
+  }
+
+  /**
+   * charge.dispute.funds_withdrawn as Stripe sends it for a yen charge on an account that settles
+   * in pounds: the dispute is in the charge's currency, each balance transaction in the account's
+   * own (with the exchange rate it used), and its fee in that currency's minor units.
+   */
+  private static String yenDisputeSettledInPounds(String balanceTransactions) {
+    return "{\"id\":\"evt_fx\",\"object\":\"event\",\"type\":\"charge.dispute.funds_withdrawn\","
+        + "\"data\":{\"object\":{\"id\":\"dp_fx\",\"object\":\"dispute\",\"amount\":5000,"
+        + "\"currency\":\"jpy\",\"charge\":\"ch_fx\",\"payment_intent\":\"pi_fx\","
+        + "\"reason\":\"fraudulent\",\"status\":\"needs_response\",\"is_charge_refundable\":false,"
+        + "\"evidence_details\":{\"due_by\":1790000000,\"has_evidence\":false,"
+        + "\"past_due\":false,\"submission_count\":0},\"balance_transactions\":"
+        + balanceTransactions
+        + "}}}";
+  }
+
+  @Test
+  void aDisputeFeeIsReadInTheCurrencyStripeChargedIt() {
+    WebhookEvent e =
+        delivered(
+            yenDisputeSettledInPounds(
+                "[{\"id\":\"txn_1\",\"object\":\"balance_transaction\",\"amount\":-2700,"
+                    + "\"currency\":\"gbp\",\"exchange_rate\":0.0054,\"fee\":1500,"
+                    + "\"fee_details\":[{\"amount\":1500,\"currency\":\"gbp\","
+                    + "\"description\":\"Dispute fee\",\"type\":\"stripe_fee\"}],"
+                    + "\"net\":-4200,\"type\":\"adjustment\"}]"));
+    DisputeNotice d = e.dispute();
+    // The disputed amount is the charge's: 5000 yen, yen having no minor unit.
+    assertEquals(new BigDecimal("5000"), d.amount());
+    assertEquals("JPY", d.currency());
+    // The fee is the account's: 1500 pence is £15.00 — never 1500 yen.
+    assertEquals(new BigDecimal("15.00"), d.fee());
+    assertEquals("GBP", d.feeCurrency());
+  }
+
+  @Test
+  void aFeeInNoCurrencyOrInTwoIsNotGuessedAt() {
+    // A balance transaction that names no currency: its fee is not read as the dispute's.
+    DisputeNotice none =
+        delivered(yenDisputeSettledInPounds("[{\"amount\":-2700,\"fee\":1500,\"net\":-4200}]"))
+            .dispute();
+    assertNull(none.fee(), "not said, so not known");
+    assertNull(none.feeCurrency());
+    // Two currencies are never summed into one figure.
+    DisputeNotice two =
+        delivered(
+                yenDisputeSettledInPounds(
+                    "[{\"amount\":-2700,\"currency\":\"gbp\",\"fee\":1500,\"net\":-4200},"
+                        + "{\"amount\":0,\"currency\":\"eur\",\"fee\":500,\"net\":-500}]"))
+            .dispute();
+    assertNull(two.fee());
+    assertNull(two.feeCurrency());
+    // No balance transaction yet: no fee charged yet, in the dispute's own currency.
+    DisputeNotice opened = parse("charge.dispute.created", "needs_response", "").dispute();
+    assertEquals(0, BigDecimal.ZERO.compareTo(opened.fee()));
+    assertEquals("GBP", opened.feeCurrency());
   }
 
   @Test

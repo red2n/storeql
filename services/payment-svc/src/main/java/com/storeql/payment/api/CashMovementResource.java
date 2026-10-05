@@ -44,7 +44,11 @@ public class CashMovementResource {
           "Petty cash movement against an open till session. direction must be PAY_IN or PAY_OUT."
               + " Requires MANAGER or OWNER.")
   @APIResponse(responseCode = "201", description = "Cash movement recorded")
-  @APIResponse(responseCode = "400", description = "Invalid direction")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "INVALID_DIRECTION, or CASH_AMOUNT_INVALID: finer than the business's currency's minor"
+              + " unit (whole yen, a dinar's three places); VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
   @POST
   @Path("/movements")
@@ -89,6 +93,11 @@ public class CashMovementResource {
               + " Requires MANAGER or OWNER.")
   @APIResponse(responseCode = "201", description = "Z-report written")
   @APIResponse(responseCode = "200", description = "The day was already settled: stored report")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "CASH_AMOUNT_INVALID: the count is finer than the report's currency's minor unit;"
+              + " CURRENCY_INVALID; Z_REPORT_CORRECTION_REASON_REQUIRED; VALIDATION_FAILED")
   @APIResponse(responseCode = "409", description = "Z_REPORT_SESSIONS_OPEN or Z_REPORT_NOT_LATEST")
   @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
   @POST

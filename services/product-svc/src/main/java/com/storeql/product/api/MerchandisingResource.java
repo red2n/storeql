@@ -505,6 +505,7 @@ public class MerchandisingResource {
       @PathParam("id") UUID id, MerchandisingDtos.OwnBrandRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
     catalogue.requireBusinessWideCatalogue(ctx, "Marking a brand as the business's own");
+    Validations.validate(req);
     svc.setOwnBrand(ctx.requireTenantId(), id, req != null && req.ownBrand());
     return ApiResponse.ok(new MerchandisingDtos.OwnBrandRequest(req != null && req.ownBrand()));
   }

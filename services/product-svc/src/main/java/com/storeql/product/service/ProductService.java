@@ -2322,8 +2322,17 @@ public class ProductService {
             // The product and the stores it is sold at in one transaction: a product whose stores
             // failed to go in after it would be left sold at every store. Naming none, a caller
             // held to stores sells it at theirs, never at every store.
+            // A categorised product announces its category with it, on the same transaction, as
+            // POST /admin/products does: category-scoped promotions and sales by category read it.
+            // (REPLACE reuses a product only of the same name and category, so a reused product's
+            // category never changes here and has nothing new to announce.)
+            List<OutboxRow> events =
+                categoryId == null
+                    ? List.of(productEvent)
+                    : List.of(
+                        productEvent, categorised(tenantId, productId, categoryId, List.of()));
             repo.createProductWithOutbox(
-                product, List.of(productEvent), null, CatalogueStores.rangeOfNew(ctx, storeIds));
+                product, events, null, CatalogueStores.rangeOfNew(ctx, storeIds));
             prodCreated++;
           }
 

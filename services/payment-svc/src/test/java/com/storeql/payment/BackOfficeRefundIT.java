@@ -37,6 +37,10 @@ import org.junit.jupiter.api.Test;
  * role has sales.refund narrowed out is refused by name; concurrent refunds on one tender cannot
  * together exceed what was captured; a retry with the same Idempotency-Key refunds once; and
  * another business's staff of every role, naming our ids, find nothing and move nothing.
+ *
+ * <p>And a refund is the store's where its tender was taken: a manager held to other stores is
+ * {@code 403 STORE_ACCESS_DENIED} (after another business's {@code 404}, before a replay is
+ * answered or anything is written), one held to that store or to none refunds it.
  */
 @HelidonTest
 class BackOfficeRefundIT {
@@ -326,6 +330,189 @@ class BackOfficeRefundIT {
     assertThat(list.list().size(), is(0));
     // The refund made by us stands, once.
     assertThat(refundRows(s), is("1"));
+  }
+
+  // ── a refund is the store's where its tender was taken ──────────────────────
+
+  /** A cash sale of {@code amount} taken at {@code store} (null for a tender taken at no store). */
+  private Sale saleAt(UUID tenant, UUID store, String amount) {
+    UUID order = Ids.newId();
+    UUID id = Ids.newId();
+    payments.createTender(
+        new PaymentTender(
+            id,
+            tenant,
+            order,
+            new BigDecimal(amount),
+            PaymentTender.METHOD_CASH,
+            null,
+            null,
+            PaymentTender.STATUS_CAPTURED,
+            null,
+            Instant.now(),
+            store),
+        new OutboxRow("PaymentCaptured", "storeql.payment.payment-captured", tenant, id, "{}"));
+    return new Sale(tenant, order, id);
+  }
+
+  private static Caller managerAt(UUID tenant, UUID... stores) {
+    return Caller.heldTo(tenant, "MANAGER", stores);
+  }
+
+  private String refundStores(Sale s) {
+    return Envelopes.scalar(
+        PG,
+        "SELECT coalesce(string_agg(DISTINCT coalesce(store_id::text, 'none'), ','), '-')"
+            + " FROM payment.refund_tenders WHERE tenant_id = '"
+            + s.tenant()
+            + "' AND payment_id = '"
+            + s.payment()
+            + "'");
+  }
+
+  @Test
+  @DisplayName(
+      "A manager held to another store cannot refund a tender taken at this one: 403"
+          + " STORE_ACCESS_DENIED, nothing written, announced or read back")
+  void aManagerHeldElsewhereCannotRefundThisStoresTender() {
+    UUID tenant = Ids.newId();
+    UUID storeA = Ids.newId();
+    UUID storeB = Ids.newId();
+    Sale s = saleAt(tenant, storeA, "30.00");
+
+    for (String method : new String[] {"CASH", "CARD", "UPI"}) {
+      Answer refused = refund(s, managerAt(tenant, storeB), "5.00", method, Ids.newId().toString());
+      assertThat(method + " " + refused.body(), refused.status(), is(403));
+      assertThat(refused.code(), is("STORE_ACCESS_DENIED"));
+    }
+    // Held to two other stores: still not this one.
+    assertThat(
+        refund(s, managerAt(tenant, storeB, Ids.newId()), "5.00", "CASH", null).code(),
+        is("STORE_ACCESS_DENIED"));
+    // The store comes before the order named and before the cap: neither is told to them.
+    Answer wrongOrder =
+        ItCalls.call(
+            target,
+            "POST",
+            "/payments/by-order/" + Ids.newId() + "/refunds",
+            managerAt(tenant, storeB),
+            refundBody(s, "5.00", "CASH"),
+            Ids.newId().toString());
+    assertThat(wrongOrder.code(), is("STORE_ACCESS_DENIED"));
+    assertThat(
+        refund(s, managerAt(tenant, storeB), "31.00", "CASH", null).code(),
+        is("STORE_ACCESS_DENIED"));
+    assertThat("store A's drawer is not moved", refundRows(s), is("0"));
+    assertThat("and its order is not told", refundEvents(s), is("0"));
+
+    // Held to the store the tender was taken at — alone or among others — or to none, it is theirs.
+    String key = Ids.newId().toString();
+    Answer own = refund(s, managerAt(tenant, storeA), "5.00", "CASH", key);
+    assertThat(own.body().toString(), own.status(), is(201));
+    assertThat(
+        refund(s, managerAt(tenant, storeB, storeA), "5.00", "CASH", null).status(), is(201));
+    assertThat(refund(s, manager(tenant), "5.00", "CASH", null).status(), is(201));
+    assertThat(refund(s, Caller.owner(tenant), "5.00", "CASH", null).status(), is(201));
+    assertThat(refundRows(s), is("4"));
+    assertMoney(refundedTotal(s), "20.00");
+    assertThat("each is the store's where the tender was taken", refundStores(s), is(storeA + ""));
+
+    // A refund already made is not replayed to a manager held elsewhere who has its key.
+    Answer replayed = refund(s, managerAt(tenant, storeB), "5.00", "CASH", key);
+    assertThat(replayed.body().toString(), replayed.status(), is(403));
+    assertThat(replayed.code(), is("STORE_ACCESS_DENIED"));
+    assertThat(replayed.body().toString().contains(own.data().getString("id")), is(false));
+    // To its own maker it is.
+    Answer again = refund(s, managerAt(tenant, storeA), "5.00", "CASH", key);
+    assertThat(again.status(), is(201));
+    assertThat(again.data().getString("id"), is(own.data().getString("id")));
+    assertThat(refundRows(s), is("4"));
+    assertThat(refundEvents(s), is("4"));
+  }
+
+  @Test
+  @DisplayName(
+      "Another business's staff of every role, held to our store by name, find no tender: 404"
+          + " before any store is judged, and nothing moves")
+  void anotherBusinessNamingOurStoreFindsNothing() {
+    UUID tenant = Ids.newId();
+    UUID storeA = Ids.newId();
+    Sale s = saleAt(tenant, storeA, "30.00");
+    UUID stranger = Ids.newId();
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      // Their own token, naming our store as one of theirs and as none.
+      for (Caller who :
+          new Caller[] {
+            new Caller(stranger, Ids.newId(), role),
+            new Caller(stranger, Ids.newId(), role, storeA),
+            Caller.heldTo(stranger, role, Ids.newId())
+          }) {
+        Answer a = refund(s, who, "5.00", "CASH", Ids.newId().toString());
+        assertThat(role + " " + a.body(), a.status(), is(404));
+        assertThat(a.code(), is("PAYMENT_NOT_FOUND"));
+      }
+    }
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      Answer a = refund(s, new Caller(stranger, Ids.newId(), role, storeA), "5.00", "CASH", null);
+      assertThat(role + " " + a.body(), a.status(), is(403));
+    }
+    assertThat(refundRows(s), is("0"));
+    assertThat(refundEvents(s), is("0"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM payment.refund_tenders WHERE tenant_id = '" + stranger + "'"),
+        is("0"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM payment.outbox WHERE tenant_id = '" + stranger + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName(
+      "A tender taken at no store is the whole business's: a manager held to stores does not"
+          + " refund it, one held to none does")
+  void aTenderWithNoStoreIsRefundedByACallerHeldToNone() {
+    UUID tenant = Ids.newId();
+    Sale s = saleAt(tenant, null, "30.00");
+
+    Answer held = refund(s, managerAt(tenant, Ids.newId()), "5.00", "CASH", null);
+    assertThat(held.body().toString(), held.status(), is(403));
+    assertThat(held.code(), is("STORE_ACCESS_DENIED"));
+    assertThat(refundRows(s), is("0"));
+    assertThat(refundEvents(s), is("0"));
+
+    assertThat(refund(s, manager(tenant), "5.00", "CASH", null).status(), is(201));
+    assertThat(refundStores(s), is("none"));
+  }
+
+  @Test
+  @DisplayName(
+      "A key that already made a refund of one tender is refused for another: 409"
+          + " IDEMPOTENCY_KEY_REUSED, never answered with the first tender's refund")
+  void aKeyUsedForAnotherTenderIsRefused() {
+    UUID tenant = Ids.newId();
+    UUID storeA = Ids.newId();
+    UUID storeB = Ids.newId();
+    Sale atA = saleAt(tenant, storeA, "30.00");
+    Sale atB = saleAt(tenant, storeB, "30.00");
+    String key = Ids.newId().toString();
+    Answer first = refund(atA, managerAt(tenant, storeA), "5.00", "CASH", key);
+    assertThat(first.body().toString(), first.status(), is(201));
+
+    // Store B's manager, with store A's key, on their own tender: not store A's refund.
+    Answer reused = refund(atB, managerAt(tenant, storeB), "5.00", "CASH", key);
+
+    assertThat(reused.body().toString(), reused.status(), is(409));
+    assertThat(reused.code(), is("IDEMPOTENCY_KEY_REUSED"));
+    assertThat(reused.body().toString().contains(first.data().getString("id")), is(false));
+    assertThat(refundRows(atB), is("0"));
+    assertThat(refundRows(atA), is("1"));
+    // Under a key of its own the same refund is taken, so the refusal was the key's.
+    assertThat(
+        refund(atB, managerAt(tenant, storeB), "5.00", "CASH", Ids.newId().toString()).status(),
+        is(201));
   }
 
   @Test

@@ -114,8 +114,13 @@ class TerminalPaymentIT {
     UUID order = Ids.newId();
     // Two cards for one sale — a split tender — and the guard must not collapse them. It keys on
     // the
-    // press, not on the order, which is why a customer may pay half on each of two cards.
-    svc.sale(tenant, t.id(), order, new BigDecimal("5.00"), "GBP", actor, Ids.newId().toString());
+    // press, not on the order, which is why a customer may pay half on each of two cards. The
+    // first is recorded as its tender before the second is asked, as the till does: until then the
+    // machine holds it (TerminalSettlementIT).
+    var first =
+        svc.sale(
+            tenant, t.id(), order, new BigDecimal("5.00"), "GBP", actor, Ids.newId().toString());
+    svc.attachPayment(tenant, first.id(), Ids.newId());
     svc.sale(tenant, t.id(), order, new BigDecimal("5.00"), "GBP", actor, Ids.newId().toString());
     assertThat(svc.attemptsOf(tenant, order), hasSize(2));
   }
@@ -189,7 +194,13 @@ class TerminalPaymentIT {
     var sale = take(t, "30.00", Ids.newId().toString());
 
     var back =
-        svc.refund(tenant, sale.id(), new BigDecimal("10.00"), actor, Ids.newId().toString());
+        svc.refund(
+            tenant,
+            sale.id(),
+            new BigDecimal("10.00"),
+            actor,
+            Ids.newId().toString(),
+            "one item was faulty");
     assertThat(back.state(), is(Terminals.APPROVED));
     assertThat(back.kind(), is(Terminals.REFUND));
     assertThat("it names what it puts back", back.refundOf(), is(sale.id()));
@@ -197,7 +208,7 @@ class TerminalPaymentIT {
     ApiException tooMuch =
         assertThrows(
             ApiException.class,
-            () -> svc.refund(tenant, sale.id(), new BigDecimal("40.00"), actor, "r2"));
+            () -> svc.refund(tenant, sale.id(), new BigDecimal("40.00"), actor, "r2", "too much"));
     assertThat(tooMuch.code(), is("TERMINAL_REFUND_TOO_LARGE"));
   }
 
@@ -208,7 +219,7 @@ class TerminalPaymentIT {
     ApiException e =
         assertThrows(
             ApiException.class,
-            () -> svc.refund(tenant, declined.id(), new BigDecimal("1.00"), actor, "r"));
+            () -> svc.refund(tenant, declined.id(), new BigDecimal("1.00"), actor, "r", "nothing"));
     assertThat(e.code(), is("TERMINAL_NOT_APPROVED"));
   }
 
@@ -320,6 +331,66 @@ class TerminalPaymentIT {
   }
 
   @Test
+  @DisplayName(
+      "A dinar's third decimal and a whole yen are kept as taken, through the database, and a"
+          + " finer amount is refused not rounded")
+  void theAmountIsTheCurrencysOwn() {
+    // A machine per approval: an approval nobody records holds its machine for the next sale.
+    Terminals.Terminal t = aTerminal("till");
+    var kwd =
+        svc.sale(
+            tenant,
+            t.id(),
+            Ids.newId(),
+            new BigDecimal("1.125"),
+            "KWD",
+            actor,
+            Ids.newId().toString());
+    // Read back from the row, not the claim held in memory: a two-place column would say 1.13.
+    var kwdRow = svc.attempt(tenant, kwd.id()).orElseThrow();
+    assertThat(kwdRow.amount().compareTo(new BigDecimal("1.125")), is(0));
+    assertThat(com.storeql.payment.mapper.TerminalMappers.toDto(kwdRow).amount(), is("1.125"));
+
+    var jpy =
+        svc.sale(
+            tenant,
+            aTerminal("till").id(),
+            Ids.newId(),
+            new BigDecimal("1250"),
+            "JPY",
+            actor,
+            Ids.newId().toString());
+    assertThat(
+        com.storeql.payment.mapper.TerminalMappers.toDto(
+                svc.attempt(tenant, jpy.id()).orElseThrow())
+            .amount(),
+        is("1250"));
+
+    var gbp = take(aTerminal("till"), "12.5", Ids.newId().toString());
+    assertThat(
+        com.storeql.payment.mapper.TerminalMappers.toDto(
+                svc.attempt(tenant, gbp.id()).orElseThrow())
+            .amount(),
+        is("12.50"));
+
+    for (String[] bad : new String[][] {{"1.1255", "KWD"}, {"1250.5", "JPY"}, {"1.005", "GBP"}}) {
+      ApiException e =
+          assertThrows(
+              ApiException.class,
+              () ->
+                  svc.sale(
+                      tenant,
+                      t.id(),
+                      Ids.newId(),
+                      new BigDecimal(bad[0]),
+                      bad[1],
+                      actor,
+                      Ids.newId().toString()));
+      assertThat(bad[0] + " " + bad[1], e.code(), is("TERMINAL_AMOUNT_INVALID"));
+    }
+  }
+
+  @Test
   @DisplayName("Nothing card-shaped is accepted, wherever it came from")
   void noCardNumbers() {
     // Belt to the gateway's braces: a PAN arriving by any other route is refused here, because
@@ -371,6 +442,89 @@ class TerminalPaymentIT {
         is("first"));
   }
 
+  private static String retirement(UUID terminalId) {
+    return scalar(
+        PG,
+        "SELECT status || '/' || coalesce(length(retired_reason)::text, 'none')"
+            + " FROM payment.card_terminals WHERE id = '"
+            + terminalId
+            + "'");
+  }
+
+  @Test
+  @DisplayName(
+      "A retirement's reason has a limit that is kept, another business cannot retire our terminal,"
+          + " and a manager held to another store cannot retire this store's")
+  void aTerminalIsRetiredOnlyWithinItsLimitsByItsOwnBusinessAtItsOwnStore() {
+    UUID biz = Ids.newId();
+    UUID here = Ids.newId();
+    UUID elsewhere = Ids.newId();
+    Terminals.Terminal t = svc.register(biz, here, "Till " + Ids.newId(), "SIMULATED", null, actor);
+    String path = "/admin/payments/terminals/" + t.id() + "/retire";
+    assertThat(retirement(t.id()), is("ACTIVE/none"));
+
+    // A reason longer than the limit (300) is refused as a whole, by name, and the terminal stays
+    // in service.
+    Answer tooLong =
+        ItCalls.post(target, path, Caller.owner(biz), "{\"reason\":\"" + "x".repeat(301) + "\"}");
+    assertThat(tooLong.body().toString(), tooLong.status(), is(400));
+    assertThat(tooLong.code(), is("VALIDATION_FAILED"));
+    assertThat("still in service, no reason kept", retirement(t.id()), is("ACTIVE/none"));
+
+    // Another business: its owner and manager find no such terminal; the rest are refused as at
+    // home.
+    UUID rival = Ids.newId();
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer theirs =
+          ItCalls.post(
+              target, path, new Caller(rival, Ids.newId(), role), "{\"reason\":\"not yours\"}");
+      assertThat(role + " " + theirs.body(), theirs.status(), is(404));
+      assertThat(role, theirs.code(), is("TERMINAL_NOT_FOUND"));
+    }
+    for (UUID business : new UUID[] {biz, rival}) {
+      for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+        assertThat(
+            role,
+            ItCalls.post(
+                    target,
+                    path,
+                    new Caller(business, Ids.newId(), role),
+                    "{\"reason\":\"not mine\"}")
+                .status(),
+            is(403));
+      }
+    }
+    // A manager of ours held to another store does not retire this store's terminal.
+    Answer wrongStore =
+        ItCalls.post(
+            target,
+            path,
+            Caller.heldTo(biz, "MANAGER", elsewhere),
+            "{\"reason\":\"not my store\"}");
+    assertThat(wrongStore.body().toString(), wrongStore.status(), is(403));
+    assertThat(wrongStore.code(), is("STORE_ACCESS_DENIED"));
+    assertThat("nothing moved", retirement(t.id()), is("ACTIVE/none"));
+
+    // The manager held to this store does, with a reason of exactly the limit.
+    Answer ok =
+        ItCalls.post(
+            target,
+            path,
+            Caller.heldTo(biz, "MANAGER", here),
+            "{\"reason\":\"" + "y".repeat(300) + "\"}");
+    assertThat(ok.body().toString(), ok.status(), is(200));
+    assertThat(retirement(t.id()), is("RETIRED/300"));
+
+    // The body is as optional as the reason: a terminal is retired with none.
+    Terminals.Terminal other =
+        svc.register(biz, here, "Till " + Ids.newId(), "SIMULATED", null, actor);
+    Answer bare =
+        ItCalls.post(
+            target, "/admin/payments/terminals/" + other.id() + "/retire", Caller.owner(biz), "{}");
+    assertThat(bare.body().toString(), bare.status(), is(200));
+    assertThat(retirement(other.id()), is("RETIRED/none"));
+  }
+
   @Test
   @DisplayName("Another business cannot refund, cancel or read an attempt it does not hold")
   void anAttemptOfAnotherBusinessIsNotFound() {
@@ -382,7 +536,12 @@ class TerminalPaymentIT {
             ApiException.class,
             () ->
                 svc.refund(
-                    rival, sale.id(), new BigDecimal("1.00"), actor, Ids.newId().toString()));
+                    rival,
+                    sale.id(),
+                    new BigDecimal("1.00"),
+                    actor,
+                    Ids.newId().toString(),
+                    "not ours"));
     assertThat(refund.status(), is(404));
     assertThat(refund.code(), is("TERMINAL_ATTEMPT_NOT_FOUND"));
     ApiException cancel = assertThrows(ApiException.class, () -> svc.cancel(rival, sale.id()));

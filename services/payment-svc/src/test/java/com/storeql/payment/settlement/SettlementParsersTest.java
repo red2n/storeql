@@ -3,12 +3,14 @@ package com.storeql.payment.settlement;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.storeql.payment.domain.Settlements;
 import com.storeql.payment.domain.Settlements.ParsedFile;
 import com.storeql.payment.domain.Settlements.ParsedLine;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import org.junit.jupiter.api.Test;
@@ -126,6 +128,52 @@ class SettlementParsersTest {
         refused(CANONICAL, header + "SALE," + "R".repeat(256) + ",1.00,0,1.00\n")
             .getMessage()
             .contains("too long a reference"));
+  }
+
+  @Test
+  void anAmountWithAHugeExponentIsRefusedAtOnce() {
+    // Twelve characters a file can carry; rounding them to four places the long way builds a
+    // power of ten eighty million digits long. Refused as too fine, at once, as any fifth place.
+    String header = "type,reference,gross,fee,net\n";
+    SettlementFileException e =
+        assertTimeoutPreemptively(
+            Duration.ofSeconds(2),
+            () -> refused(CANONICAL, header + "SALE,S1,1E-80000000,0,1E-80000000\n"));
+    assertTrue(e.getMessage().contains("more than four decimal places"), e.getMessage());
+    // Trailing zeros past the fourth place are still not precision, however they are written.
+    assertEquals(
+        money("10.00"),
+        CANONICAL.parse(header + "SALE,S1,10.000000,0,1000000E-5\n").lines().get(0).gross());
+  }
+
+  @Test
+  void aLongAmountCellIsRefusedOnItsLengthBeforeItIsRead() {
+    // A cell may be 2,000 characters (the CSV's field limit) and a file 20,000 lines: a one with
+    // 1,998 trailing zeros in every amount cell cost a quadratic strip of its zeros, cell after
+    // cell. Refused on its length before it is read, and the whole file stays fast.
+    String header = "type,reference,gross,fee,net\n";
+    String longCell = "1." + "0".repeat(1_997);
+    StringBuilder file = new StringBuilder(header);
+    for (int i = 0; i < 2_000; i++) {
+      file.append("SALE,S").append(i).append(',').append(longCell).append(",0,").append(longCell);
+      file.append('\n');
+    }
+    SettlementFileException e =
+        assertTimeoutPreemptively(Duration.ofSeconds(2), () -> refused(CANONICAL, file.toString()));
+    assertEquals(Fields.INVALID, e.code());
+    assertTrue(
+        e.getMessage().contains("Line 2: gross is too long to be an amount"), e.getMessage());
+    // A long cell is refused by its digits, whatever they are: zeros before the point too.
+    assertTrue(
+        refused(CANONICAL, header + "SALE,S1," + "0".repeat(60) + "1.00,0,1.00\n")
+            .getMessage()
+            .contains("too long to be an amount"));
+    // And an amount written at the bound is read: forty characters is more than any money needs.
+    String atBound = "1234.56" + "0".repeat(33);
+    assertEquals(40, atBound.length());
+    assertEquals(
+        money("1234.56"),
+        CANONICAL.parse(header + "SALE,S1," + atBound + ",0,1234.56\n").lines().get(0).gross());
   }
 
   @Test

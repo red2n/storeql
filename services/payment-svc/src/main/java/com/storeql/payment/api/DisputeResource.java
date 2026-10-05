@@ -70,6 +70,17 @@ public class DisputeResource {
               + " the sales.refund permission.")
   @APIResponse(responseCode = "201", description = "Recorded")
   @APIResponse(
+      responseCode = "400",
+      description =
+          "DISPUTE_AMOUNT_INVALID: the amount or fee is finer than the currency's minor unit (whole"
+              + " yen, a dinar's three places) — refused, never rounded;"
+              + " DISPUTE_AMOUNT_EXCEEDS_PAYMENT; DISPUTE_REASON_UNKNOWN; DISPUTE_DUE_DATE_PAST;"
+              + " CURRENCY_INVALID; VALIDATION_FAILED")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not an owner or manager, or PERMISSION_DENIED: sales.refund narrowed out")
+  @APIResponse(responseCode = "404", description = "PAYMENT_NOT_FOUND")
+  @APIResponse(
       responseCode = "409",
       description = "Not a card payment, or a dispute is already open")
   @POST
@@ -188,7 +199,8 @@ public class DisputeResource {
         d.evidenceDueBy() == null ? null : d.evidenceDueBy().toString(),
         overdue,
         d.openedAt().toString(),
-        d.closedAt() == null ? null : d.closedAt().toString());
+        d.closedAt() == null ? null : d.closedAt().toString(),
+        d.feeCurrency());
   }
 
   private static DisputeDtos.FileResponse toDto(Disputes.DisputeFile f) {

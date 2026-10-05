@@ -10,9 +10,7 @@ import static org.hamcrest.Matchers.is;
 import com.storeql.ids.Ids;
 import com.storeql.payment.ItCalls.Answer;
 import com.storeql.payment.ItCalls.Caller;
-import com.storeql.payment.dto.Dtos.RecordRefundRequest;
 import com.storeql.payment.repo.PaymentRepository;
-import com.storeql.payment.service.PaymentService;
 import com.storeql.test.JsonStub;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -55,7 +53,6 @@ class GroupPaymentIT {
   }
 
   @Inject WebTarget target;
-  @Inject PaymentService service;
   @Inject PaymentRepository repo;
 
   @AfterAll
@@ -206,12 +203,17 @@ class GroupPaymentIT {
     Answer paid = pay(forCheckout(c.id(), "5.05"), SHOPPER, Ids.newId().toString());
     UUID leedsTender =
         Ids.parse(paid.data().getJsonArray("tenders").getJsonObject(0).getString("id"));
-    service.recordRefund(
-        T,
-        c.leeds(),
-        new RecordRefundRequest(
-            leedsTender.toString(), new BigDecimal("3.37"), "CARD", null, null, "damaged"),
-        Ids.newId().toString());
+    Answer refunded =
+        call(
+            target,
+            "POST",
+            "/payments/by-order/" + c.leeds() + "/refunds",
+            Caller.owner(T),
+            "{\"paymentId\":\""
+                + leedsTender
+                + "\",\"amount\":3.37,\"method\":\"CARD\",\"reason\":\"damaged\"}",
+            Ids.newId().toString());
+    assertThat(refunded.body().toString(), refunded.status(), is(201));
     assertThat(repo.findRefundsByOrder(T, c.leeds()), hasSize(1));
     assertThat(repo.findRefundsByOrder(T, c.york()), hasSize(0));
   }

@@ -1,6 +1,7 @@
 package com.storeql.product.dto;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
@@ -142,9 +143,11 @@ public final class Dtos {
           String hsnCode,
       @Schema(description = "EACH, WEIGHT, VOLUME or LENGTH. Defaults to EACH.") String soldBy,
       @Schema(description = "Net quantity in the pack, for the unit price a shelf edge must show.")
+          @Digits(integer = 14, fraction = 4)
           BigDecimal netContent,
       @Schema(description = "UOM code for netContent, e.g. KG, L.") String netContentUom,
       @Schema(description = "Packaging weight a scale deducts before pricing.")
+          @Digits(integer = 14, fraction = 4)
           BigDecimal tareWeight,
       @Schema(
               description =

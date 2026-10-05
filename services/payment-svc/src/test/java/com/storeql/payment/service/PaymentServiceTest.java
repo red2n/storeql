@@ -128,7 +128,7 @@ class PaymentServiceTest {
 
   private static RecordTenderRequest req(UUID orderId, BigDecimal amount) {
     return new RecordTenderRequest(
-        orderId.toString(), amount, "CARD", null, null, null, null, null, null, null);
+        orderId.toString(), amount, "CARD", null, null, null, null, null, null, null, null);
   }
 
   @Test
@@ -304,6 +304,7 @@ class PaymentServiceTest {
         storeId.toString(),
         null,
         null,
+        null,
         null);
   }
 
@@ -356,7 +357,8 @@ class PaymentServiceTest {
     svc.repo =
         new PaymentRepository() {
           @Override
-          public RefundTender createRefundGuarded(RefundTender r, OutboxRow event) {
+          public RefundTender createRefundGuarded(
+              RefundTender r, OutboxRow event, StoreGuard mayActAt) {
             throw new AssertionError("nothing may be tried for an unknown method");
           }
         };
@@ -366,7 +368,7 @@ class PaymentServiceTest {
             ApiException.class,
             () ->
                 svc.recordRefund(
-                    Ids.newId(),
+                    staffCtx(Ids.newId()),
                     Ids.newId(),
                     new com.storeql.payment.dto.Dtos.RecordRefundRequest(
                         Ids.newId().toString(),
@@ -428,6 +430,7 @@ class PaymentServiceTest {
         null,
         customerId == null ? null : customerId.toString(),
         "GBP",
+        null,
         null);
   }
 

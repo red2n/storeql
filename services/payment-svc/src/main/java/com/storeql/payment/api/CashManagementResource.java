@@ -45,6 +45,11 @@ public class CashManagementResource {
       description =
           "Records the opening cash float for the store. Requires CASHIER, MANAGER, or" + " OWNER.")
   @APIResponse(responseCode = "201", description = "Till session opened")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "CASH_AMOUNT_INVALID: the float is finer than the business's currency's minor unit (whole"
+              + " yen, a dinar's three places) — refused, never rounded; VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller lacks a cashier/manager/owner role")
   @POST
   public Response open(OpenTillRequest req) {
@@ -100,7 +105,11 @@ public class CashManagementResource {
       summary = "Record a cash drop",
       description = "Mid-shift safe drop against an open till session. Requires MANAGER or OWNER.")
   @APIResponse(responseCode = "201", description = "Cash drop recorded")
-  @APIResponse(responseCode = "400", description = "Till already closed, or invalid drop amount")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "TILL_CLOSED, or INVALID_DROP_AMOUNT: not positive, or finer than the business's"
+              + " currency's minor unit; VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
   @APIResponse(responseCode = "404", description = "Till session not found")
   @POST
@@ -139,7 +148,11 @@ public class CashManagementResource {
           "End-of-day close: computes totals against the counted cash amount and closes the"
               + " session. Requires MANAGER or OWNER.")
   @APIResponse(responseCode = "200", description = "Till closed, Z-report generated")
-  @APIResponse(responseCode = "400", description = "Till already closed")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "TILL_CLOSED, or CASH_AMOUNT_INVALID: the count is finer than the business's currency's"
+              + " minor unit (the till stays open); VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
   @APIResponse(responseCode = "404", description = "Till session not found")
   @POST

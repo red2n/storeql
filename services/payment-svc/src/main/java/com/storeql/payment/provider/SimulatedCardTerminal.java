@@ -2,9 +2,11 @@ package com.storeql.payment.provider;
 
 import com.storeql.ids.Ids;
 import com.storeql.payment.domain.Terminals;
+import com.storeql.service.Fx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
@@ -17,8 +19,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  * out</b>, not only to approve. A simulator that always approves is what lets a decline path ship
  * broken.
  *
- * <p>The outcome is chosen from the amount's minor units, so a test can ask for a particular one
- * without a switch the production path would also have to carry:
+ * <p>The outcome is chosen from the last two minor units of the amount in its own currency (pence,
+ * fils, whole yen), so a test can ask for a particular one without a switch the production path
+ * would also have to carry:
  *
  * <ul>
  *   <li>{@code .01} declines — insufficient funds;
@@ -27,6 +30,11 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *   <li>{@code .04} fails outright;
  *   <li>anything else is approved.
  * </ul>
+ *
+ * <p>A refund is refused by the issuer on {@code .01}, fails on {@code .04} and is never answered
+ * on {@code .05} — the refund that may or may not have gone back, which holds its machine until a
+ * person says what it shows. Anything else is put back ({@code .03} included, so a sale that timed
+ * out and was seen approved can be put back in full).
  *
  * <p>The convention is the acquirers' own: test amounts have driven card testing for decades, and
  * it keeps the simulator's behaviour out of the request shape, so no production field exists that
@@ -66,7 +74,7 @@ public class SimulatedCardTerminal implements CardTerminal {
 
   @Override
   public Terminals.Outcome sale(Request request) {
-    return switch (minorUnits(request.amount())) {
+    return switch (testAmount(request)) {
       case 1 -> refused(Terminals.DECLINED, "DECLINED — insufficient funds", request);
       case 2 -> refused(Terminals.CANCELLED, "Cancelled at the terminal", request);
       // A timeout carries a provider reference even though it has no verdict: the reference is how
@@ -84,9 +92,12 @@ public class SimulatedCardTerminal implements CardTerminal {
   public Terminals.Outcome refund(Request request, String originalProviderRef) {
     // A refund goes back to the card that paid, so it needs no cardholder present and no
     // verification.
-    return switch (minorUnits(request.amount())) {
+    return switch (testAmount(request)) {
       case 1 -> refused(Terminals.DECLINED, "DECLINED — refund refused by the issuer", request);
       case 4 -> refused(Terminals.FAILED, "Terminal reported a fault", request);
+      // Never answered: it may have gone back or not, and only a person looking at the machine (or
+      // the acquirer's file) can say. Its reference is kept for that, as a sale's timeout keeps it.
+      case 5 -> refused(Terminals.TIMED_OUT, "No answer from the terminal", request);
       default -> approved(request, "CHIP", "NONE");
     };
   }
@@ -115,17 +126,24 @@ public class SimulatedCardTerminal implements CardTerminal {
   }
 
   /**
-   * The minor units of an amount — the pence, cents or paise — whatever its scale.
+   * The last two minor units of an amount, in its own currency — the pence or cents, a dinar's
+   * fils, whole yen — whatever its scale.
    *
-   * <p>Taken from the scaled value rather than by multiplying, so {@code 10.5} and {@code 10.50}
-   * are the same request and a trailing zero does not change what the simulator does.
+   * <p>Taken from the value at the currency's own minor units (common-service {@code
+   * Fx.minorUnits}, ISO 4217) rather than an assumed two places, so {@code 1001} yen declines and
+   * {@code 1.001} dinars decline, and {@code 10.5} and {@code 10.50} pounds are the same request.
    */
-  private static int minorUnits(BigDecimal amount) {
-    // HALF_UP and not UNNECESSARY: the service has already refused an amount with more than two
-    // decimal places, so this only ever sees two — and a simulator that threw on a programming
-    // error
-    // would turn it into an unreadable 500 instead of a tender that behaves.
-    return amount.setScale(2, java.math.RoundingMode.HALF_UP).unscaledValue().intValue() % 100;
+  private static int testAmount(Request request) {
+    // HALF_UP and not UNNECESSARY: the service has already refused an amount finer than its
+    // currency, so this never rounds — and a simulator that threw on a programming error would
+    // turn it into an unreadable 500 instead of a tender that behaves.
+    return request
+        .amount()
+        .setScale(Fx.minorUnits(request.currency()), RoundingMode.HALF_UP)
+        .unscaledValue()
+        .remainder(BigInteger.valueOf(100))
+        .abs()
+        .intValue();
   }
 
   /** Four digits that are stable for one attempt, so a receipt reprint shows the same card. */

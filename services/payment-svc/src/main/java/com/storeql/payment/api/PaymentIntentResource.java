@@ -61,7 +61,17 @@ public class PaymentIntentResource {
       responseCode = "404",
       description = "Order not found, not ONLINE, or not the caller's")
   @APIResponse(responseCode = "409", description = "Order is not awaiting payment")
-  @APIResponse(responseCode = "502", description = "The provider refused the authorisation")
+  @APIResponse(
+      responseCode = "422",
+      description =
+          "PAYMENT_AMOUNT_NOT_CHARGEABLE: an amount the provider cannot charge exactly in that"
+              + " currency (Stripe: a dinar's last fils not 0, a fraction of a yen, krona or"
+              + " shilling), refused before anything is recorded or the provider is asked, and"
+              + " never rounded; details name the nearest it can charge"
+              + " (currency=KWD;chargeableBelow=1.120;chargeableAbove=1.130)")
+  @APIResponse(
+      responseCode = "502",
+      description = "PAYMENT_PROVIDER_UNAVAILABLE: the provider refused the authorisation")
   @APIResponse(responseCode = "503", description = "The provider could not be reached")
   @POST
   @Path("/intents")

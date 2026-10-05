@@ -214,8 +214,8 @@ class TenderMixIT {
 
   /**
    * A manager held to two stores, naming none, sees exactly those two stores' take added together —
-   * including a refund whose own {@code store_id} is unset and is resolved back to the store of the
-   * payment it refunds — and never a third store's.
+   * including a refund, which carries the store of the payment it refunds — and never a third
+   * store's.
    */
   @Test
   void aManagerHeldToTwoStoresSeesExactlyThoseAddedTogether() {
@@ -227,8 +227,8 @@ class TenderMixIT {
     UUID cardAtA = capture(tenant, saleAtA, storeA, "10.00", PaymentTender.METHOD_CARD, "CAPTURED");
     capture(tenant, Ids.newId(), storeB, "20.00", PaymentTender.METHOD_CASH, "CAPTURED");
     capture(tenant, Ids.newId(), storeC, "999.00", PaymentTender.METHOD_CASH, "CAPTURED");
-    // A refund of the store-A card sale: refund_tenders carries no store_id of its own, so this
-    // must still count towards store A through the payment it refunds.
+    // A refund of the store-A card sale: written with the store of the payment it refunds, so it
+    // counts towards store A read from the refund alone.
     refund(tenant, saleAtA, cardAtA, "4.00", PaymentTender.METHOD_CARD);
 
     Caller manager = twoStoreManager(tenant, storeA, storeB);
@@ -362,6 +362,8 @@ class TenderMixIT {
             null,
             "test",
             Instant.now()),
-        new OutboxRow("PaymentRefunded", "storeql.payment.payment-refunded", tenantId, id, "{}"));
+        new OutboxRow("PaymentRefunded", "storeql.payment.payment-refunded", tenantId, id, "{}"),
+        // The fixture is nobody's request: who may refund where is BackOfficeRefundIT's.
+        store -> {});
   }
 }

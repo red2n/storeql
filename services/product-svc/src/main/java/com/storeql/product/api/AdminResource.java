@@ -1845,6 +1845,7 @@ public class AdminResource {
   public ApiResponse<CatalogAssignmentResponse> updateCatalogAssignment(
       @PathParam("variantId") UUID variantId, UpdateCatalogAssignmentRequest req) {
     service.requireVariantLineHeld(ctx, variantId);
+    Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
         Mappers.toCatalogAssignment(service.updateCatalogAssignment(tenantId, variantId, req)));
@@ -2298,6 +2299,7 @@ public class AdminResource {
       @PathParam("id") UUID id, UpdateCategorySetRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
     service.requireBusinessWideCatalogue(ctx, "Maintaining category sets");
+    Validations.validate(req);
     return ApiResponse.ok(
         Mappers.toCategorySet(service.updateCategorySet(ctx.requireTenantId(), id, req)));
   }
@@ -2529,8 +2531,8 @@ public class AdminResource {
   @Path("/products/variants/{variantId}/allergens")
   public ApiResponse<VariantComplianceResponse> declareAllergens(
       @PathParam("variantId") UUID variantId, AllergenDeclarationRequest req) {
-    service.requireVariantLineHeld(ctx, variantId);
     Validations.validate(req);
+    service.requireVariantLineHeld(ctx, variantId);
     return ApiResponse.ok(
         Mappers.toCompliance(
             service.declareAllergens(ctx.requireTenantId(), variantId, req, ctx.userId())));
@@ -2572,6 +2574,7 @@ public class AdminResource {
   @Path("/products/variants/{variantId}/compliance")
   public ApiResponse<VariantComplianceResponse> setCompliance(
       @PathParam("variantId") UUID variantId, VariantComplianceRequest req) {
+    Validations.validate(req);
     service.requireVariantLineHeld(ctx, variantId);
     return ApiResponse.ok(
         Mappers.toCompliance(service.updateCompliance(ctx.requireTenantId(), variantId, req)));
@@ -2733,6 +2736,7 @@ public class AdminResource {
       throw com.storeql.web.ApiException.badRequest(
           "SAFETY_INFORMATION_REQUIRED", "a body is required");
     }
+    Validations.validate(req);
     return ApiResponse.ok(
         Mappers.toSafetyInformation(
             service.setSafetyInformation(ctx.requireTenantId(), id, req, ctx.userId())));

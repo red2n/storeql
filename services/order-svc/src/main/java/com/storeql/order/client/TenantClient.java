@@ -553,7 +553,15 @@ public class TenantClient {
       return Optional.empty();
     }
     try (HttpClientResponse res =
-        forward(webClient.get(base + "/admin/workforce/commission/schemes?all=true"), tenantId, ctx)
+        forward(
+                // The query as a parameter, never in the path string: the WebClient escapes a "?"
+                // there into the path, tenant-svc answers 404, and the statement is drafted
+                // without its schemes' terms.
+                webClient
+                    .get(base + "/admin/workforce/commission/schemes")
+                    .queryParam("all", "true"),
+                tenantId,
+                ctx)
             .request()) {
       int status = res.status().code();
       String answer = res.as(String.class);

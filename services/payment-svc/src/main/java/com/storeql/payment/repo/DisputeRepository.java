@@ -33,13 +33,16 @@ public class DisputeRepository extends BaseOutboxRepository {
   private static final String COLUMNS =
       "SELECT id, tenant_id, payment_id, order_id, store_id, provider, provider_dispute_ref, amount,"
           + " fee_amount, currency, reason, network_reason_code, status, funds_withdrawn,"
-          + " evidence_due_by, opened_at, closed_at, idempotency_key, created_by FROM disputes";
+          + " evidence_due_by, opened_at, closed_at, idempotency_key, created_by,"
+          // A row imported from an export taken before V19 names no fee currency: its fee was read
+          // in the dispute's own (V19).
+          + " COALESCE(fee_currency, currency) AS fee_currency FROM disputes";
 
   private static final String INSERT =
       "INSERT INTO disputes (id, tenant_id, payment_id, order_id, store_id, provider,"
           + " provider_dispute_ref, amount, fee_amount, currency, reason, network_reason_code,"
           + " status, funds_withdrawn, evidence_due_by, opened_at, idempotency_key, created_by,"
-          + " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+          + " created_at, updated_at, fee_currency) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
   private static final String INSERT_EVENT =
       "INSERT INTO dispute_events (id, tenant_id, dispute_id, kind, detail, actor_id, created_at)"
@@ -91,6 +94,7 @@ public class DisputeRepository extends BaseOutboxRepository {
             ps.setObject(18, d.createdBy());
             ps.setObject(19, now);
             ps.setObject(20, now);
+            ps.setString(21, d.feeCurrency());
             ps.executeUpdate();
           }
           for (DisputeEvent e : history) insertEvent(c, d.tenantId(), d.id(), e);
@@ -317,6 +321,7 @@ public class DisputeRepository extends BaseOutboxRepository {
       UUID tenantId,
       UUID id,
       BigDecimal fee,
+      String feeCurrency,
       Instant when,
       DisputeEvent happened,
       OutboxRow event) {
@@ -324,12 +329,13 @@ public class DisputeRepository extends BaseOutboxRepository {
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "UPDATE disputes SET funds_withdrawn = true, fee_amount = ?, updated_at = ?"
-                      + " WHERE tenant_id = ? AND id = ? AND funds_withdrawn = false")) {
+                  "UPDATE disputes SET funds_withdrawn = true, fee_amount = ?, fee_currency = ?,"
+                      + " updated_at = ? WHERE tenant_id = ? AND id = ? AND funds_withdrawn = false")) {
             ps.setBigDecimal(1, fee);
-            ps.setObject(2, when.atOffset(ZoneOffset.UTC));
-            ps.setObject(3, tenantId);
-            ps.setObject(4, id);
+            ps.setString(2, feeCurrency);
+            ps.setObject(3, when.atOffset(ZoneOffset.UTC));
+            ps.setObject(4, tenantId);
+            ps.setObject(5, id);
             if (ps.executeUpdate() == 0) return false;
           }
           insertEvent(c, tenantId, id, happened);
@@ -465,6 +471,7 @@ public class DisputeRepository extends BaseOutboxRepository {
         rs.getObject(16, OffsetDateTime.class).toInstant(),
         closed == null ? null : closed.toInstant(),
         rs.getString(18),
-        rs.getObject(19, UUID.class));
+        rs.getObject(19, UUID.class),
+        rs.getString(20));
   }
 }

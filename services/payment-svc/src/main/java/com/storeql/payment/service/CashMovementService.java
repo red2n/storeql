@@ -33,7 +33,8 @@ public class CashMovementService {
    *     movement; blank is treated as absent
    * @return the recorded movement
    * @throws ApiException {@code INVALID_DIRECTION} (400) when direction is not {@code PAY_IN} or
-   *     {@code PAY_OUT}
+   *     {@code PAY_OUT}; {@code CASH_AMOUNT_INVALID} (400) for an amount finer than the business's
+   *     currency's minor unit (not checked while that currency cannot be read)
    */
   public CashMovementResponse recordMovement(
       UUID tenantId,
@@ -48,6 +49,12 @@ public class CashMovementService {
     UUID tillSessionId = Ids.parse(req.tillSessionId());
     UUID storeId = Ids.parse(req.storeId());
     ctx.requireStoreAccess(storeId);
+    // Till cash is the business's own currency, no finer than its minor unit (whole yen, a
+    // dinar's three places); refused, never rounded.
+    Amounts.requireFits(
+        req.amount(),
+        Amounts.currencyOrNull(profiles, tenantId, null),
+        CashManagementService.CASH_AMOUNT_INVALID);
     UUID authorisedBy = req.authorisedBy() == null ? null : Ids.parse(req.authorisedBy());
     return repo.insertMovement(
         tenantId,
@@ -90,7 +97,8 @@ public class CashMovementService {
    * @return the report, and whether this request wrote it
    * @throws ApiException {@code 400} when {@code businessDate} is not a valid date; {@code
    *     Z_REPORT_SESSIONS_OPEN} (409); {@code Z_REPORT_CORRECTION_REASON_REQUIRED} (400); {@code
-   *     Z_REPORT_NOT_FOUND} (404) and {@code Z_REPORT_NOT_LATEST} (409) for a correction
+   *     CASH_AMOUNT_INVALID} (400) for a count finer than the report's currency's minor unit;
+   *     {@code Z_REPORT_NOT_FOUND} (404) and {@code Z_REPORT_NOT_LATEST} (409) for a correction
    */
   public ZOutcome generateZReport(
       UUID tenantId, UUID generatedBy, GenerateZReportRequest req, TenantContext ctx) {
@@ -103,6 +111,7 @@ public class CashMovementService {
           "Z_REPORT_CORRECTION_REASON_REQUIRED", "A correction to a settled day needs a reason");
     }
     String currency = profiles.currencyOr(tenantId, req.currency());
+    Amounts.requireFits(req.countedCash(), currency, CashManagementService.CASH_AMOUNT_INVALID);
     ZoneId zone = zoneOrNull(tenantId, storeId);
     LocalDate businessDate = dayOf(req.businessDate(), zone);
     var settled =

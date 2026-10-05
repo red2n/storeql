@@ -170,9 +170,13 @@ public interface PaymentProvider {
    * @param phase OPENED, FUNDS_WITHDRAWN, FUNDS_REINSTATED, UPDATED or CLOSED
    * @param outcome WON or LOST when {@code phase} is CLOSED, else null
    * @param amount what is disputed, in major units
-   * @param fee what the provider charged for the dispute, in major units; zero when it did not say
+   * @param fee what the provider charged for the dispute, in major units of {@code feeCurrency};
+   *     zero when it has charged none yet, null when what it said cannot be read without a guess
+   * @param currency the disputed charge's currency, which {@code amount} is in
    * @param reason one of {@code Disputes.REASONS}
    * @param networkReasonCode the card scheme's own code, when the provider passes it on
+   * @param feeCurrency the currency the provider charged the fee in — the account's settlement
+   *     currency, which need not be the charge's; null exactly when {@code fee} is
    */
   record DisputeNotice(
       String disputeRef,
@@ -183,7 +187,32 @@ public interface PaymentProvider {
       String currency,
       String reason,
       String networkReasonCode,
-      java.time.Instant evidenceDueBy) {
+      java.time.Instant evidenceDueBy,
+      String feeCurrency) {
+
+    /** A notice whose fee is in the disputed charge's own currency. */
+    public DisputeNotice(
+        String disputeRef,
+        String phase,
+        String outcome,
+        BigDecimal amount,
+        BigDecimal fee,
+        String currency,
+        String reason,
+        String networkReasonCode,
+        java.time.Instant evidenceDueBy) {
+      this(
+          disputeRef,
+          phase,
+          outcome,
+          amount,
+          fee,
+          currency,
+          reason,
+          networkReasonCode,
+          evidenceDueBy,
+          fee == null ? null : currency);
+    }
 
     public static final String PHASE_OPENED = "OPENED";
     public static final String PHASE_FUNDS_WITHDRAWN = "FUNDS_WITHDRAWN";
@@ -222,6 +251,15 @@ public interface PaymentProvider {
    */
   default void acceptDispute(String disputeRef) {}
 
+  /**
+   * Refuses, before anything is recorded or asked, an amount this provider cannot charge exactly in
+   * its currency — a pricing fact about the provider, not an outage. The default is for a provider
+   * that charges whatever the currency's own minor units say (MANUAL): nothing to refuse.
+   *
+   * @throws AmountNotChargeable naming the nearest amounts it can charge
+   */
+  default void requireChargeable(BigDecimal amount, String currency) {}
+
   /** A provider call failed. Mapped to 502/503 by the service, never to a 500. */
   class ProviderException extends RuntimeException {
     private static final long serialVersionUID = 1L;
@@ -243,6 +281,52 @@ public interface PaymentProvider {
      */
     public boolean retryable() {
       return retryable;
+    }
+  }
+
+  /**
+   * An amount the provider cannot charge exactly in its currency (Stripe charges a dinar in tens of
+   * fils, a krona whole): the order's total is a price the provider cannot take, which asking again
+   * never changes. The service answers it as the customer's 422, never as an outage, and names what
+   * the provider could charge either side of it.
+   */
+  final class AmountNotChargeable extends ProviderException {
+    private static final long serialVersionUID = 1L;
+
+    private final BigDecimal amount;
+    private final String currency;
+    private final BigDecimal below;
+    private final BigDecimal above;
+
+    /**
+     * @param below the nearest chargeable amount under it, or null when there is none above zero
+     * @param above the nearest chargeable amount over it
+     */
+    public AmountNotChargeable(
+        String message, BigDecimal amount, String currency, BigDecimal below, BigDecimal above) {
+      super(message, false, null);
+      this.amount = amount;
+      this.currency = currency;
+      this.below = below;
+      this.above = above;
+    }
+
+    public BigDecimal amount() {
+      return amount;
+    }
+
+    public String currency() {
+      return currency;
+    }
+
+    /** The nearest amount under it the provider can charge, or null when none is above zero. */
+    public BigDecimal below() {
+      return below;
+    }
+
+    /** The nearest amount over it the provider can charge. */
+    public BigDecimal above() {
+      return above;
     }
   }
 }

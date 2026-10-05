@@ -7,7 +7,7 @@
 | **Roadmap** | new: the flow catalogue, pricing domain. Wave 1 fixed cycles, named duplicate codes and the check digit, and deferred the rest (`_notes/2026-09-30-product-pricing.md` §5, §6) |
 | **Services** | product-svc owns products, images, categories, the range and planogram data and every rule here · tenant-svc owns the plan and its entitlement keys · the admin app gets the screens |
 | **Builds on** | `product_images` (one row per product, bytes in Postgres, under 256 KB, `images.mb.max`), `PUT /admin/products/{id}/image` (`@Consumes` image types), `CategoryRepository.updateCategory` (wave 1: one transaction, `PRODUCT_CATEGORY_CYCLE`), `variants` unique SKU and barcode, `AssortmentResource`/`MerchandisingResource` (API only), the Shelf space screen (`shelf_space_screen.dart`), `Plans.CATALOGUE` and `Entitlements` |
-| **Built in** | not built |
+| **Built in** | Partly. 5d69da2d (round 3, part 1) holds what the 2026-10-02 and 2026-10-03 Decisions below record: the store-scope and master-data rules in product-svc (`CatalogueStores`, the range-change door and sweep with V29–V31, the lifecycle, variant and merchandising doors, the import guards). Scope slices 1–6 are not built; of slice 5 only the `images.per-product.max` key is in tenant-svc's `Plans.CATALOGUE` (6571513c), not yet enforced. |
 
 ## Problem
 

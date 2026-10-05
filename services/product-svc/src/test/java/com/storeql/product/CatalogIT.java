@@ -692,6 +692,45 @@ class CatalogIT {
     }
   }
 
+  /** An imported product announces its category like one made by POST /admin/products. */
+  @Test
+  void anImportedProductAnnouncesItsCategoryAndAnUncategorisedOneDoesNot() throws Exception {
+    String suffix = Ids.newId().toString();
+    String category = "Imported " + suffix;
+    String sku = "IMP-C-" + suffix;
+    String bareSku = "IMP-N-" + suffix;
+    Response r =
+        post(
+            "/admin/import",
+            "{\"categories\":[{\"name\":\""
+                + category
+                + "\"}],\"products\":[{\"name\":\"Categorised "
+                + suffix
+                + "\",\"categoryName\":\""
+                + category
+                + "\",\"variants\":[{\"sku\":\""
+                + sku
+                + "\"}]},{\"name\":\"Bare "
+                + suffix
+                + "\",\"variants\":[{\"sku\":\""
+                + bareSku
+                + "\"}]}]}",
+            TENANT_A);
+    String answer = r.readEntity(String.class);
+    assertThat(answer, r.getStatus(), is(200));
+    assertThat(answer, containsString("\"errors\":[]"));
+    String categorisedId = fieldNear(answer, sku, "productId");
+    String bareId = fieldNear(answer, bareSku, "productId");
+
+    String announced = outbox(TENANT_A, "ProductCategorised", categorisedId);
+    assertThat(announced, containsString(categorisedId));
+    assertThat(announced, containsString("\"categoryPath\":[\""));
+    assertThat(outbox(TENANT_A, "ProductCategorised", bareId), is(""));
+    assertThat(outbox(TENANT_A, "ProductCreated", bareId), not(is("")));
+    // Another business's outbox holds nothing of it.
+    assertThat(outbox(TENANT_B, "ProductCategorised", categorisedId), is(""));
+  }
+
   @Test
   void aProductAnnouncesItsCategoryPathAndItsVariants() throws Exception {
     String drinks =

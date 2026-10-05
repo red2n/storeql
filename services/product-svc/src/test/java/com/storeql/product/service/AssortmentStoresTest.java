@@ -385,6 +385,50 @@ class AssortmentStoresTest {
   }
 
   @Test
+  @DisplayName(
+      "Units sold fit their NUMERIC(14, 3) column: refused at the boundary, never overflowed")
+  void unitsSoldAreHeldToTheirColumn() {
+    for (String units : List.of("100000000000", "-100000000000", "1.2345")) {
+      Line l =
+          new Line(
+              null,
+              TENANT,
+              REVIEW,
+              Ids.newId(),
+              new java.math.BigDecimal(units),
+              null,
+              null,
+              null,
+              1,
+              null,
+              null,
+              false);
+      ApiException refused = refusedLine(l);
+      assertThat(units, refused.status(), is(400));
+      assertThat(units, refused.code(), is("REVIEW_LINE_FIGURES"));
+    }
+    assertThat("nothing was added", repo.writes, is(empty()));
+    svc.addLines(
+        TENANT,
+        REVIEW,
+        List.of(
+            new Line(
+                null,
+                TENANT,
+                REVIEW,
+                Ids.newId(),
+                new java.math.BigDecimal("99999999999.999"),
+                null,
+                null,
+                null,
+                1,
+                null,
+                null,
+                false)));
+    assertThat(repo.writes, is(List.of("addLines")));
+  }
+
+  @Test
   @DisplayName("Revenue and margin carry no more decimal places than their currency has")
   void aLinesMoneyIsHeldToItsCurrencysMinorUnits() {
     record Case(String revenue, String margin, String currency, String says) {}

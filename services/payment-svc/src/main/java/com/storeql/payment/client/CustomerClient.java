@@ -37,6 +37,9 @@ public class CustomerClient {
   private static final String CUSTOMER_SERVICE = "customer-svc";
   private static final String INTERNAL_ROLE = "CASHIER";
 
+  /** customer-svc's code for an erased customer, passed on unchanged. */
+  static final String CUSTOMER_ANONYMIZED = "CUSTOMER_ANONYMIZED";
+
   @Inject ServiceConfig config;
 
   private ServiceRegistry registry;
@@ -54,15 +57,32 @@ public class CustomerClient {
 
   /**
    * Redeem {@code amount} of the customer's store credit for {@code orderId}. Idempotent per order
-   * (a retry re-hits the same REDEEM and is a no-op). Throws {@code 422} when the balance is
-   * insufficient, {@code 404} when the customer is unknown, {@code 503} when customer-svc is
-   * unreachable. {@code @Retry} is safe here precisely because the redeem is idempotent.
+   * (a retry re-hits the same REDEEM and is a no-op). {@code @Retry} is safe here precisely because
+   * the redeem is idempotent.
+   *
+   * <p>customer-svc's deliberate answers are {@link Refusal}s: permanent for the request as made,
+   * so never retried ({@code abortOn}) and never counted against the circuit breaker ({@code
+   * skipOn}), which exists for a customer-svc that cannot answer, not for one that says no. Only an
+   * unreachable or misbehaving customer-svc is a {@code 503}.
+   *
+   * @throws Refusal {@code 422 PAYMENT_STORE_CREDIT_INSUFFICIENT} when the balance is too small;
+   *     {@code 404 PAYMENT_CUSTOMER_NOT_FOUND} when the customer is unknown; {@code 409
+   *     CUSTOMER_ANONYMIZED} when the customer has been erased (customer-svc's code, passed on: an
+   *     erased customer spends nothing new, whoever asks, and asking again will not change it)
+   * @throws ApiException {@code 503 PAYMENT_CUSTOMER_UNAVAILABLE} when customer-svc is unreachable,
+   *     its breaker is open, or it answers anything else
    */
   @Retry(
       maxRetries = 2,
       delay = 200,
       abortOn = {ApiException.class})
-  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
+  @CircuitBreaker(
+      requestVolumeThreshold = 5,
+      failureRatio = 0.6,
+      delay = 5000,
+      // A refusal is an answer, not a failure: five erased customers in a row must not open the
+      // breaker and turn the next shopper's good store credit into a 503.
+      skipOn = {Refusal.class})
   public void redeemStoreCredit(
       UUID tenantId, UUID customerId, BigDecimal amount, String currency, UUID orderId) {
     String base =
@@ -92,15 +112,23 @@ public class CustomerClient {
         return;
       }
       if (status == 422) {
-        throw new ApiException(
+        throw new Refusal(
             422,
             "PAYMENT_STORE_CREDIT_INSUFFICIENT",
-            "insufficient store credit for this customer",
-            List.of());
+            "insufficient store credit for this customer");
       }
       if (status == 404) {
-        throw ApiException.notFound(
-            "PAYMENT_CUSTOMER_NOT_FOUND", "customer " + customerId + " not found");
+        throw new Refusal(
+            404, "PAYMENT_CUSTOMER_NOT_FOUND", "customer " + customerId + " not found");
+      }
+      if (status == 409) {
+        // customer-svc's only 409 on this call: the customer has been erased, so nobody can show
+        // the balance is theirs. One state keeps one code (privacy-requests Decisions), so it is
+        // passed on as it was given, never as an outage the till would invite a retry of.
+        throw new Refusal(
+            409,
+            CUSTOMER_ANONYMIZED,
+            "the customer has been erased; their store credit can no longer be spent");
       }
       throw unavailable("customer-svc returned HTTP " + status, null);
     } catch (ApiException e) {
@@ -109,6 +137,20 @@ public class CustomerClient {
       throw unavailable("customer-svc circuit open — too many recent failures", e);
     } catch (RuntimeException e) {
       throw unavailable("customer-svc unreachable", e);
+    }
+  }
+
+  /**
+   * customer-svc's deliberate "no" to a redeem, carried as the stable code payment-svc answers
+   * with. A subtype only so the circuit breaker can tell it from an outage; it maps to the HTTP
+   * answer exactly as any {@link ApiException}.
+   */
+  public static final class Refusal extends ApiException {
+
+    private static final long serialVersionUID = 1L;
+
+    Refusal(int status, String code, String message) {
+      super(status, code, message, List.of());
     }
   }
 

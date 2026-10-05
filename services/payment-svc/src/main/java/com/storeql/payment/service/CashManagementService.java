@@ -33,6 +33,10 @@ import java.util.UUID;
 public class CashManagementService {
 
   @Inject CashManagementRepository repo;
+  @Inject com.storeql.service.TenantProfiles profiles;
+
+  /** The refusal for till cash finer than the business's currency's minor unit. */
+  static final String CASH_AMOUNT_INVALID = "CASH_AMOUNT_INVALID";
 
   /**
    * Opens a till session with its starting float.
@@ -42,11 +46,14 @@ public class CashManagementService {
    * @param req the store and the float the drawer starts with
    * @param ctx caller context, checked for access to the store
    * @return the newly opened session
+   * @throws ApiException {@code CASH_AMOUNT_INVALID} (400) for a float finer than the business's
+   *     currency's minor unit
    */
   public TillSessionResponse openTill(
       UUID tenantId, UUID openedBy, OpenTillRequest req, TenantContext ctx) {
     UUID storeId = Ids.parse(req.storeId());
     ctx.requireStoreAccess(storeId);
+    requireCash(tenantId, req.floatAmount(), CASH_AMOUNT_INVALID);
     TillSession session =
         new TillSession(
             Ids.newId(),
@@ -112,7 +119,8 @@ public class CashManagementService {
    * @param ctx caller context, checked for access to the session's store
    * @return the recorded drop
    * @throws ApiException {@code TILL_CLOSED} (400) when the session is already closed; {@code
-   *     INVALID_DROP_AMOUNT} (400) when the amount is not positive
+   *     INVALID_DROP_AMOUNT} (400) when the amount is not positive or is finer than the business's
+   *     currency's minor unit
    */
   public CashDropResponse recordDrop(
       UUID tenantId,
@@ -128,6 +136,7 @@ public class CashManagementService {
     if (amount.compareTo(BigDecimal.ZERO) <= 0) {
       throw ApiException.badRequest("INVALID_DROP_AMOUNT", "Drop amount must be positive");
     }
+    requireCash(tenantId, amount, "INVALID_DROP_AMOUNT");
     CashDrop drop =
         new CashDrop(Ids.newId(), tenantId, sessionId, amount, recordedBy, notes, Instant.now());
     repo.recordDrop(drop);
@@ -164,7 +173,8 @@ public class CashManagementService {
    * @param ctx caller context, checked for access to the session's store
    * @return the final totals, including over/short
    * @throws ApiException {@code TILL_SESSION_NOT_FOUND} (404) when no such session exists in this
-   *     tenant; {@code TILL_CLOSED} (400) when it is already closed
+   *     tenant; {@code TILL_CLOSED} (400) when it is already closed; {@code CASH_AMOUNT_INVALID}
+   *     (400) for a count finer than the business's currency's minor unit, the till left open
    */
   public TillReportResponse zReport(
       UUID tenantId, UUID sessionId, CloseTillRequest req, TenantContext ctx) {
@@ -172,6 +182,7 @@ public class CashManagementService {
     if (!TillSession.STATUS_OPEN.equals(session.status())) {
       throw ApiException.badRequest("TILL_CLOSED", "Till session is already closed");
     }
+    requireCash(tenantId, req.countedCash(), CASH_AMOUNT_INVALID);
     Instant closedAt = Instant.now();
     TillReportResponse open = buildReport(session, null, closedAt, null);
     BigDecimal overShort = cashExpectation(open, session).overShort(req.countedCash());
@@ -292,6 +303,16 @@ public class CashManagementService {
         payOuts,
         "WINDOW",
         note);
+  }
+
+  /**
+   * Cash in the drawer is the business's own currency (one business, one currency), so a figure for
+   * it is no finer than that currency's minor unit: whole yen, a dinar's three places. Not checked
+   * when the currency cannot be read right now, so a till is never stopped by a briefly unreachable
+   * tenant-svc; the four-place columns hold the figure exactly either way.
+   */
+  private void requireCash(UUID tenantId, BigDecimal amount, String code) {
+    Amounts.requireFits(amount, Amounts.currencyOrNull(profiles, tenantId, null), code);
   }
 
   private TillSession requireSession(UUID tenantId, UUID sessionId, TenantContext ctx) {

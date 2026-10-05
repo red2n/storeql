@@ -207,6 +207,39 @@ class PaymentIntentIT {
   }
 
   @Test
+  @DisplayName(
+      "An order service that is down, or answers nonsense, is 503 PAYMENT_ORDER_LOOKUP_UNAVAILABLE,"
+          + " and no intent is opened")
+  void aDownOrderServiceIsRefusedAndOpensNothing() {
+    UUID tenant = Ids.newId();
+    UUID shopper = Ids.newId();
+    UUID down = Ids.newId();
+    UUID garbled = Ids.newId();
+    // The order service errors on one order, and answers another with something that is not an
+    // order. (Two failing reads in all: the lookup's breaker trips on a run of them, and a refusal
+    // here must not take the next test's reads with it.)
+    ORDERS.on("GET", "/orders/" + down, 500, "{\"error\":{\"code\":\"INTERNAL_ERROR\"}}");
+    ORDERS.on("GET", "/orders/" + garbled, 200, "{\"data\":{\"channel\":\"ONLINE\"}}");
+
+    for (UUID order : new UUID[] {down, garbled}) {
+      Answer a =
+          call(
+              target,
+              "POST",
+              "/payments/intents",
+              new Caller(tenant, shopper, "CUSTOMER"),
+              "{\"orderId\":\"" + order + "\",\"amount\":3.37}",
+              Ids.newId().toString());
+
+      assertThat(a.body().toString(), a.status(), is(503));
+      assertThat(a.code(), is("PAYMENT_ORDER_LOOKUP_UNAVAILABLE"));
+      assertThat("no intent was opened", intentRows(order), is("0"));
+      assertThat("no money was recorded", tenders(order), is("0"));
+      assertThat("nothing was announced", captures(order), is("0"));
+    }
+  }
+
+  @Test
   @DisplayName("A webhook for a provider that is not deployed is 404 and records nothing")
   void aWebhookForAProviderNotDeployedIsRefused() {
     String before = scalar(PG, "SELECT count(*) FROM payment.payment_webhook_events");

@@ -15,10 +15,12 @@ import java.util.UUID;
 /**
  * Automatic refunds in response to order events. {@code OrderReturned} refunds the return amount
  * (to the ORIGINAL tenders, or recorded as a STORE_CREDIT / GIFT_CARD refund whose value goes to a
- * liability); {@code OrderCancelled} refunds whatever is still captured (unpaid pay-later
- * cancellations are a no-op). Both are idempotent on the order event's {@code eventId} inside
- * {@link PaymentService#refundForOrderEvent}. Separated from {@link OrderEventConsumer} so Kafka
- * lifecycle and domain logic each change for one reason (SRP).
+ * liability); {@code OrderCancelled} and {@code OrderVoided} refund whatever is still captured
+ * (unpaid pay-later cancellations are a no-op), a card a terminal took back through that terminal —
+ * a void only when it was announced after payment-svc began refunding voids ({@link
+ * PaymentService#refundVoidForOrderEvent}). Both are idempotent on the order event's {@code
+ * eventId} inside {@link PaymentService#refundForOrderEvent}. Separated from {@link
+ * OrderEventConsumer} so Kafka lifecycle and domain logic each change for one reason (SRP).
  *
  * <p>Malformed payloads are logged and skipped (they will never parse on redelivery); a failed
  * refund write propagates so the consumer loop redelivers, and the eventId dedupe keeps that safe.
@@ -91,6 +93,11 @@ class OrderEventHandler {
       } else if ("OrderCancelled".equals(eventType)) {
         requestedAmount = null;
         reason = "Order cancelled";
+      } else if ("OrderVoided".equals(eventType)) {
+        // A till sale voided after the fact never happened: everything it took goes back, a card
+        // a terminal took through that terminal, as for a cancelled order.
+        requestedAmount = null;
+        reason = "Sale voided";
       } else if ("OrderLineShortClosed".equals(eventType)
           || "OrderLineSubstituted".equals(eventType)) {
         // Substitutions for out-of-stock online lines: what the shopper paid for what they will
@@ -122,6 +129,12 @@ class OrderEventHandler {
     if (returnRefund != null) {
       service.refundReturnForOrderEvent(
           eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, returnRefund);
+      return;
+    }
+    if ("OrderVoided".equals(eventType)) {
+      // A void announced before payment-svc began refunding voids is history (V18): this group
+      // meets the whole retained topic on its first read, and those were settled by hand.
+      service.refundVoidForOrderEvent(eventId, CONSUMER_NAME, tenantId, orderId);
       return;
     }
     service.refundForOrderEvent(

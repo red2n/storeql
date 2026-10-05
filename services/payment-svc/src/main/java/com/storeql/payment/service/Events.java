@@ -227,7 +227,10 @@ final class Events {
       json.append(",\"evidenceDueBy\":\"").append(d.evidenceDueBy()).append('"');
     }
     if (outcome != null) json.append(",\"outcome\":\"").append(clean(outcome)).append('"');
-    json.append(",\"occurredAt\":\"").append(java.time.Instant.now()).append("\"}");
+    json.append(",\"occurredAt\":\"").append(java.time.Instant.now()).append('"');
+    // The currency feeAmount is in: the acquirer's settlement currency, not always the charge's.
+    // Last, so nothing before it moves.
+    json.append(",\"feeCurrency\":\"").append(clean(d.feeCurrency())).append("\"}");
     return new OutboxRow(type, topic, d.tenantId(), d.id(), json.toString());
   }
 

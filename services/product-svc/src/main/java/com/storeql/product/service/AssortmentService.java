@@ -344,8 +344,9 @@ public class AssortmentService {
    * @throws ApiException 400 {@code REVIEW_LINES_REQUIRED}; 400 {@code REVIEW_LINE_CURRENCY} for
    *     money without a currency, a currency without money, or a code ISO 4217 does not know; 400
    *     {@code REVIEW_LINE_FIGURES} for negative units or revenue, or money with more decimal
-   *     places than its currency has or too large to keep; 404 {@code REVIEW_NOT_FOUND}; 409 when
-   *     the review is closed
+   *     places than its currency has or too large to keep, or units sold with more than three
+   *     decimal places or 10^11 or more; 404 {@code REVIEW_NOT_FOUND}; 409 when the review is
+   *     closed
    */
   public Review addLines(UUID tenantId, UUID reviewId, List<Line> lines) {
     Review r = openOnly(tenantId, reviewId);
@@ -367,6 +368,7 @@ public class AssortmentService {
         throw ApiException.badRequest(
             "REVIEW_LINE_FIGURES", "Units sold and revenue are never negative");
       }
+      requireUnits(l.unitsSold());
       requireMoney(l.revenue(), "revenue", l.currency());
       requireMoney(l.margin(), "margin", l.currency());
     }
@@ -828,6 +830,30 @@ public class AssortmentService {
 
   /** The largest figure a line keeps: {@code NUMERIC(18, 4)} holds fourteen whole digits. */
   private static final BigDecimal MONEY_LIMIT = BigDecimal.TEN.pow(14);
+
+  /** The largest units a line keeps: {@code NUMERIC(14, 3)} holds eleven whole digits. */
+  private static final BigDecimal UNITS_LIMIT = BigDecimal.TEN.pow(11);
+
+  /** The decimal places a line's units keep: {@code NUMERIC(14, 3)}. */
+  private static final int UNITS_SCALE = 3;
+
+  /**
+   * A line's units fit their column: at most three decimal places and below 10^11, refused with
+   * more rather than rounded or left to overflow in the database.
+   *
+   * @throws ApiException 400 {@code REVIEW_LINE_FIGURES}
+   */
+  private static void requireUnits(BigDecimal units) {
+    if (units == null) return;
+    if (Math.max(0, units.stripTrailingZeros().scale()) > UNITS_SCALE) {
+      throw ApiException.badRequest(
+          "REVIEW_LINE_FIGURES",
+          "unitsSold has more decimal places than a line keeps (" + UNITS_SCALE + ")");
+    }
+    if (units.abs().compareTo(UNITS_LIMIT) >= 0) {
+      throw ApiException.badRequest("REVIEW_LINE_FIGURES", "unitsSold is too large to keep");
+    }
+  }
 
   /**
    * A line's money is in its currency's minor units, and small enough to keep.

@@ -42,12 +42,12 @@ public class TenderMixRepository extends BaseJdbcRepository {
    * currency. If per-tenant multi-currency ever arrives, this is one of the places that has to
    * learn about it.
    *
-   * <p>{@code refund_tenders.store_id} is written by every refund path and back-filled for older
-   * rows (V12), so a refund's store is its own. It is still read as {@code COALESCE(r.store_id,
-   * t.store_id)} through a left join back to the payment tender it refunds, exactly as the
-   * settlement matcher resolves it ({@code SettlementRepository.REFUND_TARGET}), so a row that
-   * somehow has none falls back to its payment's store. A refund with neither is store-less and so
-   * is counted only when every store is being read.
+   * <p>{@code refund_tenders.store_id} is written by every refund path (the payment's store, an
+   * exchange's own, or for a card put back through a terminal the store of the sale it reverses)
+   * and back-filled for older rows (V12, and once more by V20 when the fallback went), so a
+   * refund's store is its own and is read from the refund alone — as the settlement matcher reads
+   * it. A refund of a payment taken with no store has none, and is counted only when every store is
+   * being read.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
    * @param stores restrict to these stores, or {@code null} for every store in the tenant (a caller
@@ -67,8 +67,7 @@ public class TenderMixRepository extends BaseJdbcRepository {
     // rather than matching every row, so a caller held to no store gets the plain, unfiltered
     // clause instead — the same shape the window clauses already use below.
     String storeFilter = stores == null ? "" : " AND store_id = ANY(?)";
-    String refundStoreFilter =
-        stores == null ? "" : " AND COALESCE(r.store_id, t.store_id) = ANY(?)";
+    String refundStoreFilter = stores == null ? "" : " AND r.store_id = ANY(?)";
     String window =
         (from != null ? " AND created_at >= ?" : "") + (to != null ? " AND created_at < ?" : "");
     String refundWindow =
@@ -96,11 +95,9 @@ public class TenderMixRepository extends BaseJdbcRepository {
             + window
             + "   UNION ALL"
             // refund_tenders has no status column: a row here is a refund that happened. Its own
-            // store_id is the store; the payment it refunds is the fallback (see the javadoc).
+            // store_id is the store (see the javadoc).
             + "   SELECT r.method, 0, 0, r.amount, 1, 0"
             + "     FROM refund_tenders r"
-            + "     LEFT JOIN payment_tenders t"
-            + "       ON t.tenant_id = r.tenant_id AND t.id = r.payment_id"
             + "    WHERE r.tenant_id = ?"
             + refundStoreFilter
             + refundWindow

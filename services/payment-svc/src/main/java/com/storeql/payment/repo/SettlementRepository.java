@@ -110,13 +110,11 @@ public class SettlementRepository extends BaseOutboxRepository {
   /** A refund line by the refund's own reference. */
   private static final String MATCH_REFUNDS_BY_REFERENCE =
       "WITH candidate AS ("
-          + " SELECT l.id AS line_id, l.line_no, r.id AS refund_id, r.amount,"
-          + " COALESCE(r.store_id, t.store_id) AS store_id,"
+          + " SELECT l.id AS line_id, l.line_no, r.id AS refund_id, r.amount, r.store_id,"
           + " row_number() OVER (PARTITION BY l.id ORDER BY (r.amount = -l.gross_amount) DESC,"
           + " r.created_at, r.id) AS pick"
           + " FROM settlement_lines l JOIN refund_tenders r ON r.tenant_id = l.tenant_id"
           + " AND r.reference = l.reference"
-          + " LEFT JOIN payment_tenders t ON t.tenant_id = r.tenant_id AND t.id = r.payment_id"
           + " WHERE l.tenant_id = ? AND l.batch_id = ? AND l.type = 'REFUND'"
           + " AND l.match_status = 'UNMATCHED'"
           + " AND NOT EXISTS (SELECT 1 FROM settlement_lines s WHERE s.tenant_id = r.tenant_id"
@@ -136,8 +134,7 @@ public class SettlementRepository extends BaseOutboxRepository {
    */
   private static final String MATCH_REFUNDS_BY_PAYMENT =
       "WITH candidate AS ("
-          + " SELECT l.id AS line_id, l.line_no, r.id AS refund_id,"
-          + " COALESCE(r.store_id, t.store_id) AS store_id,"
+          + " SELECT l.id AS line_id, l.line_no, r.id AS refund_id, r.store_id,"
           + " row_number() OVER (PARTITION BY l.id ORDER BY r.created_at, r.id) AS pick"
           + " FROM settlement_lines l JOIN payment_tenders t ON t.tenant_id = l.tenant_id"
           + " AND t.reference IN (l.reference, l.original_reference)"
@@ -528,10 +525,9 @@ public class SettlementRepository extends BaseOutboxRepository {
       "SELECT id, store_id, amount FROM payment_tenders WHERE tenant_id = ? AND id = ?"
           + " AND status = 'CAPTURED' AND method IN ('CARD', 'UPI', 'WALLET')";
 
+  /** A refund is its own store's (every path writes it; V12 and V20 filled the older rows). */
   private static final String REFUND_TARGET =
-      "SELECT r.id, COALESCE(r.store_id, t.store_id), -r.amount FROM refund_tenders r"
-          + " LEFT JOIN payment_tenders t ON t.tenant_id = r.tenant_id AND t.id = r.payment_id"
-          + " WHERE r.tenant_id = ? AND r.id = ?";
+      "SELECT id, store_id, -amount FROM refund_tenders WHERE tenant_id = ? AND id = ?";
 
   private static final String CHARGEBACK_TARGET =
       "SELECT id, store_id, CASE WHEN funds_withdrawn THEN -(amount + fee_amount) ELSE 0 END"

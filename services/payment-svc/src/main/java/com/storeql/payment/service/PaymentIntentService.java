@@ -97,13 +97,23 @@ public class PaymentIntentService {
 
     UUID intentId = Ids.newId();
     Instant now = Instant.now();
+    // One provider for the record and the call: a sandbox's is MANUAL (22.8), so its intent is
+    // never authorised by the configured processor while recorded as MANUAL's.
+    PaymentProvider provider = providers.forTenant(tenantId);
+    // An amount this provider cannot charge exactly is the customer's to know, before anything is
+    // recorded or asked: a price, not an outage.
+    try {
+      provider.requireChargeable(req.amount(), currency);
+    } catch (PaymentProvider.AmountNotChargeable e) {
+      throw notChargeable(e);
+    }
     PaymentIntent pending =
         new PaymentIntent(
             intentId,
             tenantId,
             orderId,
             verified.storeId(),
-            providers.forTenant(tenantId).name(),
+            provider.name(),
             null,
             req.amount(),
             BigDecimal.ZERO,
@@ -127,17 +137,15 @@ public class PaymentIntentService {
     PaymentProvider.Authorization auth;
     try {
       auth =
-          providers
-              .active()
-              .authorize(
-                  new PaymentProvider.AuthorizeRequest(
-                      tenantId,
-                      orderId,
-                      intentId,
-                      req.amount(),
-                      currency,
-                      returnUrl,
-                      idempotencyKey));
+          provider.authorize(
+              new PaymentProvider.AuthorizeRequest(
+                  tenantId, orderId, intentId, req.amount(), currency, returnUrl, idempotencyKey));
+    } catch (PaymentProvider.AmountNotChargeable e) {
+      // Refused by the driver before it asked anything (checked above, so only a driver that
+      // learns it later says so here): nothing was held, and the intent says why it failed.
+      repo.markTerminal(
+          tenantId, intentId, PaymentIntent.STATUS_FAILED, "AMOUNT_NOT_CHARGEABLE", e.getMessage());
+      throw notChargeable(e);
     } catch (PaymentProvider.ProviderException e) {
       // The intent stays as a record of the attempt rather than vanishing, so a hold the provider
       // did place despite the error is still reconcilable when its webhook arrives.
@@ -390,6 +398,34 @@ public class PaymentIntentService {
           "returnUrl is not on the configured allowlist for this deployment");
     }
     return requested;
+  }
+
+  /**
+   * The refusal for an amount the provider cannot charge exactly: 422 {@code
+   * PAYMENT_AMOUNT_NOT_CHARGEABLE}, naming the nearest amounts it can charge either side (the one
+   * below left out when none is above zero), as {@code
+   * currency=KWD;chargeableBelow=1.120;chargeableAbove=1.130}.
+   */
+  private static ApiException notChargeable(PaymentProvider.AmountNotChargeable e) {
+    String below = e.below() == null ? null : e.below().toPlainString();
+    String above = e.above().toPlainString();
+    return new ApiException(
+        422,
+        "PAYMENT_AMOUNT_NOT_CHARGEABLE",
+        "The card payment provider cannot charge exactly this amount in "
+            + e.currency()
+            + (below == null
+                ? "; the nearest it can charge is "
+                : "; the nearest it can charge are ")
+            + (below == null ? "" : below + " and ")
+            + above,
+        List.of(
+            "currency="
+                + e.currency()
+                + (below == null ? "" : ";chargeableBelow=" + below)
+                + ";chargeableAbove="
+                + above),
+        e);
   }
 
   private static ApiException notFound(UUID intentId) {

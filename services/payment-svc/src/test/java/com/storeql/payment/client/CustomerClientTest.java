@@ -1,7 +1,10 @@
 package com.storeql.payment.client;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.ids.Ids;
@@ -9,7 +12,10 @@ import com.storeql.payment.config.ServiceConfig;
 import com.storeql.test.JsonStub;
 import com.storeql.web.ApiException;
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.UUID;
+import org.eclipse.microprofile.faulttolerance.CircuitBreaker;
+import org.eclipse.microprofile.faulttolerance.Retry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -17,7 +23,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * What the store-credit redeem says when customer-svc refuses it, against a stub standing for
- * customer-svc: the refusal keeps its own stable code and status, never a 503 and never a success.
+ * customer-svc: the refusal keeps its own stable code and status, never a 503 and never a success,
+ * and is never counted by the circuit breaker as an outage.
  */
 class CustomerClientTest {
 
@@ -95,5 +102,67 @@ class CustomerClientTest {
     UUID fine = Ids.newId();
     customers.on("POST", redeemPath(fine), 200, "{\"data\":{}}");
     redeem(fine);
+  }
+
+  @Test
+  @DisplayName(
+      "An erased customer is 409 CUSTOMER_ANONYMIZED, passed on as customer-svc gave it, never a"
+          + " 503 the till would invite a retry of")
+  void anErasedCustomerIsRefusedNotUnavailable() {
+    UUID customer = Ids.newId();
+    customers.on(
+        "POST",
+        redeemPath(customer),
+        409,
+        "{\"type\":\"urn:storeql:problem:CUSTOMER_ANONYMIZED\",\"status\":409,"
+            + "\"code\":\"CUSTOMER_ANONYMIZED\"}");
+    long before = callsTo(customer);
+
+    ApiException e = assertThrows(ApiException.class, () -> redeem(customer));
+
+    assertThat(e.status(), is(409));
+    assertThat(e.code(), is("CUSTOMER_ANONYMIZED"));
+    assertThat(e, instanceOf(CustomerClient.Refusal.class));
+    assertThat("asked once", callsTo(customer) - before, is(1L));
+  }
+
+  @Test
+  @DisplayName(
+      "Every refusal is skipped by the circuit breaker and aborts the retry; an outage is neither")
+  void refusalsNeverCountAgainstTheBreaker() throws NoSuchMethodException {
+    var redeem =
+        CustomerClient.class.getMethod(
+            "redeemStoreCredit",
+            UUID.class,
+            UUID.class,
+            BigDecimal.class,
+            String.class,
+            UUID.class);
+    assertThat(
+        Arrays.asList(redeem.getAnnotation(CircuitBreaker.class).skipOn()),
+        hasItem(CustomerClient.Refusal.class));
+    assertThat(
+        Arrays.asList(redeem.getAnnotation(Retry.class).abortOn()), hasItem(ApiException.class));
+
+    UUID poor = Ids.newId();
+    customers.on("POST", redeemPath(poor), 422, "{\"code\":\"STORE_CREDIT_INSUFFICIENT\"}");
+    assertThat(
+        assertThrows(ApiException.class, () -> redeem(poor)),
+        instanceOf(CustomerClient.Refusal.class));
+    UUID unknown = Ids.newId();
+    customers.on("POST", redeemPath(unknown), 404, "{\"code\":\"CUSTOMER_NOT_FOUND\"}");
+    assertThat(
+        assertThrows(ApiException.class, () -> redeem(unknown)),
+        instanceOf(CustomerClient.Refusal.class));
+
+    UUID down = Ids.newId();
+    customers.on("POST", redeemPath(down), 500, "{}");
+    ApiException outage = assertThrows(ApiException.class, () -> redeem(down));
+    assertThat(outage.status(), is(503));
+    assertThat(outage, not(instanceOf(CustomerClient.Refusal.class)));
+  }
+
+  private static long callsTo(UUID customer) {
+    return customers.calls().stream().filter(c -> c.path().equals(redeemPath(customer))).count();
   }
 }

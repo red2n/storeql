@@ -112,7 +112,9 @@ class SettlementIT {
             null,
             "changed their mind",
             Instant.now()),
-        new OutboxRow("PaymentRefunded", "storeql.payment.payment-refunded", SHOP, id, "{}"));
+        new OutboxRow("PaymentRefunded", "storeql.payment.payment-refunded", SHOP, id, "{}"),
+        // The fixture is nobody's request: who may refund where is BackOfficeRefundIT's.
+        store -> {});
     return id;
   }
 

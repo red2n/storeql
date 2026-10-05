@@ -38,6 +38,14 @@ class OrderEventHandlerTest {
     UUID giftCardOrder;
     BigDecimal giftCardAmount;
 
+    /** When payment-svc began giving back what a voided sale took, as the migration kept it. */
+    java.time.Instant voidsSince = java.time.Instant.EPOCH;
+
+    @Override
+    public java.time.Instant voidsHandledSince() {
+      return voidsSince;
+    }
+
     @Override
     public void exchangeForOrderEvent(
         UUID eventId, String consumer, UUID tenantId, UUID orderId, ExchangeReturn ex) {
@@ -231,6 +239,69 @@ class OrderEventHandlerTest {
     assertEquals(EVENT, service.eventId);
     // null requestedAmount => "refund whatever is still captured".
     assertNull(service.amount);
+  }
+
+  @Test
+  void aVoidedSaleGivesBackEverythingItTookAsACancelledOrderDoes() {
+    // A till sale voided after the fact never happened: before this, a voided card sale left its
+    // money on the card and in the books, because payment-svc did not hear of the void at all.
+    String voided =
+        "{\"eventId\":\""
+            + EVENT
+            + "\",\"eventType\":\"OrderVoided\",\"tenantId\":\""
+            + TENANT
+            + "\",\"orderId\":\""
+            + ORDER
+            + "\",\"storeId\":\""
+            + Ids.newId()
+            + "\",\"items\":[]}";
+
+    handler.handle(voided);
+
+    assertEquals(1, service.calls);
+    assertEquals(EVENT, service.eventId);
+    assertEquals(ORDER, service.orderId);
+    assertNull(service.amount, "a whole-order refund: everything still captured");
+    assertEquals("Sale voided", service.reason);
+    assertNull(service.kind, "not an adjustment");
+  }
+
+  @Test
+  void aVoidAnnouncedBeforeVoidsWereRefundedIsHistory() {
+    // payment-svc's consumer group had never read the voids topic, so its first deployment starts
+    // at the earliest retained void: those were settled by hand when they happened, and refunding
+    // them today would pay out cash, post refunds and put money back on cards a second time.
+    java.time.Instant since = java.time.Instant.now();
+    service.voidsSince = since;
+    String millis = String.format("%012x", since.minusSeconds(3600).toEpochMilli());
+    UUID historic =
+        Ids.parse(
+            millis.substring(0, 8)
+                + "-"
+                + millis.substring(8)
+                + "-"
+                + Ids.newId().toString().substring(14));
+
+    handler.handle(voidedEvent(historic));
+    assertEquals(0, service.calls, "a void from before is not acted on");
+
+    UUID fresh = Ids.newId();
+    handler.handle(voidedEvent(fresh));
+    assertEquals(1, service.calls, "a void from after is");
+    assertEquals(fresh, service.eventId);
+    assertEquals("Sale voided", service.reason);
+  }
+
+  private static String voidedEvent(UUID eventId) {
+    return "{\"eventId\":\""
+        + eventId
+        + "\",\"eventType\":\"OrderVoided\",\"tenantId\":\""
+        + TENANT
+        + "\",\"orderId\":\""
+        + ORDER
+        + "\",\"storeId\":\""
+        + Ids.newId()
+        + "\",\"items\":[]}";
   }
 
   @Test

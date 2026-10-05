@@ -88,15 +88,50 @@ public class TerminalResource {
       summary = "Retire a terminal",
       description =
           "Never deleted: payments point at it. Its label is then free for the device that replaces"
-              + " it, which is what happens when one is swapped after a fault.")
+              + " it, which is what happens when one is swapped after a fault. The reason is"
+              + " optional, and so is the body; one that is sent is held to its limit (300"
+              + " characters), and a longer one is refused as a whole with the terminal left in"
+              + " service. A manager held to other stores cannot retire this store's terminal."
+              + " Not while it holds a card payment that is not settled (at the machine, approved"
+              + " and neither recorded nor put back, or timed out with nobody's word on it — a"
+              + " refund too): settle it first, the way the guard on a new sale says. Nor while"
+              + " it is the last machine of its vendor in service at its store and cards that"
+              + " vendor's machines took there are owed money back (a card goes back through the"
+              + " machine that took it or another of its vendor there): register its replacement"
+              + " first, ask it again, or record how each was given back another way.")
+  @APIResponse(responseCode = "200", description = "Retired")
+  @APIResponse(
+      responseCode = "400",
+      description = "VALIDATION_FAILED: the reason is longer than 300 characters")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not management, or STORE_ACCESS_DENIED: held to stores that are not this one")
+  @APIResponse(
+      responseCode = "404",
+      description = "TERMINAL_NOT_FOUND: no such terminal for this business")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "TERMINAL_ALREADY_RETIRED; TERMINAL_UNSETTLED_APPROVAL: it holds a card payment that is"
+              + " not settled, one detail per payment"
+              + " (attemptId=…;orderId=…;amount=…;currency=…;onCard=…;state=…;standing=…;kind=…);"
+              + " TERMINAL_REFUNDS_OWED: it is the last of its vendor at its store and money is"
+              + " owed back to cards, one detail per sum, the oldest fifty"
+              + " (dueId=…;attemptId=…;orderId=…;amount=…;currency=…;state=…)")
   @POST
   @Path("/{id}/retire")
   public ApiResponse<TerminalDtos.TerminalResponse> retire(
       @PathParam("id") UUID id, TerminalDtos.RetireRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    // The reason is optional, so the body is too; one that is sent is held to its limits.
+    if (req != null) {
+      Validations.validate(req);
+    }
+    UUID tenantId = ctx.requireTenantId();
+    // The business's own terminal (404 otherwise), then at a store the caller may act at.
+    ctx.requireStoreAccess(svc.get(tenantId, id).storeId());
     return ApiResponse.ok(
-        TerminalMappers.toDto(
-            svc.retire(ctx.requireTenantId(), id, req == null ? null : req.reason())));
+        TerminalMappers.toDto(svc.retire(tenantId, id, req == null ? null : req.reason())));
   }
 
   /** The vendors this deployment can talk to, so a screen offers only those. */
