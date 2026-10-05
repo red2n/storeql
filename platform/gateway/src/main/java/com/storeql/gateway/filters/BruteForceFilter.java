@@ -128,8 +128,9 @@ public class BruteForceFilter implements ContainerRequestFilter, ContainerRespon
       protection.recordFailure(userKey);
       protection.recordFailure(ipKey);
     } else if (status >= 200 && status < 300) {
+      // Only the account's own counter is cleared. Clearing the address's too let a client that
+      // had one valid account reset its guesses against every other account it tried.
       protection.recordSuccess(userKey);
-      protection.recordSuccess(ipKey);
     }
   }
 

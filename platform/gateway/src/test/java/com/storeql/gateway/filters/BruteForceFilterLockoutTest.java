@@ -124,6 +124,38 @@ class BruteForceFilterLockoutTest {
     verify(request).abortWith(any());
   }
 
+  /**
+   * A client that guesses against accounts it does not own must not reset its own address's count
+   * by logging into an account it does own. The success clears that account's counter, never the
+   * address's; before, one good login from the address cleared the address, so a guesser with one
+   * valid account could guess again without limit.
+   */
+  @Test
+  void aSuccessOnOneAccountDoesNotClearTheAddressCounter() throws IOException {
+    when(response.getStatus()).thenReturn(401, 200, 401);
+    attempt("alice@example.com"); // 401: address 1, alice 1
+    attempt("bob@example.com"); // 200: bob cleared, the address must keep its 1
+    attempt("carol@example.com"); // 401: address 2, so the address is locked
+
+    freshBody("dave@example.com");
+    filter.filter(request);
+
+    verify(request).abortWith(any());
+  }
+
+  private void attempt(String email) throws IOException {
+    freshBody(email);
+    filter.filter(request);
+    filter.filter(request, response);
+  }
+
+  private void freshBody(String email) {
+    String body = "{\"email\":\"" + email + "\",\"password\":\"x\"}";
+    lenient()
+        .when(request.getEntityStream())
+        .thenReturn(new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+  }
+
   @Test
   void rbacDeniedNonLoginAuthPathsDoNotFeedTheCounter() throws IOException {
     // A 403 from e.g. the POS session sweep is an authorization result, not a failed credential
@@ -197,22 +229,25 @@ class BruteForceFilterLockoutTest {
   }
 
   @Test
-  void aRightTokenClearsTheCounter() throws IOException {
+  void aRightTokenDoesNotClearTheAddressCounter() throws IOException {
+    // A right token proves the holder had one valid link. It must not reset the address's count of
+    // misses: that let one valid link buy unlimited guesses at the others. The address stays one
+    // miss from the limit after the right token, so the next miss locks it.
     lenient().when(uriInfo.getPath()).thenReturn("api/customer-svc/marketing/unsubscribe");
-    when(response.getStatus()).thenReturn(404, 200, 404, 404);
+    when(response.getStatus()).thenReturn(404, 200, 404);
 
     freshBody();
     filter.filter(request);
     filter.filter(request, response); // 404: one miss
     freshBody();
     filter.filter(request);
-    filter.filter(request, response); // 200: the right token clears it
+    filter.filter(request, response); // 200: the right token, which clears nothing here
     freshBody();
     filter.filter(request);
-    filter.filter(request, response); // 404
+    filter.filter(request, response); // 404: the second miss
     freshBody();
-    filter.filter(request); // still one short of the limit
-    verify(request, never()).abortWith(any());
+    filter.filter(request); // locked
+    verify(request).abortWith(any());
   }
 
   @Test
