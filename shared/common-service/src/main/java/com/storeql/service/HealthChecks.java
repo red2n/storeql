@@ -107,12 +107,18 @@ public final class HealthChecks {
     @Override
     public HealthCheckResponse call() {
       Set<String> failed = KafkaConsumerRegistry.failedConsumers();
-      if (failed.isEmpty()) {
+      // A running loop whose broker has stopped answering is not ready either: it is not taking
+      // events, and traffic for its projections would otherwise keep arriving at a stopped replica.
+      long windowMillis = Math.max(1, Cfg.getLong("storeql.kafka.stall-seconds", 60L)) * 1000L;
+      Set<String> stalled =
+          KafkaConsumerRegistry.stalledConsumers(System.currentTimeMillis(), windowMillis);
+      if (failed.isEmpty() && stalled.isEmpty()) {
         return HealthCheckResponse.named("kafka-consumers").up().build();
       }
       return HealthCheckResponse.named("kafka-consumers")
           .down()
           .withData("failed", String.join(",", failed))
+          .withData("stalled", String.join(",", stalled))
           .build();
     }
   }

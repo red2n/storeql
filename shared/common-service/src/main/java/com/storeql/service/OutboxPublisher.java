@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -124,14 +125,16 @@ public class OutboxPublisher {
    * logged and deferred to the next tick, since rows that aren't confirmed published stay pending.
    */
   void drainQuietly() {
-    try {
+    try (var lease = store.tryDrainLock().orElse(null)) {
+      if (lease == null) return; // another replica is draining this schema
       long deadline = System.nanoTime() + drainBudgetMillis * 1_000_000L;
-      int drained;
+      int claimed;
       do {
-        // The claim (FOR UPDATE SKIP LOCKED) and the published-mark run in the repo's single
-        // transaction, so two replicas draining at the same instant never claim the same row.
-        drained = store.drainAndPublish(batchSize, this::publishBatch).size();
-      } while (drained >= batchSize
+        // Keep going while batches come back full: a full claim may leave rows behind it. The
+        // condition is on rows claimed, not rows published: a batch that failed to publish is still
+        // a full batch, and its failed rows are backed off, so the next claim reaches past them.
+        claimed = store.drainOnce(lease, batchSize, this::publishBatch).claimed();
+      } while (claimed >= batchSize
           && System.nanoTime() < deadline
           && !Thread.currentThread().isInterrupted());
     } catch (Exception e) {
@@ -188,7 +191,7 @@ public class OutboxPublisher {
    * @return the ids of {@code rows} whose send was confirmed by the broker; a subset when some
    *     sends failed or timed out
    */
-  List<UUID> publishBatch(List<OutboxStore.PendingOutbox> rows) {
+  OutboxStore.PublishOutcome publishBatch(List<OutboxStore.PendingOutbox> rows) {
     // Per-aggregate order: an aggregate's Nth row is sent only after its N-1 predecessors are
     // acknowledged, and a row whose predecessor failed is not sent at all, so Kafka sees an
     // aggregate's events in the order they were written and no row is sent twice. Rows are sent in
@@ -201,14 +204,15 @@ public class OutboxPublisher {
       if (waves.size() <= n) waves.add(new ArrayList<>());
       waves.get(n).add(i);
     }
-    Set<String> failed = new HashSet<>();
+    Set<String> failedKeys = new HashSet<>();
     List<UUID> published = new ArrayList<>(rows.size());
+    Map<UUID, String> failed = new LinkedHashMap<>();
     for (List<Integer> wave : waves) {
       List<Integer> sent = new ArrayList<>(wave.size());
       List<Future<RecordMetadata>> futures = new ArrayList<>(wave.size());
       for (int i : wave) {
         OutboxStore.PendingOutbox row = rows.get(i);
-        if (failed.contains(row.key())) continue;
+        if (failedKeys.contains(row.key())) continue;
         sent.add(i);
         futures.add(producer.send(new ProducerRecord<>(row.topic(), row.key(), row.payload())));
       }
@@ -220,14 +224,18 @@ public class OutboxPublisher {
           published.add(row.id());
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
-          return published;
+          return new OutboxStore.PublishOutcome(published, failed);
         } catch (Exception e) {
-          failed.add(row.key());
-          LOG.log(Level.WARNING, "Publish failed for outbox {0}: {1}", row.id(), e.getMessage());
+          // Exception, not Throwable: an Error is not a failed send and must not be recorded as
+          // one.
+          failedKeys.add(row.key());
+          String reason = String.valueOf(e.getMessage());
+          failed.put(row.id(), reason);
+          LOG.log(Level.WARNING, "Publish failed for outbox {0}: {1}", row.id(), reason);
         }
       }
     }
-    return published;
+    return new OutboxStore.PublishOutcome(published, failed);
   }
 
   /** Stops the drain timer and closes the producer, if either was started. */

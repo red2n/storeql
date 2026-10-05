@@ -1,6 +1,8 @@
 package com.storeql.service;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -13,17 +15,59 @@ import java.util.function.Function;
 public interface OutboxStore {
 
   /**
-   * Locks up to {@code limit} unpublished rows ({@code FOR UPDATE SKIP LOCKED} — production runs
-   * multiple replicas of every service, so without this every replica's drain would claim and
-   * re-publish the same rows), hands them to {@code publish}, and — inside that same transaction —
-   * marks published exactly the ids it returns. Rows {@code publish} doesn't report back stay
-   * unpublished and are claimable again (by any replica) on the next drain.
+   * Takes this schema's drain right, or returns empty when another replica holds it. Production
+   * runs several replicas of every service, and each drains the same outbox: without one drainer at
+   * a time, a second replica could publish an aggregate's later row while the first is still
+   * publishing its earlier one. The right is a session-level advisory lock on a connection the
+   * lease holds; it is released when the lease closes, or when the process or connection dies.
    *
-   * @param limit max rows to claim in one call
-   * @param publish sends the claimed rows and returns the ids that were confirmed delivered
-   * @return the ids that were claimed and successfully marked published
+   * @return the lease, or empty when another drainer holds the schema
    */
-  List<UUID> drainAndPublish(int limit, Function<List<PendingOutbox>, List<UUID>> publish);
+  default Optional<DrainLease> tryDrainLock() {
+    return Optional.of(() -> {});
+  }
+
+  /**
+   * Claims up to {@code limit} rows that may publish now, hands them to {@code publish}, and
+   * records the outcome: delivered rows are marked published; a failed row gets one more attempt, a
+   * backoff before its next try, and after the configured attempts a dead letter. Only the holder
+   * of {@code lease} may call this.
+   *
+   * <p>A row is claimable only when no earlier row of its aggregate is still unpublished, so a row
+   * that keeps failing holds back its own aggregate and nothing else. No transaction is open while
+   * {@code publish} runs.
+   *
+   * @param lease the drain right from {@link #tryDrainLock()}
+   * @param limit the most rows to claim in this call
+   * @param publish sends the claimed rows and reports which were delivered and which failed
+   * @return how many rows were claimed, and which of them were marked published
+   */
+  DrainResult drainOnce(
+      DrainLease lease, int limit, Function<List<PendingOutbox>, PublishOutcome> publish);
+
+  /** The drain right; closing it releases the lock. */
+  @FunctionalInterface
+  interface DrainLease extends AutoCloseable {
+    @Override
+    void close();
+  }
+
+  /**
+   * What one drain call did.
+   *
+   * @param claimed rows claimed and handed to publish, whatever their outcome
+   * @param published the claimed rows that were delivered and marked published
+   */
+  record DrainResult(int claimed, List<UUID> published) {}
+
+  /**
+   * What publish reports back for a batch.
+   *
+   * @param published ids delivered
+   * @param failed ids that were attempted and not delivered, with the reason for the log and the
+   *     row (rows held back behind a failure are in neither list and are not counted as attempts)
+   */
+  record PublishOutcome(List<UUID> published, Map<UUID, String> failed) {}
 
   /**
    * Deletes outbox rows that were PUBLISHED before {@code cutoff}, at most {@code batch} rows. Rows

@@ -176,4 +176,21 @@ class KafkaEventLoopTest {
   private static <E extends Throwable> void sneaky(Throwable t) throws E {
     throw (E) t;
   }
+
+  /**
+   * A loop is stalled once its broker has not answered for the window: readiness must say so, so a
+   * replica whose broker went away stops taking traffic. Before, a readiness probe saw no failed
+   * start and reported UP for a loop that had silently stopped.
+   */
+  @Test
+  void aLoopWhoseBrokerStopsAnsweringIsUnhealthyAfterTheWindow() {
+    KafkaEventLoop loop =
+        new KafkaEventLoop("stall", "localhost:1", "g", List.of("x"), (topic, value) -> {});
+    long window = 60_000;
+    loop.markHealthy(1_000);
+    assertTrue(loop.isHealthy(1_000 + window, window));
+    assertFalse(loop.isHealthy(1_001 + window, window));
+    loop.markHealthy(2_000_000);
+    assertTrue(loop.isHealthy(2_000_001, window), "an answer brings it back");
+  }
 }

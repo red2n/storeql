@@ -1,6 +1,7 @@
 package com.storeql.purchase;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
@@ -12,8 +13,8 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,33 +79,37 @@ class OutboxSingleDrainerIT {
     Replica second = new Replica(ds);
     CountDownLatch publishing = new CountDownLatch(1);
     CountDownLatch release = new CountDownLatch(1);
-    List<UUID> secondClaimed = new CopyOnWriteArrayList<>();
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try {
-      Future<List<UUID>> held =
+      Future<OutboxStore.DrainResult> held =
           pool.submit(
-              () ->
-                  first.drainAndPublish(
+              () -> {
+                try (OutboxStore.DrainLease lease = first.tryDrainLock().orElseThrow()) {
+                  return first.drainOnce(
+                      lease,
                       1,
                       rows -> {
                         publishing.countDown();
                         awaitQuietly(release);
-                        return ids(rows);
-                      }));
+                        return new OutboxStore.PublishOutcome(ids(rows), Map.of());
+                      });
+                }
+              });
       assertEquals(true, publishing.await(10, TimeUnit.SECONDS), "the first replica is publishing");
 
-      List<UUID> got =
-          second.drainAndPublish(
-              1,
-              rows -> {
-                secondClaimed.addAll(ids(rows));
-                return ids(rows);
-              });
+      // the second replica cannot take the schema's drain right, so it claims nothing at all
+      assertTrue(second.tryDrainLock().isEmpty(), "the drain right is held by the first replica");
 
       release.countDown();
-      assertEquals(1, held.get(10, TimeUnit.SECONDS).size(), "the first replica publishes its row");
-      assertEquals(List.of(), got, "the second replica leaves the outbox to the first");
-      assertEquals(List.of(), secondClaimed, "nothing is claimed while the first is publishing");
+      assertEquals(1, held.get(10, TimeUnit.SECONDS).published().size());
+      try (OutboxStore.DrainLease lease = second.tryDrainLock().orElseThrow()) {
+        // once free, the second replica takes r2, which is now eligible
+        assertEquals(
+            1,
+            second
+                .drainOnce(lease, 1, rows -> new OutboxStore.PublishOutcome(ids(rows), Map.of()))
+                .claimed());
+      }
     } finally {
       release.countDown();
       pool.shutdownNow();

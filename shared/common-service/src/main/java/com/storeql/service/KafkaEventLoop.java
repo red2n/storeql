@@ -55,12 +55,25 @@ public final class KafkaEventLoop implements AutoCloseable {
   private static final long RETRY_BACKOFF_MS = 2000;
 
   private final String name;
+  private final List<String> topics;
   private final String bootstrap;
   private final Handler handler;
   private final KafkaConsumer<String, String> consumer;
   private final String offsetReset;
   private final ScheduledExecutorService scheduler;
   private volatile boolean running;
+
+  /** When the broker last answered a metadata request; the readiness probe reads it. */
+  private volatile long lastHealthyMillis;
+
+  /** When the next broker probe is due. Only the poll thread touches it. */
+  private long nextProbeAtMillis;
+
+  /** How often the loop asks the broker for metadata, whatever the traffic. */
+  static final long PROBE_EVERY_MILLIS = 10_000;
+
+  /** How long a broker probe may take before it counts as not answering. */
+  static final long PROBE_TIMEOUT_SECONDS = 2;
 
   /** Tracks retry count for the offset currently stuck at the head of each partition. */
   private final Map<TopicPartition, Attempt> attempts = new HashMap<>();
@@ -103,6 +116,7 @@ public final class KafkaEventLoop implements AutoCloseable {
       String offsetReset,
       Handler handler) {
     this.name = name;
+    this.topics = List.copyOf(topics);
     this.offsetReset = offsetReset;
     this.bootstrap = bootstrap;
     this.handler = handler;
@@ -145,6 +159,8 @@ public final class KafkaEventLoop implements AutoCloseable {
    */
   public void start() {
     running = true;
+    markHealthy(System.currentTimeMillis());
+    KafkaConsumerRegistry.track(this);
     // poll() already waits up to 500 ms for records, so the pause between ticks can be tiny: a
     // backlog is drained back to back instead of one batch per 2 s. A failed record is the one
     // case that must wait (see RETRY_BACKOFF_MS) so its 5 attempts are not burnt in a blink.
@@ -166,6 +182,7 @@ public final class KafkaEventLoop implements AutoCloseable {
       return;
     }
     try {
+      probeBrokerIfDue();
       var records = consumer.poll(Duration.ofMillis(500));
       if (records.isEmpty()) {
         return;
@@ -242,6 +259,50 @@ public final class KafkaEventLoop implements AutoCloseable {
       }
     }
     return rewind;
+  }
+
+  String name() {
+    return name;
+  }
+
+  /**
+   * Records that the broker answered at {@code atMillis}.
+   *
+   * @param atMillis the time of the answer, in epoch milliseconds
+   */
+  void markHealthy(long atMillis) {
+    lastHealthyMillis = atMillis;
+  }
+
+  /**
+   * Whether the broker has answered within {@code windowMillis} of {@code nowMillis}. A poll that
+   * returns empty proves nothing about the broker, since the client returns empty while it cannot
+   * connect; the answer that counts is a metadata request that succeeds.
+   *
+   * @param nowMillis the current time, in epoch milliseconds
+   * @param windowMillis how long an answer stays good
+   * @return {@code true} while the broker's last answer is within the window
+   */
+  boolean isHealthy(long nowMillis, long windowMillis) {
+    return nowMillis - lastHealthyMillis <= windowMillis;
+  }
+
+  /**
+   * Asks the broker for the first topic's metadata, at most once per {@link #PROBE_EVERY_MILLIS}.
+   * Any answer, even an empty topic, counts; a timeout or an error does not.
+   */
+  private void probeBrokerIfDue() {
+    long now = System.currentTimeMillis();
+    if (now < nextProbeAtMillis || topics.isEmpty()) {
+      return;
+    }
+    nextProbeAtMillis = now + PROBE_EVERY_MILLIS;
+    try {
+      consumer.partitionsFor(topics.get(0), Duration.ofSeconds(PROBE_TIMEOUT_SECONDS));
+      markHealthy(System.currentTimeMillis());
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "{0}: broker not answering: {1}", name, e.getMessage());
+    }
   }
 
   /**
@@ -334,6 +395,7 @@ public final class KafkaEventLoop implements AutoCloseable {
   @Override
   public void close() {
     running = false;
+    KafkaConsumerRegistry.untrack(name);
     consumer.wakeup();
     scheduler.shutdownNow();
     try {

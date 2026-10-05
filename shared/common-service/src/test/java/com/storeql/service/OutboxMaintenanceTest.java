@@ -40,10 +40,10 @@ class OutboxMaintenanceTest {
     List<UUID> full = new ArrayList<>();
     for (int i = 0; i < 100; i++) full.add(Ids.newId());
     OutboxStore store =
-        (limit, publish) -> {
+        (lease, limit, publish) -> {
           int n = calls.incrementAndGet();
-          // three full batches, then a short one: the backlog is cleared within one tick
-          return n <= 3 ? full : List.of(Ids.newId());
+          // three full claims, then a short one: the backlog is cleared within one tick
+          return new OutboxStore.DrainResult(n <= 3 ? full.size() : 1, List.of());
         };
     publisherWith(store).drainQuietly();
     assertEquals(4, calls.get());
@@ -53,9 +53,9 @@ class OutboxMaintenanceTest {
   void anEmptyOutboxIsOneQueryPerTick() throws Exception {
     AtomicInteger calls = new AtomicInteger();
     OutboxStore store =
-        (limit, publish) -> {
+        (lease, limit, publish) -> {
           calls.incrementAndGet();
-          return List.of();
+          return new OutboxStore.DrainResult(0, List.of());
         };
     publisherWith(store).drainQuietly();
     assertEquals(1, calls.get());
@@ -89,7 +89,7 @@ class OutboxMaintenanceTest {
     var a1 = new OutboxStore.PendingOutbox(Ids.newId(), a, "t", "{}");
     var a2 = new OutboxStore.PendingOutbox(Ids.newId(), a, "t", "{}");
     var b1 = new OutboxStore.PendingOutbox(Ids.newId(), b, "t", "{}");
-    List<UUID> published = p.publishBatch(List.of(a1, a2, b1));
+    List<UUID> published = p.publishBatch(List.of(a1, a2, b1)).published();
     assertEquals(List.of(b1.id()), published);
     assertFalse(published.contains(a2.id()), "a2 must not overtake a1");
     // Not marked published is not enough: a2 must never reach Kafka ahead of a1's retry.
@@ -129,7 +129,7 @@ class OutboxMaintenanceTest {
     assertEquals(List.of("a1"), sent, "the failed row goes out alone; its successor waits");
     // the next tick: the retry goes first, then the row after it
     sent.clear();
-    List<UUID> again = p.publishBatch(List.of(a1, a2));
+    List<UUID> again = p.publishBatch(List.of(a1, a2)).published();
     assertEquals(List.of(a1.id(), a2.id()), again);
     assertEquals(List.of("a1", "a2"), sent);
   }
@@ -232,8 +232,9 @@ class OutboxMaintenanceTest {
     OutboxStore store =
         new OutboxStore() {
           @Override
-          public List<UUID> drainAndPublish(int l, Function<List<PendingOutbox>, List<UUID>> p) {
-            return List.of();
+          public DrainResult drainOnce(
+              DrainLease lease, int l, Function<List<PendingOutbox>, PublishOutcome> p) {
+            return new DrainResult(0, List.of());
           }
 
           @Override
