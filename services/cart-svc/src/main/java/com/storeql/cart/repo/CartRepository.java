@@ -354,24 +354,31 @@ public class CartRepository extends BaseJdbcRepository {
    * same transaction.
    */
   public CartItem upsertItem(CartItem item, StaffAction audit) {
+    // The cart must be ACTIVE in the database, not in the cache: the row is locked FOR SHARE in the
+    // same statement, so a checkout that commits first is seen (and refused), and one that waits
+    // for this add cannot close the cart under it. A cache that was behind cannot accept an item.
     CartItem result =
         inTx(
             c -> {
               try (var ps =
                   c.prepareStatement(
-                      "INSERT INTO cart_items (id, cart_id, tenant_id, variant_id, qty,"
-                          + " unit_price, added_at) VALUES (?,?,?,?,?,?, now())"
+                      "WITH live AS (SELECT id FROM carts"
+                          + " WHERE tenant_id = ? AND id = ? AND status = 'ACTIVE' FOR SHARE)"
+                          + " INSERT INTO cart_items (id, cart_id, tenant_id, variant_id, qty,"
+                          + " unit_price, added_at)"
+                          + " SELECT ?, live.id, ?, ?, ?, ?, now() FROM live"
                           + " ON CONFLICT (cart_id, variant_id) DO UPDATE SET"
                           + "   qty        = cart_items.qty + EXCLUDED.qty,"
                           + "   unit_price = COALESCE(EXCLUDED.unit_price, cart_items.unit_price)"
                           + " RETURNING id, cart_id, tenant_id, variant_id, qty, unit_price,"
                           + " added_at")) {
-                ps.setObject(1, item.id());
+                ps.setObject(1, item.tenantId());
                 ps.setObject(2, item.cartId());
-                ps.setObject(3, item.tenantId());
-                ps.setObject(4, item.variantId());
-                ps.setBigDecimal(5, item.qty());
-                ps.setBigDecimal(6, item.unitPrice());
+                ps.setObject(3, item.id());
+                ps.setObject(4, item.tenantId());
+                ps.setObject(5, item.variantId());
+                ps.setBigDecimal(6, item.qty());
+                ps.setBigDecimal(7, item.unitPrice());
                 try (var rs = ps.executeQuery()) {
                   if (rs.next()) {
                     CartItem written = mapItem(rs);
@@ -392,7 +399,8 @@ public class CartRepository extends BaseJdbcRepository {
                   }
                 }
               }
-              throw ApiException.unprocessable("CART_ITEM_UPSERT_FAILED", "upsert returned no row");
+              // no ACTIVE cart in the database: nothing was written
+              throw ApiException.conflict("CART_NOT_ACTIVE", "cart is not active");
             },
             "upsert cart item");
     evictItems(result.tenantId(), result.cartId());

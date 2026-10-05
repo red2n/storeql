@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -215,6 +216,46 @@ class CartCachingIT {
     // A second part of the same checkout finds nothing left to close.
     repo.markCheckedOutByCustomer(Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A));
     assertThat(cartStatus(cartId), is("CHECKED_OUT"));
+  }
+
+  /**
+   * A checkout the cache never heard of: the cart is cached ACTIVE, then closed in the database
+   * with no eviction, the way a read that raced the checkout leaves it. The add must be refused by
+   * the database, not accepted on the cache's word. Before, the item was written.
+   */
+  @Test
+  void aStaleActiveCacheEntryDoesNotAcceptAnAdd() {
+    Response c = post("/cart", "{\"storeId\":\"" + STORE_A + "\"}");
+    String cartId = field(c.readEntity(String.class), "id");
+    String first = Ids.newId().toString();
+    assertThat(
+        post(
+                "/cart/items",
+                "{\"cartId\":\"" + cartId + "\",\"variantId\":\"" + first + "\",\"qty\":1}")
+            .getStatus(),
+        is(200)); // warms the cache with the ACTIVE row
+    try (Connection db = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        Statement st = db.createStatement()) {
+      st.executeUpdate("UPDATE cart.carts SET status = 'CHECKED_OUT' WHERE id = '" + cartId + "'");
+    } catch (SQLException e) {
+      throw new AssertionError(e);
+    }
+    String later = Ids.newId().toString();
+    Response refused =
+        post(
+            "/cart/items",
+            "{\"cartId\":\"" + cartId + "\",\"variantId\":\"" + later + "\",\"qty\":1}");
+    assertThat(refused.readEntity(String.class), containsString("CART_NOT_ACTIVE"));
+    assertThat(refused.getStatus(), is(409));
+    assertThat(
+        com.storeql.test.Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM cart.cart_items WHERE cart_id = '"
+                + cartId
+                + "' AND variant_id = '"
+                + later
+                + "'"),
+        is("0"));
   }
 
   private static String cartStatus(String cartId) {
