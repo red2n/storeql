@@ -4,9 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -131,5 +133,47 @@ class KafkaEventLoopTest {
     var rec = new ConsumerRecord<>("storeql.x", 0, 7L, "k", "{}");
     assertTrue(KafkaEventLoop.publishDeadLetter(producer, rec));
     assertEquals("storeql.x.DLT", producer.history().get(0).topic());
+  }
+
+  /**
+   * A handler that fails with an {@link Error} is a failed record like any other: the partition is
+   * rewound to it and the poll loop carries on. Before, the Error escaped the loop, the scheduled
+   * poll task died, and nothing consumed the topic again until restart.
+   */
+  @Test
+  void aHandlerErrorRewindsThePartitionAndDoesNotEscape() {
+    KafkaEventLoop loop =
+        new KafkaEventLoop(
+            "errors",
+            "localhost:1",
+            "g",
+            List.of("x"),
+            (topic, value) -> {
+              throw new AssertionError("boom");
+            });
+    var rec = new org.apache.kafka.clients.consumer.ConsumerRecord<>("x", 0, 5L, "k", "v");
+    Map<TopicPartition, Long> rewind = loop.dispatch(List.of(rec));
+    assertEquals(Map.of(new TopicPartition("x", 0), 5L), rewind);
+  }
+
+  /** A checked exception thrown past the compiler is still a failed record, not a dead loop. */
+  @Test
+  void aSneakyCheckedFailureRewindsThePartitionToo() {
+    KafkaEventLoop loop =
+        new KafkaEventLoop(
+            "sneaky",
+            "localhost:1",
+            "g",
+            List.of("x"),
+            (topic, value) -> {
+              KafkaEventLoopTest.<RuntimeException>sneaky(new IOException("disk gone"));
+            });
+    var rec = new org.apache.kafka.clients.consumer.ConsumerRecord<>("x", 0, 9L, "k", "v");
+    assertEquals(Map.of(new TopicPartition("x", 0), 9L), loop.dispatch(List.of(rec)));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <E extends Throwable> void sneaky(Throwable t) throws E {
+    throw (E) t;
   }
 }

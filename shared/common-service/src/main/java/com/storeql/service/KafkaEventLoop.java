@@ -159,6 +159,8 @@ public final class KafkaEventLoop implements AutoCloseable {
    * {@link #close()}) and any other exception are caught and logged, so a bad tick never kills the
    * scheduler.
    */
+  // Throwable on purpose: an Error escaping this tick would kill the scheduled task silently.
+  @SuppressWarnings("PMD.AvoidCatchingThrowable")
   private void pollQuietly() {
     if (!running) {
       return;
@@ -168,44 +170,7 @@ public final class KafkaEventLoop implements AutoCloseable {
       if (records.isEmpty()) {
         return;
       }
-      // First failed offset per partition; later records of that partition are left unprocessed
-      // to preserve per-partition ordering — unless that offset has exhausted its retries and was
-      // dead-lettered, in which case processing of the partition resumes with the next record.
-      Map<TopicPartition, Long> rewind = new HashMap<>();
-      for (var rec : records) {
-        var tp = new TopicPartition(rec.topic(), rec.partition());
-        if (rewind.containsKey(tp)) {
-          continue;
-        }
-        try {
-          handler.handle(rec.topic(), rec.value());
-          attempts.remove(tp);
-        } catch (RuntimeException e) {
-          int count = recordAttempt(tp, rec.offset());
-          if (count >= MAX_ATTEMPTS && deadLetter(rec, e)) {
-            LOG.log(
-                Level.ERROR,
-                "{0}: record {1}@{2} failed {3} times, dead-lettered and skipped: {4}",
-                name,
-                tp,
-                rec.offset(),
-                count,
-                e.getMessage());
-            attempts.remove(tp);
-          } else {
-            rewind.put(tp, rec.offset());
-            LOG.log(
-                Level.WARNING,
-                "{0}: record {1}@{2} failed (attempt {3}/{4}), will retry: {5}",
-                name,
-                tp,
-                rec.offset(),
-                count,
-                MAX_ATTEMPTS,
-                e.getMessage());
-          }
-        }
-      }
+      Map<TopicPartition, Long> rewind = dispatch(records);
       // Seek resets the position, so commitSync() acks exactly up to (not including) failures.
       rewind.forEach(consumer::seek);
       consumer.commitSync();
@@ -216,9 +181,67 @@ public final class KafkaEventLoop implements AutoCloseable {
       Thread.currentThread().interrupt();
     } catch (WakeupException e) {
       LOG.log(Level.DEBUG, "{0} woken for shutdown", name);
-    } catch (Exception e) {
+    } catch (VirtualMachineError fatal) {
+      throw fatal;
+    } catch (Throwable e) {
       LOG.log(Level.WARNING, "{0} poll deferred: {1}", name, e.getMessage());
     }
+  }
+
+  /**
+   * Hands each record to the handler, in order, and returns for each partition the offset to seek
+   * back to: the first record that must be redelivered. Any failure of the handler, checked or not,
+   * is a failed record: it is retried, or dead-lettered once its attempts run out. Only a {@link
+   * VirtualMachineError} leaves this method, so one bad record cannot kill the poll loop.
+   *
+   * @param records the records of one poll, in the order the broker gave them
+   * @return the partitions that must be rewound, with the offset to rewind each to
+   */
+  // Throwable on purpose: the handler contract is "throw to mean retry", and a handler's failure
+  // of any kind must be a failed record. Only VirtualMachineError is let through.
+  @SuppressWarnings("PMD.AvoidCatchingThrowable")
+  Map<TopicPartition, Long> dispatch(Iterable<ConsumerRecord<String, String>> records) {
+    // First failed offset per partition; later records of that partition are left unprocessed
+    // to preserve per-partition ordering — unless that offset has exhausted its retries and was
+    // dead-lettered, in which case processing of the partition resumes with the next record.
+    Map<TopicPartition, Long> rewind = new HashMap<>();
+    for (var rec : records) {
+      var tp = new TopicPartition(rec.topic(), rec.partition());
+      if (rewind.containsKey(tp)) {
+        continue;
+      }
+      try {
+        handler.handle(rec.topic(), rec.value());
+        attempts.remove(tp);
+      } catch (VirtualMachineError fatal) {
+        throw fatal;
+      } catch (Throwable e) {
+        int count = recordAttempt(tp, rec.offset());
+        if (count >= MAX_ATTEMPTS && deadLetter(rec, e)) {
+          LOG.log(
+              Level.ERROR,
+              "{0}: record {1}@{2} failed {3} times, dead-lettered and skipped: {4}",
+              name,
+              tp,
+              rec.offset(),
+              count,
+              e.getMessage());
+          attempts.remove(tp);
+        } else {
+          rewind.put(tp, rec.offset());
+          LOG.log(
+              Level.WARNING,
+              "{0}: record {1}@{2} failed (attempt {3}/{4}), will retry: {5}",
+              name,
+              tp,
+              rec.offset(),
+              count,
+              MAX_ATTEMPTS,
+              e.getMessage());
+        }
+      }
+    }
+    return rewind;
   }
 
   /**
@@ -249,7 +272,7 @@ public final class KafkaEventLoop implements AutoCloseable {
    * @param cause the last handler failure for this record, kept for the log line
    * @return {@code true} when the dead letter was acknowledged and the record may be skipped
    */
-  private boolean deadLetter(ConsumerRecord<String, String> rec, RuntimeException cause) {
+  private boolean deadLetter(ConsumerRecord<String, String> rec, Throwable cause) {
     if (dlqProducer == null) {
       Properties props = new Properties();
       props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
