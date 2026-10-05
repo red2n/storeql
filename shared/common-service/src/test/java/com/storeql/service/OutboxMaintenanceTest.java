@@ -92,6 +92,46 @@ class OutboxMaintenanceTest {
     List<UUID> published = p.publishBatch(List.of(a1, a2, b1));
     assertEquals(List.of(b1.id()), published);
     assertFalse(published.contains(a2.id()), "a2 must not overtake a1");
+    // Not marked published is not enough: a2 must never reach Kafka ahead of a1's retry.
+    assertEquals(2, sends.get(), "a1 and b1 are sent; a2 is held back and not sent");
+  }
+
+  /**
+   * A batch with the same aggregate twice in a row and a failure on the first: the second row must
+   * be sent only after the first is acknowledged, so the retry is what Kafka sees first.
+   */
+  @Test
+  void aRetriedRowIsSentBeforeTheRowsWrittenAfterIt() throws Exception {
+    List<String> sent = new ArrayList<>();
+    java.util.Set<String> failOnce = new java.util.HashSet<>(List.of("a1"));
+    MockProducer<String, String> producer =
+        new MockProducer<>(true, new StringSerializer(), new StringSerializer()) {
+          @Override
+          public synchronized java.util.concurrent.Future<
+                  org.apache.kafka.clients.producer.RecordMetadata>
+              send(org.apache.kafka.clients.producer.ProducerRecord<String, String> record) {
+            sent.add(record.value());
+            if (failOnce.remove(record.value())) {
+              return java.util.concurrent.CompletableFuture.failedFuture(
+                  new RuntimeException("broker said no"));
+            }
+            return super.send(record);
+          }
+        };
+    OutboxPublisher p = publisherWith(null);
+    Field f = OutboxPublisher.class.getDeclaredField("producer");
+    f.setAccessible(true);
+    f.set(p, producer);
+    UUID a = Ids.newId();
+    var a1 = new OutboxStore.PendingOutbox(Ids.newId(), a, "t", "a1");
+    var a2 = new OutboxStore.PendingOutbox(Ids.newId(), a, "t", "a2");
+    p.publishBatch(List.of(a1, a2));
+    assertEquals(List.of("a1"), sent, "the failed row goes out alone; its successor waits");
+    // the next tick: the retry goes first, then the row after it
+    sent.clear();
+    List<UUID> again = p.publishBatch(List.of(a1, a2));
+    assertEquals(List.of(a1.id(), a2.id()), again);
+    assertEquals(List.of("a1", "a2"), sent);
   }
 
   // ── purge ─────────────────────────────────────────────────────────────────

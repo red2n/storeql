@@ -14,6 +14,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
@@ -46,6 +47,9 @@ public final class KafkaEventLoop implements AutoCloseable {
    * A record still failing after this many deliveries is dead-lettered instead of retried forever.
    */
   private static final int MAX_ATTEMPTS = 5;
+
+  /** How long a dead letter may take to be acknowledged before it counts as not written. */
+  static final long DLQ_ACK_TIMEOUT_SECONDS = 10;
 
   /** Pause after a poll in which a record failed, before it is redelivered. */
   private static final long RETRY_BACKOFF_MS = 2000;
@@ -125,11 +129,6 @@ public final class KafkaEventLoop implements AutoCloseable {
             });
   }
 
-  /**
-   * Starts polling on a dedicated daemon thread, ticking every {@code storeql.kafka.poll-delay-ms}
-   * (default 50) milliseconds after the previous poll finished. Idempotent to call only once per
-   * instance — call {@link #close()} and construct a new loop to restart.
-   */
   /** Where this loop's group starts with no committed offset: what it was built with. */
   String offsetReset() {
     return offsetReset;
@@ -139,6 +138,11 @@ public final class KafkaEventLoop implements AutoCloseable {
     return Math.max(1, Cfg.getLong("storeql.kafka.poll-delay-ms", 50L));
   }
 
+  /**
+   * Starts polling on a dedicated daemon thread, ticking every {@code storeql.kafka.poll-delay-ms}
+   * (default 50) milliseconds after the previous poll finished. Idempotent to call only once per
+   * instance — call {@link #close()} and construct a new loop to restart.
+   */
   public void start() {
     running = true;
     // poll() already waits up to 500 ms for records, so the pause between ticks can be tiny: a
@@ -178,16 +182,15 @@ public final class KafkaEventLoop implements AutoCloseable {
           attempts.remove(tp);
         } catch (RuntimeException e) {
           int count = recordAttempt(tp, rec.offset());
-          if (count >= MAX_ATTEMPTS) {
+          if (count >= MAX_ATTEMPTS && deadLetter(rec, e)) {
             LOG.log(
                 Level.ERROR,
-                "{0}: record {1}@{2} failed {3} times, dead-lettering and skipping: {4}",
+                "{0}: record {1}@{2} failed {3} times, dead-lettered and skipped: {4}",
                 name,
                 tp,
                 rec.offset(),
                 count,
                 e.getMessage());
-            deadLetter(rec, e);
             attempts.remove(tp);
           } else {
             rewind.put(tp, rec.offset());
@@ -237,15 +240,16 @@ public final class KafkaEventLoop implements AutoCloseable {
   }
 
   /**
-   * Publishes a record that exhausted {@link #MAX_ATTEMPTS} to {@code <topic>.DLT}, lazily creating
-   * the producer on first use. A failure to publish the dead letter itself is logged (with the
-   * original cause) and swallowed — the record is skipped either way so the partition isn't stuck
-   * forever.
+   * Publishes a record that exhausted {@link #MAX_ATTEMPTS} to {@code <topic>.DLT}, creating the
+   * producer on first use. The record is skipped only once the broker has acknowledged the dead
+   * letter; otherwise it stays unacknowledged and is tried again on a later poll, so a dead letter
+   * that never reaches Kafka can never lose the record.
    *
    * @param rec the record that exhausted its retries
-   * @param cause the last handler failure for this record
+   * @param cause the last handler failure for this record, kept for the log line
+   * @return {@code true} when the dead letter was acknowledged and the record may be skipped
    */
-  private void deadLetter(ConsumerRecord<String, String> rec, RuntimeException cause) {
+  private boolean deadLetter(ConsumerRecord<String, String> rec, RuntimeException cause) {
     if (dlqProducer == null) {
       Properties props = new Properties();
       props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
@@ -253,17 +257,45 @@ public final class KafkaEventLoop implements AutoCloseable {
       props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
       dlqProducer = new KafkaProducer<>(props);
     }
-    try {
-      dlqProducer.send(new ProducerRecord<>(rec.topic() + ".DLT", rec.key(), rec.value()));
-    } catch (RuntimeException e) {
+    boolean acknowledged = publishDeadLetter(dlqProducer, rec);
+    if (!acknowledged) {
       LOG.log(
           Level.ERROR,
-          "{0}: failed to publish dead letter for {1}@{2} (original cause: {3}): {4}",
+          "{0}: dead letter for {1}@{2} not acknowledged, will retry (original cause: {3})",
           name,
           rec.topic(),
           rec.offset(),
-          cause.getMessage(),
+          cause.getMessage());
+    }
+    return acknowledged;
+  }
+
+  /**
+   * Sends one dead letter and waits, bounded, for the broker's acknowledgement. A send that fails
+   * or times out is reported as not written: the caller must not treat the record as handled.
+   *
+   * @param producer the producer to send with
+   * @param rec the record to dead-letter
+   * @return {@code true} only when the broker acknowledged the write
+   */
+  static boolean publishDeadLetter(
+      Producer<String, String> producer, ConsumerRecord<String, String> rec) {
+    try {
+      producer
+          .send(new ProducerRecord<>(rec.topic() + ".DLT", rec.key(), rec.value()))
+          .get(DLQ_ACK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+      return true;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    } catch (Exception e) {
+      LOG.log(
+          Level.ERROR,
+          "failed to publish dead letter for {0}@{1}: {2}",
+          rec.topic(),
+          rec.offset(),
           e.getMessage());
+      return false;
     }
   }
 

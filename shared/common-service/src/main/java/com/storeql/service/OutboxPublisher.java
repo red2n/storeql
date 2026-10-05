@@ -10,16 +10,23 @@ import jakarta.inject.Inject;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.serialization.StringSerializer;
 
 /**
@@ -182,27 +189,42 @@ public class OutboxPublisher {
    *     sends failed or timed out
    */
   List<UUID> publishBatch(List<OutboxStore.PendingOutbox> rows) {
-    var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>(rows.size());
-    for (var row : rows) {
-      futures.add(producer.send(new ProducerRecord<>(row.topic(), row.key(), row.payload())));
-    }
-    producer.flush();
-    var published = new java.util.ArrayList<UUID>(rows.size());
-    // Once a row fails, later rows about the SAME aggregate are not marked published, so the
-    // retry sends them after it (per-aggregate order); other aggregates are unaffected.
-    var failedKeys = new java.util.HashSet<String>();
+    // Per-aggregate order: an aggregate's Nth row is sent only after its N-1 predecessors are
+    // acknowledged, and a row whose predecessor failed is not sent at all, so Kafka sees an
+    // aggregate's events in the order they were written and no row is sent twice. Rows are sent in
+    // waves (the Nth row of every aggregate together), so one batch still pipelines across
+    // aggregates.
+    Map<String, Integer> seen = new HashMap<>();
+    List<List<Integer>> waves = new ArrayList<>();
     for (int i = 0; i < rows.size(); i++) {
-      if (failedKeys.contains(rows.get(i).key())) continue;
-      try {
-        futures.get(i).get();
-        published.add(rows.get(i).id());
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        break;
-      } catch (Exception e) {
-        failedKeys.add(rows.get(i).key());
-        LOG.log(
-            Level.WARNING, "Publish failed for outbox {0}: {1}", rows.get(i).id(), e.getMessage());
+      int n = seen.merge(rows.get(i).key(), 1, Integer::sum) - 1;
+      if (waves.size() <= n) waves.add(new ArrayList<>());
+      waves.get(n).add(i);
+    }
+    Set<String> failed = new HashSet<>();
+    List<UUID> published = new ArrayList<>(rows.size());
+    for (List<Integer> wave : waves) {
+      List<Integer> sent = new ArrayList<>(wave.size());
+      List<Future<RecordMetadata>> futures = new ArrayList<>(wave.size());
+      for (int i : wave) {
+        OutboxStore.PendingOutbox row = rows.get(i);
+        if (failed.contains(row.key())) continue;
+        sent.add(i);
+        futures.add(producer.send(new ProducerRecord<>(row.topic(), row.key(), row.payload())));
+      }
+      producer.flush();
+      for (int k = 0; k < sent.size(); k++) {
+        OutboxStore.PendingOutbox row = rows.get(sent.get(k));
+        try {
+          futures.get(k).get();
+          published.add(row.id());
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          return published;
+        } catch (Exception e) {
+          failed.add(row.key());
+          LOG.log(Level.WARNING, "Publish failed for outbox {0}: {1}", row.id(), e.getMessage());
+        }
       }
     }
     return published;

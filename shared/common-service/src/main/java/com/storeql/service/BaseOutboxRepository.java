@@ -58,6 +58,20 @@ public abstract class BaseOutboxRepository extends BaseJdbcRepository implements
   public List<UUID> drainAndPublish(int limit, Function<List<PendingOutbox>, List<UUID>> publish) {
     return inTx(
         c -> {
+          // One drainer per schema at a time. SKIP LOCKED alone lets a second replica claim an
+          // aggregate's later row while the first is still publishing its earlier one, and Kafka
+          // would then see the later event first. A replica that cannot take the lock leaves the
+          // outbox to the one that holds it and drains on a later tick.
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT pg_try_advisory_xact_lock(hashtext(current_schema() || ':outbox'))")) {
+            try (ResultSet rs = ps.executeQuery()) {
+              rs.next();
+              if (!rs.getBoolean(1)) {
+                return List.<UUID>of();
+              }
+            }
+          }
           List<PendingOutbox> rows = new ArrayList<>();
           try (PreparedStatement ps =
               c.prepareStatement(

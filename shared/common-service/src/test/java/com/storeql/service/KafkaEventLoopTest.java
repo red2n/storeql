@@ -1,11 +1,20 @@
 package com.storeql.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.MockProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -96,5 +105,31 @@ class KafkaEventLoopTest {
 
     assertEquals(3, recordAttempt(loop, tp0, 1L));
     assertEquals(2, recordAttempt(loop, tp1, 1L));
+  }
+
+  /**
+   * A dead letter the broker never acknowledges is not a handled record: the loop keeps the record
+   * for another attempt rather than skipping it and losing it.
+   */
+  @Test
+  void aDeadLetterTheBrokerNeverAcknowledgesIsNotCountedAsWritten() {
+    MockProducer<String, String> producer =
+        new MockProducer<>(true, new StringSerializer(), new StringSerializer()) {
+          @Override
+          public synchronized Future<RecordMetadata> send(ProducerRecord<String, String> record) {
+            return CompletableFuture.failedFuture(new RuntimeException("broker down"));
+          }
+        };
+    var rec = new ConsumerRecord<>("storeql.x", 0, 7L, "k", "{}");
+    assertFalse(KafkaEventLoop.publishDeadLetter(producer, rec));
+  }
+
+  @Test
+  void anAcknowledgedDeadLetterGoesToTheDltTopic() {
+    MockProducer<String, String> producer =
+        new MockProducer<>(true, new StringSerializer(), new StringSerializer());
+    var rec = new ConsumerRecord<>("storeql.x", 0, 7L, "k", "{}");
+    assertTrue(KafkaEventLoop.publishDeadLetter(producer, rec));
+    assertEquals("storeql.x.DLT", producer.history().get(0).topic());
   }
 }
