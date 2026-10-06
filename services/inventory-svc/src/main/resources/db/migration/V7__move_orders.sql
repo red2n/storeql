@@ -7,12 +7,16 @@ CREATE TABLE move_orders (
     tenant_id     UUID        NOT NULL,
     from_store_id UUID        NOT NULL,
     to_store_id   UUID        NOT NULL,
+    -- The free-text zone names.
     from_zone     TEXT,
     to_zone       TEXT,
     notes         TEXT,
     status        TEXT        NOT NULL DEFAULT 'DRAFT',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     picked_at     TIMESTAMPTZ,
+    -- The zones the order moves between, by id: tenant-svc's zones, referenced never joined.
+    from_zone_id  UUID,
+    to_zone_id    UUID,
     CONSTRAINT pk_move_orders PRIMARY KEY (id),
     CONSTRAINT chk_move_order_status CHECK (status IN ('DRAFT','OPEN','COMPLETED','CANCELLED'))
 );

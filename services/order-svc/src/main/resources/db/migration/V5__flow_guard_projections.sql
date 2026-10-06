@@ -5,8 +5,14 @@
 
 CREATE TABLE tenant_status (
     tenant_id         UUID        PRIMARY KEY,
-    status            TEXT        NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | SUSPENDED | BLOCKED
-    status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    status            TEXT        NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | INACTIVE, as TenantStatusChanged carries them
+    status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- The business's currency, projected from TenantCreated (the event iam-svc also consumes). Nullable: a
+    -- tenant whose TenantCreated has not been projected has no row yet, or no currency. Checkout reads it
+    -- here first; with no value here it asks tenant-svc (TenantProfiles.requireCurrency), and when tenant-svc
+    -- cannot answer it refuses (503) rather than guessing a default. The status fails open to ACTIVE when
+    -- there is no row, as the header says.
+    currency          CHAR(3)
 );
 
 CREATE TABLE store_status (

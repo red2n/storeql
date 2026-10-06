@@ -1,4 +1,4 @@
--- Single sign-on through a business's own identity provider, over OpenID Connect (20.x, SSO).
+-- Single sign-on through a business's own identity provider, over OpenID Connect.
 --
 -- A business connects one provider. Its staff are found by the sign-in name the business chose,
 -- sent to the provider, and come back proved; they are matched to the logins the business already
@@ -64,13 +64,3 @@ CREATE UNIQUE INDEX uq_sso_flows_state ON sso_flows (state_hash);
 CREATE UNIQUE INDEX uq_sso_flows_ticket ON sso_flows (ticket_hash) WHERE ticket_hash IS NOT NULL;
 CREATE INDEX idx_sso_flows_tenant ON sso_flows (tenant_id, created_at);
 CREATE INDEX idx_sso_flows_expiry ON sso_flows (expires_at);
-
--- What a waiting sign-in proved before its second factor was asked for: a password, or the
--- provider. NULL is a password, which is all it could be before this.
-ALTER TABLE mfa_challenges ADD COLUMN first_factor TEXT;
-
--- When the session a refresh token belongs to was signed into, carried across every rotation. A
--- session the provider vouched for lasts only so long before the provider is asked again: that is
--- what makes switching someone off at the provider switch them off here. NULL for a session older
--- than this column.
-ALTER TABLE refresh_tokens ADD COLUMN authenticated_at TIMESTAMPTZ;

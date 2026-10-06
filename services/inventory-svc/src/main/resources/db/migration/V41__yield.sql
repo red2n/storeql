@@ -52,13 +52,16 @@ CREATE TABLE yield_runs (
     template_id       UUID          NOT NULL,
     input_variant_id  UUID          NOT NULL,
     input_qty         NUMERIC(18,3) NOT NULL,
+    -- Money is unconstrained NUMERIC: its scale belongs to the currency. The service rounds a breakdown's
+    -- costs half up to the business currency's minor units (common-service Fx.minorUnits) before it writes
+    -- them, so a currency with three decimal places keeps them and one with none is not given two.
     -- What the primal cost, from the batches it was drawn from; null when any had no cost.
-    input_cost        NUMERIC(18,2),
+    input_cost        NUMERIC,
     output_qty        NUMERIC(18,3) NOT NULL,
     loss_qty          NUMERIC(18,3) NOT NULL,
     expected_loss_qty NUMERIC(18,3) NOT NULL,
     -- The loss at the primal's unit cost: what the bin took, for the report. The cuts absorb it.
-    loss_at_cost      NUMERIC(18,2),
+    loss_at_cost      NUMERIC,
     reference         TEXT,
     notes             TEXT,
     recorded_by       UUID,
@@ -76,7 +79,7 @@ CREATE TABLE yield_run_outputs (
     variant_id   UUID          NOT NULL,
     qty          NUMERIC(18,3) NOT NULL,
     expected_qty NUMERIC(18,3) NOT NULL,
-    unit_cost    NUMERIC(18,2),
+    unit_cost    NUMERIC,
     -- The batch the cut became; null when nothing of this cut came out.
     batch_id     UUID,
     CONSTRAINT pk_yield_run_outputs PRIMARY KEY (id),

@@ -12,9 +12,10 @@ public final class Domain {
 
   /**
    * A shop's own record of a person. {@code loginId} is the iam-svc login it belongs to, or {@code
-   * null} for a walk-in the till created — a login is global and a customer record is not, so one
-   * login has at most one of these per tenant (SJ-D44). {@code firstName}/{@code lastName} are null
-   * until someone gives them: a linked login starts with an email and nothing else.
+   * null} for a record the till created that no login has adopted yet (a login adopts it by the
+   * same email; see CustomerRepository.linkLogin). A login is global and a customer record is not,
+   * so one login has at most one of these per tenant (SJ-D44). {@code firstName}/{@code lastName}
+   * are null until someone gives them: a linked login starts with an email and nothing else.
    */
   /**
    * @param phoneE164 {@code phone} normalised to E.164 against the business's own regions; {@code

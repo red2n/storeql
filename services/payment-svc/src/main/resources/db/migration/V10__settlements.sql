@@ -110,9 +110,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_settlement_lines_refund
 CREATE UNIQUE INDEX IF NOT EXISTS uq_settlement_lines_dispute
     ON settlement_lines (tenant_id, matched_dispute_id, type)
     WHERE matched_dispute_id IS NOT NULL;
-
--- Matching looks a tender up by what the acquirer calls it.
-CREATE INDEX IF NOT EXISTS idx_payment_tenders_tenant_reference
-    ON payment_tenders (tenant_id, reference) WHERE reference IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_refund_tenders_tenant_reference
-    ON refund_tenders (tenant_id, reference) WHERE reference IS NOT NULL;

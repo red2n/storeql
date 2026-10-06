@@ -1592,23 +1592,19 @@ public class PricingService {
   }
 
   /**
-   * Scopes a promotion to a variant, or to everything.
+   * Scopes a promotion to a variant, a category, or everything.
    *
-   * <p><b>CATEGORY is rejected, and that is a change in behaviour rather than a restriction.</b> It
-   * has been accepted since V1 — it is in the CHECK constraint, the domain constants, the request
-   * schema and the API guide — and the matching query never handled it, so a category promotion was
-   * stored and never fired. Rejecting it says so at the point the mistake is made. Honouring it
-   * needs the variant→category mapping, which product-svc owns and publishes on no topic; that
-   * projection is the same one sales-by-category is blocked on, and is written up in
-   * docs/reporting-api-gap-analysis.md.
+   * <p>A CATEGORY scope resolves at quote time to the variants of every product whose category path
+   * carries that category, through the catalogue product-svc announces, so a parent category
+   * reaches its children's products. A category nothing has been announced for discounts nothing.
    *
    * @param ctx caller context; supplies the tenant
    * @param promotionId the promotion to scope
-   * @param req the scope type ({@code VARIANT} or {@code ALL}) and, for VARIANT, the variant id
+   * @param req the scope type ({@code VARIANT}, {@code CATEGORY} or {@code ALL}) and, for VARIANT
+   *     and CATEGORY, the variant or category id
    * @return the stored scope row
-   * @throws ApiException {@code PRICING_CATEGORY_SCOPE_UNSUPPORTED} or {@code
-   *     PRICING_INVALID_SCOPE} (both 400) when the scope is a category, unknown, or a VARIANT scope
-   *     with no variant named
+   * @throws ApiException {@code PRICING_INVALID_SCOPE} (400) when the scope is unknown, or a
+   *     VARIANT or CATEGORY scope names no id
    */
   public PromotionItem addPromotionItem(
       TenantContext ctx, UUID promotionId, AddPromotionItemRequest req) {
@@ -1650,8 +1646,8 @@ public class PricingService {
    * @return the recorded transaction
    */
   public TaxTransaction recordTaxTransaction(RecordTaxTransactionRequest req, TenantContext ctx) {
-    // The line's money in the business's own currency's minor units (half up, as the columns kept
-    // it before V16): whole yen, three-decimal dinars.
+    // The line's money in the business's own currency's minor units (half up): whole yen,
+    // three-decimal dinars.
     int units = com.storeql.service.Fx.minorUnits(profiles.requireCurrency(ctx.requireTenantId()));
     TaxTransaction tt =
         new TaxTransaction(

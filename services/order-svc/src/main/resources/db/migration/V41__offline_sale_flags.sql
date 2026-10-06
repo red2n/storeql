@@ -31,6 +31,9 @@ CREATE TABLE offline_sale_flags (
     rung_up_at           TIMESTAMPTZ   NOT NULL,
     reason               TEXT          NOT NULL,
     cashier_id           UUID,
+    -- Whose sign-in sent the sale from the till's offline queue. Nullable: the table is append-only, so the
+    -- sender is recorded when the sale is replayed and never filled in later.
+    replayed_by          UUID,
     recorded_at          TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT pk_offline_sale_flags PRIMARY KEY (id),
     CONSTRAINT ck_offline_sale_flags_kind
@@ -46,3 +49,10 @@ CREATE TABLE offline_sale_flags (
 );
 -- The trail reads newest first per tenant, by when the sale was rung up.
 CREATE INDEX idx_offline_sale_flags_tenant_time ON offline_sale_flags (tenant_id, rung_up_at DESC);
+
+COMMENT ON COLUMN offline_sale_flags.cashier_id IS
+    'Who rang the sale up, as the till recorded it at the sale, when that is a login of the business allowed at the store; null for an unknown member of staff.';
+COMMENT ON COLUMN offline_sale_flags.replayed_by IS
+    'Whose sign-in sent the sale from the till''s offline queue; may differ from cashier_id.';
+COMMENT ON COLUMN offline_sale_flags.instrument_standing IS
+    'The register''s standing of the scale, NOT_REGISTERED when the store''s register does not hold it, or UNKNOWN_AT_SALE when the register cannot show it was fit for trade when the sale was rung up.';

@@ -10,6 +10,11 @@ CREATE TABLE einvoice_transport_settings (
     network          TEXT        NOT NULL,   -- NONE | PEPPOL | FR_PDP | KSEF | IRP
     provider         TEXT,                   -- SIMULATED | ACCESS_POINT …; none when NONE
     provider_account TEXT,                   -- the business at the provider: a legal-entity id, a NIP, an IRP user
+    -- A provider that takes the business's own credentials — India's portal wants the taxpayer's API user
+    -- and password, KSeF an authorisation token — keeps them here, sealed under the deployment's key
+    -- (storeql.einvoice.secrets-key, AES-GCM) and never reads them back over the API. Nothing is stored
+    -- until the key exists: a deployment without one cannot choose such a provider.
+    provider_secret  TEXT,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by       UUID,
     CONSTRAINT pk_einvoice_transport_settings PRIMARY KEY (tenant_id),

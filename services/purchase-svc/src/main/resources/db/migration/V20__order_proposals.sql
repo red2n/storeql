@@ -6,11 +6,9 @@
 -- reorder point raises a DRAFT purchase order on the supplier the business last bought it from —
 -- one order per supplier, every line carrying the arithmetic that produced it. A person submits
 -- it, as they submit any draft; nothing is committed to a supplier by a machine.
-ALTER TABLE purchase_orders ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL';
-ALTER TABLE purchase_orders ADD CONSTRAINT ck_po_source CHECK (source IN ('MANUAL', 'PROPOSAL'));
-
--- Why the proposal put this line here, in the buyer's words; null on a line a person typed.
-ALTER TABLE purchase_order_lines ADD COLUMN proposal_reason TEXT;
+--
+-- The proposal's draft orders carry source PROPOSAL and its lines carry proposal_reason (purchase_orders
+-- and purchase_order_lines, V1).
 
 CREATE TABLE order_proposal_runs (
     id             UUID        NOT NULL,

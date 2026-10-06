@@ -27,8 +27,8 @@ import org.junit.jupiter.api.Test;
 /**
  * The scheduled purge of delivered outbox rows and old consumer dedupe rows, on the schema
  * pricing-svc migrates: it deletes only what is past its cutoff, in bounded batches, and the
- * indexes of V15__outbox_purge_indexes.sql are what let a batch find its rows without reading the
- * table.
+ * indexes on outbox (V1__init.sql) and on processed_events (V8__catalogue_projection.sql) are what
+ * let a batch find its rows without reading the table.
  */
 class OutboxPurgeIndexIT {
 

@@ -13,10 +13,13 @@ import java.util.UUID;
 
 /**
  * Business handler for {@code storeql.order.order-placed}. When an order is placed for a known
- * customer, marks that customer's active cart at that store as CHECKED_OUT so it no longer appears
- * as their open cart. Guest/POS orders (no customerId in the event) are silently skipped.
+ * customer, marks that customer's ACTIVE cart CHECKED_OUT so it no longer appears as their open
+ * cart: at any store for an online order, at the order's own store for a till sale. Guest orders
+ * and till sales naming no customer (no customerId in the event) are silently skipped.
  *
- * <p>Idempotent: UPDATE WHERE status='ACTIVE' is a no-op if the cart is already CHECKED_OUT.
+ * <p>Not deduplicated: cart-svc keeps no processed_events table, so a redelivered event runs the
+ * update again. That is a no-op on a cart already CHECKED_OUT, but it closes an ACTIVE cart the
+ * shopper opened after the first delivery.
  */
 @ApplicationScoped
 class OrderPlacedHandler {

@@ -43,11 +43,10 @@ public class TenderMixRepository extends BaseJdbcRepository {
    * learn about it.
    *
    * <p>{@code refund_tenders.store_id} is written by every refund path (the payment's store, an
-   * exchange's own, or for a card put back through a terminal the store of the sale it reverses)
-   * and back-filled for older rows (V12, and once more by V20 when the fallback went), so a
-   * refund's store is its own and is read from the refund alone — as the settlement matcher reads
-   * it. A refund of a payment taken with no store has none, and is counted only when every store is
-   * being read.
+   * exchange's own, or for a card put back through a terminal the store of the sale it reverses),
+   * so a refund's store is its own and is read from the refund alone — as the settlement matcher
+   * reads it. A refund with no store (its payment named none, and it is not an exchange at a store)
+   * is counted only when every store is being read.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
    * @param stores restrict to these stores, or {@code null} for every store in the tenant (a caller

@@ -33,6 +33,11 @@ CREATE TABLE recall_notices (
     -- ISSUED: someone to tell, and told. UNIDENTIFIED: an anonymous till sale, kept for the count
     -- and for the buyer who comes back with the receipt.
     status               TEXT          NOT NULL,
+    -- Whether the order named anyone the notice could be written to, fixed when the notice was issued. It
+    -- is not read off the status, which moves: an anonymous till sale that staff settle at the counter stops
+    -- being UNIDENTIFIED, and the count of buyers told would grow by one who was never written to. The
+    -- number a buyer left is forgotten with their erasure; that they were told is not.
+    buyer_identified     BOOLEAN       NOT NULL,
     issued_at            TIMESTAMPTZ   NOT NULL DEFAULT now(),
     remedy               TEXT,
     remedy_chosen_at     TIMESTAMPTZ,

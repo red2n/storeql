@@ -17,8 +17,9 @@ import java.util.function.Function;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
- * The retention purge of the notification log (21.16), and this service's outbox, which exists for
- * its announcement. Every query filters tenant_id first.
+ * The retention purge of the notification log (21.16), and this service's outbox, which carries its
+ * announcements: each purge here, and each text sent (SmsUsageRepository). Every query on a
+ * business's rows filters tenant_id first; tenantsWithLog reads only the ids of the businesses.
  */
 @ApplicationScoped
 public class RetentionRunRepository extends BaseOutboxRepository {

@@ -157,7 +157,10 @@ public class AssortmentRepository extends BaseOutboxRepository {
           + " decided_by, created_at, applied_at, review_id, held_to_stores, refused_at,"
           + " refusal_code, refusal_detail FROM assortment_changes";
 
-  /** A change still open: neither applied nor closed as refused (V31). */
+  /**
+   * A change still open: neither applied nor closed as refused. The same predicate as the partial
+   * index idx_assortment_changes_pending in V27__assortment_and_range_review.sql.
+   */
   private static final String UNSETTLED = " applied_at IS NULL AND refused_at IS NULL";
 
   public Change record(Change ch) {

@@ -65,6 +65,8 @@ CREATE TABLE rfq_suppliers (
     valid_until    DATE,
     notes          TEXT,
     quoted_at      TIMESTAMPTZ,
+    -- A quote recorded after the request's due day is kept, and flagged: the due day is advisory.
+    received_late  BOOLEAN     NOT NULL DEFAULT FALSE,
     CONSTRAINT pk_rfq_suppliers PRIMARY KEY (id),
     CONSTRAINT uq_rfq_supplier UNIQUE (rfq_id, supplier_id),
     CONSTRAINT fk_rfq_supplier_rfq FOREIGN KEY (rfq_id) REFERENCES rfqs (id) ON DELETE CASCADE,
@@ -100,14 +102,11 @@ CREATE TABLE rfq_awards (
     unit_price  NUMERIC     NOT NULL,
     currency    CHAR(3)     NOT NULL,
     awarded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- An award away from the lowest comparable bid carries the buyer's reason, kept on the award.
+    reason      TEXT,
     CONSTRAINT pk_rfq_awards PRIMARY KEY (id),
     CONSTRAINT uq_rfq_award_line UNIQUE (rfq_line_id),
     CONSTRAINT fk_rfq_award_rfq FOREIGN KEY (rfq_id) REFERENCES rfqs (id) ON DELETE CASCADE,
     CONSTRAINT fk_rfq_award_line FOREIGN KEY (rfq_line_id) REFERENCES rfq_lines (id) ON DELETE CASCADE
 );
 CREATE INDEX idx_rfq_awards_tenant ON rfq_awards (tenant_id, rfq_id);
-
--- An order may now come from an award.
-ALTER TABLE purchase_orders DROP CONSTRAINT IF EXISTS ck_po_source;
-ALTER TABLE purchase_orders
-    ADD CONSTRAINT ck_po_source CHECK (source IN ('MANUAL', 'PROPOSAL', 'DROPSHIP', 'RFQ'));

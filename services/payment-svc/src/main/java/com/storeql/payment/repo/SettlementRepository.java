@@ -525,7 +525,7 @@ public class SettlementRepository extends BaseOutboxRepository {
       "SELECT id, store_id, amount FROM payment_tenders WHERE tenant_id = ? AND id = ?"
           + " AND status = 'CAPTURED' AND method IN ('CARD', 'UPI', 'WALLET')";
 
-  /** A refund is its own store's (every path writes it; V12 and V20 filled the older rows). */
+  /** A refund is its own store's (every path writes it). */
   private static final String REFUND_TARGET =
       "SELECT id, store_id, -amount FROM refund_tenders WHERE tenant_id = ? AND id = ?";
 

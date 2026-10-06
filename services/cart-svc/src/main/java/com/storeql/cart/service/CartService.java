@@ -281,16 +281,19 @@ public class CartService {
   /**
    * Marks the customer's active cart at a store as checked out once their order is placed.
    *
-   * <p>Idempotent, as the {@code OrderPlaced} consumer may redeliver: a cart already moved out of
-   * {@code ACTIVE} is left untouched. Guest and POS orders carry no customer id and are ignored —
-   * they have no server-side cart to retire.
+   * <p>Not deduplicated: cart-svc keeps no dedupe table, so a redelivered {@code OrderPlaced} runs
+   * the update again. A cart already moved out of {@code ACTIVE} is left untouched, but a newer
+   * {@code ACTIVE} cart the customer opened at that store since the first delivery is closed. Guest
+   * orders and till sales naming no customer carry no customer id and are ignored: they have no
+   * server-side cart to retire.
    *
    * @param tenantId owning tenant
-   * @param customerId the ordering customer, or {@code null} for a guest/POS order
+   * @param customerId the ordering customer, or {@code null} for a guest order or a till sale that
+   *     names none
    * @param storeId the store the order was placed against
    */
   public void onOrderPlaced(UUID tenantId, UUID customerId, UUID storeId) {
-    if (customerId == null) return; // guest or POS order — no cart to mark
+    if (customerId == null) return; // guest order, or a till sale naming no customer
     repo.markCheckedOutByCustomerAndStore(tenantId, customerId, storeId);
   }
 
@@ -298,7 +301,8 @@ public class CartService {
    * Marks the shopper's active cart checked out once their online order is placed, whichever store
    * the order went to: a delivery resolves to the store serving the postcode and may be split
    * across several (order orchestration), none of which need be the store the cart was filled at.
-   * Idempotent: every part of a split announces itself, and the first closes the cart.
+   * Not deduplicated (see {@code onOrderPlaced}): each part of a split announces itself and closes
+   * the shopper's ACTIVE cart, so a redelivery closes an ACTIVE cart the shopper opened since.
    *
    * @param loginId the shopper's login, which is what holds a cart
    */

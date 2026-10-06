@@ -277,8 +277,8 @@ public class ForecastService {
 
   /**
    * The item's life as the batches tell it: the median shelf life, rounded to whole days, and the
-   * share of what was received that went out of date unsold — waste over sold plus waste — null
-   * when there was neither.
+   * waste rate, the share of sold-or-wasted stock that went out of date unsold (waste over sold
+   * plus waste), null when there was neither.
    */
   static FreshProfile freshProfile(FreshFacts facts, List<BigDecimal> series) {
     if (facts == null) {

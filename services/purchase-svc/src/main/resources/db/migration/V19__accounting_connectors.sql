@@ -48,7 +48,15 @@ CREATE TABLE accounting_syncs (
     leased_until    TIMESTAMPTZ,                     -- claimed by one instance until then
     created_at      TIMESTAMPTZ NOT NULL,
     delivered_at    TIMESTAMPTZ,
+    -- A person's decision on a push whose outcome was unknown (UNCERTAIN): the journal did land in the
+    -- package (recorded delivered, under the package's own reference, never pushed again) or it never
+    -- landed (queued to be tried again). Kept on the row: who decided, when, and the note.
+    resolution      TEXT,
+    resolved_by     UUID,
+    resolved_at     TIMESTAMPTZ,
+    resolution_note TEXT,
     CONSTRAINT ck_accounting_sync_status CHECK (status IN ('PENDING', 'DELIVERED', 'FAILED', 'UNCERTAIN', 'SKIPPED')),
+    CONSTRAINT ck_accounting_sync_resolution CHECK (resolution IS NULL OR resolution IN ('LANDED', 'NOT_LANDED')),
     CONSTRAINT uq_accounting_sync UNIQUE (connection_id, journal_id)
 );
 CREATE INDEX idx_accounting_syncs_due ON accounting_syncs (next_attempt_at) WHERE status = 'PENDING';

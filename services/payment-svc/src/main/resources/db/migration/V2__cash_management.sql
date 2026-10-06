@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS till_sessions (
     over_short      NUMERIC(14,4),            -- counted_cash - expected_cash, filled on close
     opened_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
     closed_at       TIMESTAMPTZ,
+    -- A closed session keeps who closed it and the note the closer gave for a difference. Both are
+    -- written once, by the close that also writes counted_cash and over_short.
+    closed_by       UUID,
+    note            TEXT,
     PRIMARY KEY (tenant_id, id)
 );
 

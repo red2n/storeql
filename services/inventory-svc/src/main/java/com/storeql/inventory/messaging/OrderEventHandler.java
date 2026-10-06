@@ -195,7 +195,7 @@ class OrderEventHandler {
         releaseQuietly(tenantId, leftover.id());
       }
     }
-    // Handed over in full: the order waits no more, and a confirmation arriving late changes
+    // Fulfilled in full: the order waits no more, and a confirmation arriving late changes
     // nothing.
     if (fulfil && complete) waves.forget(tenantId, orderId, waits(obj));
     LOG.log(Level.INFO, "{0} {1}: processed {2} line(s)", eventType, orderId, items.size());

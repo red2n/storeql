@@ -2301,10 +2301,11 @@ public class InventoryRepository extends BaseOutboxRepository {
    *
    * <p>System-caused movements pass {@code null} for both {@code reasonCode} and {@code actorId}:
    * they already carry {@code refType}/{@code refId} pointing at the order, GRN or transfer header
-   * that caused them, and that record names its own actor. NULL here therefore means "see the
-   * referenced record", not "unknown". Adjustments are the exception -- they are written with
-   * {@code refId = null}, so without these two columns nothing links a stock correction to a person
-   * or a reason (SJ-D4).
+   * that caused them, and that record names its own actor. For those movements NULL means "see the
+   * referenced record", not "unknown". Adjustments are the exception: a person's adjustment passes
+   * its actor and reason (SJ-D4), so a stock correction is attributable to a person and a reason
+   * even where {@code refId} is null (the plain adjust writes none). A manual receipt passes a null
+   * {@code refId} with system attribution, so it names neither a record nor a person.
    */
   static void insertMovement(
       Connection c,

@@ -197,9 +197,11 @@ class ReportingIT {
   }
 
   /**
-   * The scheduled purge (V8) takes published outbox rows and consumer dedupe rows once they are
-   * old, a batch at a time, and each batch has to find its rows by age: both statements are planned
-   * here with a table scan and a sort ruled out, so they show whether an index can serve them.
+   * The scheduled purge takes published outbox rows and consumer dedupe rows once they are old, a
+   * batch at a time, and each batch has to find its rows by age: both statements are planned here
+   * with a table scan and a sort ruled out, so they show whether an index can serve them
+   * (idx_outbox_published, created with the outbox in V3; idx_processed_events_processed_at,
+   * created with processed_events in V1).
    */
   @Test
   void thePurgeTakesOnlyOldRowsAndCanFindThemThroughItsIndexes() throws Exception {

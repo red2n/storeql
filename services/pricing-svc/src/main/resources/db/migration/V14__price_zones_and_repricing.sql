@@ -1,4 +1,4 @@
--- Price zones and competitor-driven repricing (readiness review 03.x).
+-- Price zones and competitor-driven repricing.
 --
 -- A business does not charge the same everywhere: a city-centre store, a motorway forecourt and
 -- an out-of-town warehouse each face a different rival across the road. A price zone groups the
@@ -14,16 +14,6 @@
 -- pricing-svc holds no cost, so the floor is a percentage of the current price and the rule says
 -- so; margin protection proper lives with the buyer's cost in purchase-svc.
 
-CREATE TABLE price_zones (
-    id          UUID        PRIMARY KEY,
-    tenant_id   UUID        NOT NULL,
-    name        TEXT        NOT NULL,
-    description TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT uq_price_zone_name UNIQUE (tenant_id, name)
-);
-CREATE INDEX ix_price_zones_tenant ON price_zones (tenant_id, created_at, id);
-
 -- Which stores price alike. A store is in one zone at most; assigning it again moves it.
 -- tenant-svc owns the store; it is referenced, never joined (its table is another service's).
 CREATE TABLE price_zone_stores (
@@ -33,10 +23,6 @@ CREATE TABLE price_zone_stores (
     PRIMARY KEY (tenant_id, store_id)
 );
 CREATE INDEX ix_price_zone_stores_zone ON price_zone_stores (tenant_id, zone_id);
-
--- A price list bound to a zone; NULL is the tenant-wide list every store falls back to.
-ALTER TABLE price_lists ADD COLUMN zone_id UUID REFERENCES price_zones (id);
-CREATE INDEX ix_price_lists_zone ON price_lists (tenant_id, zone_id) WHERE zone_id IS NOT NULL;
 
 -- What a rival charged, as seen: append-only, in the business's own currency (like for like).
 CREATE TABLE competitor_prices (

@@ -1,33 +1,31 @@
 -- Structured supplier e-invoices received (readiness review 07.13).
 --
--- A supplier invoice was keyed into a form. Since 1 January 2025 every German business must be able
--- to receive an EN 16931 e-invoice (UStG §14); Belgian businesses have exchanged invoices over Peppol
--- since 1 January 2026; France's reform has every business receiving them from 1 September 2026; and
--- Poland's KSeF carries every invoice from 2026. A supplier there may send nothing else, so a tenant
--- that can only key invoices cannot be invoiced at all.
+-- A supplier invoice is keyed into a form, or it arrives as a structured e-invoice. Since 1 January
+-- 2025 every German business must be able to receive an EN 16931 e-invoice (UStG §14); Belgian
+-- businesses have exchanged invoices over Peppol since 1 January 2026; France's reform has every
+-- business receiving them from 1 September 2026; and Poland's KSeF carries every invoice from 2026. A
+-- supplier there may send nothing else, so a tenant that can only key invoices cannot be invoiced at all.
 --
--- A received document is read by shared/einvoice — UBL, CII, or the CII inside a Factur-X or ZUGFeRD
--- PDF — and checked against CEN's and Peppol's rules. It is then matched to a supplier, a purchase
--- order and the order's lines, and captured through the same three-way match a keyed invoice goes
--- through; a credit note closes the return it credits. What cannot be matched waits here, saying
+-- A received document is read by shared/einvoice — UBL, CII, FA(3), or the CII inside a Factur-X or
+-- ZUGFeRD PDF — and checked against CEN's and Peppol's rules. It is then matched to a supplier, a
+-- purchase order and the order's lines, and captured through the same three-way match a keyed invoice
+-- goes through; a credit note closes the return it credits. What cannot be matched waits here, saying
 -- why, for a person to finish, and what the person decides about a supplier's item codes is kept so
 -- the next invoice matches on its own.
+--
+-- Delivery in over a network. A Peppol access point pushes what it received over AS4, France's
+-- approved platform hands over what was deposited for the business, and the simulated provider on
+-- this platform delivers straight into the receiver's inbox when the receiver is a business here. The
+-- channel says which network it came through, and the network's own reference for the delivery is
+-- kept beside the document, so a question from the network can be answered by it. KSeF is not a
+-- delivery network: a Polish buyer fetches its invoices from the system (see V17).
 --
 -- The document is kept exactly as it arrived. For an e-invoice the file is the invoice: the laws
 -- that make a business accept one make it keep that file, unaltered, for as long as the invoice is
 -- kept (UStG §14b, CGI art.289, VAT Act 1994 Sch.11 para.6). A rendering of it is not a copy.
-
--- Where a supplier's e-invoices come from: its Peppol participant identifier, as an EAS scheme
--- (0088 GLN, 9930 German VAT, 0208 Belgian enterprise number …) and the identifier within it.
-ALTER TABLE suppliers
-    ADD COLUMN einvoice_scheme TEXT,
-    ADD COLUMN einvoice_id     TEXT;
-CREATE UNIQUE INDEX uq_suppliers_einvoice_address
-    ON suppliers (tenant_id, einvoice_scheme, lower(einvoice_id))
-    WHERE einvoice_id IS NOT NULL;
-CREATE INDEX idx_suppliers_vat_number
-    ON suppliers (tenant_id, upper(replace(vat_number, ' ', '')))
-    WHERE vat_number IS NOT NULL;
+--
+-- A supplier's electronic address (suppliers.einvoice_scheme / einvoice_id) and VAT number are on
+-- suppliers (V1), where the e-invoice matching looks them up.
 
 -- Every e-invoice received, once per document. The same bytes sent twice are one document.
 CREATE TABLE supplier_einvoices (
@@ -35,10 +33,12 @@ CREATE TABLE supplier_einvoices (
     tenant_id           UUID        NOT NULL,
     received_at         TIMESTAMPTZ NOT NULL,
     received_by         UUID,
-    channel             TEXT        NOT NULL,      -- UPLOAD; PEPPOL when an access point delivers
+    channel             TEXT        NOT NULL,      -- UPLOAD, a delivering network, or KSEF (fetched, V17)
+    -- The network's own reference for the delivery; null for an upload.
+    delivery_ref        TEXT,
     content_type        TEXT        NOT NULL,
     container           TEXT        NOT NULL,      -- XML, or PDF for a Factur-X/ZUGFeRD hybrid
-    syntax              TEXT        NOT NULL,      -- UBL | CII
+    syntax              TEXT        NOT NULL,      -- UBL | CII | FA3 (FA(3), Poland's KSeF structure)
     embedded_filename   TEXT,                      -- the PDF attachment the XML was found under
     document            BYTEA       NOT NULL,
     document_sha256     TEXT        NOT NULL,
@@ -86,9 +86,9 @@ CREATE TABLE supplier_einvoices (
         'CAPTURED',
         'CREDITED',
         'REFUSED')),
-    CONSTRAINT chk_supplier_einvoice_channel CHECK (channel IN ('UPLOAD', 'PEPPOL')),
+    CONSTRAINT chk_supplier_einvoice_channel CHECK (channel IN ('UPLOAD', 'PEPPOL', 'FR_PDP', 'SIMULATED', 'KSEF')),
     CONSTRAINT chk_supplier_einvoice_container CHECK (container IN ('XML', 'PDF')),
-    CONSTRAINT chk_supplier_einvoice_syntax CHECK (syntax IN ('UBL', 'CII'))
+    CONSTRAINT chk_supplier_einvoice_syntax CHECK (syntax IN ('UBL', 'CII', 'FA3'))
 );
 CREATE INDEX idx_supplier_einvoices_status
     ON supplier_einvoices (tenant_id, status, received_at DESC);

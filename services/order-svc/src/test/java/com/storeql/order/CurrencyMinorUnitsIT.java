@@ -28,9 +28,9 @@ import org.junit.jupiter.api.Test;
 /**
  * Money in the currency's own minor units, end to end (the currency minor-units sweep): a dinar
  * business keeps its fils and a yen business is whole yen, on the order, its lines, a layaway, a
- * special order, a parked sale and a gift card — in the answer and in the table (V49 took the
- * columns' two places away; the service rounds before it writes). A gift card is no finer than its
- * currency, and another business never reaches ours whatever store it names.
+ * special order, a parked sale and a gift card — in the answer and in the table (the money columns
+ * are unconstrained NUMERIC, so the service rounds before it writes). A gift card is no finer than
+ * its currency, and another business never reaches ours whatever store it names.
  */
 @HelidonTest
 class CurrencyMinorUnitsIT {
@@ -139,7 +139,7 @@ class CurrencyMinorUnitsIT {
     assertThat(number(order, "subtotal"), is(new BigDecimal("3.705")));
     assertThat(number(order, "discountAmount"), is(new BigDecimal("0.011")));
     assertThat(number(order, "total"), is(new BigDecimal("3.694")));
-    // As the table keeps it (V49 took the columns' two places away).
+    // As the table keeps it: unconstrained NUMERIC money columns, so nothing rounds them there.
     assertThat(column("orders", "total", id), is("3.694"));
     assertThat(
         rig()

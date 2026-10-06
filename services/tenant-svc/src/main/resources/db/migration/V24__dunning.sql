@@ -5,9 +5,9 @@
 -- says so, not a check somebody remembered to write.
 --
 -- The decision that shapes this file: paying up must reactivate a business the platform suspended for
--- non-payment, and must never reactivate one an administrator switched off. Until now tenants.status
--- recorded ACTIVE or INACTIVE and nothing about why, so the two were indistinguishable and a payment
--- would have quietly overruled a decision somebody took.
+-- non-payment, and must never reactivate one an administrator switched off. tenants.status records
+-- ACTIVE or INACTIVE; tenants.deactivated_reason (V1) says why a business is INACTIVE, so a payment can
+-- tell the two apart and never overrule a decision somebody took.
 
 -- What the platform's tolerance is. A singleton, like platform_billing_profile: one row, id = 1, and
 -- the database enforces it.
@@ -66,24 +66,3 @@ CREATE UNIQUE INDEX uq_dunning_step ON dunning_events (invoice_id, step)
     WHERE step <> 'DUE_DATE_EXTENDED';
 CREATE INDEX idx_dunning_tenant ON dunning_events (tenant_id, created_at DESC);
 CREATE INDEX idx_dunning_invoice ON dunning_events (invoice_id, created_at);
-
--- Why a business was switched off, and by whom.
---
--- Without this, "pay your bill and the platform comes back" cannot tell a business the platform
--- suspended from one an administrator suspended, and a payment would lift both. Only NON_PAYMENT is
--- ever lifted by money; everything else stays exactly as it is, and the payment is still recorded.
-ALTER TABLE tenants ADD COLUMN deactivated_reason TEXT;
-ALTER TABLE tenants ADD COLUMN deactivated_by UUID;
-ALTER TABLE tenants ADD COLUMN deactivated_at TIMESTAMPTZ;
-
-ALTER TABLE tenants ADD CONSTRAINT ck_tenant_deactivated_reason
-    CHECK (deactivated_reason IS NULL OR deactivated_reason IN ('NON_PAYMENT', 'ADMINISTRATOR'));
-
--- A business that is off has a reason; one that is on has none. Stated here so the pair cannot drift:
--- a reason left behind on a reactivated business would make the next payment lift a suspension nobody
--- asked it to lift.
-ALTER TABLE tenants ADD CONSTRAINT ck_tenant_deactivated_pair
-    CHECK ((status = 'INACTIVE') OR (deactivated_reason IS NULL));
-
-COMMENT ON COLUMN tenants.deactivated_reason IS
-    'NON_PAYMENT (dunning, lifted by paying up) or ADMINISTRATOR (never lifted by a payment).';

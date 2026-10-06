@@ -1341,8 +1341,8 @@ public final class Domain {
 
   /**
    * What the batches say about an item's life (06.x): the median days from receipt to expiry, and
-   * how much of what was received went out of date unsold. An item that lives fourteen days or
-   * fewer is fresh; an order for it should cover no more days than it lives.
+   * the waste rate, the share of sold-or-wasted stock that went out of date unsold. An item that
+   * lives fourteen days or fewer is fresh; an order for it should cover no more days than it lives.
    */
   public record FreshProfile(Integer shelfLifeDays, BigDecimal wasteRate) {
     public static final int FRESH_MAX_DAYS = 14;

@@ -1,24 +1,9 @@
 -- Supplier payment runs and remittance (readiness review 17.10).
 --
--- The ledger knew what was owed to whom (the accounting seam posts the creditor at capture) and
--- nothing ever paid it: there was no route that settled a supplier invoice, no bank file, and no
--- advice telling a supplier what a payment was for. This is the payment run as finance suites run
--- it — proposed from what is due, approved by a second person, paid with a posting that clears the
--- creditor against the bank, and advised to each supplier.
-
--- Where a supplier is paid and told. Account details are for a UK Faster Payments / BACS payment
--- (sort code + account number) or an international one (IBAN, with a BIC). A change to them is
--- the classic payment-diversion fraud, so the moment and the person are recorded and a payment run
--- flags a change made shortly before it.
-ALTER TABLE suppliers
-    ADD COLUMN remittance_email        TEXT,
-    ADD COLUMN bank_account_name       TEXT,
-    ADD COLUMN bank_sort_code          VARCHAR(6),
-    ADD COLUMN bank_account_number     VARCHAR(8),
-    ADD COLUMN bank_iban               VARCHAR(34),
-    ADD COLUMN bank_bic                VARCHAR(11),
-    ADD COLUMN bank_details_changed_at TIMESTAMPTZ,
-    ADD COLUMN bank_details_changed_by UUID;
+-- The ledger knows what is owed to each supplier (the accounting seam posts the creditor at capture),
+-- and a payment run settles it. This is the payment run as finance suites run it: proposed from what
+-- is due, approved by a second person, paid with a posting that clears the creditor against the bank,
+-- and advised to each supplier. Where a supplier is paid and told is held on suppliers (V1).
 
 CREATE TABLE payment_runs (
     id             UUID        PRIMARY KEY,
@@ -71,11 +56,3 @@ CREATE TABLE payment_run_items (
 CREATE INDEX idx_pri_run ON payment_run_items (tenant_id, run_id);
 CREATE UNIQUE INDEX uq_pri_open_document
     ON payment_run_items (tenant_id, item_type, document_id) WHERE open;
-
-ALTER TABLE supplier_invoices
-    ADD COLUMN paid_at        TIMESTAMPTZ,
-    ADD COLUMN payment_run_id UUID;
-
-ALTER TABLE vendor_returns
-    ADD COLUMN allocated_at     TIMESTAMPTZ,
-    ADD COLUMN allocated_run_id UUID;

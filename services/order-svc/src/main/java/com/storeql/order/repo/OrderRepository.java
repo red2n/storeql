@@ -331,7 +331,7 @@ public class OrderRepository extends BaseOutboxRepository {
       throws java.sql.SQLException {
     Order order = n.order();
     // Every amount at the order currency's own minor units, half up — what the NUMERIC(18,2)
-    // columns used to do for the pound, and right for the yen and the dinar (SJ-D25, V49).
+    // columns used to do for the pound, and right for the yen and the dinar (SJ-D25).
     int scale = com.storeql.service.Fx.minorUnits(order.currency());
     try (PreparedStatement ps =
         c.prepareStatement(
@@ -406,7 +406,7 @@ public class OrderRepository extends BaseOutboxRepository {
 
   /**
    * An amount at a currency's own minor units ({@code scale}, from {@code Fx.minorUnits}), half up:
-   * what a NUMERIC(18,2) column did for the pound before V49, and right for the yen and the dinar.
+   * what a NUMERIC(18,2) column did for the pound, and right for the yen and the dinar.
    */
   static BigDecimal money(BigDecimal amount, int scale) {
     return amount == null ? null : amount.setScale(scale, java.math.RoundingMode.HALF_UP);

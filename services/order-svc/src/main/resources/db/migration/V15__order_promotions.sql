@@ -1,15 +1,7 @@
--- Promotional discounts on an order, from the rebuilt promotion engine.
+-- Which promotions applied to an order, and for how much. Append-only (golden rule #8).
 --
--- Kept apart from orders.discount_amount deliberately. That column is the *staff* discount
--- (SJ-D6): a deliberate act by a named person, requiring a reason, capped by the calling role's
--- percentage ceiling, and audited in order_discounts. A promotional discount is none of those
--- things — it is automatic, has no actor, and answers to a rule rather than to a person. Adding
--- one to the other would put promotional money inside the role-ceiling check, so a large automatic
--- offer would start refusing a cashier's small manual one.
-ALTER TABLE orders
-    ADD COLUMN promotion_discount NUMERIC(18,2) NOT NULL DEFAULT 0;
-
--- Which promotions applied, and for how much. Append-only (golden rule #8).
+-- The order's promotion_discount total is on orders (V1__init.sql); it is kept apart from the staff
+-- discount_amount on purpose (see the comment there).
 --
 -- pricing-svc keeps the redemption ledger that enforces usage caps; this is the order's own
 -- record, and it exists for two readers the ledger cannot serve: a receipt that has to print
@@ -23,7 +15,7 @@ CREATE TABLE order_promotions (
     promotion_name TEXT          NOT NULL,
     -- Null for a whole-basket promotion, which belongs to no single line.
     variant_id     UUID,
-    amount         NUMERIC(18,2) NOT NULL,
+    amount         NUMERIC       NOT NULL,
     created_at     TIMESTAMPTZ   NOT NULL DEFAULT now()
 );
 

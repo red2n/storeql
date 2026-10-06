@@ -94,12 +94,12 @@ stack's setting so that refusal cannot come back unseen. Two findings from two d
 for the drill: neither was in a test, and both would have been met for the first time on the day a
 restore was needed.
 
-**An extension in a migration (1 Oct 2026).** customer-svc's `V13__customer_search_trigram.sql`
+**An extension in a migration (1 Oct 2026).** customer-svc's `V1__init.sql` (folded)
 creates `pg_trgm` in `public` where the service's role is allowed to (it is a trusted extension
 from PostgreSQL 13; where it is refused the migration says so in a NOTICE, builds nothing, and the
 customer search runs unindexed as before) and builds four GIN indexes whose operator class it
 writes qualified with the extension's schema, so `pg_restore`'s empty search path cannot lose it.
 The whole-database dump carries the extension, so a server restored into must offer `pg_trgm` (the
 Postgres image's contrib modules do). It is the kind of change the drill exists for: run
-`scripts/backup-drill.sh` on a stack that carries it. The day's other migrations — order-svc V47,
-inventory-svc V49, iam-svc V21, notification-svc V8 — add plain or partial indexes only.
+`scripts/backup-drill.sh` on a stack that carries it. The day's other migrations — order-svc `V1__init.sql` (folded),
+inventory-svc `V1__init.sql` (folded), iam-svc `V1__init.sql` (folded), notification-svc `V7__webhooks.sql` (folded) — add plain or partial indexes only.

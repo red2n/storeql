@@ -22,7 +22,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * No column in this service's schema rounds money at a fixed two places (SJ-D25, V5).
+ * No column in this service's schema rounds money at a fixed two places (SJ-D25).
  *
  * <p>Postgres rounds to a column's declared scale on write without complaint, so a {@code
  * NUMERIC(p,2)} money column silently drops a dinar's third decimal and answers whole yen as {@code

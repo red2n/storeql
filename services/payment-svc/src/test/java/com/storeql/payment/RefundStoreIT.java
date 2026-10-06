@@ -4,7 +4,6 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
 import com.storeql.payment.ItCalls.Answer;
@@ -20,7 +19,6 @@ import jakarta.inject.Inject;
 import jakarta.json.JsonArray;
 import jakarta.ws.rs.client.WebTarget;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.sql.DriverManager;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -36,8 +34,7 @@ import org.junit.jupiter.api.Test;
  * {@code refund_tenders.store_id}: every path that writes a refund names the store it belongs to,
  * so a store's Z report and tender mix read it directly. From the payment refunded for a manual
  * refund, a return, a cancellation and a line adjustment; from the event's store for an exchange
- * (the store where it was made, the same store the EXCHANGE tender is taken at); and V12 gives the
- * rows written before it the store of their payment, touching nothing else.
+ * (the store where it was made, the same store the EXCHANGE tender is taken at).
  */
 @HelidonTest
 class RefundStoreIT {
@@ -406,7 +403,7 @@ class RefundStoreIT {
         is(0));
   }
 
-  // ── the back-fill ──────────────────────────────────────────────────────────
+  // ── refund rows as the write paths leave them, and the store-held reads over them ─────────
 
   private void insertRefund(UUID tenant, UUID order, UUID payment, UUID store) throws Exception {
     try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
@@ -426,65 +423,11 @@ class RefundStoreIT {
     }
   }
 
-  private void runBackfill() throws Exception {
-    runBackfill("V12__backfill_refund_tender_store.sql");
-  }
-
-  private void runBackfill(String migration) throws Exception {
-    String sql;
-    try (var in = getClass().getResourceAsStream("/db/migration/" + migration)) {
-      sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-    }
-    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
-        var st = c.createStatement()) {
-      st.execute("SET search_path TO payment");
-      st.execute(sql);
-    }
-  }
-
-  @Test
-  @DisplayName("V12 gives an old refund its payment's store and touches nothing else")
-  void theBackfillFillsOnlyWhatWasNeverSet() throws Exception {
-    UUID tenant = Ids.newId();
-    UUID other = Ids.newId();
-    UUID store = Ids.newId();
-    UUID keptStore = Ids.newId();
-    UUID orderA = Ids.newId();
-    UUID orderB = Ids.newId();
-    UUID orderC = Ids.newId();
-    UUID orderD = Ids.newId();
-    UUID withStore = tender(tenant, orderA, store, "9.00", PaymentTender.METHOD_CARD);
-    UUID noStore = tender(tenant, orderB, null, "9.00", PaymentTender.METHOD_CARD);
-    UUID forKept = tender(tenant, orderC, store, "9.00", PaymentTender.METHOD_CARD);
-    UUID ours = tender(tenant, orderD, store, "9.00", PaymentTender.METHOD_CARD);
-    insertRefund(tenant, orderA, withStore, null); // written before: gets the payment's store
-    insertRefund(tenant, orderB, noStore, null); // its payment had none: stays store-less
-    insertRefund(tenant, orderC, forKept, keptStore); // already set: never changed
-    insertRefund(other, orderD, ours, null); // another business's row naming our payment: no match
-
-    runBackfill();
-    runBackfill(); // once or twice, the same
-
-    assertThat(stores(tenant, orderA), contains(store.toString()));
-    assertThat(stores(tenant, orderB), contains("null"));
-    assertThat(stores(tenant, orderC), contains(keptStore.toString()));
-    assertThat(stores(other, orderD), contains("null"));
-    assertThat(
-        Envelopes.scalar(
-            PG,
-            "SELECT store_id FROM payment.refund_tenders WHERE tenant_id = '"
-                + other
-                + "' AND order_id = '"
-                + orderD
-                + "'"),
-        nullValue());
-  }
-
   @Test
   @DisplayName(
-      "V20 fills, once more, a store a refund was written without (a rolling deploy's older build),"
-          + " so the store-held reads that no longer fall back to the payment still count it")
-  void theSecondBackfillLetsTheReadsTakeTheRefundsOwnStore() throws Exception {
+      "The store-held reads count a refund at the store it was written at, which is not always"
+          + " its payment's (an exchange made at another store)")
+  void theReadsCountARefundAtItsOwnStore() throws Exception {
     UUID tenant = Ids.newId();
     UUID other = Ids.newId();
     UUID storeA = Ids.newId();
@@ -492,24 +435,27 @@ class RefundStoreIT {
     UUID orderA = Ids.newId();
     UUID orderB = Ids.newId();
     UUID orderC = Ids.newId();
+    UUID orderD = Ids.newId();
     UUID paidA = tender(tenant, orderA, storeA, "9.00", PaymentTender.METHOD_CARD);
     UUID paidNoStore = tender(tenant, orderB, null, "9.00", PaymentTender.METHOD_CARD);
     UUID paidB = tender(tenant, orderC, storeB, "9.00", PaymentTender.METHOD_CARD);
-    insertRefund(tenant, orderA, paidA, null); // written without one: gets its payment's
+    insertRefund(tenant, orderA, paidA, storeA); // the payment's store, as every path writes it
     insertRefund(tenant, orderB, paidNoStore, null); // its payment had none: stays store-less
-    insertRefund(tenant, orderC, paidB, storeA); // set (an exchange at another store): kept
+    insertRefund(tenant, orderC, paidB, storeA); // written at another store (an exchange): kept
+    // Written with no store under a payment that had one: its store is none, not the payment's,
+    // so a store-held read does not take it from the payment (no fallback to t.store_id).
+    insertRefund(tenant, orderD, paidA, null);
     insertRefund(other, orderA, paidA, null); // another business's row naming our payment
-
-    runBackfill("V20__refund_store_written_everywhere.sql");
-    runBackfill("V20__refund_store_written_everywhere.sql"); // once or twice, the same
 
     assertThat(stores(tenant, orderA), contains(storeA.toString()));
     assertThat(stores(tenant, orderB), contains("null"));
     assertThat(stores(tenant, orderC), contains(storeA.toString()));
+    assertThat(stores(tenant, orderD), contains("null"));
     assertThat(stores(other, orderA), contains("null"));
 
-    // A manager held to store A reads the refund now on A, and the exchange's written at A; one
-    // held to B reads neither (the exchange was A's, though its payment was B's).
+    // A manager held to store A reads the refund now on A, and the exchange's written at A, not the
+    // store-less one under A's payment; one held to B reads neither (the exchange was A's, though
+    // its payment was B's).
     Answer atA =
         ItCalls.get(
             target,
@@ -530,6 +476,18 @@ class RefundStoreIT {
             new Caller(tenant, Ids.newId(), "MANAGER", storeB));
     assertThat(
         atB.list().getJsonObject(0).getJsonNumber("refundedAmount").bigDecimalValue().signum(),
+        is(0));
+    // A caller held to no store reads every refund, the store-less ones included: four of 1.00.
+    Answer whole =
+        ItCalls.get(target, "/admin/reports/tender-mix", new Caller(tenant, Ids.newId(), "OWNER"));
+    assertThat(whole.body().toString(), whole.status(), is(200));
+    assertThat(
+        whole
+            .list()
+            .getJsonObject(0)
+            .getJsonNumber("refundedAmount")
+            .bigDecimalValue()
+            .compareTo(new BigDecimal("4.00")),
         is(0));
     // Another business's manager naming our store reads none of ours.
     Answer stranger =

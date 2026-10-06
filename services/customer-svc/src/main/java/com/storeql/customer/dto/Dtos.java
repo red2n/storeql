@@ -291,7 +291,8 @@ public final class Dtos {
               description =
                   "Who the export is about. A person has up to two ids here: the shop's own"
                       + " customer record, and the login they sign in with. Either may be absent —"
-                      + " a walk-in has no login, and a shopper who has only ever browsed has no"
+                      + " a walk-in has no login until a shopper signs in with its email, and a"
+                      + " shopper who has only ever browsed has no"
                       + " customer record.")
           ExportSubject subject,
       @Schema(description = "The shop's customer record, or null if it holds none.")

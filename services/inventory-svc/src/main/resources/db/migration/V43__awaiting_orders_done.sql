@@ -1,6 +1,6 @@
--- Wave picking, hardened after review (intent/wave-picking-and-directed-putaway.md).
+-- Wave picking: the done orders (intent/wave-picking-and-directed-putaway.md).
 --
--- An order that is done — cancelled, or handed over in full — leaves a tombstone here when it
+-- An order that is done — cancelled, or fulfilled in full — leaves a tombstone here when it
 -- leaves the waiting list, so a confirmation that arrives after it (the topics are consumed in
 -- either order) cannot make the order wait again. The order id is order-svc's UUIDv7, bound on
 -- every insert; nothing here is minted.

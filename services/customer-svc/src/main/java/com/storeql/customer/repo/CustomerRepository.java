@@ -760,7 +760,7 @@ public class CustomerRepository extends BaseOutboxRepository {
     String digits = term == null ? null : CustomerSearch.phonePattern(term);
     if (pattern != null) {
       // A null half is read as empty, so a record with only a first or a last name still matches.
-      // The expression is IMMUTABLE and the same as the trigram index on it (V13), which a
+      // The expression is IMMUTABLE and the same as the trigram index on it (V1__init.sql), which a
       // concat_ws (only STABLE) could not be.
       sql.append(
           " AND ((COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ? ESCAPE '\\'"

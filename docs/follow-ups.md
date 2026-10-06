@@ -60,8 +60,8 @@ industry default and needs no decision.
 
 ### 2b. Legacy product images above 256 KB
 
-`V15` adds the size constraint as **`NOT VALID`** — enforced on every new write, but rows written
-under the old 512 KB cap were never re-checked, so any that exist are still serving.
+`V14__product_images.sql` (folded) adds the size constraint, enforced inline on every new write. Rows written
+under the old 512 KB cap were never re-checked, so any that exist are still serving. A database that applied the earlier `NOT VALID` form still needs the `VALIDATE` below.
 
 ```sql
 -- Find rows still in breach:
@@ -149,7 +149,7 @@ one move. This is the real fix for the whole class of problem; the client compre
 | Commit | Change |
 |---|---|
 | `ad10044` | Client-side image compression to a 256 KB budget (web canvas / `package:image`) |
-| `47d0518` | 256 KB enforced as a system invariant: service cap + `V15` CHECK constraint |
+| `47d0518` | 256 KB enforced as a system invariant: service cap + `V14__product_images.sql` (folded) CHECK constraint |
 | `21b980e` | Thumbnails decode to their layout box — ~4.9 MB → ~114 KB for the 72×72 tile |
 | `3d95c66` | Product image byte cache bounded by an LRU (16 MB / 200 entries) |
 | `2244d13` | Redis fails open; Lettuce command timeout 60s → 250ms |

@@ -639,7 +639,8 @@ class CartCasesIT {
    * The hourly purge (common-service) deletes published outbox rows in batches, oldest first, and
    * each batch needs an index on published_at or it scans the whole table. With sequential scans
    * switched off the planner takes an index only when one can serve the statement, so the plan
-   * names it. (cart-svc keeps no processed_events table, so there is no second statement to serve.)
+   * names it. (cart-svc keeps no processed_events table, so the purge's second statement has no
+   * index to serve here.)
    */
   @Test
   @DisplayName("The purge of published outbox rows is served by an index")

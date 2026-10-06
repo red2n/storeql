@@ -16,12 +16,12 @@ CREATE TABLE order_deposits (
     material       TEXT NOT NULL,          -- PET, ALUMINIUM, STEEL or GLASS
     volume_ml      INTEGER NOT NULL,
     qty            NUMERIC(14, 3) NOT NULL,
-    deposit_each   NUMERIC(14, 2) NOT NULL,
-    amount         NUMERIC(14, 2) NOT NULL, -- qty × deposit_each, as charged
+    deposit_each   NUMERIC NOT NULL,
+    amount         NUMERIC NOT NULL,       -- qty × deposit_each, as charged
     currency       TEXT NOT NULL,
     vat_treatment  TEXT NOT NULL,          -- OUTSIDE_SCOPE or STANDARD
     vat_rate       NUMERIC(8, 4),          -- the drink's rate when STANDARD; null when outside scope
-    vat_amount     NUMERIC(14, 2) NOT NULL, -- the VAT inside amount; 0 when outside scope
+    vat_amount     NUMERIC NOT NULL,       -- the VAT inside amount; 0 when outside scope
     scheme_scope   TEXT NOT NULL,          -- the scheme's country
     citation       TEXT NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL,
@@ -38,7 +38,7 @@ CREATE TABLE container_refunds (
     till_session_id  UUID NOT NULL,
     currency         TEXT NOT NULL,
     containers       INTEGER NOT NULL,
-    amount           NUMERIC(14, 2) NOT NULL,
+    amount           NUMERIC NOT NULL,
     scheme_scope     TEXT NOT NULL,
     idempotency_key  TEXT NOT NULL,
     refunded_by      UUID NOT NULL,
@@ -54,8 +54,8 @@ CREATE TABLE container_refund_lines (
     material      TEXT NOT NULL,
     volume_ml     INTEGER NOT NULL,
     count         INTEGER NOT NULL,
-    deposit_each  NUMERIC(14, 2) NOT NULL,
-    amount        NUMERIC(14, 2) NOT NULL,
+    deposit_each  NUMERIC NOT NULL,
+    amount        NUMERIC NOT NULL,
     CONSTRAINT chk_container_refund_lines_count CHECK (count > 0)
 );
 CREATE INDEX ix_container_refund_lines_tenant_refund ON container_refund_lines (tenant_id, refund_id);

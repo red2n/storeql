@@ -30,7 +30,7 @@ public final class Domain {
       UUID tenantId,
       UUID variantId,
       BigDecimal qty,
-      BigDecimal unitPrice, // null until pricing-svc enriches the view
+      BigDecimal unitPrice, // as the caller gave it on add, null if none; never priced here
       Instant addedAt) {}
 
   /**

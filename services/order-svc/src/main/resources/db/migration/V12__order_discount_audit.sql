@@ -1,21 +1,9 @@
--- SJ-D6: a POS discount was silently discarded, so discounted sales never confirmed.
+-- A staff-applied discount on a POS sale is honoured under pricing enforcement, not discarded.
 --
--- The chain, all of it live in the default configuration:
---   1. The till applies a discount and computes what to tender as subtotal - discount, refusing to
---      complete until that reduced amount is fully tendered (tender_screen.dart).
---   2. It places the order with discountAmount set.
---   3. order-svc, with storeql.order.pricing.enforce=true (the default), sets disc = ZERO and
---      stores total = subtotal + tax -- the full, undiscounted price.
---   4. Tenders are recorded summing to the discounted amount, which is less than that stored
---      total, so paid_amount never covers it and the order is never confirmed.
---   5. PendingOrderSweeper eventually cancels it.
--- The customer has paid, the receipt shows the discount, and the order is cancelled.
---
--- The fix honours the discount under pricing enforcement instead of discarding it. Enforcement
--- still owns unit prices -- the client cannot name its own price -- but a staff-applied discount on
--- top is now accepted, and constrained the way retail constrains it: staff only, never more than
--- the subtotal, never more than the caller's role is authorised for, always with a reason, and
--- always recorded here.
+-- Enforcement still owns unit prices — the client cannot name its own price — but a staff-applied discount
+-- on top is accepted, and constrained the way retail constrains it: staff only, never more than the
+-- subtotal, never more than the caller's role is authorised for, always with a reason, and always recorded
+-- here. The order's discount_amount carries the total; this table is the audit of each grant.
 --
 -- Append-only (golden rule #8): no UPDATE or DELETE. Modelled on pricing-svc's price_overrides,
 -- which already records till price overrides with their actor.
@@ -24,8 +12,8 @@ CREATE TABLE order_discounts (
     tenant_id       UUID          NOT NULL,
     order_id        UUID          NOT NULL,
     store_id        UUID          NOT NULL,
-    subtotal        NUMERIC(18,2) NOT NULL,
-    discount_amount NUMERIC(18,2) NOT NULL CHECK (discount_amount > 0),
+    subtotal        NUMERIC       NOT NULL,
+    discount_amount NUMERIC       NOT NULL CHECK (discount_amount > 0),
     -- Stored rather than derived so the authority check stays auditable even if the ceilings are
     -- later reconfigured: this is the percentage that was actually granted at the time.
     discount_pct    NUMERIC(6,3)  NOT NULL,
@@ -42,3 +30,5 @@ CREATE INDEX idx_order_discounts_tenant_store ON order_discounts (tenant_id, sto
 -- "What has this cashier been discounting?" is the exception-report question.
 CREATE INDEX idx_order_discounts_granted_by ON order_discounts (tenant_id, granted_by, created_at DESC)
     WHERE granted_by IS NOT NULL;
+-- The audit trail reads the stream newest-first per tenant.
+CREATE INDEX idx_order_discounts_tenant_time ON order_discounts (tenant_id, created_at DESC);

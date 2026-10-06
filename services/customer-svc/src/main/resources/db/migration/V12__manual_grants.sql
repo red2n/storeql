@@ -7,13 +7,16 @@
 --
 -- It is also what makes a manual award or adjustment safe to retry: a request carries an
 -- Idempotency-Key, and (tenant_id, idempotency_key) is unique, so the same key writes once. Store
--- credit issued by hand carries no key today, so its rows have a null one.
+-- credit issued by hand takes one the same way, so its rows carry one too.
 CREATE TABLE manual_grants (
     id              UUID          PRIMARY KEY,
     tenant_id       UUID          NOT NULL,
     customer_id     UUID          NOT NULL,
     kind            TEXT          NOT NULL,             -- LOYALTY_EARN | LOYALTY_ADJUST | STORE_CREDIT_ISSUE
-    amount          NUMERIC(18,2) NOT NULL,             -- points, or money in currency; signed for an adjustment
+    -- Points, or money in currency (store credit), signed for an adjustment. It takes the money scale
+    -- of four places because it holds either; points written here are still held to two places by
+    -- the requests that make them.
+    amount          NUMERIC(18,4) NOT NULL,
     currency        TEXT,                               -- store credit only
     reason          TEXT,
     actor_id        UUID,                               -- the signed-in user who did it

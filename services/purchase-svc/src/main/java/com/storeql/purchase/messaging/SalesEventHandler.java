@@ -15,8 +15,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Reads the three events that describe a sale and hands them to {@link SalesPostingService} (17.7).
- * A payload that is not what its producer sends is logged and skipped: redelivering it would never
+ * Reads the events that describe a sale and its money (17.7): the sale, its tenders, refunds and
+ * no-receipt returns, the card disputes and the acquirer's settlement. Each goes to {@link
+ * SalesPostingService}, and to the dropship and deferred-revenue services where it applies. A
+ * payload that is not what its producer sends is logged and skipped: redelivering it would never
  * make it parse, and the order's clearing stays open on the report where someone will see it.
  */
 @ApplicationScoped

@@ -1,17 +1,13 @@
--- payment-svc acts on a void from now on, and never on the voids before (2 Oct 2026, review of the
--- card-terminal settlement, V16).
+-- payment-svc acts on a void, and only on the voids announced from the moment this table exists.
 --
--- payment-svc began consuming storeql.order.order-voided with V16's work: a voided till sale gives
--- back what it took, a card through the machine that took it. Its consumer group had never read
--- that topic, so its first deployment starts at the earliest void Kafka still holds — on a stack
--- with history, every void retained — and each carries an eventId new to processed_events, so the
--- dedupe does not stop it. Those voids were settled by hand when they happened (the till said money
--- was not put back). Acting on them now would refund them a second time, dated today: a cash refund
--- at the sale's store that today's expected drawer cash and Z-report subtract although nobody paid
--- it out, a PaymentRefunded the ledger and reporting post today, and a card put back through the
--- machine.
+-- payment-svc gives back what a voided till sale took: a card through the machine that took it, a cash
+-- refund at the sale's store. A consumer group that starts reading storeql.order.order-voided begins at
+-- the earliest void Kafka still holds, and each carries an eventId the dedupe has never seen, so the
+-- dedupe does not stop it. Voids settled by hand before the consumer existed must not be refunded
+-- again: a cash refund dated today would be subtracted from today's expected drawer cash although
+-- nobody paid it out, and a card would be put back through the machine a second time.
 --
--- So the moment this migration runs is kept here, and a void announced before it is logged and not
+-- So the moment this table is created is kept here, and a void announced before it is logged and not
 -- acted on (its eventId is a UUIDv7, which says when it was made: EventCutoff.predates); every one
 -- after is, wherever the consumer's offset starts. Not a consumer group of its own at the latest
 -- offset: a new group commits no offset until it reads a record, so a restart before the first void

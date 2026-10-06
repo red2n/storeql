@@ -8,29 +8,11 @@
 --   art.37                            at least two of repair, replacement and refund, the consumer
 --                                     choosing, unless only one is possible or proportionate
 --
--- A recall already takes stock off sale and tells the stores. What it could not do was tell the
--- people who had bought the product, although every sale drew its stock from a batch this service
--- knows the lot and date of, under an order id. So a recall now finds those sales as it opens and
--- announces each order to order-svc, which knows the buyer; the notice's remedies and contact ride
--- with it, and the recall keeps the sales it found as evidence of who was reached.
-
--- What the notice offers and where to turn. A withdrawal carries none of it.
-ALTER TABLE recalls
-    ADD COLUMN remedies             TEXT,
-    ADD COLUMN single_remedy_reason TEXT,
-    ADD COLUMN contact_phone        TEXT,
-    ADD COLUMN contact_url          TEXT,
-    -- Sales on or after this day are looked for; NULL means every sale of the packs in scope.
-    ADD COLUMN sold_from            DATE;
-
-ALTER TABLE recalls ADD CONSTRAINT chk_recall_remedies CHECK (
-    remedies IS NULL OR remedies ~ '^(REPAIR|REPLACEMENT|REFUND)(,(REPAIR|REPLACEMENT|REFUND))*$');
--- NOT VALID: recalls opened before this revision offered no remedy and named no contact; only a
--- recall opened from now on has to.
-ALTER TABLE recalls ADD CONSTRAINT chk_recall_offers_remedy CHECK (
-    kind <> 'RECALL' OR remedies IS NOT NULL) NOT VALID;
-ALTER TABLE recalls ADD CONSTRAINT chk_recall_names_contact CHECK (
-    kind <> 'RECALL' OR contact_phone IS NOT NULL OR contact_url IS NOT NULL) NOT VALID;
+-- A recall takes stock off sale and tells the stores. It also tells the people who had bought the
+-- product, because every sale drew its stock from a batch this service knows the lot and date of,
+-- under an order id. So a recall finds those sales as it opens and announces each order to order-svc,
+-- which knows the buyer; the notice's remedies and contact ride with it (recalls, V27), and the recall
+-- keeps the sales it found as evidence of who was reached.
 
 -- Every sale a recall found in its scope: which order drew which batch, and how sure the recall is
 -- that the pack was affected. Append-only; the record of who was reached.
@@ -53,7 +35,3 @@ CREATE TABLE recall_sales (
     CONSTRAINT uq_recall_sale UNIQUE (tenant_id, recall_id, order_id, batch_id)
 );
 CREATE INDEX idx_recall_sales_recall ON recall_sales (tenant_id, recall_id, order_id);
-
--- The sales a recall looks for are found by variant and type; the FIFO index leads with the store.
-CREATE INDEX idx_movements_variant_sales ON stock_movements (tenant_id, variant_id, created_at)
-    WHERE type = 'SALE' AND ref_type = 'ORDER';

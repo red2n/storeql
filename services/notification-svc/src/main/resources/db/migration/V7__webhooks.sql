@@ -6,6 +6,8 @@
 -- once when made and once when rotated. A delivery is one event to one endpoint: made when the
 -- event arrives, tried until it lands or the attempts run out, and kept so the business can see
 -- what was sent, when, and what came back. Every attempt is a row of its own, never rewritten.
+-- A settled delivery is pruned once its keep period has passed (storeql.webhooks.keep-days, 30 by
+-- default), and its attempts go with it.
 CREATE TABLE webhook_endpoints (
     id                   UUID PRIMARY KEY,
     tenant_id            UUID NOT NULL,
@@ -42,6 +44,9 @@ CREATE UNIQUE INDEX uq_webhook_deliveries_event ON webhook_deliveries (endpoint_
 CREATE INDEX idx_webhook_deliveries_due ON webhook_deliveries (next_attempt_at) WHERE status = 'PENDING';
 CREATE INDEX idx_webhook_deliveries_tenant ON webhook_deliveries (tenant_id, id);
 CREATE INDEX idx_webhook_deliveries_endpoint ON webhook_deliveries (endpoint_id, id);
+-- The prune of settled deliveries (created_at < cutoff AND status <> 'PENDING') runs hourly by
+-- default, in bounded batches; this partial index serves it.
+CREATE INDEX idx_webhook_deliveries_settled ON webhook_deliveries (created_at) WHERE status <> 'PENDING';
 
 -- Append-only: what each try got back.
 CREATE TABLE webhook_attempts (

@@ -149,14 +149,15 @@ public class AdminPromotionResource {
   /**
    * Scopes a promotion to a variant, or to everything.
    *
-   * <p>{@code CATEGORY} is rejected: pricing-svc has no variant→category mapping, so such a
-   * promotion would be stored and never fire.
+   * <p>A {@code CATEGORY} scope resolves to the variants of the products in that category, through
+   * the catalogue product-svc announces.
    *
    * @param id the promotion to scope
-   * @param req the scope type ({@code VARIANT} or {@code ALL}) and, for VARIANT, the variant id
+   * @param req the scope type ({@code VARIANT}, {@code CATEGORY} or {@code ALL}) and, for VARIANT
+   *     and CATEGORY, the variant or category id
    * @return the stored scope row
-   * @throws com.storeql.web.ApiException {@code 400} when the scope is a category, unknown, or a
-   *     VARIANT scope with no variant named
+   * @throws com.storeql.web.ApiException {@code 400} when the scope is unknown, or a VARIANT or
+   *     CATEGORY scope names no id
    */
   @Operation(
       summary = "Add a scope item to a promotion",

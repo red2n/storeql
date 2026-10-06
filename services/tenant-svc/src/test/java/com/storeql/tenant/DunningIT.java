@@ -599,8 +599,9 @@ class DunningIT {
   @DisplayName("An administrator's suspension survives a payment")
   void anAdministratorsSuspensionSurvivesAPayment() throws Exception {
     // The assertion this class exists for. Paying up lifts what the platform imposed for money and
-    // nothing else: a decision somebody took is not an argument a payment can win. Before V24 the
-    // reason was not recorded at all, so the two suspensions were indistinguishable.
+    // nothing else: a decision somebody took is not an argument a payment can win. Without the
+    // reason recorded on tenants.deactivated_reason (V1__init.sql) the two suspensions would be
+    // indistinguishable.
     sellerIs();
     tightPolicy();
     planOnSale("IT-DUN-ADMIN-" + Ids.newId().toString().substring(0, 8));

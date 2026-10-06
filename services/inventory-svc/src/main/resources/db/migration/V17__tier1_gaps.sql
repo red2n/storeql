@@ -21,9 +21,6 @@ INSERT INTO transaction_reason_codes (id, tenant_id, code, description) VALUES
   ('01a090a0-1bc3-7061-bf56-41be377d3c05', NULL, 'CORRECTION',    'Data-entry correction'),
   ('01a090a0-1bc3-7062-8cbe-0d4dd6bc58cf', NULL, 'SAMPLING',      'Quality sampling');
 
--- Add reason_code column to stock_movements (nullable — historic rows have none)
-ALTER TABLE stock_movements ADD COLUMN reason_code TEXT;
-
 -- 22 Configurable transaction source types
 CREATE TABLE transaction_source_types (
     id          UUID PRIMARY KEY,
@@ -46,7 +43,12 @@ INSERT INTO transaction_source_types (id, tenant_id, code, description) VALUES
   ('01a090a0-1bc3-7069-8543-d504d7d4161a', NULL, 'RELEASE',    'Reservation release'),
   ('01a090a0-1bc3-706a-8978-785541df58b8', NULL, 'CYCLE_COUNT','Cycle count adjustment'),
   ('01a090a0-1bc3-706b-aeb4-ef140b731d8c', NULL, 'LOT_SPLIT',  'Lot split action'),
-  ('01a090a0-1bc3-706c-a90c-f7fff87bb4c9', NULL, 'LOT_MERGE',  'Lot merge action');
+  ('01a090a0-1bc3-706c-a90c-f7fff87bb4c9', NULL, 'LOT_MERGE',  'Lot merge action'),
+  -- Return to vendor (readiness review 07.8): the movement that sends goods back to a supplier.
+  -- purchase-svc raises the return and the debit note; the stock leaves here, when ReturnedToVendor
+  -- is consumed — a signed movement of its own type against the return, so a supplier's goods going
+  -- back are never confused with a customer's return coming in (RETURN) or a write-off (ADJUST).
+  ('01a09650-2b3c-7001-8f6a-2a6d1d9e5c11', NULL, 'RTV',        'Return to vendor');
 
 -- 23 Lot action codes — lot_actions table (split/merge create new batches)
 CREATE TABLE lot_actions (
@@ -62,9 +64,6 @@ CREATE TABLE lot_actions (
 CREATE INDEX idx_lot_actions_tenant   ON lot_actions (tenant_id, created_at DESC);
 CREATE INDEX idx_lot_actions_source   ON lot_actions (tenant_id, source_batch_id);
 CREATE INDEX idx_lot_actions_result   ON lot_actions (tenant_id, result_batch_id);
-
--- 25 Grade control — grade column on inventory_batches
-ALTER TABLE inventory_batches ADD COLUMN grade TEXT;   -- e.g. A | B | C | REJECT
 
 -- 26 Lot-specific UOM conversions
 CREATE TABLE lot_uom_conversions (
@@ -94,14 +93,6 @@ CREATE TABLE par_level_configs (
     UNIQUE (tenant_id, store_id, variant_id)
 );
 CREATE INDEX idx_par_level_tenant ON par_level_configs (tenant_id, store_id);
-
--- 28 Order modifiers on reorder_point_plans and kanban_cards
-ALTER TABLE reorder_point_plans ADD COLUMN min_order_qty   NUMERIC(18,3);
-ALTER TABLE reorder_point_plans ADD COLUMN max_order_qty   NUMERIC(18,3);
-ALTER TABLE reorder_point_plans ADD COLUMN lot_multiplier  NUMERIC(18,3);
-ALTER TABLE kanban_cards        ADD COLUMN min_order_qty   NUMERIC(18,3);
-ALTER TABLE kanban_cards        ADD COLUMN max_order_qty   NUMERIC(18,3);
-ALTER TABLE kanban_cards        ADD COLUMN lot_multiplier  NUMERIC(18,3);
 
 -- 31 GL account mapping — zone/subinventory → nominal code
 CREATE TABLE zone_gl_mappings (

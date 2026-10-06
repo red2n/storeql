@@ -26,7 +26,8 @@ import org.junit.jupiter.api.Test;
  * The scheduled purge of this service's operational tables, against its real schema: published
  * outbox rows and consumer dedupe rows older than their retention go, in bounded batches, and
  * nothing else does; and the statements the purge runs are served by an index, not by a scan and
- * sort of the whole table on every batch (V9).
+ * sort of the whole table on every batch (indexes idx_outbox_published in V5__outbox.sql and
+ * idx_processed_events_processed_at in V1__init.sql).
  */
 @HelidonTest
 class OutboxPurgeIT {

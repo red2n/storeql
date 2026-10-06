@@ -3,9 +3,9 @@
 -- Fiscal law in several markets requires that receipts carry consecutive numbers with no gaps,
 -- per till or per store, and that the absence of gaps can be demonstrated to an inspector:
 -- Italy's corrispettivi, Germany's KassenSichV, Portugal's certified software regime, Poland,
--- Brazil, and India's e-invoicing. order_receipts already existed but records PRINT and EMAIL
--- events -- how many times a document was produced, not which document it was. A reprint is not a
--- new sale, and a sale with no number is not a receipt.
+-- Brazil, and India's e-invoicing. order_receipts records PRINT and EMAIL events -- how many times a
+-- document was produced, not which document it was. A reprint is not a new sale, and a sale with no
+-- number is not a receipt.
 --
 -- Why not a Postgres SEQUENCE: sequences deliberately do not roll back. Two concurrent
 -- transactions take 41 and 42, the first aborts, and 41 is gone forever. That is the correct
@@ -54,6 +54,43 @@ CREATE TABLE fiscal_receipts (
     voided_at   TIMESTAMPTZ,
     void_reason TEXT,
 
+    -- Tamper evidence for the legal receipt register. Every document carries a SHA-256 of its own figures
+    -- and of the document before it in its series, so an altered or re-inserted row no longer matches --
+    -- the property SAF-T (PT), KassenSichV (DE) and the Italian corrispettivi all ask a register to have,
+    -- in the one form this repo can give it without certified hardware or a tax-authority signing key.
+    -- prev_hash is GENESIS on the first document of a chain (Domain.FiscalReceipt.GENESIS), never null on a
+    -- document this service issues.
+    prev_hash   TEXT,
+    hash        TEXT,
+
+    -- The fiscal regime the store traded under when this was issued (fiscal_store_settings) and the stamp
+    -- it carries. Stored on the document because an inspector reads it off the document, years later,
+    -- whatever the store's settings are by then. NONE is the register alone: no stamp.
+    regime      TEXT NOT NULL DEFAULT 'NONE',
+    -- The stamp on the document. Nullable because a document issued under NONE carries none, and a
+    -- document issued under DE_KASSENSICHV while the device was unreachable carries the failure
+    -- instead — KassenSichV lets the till keep selling and requires the outage to be recorded, which
+    -- is what DSFinV-K's TSE_TA_FEHLER column is for.
+    tse_serial              TEXT,
+    tse_client_id           TEXT,
+    tse_transaction_number  BIGINT,
+    tse_signature_counter   BIGINT,
+    tse_signature           TEXT,
+    tse_algorithm           TEXT,
+    tse_public_key          TEXT,
+    tse_time_format         TEXT,
+    tse_started_at          TIMESTAMPTZ,
+    tse_finished_at         TIMESTAMPTZ,
+    tse_process_type        TEXT,
+    tse_process_data        TEXT,
+    tse_qr                  TEXT,
+    tse_error               TEXT,
+    pt_invoice_no           TEXT,
+    pt_hash                 TEXT,
+    pt_hash_control         TEXT,
+    pt_atcud                TEXT,
+    pt_certificate_number   TEXT,
+
     -- The gapless guarantee, enforced by the database rather than by the code that means well.
     CONSTRAINT uq_receipt_number UNIQUE (tenant_id, store_id, series_code, period, number),
     -- One receipt per order. A reprint returns the number already issued; issuing a second
@@ -69,3 +106,6 @@ CREATE INDEX idx_fiscal_receipts_series
 -- "What did this store take on this day" -- the daily reconciliation.
 CREATE INDEX idx_fiscal_receipts_issued
     ON fiscal_receipts (tenant_id, store_id, issued_at DESC);
+
+-- Receipt lookup at the till: by the printed fiscal number (case-insensitive).
+CREATE INDEX idx_fiscal_receipts_full_number ON fiscal_receipts (tenant_id, lower(full_number));

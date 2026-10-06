@@ -1,4 +1,4 @@
--- Asymmetric token signing with key rotation (readiness review 20.15; RFC 8725, OWASP ASVS V9).
+-- Asymmetric token signing with key rotation (RFC 8725, OWASP ASVS V9).
 --
 -- iam-svc signed access tokens HS256 with a secret the gateway (and the MQTT broker, and
 -- notification-svc) also held, so anything holding it could mint an owner's token. Tokens are now

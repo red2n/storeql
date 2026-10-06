@@ -12,6 +12,8 @@ CREATE TABLE stock_movements_archive (
     ref_type    TEXT,
     ref_id      UUID,
     reason_code TEXT,
+    -- As stock_movements.actor_id: carried over unchanged when a row is relocated.
+    actor_id    UUID,
     created_at  TIMESTAMPTZ NOT NULL,
     archived_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

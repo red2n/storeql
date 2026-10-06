@@ -753,8 +753,9 @@ public class ProductService {
    * back in full on every storefront render.
    *
    * <p>Enforced here at the boundary and again as a CHECK constraint on {@code product_images} (see
-   * V15), so the invariant holds whichever client writes — the admin app compresses to the same
-   * budget before uploading, but nothing may depend on a client having done so.
+   * V14__product_images.sql), so the invariant holds whichever client writes — the admin app
+   * compresses to the same budget before uploading, but nothing may depend on a client having done
+   * so.
    */
   public static final int MAX_IMAGE_BYTES = 256 * 1024;
 
@@ -1571,10 +1572,11 @@ public class ProductService {
       throw ApiException.notFound("VARIANT_NOT_FOUND", "Variant not found");
     }
 
-    // Whether an item is food decides whether its allergens are owed at all. Until this flag
-    // existed
-    // nothing ever set UNDECLARED — the column defaults to NOT_APPLICABLE, whatever V17's comment
-    // says — so the allergen-gaps list an inspector asks for could never contain a row (SJ-D42).
+    // Whether an item is food decides whether its allergens are owed at all. Only this flag sets
+    // UNDECLARED (through ComplianceRepository.markFoodUndeclared). Without it nothing would: the
+    // column defaults to NOT_APPLICABLE (see the comment on product_variants.allergen_status in
+    // V1__init.sql), so the allergen-gaps list an inspector asks for could never contain a row
+    // (SJ-D42).
     if (Boolean.TRUE.equals(req.food())) {
       complianceRepo.markFoodUndeclared(tenantId, variantId);
     } else if (Boolean.FALSE.equals(req.food())) {

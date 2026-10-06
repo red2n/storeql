@@ -1580,7 +1580,7 @@ public final class Dtos {
           Integer shelfLifeDays,
       @Schema(
               description =
-                  "Percent of what was received that went out of date unsold (past-date stock plus"
+                  "Percent of sold-or-wasted stock that went out of date unsold (past-date stock plus"
                       + " EXPIRY write-offs); null when nothing sold or wasted.")
           BigDecimal wasteRatePct,
       @Schema(

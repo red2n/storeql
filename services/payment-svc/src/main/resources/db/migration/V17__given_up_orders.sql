@@ -1,11 +1,11 @@
--- Card terminals, settled on the server: the orders given up (2 Oct 2026, review of V16).
+-- Card terminals, settled on the server: the orders given up.
 --
--- An order cancelled or voided owes back what a card machine took for it. That was worked out once,
--- when the order event arrived, from what was known then. An approval learnt of afterwards — a
--- timeout a manager later saw approved, or a card still at the machine when the sale was given up
--- and approved a moment later — was owed back to nobody, and a till replaying its queued tender could
--- then record it as paid on the given-up order: the customer paid for a sale that never happened,
--- with nothing owed and nothing flagged.
+-- An order cancelled or voided owes back what a card machine took for it. What is owed is worked out
+-- when the order event arrives, from what is known then; an approval learnt of afterwards — a timeout
+-- a manager later sees approved, or a card still at the machine when the sale is given up and approved
+-- a moment later — must be owed back too. Otherwise a till replaying its queued tender could record it
+-- as paid on the given-up order: the customer pays for a sale that never happened, with nothing owed
+-- and nothing flagged.
 --
 -- Whether an order was given up is kept here, so the moment a sale on it is known to have taken
 -- money, what it took is owed back on that same transaction (card_refund_dues, source ORDER_EVENT)

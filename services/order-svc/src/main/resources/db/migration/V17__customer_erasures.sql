@@ -1,5 +1,5 @@
--- SJ-D43: a customer erased by a shop must lose their name, phone and address from that shop's
--- orders too — and customer-svc's erasure used to stop at its own customers row.
+-- A customer erased by a shop must lose their name, phone and address from that shop's orders too, and
+-- the erasure reaches the shopper's online orders as well as the shop's own customer record.
 --
 -- An order that is still open keeps its delivery details until it is finished: they are needed to
 -- deliver it, and performing the contract is a lawful reason to delay erasure. So the erasure is
@@ -10,12 +10,11 @@ CREATE TABLE customer_erasures (
     customer_id UUID        NOT NULL,
     event_id    UUID        NOT NULL,
     erased_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Erasure has to reach a person by either id: the shop erases a customer it knows (customer_id), and
+    -- that same person's online orders are filed under their login (login_id). Recording both on the
+    -- erasure lets one sweep find both.
+    login_id    UUID,
     CONSTRAINT pk_customer_erasures PRIMARY KEY (tenant_id, customer_id)
 );
-
--- Redaction finds a customer's parked sales and layaways by customer; neither table had an index
--- that could. (special_orders already has idx_special_orders_tenant_cust.)
-CREATE INDEX IF NOT EXISTS idx_parked_sales_customer
-    ON parked_sales (tenant_id, customer_id) WHERE customer_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_layaways_customer
-    ON layaways (tenant_id, customer_id) WHERE customer_id IS NOT NULL;
+CREATE INDEX idx_customer_erasures_login
+    ON customer_erasures (login_id) WHERE login_id IS NOT NULL;

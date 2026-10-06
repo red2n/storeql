@@ -2,8 +2,8 @@
 -- instrument.
 --
 -- Much of what the readiness review found missing is law in some markets and not in others: the
--- 30-day prior price and GPSR are EU law, unit pricing and the tobacco birth-date ban are UK law, the
--- DPDP Act is Indian, the e-invoicing mandates arrive country by country. Without a shared answer,
+-- 30-day prior price and GPSR are EU law, unit pricing is both EU and UK law, the tobacco birth-date
+-- ban is UK law, the DPDP Act is Indian, the e-invoicing mandates arrive country by country. Without a shared answer,
 -- each fix would carry its own list of EU members and its own dates — the same kind of literal SJ-D53
 -- removed for currencies. tenant-svc owns the tenant's country, so it owns this too, and every
 -- service asks it.
@@ -32,6 +32,12 @@ CREATE TABLE jurisdiction_members (
 CREATE INDEX idx_jurisdiction_members_country ON jurisdiction_members (country);
 
 -- One row per obligation per scope: a regime (every member while a member) or a single country.
+--
+-- An obligation can carry a number: a period, a minimum validity, a share, a count. limit_value and
+-- limit_unit come together or not at all: a number without its unit is unreadable. qualifier narrows a
+-- row to one kind of case (a channel, a product class) and is free of any vocabulary here; the service
+-- that reads the obligation code owns the meaning. A row with no number has limit_value and
+-- limit_unit both null. Nothing ties qualifier to a number: a row with no number may carry one.
 CREATE TABLE legal_obligations (
     code           TEXT NOT NULL,
     scope_kind     TEXT NOT NULL,
@@ -40,10 +46,17 @@ CREATE TABLE legal_obligations (
     effective_to   DATE,
     citation       TEXT NOT NULL,
     summary        TEXT NOT NULL,
+    limit_value    NUMERIC(18,4),
+    limit_unit     TEXT,
+    qualifier      TEXT,
     CONSTRAINT pk_legal_obligations PRIMARY KEY (code, scope),
     CONSTRAINT chk_obligation_code CHECK (code ~ '^[A-Z][A-Z0-9_]*$'),
     CONSTRAINT chk_obligation_scope_kind CHECK (scope_kind IN ('REGIME', 'COUNTRY')),
-    CONSTRAINT chk_obligation_window CHECK (effective_to IS NULL OR effective_to >= effective_from)
+    CONSTRAINT chk_obligation_window CHECK (effective_to IS NULL OR effective_to >= effective_from),
+    CONSTRAINT chk_obligation_limit_pair CHECK ((limit_value IS NULL) = (limit_unit IS NULL)),
+    CONSTRAINT chk_obligation_limit_value CHECK (limit_value IS NULL OR limit_value >= 0),
+    CONSTRAINT chk_obligation_limit_unit CHECK (limit_unit IS NULL OR limit_unit ~ '^[A-Z][A-Z0-9_]*$'),
+    CONSTRAINT chk_obligation_qualifier CHECK (qualifier IS NULL OR (qualifier = btrim(qualifier) AND qualifier <> ''))
 );
 CREATE INDEX idx_legal_obligations_scope ON legal_obligations (scope_kind, scope);
 
@@ -91,6 +104,11 @@ INSERT INTO legal_obligations (code, scope_kind, scope, effective_from, effectiv
   'Deposit return systems run for single-use plastic bottles and metal cans up to three litres.'),
  ('E_INVOICING_CROSS_BORDER','REGIME','EU',DATE '2030-07-01',NULL,'Council Directive (EU) 2025/516 (VAT in the Digital Age)',
   'Cross-border business supplies are invoiced electronically and reported digitally.'),
+ -- Directive 98/6/EC art.3: the EU's unit-price rule. The same code as the UK's, so a service asks one
+ -- question for any market; without this row a German or French business would be told it owes no unit
+ -- price, and the unit price would quietly not be shown where it is law.
+ ('UNIT_PRICING','REGIME','EU',DATE '2000-03-18',NULL,'Directive 98/6/EC art.3',
+  'The selling price and the unit price of a product offered to consumers are shown, per kilogram, litre, metre, square metre or cubic metre, or per item for goods sold by number.'),
  -- The United Kingdom
  ('UK_GDPR','COUNTRY','GB',DATE '2021-01-01',NULL,'UK GDPR; Data Protection Act 2018',
   'Personal data needs a lawful basis; people may see, correct, erase and take it; a breach is reported within 72 hours.'),
@@ -111,6 +129,17 @@ INSERT INTO legal_obligations (code, scope_kind, scope, effective_from, effectiv
   'Every business can receive EN 16931 e-invoices.'),
  ('E_INVOICING_ISSUE','COUNTRY','DE',DATE '2027-01-01',NULL,'Umsatzsteuergesetz s.14',
   'Businesses with turnover over EUR 800,000 issue e-invoices; every business from 1 January 2028.'),
+ -- Germany's Preisangabenverordnung 2022 takes up both member-state options in Directive 98/6/EC art.6a:
+ -- art.6a(5), a reduction increased step by step keeps the price before its first step as its prior
+ -- price; and art.6a(3), different rules for goods that spoil or expire quickly. pricing-svc applies
+ -- neither unless every country whose law reaches the offer has taken it up, so a country is listed
+ -- here only where its own law says so.
+ ('PRICE_REDUCTION_PROGRESSIVE','COUNTRY','DE',DATE '2022-05-28',NULL,
+  'Preisangabenverordnung 2022 §11(3), under Directive 98/6/EC art.6a(5)',
+  'A price reduction increased step by step without a break is announced against the lowest price of the 30 days before its first step.'),
+ ('PRICE_REDUCTION_PERISHABLE_EXEMPT','COUNTRY','DE',DATE '2022-05-28',NULL,
+  'Preisangabenverordnung 2022 §11(4), under Directive 98/6/EC art.6a(3)',
+  'Goods that spoil quickly or are near their expiry, reduced because of it, need no prior price when the reason is made clear.'),
  -- France
  ('CERTIFIED_TILL_SOFTWARE','COUNTRY','FR',DATE '2018-01-01',NULL,'Code general des impots art.286 I 3 bis',
   'Till software is certified or attested as unalterable, secured, kept and archived.'),
@@ -118,6 +147,13 @@ INSERT INTO legal_obligations (code, scope_kind, scope, effective_from, effectiv
   'Every business can receive e-invoices.'),
  ('E_INVOICING_ISSUE','COUNTRY','FR',DATE '2026-09-01',NULL,'French e-invoicing and e-reporting reform',
   'Large and mid-sized businesses issue e-invoices and e-report their sales; small businesses from 1 September 2027.'),
+ -- The duty to report the transactions no e-invoice covers is named on the obligations sheet rather than
+ -- left inside another row's summary. It is a separate obligation in law: a business that issues every
+ -- invoice correctly and reports nothing is still in breach, and a sheet that folded the two together could
+ -- not show that.
+ ('E_REPORTING','COUNTRY','FR',DATE '2026-09-01',NULL,
+  'CGI art. 290 and 290 A; decret n. 2022-1299 du 7 oct. 2022',
+  'Transactions no e-invoice covers — sales to consumers and abroad — and the payment data for services are transmitted to the administration through the business''s platform.'),
  -- Belgium, Poland, Spain, Portugal
  ('E_INVOICING_B2B','COUNTRY','BE',DATE '2026-01-01',NULL,'Belgian B2B e-invoicing mandate (Peppol)',
   'Business invoices are exchanged as structured e-invoices over Peppol.'),

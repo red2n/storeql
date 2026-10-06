@@ -1,11 +1,11 @@
--- 03.12: the prior price of a price reduction.
+-- The prior price of a price reduction.
 --
 -- Directive 98/6/EC art.6a (inserted by Directive (EU) 2019/2161, applying since 28 May 2022): an
 -- announcement of a price reduction states the prior price, the lowest price applied during a period
 -- of at least 30 days before the reduction; for a progressively increasing reduction, where a member
--- state allows it, the price before its first application. pricing-svc kept only the current price:
--- list prices are overwritten in place, and so are VAT rates and a product's VAT category, so what a
--- shopper was charged last month cannot be reconstructed from the definitions.
+-- state allows it, the price before its first application. A list price is overwritten in place, and
+-- so are VAT rates and a product's VAT category, so what a shopper was charged last month cannot be
+-- reconstructed from the definitions.
 --
 -- So the prices actually applied are recorded, as the price engine itself computes them. A change
 -- that can move a price queues an evaluation in the same transaction as the change; a promotion or
@@ -13,18 +13,18 @@
 -- in order for each variant, and appends a row only when what a shopper is offered changed.
 --
 -- A worker runs after the change commits. Price lists, promotions, their scopes and their switches
--- carry when they were made and thrown, and list prices now keep their history below, so an
--- evaluation reads those as they stood at its moment. A VAT rate, a VAT category and the catalogue
--- are still overwritten in place: when one of those changed again before the worker ran, what the
--- shopper saw at the evaluated moment cannot be known, and the row says so. No reduction whose 30
--- days cross such a span is announced.
+-- carry when they were made and thrown, and list prices keep their history below, so an evaluation
+-- reads those as they stood at its moment. A VAT rate, a VAT category and the catalogue are still
+-- overwritten in place: when one of those changed again before the worker ran, what the shopper saw
+-- at the evaluated moment cannot be known, and the row says so. No reduction whose 30 days cross such
+-- a span is announced.
 
 -- Every price a list item has carried, from when. Appended with each change to the item.
 CREATE TABLE price_list_item_prices (
     id                 UUID           PRIMARY KEY,
     tenant_id          UUID           NOT NULL,
     price_list_item_id UUID           NOT NULL REFERENCES price_list_items (id),
-    price              NUMERIC(18, 2) NOT NULL CHECK (price >= 0),
+    price              NUMERIC        NOT NULL CHECK (price >= 0),
     valid_from         TIMESTAMPTZ    NOT NULL
 );
 CREATE INDEX idx_price_list_item_prices_item
@@ -40,11 +40,11 @@ CREATE TABLE applied_prices (
     -- False while the variant has no price in force: a gap ends a run of reductions.
     priced          BOOLEAN        NOT NULL,
     -- What the shopper is offered, VAT and item-level promotions included.
-    price           NUMERIC(18, 2) CHECK (price >= 0),
+    price           NUMERIC        CHECK (price >= 0),
     -- The same before VAT, for a till that shows prices net of it.
-    net_price       NUMERIC(18, 2) CHECK (net_price >= 0),
+    net_price       NUMERIC        CHECK (net_price >= 0),
     -- The offer without promotions: the reduction is price against this.
-    regular_price   NUMERIC(18, 2) CHECK (regular_price >= 0),
+    regular_price   NUMERIC        CHECK (regular_price >= 0),
     promotion_name  TEXT,
     currency        TEXT           CHECK (currency ~ '^[A-Z]{3}$'),
     applied_from    TIMESTAMPTZ    NOT NULL,
@@ -65,8 +65,14 @@ CREATE INDEX idx_applied_prices_recorded ON applied_prices (tenant_id, recorded_
 
 -- Append-only, enforced where it cannot be skipped: a prior price read from a history that can be
 -- edited is a claim, not a record. The same holds for the list prices it is rebuilt from.
+-- The one delete allowed is erasure. When a departed business's retrieval period ends (EU Data Act
+-- art.25(2)(h)), its rows are erased in the transaction that names it in
+-- storeql.erasing_tenant, and only that business's rows can go.
 CREATE FUNCTION applied_prices_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF TG_OP = 'DELETE' AND OLD.tenant_id::text = current_setting('storeql.erasing_tenant', true) THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
 END
 $$;

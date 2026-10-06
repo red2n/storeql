@@ -2,7 +2,7 @@
 --
 -- Stock turn already costs every sale from the batches it drew down; what it could not do is set
 -- that cost against what the sale earned, because the revenue lived in order-svc and neither service
--- may read the other's tables. OrderFulfilled now carries each line's revenue, net of VAT and of the
+-- may read the other's tables. OrderFulfilled carries each line's revenue, net of VAT and of the
 -- order's discounts, and this service keeps it beside the movement it paid for, in the same
 -- transaction and under the same per-line dedupe, so a margin is never computed from a sale half
 -- recorded.

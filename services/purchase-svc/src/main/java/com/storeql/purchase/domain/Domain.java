@@ -732,10 +732,10 @@ public final class Domain {
   /**
    * One decision in a purchase order's approval history. Append-only (golden rule #8).
    *
-   * <p>A column pair on the order would have covered a single decision, the way V3 handled
-   * cancellation — but a rejection sends the order back to DRAFT to be corrected and resubmitted,
-   * so one order can cycle through several. A spend-authority trail that keeps only the last
-   * decision is not an audit trail.
+   * <p>A column pair on the order would have covered a single decision, the way the cancellation
+   * reason is held on the order (V1) — but a rejection sends the order back to DRAFT to be
+   * corrected and resubmitted, so one order can cycle through several. A spend-authority trail that
+   * keeps only the last decision is not an audit trail.
    *
    * @param totalNet the figure the decision was made against, captured at decision time rather than
    *     read back later: the order can be edited after a rejection, and an approval that silently

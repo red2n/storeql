@@ -151,6 +151,12 @@ CREATE TABLE billing_invoices (
     subscription_id UUID          NOT NULL REFERENCES subscriptions (id),
     number          TEXT          NOT NULL,   -- INV-2026-000123
     status          TEXT          NOT NULL,
+    -- PERIOD (the run raised it, one per period) or ADJUSTMENT (a proration, any number per period).
+    -- A proration is not a period: it adjusts one, it can happen more than once in a period, and it must
+    -- not compete with the period's own invoice for a slot. No DEFAULT: every INSERT names the kind, the
+    -- way every INSERT names its id. A default would let a caller raise an adjustment that silently claims
+    -- a period's slot.
+    kind            TEXT          NOT NULL,
 
     issue_date      DATE          NOT NULL,
     due_date        DATE          NOT NULL,
@@ -183,6 +189,7 @@ CREATE TABLE billing_invoices (
     updated_at      TIMESTAMPTZ   NOT NULL,
 
     CONSTRAINT ck_invoices_status CHECK (status IN ('OPEN', 'PAID', 'VOID', 'UNCOLLECTIBLE')),
+    CONSTRAINT ck_invoices_kind CHECK (kind IN ('PERIOD', 'ADJUSTMENT')),
     CONSTRAINT ck_invoices_treatment CHECK (
         tax_treatment IN ('DOMESTIC', 'REVERSE_CHARGE', 'DESTINATION', 'OUT_OF_SCOPE')
     ),
@@ -198,12 +205,20 @@ CREATE TABLE billing_invoices (
 );
 
 CREATE UNIQUE INDEX uq_invoices_number ON billing_invoices (number);
--- A period is invoiced once. This is what makes the billing run safe to repeat.
+-- A period is invoiced once. This is what makes the billing run safe to repeat. Only the invoices that
+-- are a period hold the slot: an adjustment does not compete for it. A withdrawn (VOID) one frees its slot;
+-- it keeps its number but it is no longer the period's invoice.
 CREATE UNIQUE INDEX uq_invoices_period ON billing_invoices (subscription_id, period_start)
-    WHERE status <> 'VOID';
+    WHERE status <> 'VOID' AND kind = 'PERIOD';
+-- What an adjustment is read by: the period it adjusts, newest first.
+CREATE INDEX idx_invoices_adjustments ON billing_invoices (subscription_id, period_start)
+    WHERE kind = 'ADJUSTMENT';
 CREATE INDEX idx_invoices_tenant ON billing_invoices (tenant_id, issue_date DESC, id);
 -- What dunning reads: everything open and past its date.
 CREATE INDEX idx_invoices_overdue ON billing_invoices (due_date) WHERE status = 'OPEN';
+
+COMMENT ON COLUMN billing_invoices.kind IS
+    'PERIOD (the run raised it, one per period) or ADJUSTMENT (a proration, any number per period).';
 
 CREATE TABLE billing_invoice_lines (
     id          UUID          PRIMARY KEY,
@@ -213,13 +228,13 @@ CREATE TABLE billing_invoice_lines (
     tenant_id   UUID          NOT NULL,
     invoice_id  UUID          NOT NULL REFERENCES billing_invoices (id),
     line_no     INTEGER       NOT NULL,
-    kind        TEXT          NOT NULL,   -- PLAN | PRORATION | CREDIT
+    kind        TEXT          NOT NULL,   -- PLAN | PRORATION | CREDIT | USAGE (a metered overage, billed in arrears: usage_periods)
     description TEXT          NOT NULL,
     quantity    NUMERIC(12,4) NOT NULL,
     unit_amount NUMERIC(18,4) NOT NULL,
     amount      NUMERIC(18,4) NOT NULL,
 
-    CONSTRAINT ck_invoice_lines_kind CHECK (kind IN ('PLAN', 'PRORATION', 'CREDIT')),
+    CONSTRAINT ck_invoice_lines_kind CHECK (kind IN ('PLAN', 'PRORATION', 'CREDIT', 'USAGE')),
     CONSTRAINT ck_invoice_lines_amount CHECK (amount = round(quantity * unit_amount, 4))
 );
 CREATE UNIQUE INDEX uq_invoice_lines ON billing_invoice_lines (invoice_id, line_no);

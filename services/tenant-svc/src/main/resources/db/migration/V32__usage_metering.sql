@@ -125,8 +125,3 @@ CREATE TABLE usage_alerts (
 CREATE UNIQUE INDEX uq_usage_alerts ON usage_alerts (tenant_id, meter, period_start, threshold);
 -- The platform's read across businesses: who reached a threshold lately, newest first.
 CREATE INDEX idx_usage_alerts_recent ON usage_alerts (raised_at DESC);
-
--- ── the invoice learns a fourth kind of line ──────────────────────────────────
-ALTER TABLE billing_invoice_lines DROP CONSTRAINT ck_invoice_lines_kind;
-ALTER TABLE billing_invoice_lines ADD CONSTRAINT ck_invoice_lines_kind
-    CHECK (kind IN ('PLAN', 'PRORATION', 'CREDIT', 'USAGE'));

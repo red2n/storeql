@@ -3,7 +3,7 @@
 -- first — the link itself is the proof. The raw token is never stored, only its hash.
 --
 -- password_reset_tokens.tenant_id is the LOGIN's own tenant (NULL for a shopper), carried here for
--- isolation, export and erasure (21.14) — never the forgot-password request's own, which belongs
+-- isolation, export and erasure — never the forgot-password request's own, which belongs
 -- to no business. ON DELETE CASCADE clears a login's tokens if its user row is ever hard-deleted;
 -- the one path that anonymises a row instead of deleting it (UserRepository.deleteCustomerAccount)
 -- clears them explicitly, in the same transaction, for the same reason.

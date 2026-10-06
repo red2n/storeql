@@ -19,7 +19,8 @@ import java.util.UUID;
  * clearing with the total and credits sales net of VAT and VAT output. A sale paid in full nets
  * clearing to zero for its order; what does not is the reconciliation exception the clearing report
  * lists. A refund credits the control account each refunded tender came from and debits sales and
- * VAT in the sale's own VAT ratio — or clearing, when the ledger never saw the sale confirmed.
+ * VAT in the sale's own VAT ratio for the part the confirmed sale covers; clearing takes the rest,
+ * or all of it when the ledger never saw the sale confirmed.
  *
  * <p>A chargeback (11.9) is the acquirer taking a card payment back while the argument about it
  * runs. The amount leaves card clearing — the acquirer nets it off what it settles — for card

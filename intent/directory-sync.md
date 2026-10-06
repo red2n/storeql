@@ -6,7 +6,7 @@
 | **Author** | the user, from the StoreQL Flow Tests catalogue (platform/auth-sso-business-identity-provider, AUTH-413) · 2026-09-30 |
 | **Roadmap** | new: the flow catalogue, platform and access domain — AUTH-413, "no SCIM / group-to-role auto-provisioning" |
 | **Services** | iam-svc owns the SCIM endpoint, the directory tokens and the logins · tenant-svc owns group-to-role mappings and the staff assignments they produce · notification-svc tells the owner of failures · the gateway lets a directory token reach only the SCIM routes · the app gets the owner's Directory screen |
-| **Builds on** | iam-svc single sign-on (`sso_connections`, `sso_identities`, `SsoService`, `required_tiers`), `users.status` (ACTIVE / DISABLED), `POST /auth/admin/staff-users`, `refresh_tokens`, tenant-svc `staff_assignments` (now with business-wide rows, V39), `StaffAssigned` / `StaffRemoved`, `RoleGrants` (wave 1), `GET /admin/tenant/audit`, `intent/password-reset.md` (a tier that signs in through its own provider is told so, with no link) |
+| **Builds on** | iam-svc single sign-on (`sso_connections`, `sso_identities`, `SsoService`, `required_tiers`), `users.status` (ACTIVE / DISABLED), `POST /auth/admin/staff-users`, `refresh_tokens`, tenant-svc `staff_assignments` (now with business-wide rows, `V1__init.sql` (folded)), `StaffAssigned` / `StaffRemoved`, `RoleGrants` (wave 1), `GET /admin/tenant/audit`, `intent/password-reset.md` (a tier that signs in through its own provider is told so, with no link) |
 | **Built in** | (not yet built) |
 
 ## Problem
@@ -24,7 +24,7 @@ A business that connects its own identity provider (Entra ID, Okta, Google Works
 
 - **Personas** ([PRD §2](../PRD.md)): the owner (turns it on, maps groups), the business's IT administrator using their provider (the caller of SCIM, a machine), the manager (sees who is directory-managed).
 - **Channels:** the SCIM endpoint (machine to machine, through the gateway) · back-office Directory screen.
-- **Scope:** per business. One directory token per business (two live at once while it is being replaced). A group maps to a store list or the whole business (the business-wide assignment tenant-svc allows since V39).
+- **Scope:** per business. One directory token per business (two live at once while it is being replaced). A group maps to a store list or the whole business (the business-wide assignment tenant-svc allows since `V1__init.sql`).
 - **Roles that can write:** OWNER only (token, mappings, turning on and off): directory sync is a way of granting access, so it is the owner's, like the provider itself (`AccountSecurityIT.ssoRolesAndIsolation`). A manager reads. The SCIM caller acts with a token, not a role.
 - **Sandbox tenant:** works the same, against the sandbox business's own provider; the token has the `sqk_test_` style prefix for sandbox.
 

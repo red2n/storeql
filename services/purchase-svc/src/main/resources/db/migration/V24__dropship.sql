@@ -8,9 +8,10 @@
 -- Making or ending one tells inventory-svc (VariantSourcingChanged), which then answers "available"
 -- with nothing on the shelf and places a hold that draws nothing. A confirmed order with such a
 -- line raises one DRAFT purchase order per supplier — source DROPSHIP, shipped to the customer, the
--- sale it came from named — for a person to submit, as a proposal's draft is. It is never received
--- into stock: the supplier's delivery to the customer is marked instead, and the cost of goods the
--- business never held is posted against what the supplier will invoice.
+-- sale it came from named (purchase_orders.sales_order_id and ship_to, V1) — for a person to submit,
+-- as a proposal's draft is. It is never received into stock: the supplier's delivery to the customer
+-- is marked instead, and the cost of goods the business never held is posted against what the
+-- supplier will invoice.
 
 CREATE TABLE dropship_arrangements (
     id          UUID        PRIMARY KEY,
@@ -30,14 +31,3 @@ CREATE UNIQUE INDEX ux_dropship_arrangement_live
     ON dropship_arrangements (tenant_id, variant_id) WHERE active;
 CREATE INDEX ix_dropship_arrangements_tenant
     ON dropship_arrangements (tenant_id, created_at DESC, id);
-
--- A dropship order knows the sale it fulfils and where the supplier ships it.
-ALTER TABLE purchase_orders
-    ADD COLUMN sales_order_id UUID,                          -- order-svc's order, referenced
-    ADD COLUMN ship_to        TEXT;                          -- the customer, as the order said
-CREATE INDEX ix_po_sales_order ON purchase_orders (tenant_id, sales_order_id)
-    WHERE sales_order_id IS NOT NULL;
-
-ALTER TABLE purchase_orders DROP CONSTRAINT IF EXISTS ck_po_source;
-ALTER TABLE purchase_orders
-    ADD CONSTRAINT ck_po_source CHECK (source IN ('MANUAL', 'PROPOSAL', 'DROPSHIP'));

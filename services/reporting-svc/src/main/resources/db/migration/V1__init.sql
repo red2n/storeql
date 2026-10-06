@@ -1,10 +1,26 @@
 -- reporting-svc schema
 
+-- Consumer dedupe marks, one per (event, consumer). The key is the pair, not event_id alone: one
+-- consumer's mark must not stop another consumer from applying the same event, and each consumer
+-- name is one purpose.
 CREATE TABLE processed_events (
-    event_id     UUID PRIMARY KEY,
+    event_id     UUID         NOT NULL,
     consumer     VARCHAR(120) NOT NULL,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    processed_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+
+    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
 );
+
+-- The scheduled purge (common-service OutboxPublisher -> BaseOutboxRepository) deletes marks once
+-- they are old enough, a batch at a time, found by age:
+--
+--   DELETE FROM processed_events WHERE (event_id, consumer) IN (
+--     SELECT event_id, consumer FROM processed_events
+--      WHERE processed_at < ? ORDER BY processed_at ASC LIMIT ? FOR UPDATE SKIP LOCKED)
+--
+-- processed_events gains a row for every consumed event and the dedupe check reads it on every event,
+-- so the purge's search by age needs its own index; the oldest marks are the ones it takes first.
+CREATE INDEX idx_processed_events_processed_at ON processed_events (processed_at);
 
 -- Projection: current on-hand per (tenant, store, variant). Updated from stock events.
 CREATE TABLE inventory_projection (

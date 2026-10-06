@@ -1,7 +1,8 @@
--- Multi-factor authentication (20.12). A login may hold an authenticator app (TOTP), passkeys
+-- Multi-factor authentication. A login may hold an authenticator app (TOTP), passkeys
 -- (WebAuthn) and ten single-use recovery codes; a business may require a second factor of its
--- staff by tier. Everything here except the policy is a credential: kept sealed or hashed, never
--- exported, gone with the login.
+-- staff by tier. Everything here except the policy is credential material or the record of it: a
+-- secret is kept sealed or hashed, never exported, and a passkey's public parts are kept as the
+-- authenticator sends them. All of it goes with the login.
 
 CREATE TABLE mfa_totp (
     user_id        UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -35,7 +36,7 @@ CREATE TABLE mfa_passkeys (
 CREATE UNIQUE INDEX uq_mfa_passkey_credential ON mfa_passkeys (credential_id);
 CREATE INDEX idx_mfa_passkeys_user ON mfa_passkeys (user_id);
 
--- A sign-in that has passed its password and owes a second factor, or a passkey registration in
+-- A sign-in that has passed its first factor and owes a second, or a passkey registration in
 -- progress. The token is random and only its hash is kept; a handful of wrong answers ends it.
 CREATE TABLE mfa_challenges (
     id                 UUID PRIMARY KEY,
@@ -46,7 +47,10 @@ CREATE TABLE mfa_challenges (
     attempts           INT NOT NULL,
     expires_at         TIMESTAMPTZ NOT NULL,
     consumed_at        TIMESTAMPTZ,
-    created_at         TIMESTAMPTZ NOT NULL
+    created_at         TIMESTAMPTZ NOT NULL,
+    -- What the waiting sign-in proved before its second factor was asked for: a password, or the
+    -- provider. NULL means a password.
+    first_factor       TEXT
 );
 CREATE UNIQUE INDEX uq_mfa_challenge_token ON mfa_challenges (token_hash);
 CREATE INDEX idx_mfa_challenges_expiry ON mfa_challenges (expires_at);
@@ -58,6 +62,3 @@ CREATE TABLE mfa_policies (
     updated_at     TIMESTAMPTZ NOT NULL,
     updated_by     UUID NOT NULL
 );
-
--- How a session was authenticated, carried across refreshes so a renewed token says the same.
-ALTER TABLE refresh_tokens ADD COLUMN amr TEXT;

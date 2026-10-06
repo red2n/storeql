@@ -3,16 +3,7 @@
 -- The platform could already say who rang a sale up — pos_log_entries.cashier_id, the POS journal —
 -- and that is not the same question. The person who operated the till is not always the person who
 -- sold the goods: on a counter, an assistant sells and a supervisor takes the money, and a shop that
--- pays commission pays the seller. An online order usually has no seller at all, and says so by
--- leaving the column null rather than crediting whoever happened to confirm it.
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_user_id UUID;
-
-COMMENT ON COLUMN orders.seller_user_id IS
-    'Who is credited with the sale, which is not necessarily who rang it up (pos_log_entries.cashier_id). Null for a sale nobody is credited with.';
-
--- Partial, because most orders online have no seller and an index over nulls would be mostly empty.
-CREATE INDEX IF NOT EXISTS idx_orders_seller
-    ON orders (tenant_id, seller_user_id, created_at DESC) WHERE seller_user_id IS NOT NULL;
+-- pays commission pays the seller. The seller is orders.seller_user_id (V1__init.sql).
 
 -- Attribution is corrected, not overwritten: money follows it, so who changed it, when, and why has
 -- to survive the change. Append-only.
@@ -50,8 +41,8 @@ CREATE TABLE commission_statements (
     period_end     DATE          NOT NULL,
     currency       CHAR(3)       NOT NULL,
     status         TEXT          NOT NULL DEFAULT 'DRAFT',
-    net_sales      NUMERIC(18,2) NOT NULL,
-    commission     NUMERIC(18,2) NOT NULL,
+    net_sales      NUMERIC       NOT NULL,
+    commission     NUMERIC       NOT NULL,
     note           TEXT,
     supersedes     UUID          REFERENCES commission_statements(id) DEFERRABLE INITIALLY DEFERRED,
     superseded_by  UUID          REFERENCES commission_statements(id) DEFERRABLE INITIALLY DEFERRED,
@@ -76,6 +67,9 @@ CREATE UNIQUE INDEX uq_statement_approved_period ON commission_statements (
 
 CREATE INDEX idx_statements_tenant ON commission_statements (tenant_id, period_start DESC, created_at DESC);
 
+COMMENT ON TABLE commission_statements IS
+    'What a period earned, per currency and optionally per store. A draft until approved, immutable after, superseded when it has to change.';
+
 -- One row per person, per stretch of days under one arrangement, per rate band — so a statement
 -- explains itself in the terms the arrangement was written in, and a person paid on it can check
 -- which part of what they sold earned which rate.
@@ -92,22 +86,30 @@ CREATE TABLE commission_statement_lines (
     scheme_name    TEXT,
     segment_from   DATE          NOT NULL,
     segment_to     DATE          NOT NULL,
-    threshold_from NUMERIC(18,2),
+    threshold_from NUMERIC,
     rate           NUMERIC(12,4),
     -- Net sales under a percentage arrangement, units under a per-unit one: the same thing the rate
-    -- is charged on. Deliberately unconstrained, so the figure keeps the scale the arrangement rated
-    -- it at — money to the penny, units to a thousandth. A fixed scale would print 20.000 of money
-    -- beside a commission of 0.40, which is the mixed-scale drift that has cost two reports here.
+    -- is charged on. Deliberately unconstrained and written as computed, not rounded to the statement's
+    -- minor units, so a count of units keeps the fraction the rate was set against. See the header of
+    -- V1__init.sql for the money columns generally.
     amount         NUMERIC        NOT NULL,
-    commission     NUMERIC(18,2) NOT NULL,
+    commission     NUMERIC        NOT NULL,
+    -- A per-unit arrangement pays an amount per unit in the currency it names, which may be any ISO 4217
+    -- code; a statement is counted in one currency. The commission is in the statement's currency,
+    -- translated at the business's own rate when it has to be, and a line that showed a rate of 0.50 beside
+    -- a commission of 0.43 would explain nothing to the person paid on it. So the line keeps the rate's
+    -- currency and the commission as rated in it, and the statement explains itself after the rate has
+    -- moved on. Both are null on a percentage line, whose rate is a ratio, and where the rate needed no
+    -- translation.
+    rate_currency    CHAR(3),
+    rated_commission NUMERIC,
 
-    CONSTRAINT ck_line_segment CHECK (segment_to >= segment_from)
+    CONSTRAINT ck_line_segment CHECK (segment_to >= segment_from),
+    CONSTRAINT ck_line_rated_commission CHECK (rated_commission IS NULL OR rate_currency IS NOT NULL)
 );
 
 CREATE INDEX idx_statement_lines_statement
     ON commission_statement_lines (tenant_id, statement_id, seller_user_id, segment_from);
 
-COMMENT ON TABLE commission_statements IS
-    'What a period earned, per currency and optionally per store. A draft until approved, immutable after, superseded when it has to change.';
 COMMENT ON TABLE commission_statement_lines IS
     'One row per person, per stretch under one arrangement, per rate band. A row with no scheme carries sales that earned nothing.';

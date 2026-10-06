@@ -161,9 +161,9 @@ public class CashManagementRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Sum of refunds grouped by method at one store in a window. A refund belongs to the store its
-   * payment was taken at ({@code refund_tenders.store_id}, written on every path and backfilled by
-   * V12); one with no store belongs to no drawer.
+   * Sum of refunds grouped by method at one store in a window. A refund belongs to the store it was
+   * made at ({@code refund_tenders.store_id}, written on every path): its payment's store, or an
+   * exchange's own. One with no store belongs to no drawer.
    */
   public List<Object[]> sumRefundsByMethod(
       UUID tenantId, UUID storeId, java.time.Instant from, java.time.Instant to) {

@@ -1,10 +1,5 @@
 -- Landed cost (07.x): a charge landed on a receipt lifts the unit cost of the batches that receipt
 -- created, by the per-unit share purchase-svc apportioned; a reversal lowers it by the same.
---
--- A batch's cost is now kept to four places. A unit's share of freight is rarely a whole penny, and
--- rounding it on every application would leave a reversal a penny away from where it started; the
--- currency's minor unit belongs to the valuation report, not to the record it is built from.
-ALTER TABLE inventory_batches ALTER COLUMN cost_price TYPE NUMERIC(18,4);
 
 -- Append-only: every change to a batch's cost, with what it was and what it became, so a valuation
 -- can be explained back to the charge that moved it.

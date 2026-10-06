@@ -1,11 +1,11 @@
 -- Deferred revenue for loyalty points and gift card breakage (readiness review 17.11).
 --
 -- FRS 102 section 23, as revised by the 2024 periodic review for periods from 1 January 2026,
--- takes IFRS 15's five-step model, and two things this ledger did not do follow from it. A point a
--- shopper earns with a purchase is a separate promise, so part of the sale's revenue belongs to it;
--- and a gift card sold is a liability, part of which the business expects never to be claimed.
--- Until now loyalty never reached the ledger, selling a gift card posted nothing, and only spending
--- one did (Dr 2310 from the tender, 17.7).
+-- takes IFRS 15's five-step model, and two things follow from it. A point a shopper earns with a
+-- purchase is a separate promise, so part of the sale's revenue belongs to it; and a gift card sold
+-- is a liability, part of which the business expects never to be claimed. Loyalty and gift cards
+-- therefore reach the ledger through the events that describe them, and selling a gift card posts
+-- as well as spending one (Dr 2310 from the tender, 17.7).
 --
 --   points earned with a sale   Dr 4010 sales / Cr 2330 deferred income: the sale's net revenue
 --                               split between the goods and the points by standalone selling
@@ -13,7 +13,10 @@
 --   points given away           Dr 6410 loyalty points awarded / Cr 2330
 --   points spent                Dr 2330 / Cr 4020 their share of what is deferred against the
 --                               points expected to be spent; when none remain, the rest Cr 4030
---   a gift card sold, reloaded  Dr the tender's control account (6420 when given away) / Cr 2310
+--   a gift card sold, reloaded  Dr 1105 sales clearing when sold in a sale (the order nets to zero),
+--                               or Dr 6420 when given away, or otherwise Dr the tender's control
+--                               account / Cr 2310
+--   a gift card loaded by a return  nothing: the refund already owes the card
 --   a gift card spent           Dr 2310 / Cr 4031 breakage, in proportion to what is spent
 --
 -- The value of a point and the two breakage estimates are the tenant accountant's settings. An
@@ -36,10 +39,16 @@ CREATE INDEX idx_drs_tenant_set_at ON deferred_revenue_settings (tenant_id, set_
 
 -- Every announcement customer-svc made about points, posted or waiting for the settings. The row
 -- is the consumer's dedupe as well: an event is recorded once.
+--   EARNED    points a sale earned            REDEEMED  points spent
+--   ADJUSTED  points awarded or adjusted by hand
+--   EXPIRED   a lapse the customer did not choose; its deferred income is breakage once nothing is
+--             outstanding
+--   REVERSED  points taken back because the sale that earned them was returned or voided; the
+--             deferral that went with them goes back to sales
 CREATE TABLE loyalty_events (
     tenant_id   UUID        NOT NULL,
     event_id    UUID        NOT NULL,
-    kind        VARCHAR(10) NOT NULL CHECK (kind IN ('EARNED','REDEEMED','ADJUSTED')),
+    kind        VARCHAR(10) NOT NULL,
     customer_id UUID,
     order_id    UUID,
     points      NUMERIC     NOT NULL,
@@ -48,7 +57,8 @@ CREATE TABLE loyalty_events (
     received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     posted_at   TIMESTAMPTZ,
     journal_id  UUID,
-    PRIMARY KEY (tenant_id, event_id)
+    PRIMARY KEY (tenant_id, event_id),
+    CONSTRAINT loyalty_events_kind_check CHECK (kind IN ('EARNED','REDEEMED','ADJUSTED','EXPIRED','REVERSED'))
 );
 CREATE INDEX idx_loyalty_events_waiting ON loyalty_events (tenant_id, received_at, event_id)
     WHERE posted_at IS NULL;
@@ -64,7 +74,7 @@ CREATE TABLE loyalty_point_pools (
 );
 
 -- The tenant's gift cards since the ledger began to follow them: what breakage may be recognised
--- against. Cards loaded before this migration are outside it, so they earn no breakage.
+-- against. A card loaded before that is outside it, so it earns no breakage.
 CREATE TABLE gift_card_pools (
     tenant_id  UUID        PRIMARY KEY,
     loaded     NUMERIC     NOT NULL CHECK (loaded >= 0),
@@ -75,6 +85,11 @@ CREATE TABLE gift_card_pools (
 
 -- A gift card load as order-svc announced it: one row per card transaction, so a load announced
 -- twice is posted once.
+--
+-- Where the value came from: order-svc's GiftCardLoaded names the order (order_id), the source, and a
+-- note. SALE is sold on a paid till sale and names the order; RETURN is loaded by a return's refund;
+-- a hand reason (GOODWILL, PROMOTION, COMPENSATION, MIGRATION) carries the manager's note. Null where
+-- the load named none of them.
 CREATE TABLE gift_card_loads (
     tenant_id      UUID        NOT NULL,
     transaction_id UUID        NOT NULL,
@@ -84,7 +99,15 @@ CREATE TABLE gift_card_loads (
     paid_by        VARCHAR(20) NOT NULL,
     amount         NUMERIC     NOT NULL CHECK (amount > 0),
     currency       CHAR(3)     NOT NULL,
-    journal_id     UUID        NOT NULL,
+    -- A gift card loaded by a return's refund is counted in the gift-card pool but posts nothing of
+    -- its own: the refund, announced by payment-svc, already credits the gift-card liability, and a
+    -- second posting would owe the cardholder twice. Such a load has no journal; every other load
+    -- still must.
+    journal_id     UUID,
     loaded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, transaction_id)
+    order_id       UUID,
+    source         TEXT,
+    note           TEXT,
+    PRIMARY KEY (tenant_id, transaction_id),
+    CONSTRAINT ck_gift_card_loads_journal CHECK (journal_id IS NOT NULL OR paid_by = 'RETURN')
 );

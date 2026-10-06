@@ -1,44 +1,16 @@
--- Merchandising: what gets shelf space, how much, and where it sits (07.17).
+-- Merchandising: what gets shelf space, how much, and where it sits.
 --
--- The domain the Review calls "essentially untouched": deciding what to stock, how much space it gets
--- and where it sits. Four things were genuinely absent — planograms and shelf layout, space planning
--- and category resets, own-brand, and the capacity that drives replenishment. Two others were already
--- built and had been graded absent: per-store assortment (V13's product_stores) and the new-line half
--- of range review (V24's lifecycle). Nothing here duplicates them.
+-- Deciding what to stock, how much space it gets and where it sits. The tables here are planograms and
+-- shelf layout, space planning and category resets, and the capacity that drives replenishment. The
+-- brand flag (brands.own_brand) and the shelf width of a unit (product_variants.facing_width_mm) are
+-- columns on the catalogue tables in V1__init.sql. Per-store assortment (product_stores,
+-- V13__product_store_assortment.sql) and the new-line half of range review (the item lifecycle in
+-- V1__init.sql) are not duplicated here.
 --
 -- It lives in product-svc because product-svc already answers "what do we range, and where" — it owns
 -- the catalogue and the per-store assortment. Capacity is published as an event for inventory-svc to
 -- project, the way catalog_lines_out already works, so replenishment reads a local table and no
 -- service joins across another's.
-
--- ── own-brand ───────────────────────────────────────────────────────────────────────────────────────
---
--- A brand the business owns rather than buys. It is one flag and it earns its place: own-brand changes
--- how a line is treated at almost every step — margin is the business's own rather than a supplier's,
--- a range review protects it against the brands beside it, a recall is the business's own
--- responsibility, and a planogram usually guarantees it a facing at eye level. A boolean here rather
--- than a brand "kind", because every other distinction a shop draws (premium, value, exclusive) is a
--- marketing label that changes, and this one is a fact about who owns the label.
-ALTER TABLE brands ADD COLUMN own_brand BOOLEAN NOT NULL DEFAULT false;
-
-COMMENT ON COLUMN brands.own_brand IS
-    'True for a brand the business owns. Changes margin, range protection and recall responsibility.';
-
--- ── the width a unit takes on a shelf ──────────────────────────────────────────────────────────────
---
--- Nothing in the catalogue carried this. Without it a planogram can be drawn but never checked: facings
--- times width either fits the shelf or does not, and that is the one arithmetic a layout has to pass.
---
--- Nullable on purpose. Most catalogues have gaps, and a planogram nobody can save because one line has
--- no measurement is worse than one whose width check covers what it can and says so. A position with no
--- width is placed and not checked.
-ALTER TABLE product_variants ADD COLUMN facing_width_mm INTEGER;
-
-ALTER TABLE product_variants ADD CONSTRAINT ck_variant_facing_width
-    CHECK (facing_width_mm IS NULL OR facing_width_mm BETWEEN 1 AND 5000);
-
-COMMENT ON COLUMN product_variants.facing_width_mm IS
-    'How wide one unit is as it faces the customer. Null means a layout using it cannot be width-checked.';
 
 -- ── fixtures: the physical furniture ───────────────────────────────────────────────────────────────
 --
@@ -222,6 +194,10 @@ CREATE INDEX idx_resets_tenant ON category_resets (tenant_id, scheduled_for DESC
 
 -- Which shelves the reset moves. A planogram belongs to at most one reset: two resets claiming the
 -- same shelf on different days is the contradiction this prevents being recorded at all.
+--
+-- No index on this table leads with tenant_id: the primary key is (reset_id, planogram_id) and
+-- uq_reset_planogram_once is on (planogram_id). Every read of it filters on tenant_id first, so only
+-- the index is missing. Adding one is a schema change, so it belongs in a later migration.
 CREATE TABLE category_reset_planograms (
     reset_id     UUID NOT NULL REFERENCES category_resets (id) ON DELETE CASCADE,
     planogram_id UUID NOT NULL REFERENCES planograms (id),

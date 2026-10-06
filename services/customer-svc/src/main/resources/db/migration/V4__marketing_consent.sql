@@ -12,9 +12,6 @@
 -- there are two tables: what is true now, and an append-only record of every time it changed, with
 -- who changed it, how, and what they were shown. The second one is the proof; the first is only a
 -- fast read of it.
---
--- The pre-existing customers.gdpr_consent_at said the same thing in one bit and one timestamp, so
--- it is carried across rather than abandoned: a shop that already has consent does not lose it.
 
 CREATE TABLE marketing_preferences (
     tenant_id   UUID        NOT NULL,
@@ -53,8 +50,13 @@ CREATE TABLE marketing_consent_log (
     actor_id    UUID,
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_consent_log_channel CHECK (channel IN ('EMAIL', 'SMS', 'PHONE', 'POST')),
+    -- PURPOSE_WITHDRAWN is the switch-off of each channel when the MARKETING purpose is withdrawn,
+    -- written on the same transaction as that withdrawal. It is its own source, so the evidence says
+    -- why the channel went off (the purpose) — never disguised as a preference-centre click, an
+    -- unsubscribe link or a member of staff.
     CONSTRAINT chk_consent_log_source CHECK (source IN (
-        'SIGNUP', 'CHECKOUT', 'PREFERENCE_CENTRE', 'STAFF', 'UNSUBSCRIBE_LINK', 'IMPORT'))
+        'SIGNUP', 'CHECKOUT', 'PREFERENCE_CENTRE', 'STAFF', 'UNSUBSCRIBE_LINK', 'IMPORT',
+        'PURPOSE_WITHDRAWN'))
 );
 CREATE INDEX idx_marketing_consent_log_customer
     ON marketing_consent_log (tenant_id, customer_id, recorded_at DESC);
@@ -71,15 +73,3 @@ CREATE TABLE marketing_unsubscribe_tokens (
 );
 CREATE INDEX idx_marketing_unsub_customer
     ON marketing_unsubscribe_tokens (tenant_id, customer_id);
-
--- Carry the old one-bit consent across. No log row is written for it: ids are minted in the service
--- and never in SQL, and inventing evidence of a wording nobody recorded would be worse than saying
--- plainly that this consent predates the record — which the preference's own date does.
--- A customer who had given it keeps it, on the email channel
--- and on the CONSENT basis, dated when it was given; everyone else starts with no preference row at
--- all, which reads as "no consent" and is the correct default.
-INSERT INTO marketing_preferences (tenant_id, customer_id, channel, granted, basis, updated_at)
-SELECT tenant_id, id, 'EMAIL', TRUE, 'CONSENT', gdpr_consent_at
-  FROM customers
- WHERE gdpr_consent_at IS NOT NULL
-   AND status <> 'ANONYMIZED';

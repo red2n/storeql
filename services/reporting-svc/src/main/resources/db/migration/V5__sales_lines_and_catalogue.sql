@@ -2,9 +2,9 @@
 --
 -- sales_facts knows a sale as one row: an order, a total, a currency. A category report needs the
 -- sale line by line — which variant, how many, for how much — and the catalogue's own word on where
--- each variant sits. Both are projections of events already published: OrderConfirmed now carries
--- its lines, and product-svc has announced ProductCategorised (a product's category path, leaf
--- first, root last, and the variants it names) and VariantCreated since PR #38.
+-- each variant sits. Both are projections of events already published: OrderConfirmed carries its
+-- lines, and product-svc announces ProductCategorised (a product's category path, leaf first, root
+-- last, and the variants it names) and VariantCreated.
 --
 -- What is NOT here is a category's name. The report answers in category ids; the catalogue that
 -- owns the names is product-svc, and the app reads them from it. A copy of the names here would be
@@ -20,7 +20,8 @@ CREATE TABLE sales_line_facts (
     qty          NUMERIC(18,3) NOT NULL,
     -- Null when the line was priced off-platform; the line total is always known.
     unit_price   NUMERIC(18,4),
-    line_total   NUMERIC(18,2) NOT NULL,
+    -- At the currency's minor units, as sales_facts keeps money.
+    line_total   NUMERIC(18,4) NOT NULL,
     currency     TEXT          NOT NULL,
     confirmed_at TIMESTAMPTZ   NOT NULL,
 

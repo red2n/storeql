@@ -1,13 +1,13 @@
--- Completing two rows that were partial (07.18): assortment by store, and range review.
+-- Assortment by store, and range review.
 --
--- Both had a real half already. V13's product_stores records which stores carry a product, with the
--- sensible default that a product with no rows sells everywhere. V24's lifecycle launches, discontinues
--- and reinstates a line against a date. Neither is touched here.
+-- Both build on what the catalogue already holds. product_stores (V13__product_store_assortment.sql)
+-- records which stores carry a product, with the sensible default that a product with no rows sells
+-- everywhere. The item lifecycle (products.status, launch_on and discontinued_at in V1__init.sql)
+-- launches, discontinues and reinstates a line against a date. Neither is replaced here.
 --
--- What was missing in each case was the discipline around the data, and it is the same shape twice: a
--- decision with a date, a reason, and the comparison it was made against. Today a line is ranged or
--- de-listed store by store, on somebody's judgement, and nothing records why or what it was weighed
--- against. That is the gap.
+-- What is added is the discipline around the data, and it is the same shape twice: a decision with a
+-- date, a reason, and the comparison it was made against. A line is ranged or de-listed store by
+-- store, on somebody's judgement; this records why, and what it was weighed against.
 
 -- ── clusters: range by a group of stores, not one at a time ─────────────────────────────────────────
 --
@@ -46,57 +46,18 @@ CREATE TABLE store_cluster_members (
 
 CREATE INDEX idx_cluster_members_store ON store_cluster_members (tenant_id, store_id);
 
--- ── assortment changes: the decision, dated, with a reason ──────────────────────────────────────────
---
--- product_stores stays exactly as it is: the range as it stands today, which is what the till and the
--- storefront ask. This table is the decision log in front of it — append-only, because the point is to
--- be able to answer "who took this line out of the Scottish shops, when, and why" months later, and an
--- edited row cannot.
---
--- Two things follow from having dates. A change can be recorded BEFORE it takes effect, which is how a
--- range is planned rather than typed on the morning it happens; and applying it is a separate step, so
--- the log is the intent and product_stores is the state. `applied_at` is what distinguishes them.
-CREATE TABLE assortment_changes (
-    id             UUID        PRIMARY KEY,
-    tenant_id      UUID        NOT NULL,
-    product_id     UUID        NOT NULL REFERENCES products (id) ON DELETE CASCADE,
-    -- Exactly one of these: a change is aimed at one store or at a cluster of them.
-    store_id       UUID,
-    cluster_id     UUID        REFERENCES store_clusters (id),
-    action         TEXT        NOT NULL,
-    effective_from DATE        NOT NULL,
-    -- Why. Required, and that is the point of the table: a de-list with no reason is the thing this row
-    -- exists to stop being possible.
-    reason         TEXT        NOT NULL,
-    decided_by     UUID        NOT NULL,
-    created_at     TIMESTAMPTZ NOT NULL,
-    -- When the change was actually pushed into product_stores. Null until then.
-    applied_at     TIMESTAMPTZ,
-    -- The review that produced it, when it came from one rather than from a single decision.
-    review_id      UUID,
+COMMENT ON TABLE store_clusters IS
+    'A named group of stores to range against. A store may belong to several: groupings overlap.';
 
-    CONSTRAINT ck_assortment_action CHECK (action IN ('LIST', 'DELIST')),
-    CONSTRAINT ck_assortment_target CHECK (
-        (store_id IS NOT NULL AND cluster_id IS NULL)
-        OR (store_id IS NULL AND cluster_id IS NOT NULL)
-    ),
-    CONSTRAINT ck_assortment_reason CHECK (length(btrim(reason)) > 0)
-);
-
-CREATE INDEX idx_assortment_changes_product
-    ON assortment_changes (tenant_id, product_id, effective_from DESC);
--- The sweep that applies what is due reads this: everything dated on or before today, not yet applied.
-CREATE INDEX idx_assortment_changes_pending
-    ON assortment_changes (tenant_id, effective_from)
-    WHERE applied_at IS NULL;
-
--- ── range review: the comparison behind an add or a drop ────────────────────────────────────────────
+-- ── range reviews: the comparison behind an add or a drop ────────────────────────────────────────────
 --
--- The half that was missing. A review looks at one category over a period, ranks its lines on what they
--- actually did, and produces the decisions a buyer signs off. Its value is not the decision — the
--- lifecycle could already launch and discontinue — it is that the figures the decision was taken on are
--- kept beside it. "We de-listed this because it was bottom of the category on margin, and here is the
--- number" is a different thing from "somebody de-listed this".
+-- A review looks at one category over a period, ranks its lines on what they actually did, and produces
+-- the decisions a buyer signs off. Its value is not the decision — the lifecycle could already launch and
+-- discontinue — it is that the figures the decision was taken on are kept beside it. "We de-listed this
+-- because it was bottom of the category on margin, and here is the number" is a different thing from
+-- "somebody de-listed this".
+--
+-- Declared before assortment_changes, which refers to it.
 CREATE TABLE range_reviews (
     id          UUID        PRIMARY KEY,
     tenant_id   UUID        NOT NULL,
@@ -120,12 +81,114 @@ CREATE TABLE range_reviews (
 CREATE INDEX idx_range_reviews_category
     ON range_reviews (tenant_id, category_id, period_from DESC);
 
--- One line under review, with the figures it was judged on.
+COMMENT ON TABLE range_reviews IS
+    'A category reviewed over a period. Its worth is the figures kept beside each decision.';
+
+-- ── assortment changes: the decision, dated, with a reason ──────────────────────────────────────────
+--
+-- product_stores stays exactly as it is: the range as it stands today, which is what the till and the
+-- storefront ask. This table is the decision log in front of it. A decision (the line, the action, its
+-- date, the reason and who decided) is written once and never edited, so the question "who took this
+-- line out of the Scottish shops, when, and why" can be answered months later. Only the sweep stamps
+-- an outcome on it: applied_at when the change is pushed, or refused_at when it is closed for good.
+--
+-- Two things follow from having dates. A change can be recorded BEFORE it takes effect, which is how a
+-- range is planned rather than typed on the morning it happens; and applying it is a separate step, so
+-- the log is the intent and product_stores is the state. `applied_at` is what distinguishes them.
+--
+-- A range change the sweep refuses for good is closed, not left due for ever. A de-list that would take a
+-- line out of the last stores it is sold at can never be applied as it reads: no product_stores rows
+-- means every store, the opposite of a de-list. It is refused when it is recorded, judged on the line's
+-- whole plan, but the range can still move under it afterwards — a PUT of the product's stores, another
+-- change recorded later, a store added to the cluster it aims at — and the sweep would then meet it on
+-- every run, refuse it every time, and it would stay due for ever. So the sweep closes it, once, with its
+-- reason: refused_at is set in the same transaction that judged it, with the product row locked, and it
+-- is never due again. A change is applied or refused, never both. The other refusals (a de-list of a line
+-- sold everywhere, a held manager's listing of a line now sold everywhere, an empty cluster) still leave a
+-- change due: a range or a membership can still allow those.
+CREATE TABLE assortment_changes (
+    id             UUID        PRIMARY KEY,
+    tenant_id      UUID        NOT NULL,
+    product_id     UUID        NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+    -- Exactly one of these: a change is aimed at one store or at a cluster of them.
+    store_id       UUID,
+    cluster_id     UUID        REFERENCES store_clusters (id),
+    action         TEXT        NOT NULL,
+    effective_from DATE        NOT NULL,
+    -- Why. Required, and that is the point of the table: a de-list with no reason is the thing this row
+    -- exists to stop being possible.
+    reason         TEXT        NOT NULL,
+    decided_by     UUID        NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL,
+    -- When the change was actually pushed into product_stores. Null until then.
+    applied_at     TIMESTAMPTZ,
+    -- The review that produced it, when it came from one rather than from a single decision.
+    review_id      UUID,
+    -- Decided by a manager held to stores. Such a manager may change a line's range only at their own
+    -- stores, and never move it to or from "every store" (no product_stores rows): that is for an owner or
+    -- a manager of the whole business. The change is judged when it is recorded, but it is applied on its
+    -- own day, and the range may have moved in between — a line ranged to another shop when a branch
+    -- manager planned to list it at theirs may be sold everywhere by then, and listing it would take it off
+    -- every other shelf. So the change keeps who could make it, and the sweep judges it again on the range
+    -- it finds. false (the default) reads as a business-wide decision.
+    held_to_stores BOOLEAN     NOT NULL DEFAULT false,
+    -- When the sweep closed the change as refused for good, with the refusal it was closed with. The three
+    -- are set together or not at all, and a change is never both applied and refused.
+    refused_at     TIMESTAMPTZ,
+    refusal_code   TEXT,
+    refusal_detail TEXT,
+
+    CONSTRAINT ck_assortment_action CHECK (action IN ('LIST', 'DELIST')),
+    CONSTRAINT ck_assortment_target CHECK (
+        (store_id IS NOT NULL AND cluster_id IS NULL)
+        OR (store_id IS NULL AND cluster_id IS NOT NULL)
+    ),
+    CONSTRAINT ck_assortment_reason CHECK (length(btrim(reason)) > 0),
+    CONSTRAINT fk_assortment_change_review
+        FOREIGN KEY (review_id) REFERENCES range_reviews (id),
+    CONSTRAINT ck_assortment_change_refusal CHECK (
+        (refused_at IS NULL AND refusal_code IS NULL AND refusal_detail IS NULL)
+        OR (refused_at IS NOT NULL AND length(btrim(refusal_code)) > 0
+            AND length(btrim(refusal_detail)) > 0)
+    ),
+    CONSTRAINT ck_assortment_change_settled_once CHECK (
+        refused_at IS NULL OR applied_at IS NULL
+    )
+);
+
+CREATE INDEX idx_assortment_changes_product
+    ON assortment_changes (tenant_id, product_id, effective_from DESC);
+-- The sweep that applies what is due reads this: everything dated on or before today that is neither
+-- applied nor closed as refused.
+CREATE INDEX idx_assortment_changes_pending
+    ON assortment_changes (tenant_id, effective_from)
+    WHERE applied_at IS NULL AND refused_at IS NULL;
+
+-- The text below says "append-only", which the table does not enforce: the sweep stamps applied_at,
+-- refused_at and the refusal columns on a row after it is written (AssortmentRepository). Nothing in
+-- the schema stops an UPDATE. The text is left as it is because changing a COMMENT ON changes the
+-- schema's catalogue.
+COMMENT ON TABLE assortment_changes IS
+    'The dated, reasoned decision log in front of product_stores. Append-only; applied_at marks the push.';
+COMMENT ON COLUMN assortment_changes.held_to_stores IS
+    'Decided by a manager held to stores: never applied so as to move the line to or from every store.';
+COMMENT ON COLUMN assortment_changes.refused_at IS
+    'When the sweep closed the change as refused for good (a de-list of a line''s last stores). Never due again.';
+COMMENT ON COLUMN assortment_changes.refusal_code IS
+    'The refusal it was closed with, e.g. ASSORTMENT_LAST_STORE.';
+COMMENT ON COLUMN assortment_changes.refusal_detail IS
+    'The sentence it was closed with, as the sweep reported it.';
+
+-- ── range review lines: one line under review, with the figures it was judged on ─────────────────────
 --
 -- The figures are a SNAPSHOT supplied when the line is added, not a live read. Deliberate: sales and
 -- margin belong to order-svc and reporting-svc, and product-svc does not read another service's tables.
 -- A snapshot is also the more useful record — the decision was taken on the numbers as they stood, and
 -- a report re-run next year would show different ones and make the decision look arbitrary.
+--
+-- No index on this table leads with tenant_id: the indexes are (review_id, variant_id) and
+-- (review_id, rank_in_category). Every read and update of it filters on tenant_id first, so only the
+-- index is missing. Adding one is a schema change, so it belongs in a later migration.
 CREATE TABLE range_review_lines (
     id            UUID    PRIMARY KEY,
     tenant_id     UUID    NOT NULL,
@@ -133,8 +196,14 @@ CREATE TABLE range_review_lines (
     variant_id    UUID    NOT NULL REFERENCES product_variants (id),
     -- What it did over the period, as recorded at review time.
     units_sold    NUMERIC(14, 3),
-    revenue       NUMERIC(14, 2),
-    margin        NUMERIC(14, 2),
+    -- Money in the line's own currency. A figure's scale is its currency's minor units (ISO 4217), and the
+    -- column holds four decimal places, the most any currency gives (CLF, UYW), so every currency's minor
+    -- units fit. product-svc holds each figure to its currency's scale when the line is added
+    -- (AssortmentService.addLines, through common-service Fx.minorUnits): a figure with more is refused,
+    -- never rounded, and the answer writes each at its currency's minor units. Fourteen whole digits, the
+    -- most a figure may carry (AssortmentService refuses one of 10^14 or more).
+    revenue       NUMERIC(18, 4),
+    margin        NUMERIC(18, 4),
     currency      CHAR(3),
     -- Where it came in the category on whatever the buyer ranked by. 1 is best.
     rank_in_category INTEGER,
@@ -160,17 +229,9 @@ CREATE TABLE range_review_lines (
 CREATE UNIQUE INDEX uq_review_line ON range_review_lines (review_id, variant_id);
 CREATE INDEX idx_review_lines_review ON range_review_lines (review_id, rank_in_category);
 
--- The link from a decision to the change it produced, so a de-listed line traces back to the review and
--- the figures. Added now rather than left implicit: without it the two tables are two stories.
-ALTER TABLE assortment_changes
-    ADD CONSTRAINT fk_assortment_change_review
-    FOREIGN KEY (review_id) REFERENCES range_reviews (id);
-
-COMMENT ON TABLE store_clusters IS
-    'A named group of stores to range against. A store may belong to several: groupings overlap.';
-COMMENT ON TABLE assortment_changes IS
-    'The dated, reasoned decision log in front of product_stores. Append-only; applied_at marks the push.';
-COMMENT ON TABLE range_reviews IS
-    'A category reviewed over a period. Its worth is the figures kept beside each decision.';
 COMMENT ON COLUMN range_review_lines.units_sold IS
     'A snapshot at review time, not a live read: product-svc does not read another service''s tables.';
+COMMENT ON COLUMN range_review_lines.revenue IS
+    'Money in the line''s currency, at that currency''s minor units (ISO 4217); checked by product-svc.';
+COMMENT ON COLUMN range_review_lines.margin IS
+    'Money in the line''s currency, at that currency''s minor units (ISO 4217); checked by product-svc.';

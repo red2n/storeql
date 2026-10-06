@@ -51,12 +51,3 @@ CREATE INDEX idx_transfer_proposal_runs_wh ON transfer_proposal_runs (tenant_id,
 CREATE UNIQUE INDEX uq_transfer_proposal_runs_key
     ON transfer_proposal_runs (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
--- A transfer says what raised it; a proposed one starts as a DRAFT a person releases.
-ALTER TABLE transfer_orders ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL';
-ALTER TABLE transfer_orders ADD COLUMN proposal_run_id UUID;
-ALTER TABLE transfer_orders ADD CONSTRAINT chk_transfer_source CHECK (source IN ('MANUAL','PROPOSAL'));
-ALTER TABLE transfer_orders DROP CONSTRAINT chk_transfer_status;
-ALTER TABLE transfer_orders ADD CONSTRAINT chk_transfer_status
-    CHECK (status IN ('DRAFT','PENDING','SHIPPED','RECEIVED','CANCELLED'));
-CREATE INDEX idx_transfer_orders_to ON transfer_orders (tenant_id, to_store_id, status);
-ALTER TABLE transfer_order_lines ADD COLUMN reason TEXT;

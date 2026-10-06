@@ -1,4 +1,4 @@
--- Poland: a buyer fetches its invoices, and they arrive as FA(3) (closing the code half of 07.13).
+-- Poland: a buyer fetches its invoices, and they arrive as FA(3) (readiness review 07.13).
 --
 -- Every other network on this platform DELIVERS: an access point pushes what it received, France's
 -- platform hands over what was deposited. KSeF does neither. A Polish buyer's invoices sit in the
@@ -6,21 +6,12 @@
 -- 16931 document — KSeF takes and gives only its own structure.
 --
 -- Two consequences, and both are here:
---   * FA(3) becomes a syntax this inbox accepts. `shared/einvoice`'s Fa3Reader reads it into the same
---     model a UBL or CII document produces, so the checks, the supplier matching, the three-way match
---     and the posting all work on a Polish invoice without knowing it is one.
+--   * FA(3) is a syntax this inbox accepts (supplier_einvoices.syntax, V15). shared/einvoice's
+--     Fa3Reader reads it into the same model a UBL or CII document produces, so the checks, the
+--     supplier matching, the three-way match and the posting all work on a Polish invoice without
+--     knowing it is one.
 --   * the inbox needs a credential of its own. Sending is order-svc's; fetching is this service's, and
 --     the business's KSeF token is sealed here under the deployment's key, never shown again.
-
-ALTER TABLE supplier_einvoices
-    DROP CONSTRAINT chk_supplier_einvoice_syntax,
-    ADD CONSTRAINT chk_supplier_einvoice_syntax
-        CHECK (syntax IN ('UBL', 'CII', 'FA3'));
-
-ALTER TABLE supplier_einvoices
-    DROP CONSTRAINT chk_supplier_einvoice_channel,
-    ADD CONSTRAINT chk_supplier_einvoice_channel
-        CHECK (channel IN ('UPLOAD', 'PEPPOL', 'FR_PDP', 'SIMULATED', 'KSEF'));
 
 -- Where this business fetches from, and what it signs in with. One row per business.
 CREATE TABLE einvoice_inbox_settings (

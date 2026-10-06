@@ -28,15 +28,35 @@ CREATE TABLE recalls (
     ended_by         UUID,
     ended_at         TIMESTAMPTZ,
     end_notes        TEXT,
+    -- What the notice offers and where to turn. A withdrawal carries none of it.
+    remedies             TEXT,
+    single_remedy_reason TEXT,
+    contact_phone        TEXT,
+    contact_url          TEXT,
+    -- Sales on or after this day are looked for; NULL means every sale of the packs in scope.
+    sold_from            DATE,
     CONSTRAINT chk_recall_kind CHECK (kind IN ('WITHDRAWAL', 'RECALL')),
     CONSTRAINT chk_recall_hazard CHECK (hazard IN (
         'MICROBIOLOGICAL', 'ALLERGEN', 'FOREIGN_BODY', 'CHEMICAL', 'LABELLING', 'QUALITY', 'OTHER')),
-    CONSTRAINT chk_recall_source CHECK (source IN ('SUPPLIER', 'FSA', 'FSS', 'INTERNAL', 'OTHER')),
+    -- Country-neutral sources sit beside the UK regulators (FSA, FSS): REGULATOR is whichever authority
+    -- the business answers to (the notice's own reference says which); MANUFACTURER and SUPPLIER say who
+    -- issued the notice; INTERNAL is found in house.
+    CONSTRAINT chk_recall_source CHECK (source IN (
+        'SUPPLIER', 'MANUFACTURER', 'REGULATOR', 'FSA', 'FSS', 'INTERNAL', 'OTHER')),
     CONSTRAINT chk_recall_status CHECK (status IN ('OPEN', 'CLOSED', 'CANCELLED')),
     CONSTRAINT chk_recall_notice CHECK (kind <> 'RECALL' OR customer_notice IS NOT NULL),
     CONSTRAINT chk_recall_ended CHECK ((status = 'OPEN') = (ended_at IS NULL)),
-    CONSTRAINT chk_recall_ended_by CHECK ((ended_at IS NULL) = (ended_by IS NULL))
+    CONSTRAINT chk_recall_ended_by CHECK ((ended_at IS NULL) = (ended_by IS NULL)),
+    CONSTRAINT chk_recall_remedies CHECK (
+        remedies IS NULL OR remedies ~ '^(REPAIR|REPLACEMENT|REFUND)(,(REPAIR|REPLACEMENT|REFUND))*$')
 );
+-- A recall offers a remedy and names a contact. NOT VALID: every row written, including an update, is
+-- checked; a row already present when the check is added is not re-checked. CREATE TABLE accepts NOT
+-- VALID but creates a validated constraint (PostgreSQL 16), so these two are added after the table.
+ALTER TABLE recalls ADD CONSTRAINT chk_recall_offers_remedy CHECK (
+    kind <> 'RECALL' OR remedies IS NOT NULL) NOT VALID;
+ALTER TABLE recalls ADD CONSTRAINT chk_recall_names_contact CHECK (
+    kind <> 'RECALL' OR contact_phone IS NOT NULL OR contact_url IS NOT NULL) NOT VALID;
 -- One record per notice: a retried open finds the recall it already made instead of a second one.
 CREATE UNIQUE INDEX uq_recalls_reference ON recalls (tenant_id, lower(reference));
 CREATE INDEX idx_recalls_status ON recalls (tenant_id, status, opened_at DESC, id DESC);

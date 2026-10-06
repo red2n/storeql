@@ -99,8 +99,8 @@ public class WaveRepository extends BaseOutboxRepository {
   }
 
   /**
-   * The order is cancelled, or handed over in full: it waits no more, and a confirmation that
-   * arrives after this cannot make it wait again.
+   * The order is cancelled, or fulfilled in full: it waits no more, and a confirmation that arrives
+   * after this cannot make it wait again.
    */
   public void forget(UUID tenantId, UUID orderId, boolean couldHaveWaited) {
     inTx(

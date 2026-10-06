@@ -1,4 +1,4 @@
--- 01.12: product safety information for online offers.
+-- Product safety information for online offers.
 --
 -- The General Product Safety Regulation ((EU) 2023/988, applying since 13 December 2024) art.19
 -- requires an online offer to show, clearly and visibly: the manufacturer's name, postal address and

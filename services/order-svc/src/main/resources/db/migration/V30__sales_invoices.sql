@@ -4,12 +4,7 @@
 -- Germany a structured EN 16931 one, in India one reported to the Invoice Registration Portal, and
 -- in the UK a full VAT invoice on request. The receipt the till prints is not that document: it
 -- names no buyer and is numbered per store, where a business's invoices run in one series.
-
--- What the quote taxed each line at. The line already kept its VAT amount (18.5); the rate cannot
--- be recovered from a rounded amount on a small line, and an invoice states it.
-ALTER TABLE order_items
-    ADD COLUMN vat_code TEXT,
-    ADD COLUMN vat_rate NUMERIC(7,4);   -- the fraction the quote applied: 0.2000 for 20%
+-- The VAT code and rate each line was quoted at are on order_items (V1__init.sql).
 
 -- One counter per series and year, moved under its row lock inside the issuing transaction, so a
 -- rolled-back issue gives its number back: the same gapless guarantee as receipt_series (V16).

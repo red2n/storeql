@@ -4,19 +4,12 @@
 -- INVOICED. It is the control that stops a business paying for goods it did not order, did not get,
 -- or was charged the wrong price for — and it is the reason procurement software exists at all.
 --
--- Two of those three legs only became trustworthy on this branch, which is why this could not have
--- been built earlier:
+--   ordered   the order's total (SJ-D22), which the purchase order carries (V1).
+--   received  the order's receipts, by quantity (partial receipt, V1 and goods_receipt_lines).
+--   invoiced  this file.
 --
---   ordered   SJ-D22. total_net/vat/gross were inserted as zero and never written again, so every
---             purchase order in the product reported a value of 0.00. A match against that would
---             have compared every invoice to nothing.
---   received  Partial receipt. A goods receipt used to close the whole order regardless of quantity
---             and then REFUSE the next delivery, so "how much has actually arrived" could not be
---             represented for any order that came in more than one lorry.
---   invoiced  This migration. Nothing existed.
---
--- intercompany_invoices is deliberately untouched and unrelated: that is store-to-store inside one
--- tenant, with no supplier and nothing to match against.
+-- intercompany_invoices is deliberately untouched and unrelated (V1): that is store-to-store inside
+-- one tenant, with no supplier and nothing to match against.
 
 CREATE TABLE supplier_invoices (
     id              UUID        PRIMARY KEY,
@@ -32,22 +25,42 @@ CREATE TABLE supplier_invoices (
     -- business pays once too often.
     invoice_number  TEXT        NOT NULL,
     invoice_date    DATE        NOT NULL,
+    -- invoice_date + the supplier's payment terms. The one figure accounts payable actually
+    -- schedules by.
+    due_date        DATE,
     currency        CHAR(3)     NOT NULL,
-    -- Unconstrained NUMERIC, per SJ-D25: NUMERIC(14,2) is a statement about sterling rather than
-    -- about money, and silently truncated the third decimal of a dinar.
+    -- Unconstrained NUMERIC, per SJ-D25: the currency decides the precision, not the column.
     net_amount      NUMERIC     NOT NULL,
     vat_amount      NUMERIC     NOT NULL DEFAULT 0,
     gross_amount    NUMERIC     NOT NULL,
+    -- The total printed on the supplier's document, when the capturer keys it. Compared with the sum
+    -- of the supplier's own lines plus VAT; a disagreement is a header variance, because an invoice
+    -- that does not add up is wrong before any line is looked at.
+    stated_gross    NUMERIC,
+    -- Header-level variances, comma-separated like the line-level ones: TOTAL_MISMATCH.
+    header_variances TEXT NOT NULL DEFAULT '',
     -- MATCHED   every line agreed with the order and the receipt, inside tolerance
     -- FLAGGED    at least one line did not — see supplier_invoice_lines.variances
+    -- APPROVED   a flagged invoice a person released for payment
+    -- REJECTED   a flagged invoice a person refused: its posting is reversed and the quantities it
+    --            billed for are freed for a corrected invoice
     -- The invoice is stored either way. Flagging does not block capture: an invoice that arrived is
     -- a fact, and refusing to record it because it disagrees with the order loses the evidence of
     -- the disagreement.
     status          VARCHAR(20) NOT NULL,
     matched_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- When the AP posting was written. Set at capture for every invoice.
+    posted_at       TIMESTAMPTZ,
+    -- The decision on a flagged invoice: who, when and why.
+    resolved_at       TIMESTAMPTZ,
+    resolved_by       UUID,
+    resolution_reason TEXT,
+    -- When the payment run that settled it paid it, and the run (payment_runs, V10).
+    paid_at         TIMESTAMPTZ,
+    payment_run_id  UUID,
     created_by      UUID,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT chk_si_status CHECK (status IN ('MATCHED','FLAGGED'))
+    CONSTRAINT chk_si_status CHECK (status IN ('MATCHED','FLAGGED','APPROVED','REJECTED'))
 );
 
 -- The duplicate-payment guard. Case-insensitive because a supplier's own reference is printed on

@@ -26,8 +26,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The scheduled purge of delivered outbox rows, on the schema tenant-svc migrates: it deletes only
- * what is past its cutoff, in bounded batches, and the index of V43__outbox_purge_index.sql is what
- * lets a batch find its rows without reading the table.
+ * what is past its cutoff, in bounded batches, and the idx_outbox_published index of V1__init.sql
+ * is what lets a batch find its rows without reading the table.
  */
 class OutboxPurgeIndexIT {
 

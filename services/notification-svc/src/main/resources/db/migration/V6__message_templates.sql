@@ -38,9 +38,3 @@ CREATE TABLE message_settings (
     updated_by       UUID        NOT NULL,
     CONSTRAINT chk_message_settings_language CHECK (default_language ~ '^[a-z]{2,3}$')
 );
-
--- What each message was written in, and from which words: 'default' for the platform's own, 'v3'
--- for the business's third version. NULL for a message sent before templates.
-ALTER TABLE notification_log
-    ADD COLUMN language TEXT,
-    ADD COLUMN template TEXT;

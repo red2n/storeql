@@ -1,9 +1,10 @@
 -- payment_intents: the record of asking a payment service provider to take money.
 --
--- Until now payment-svc had no such record. POST /payments/online validated the order and wrote a
--- payment_tenders row directly, so a tender existed for money nobody had ever authorised. The
--- table is named in PRD §7 as one of payment-svc's own ("payments, refunds, payment_intents") and
--- was never built; this is it.
+-- A payment_tenders row is written only for money that was taken: by a provider when an intent
+-- captures, or recorded at the till (cash, store credit, a card machine's approval). An intent is
+-- the asking, so it has a record of its own from the start, and an intent that never captures
+-- leaves no tender behind. PRD §3.4 names it among payment-svc's own tables ("payments, refunds,
+-- payment_intents").
 --
 -- Why a separate table rather than more columns on payment_tenders: a tender is an append-only
 -- statement that money WAS taken (golden rule #8), while an intent is mutable by nature — it moves
@@ -15,13 +16,13 @@ CREATE TABLE IF NOT EXISTS payment_intents (
     id               UUID          NOT NULL,
     tenant_id        UUID          NOT NULL,
     order_id         UUID          NOT NULL,
-    -- Denormalised from the order, exactly as payment_tenders.store_id is (V4): this endpoint has
+    -- Denormalised from the order, exactly as payment_tenders.store_id is: this endpoint has
     -- no staff role to trust, so the store must come from the order rather than the request.
     store_id         UUID,
 
-    -- Which provider holds the money. PRD §11 settles the v1 set as Razorpay (India) + Stripe;
-    -- MANUAL is the no-provider mode that preserves today's behaviour for local dev and for
-    -- tenants who only ever take cash at the till.
+    -- Which provider holds the money. PRD §11 assumes the v1 set is Razorpay (India) + Stripe, to
+    -- be confirmed; MANUAL is the no-provider mode for local dev and for tenants who only ever take
+    -- cash at the till.
     provider         VARCHAR(30)   NOT NULL,
     -- The provider's own id for this intent (Stripe `pi_…`, Razorpay `order_…`). Null only in the
     -- window between inserting the row and the provider call returning — see the unique index.
@@ -84,7 +85,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_intents_idempotency
     ON payment_intents (tenant_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 
--- Sweeping intents abandoned mid-SCA: the customer closed the tab and the funds are still held.
+-- Intents left open mid-SCA, the customer having closed the tab while the funds are still held.
+-- No sweep reads this yet; it is the lookup such a sweep would use.
 CREATE INDEX IF NOT EXISTS idx_payment_intents_stale
     ON payment_intents (status, created_at)
     WHERE status IN ('REQUIRES_ACTION', 'AUTHORIZED');

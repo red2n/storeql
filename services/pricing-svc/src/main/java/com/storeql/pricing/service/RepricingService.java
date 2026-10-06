@@ -355,9 +355,9 @@ public class RepricingService {
               + " days ago; run the rule again or dismiss the proposal");
     }
     // The list's own currency sets the price's scale, as every other list-price write is held to
-    // it (priceIn): the proposal column keeps four places, and V16 left the price column
-    // unconstrained, so 7.9900 written as it was read would be the price the till and the basket
-    // quote say back.
+    // it (priceIn): the proposal column keeps four places, and the list item's price column is
+    // unconstrained NUMERIC (V1__init.sql), so 7.9900 written as it was read would be the price the
+    // till and the basket quote say back.
     PriceList list =
         pricing
             .findPriceList(ctx.tenantId(), p.priceListId())

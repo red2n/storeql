@@ -1,10 +1,11 @@
--- Four mandatory capabilities the readiness review graded absent, all of them law rather than
--- product strategy: allergen declaration, country of origin, age-restricted sales, and selling
--- goods by weight.
+-- Four capabilities a retailer must be able to state about an item before it may be offered, all of
+-- them law rather than product strategy: allergen declaration, country of origin, age-restricted
+-- sales, and selling goods by weight.
 --
--- They land together because they are the same shape -- statements a retailer must be able to make
--- about an item before it may be offered -- and because three of the four are attributes of a
--- variant, so splitting them would mean three migrations touching one table.
+-- The variant columns these rules read (country_of_origin, allergen_status, restriction_category,
+-- sold_by, net content, tare, catch weight) are on product_variants in V1__init.sql, because three of
+-- the four are attributes of a variant. This file holds the tables: the allergen list and the
+-- declarations made against it, and the age rules that apply per country.
 
 -- ---------------------------------------------------------------------------------------------
 -- 1. Allergens.  Natasha's Law (Food Information (Amendment) (England) Regulations 2019) and
@@ -72,45 +73,61 @@ CREATE INDEX idx_variant_allergens_by_allergen
 -- ---------------------------------------------------------------------------------------------
 
 -- Statutory defaults, system-wide reference data like the allergen list.
+--
+-- A rule holds a minimum age and, where a statute refuses sale by date of birth rather than by age, a
+-- born-before cut-off beside it. The generational tobacco ban (Tobacco and Vapes Act 2026, Royal Assent
+-- 29 April 2026) makes it an offence to sell tobacco to anyone born on or after 1 January 2009, however
+-- old they are. That is a date of birth, not an age, and a rule table that only holds a minimum age
+-- cannot write it: in 2040 a 31-year-old born in 2009 is still refused. The minimum age stays — it is
+-- still the rule for everyone born before the cut-off — and the cut-off sits beside it with the day it
+-- takes effect. Anyone the cut-off catches is under 18 until 1 January 2027, so the minimum age already
+-- refuses them until then; the effective date keeps the till's prompt honest rather than changing who
+-- is served.
 CREATE TABLE age_restriction_rules (
-    country     CHAR(2) NOT NULL,
-    category    TEXT    NOT NULL,
-    minimum_age INT     NOT NULL,
-    note        TEXT,
+    country          CHAR(2) NOT NULL,
+    category         TEXT    NOT NULL,
+    minimum_age      INT     NOT NULL,
+    note             TEXT,
+    -- Refuse anyone born on or after this date, whatever their age.
+    born_before      DATE,
+    -- The day the cut-off takes effect; a statutory cut-off always has one.
+    born_before_from DATE,
     CONSTRAINT pk_age_rules  PRIMARY KEY (country, category),
-    CONSTRAINT chk_age_range CHECK (minimum_age BETWEEN 0 AND 120)
+    CONSTRAINT chk_age_range CHECK (minimum_age BETWEEN 0 AND 120),
+    CONSTRAINT chk_age_born_before_pair CHECK ((born_before IS NULL) = (born_before_from IS NULL))
 );
 
-INSERT INTO age_restriction_rules (country, category, minimum_age, note) VALUES
- ('GB','ALCOHOL',18,'Licensing Act 2003'),
- ('GB','TOBACCO',18,'Children and Young Persons (Protection from Tobacco) Act 1991'),
- ('GB','NICOTINE_VAPE',18,'Nicotine Inhaling Products (Age of Sale) Regulations 2015'),
- ('GB','KNIVES',18,'Criminal Justice Act 1988 s.141A'),
- ('GB','CORROSIVES',18,'Offensive Weapons Act 2019'),
- ('GB','SOLVENTS',18,'Intoxicating Substances (Supply) Act 1985'),
- ('GB','FIREWORKS',18,'Fireworks Regulations 2004'),
- ('GB','LOTTERY',18,'raised from 16 in October 2021'),
- ('GB','VIDEO_18',18,'Video Recordings Act 1984'),
- ('GB','PETROL',16,NULL),
- ('US','ALCOHOL',21,'National Minimum Drinking Age Act 1984'),
- ('US','TOBACCO',21,'federal Tobacco 21, December 2019'),
- ('US','NICOTINE_VAPE',21,'federal Tobacco 21, December 2019'),
- ('US','FIREWORKS',18,'varies by state -- override per tenant'),
- ('JP','ALCOHOL',20,'Minor Drinking Prohibition Act -- unchanged by the 2022 majority reform'),
- ('JP','TOBACCO',20,'Minor Smoking Prohibition Act'),
- ('JP','NICOTINE_VAPE',20,NULL),
- ('CN','ALCOHOL',18,NULL),
- ('CN','TOBACCO',18,'Law on the Protection of Minors'),
- ('IN','TOBACCO',18,'COTPA 2003'),
+INSERT INTO age_restriction_rules (country, category, minimum_age, note, born_before, born_before_from) VALUES
+ ('GB','ALCOHOL',18,'Licensing Act 2003',NULL,NULL),
+ ('GB','TOBACCO',18,'Children and Young Persons (Protection from Tobacco) Act 1991; Tobacco and Vapes Act 2026: no sale to anyone born on or after 1 Jan 2009',DATE '2009-01-01',DATE '2027-01-01'),
+ ('GB','NICOTINE_VAPE',18,'Nicotine Inhaling Products (Age of Sale) Regulations 2015',NULL,NULL),
+ ('GB','KNIVES',18,'Criminal Justice Act 1988 s.141A',NULL,NULL),
+ ('GB','CORROSIVES',18,'Offensive Weapons Act 2019',NULL,NULL),
+ ('GB','SOLVENTS',18,'Intoxicating Substances (Supply) Act 1985',NULL,NULL),
+ ('GB','FIREWORKS',18,'Fireworks Regulations 2004',NULL,NULL),
+ ('GB','LOTTERY',18,'raised from 16 in October 2021',NULL,NULL),
+ ('GB','VIDEO_18',18,'Video Recordings Act 1984',NULL,NULL),
+ ('GB','PETROL',16,NULL,NULL,NULL),
+ ('US','ALCOHOL',21,'National Minimum Drinking Age Act 1984',NULL,NULL),
+ ('US','TOBACCO',21,'federal Tobacco 21, December 2019',NULL,NULL),
+ ('US','NICOTINE_VAPE',21,'federal Tobacco 21, December 2019',NULL,NULL),
+ ('US','FIREWORKS',18,'varies by state -- override per tenant',NULL,NULL),
+ ('JP','ALCOHOL',20,'Minor Drinking Prohibition Act -- unchanged by the 2022 majority reform',NULL,NULL),
+ ('JP','TOBACCO',20,'Minor Smoking Prohibition Act',NULL,NULL),
+ ('JP','NICOTINE_VAPE',20,NULL,NULL,NULL),
+ ('CN','ALCOHOL',18,NULL,NULL,NULL),
+ ('CN','TOBACCO',18,'Law on the Protection of Minors',NULL,NULL),
+ ('IN','TOBACCO',18,'COTPA 2003',NULL,NULL),
  -- India sets the drinking age by state: 18 in some, 21 in others, 25 in Maharashtra for spirits,
  -- and prohibition in Gujarat and Bihar. 21 is the commonest and is deliberately the conservative
  -- floor; a tenant trading in a state that differs must override it, which is what the override
  -- table below exists for.
- ('IN','ALCOHOL',21,'varies by state (18-25, prohibition in some) -- override per store country');
+ ('IN','ALCOHOL',21,'varies by state (18-25, prohibition in some) -- override per store country',NULL,NULL);
 
 -- A tenant's own rule wins over the statutory default. Needed both for jurisdictions that vary
 -- below national level and for a business choosing to sell above the legal minimum, which is
--- allowed and is a policy some chains adopt.
+-- allowed and is a policy some chains adopt. A business may adopt a born-before cut-off early, or an
+-- earlier one, as its own policy: it applies at once.
 CREATE TABLE tenant_age_restriction_rules (
     tenant_id   UUID    NOT NULL,
     country     CHAR(2) NOT NULL,
@@ -119,75 +136,7 @@ CREATE TABLE tenant_age_restriction_rules (
     reason      TEXT,
     set_by      UUID,
     set_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    born_before DATE,
     CONSTRAINT pk_tenant_age_rules  PRIMARY KEY (tenant_id, country, category),
     CONSTRAINT chk_tenant_age_range CHECK (minimum_age BETWEEN 0 AND 120)
 );
-
--- ---------------------------------------------------------------------------------------------
--- 3. The variant columns: origin, restriction category, and selling by weight.
--- ---------------------------------------------------------------------------------------------
-
-ALTER TABLE product_variants
-    -- ISO 3166-1 alpha-2. Country of origin is mandatory for unprocessed meat, fruit and veg,
-    -- fish, honey, olive oil and wine, and mandatory whenever its absence would mislead
-    -- (EU 1169/2011 art.26).
-    ADD COLUMN country_of_origin CHAR(2),
-    -- "Produce of Spain, packed in the UK" -- the sentence a label carries when one code cannot
-    -- say it.
-    ADD COLUMN origin_detail TEXT,
-
-    -- Which age rule applies, or NULL for the overwhelming majority that are unrestricted.
-    ADD COLUMN restriction_category TEXT,
-
-    -- Whether this is a food product at all, and whether its allergens have been stated.
-    --
-    -- This column is the whole safety argument. An empty allergen list must never be read as
-    -- "free from" -- a tin of biscuits nobody has got round to declaring looks identical to one
-    -- declared allergen-free, and the difference is a hospital admission. UNDECLARED is the
-    -- default so a new food product is silently unsafe to advertise rather than silently safe.
-    ADD COLUMN allergen_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE',
-
-    -- Ingredients, as printed. Required alongside the allergen list for prepacked food, and the
-    -- source a declaration is checked against.
-    ADD COLUMN ingredients TEXT,
-
-    -- How the item is sold. EACH is the default and covers nearly everything; WEIGHT is the loose
-    -- produce, deli and butchery counter a supermarket cannot trade without.
-    ADD COLUMN sold_by TEXT NOT NULL DEFAULT 'EACH',
-
-    -- Net quantity in the pack, for the unit price a shelf edge must display
-    -- (Price Marking Order 2004: price per kg / per litre alongside the selling price).
-    ADD COLUMN net_content NUMERIC(18,4),
-    ADD COLUMN net_content_uom TEXT,
-
-    -- Packaging weight a scale deducts before pricing. Charging the customer for the tub is one
-    -- of the things weights-and-measures inspection exists to catch.
-    ADD COLUMN tare_weight NUMERIC(18,4),
-
-    -- True when every individual item has its own weight -- a joint of meat, a whole fish. The
-    -- price is not knowable until the item is on the scale.
-    ADD COLUMN catch_weight BOOLEAN NOT NULL DEFAULT FALSE,
-
-    ADD CONSTRAINT chk_variant_sold_by
-        CHECK (sold_by IN ('EACH','WEIGHT','VOLUME','LENGTH')),
-    ADD CONSTRAINT chk_variant_allergen_status
-        CHECK (allergen_status IN ('UNDECLARED','DECLARED','NOT_APPLICABLE')),
-    -- A country code that is not two letters is a data-entry slip, and origin is a legal claim.
-    ADD CONSTRAINT chk_variant_origin
-        CHECK (country_of_origin IS NULL OR country_of_origin ~ '^[A-Z]{2}$'),
-    -- Selling by weight without saying which unit leaves the shelf edge unable to price it.
-    ADD CONSTRAINT chk_variant_net_content
-        CHECK (sold_by = 'EACH' OR net_content_uom IS NOT NULL OR catch_weight),
-    ADD CONSTRAINT chk_variant_tare
-        CHECK (tare_weight IS NULL OR tare_weight >= 0);
-
--- The till asks "is this restricted?" on every scanned line, and the compliance screen asks
--- "what have we not declared yet?". Both are partial -- the restricted and undeclared sets are
--- small next to the catalogue.
-CREATE INDEX idx_variants_restricted
-    ON product_variants (tenant_id, restriction_category)
-    WHERE restriction_category IS NOT NULL;
-
-CREATE INDEX idx_variants_undeclared
-    ON product_variants (tenant_id)
-    WHERE allergen_status = 'UNDECLARED';

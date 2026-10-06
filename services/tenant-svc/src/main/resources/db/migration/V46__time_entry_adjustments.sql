@@ -9,9 +9,6 @@
 -- afterMigrate's CHECK on every idempotency_key column), unique within the business; an entry is
 -- corrected once (time_entries.superseded_by holds one successor), so it is unique too. The
 -- supersede, the new entry, its breaks, its LabourRecorded and this row are one transaction.
---
--- Corrections made before this migration have no row: they were keyless, and a retry of one is
--- refused as it always was (WORKFORCE_ENTRY_NOT_STANDING).
 CREATE TABLE time_entry_adjustments (
     id               UUID        PRIMARY KEY,
     tenant_id        UUID        NOT NULL,

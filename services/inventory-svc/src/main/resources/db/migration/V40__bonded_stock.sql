@@ -2,8 +2,8 @@
 --
 -- Excise goods — spirits, wine, beer, tobacco — may be held in an approved warehouse with the duty
 -- suspended: the business owns them at cost without the duty, and the duty crystallises only when
--- they are released to home use. Until now every batch was silently duty-paid: a bonded warehouse
--- could not say so, a release had no movement of its own, and the duty owed on it was nobody's
+-- they are released to home use. Every batch says whether its duty is paid or suspended, so a bonded
+-- warehouse can say so, a release has a movement of its own, and the duty owed on it is a recorded
 -- figure.
 --
 -- A store is approved as a bonded warehouse (the revenue's approval number; excise or customs
@@ -39,12 +39,6 @@ CREATE TABLE excise_duty_rates (
     PRIMARY KEY (tenant_id, variant_id),
     CONSTRAINT chk_duty_per_unit CHECK (duty_per_unit >= 0)
 );
-
-ALTER TABLE inventory_batches
-    ADD COLUMN duty_status TEXT NOT NULL DEFAULT 'DUTY_PAID',
-    ADD CONSTRAINT chk_batch_duty_status CHECK (duty_status IN ('DUTY_PAID', 'DUTY_SUSPENDED'));
-CREATE INDEX idx_batches_in_bond
-    ON inventory_batches (tenant_id, store_id, variant_id) WHERE duty_status = 'DUTY_SUSPENDED';
 
 -- Each release to home use: what left bond, at what rate, owing what. Append-only.
 CREATE TABLE bond_releases (

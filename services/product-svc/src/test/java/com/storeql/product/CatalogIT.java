@@ -857,7 +857,7 @@ class CatalogIT {
     assertThat(keeper.getStatus(), is(403));
   }
 
-  // ── the scheduled outbox purge finds its rows through an index (V28) ─────────
+  // ── the scheduled outbox purge finds its rows through an index (V1__init.sql) ─────────
 
   @Test
   void theOutboxPurgeTakesOnlyOldPublishedRowsAndCanFindThemThroughItsIndex() throws Exception {
@@ -880,7 +880,7 @@ class CatalogIT {
     assertThat("a row never published is never purged", outboxRows(oldUnpublished), is(1));
 
     // The purge's own statement, planned with every other way of finding the rows ruled out: it
-    // must be able to use V28's index. Without one, each batch read the whole table.
+    // must be able to use the index on published_at. Without one, each batch read the whole table.
     String plan =
         planOf(
             "SELECT id FROM product.outbox WHERE published_at IS NOT NULL"

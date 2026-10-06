@@ -1,9 +1,11 @@
--- 18.5: Making Tax Digital for VAT — the digital link from the computed return to HMRC.
+-- Making Tax Digital for VAT — the digital link from the computed return to HMRC.
 --
 -- MTD's rule is that the nine boxes reach HMRC from the records that produced them with no
--- re-keying. The return has been computed here since V1 (boxes 1/3/5/6) and V5 (boxes 4/7); this
--- adds the registration that names the VAT number the return is filed under and the provider it
--- is filed through, and an append-only record of every submission and what HMRC answered.
+-- re-keying. The return is computed here from tax_transactions (boxes 1 and 6) and
+-- input_tax_transactions (boxes 4 and 7). Box 3 is box 1 plus box 2, box 5 is box 3 less box 4 made
+-- absolute, and boxes 2, 8 and 9 are zero in that computation. This file holds the registration
+-- that names the VAT number the return is filed under and the provider it is filed through, and an
+-- append-only record of every submission and what HMRC answered.
 
 -- One registration per tenant. The tokens HMRC's OAuth grant issues for the taxpayer are held
 -- encrypted with a key from configuration; SIMULATED needs none.
@@ -21,8 +23,11 @@ CREATE TABLE vat_registrations (
 );
 
 -- Every return filed, as filed. Append-only: a filed return is a legal record; a correction is
--- HMRC's error-correction process, never an edit here. The nine boxes are stored as sent — boxes
--- 6 to 9 in whole pounds, as the API requires.
+-- HMRC's error-correction process, never an edit here. The nine boxes are stored as sent. Boxes 1
+-- to 5 are to the penny and boxes 6 to 9 are whole pounds, as HMRC's MTD VAT return requires. The
+-- return is in pounds under UK law, so these columns keep NUMERIC(18,2) whatever the business's
+-- currency. The figures are the tax transactions' amounts summed as recorded: nothing converts them
+-- to pounds, and MtdService.submit does not check the business's currency before it files.
 CREATE TABLE vat_return_submissions (
     id                 UUID PRIMARY KEY,
     tenant_id          UUID NOT NULL,

@@ -1,16 +1,12 @@
 -- Bonded and duty-suspended stock, the buyer's side.
 --
 -- A purchase order for excise goods may be placed under bond: the goods arrive at an approved
--- warehouse with the duty suspended, owned at cost without it. The receipt tells inventory-svc so
--- (GoodsReceived carries dutyStatus). When inventory-svc releases goods to home use it announces
--- DutyReleased with the duty it computed at the variant's rate; that duty is owed to the revenue
--- the day of the release — Excise Duty against Excise Duty Payable — and each announcement is
--- recorded once, so a redelivery owes nothing twice. The releases of a period are what an excise
--- return is made from.
-
-ALTER TABLE purchase_orders ADD COLUMN duty_status TEXT NOT NULL DEFAULT 'DUTY_PAID';
-ALTER TABLE purchase_orders
-    ADD CONSTRAINT ck_po_duty_status CHECK (duty_status IN ('DUTY_PAID', 'DUTY_SUSPENDED'));
+-- warehouse with the duty suspended, owned at cost without it (purchase_orders.duty_status, V1). The
+-- receipt tells inventory-svc so (GoodsReceived carries dutyStatus). When inventory-svc releases goods
+-- to home use it announces DutyReleased with the duty it computed at the variant's rate; that duty is
+-- owed to the revenue the day of the release — Excise Duty against Excise Duty Payable — and each
+-- announcement is recorded once, so a redelivery owes nothing twice. The releases of a period are what
+-- an excise return is made from.
 
 CREATE TABLE duty_releases (
     id            UUID        PRIMARY KEY,

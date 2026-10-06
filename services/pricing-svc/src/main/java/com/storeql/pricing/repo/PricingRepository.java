@@ -982,11 +982,9 @@ public class PricingRepository extends BaseOutboxRepository {
    * engine reads a missing entry as "everything", so an unscoped promotion cannot accidentally
    * become a scoped-to-nothing one.
    *
-   * <p><b>CATEGORY rows are deliberately not resolved here</b> and the service rejects creating
-   * them: the variant→category mapping belongs to product-svc, which publishes no catalogue event
-   * for pricing-svc to project (golden rule #1 forbids reading its tables). Until it does, a
-   * CATEGORY promotion cannot be honoured — and the previous engine's answer to that was to accept
-   * one, store it, and never fire it.
+   * <p>A CATEGORY row is resolved after the scope rows are read, through the catalogue product-svc
+   * announces: every variant of every product whose category path carries that category, so a
+   * parent category reaches its children's products.
    */
   public Map<UUID, Set<UUID>> findPromotionVariantScopes(UUID tenantId, List<UUID> promotionIds) {
     return findPromotionVariantScopes(tenantId, promotionIds, null);

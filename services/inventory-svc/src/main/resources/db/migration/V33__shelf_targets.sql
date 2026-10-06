@@ -5,7 +5,7 @@
 -- question is "does the bay look full", and the two differ by exactly the shelf: 40 units on hand is
 -- plenty for a bay that holds 12 and a gap in one that holds 60.
 --
--- A planogram knows the answer — facings times depth is what the shelf holds — and now says so. This
+-- A planogram knows the answer — facings times depth is what the shelf holds — and says so. This
 -- is a projection of that event, not a second copy of the layout: no positions, no shelves, no
 -- sequence, only what a replenishment run needs. product-svc stays the owner (golden rule #1).
 CREATE TABLE shelf_targets (

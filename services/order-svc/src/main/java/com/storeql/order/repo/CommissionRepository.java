@@ -143,8 +143,8 @@ public class CommissionRepository extends BaseJdbcRepository {
    * correction. The old one closes when the new one is approved.
    */
   public Statement record(Statement s) {
-    // Money at the statement currency's own minor units, half up, as the columns kept it before
-    // V49 for the pound: whole yen, three-decimal dinars.
+    // Money at the statement currency's own minor units, half up, as NUMERIC(18,2) kept it for the
+    // pound: whole yen, three-decimal dinars.
     int scale = com.storeql.service.Fx.minorUnits(s.currency());
     return inTx(
         c -> {

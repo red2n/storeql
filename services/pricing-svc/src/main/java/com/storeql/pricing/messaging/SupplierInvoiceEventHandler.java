@@ -77,8 +77,8 @@ public class SupplierInvoiceEventHandler {
       vat = vat.negate();
       gross = gross.negate();
     }
-    // In the invoice currency's own minor units (half up, as the columns kept it before V16); an
-    // event that does not name its currency is kept as it came.
+    // In the invoice currency's own minor units (half up); an event that does not name its
+    // currency is kept as it came.
     String currency = obj.getString("currency", null);
     if (currency != null && !currency.isBlank()) {
       int units = com.storeql.service.Fx.minorUnits(currency);

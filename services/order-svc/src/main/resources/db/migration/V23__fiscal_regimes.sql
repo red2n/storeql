@@ -1,15 +1,15 @@
 -- 18.5: the fiscal regime a store trades under, and what it stamps on every legal receipt.
 --
--- A gapless, hash-chained register (V16, V22) is what every fiscal regime asks a till to keep.
+-- A gapless, hash-chained register (fiscal_receipts, V16) is what every fiscal regime asks a till to keep.
 -- What differs by market is the stamp each document must also carry: in Germany a signature from a
 -- certified security module (TSE) over the transaction (§146a AO, KassenSichV §2 and §6); in
 -- Portugal an RSA signature over the document's own figures chained to the previous document
 -- (Decreto-Lei 198/2012, Portaria 363/2010, Despacho 8632/2014). The regime is set per store
--- because a tenant trades in more than one country, and the stamp is stored on the document because
--- an inspector reads it off the document, years later, whatever the store's settings are by then.
+-- because a tenant trades in more than one country. The stamp itself is stored on each document
+-- (fiscal_receipts), not derived from these settings.
 
 -- Which regime each store is under, and the identity the regime's file names the business by.
--- NONE is the register alone — what every store was under before this migration.
+-- NONE is the register alone: a store under no stamping regime.
 CREATE TABLE fiscal_store_settings (
     tenant_id               UUID NOT NULL,
     store_id                UUID NOT NULL,
@@ -56,37 +56,3 @@ CREATE TABLE tse_devices (
     CONSTRAINT uq_tse_device_store UNIQUE (tenant_id, store_id),
     CONSTRAINT chk_tse_provider CHECK (provider IN ('SIMULATED', 'CLOUD'))
 );
-
--- The stamp on the document. Nullable because a document issued under NONE carries none, and a
--- document issued under DE_KASSENSICHV while the device was unreachable carries the failure
--- instead — KassenSichV lets the till keep selling and requires the outage to be recorded, which
--- is what DSFinV-K's TSE_TA_FEHLER column is for.
-ALTER TABLE fiscal_receipts ADD COLUMN regime TEXT NOT NULL DEFAULT 'NONE';
-ALTER TABLE fiscal_receipts ADD COLUMN tse_serial TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_client_id TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_transaction_number BIGINT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_signature_counter BIGINT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_signature TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_algorithm TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_public_key TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_time_format TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_started_at TIMESTAMPTZ;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_finished_at TIMESTAMPTZ;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_process_type TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_process_data TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_qr TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN tse_error TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN pt_invoice_no TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN pt_hash TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN pt_hash_control TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN pt_atcud TEXT;
-ALTER TABLE fiscal_receipts ADD COLUMN pt_certificate_number TEXT;
-
--- The VAT on each line, as the quote priced it. Both the German and the Portuguese file list
--- every document by VAT rate, and a basket of 19% and 7% lines cannot be split from the order's
--- one tax total. NULL for a line placed with server-side pricing off.
-ALTER TABLE order_items ADD COLUMN vat_amount NUMERIC(18,4);
-
--- How each tender was paid. The German file lists every payment as cash or not, and the TSE
--- signs that split; the order's one payment_method cannot say how a cash-and-card sale divided.
-ALTER TABLE order_payment_events ADD COLUMN method TEXT;

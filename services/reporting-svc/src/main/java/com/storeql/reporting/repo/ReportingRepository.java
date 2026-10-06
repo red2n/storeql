@@ -28,9 +28,10 @@ import java.util.UUID;
 /**
  * JDBC access to reporting-svc's own projection tables.
  *
- * <p>Write methods are called from Kafka handlers and are idempotent — the {@code *Once} variants
- * fold the dedupe check into the same statement as the projection write, so a redelivered event
- * cannot double-count. Read methods back the report endpoints.
+ * <p>Write methods are called from Kafka handlers and are idempotent. The {@code *Once} variants
+ * take a processed_events mark in the same transaction as the projection write, so a redelivered
+ * event cannot double-count. The exception is {@code recordSaleOnce}, whose primary key is the
+ * dedupe, checked in the same statement. Read methods back the report endpoints.
  */
 @ApplicationScoped
 public class ReportingRepository extends BaseJdbcRepository {
@@ -93,10 +94,11 @@ public class ReportingRepository extends BaseJdbcRepository {
   /**
    * Records one in-transit transfer line.
    *
-   * <p>{@code ON CONFLICT (id) DO NOTHING} makes a redelivered {@code TransferShipped} a no-op: the
-   * caller derives each line's id from the event, so the retry reuses the same primary key.
+   * <p>{@code ON CONFLICT (id) DO NOTHING} is only a guard: each line's id is minted fresh per
+   * call, so it never matches a row an earlier delivery wrote. The processed_events mark, taken in
+   * the same transaction, refuses a redelivered event (see {@link #applyTransferShippedOnce}).
    *
-   * @param line the supply line to open, keyed by the shipping event's id
+   * @param line the supply line to open, tagged with the shipping event's id
    */
   private static void insertSupplyLineTx(Connection c, OpenSupplyLine line) throws SQLException {
     try (PreparedStatement ps =

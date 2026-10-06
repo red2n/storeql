@@ -1,15 +1,15 @@
 -- Bank-standard payment files and the bank's answer (readiness review 17.12).
 --
--- A payment run wrote its own CSV. The SEPA Regulation (EU) 260/2012 art.5(1)(d) requires bundled
--- euro credit transfers a business sends its bank to be ISO 20022 XML (pain.001), and a UK bank
--- takes a sterling bulk payment as a Bacs Standard 18 file. Since 9 October 2025 the Instant
--- Payments Regulation (EU) 2024/886 has a bank verify each payee's name against the IBAN before a
--- euro transfer, and answers match, close match or no match per payee; nothing read that answer, so
--- a payee the bank could not match would still have been posted as paid.
+-- A payment run is written as the bank's own standard file. The SEPA Regulation (EU) 260/2012
+-- art.5(1)(d) requires bundled euro credit transfers a business sends its bank to be ISO 20022 XML
+-- (pain.001), and a UK bank takes a sterling bulk payment as a Bacs Standard 18 file. Since 9 October
+-- 2025 the Instant Payments Regulation (EU) 2024/886 has a bank verify each payee's name against the
+-- IBAN before a euro transfer, and answer match, close match or no match per payee. That answer is
+-- read, so a payee the bank could not match is never posted as paid.
 --
--- Both files name the account the business pays from, and Bacs its service user number, which this
--- service did not hold. The files themselves are not stored: they are written from the run, which
--- names them the same way every time, so the bank's duplicate check refuses a file sent twice.
+-- Both files name the account the business pays from, and Bacs its service user number. The files
+-- themselves are not stored: they are written from the run, which names them the same way every
+-- time, so the bank's duplicate check refuses a file sent twice.
 
 -- The business's paying account per currency. Append-only: the account in force is the latest row,
 -- and a change made after a run was approved stops that run's bank file, as a supplier's does.

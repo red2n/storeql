@@ -40,7 +40,7 @@ import java.util.UUID;
  * <p><b>Paying up lifts only what the platform imposed.</b> A business switched off for {@code
  * NON_PAYMENT} comes back when it pays; one an administrator switched off does not, whatever it
  * pays, because that was a decision somebody took and money does not overrule it. Without the
- * reason on the row the two are indistinguishable, which is why V23 adds it.
+ * reason on the row the two are indistinguishable, which is why tenants.deactivated_reason exists.
  */
 @ApplicationScoped
 public class DunningService {

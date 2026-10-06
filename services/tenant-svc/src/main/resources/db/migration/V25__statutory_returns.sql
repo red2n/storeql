@@ -45,7 +45,11 @@ CREATE TABLE statutory_returns (
 
     CONSTRAINT pk_statutory_returns PRIMARY KEY (code, scope_kind, scope, effective_from),
     CONSTRAINT ck_statutory_scope_kind CHECK (scope_kind IN ('COUNTRY', 'REGIME')),
-    CONSTRAINT ck_statutory_frequency CHECK (frequency IN ('MONTHLY', 'QUARTERLY', 'ANNUAL')),
+    -- DECADAL is a real frequency in French tax law and not a rounding of "monthly": a business on the
+    -- ordinary monthly VAT regime reports three times a month. It cannot be expressed as a day count — the
+    -- third period of a month runs from the 21st to the 1st, which is 11 days in March and 8 in February —
+    -- so it is a frequency the calendar derives, exactly like a quarter.
+    CONSTRAINT ck_statutory_frequency CHECK (frequency IN ('DECADAL', 'MONTHLY', 'QUARTERLY', 'ANNUAL')),
     -- At least one component: a bare 'P' is not a period, and it would read as "due immediately".
     CONSTRAINT ck_statutory_due_after CHECK (
         due_after ~ '^P([0-9]+M)?([0-9]+D)?$' AND due_after <> 'P'
@@ -88,7 +92,27 @@ VALUES
 -- is why membership is asked of the period's own dates and not of a list.
     ('EC_SALES_LIST', 'REGIME', 'EU', 'Recapitulative statement (EC Sales List)', 'MONTHLY', 'P19D',
      NULL, NULL,
-     'Directive 2006/112/EC art. 262-264', '2010-01-01');
+     'Directive 2006/112/EC art. 262-264', '2010-01-01'),
+
+-- France's e-reporting, on the statutory calendar. Two rows, because the law asks for two streams with the
+-- same cadence but different content. Transaction data: the B2C sales and the cross-border sales of the
+-- period, with the payload built by order-svc, which owns the sales and already holds each line's VAT rate.
+    ('EREPORTING_TX_FR', 'COUNTRY', 'FR',
+     'E-reporting: transaction data (données de transaction)', 'DECADAL', 'P10D',
+     'order-svc', '/admin/ereporting/submissions',
+     'CGI art. 290; décret n° 2022-1299 du 7 oct. 2022; LF 2024 art. 91 (dates)', '2026-09-01'),
+
+-- Payment data: when the money for a service was actually received. Reported on the same cadence and
+-- to the same platform, and kept as its own return because a business may owe one stream and not the
+-- other — a shop selling only goods owes no payment data at all, and a calendar that hid that
+-- distinction would show it a duty it does not have.
+    ('EREPORTING_PAY_FR', 'COUNTRY', 'FR',
+     'E-reporting: payment data (données de paiement, services)', 'DECADAL', 'P10D',
+     'order-svc', '/admin/ereporting/submissions',
+     'CGI art. 290 A; décret n° 2022-1299 du 7 oct. 2022', '2026-09-01');
+
+COMMENT ON COLUMN statutory_returns.frequency IS
+    'DECADAL (three ten-day periods a month, French e-reporting), MONTHLY, QUARTERLY or ANNUAL. Derived, never stored.';
 
 -- What a business filed. Append-only: a correction is a new filing that supersedes its predecessor,
 -- with both on the record, for the same reason an invoice is never edited.

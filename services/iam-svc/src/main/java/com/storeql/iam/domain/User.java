@@ -5,12 +5,12 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * A user — STAFF (belongs to a tenant) or CUSTOMER (tenantId null/global). See V1__init.sql for the
- * tenant note.
+ * A user — STAFF (belongs to a tenant, or to none: a business sign-up not yet onboarded, the
+ * platform administrator) or CUSTOMER (tenantId null/global). See V1__init.sql for the tenant note.
  *
- * <p>The type is also the kind of account (29 Sep 2026): a shopper's account (CUSTOMER) and a
- * business account (STAFF) are separate identities, so one address may hold one of each outside any
- * business (V17__email_unique_per_account_kind.sql).
+ * <p>The type is also the kind of account: a shopper's account (CUSTOMER) and a business account
+ * (STAFF) are separate identities, so one address may hold one of each outside any business (the
+ * per-kind unique indexes in V1__init.sql).
  */
 public record User(
     UUID id,

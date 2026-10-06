@@ -15,6 +15,10 @@ CREATE TABLE kanban_cards (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     triggered_at    TIMESTAMPTZ,
     replenished_at  TIMESTAMPTZ,
+    -- Order modifiers: the minimum and maximum order quantity and the lot multiplier. Null when the card sets none.
+    min_order_qty   NUMERIC(18,3),
+    max_order_qty   NUMERIC(18,3),
+    lot_multiplier  NUMERIC(18,3),
     CONSTRAINT pk_kanban_cards PRIMARY KEY (id),
     CONSTRAINT chk_kanban_type   CHECK (kanban_type IN ('SUPPLIER','INTER_ORG','INTRA_ORG','PRODUCTION')),
     CONSTRAINT chk_kanban_status CHECK (status IN ('EMPTY','TRIGGERED','IN_PROGRESS','REPLENISHED'))

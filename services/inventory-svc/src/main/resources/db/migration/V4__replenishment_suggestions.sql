@@ -1,13 +1,7 @@
 -- Gap #1: Min-Max Planning Engine
--- Adds max_qty (reorder-to level) to thresholds and a suggestions table.
+-- Replenishment suggestions produced by the min-max engine. The reorder-to level (max_qty) lives on
+-- reorder_thresholds.
 
-ALTER TABLE reorder_thresholds ADD COLUMN max_qty NUMERIC(14,4);
-
-ALTER TABLE reorder_thresholds
-    ADD CONSTRAINT chk_threshold_max_gt_min
-        CHECK (max_qty IS NULL OR max_qty > threshold);
-
--- Replenishment suggestions produced by the min-max engine.
 -- suggested_qty = max_qty - available  (or  threshold*2 - available when max_qty is NULL).
 CREATE TABLE replenishment_suggestions (
     id             UUID          PRIMARY KEY,

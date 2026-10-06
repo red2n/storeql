@@ -1,10 +1,10 @@
 -- Return to vendor and debit notes (readiness review 07.8; Oracle SIOCS ch. 8, RMFCS RTV).
 --
--- The only way stock leaves a bad delivery. A goods receipt books stock against an order and
--- nothing could send it back: a damaged case, a wrong item, an over-delivery or a recalled lot
--- sat on the books until someone wrote it off as shrink, which is the wrong record for goods the
--- supplier owes money on. SJ-D3 refused to cancel a received order for exactly this reason and
--- named the return to vendor as the missing reverse.
+-- The only way stock leaves a bad delivery. A goods receipt books stock against an order, and a return
+-- sends it back: a damaged case, a wrong item, an over-delivery or a recalled lot is returned to the
+-- supplier rather than written off as shrink, which is the wrong record for goods the supplier owes
+-- money on. A received order is not cancelled for this reason (see purchase_orders, V1): the return
+-- to vendor is its reverse.
 --
 -- A return is two documents in one: the goods going back (a stock movement inventory-svc makes
 -- when it consumes ReturnedToVendor) and the DEBIT NOTE the retailer raises against the supplier
@@ -49,6 +49,10 @@ CREATE TABLE vendor_returns (
     credited_at        TIMESTAMPTZ,
     credited_by        UUID,
     idempotency_key    TEXT,
+    -- The payment run that settles this return's credit against the supplier's invoices (the credit
+    -- is offset in a run, see payment_run_items).
+    allocated_at       TIMESTAMPTZ,
+    allocated_run_id   UUID,
     CONSTRAINT chk_vendor_return_status CHECK (status IN ('RAISED', 'CREDITED')),
     CONSTRAINT chk_vendor_return_reason CHECK (reason IN
         ('DAMAGED', 'WRONG_ITEM', 'OVER_DELIVERED', 'QUALITY', 'EXPIRED', 'RECALL', 'OTHER')),

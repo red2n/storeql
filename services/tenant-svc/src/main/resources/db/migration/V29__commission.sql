@@ -50,8 +50,11 @@ CREATE TABLE commission_scheme_bands (
     id             UUID          PRIMARY KEY,
     tenant_id      UUID          NOT NULL,
     scheme_id      UUID          NOT NULL REFERENCES commission_schemes(id),
-    -- The period-to-date net sales at which this band starts. The first band starts at zero.
-    threshold_from NUMERIC(18,2) NOT NULL,
+    -- The period-to-date net sales at which this band starts. The first band starts at zero. Held at four
+    -- decimals and sixteen integer digits: enough for a percentage band at the business currency's minor
+    -- units (none for yen, three for a Kuwaiti dinar) and a per-unit band's quantity at three. Each
+    -- threshold is read back at its own scale, so no value is rounded on the way in.
+    threshold_from NUMERIC(20,4) NOT NULL,
     -- A percentage (PERCENT_OF_NET, so 2.5 means 2.5%) or an amount per unit (PER_UNIT).
     rate           NUMERIC(12,4) NOT NULL,
 

@@ -34,8 +34,7 @@ public class DisputeRepository extends BaseOutboxRepository {
       "SELECT id, tenant_id, payment_id, order_id, store_id, provider, provider_dispute_ref, amount,"
           + " fee_amount, currency, reason, network_reason_code, status, funds_withdrawn,"
           + " evidence_due_by, opened_at, closed_at, idempotency_key, created_by,"
-          // A row imported from an export taken before V19 names no fee currency: its fee was read
-          // in the dispute's own (V19).
+          // A row from an export that names no fee currency: its fee was read in the dispute's own.
           + " COALESCE(fee_currency, currency) AS fee_currency FROM disputes";
 
   private static final String INSERT =

@@ -28,10 +28,12 @@ import org.postgresql.ds.PGSimpleDataSource;
 
 /**
  * The outbox's drain and the scheduled purge of delivered outbox rows and old consumer dedupe rows,
- * on the schema purchase-svc migrates: the drain reads what is waiting through an index of its own,
- * the purge deletes only what is past its cutoff, in bounded batches, and the indexes of
- * V34__outbox_drain_and_purge_indexes.sql are what let a batch find its rows without reading the
- * table.
+ * on the schema purchase-svc migrates: the purge deletes only what is past its cutoff, in bounded
+ * batches, and the outbox indexes of V1__init.sql and the processed_events index of
+ * V11__sales_postings.sql are what let a batch find its rows without reading the table. The drain
+ * is planned here as one query over the waiting rows. The relay runs BaseOutboxRepository.claim,
+ * which adds the dead-letter and backoff filters (its index is idx_outbox_claim, in V1__init.sql);
+ * no test here plans that query.
  */
 class OutboxPurgeIndexIT {
 
@@ -175,6 +177,10 @@ class OutboxPurgeIndexIT {
         "the index on the boolean nothing writes is dropped: " + all);
   }
 
+  /**
+   * Plans the drain's query over the waiting rows, without the relay's dead-letter and backoff
+   * filters, and asserts that it uses idx_outbox_unpublished and sorts nothing.
+   */
   @Test
   @DisplayName("The drain reads the oldest waiting rows through its index, already in order")
   void theDrainIsServedByItsIndex() throws SQLException {

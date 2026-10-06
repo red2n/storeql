@@ -242,7 +242,7 @@ class ObligationIT {
         obligation(body, "CRA_VULNERABILITY_REPORTING"), containsString("\"status\":\"IN_FORCE\""));
     assertThat(obligation(body, "E_INVOICING_RECEIVE"), containsString("\"scope\":\"DE\""));
     assertThat(obligation(body, "E_INVOICING_ISSUE"), containsString("\"status\":\"UPCOMING\""));
-    // Directive 98/6/EC art.3 (V12): a unit price is EU law too, not the UK's alone.
+    // Directive 98/6/EC art.3 (V9): a unit price is EU law too, not the UK's alone.
     assertThat(obligation(body, "UNIT_PRICING"), containsString("\"scope\":\"EU\""));
     assertThat(
         "in force first, then upcoming",

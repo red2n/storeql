@@ -6,7 +6,7 @@
 | **Author** | the user, from the StoreQL Flow Tests catalogue's open findings on expiry (inv-expiry-and-markdown: nothing takes expired stock off the shelf, INV-66) · 2026-09-30 |
 | **Roadmap** | new: the flow catalogue, inventory domain: inv-expiry-and-markdown, inv-stock-adjustments-writeoffs |
 | **Services** | inventory-svc owns dates, the watch list and disposals · product-svc owns whether a date is use-by or best-before · pricing-svc owns the markdown ladder and its cap · purchase-svc owns returns to vendor and posts write-offs · notification-svc sends the daily digest · tenant-svc's store tasks carry the "do the date check" reminder |
-| **Builds on** | `inventory_batches.expiry_date`, `domain/Expiry.java` and `ExpiryDay` (the store's own day; expired stock is on hand, never available, drawn only by write-off and return to vendor: 30 Sep 2026), `ExpiryAlertSweeper` (logs only), reason code `EXPIRY`, `ReturnedToVendor` (`V29`), the markdown ladder and `POST /markdowns` (pricing-svc `MarkdownResource`), tenant-svc `task_templates` (`V30__store_tasks.sql`), GS1 AI 17 / AI 15 in `ScannedCodeResponse` |
+| **Builds on** | `inventory_batches.expiry_date`, `domain/Expiry.java` and `ExpiryDay` (the store's own day; expired stock is on hand, never available, drawn only by write-off and return to vendor: 30 Sep 2026), `ExpiryAlertSweeper` (logs only), reason code `EXPIRY`, `ReturnedToVendor` (`V17__tier1_gaps.sql`), the markdown ladder and `POST /markdowns` (pricing-svc `MarkdownResource`), tenant-svc `task_templates` (`V30__store_tasks.sql`), GS1 AI 17 / AI 15 in `ScannedCodeResponse` |
 | **Built in** | |
 
 ## Problem
@@ -82,7 +82,7 @@ Today's rule is right and half finished. Expired stock stays on hand and is neve
 - The rule of 30 Sep 2026: `expiry_date` is the last day of sale in the store's zone; expired stock is on hand, never available, never drawn by a sale, wave, transfer, move order, cross-dock, yield or bond release; still drawn by a write-off and a return to vendor. `domain/Expiry.java`, `repo/ExpiryDay.java`; `ExpiryTest` and `ExpiryIT` (four tests).
 - `expired` on every level answer.
 - The reason code `EXPIRY` exists (`V17`); Adjust dialog offers reason codes (wave 1, `inventory_adjust_reason_codes_test`).
-- The expiring-batches report and `ExpiryAlertSweeper` (logs only). Return to vendor exists (`V29`, `ReturnedToVendorHandler`). The markdown ladder and `POST /markdowns` exist (`markdown-flow` k6).
+- The expiring-batches report and `ExpiryAlertSweeper` (logs only). Return to vendor exists (`V17__tier1_gaps.sql`, `ReturnedToVendorHandler`). The markdown ladder and `POST /markdowns` exist (`markdown-flow` k6).
 - The app already shows `expired` on a level (wave 1, `inventory_expired_test.dart`); what slice 9 adds is `past best before`, the date watch and the actions.
 
 ## Open questions
