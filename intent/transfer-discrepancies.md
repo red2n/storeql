@@ -11,7 +11,7 @@
 
 ## Problem
 
-A store receiving a transfer can only say "it all arrived". The receipt copies the shipped quantity into the received quantity for every line, so ten shipped and eight on the pallet is eight units missing from the books nowhere: the sending store's stock fell by ten, the receiving store's rose by ten, and the two extra units exist only on paper until a stocktake finds them. The fix today is a later adjustment that has lost its link to the transfer, so nobody can tell transit loss from shrinkage, claim it from a carrier, or see which route loses stock. Between "shipped" and "received" the stock is on no shelf and on no report except the transfer header. A move order has the same blind spot: it moves the full requested quantity or refuses the whole pick.
+A store receiving a transfer can only say "it all arrived". The receipt copies the shipped quantity into the received quantity for every line, so ten shipped and eight on the pallet is eight units missing from the books nowhere: the sending store's stock fell by ten, the receiving store's rose by ten, and the two extra units exist only on paper until a stocktake finds them. The fix today is a later adjustment that has lost its link to the transfer, so nobody can tell transit loss from shrinkage, claim it from a carrier, or see which route loses stock. Between "shipped" and "received" the stock is on no shelf and in none of inventory-svc's levels or its valuation. It shows on the transfer header; inventory-svc's replenishment position counts the lines of transfers still DRAFT, PENDING or SHIPPED as inbound to the receiving shop; and reporting-svc's supply and demand netting holds an INTRANSIT shipment's lines as supply bound for the receiving store until the receipt retires them ([depot-dc-replenishment](depot-dc-replenishment.md), Decisions). A move order has the same blind spot: it moves the full requested quantity or refuses the whole pick.
 
 ## Outcome
 
@@ -61,7 +61,7 @@ A store receiving a transfer can only say "it all arrived". The receipt copies t
   - `move_order_lines.short_qty`, `short_reason_code`; move order status gains `COMPLETED_SHORT`.
   - Seeded reason codes (platform-wide, `transaction_reason_codes`): `TRANSIT_LOSS`, `TRANSIT_DAMAGE`, `MISCOUNT_AT_SHIP`.
 - **Needs from other services:** the home currency through `TenantProfiles`; product names for the notification through the catalogue projection notification-svc already reads. No joins.
-- **Events published:** `TransferDiscrepancyRecorded` (`storeql.inventory.transfer-discrepancy-recorded`: tenantId, transferOrderId, fromStoreId, toStoreId, lines of kind/variantId/qty/value/currency, recordedBy) consumed by purchase-svc (posts once, keyed by the event id), notification-svc (tells) and reporting-svc (a discrepancy report by route). `TransferDiscrepancyResolved` (same fields plus resolution) consumed by purchase-svc (FOUND reverses the posting). `TransferOverdue` consumed by notification-svc. `TransferOrderReceived` gains fields, no field removed.
+- **Events published:** `TransferDiscrepancyRecorded` (`storeql.inventory.transfer-discrepancy-recorded`: tenantId, transferOrderId, fromStoreId, toStoreId, lines of kind/variantId/qty/value/currency, recordedBy) consumed by purchase-svc (posts once, keyed by the event id), notification-svc (tells) and reporting-svc (a discrepancy report by route). `TransferDiscrepancyResolved` (same fields plus resolution) consumed by purchase-svc (FOUND reverses the posting). `TransferOverdue` consumed by notification-svc. `TransferOrderReceived` gains fields, no field removed: reporting-svc retires a transfer's in-transit lines from the receipt's `tenantId` and `aggregateId` (the transfer order) alone, so both must stay and the added per-line fields do not touch it.
 - **Retryable writes (Idempotency-Key):** receive, resolve, move-order pick.
 - **New error codes:** `422 TRANSFER_RECEIPT_LINE_UNKNOWN`, `422 TRANSFER_RECEIPT_QTY_INVALID` (negative, or good + damaged exceeding shipped when over-receipt is not explained by a reason), `409 TRANSFER_DISCREPANCY_RESOLVED`, `404 TRANSFER_DISCREPANCY_NOT_FOUND`, `422 MOVE_ORDER_PICK_QTY_INVALID`, `400 IDEMPOTENCY_KEY_REQUIRED`.
 
@@ -84,7 +84,7 @@ A store receiving a transfer can only say "it all arrived". The receipt copies t
 - Transfers exist with ship/receive/cancel/release, gated by `stock.transfer` and store access (`TransferOrderResource`); receipt reads back each source batch's lot, date and cost (`InventoryRepository.receiveTransferOrder`, 2909) so the arriving stock keeps them.
 - Move orders exist with `picked_qty` on the line (`V7__move_orders.sql`); pick is gated `stock.transfer` (`MoveOrderResource`, SJ-D73).
 - The Transfers tab in the admin app lists transfers.
-- What is not there: any count at receipt, any in-transit figure, any loss posting.
+- What is not there: any count at receipt, any in-transit figure in inventory-svc's levels or valuation, any loss posting.
 
 ## Open questions
 

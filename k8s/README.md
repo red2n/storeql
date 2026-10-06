@@ -130,13 +130,27 @@ Platform admin login: `https://app.storeql.com/#/platform/login`.
 - **Postgres tuning was bumped one step** (`shared_buffers=1GB`, `effective_cache_size=4GB`,
   vs. the dev file's 512MB/2GB) since a bigger shared Postgres cache helps every tenant
   simultaneously, unlike per-JVM heaps.
-- **Flyway migrations run inline at each service's boot**, exactly like
-  `docker-compose.yml` and the live storeql.com VPS deployment today — there is no
+- **Flyway migrations are meant to run inline at each service's boot**, as in
+  `docker-compose.yml` and the live storeql.com VPS deployment today; where these
+  manifests' network policies are enforced they cannot (see below). There is no
   standalone "migrate as a separate Job" entry point in this codebase yet (the
   `FlywayRunner` class in `shared/common-service` explicitly documents this as a
   known gap vs. the aspirational model in `ARCHITECTURE.md` §17). Safe at
   `replicas: 1` everywhere (no concurrent-migration race) — re-verify before ever
   scaling a business service beyond 1 replica.
+  A schema that fails Flyway's validation (a changed checksum, an applied version whose
+  file is gone unless it is newer than every file, a migration numbered below the applied
+  ones) or a build with no
+  migration stops the pod from starting, with the reason and the remedy in its log at
+  `ERROR`. Any other failure of the attempt is logged at `WARNING` ("Flyway migration
+  deferred") and the pod goes on starting; nothing tries again. **Where these manifests'
+  network policies are enforced, the attempt is deferred:** `STOREQL_DB_MIGRATION_URL`
+  (`02-configmaps.yaml`) names `postgres:5432` directly, while `05-network-policies.yaml`
+  lets a business pod reach PgBouncer (6432) but not Postgres, which admits only
+  PgBouncer, its exporter and the backup pod. The inline attempt cannot connect, so the
+  pod does not migrate its schema. `ARCHITECTURE.md` §17 lists "DB migrations (run-once Jobs)" as a stage before
+  the business services, but no such Job is among these manifests (the only batch
+  workloads are the backup CronJob and the bootstrap Job).
 - **`STOREQL_ADVERTISE_HOST` must equal each Deployment's k8s Service name.** Confirmed
   by reading `ConsulRegistrar`/`ConsulClient`: every service registers in Consul with
   `Address = STOREQL_ADVERTISE_HOST`, and every peer (gateway included) resolves others

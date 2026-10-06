@@ -4,6 +4,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 
 import com.storeql.cart.repo.CartRepository;
 import com.storeql.ids.Ids;
@@ -174,21 +175,29 @@ class CartCasesIT {
   }
 
   @Test
-  @DisplayName("SHOP-37: a suspended business refuses adds")
-  void suspendedTenantRefusesAdds() {
+  @DisplayName("SHOP-37: a switched-off business refuses adds, and says so in those words")
+  void switchedOffTenantRefusesAdds() {
     UUID tenant = Ids.newId();
     UUID shopper = Ids.newId();
     String cart = cartOf(tenant, shopper, Ids.newId());
-    tenants.upsertTenantStatus(tenant, "SUSPENDED", Instant.now());
-    refused(
+    // INACTIVE is what tenant-svc publishes for a business that is switched off.
+    tenants.upsertTenantStatus(tenant, "INACTIVE", Instant.now());
+    Response refusal =
         post(
             "/cart/items",
             tenant,
             shopper,
             "CUSTOMER",
-            "{\"cartId\":\"" + cart + "\",\"variantId\":\"" + Ids.newId() + "\",\"qty\":1}"),
-        409,
-        "TENANT_NOT_OPERATIONAL");
+            "{\"cartId\":\"" + cart + "\",\"variantId\":\"" + Ids.newId() + "\",\"qty\":1}");
+    String body = refusal.readEntity(String.class);
+    assertThat(body, refusal.getStatus(), is(409));
+    assertThat(body, containsString("TENANT_NOT_OPERATIONAL"));
+    assertThat(
+        "a business is PENDING, ACTIVE or INACTIVE; the refusal says it is switched off",
+        body,
+        containsString("switched off"));
+    assertThat(body, not(containsString("suspended")));
+    assertThat(body, not(containsString("blocked")));
     assertThat(count("cart_items", tenant, cart), is(0L));
   }
 
@@ -223,7 +232,7 @@ class CartCasesIT {
     UUID tenant = Ids.newId();
     UUID shopper = Ids.newId();
     String cart = cartOf(tenant, shopper, Ids.newId());
-    carts.markCheckedOutByCustomer(tenant, shopper);
+    carts.markCheckedOutOnce(Ids.newId(), "test", tenant, shopper, null);
     refused(
         post(
             "/cart/items",
@@ -609,11 +618,24 @@ class CartCasesIT {
             + ")");
   }
 
+  /** A consumer dedupe row, recorded the given interval ago. */
+  private static void processedProbe(String consumer, String ago) {
+    Envelopes.exec(
+        PG,
+        "INSERT INTO cart.processed_events (event_id, consumer, processed_at) VALUES ('"
+            + Ids.newId()
+            + "', '"
+            + consumer
+            + "', now() - interval '"
+            + ago
+            + "')");
+  }
+
   /**
    * The hourly purge, run against this schema: published outbox rows older than the cutoff go, in
-   * batches, oldest first; a row recent enough, or not yet published, stays whatever its age. This
-   * service keeps no processed_events table, which the purge's second statement takes as nothing to
-   * trim and not as an error.
+   * batches, oldest first; a row recent enough, or not yet published, stays whatever its age. The
+   * purge's second statement trims the consumer dedupe rows the same way, by the cutoff and in
+   * batches, and keeps the recent ones that still guard against a redelivery.
    */
   @Test
   @DisplayName("The purge trims published outbox rows in batches, and no more")
@@ -632,15 +654,25 @@ class CartCasesIT {
         "the recent and the unpublished stay",
         scalar("SELECT count(*) FROM cart.outbox WHERE topic = '" + marker + "'"),
         is("3"));
-    assertThat("no dedupe table is no error", outbox.purgeProcessedEvents(cutoff, 100), is(0));
+
+    String consumer = "purge-" + tail.substring(tail.length() - 12);
+    for (int i = 0; i < 3; i++) processedProbe(consumer, "40 days");
+    for (int i = 0; i < 2; i++) processedProbe(consumer, "1 hour");
+    Instant dedupeCutoff = Instant.now().minus(java.time.Duration.ofDays(30));
+    assertThat("a batch of two", outbox.purgeProcessedEvents(dedupeCutoff, 2), is(2));
+    assertThat("then the rest", outbox.purgeProcessedEvents(dedupeCutoff, 2), is(1));
+    assertThat("and no more", outbox.purgeProcessedEvents(dedupeCutoff, 2), is(0));
+    assertThat(
+        "the recent ones stay: they still guard against a redelivery",
+        scalar("SELECT count(*) FROM cart.processed_events WHERE consumer = '" + consumer + "'"),
+        is("2"));
   }
 
   /**
    * The hourly purge (common-service) deletes published outbox rows in batches, oldest first, and
    * each batch needs an index on published_at or it scans the whole table. With sequential scans
    * switched off the planner takes an index only when one can serve the statement, so the plan
-   * names it. (cart-svc keeps no processed_events table, so the purge's second statement has no
-   * index to serve here.)
+   * names it. The same holds for the dedupe rows' purge, which deletes by processed_at.
    */
   @Test
   @DisplayName("The purge of published outbox rows is served by an index")
@@ -661,5 +693,55 @@ class CartCasesIT {
       }
     }
     assertThat(plan.toString(), containsString("idx_outbox_published"));
+
+    StringBuilder dedupe = new StringBuilder();
+    try (var conn =
+            java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      try (var rs =
+          st.executeQuery(
+              "EXPLAIN SELECT event_id, consumer FROM cart.processed_events"
+                  + " WHERE processed_at < now() ORDER BY processed_at ASC LIMIT 1000"
+                  + " FOR UPDATE SKIP LOCKED")) {
+        while (rs.next()) {
+          dedupe.append(rs.getString(1)).append('\n');
+        }
+      }
+    }
+    assertThat(dedupe.toString(), containsString("idx_processed_events_processed_at"));
+  }
+
+  /**
+   * The index store_status carries beside its primary key (store_id) is what serves the statements
+   * that take one business's rows: a page of its data export, in store_id order, and the erasure of
+   * a departed business (TenantDataRepository). With sequential scans off the plan names it.
+   */
+  @Test
+  @DisplayName("One business's store-status rows are found through the tenant-led index")
+  void aBusinessesStoreStatusRowsAreServedByTheTenantLedIndex() throws Exception {
+    UUID tenant = Ids.newId();
+    for (String statement :
+        new String[] {
+          "SELECT store_id, status FROM cart.store_status WHERE tenant_id = '"
+              + tenant
+              + "' AND store_id > '"
+              + Ids.newId()
+              + "' ORDER BY store_id LIMIT 1001",
+          "DELETE FROM cart.store_status WHERE tenant_id = '" + tenant + "'"
+        }) {
+      StringBuilder plan = new StringBuilder();
+      try (var conn =
+              java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+          var st = conn.createStatement()) {
+        st.execute("SET enable_seqscan = off");
+        try (var rs = st.executeQuery("EXPLAIN " + statement)) {
+          while (rs.next()) {
+            plan.append(rs.getString(1)).append('\n');
+          }
+        }
+      }
+      assertThat(statement, plan.toString(), containsString("idx_store_status_tenant_store"));
+    }
   }
 }

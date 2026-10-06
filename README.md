@@ -301,7 +301,7 @@ A buyer raises a purchase order with a supplier and submits it → when the deli
 Every business on StoreQL operates as if it had the platform to itself:
 
 - A business never sees another business's products, stock, prices, orders, or customers — there is no setting or permission that can cross that line.
-- Staff accounts, customer accounts, and even login pages are kept separate per business (and separate again from the platform-operator login) — a password for one business's admin console does nothing anywhere else.
+- A member of staff's login belongs to one business — a person who works for two businesses has a login in each, with a password of its own — and the platform-operator login is separate again, so a staff password for one business's admin console opens nothing of another's. A shopper's login is the one thing that is not kept per business: it belongs to no business, so one shopper login signs in at any storefront, and each business keeps its own customer record of that shopper (profile, addresses, points, store credit, consents) tied to the login, which no other business can see.
 - Suspending one business has zero effect on any other business's storefront, POS, or admin console.
 - A new business's very first action (signup) already has this isolation in place — there's no "shared" or "default" tenant that data could leak into.
 

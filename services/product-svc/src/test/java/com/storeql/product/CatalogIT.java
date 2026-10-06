@@ -2,6 +2,7 @@ package com.storeql.product;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 
@@ -26,6 +27,8 @@ import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -891,6 +894,53 @@ class CatalogIT {
     assertThat(indexDefinition("idx_outbox_published"), containsString("published_at IS NOT NULL"));
   }
 
+  /**
+   * The relay's claim, planned as the relay runs it, walks {@code idx_outbox_claim} for its rows
+   * (its check of an aggregate's earlier rows reads {@code idx_outbox_aggregate_pending}): the
+   * broader {@code idx_outbox_unpublished} (every unpublished row by {@code created_at}, dead
+   * letters included) is not in the schema, because the claim is the one statement on the table
+   * that reads the waiting rows in that order and its ordered scan never reads a dead letter.
+   */
+  @Test
+  void theRelaysClaimIsServedByItsOwnIndexAndNoBroaderOneExists() throws Exception {
+    UUID tenant = Ids.newId();
+    Instant now = Instant.now();
+    outboxRow(Ids.newId(), tenant, now.minus(Duration.ofMinutes(5)), null);
+    outboxRow(
+        Ids.newId(), tenant, now.minus(Duration.ofMinutes(4)), now.minus(Duration.ofMinutes(3)));
+
+    // The statement BaseOutboxRepository.claim runs (common-service), conditions and all: not
+    // published, not dead, past its backoff, and not behind a dead or backing-off row of its own
+    // aggregate. Only the limit is a literal here where the relay binds it.
+    String claim =
+        "SELECT o.id, o.aggregate_id, o.topic, o.payload FROM product.outbox o"
+            + " WHERE o.published_at IS NULL AND o.dead_at IS NULL"
+            + " AND o.next_attempt_at <= now()"
+            + " AND NOT EXISTS (SELECT 1 FROM product.outbox p"
+            + "   WHERE p.aggregate_id = o.aggregate_id AND p.published_at IS NULL"
+            + "   AND (p.dead_at IS NOT NULL OR p.next_attempt_at > now())"
+            + "   AND (p.created_at, p.id) < (o.created_at, o.id))"
+            + " ORDER BY o.created_at, o.id LIMIT 100";
+    String plan = planOf(claim);
+    assertThat(plan, plan, containsString("idx_outbox_claim"));
+    assertThat(plan, plan, containsString("idx_outbox_aggregate_pending"));
+    assertThat(plan, plan, not(containsString("idx_outbox_unpublished")));
+    assertThat(
+        "the claim index holds only rows that are neither published nor dead",
+        indexDefinition("idx_outbox_claim"),
+        containsString("published_at IS NULL) AND (dead_at IS NULL)"));
+
+    // The outcome writes go by primary key and the purge by idx_outbox_published (tested above);
+    // the claim reads idx_outbox_claim (planned above) and, for its aggregate check,
+    // idx_outbox_aggregate_pending. No statement needs the broader one.
+    assertThat(
+        "idx_outbox_unpublished (every unpublished row by created_at) is not created",
+        outboxIndexes(),
+        not(hasItem("idx_outbox_unpublished")));
+    assertThat(outboxIndexes(), hasItem("idx_outbox_aggregate_pending"));
+    assertThat(outboxIndexes(), hasItem("idx_outbox_published"));
+  }
+
   private static void outboxRow(UUID id, UUID tenant, Instant createdAt, Instant publishedAt)
       throws SQLException {
     try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
@@ -938,6 +988,22 @@ class CatalogIT {
         }
       }
       return plan.toString();
+    }
+  }
+
+  private static List<String> outboxIndexes() throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT indexname FROM pg_indexes"
+                    + " WHERE schemaname = 'product' AND tablename = 'outbox'")) {
+      List<String> names = new ArrayList<>();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          names.add(rs.getString(1));
+        }
+      }
+      return names;
     }
   }
 

@@ -19,6 +19,7 @@ import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
@@ -100,7 +101,7 @@ class NotificationIT {
         null,
         event,
         "PASSWORD_RESET",
-        "EMAIL",
+        "SMTP",
         "forgetful@example.com",
         "Reset your password",
         "Shopper account: [link removed]",
@@ -132,7 +133,7 @@ class NotificationIT {
         Ids.newId(),
         event,
         "PASSWORD_CHANGED",
-        "EMAIL",
+        "SMTP",
         "changed-pw@example.com",
         "Your password was changed",
         "The password for your login at this email address was changed.",
@@ -279,7 +280,7 @@ class NotificationIT {
         user,
         reset,
         "PASSWORD_RESET",
-        "EMAIL",
+        "SMTP",
         "leaving@example.com",
         "Reset your password",
         "Shopper account: [link removed]",
@@ -538,6 +539,69 @@ class NotificationIT {
         com.storeql.test.Envelopes.scalar(
             PG, "SELECT count(*) FROM notification.notification_log WHERE " + mine + OTHER + "'"),
         is("0"));
+  }
+
+  // ── the feed read by channel ───────────────────────────────────────────────
+
+  private List<String> recipientsByChannel(String tenant, String role, String channel) {
+    Response r =
+        target
+            .path("/admin/notifications")
+            .queryParam("channel", channel)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-Roles", role)
+            .get();
+    return com.storeql.test.Envelopes.okArray(r).getValuesAs(JsonObject.class).stream()
+        .map(o -> o.getString("recipient"))
+        .toList();
+  }
+
+  /**
+   * On a deployment that only keeps the in-app feed, EMAIL — the name of its default channel — is
+   * the in-app feed, which is the carrier the log names APP: a message sent by EMAIL there is found
+   * by it. Another business's rows are never returned.
+   */
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "On an in-app deployment EMAIL finds the in-app rows; another business's, never")
+  void emailIsTheInAppFeedWhereThatIsTheDefaultChannel() {
+    UUID mine = Ids.newId();
+    UUID theirs = Ids.newId();
+    String inApp = "inapp-" + Ids.newId() + "@example.com";
+    String text = "+4915112345678";
+    String theirInApp = "inapp-" + Ids.newId() + "@example.com";
+    notifications.recordNotification(
+        mine, null, Ids.newId(), "WELCOME", "APP", inApp, "Welcome", "hi", "SENT");
+    notifications.recordNotification(
+        mine, null, Ids.newId(), "ORDER_READY", "SMS", text, "Ready", "collect", "SENT");
+    notifications.recordNotification(
+        theirs, null, Ids.newId(), "WELCOME", "APP", theirInApp, "Welcome", "hi", "SENT");
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(role, recipientsByChannel(mine.toString(), role, "EMAIL"), is(List.of(inApp)));
+      assertThat(role, recipientsByChannel(mine.toString(), role, "APP"), is(List.of(inApp)));
+      assertThat(role, recipientsByChannel(mine.toString(), role, "SMS"), is(List.of(text)));
+      assertThat(
+          role, recipientsByChannel(theirs.toString(), role, "EMAIL"), is(List.of(theirInApp)));
+      // A business that has sent nothing finds none of ours, by the same channel names.
+      assertThat(role, recipientsByChannel(Ids.newId().toString(), role, "EMAIL"), is(List.of()));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      for (UUID business : new UUID[] {mine, theirs}) {
+        Response r =
+            target
+                .path("/admin/notifications")
+                .queryParam("channel", "EMAIL")
+                .request()
+                .header("X-Tenant-Id", business)
+                .header("X-Roles", role)
+                .get();
+        String body = r.readEntity(String.class);
+        assertThat(role + ": " + body, r.getStatus(), is(403));
+        assertThat(role, body.contains(inApp), is(false));
+      }
+    }
   }
 
   // ── the shortage-alert feed is held to the caller's stores ─────────────────

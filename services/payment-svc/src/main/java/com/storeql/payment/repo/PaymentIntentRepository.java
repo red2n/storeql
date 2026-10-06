@@ -74,13 +74,16 @@ public class PaymentIntentRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Resolves the intent a provider webhook refers to.
+   * Resolves the intent a provider holds a reference for, whichever business it belongs to.
    *
-   * <p>Deliberately not tenant-scoped: a webhook arrives from the provider carrying only its own
-   * reference, so the tenant is what the row says it is rather than something the caller may
-   * assert. That is safe because the reference is an opaque provider-issued id which no external
-   * caller can guess, and because the signature has already been verified before this is reached —
-   * but it is the one read in this service that crosses tenants, so it is named that way.
+   * <p>Deliberately not tenant-scoped: the provider's reference is the key a webhook is found by
+   * (an event may carry nothing else of ours), so the tenant is what the row says it is rather than
+   * something the caller may assert. That is safe because the reference is an opaque
+   * provider-issued id which no external caller can guess, and because the signature has already
+   * been verified before this is reached. The lookup crosses tenants, so it is named that way. When
+   * the event also carries our own ids, {@code PaymentIntentService} compares them with the row
+   * found and applies the event to nothing if they differ. Looking an intent up by those ids, in
+   * the business they name, is {@link #findById}.
    *
    * @param provider provider name
    * @param providerRef the provider's reference for the intent
@@ -105,8 +108,46 @@ public class PaymentIntentRepository extends BaseOutboxRepository {
   }
 
   /**
+   * Gives an intent the provider reference it has not learnt yet, and says how it stands.
+   *
+   * <p>An intent has no reference from the moment its row is written until the provider's answer to
+   * the authorisation is recorded, and keeps none for good when that answer never came, so an event
+   * the provider sends meanwhile is matched by the intent's own id instead. Written here, the
+   * reference lets the next event be matched by it and a capture name the provider's own object. A
+   * reference an intent already holds is never replaced.
+   *
+   * @param tenantId owning tenant; the first condition of the statement
+   * @param id intent id
+   * @param providerRef the provider's reference, as an event named it
+   * @return the intent as it now stands, holding {@code providerRef} unless another reference got
+   *     there first; null if this tenant has no such intent
+   */
+  public PaymentIntent adoptProviderRef(UUID tenantId, UUID id, String providerRef) {
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE payment_intents SET provider_ref = ?, updated_at = now()"
+                      + " WHERE tenant_id = ? AND id = ? AND provider_ref IS NULL")) {
+            ps.setString(1, providerRef);
+            ps.setObject(2, tenantId);
+            ps.setObject(3, id);
+            ps.executeUpdate();
+          }
+          return findByIdTx(c, tenantId, id);
+        },
+        "adopt payment intent provider ref");
+  }
+
+  /**
    * Records the provider's answer to {@code authorize}: its reference, the resulting status, and
    * any SCA step the customer must complete.
+   *
+   * <p>Forward only, because an event the provider sent in the meantime may have been applied
+   * already (matched by the intent's own id, as it holds no reference until this runs): the
+   * reference is written unless the intent holds one, an intent that is already AUTHORIZED keeps
+   * its status and its next step rather than going back to waiting for the customer, and an intent
+   * that has finished is not touched.
    *
    * @param tenantId owning tenant
    * @param id intent id
@@ -120,8 +161,12 @@ public class PaymentIntentRepository extends BaseOutboxRepository {
         c -> {
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "UPDATE payment_intents SET provider_ref = ?, status = ?, next_action_url = ?,"
-                      + " updated_at = now() WHERE tenant_id = ? AND id = ?")) {
+                  "UPDATE payment_intents SET provider_ref = COALESCE(provider_ref, ?),"
+                      + " status = CASE WHEN status = 'AUTHORIZED' THEN status ELSE ? END,"
+                      + " next_action_url = CASE WHEN status = 'AUTHORIZED' THEN next_action_url"
+                      + " ELSE ? END, updated_at = now()"
+                      + " WHERE tenant_id = ? AND id = ?"
+                      + " AND status IN ('REQUIRES_ACTION','AUTHORIZED')")) {
             ps.setString(1, providerRef);
             ps.setString(2, status);
             ps.setString(3, nextActionUrl);

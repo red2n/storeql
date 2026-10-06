@@ -25,8 +25,12 @@ CREATE TABLE IF NOT EXISTS payment_intents (
     -- cash at the till.
     provider         VARCHAR(30)   NOT NULL,
     -- The provider's own id for this intent (Stripe `pi_…`, Razorpay `order_…`). Null until the
-    -- provider call returns one; an intent whose call fails keeps it null, as markTerminal never
-    -- writes it. See the unique index.
+    -- provider call returns one, or until an event from the provider names it first: a webhook
+    -- finds its intent by this column and, when none holds the reference, by this row's own id
+    -- (sent to the provider as metadata), and PaymentIntentRepository.adoptProviderRef then writes
+    -- the reference. An intent whose call fails keeps it null until such an event arrives, as
+    -- markTerminal never writes it (a provider error carries no reference). See the unique index,
+    -- which holds a reference once within a business.
     provider_ref     VARCHAR(255),
 
     -- Money is NUMERIC and the currency is stored explicitly (golden rule #13). amount is what was
@@ -73,8 +77,10 @@ CREATE TABLE IF NOT EXISTS payment_intents (
 CREATE INDEX IF NOT EXISTS idx_payment_intents_order
     ON payment_intents (tenant_id, order_id);
 
--- A provider reference maps to exactly one intent. This is what makes webhook handling safe: a
--- redelivered `payment_intent.succeeded` resolves to the same row rather than creating a second.
+-- Within a business a provider's reference maps to at most one intent, so a redelivered
+-- `payment_intent.succeeded` resolves to the same row rather than creating a second. The index
+-- starts with tenant_id, so it says nothing across businesses: the webhook lookup is by provider
+-- and reference alone, and takes the reference to be one the provider issued once.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_intents_provider_ref
     ON payment_intents (tenant_id, provider, provider_ref)
     WHERE provider_ref IS NOT NULL;
@@ -87,7 +93,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_intents_idempotency
     WHERE idempotency_key IS NOT NULL;
 
 -- Intents left open mid-SCA, the customer having closed the tab while the funds are still held.
--- No sweep reads this yet; it is the lookup such a sweep would use.
+-- No sweep reads this yet; it is the lookup such a sweep would use. Unlike the other indexes of
+-- this table it is not led by tenant_id: the sweep it is for reads every business's stale intents
+-- together, as the outbox relay does.
 CREATE INDEX IF NOT EXISTS idx_payment_intents_stale
     ON payment_intents (status, created_at)
     WHERE status IN ('REQUIRES_ACTION', 'AUTHORIZED');

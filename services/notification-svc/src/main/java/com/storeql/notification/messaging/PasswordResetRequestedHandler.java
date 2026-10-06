@@ -26,7 +26,9 @@ import java.util.regex.Pattern;
  * <p>Sent by SMTP alone, through a dedicated {@link AccountEmailSender} — never in-app, MQTT or
  * SMS, so the link cannot reach a feed a business's own console can read. With no email transport
  * configured, or a failed send, nothing is retried (a retry could send the same links twice): the
- * row is written NOT_SENT and the consumer moves on, exactly once per event either way.
+ * row is written NOT_SENT and the consumer moves on, exactly once per event either way. Either way
+ * the row names the channel the sender carries it on ({@link AccountEmailSender#channel}, {@code
+ * SMTP}), as every email in the log does.
  *
  * <p>{@code subject_id} is the shopper login's own id when the address holds one, else the first
  * login's — so a person who deletes their account finds this row erased with their others by the
@@ -102,7 +104,7 @@ class PasswordResetRequestedHandler {
         subjectOf(entries), // the shopper login's id, or the first login's — see the class doc
         eventId,
         TYPE,
-        "EMAIL",
+        sender.channel(),
         email,
         words.subject(),
         redact(words.body(), entries),

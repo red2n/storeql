@@ -106,9 +106,30 @@ class PasswordChangedHandlerTest {
 
     assertNull(repo.tenantId, "no business's log read may find it");
     assertEquals(user, repo.subjectId);
-    assertEquals("EMAIL", repo.channel);
+    assertEquals("SMTP", repo.channel, "the channel that carried it, as every email is logged");
     assertEquals(EMAIL, repo.recipient);
     assertEquals("SENT", repo.lastStatus);
+  }
+
+  @Test
+  void theRowNamesWhateverChannelTheSenderCarriesItOn() {
+    sender.channel = "SOMEWHERE-ELSE";
+    handler.handle(event(Ids.newId(), Ids.newId(), EMAIL, null, "SHOPPER", null));
+    assertEquals("SOMEWHERE-ELSE", repo.channel);
+  }
+
+  @Test
+  void aRowThatWasNotSentStillNamesTheChannelItWouldHaveGoneOn() {
+    sender.live = false;
+    handler.handle(event(Ids.newId(), Ids.newId(), EMAIL, null, "SHOPPER", null));
+    assertEquals("NOT_SENT", repo.lastStatus);
+    assertEquals("SMTP", repo.channel);
+
+    sender.live = true;
+    sender.fail = true;
+    handler.handle(event(Ids.newId(), Ids.newId(), EMAIL, null, "SHOPPER", null));
+    assertEquals("NOT_SENT", repo.lastStatus);
+    assertEquals("SMTP", repo.channel);
   }
 
   @Test

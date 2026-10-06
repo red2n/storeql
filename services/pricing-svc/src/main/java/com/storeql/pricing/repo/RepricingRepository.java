@@ -249,7 +249,7 @@ public class RepricingRepository extends BaseOutboxRepository {
         rs.getObject("tenant_id", UUID.class),
         rs.getObject("variant_id", UUID.class),
         rs.getString("competitor"),
-        rs.getBigDecimal("price"),
+        shown(rs.getBigDecimal("price"), rs.getString("currency")),
         rs.getString("currency"),
         rs.getObject("zone_id", UUID.class),
         rs.getObject("observed_on", LocalDate.class),
@@ -487,9 +487,11 @@ public class RepricingRepository extends BaseOutboxRepository {
   }
 
   /**
-   * A figure from the proposal columns (four places, NUMERIC(19,4)) at its currency's own minor
-   * units — {@code 7.99} pounds, {@code 1250} yen, {@code 8.990} dinars — or, when it is finer than
-   * that (a rival's price seen to a tenth of a penny), as it was kept, so reading never rounds.
+   * A figure read from a four-place column (NUMERIC(19,4)) at its currency's own minor units —
+   * {@code 7.99} pounds, {@code 1250} yen, {@code 8.990} dinars — or, when it is finer than they
+   * are, as it was kept, so reading rounds nothing. A rival's price can be finer than the units: it
+   * is an observation, kept as seen ({@code RepricingService.rivalPriceIn}). A proposed price is
+   * made at the units ({@code Repricing.propose}).
    */
   private static BigDecimal shown(BigDecimal amount, String currency) {
     if (amount == null || currency == null || !Fx.isCurrency(currency)) return amount;

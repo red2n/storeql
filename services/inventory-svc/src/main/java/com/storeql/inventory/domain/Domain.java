@@ -128,9 +128,12 @@ public final class Domain {
       return OWNERSHIP_CONSIGNMENT.equals(ownership);
     }
 
+    /**
+     * The only lifecycle status a batch has (the database holds it to this, {@code
+     * chk_batch_status}): a batch that runs out says so through {@code remainingQty}, and one past
+     * its date is judged by {@link Expiry}.
+     */
     public static final String STATUS_ACTIVE = "ACTIVE";
-    public static final String STATUS_DEPLETED = "DEPLETED";
-    public static final String STATUS_EXPIRED = "EXPIRED";
 
     public static final String MATERIAL_AVAILABLE = "AVAILABLE";
     public static final String MATERIAL_QUARANTINE = "QUARANTINE";
@@ -254,7 +257,10 @@ public final class Domain {
    * carries {@code refType}/{@code refId} pointing at that record, which names its own actor, so
    * repeating it here would duplicate rather than add. Adjustments are the exception -- they are
    * written with no {@code refId}, so without this nothing links a stock correction to a person or
-   * a reason, and shrinkage cannot be attributed.
+   * a reason, and shrinkage cannot be attributed. A receipt a person enters by hand is another: it
+   * cites no record either, so it names the person. A lot split is a third: it cites its lot
+   * action, which names no one, so the person is on its movements. A lot merge is a fourth, for the
+   * same reason.
    *
    * @param reasonCode a {@code transaction_reason_codes} code, or null
    * @param actorId the authenticated user who performed the adjustment, or null for a system flow
@@ -1095,7 +1101,10 @@ public final class Domain {
     public static final String TRANSFORM = "TRANSFORM";
   }
 
-  /** Movement types (stock_movements.type). qty is signed (+in / -out). */
+  /**
+   * Movement types (stock_movements.type). qty is signed (+in / -out). A customer return or a void
+   * is a RECEIVE whose {@code ref_type} says RETURN or VOID, not a type of its own.
+   */
   public static final class MoveType {
     private MoveType() {}
 
@@ -1103,7 +1112,6 @@ public final class Domain {
     public static final String SALE = "SALE";
     public static final String ADJUST = "ADJUST";
     public static final String TRANSFER = "TRANSFER";
-    public static final String RETURN = "RETURN";
 
     /** Goods going back to the supplier (07.8): out, against the return that sent them. */
     public static final String RTV = "RTV";
@@ -1117,6 +1125,19 @@ public final class Domain {
     public static final String YIELD = "YIELD";
 
     public static final String RELEASE = "RELEASE";
+
+    /**
+     * A lot split: out of the source batch, into the child batch it makes at the same store, for
+     * the same variant. The two legs net to zero, so it is neither a receipt nor a sale.
+     */
+    public static final String LOT_SPLIT = "LOT_SPLIT";
+
+    /**
+     * A lot merge: out of the source batch, into the target batch it is merged into, both at the
+     * same store and of the same variant. The two legs net to zero, so it is neither a write-off
+     * nor a find, a receipt or a sale.
+     */
+    public static final String LOT_MERGE = "LOT_MERGE";
   }
 
   // ── Gap #19: Reorder Point + EOQ ─────────────────────────────────────────

@@ -6,7 +6,7 @@
 | **Author** | the user, from the StoreQL Flow Tests catalogue (platform/auth-sso-business-identity-provider, AUTH-413) · 2026-09-30 |
 | **Roadmap** | new: the flow catalogue, platform and access domain — AUTH-413, "no SCIM / group-to-role auto-provisioning" |
 | **Services** | iam-svc owns the SCIM endpoint, the directory tokens and the logins · tenant-svc owns group-to-role mappings and the staff assignments they produce · notification-svc tells the owner of failures · the gateway lets a directory token reach only the SCIM routes · the app gets the owner's Directory screen |
-| **Builds on** | iam-svc single sign-on (`sso_connections`, `sso_identities`, `SsoService`, `required_tiers`), `users.status` (ACTIVE / DISABLED), `POST /auth/admin/staff-users`, `refresh_tokens`, tenant-svc `staff_assignments` (now with business-wide rows, `V1__init.sql` (folded)), `StaffAssigned` / `StaffRemoved`, `RoleGrants` (wave 1), `GET /admin/tenant/audit`, `intent/password-reset.md` (a tier that signs in through its own provider is told so, with no link) |
+| **Builds on** | iam-svc single sign-on (`sso_connections`, `sso_identities`, `SsoService`, `required_tiers`), `users.status` (ACTIVE / DISABLED), `POST /auth/admin/staff-users`, `refresh_tokens`, tenant-svc `staff_assignments` (now with business-wide rows, `V1__init.sql`), `StaffAssigned` / `StaffRemoved`, `RoleGrants` (wave 1), `GET /admin/tenant/audit`, `intent/password-reset.md` (a tier that signs in through its own provider is told so, with no link) |
 | **Built in** | (not yet built) |
 
 ## Problem

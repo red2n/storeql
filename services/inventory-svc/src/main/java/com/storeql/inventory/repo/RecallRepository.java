@@ -157,9 +157,15 @@ public class RecallRepository extends BaseOutboxRepository {
           }
           Set<UUID> stores = new TreeSet<>();
           String reason = holdReason(header.reference());
-          for (Candidate batch : lockCandidates(c, header.tenantId(), scope)) {
+          List<Candidate> candidates = lockCandidates(c, header.tenantId(), scope);
+          Map<UUID, List<Recall.Lot>> carried =
+              ancestry(c, header.tenantId(), candidates.stream().map(Candidate::batchId).toList());
+          for (Candidate batch : candidates) {
             Match match =
-                Recall.classify(scope, batch.variantId(), batch.batchNo(), batch.expiryDate());
+                Recall.classify(
+                    scope,
+                    batch.variantId(),
+                    lotsOf(batch.batchNo(), batch.expiryDate(), carried.get(batch.batchId())));
             if (match != null) {
               hold(c, header.tenantId(), header.id(), batch, match, QuarantinedOn.OPEN, reason);
               stores.add(batch.storeId());
@@ -183,12 +189,24 @@ public class RecallRepository extends BaseOutboxRepository {
 
   /**
    * The sales that drew on packs in a recall's scope, classified as its batches are: a sale from a
-   * batch whose lot or date is not known cannot be ruled out, so its buyer is told too.
+   * batch whose lot or date is not known cannot be ruled out, so its buyer is told too. A batch is
+   * judged by the lots it carries as well as its own number, at whatever time it was sold: a sale
+   * from a batch that was merged into later is attributed to the lots merged into it, because the
+   * buyer is then told rather than missed.
    */
   private static List<AffectedSale> findAffectedSales(Connection c, Header h, List<Scope> scope)
       throws SQLException {
     Object[] variants = scope.stream().map(Scope::variantId).distinct().toArray();
-    List<AffectedSale> out = new ArrayList<>();
+    record Sold(
+        UUID orderId,
+        UUID storeId,
+        UUID variantId,
+        UUID batchId,
+        String batchNo,
+        LocalDate expiry,
+        BigDecimal qty,
+        Instant soldAt) {}
+    List<Sold> sold = new ArrayList<>();
     try (PreparedStatement ps = c.prepareStatement(SALES_OF_VARIANTS)) {
       ps.setObject(1, h.tenantId());
       ps.setArray(2, c.createArrayOf("uuid", variants));
@@ -201,25 +219,40 @@ public class RecallRepository extends BaseOutboxRepository {
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          UUID variantId = rs.getObject("variant_id", UUID.class);
-          String batchNo = rs.getString("batch_no");
-          LocalDate expiry = rs.getObject("expiry_date", LocalDate.class);
-          Match match = Recall.classify(scope, variantId, batchNo, expiry);
-          if (match == null) {
-            continue;
-          }
-          out.add(
-              new AffectedSale(
+          sold.add(
+              new Sold(
                   rs.getObject("order_id", UUID.class),
                   rs.getObject("store_id", UUID.class),
-                  variantId,
+                  rs.getObject("variant_id", UUID.class),
                   rs.getObject("batch_id", UUID.class),
-                  batchNo,
-                  expiry,
+                  rs.getString("batch_no"),
+                  rs.getObject("expiry_date", LocalDate.class),
                   rs.getBigDecimal("qty"),
-                  instant(rs, "created_at"),
-                  match));
+                  instant(rs, "created_at")));
         }
+      }
+    }
+    Map<UUID, List<Recall.Lot>> carried =
+        ancestry(c, h.tenantId(), sold.stream().map(Sold::batchId).distinct().toList());
+    List<AffectedSale> out = new ArrayList<>();
+    for (Sold sale : sold) {
+      Match match =
+          Recall.classify(
+              scope,
+              sale.variantId(),
+              lotsOf(sale.batchNo(), sale.expiry(), carried.get(sale.batchId())));
+      if (match != null) {
+        out.add(
+            new AffectedSale(
+                sale.orderId(),
+                sale.storeId(),
+                sale.variantId(),
+                sale.batchId(),
+                sale.batchNo(),
+                sale.expiry(),
+                sale.qty(),
+                sale.soldAt(),
+                match));
       }
     }
     return out;
@@ -271,6 +304,17 @@ public class RecallRepository extends BaseOutboxRepository {
    * @return the reason the batch is now held, or null when no open recall covers it
    */
   static String holdOnArrival(Connection c, Batch batch) throws SQLException {
+    return holdOnArrival(c, batch, List.of());
+  }
+
+  /**
+   * As above for a batch made from other batches (a split's child): it is judged by its own lot and
+   * by the lots of the batches it is made from, and not held by a recall that already let one of
+   * them go, because a person checked that stock and found it not affected.
+   *
+   * @param parents the batches the new one is made from; none for stock that is not
+   */
+  static String holdOnArrival(Connection c, Batch batch, List<UUID> parents) throws SQLException {
     Map<UUID, List<Scope>> scopeByRecall = new LinkedHashMap<>();
     Map<UUID, String> referenceByRecall = new LinkedHashMap<>();
     try (PreparedStatement ps =
@@ -290,6 +334,16 @@ public class RecallRepository extends BaseOutboxRepository {
         }
       }
     }
+    if (scopeByRecall.isEmpty()) {
+      return null;
+    }
+    List<Recall.Lot> lots = new ArrayList<>();
+    lots.add(new Recall.Lot(batch.batchNo(), batch.expiryDate()));
+    Set<UUID> letGo = Set.of();
+    if (!parents.isEmpty()) {
+      lots.addAll(lotsOfStockBehind(c, batch.tenantId(), parents));
+      letGo = recallsThatReleased(c, batch.tenantId(), parents);
+    }
     var candidate =
         new Candidate(
             batch.id(),
@@ -301,14 +355,193 @@ public class RecallRepository extends BaseOutboxRepository {
             batch.materialStatus() == null ? Batch.MATERIAL_AVAILABLE : batch.materialStatus());
     String heldFor = null;
     for (var entry : scopeByRecall.entrySet()) {
-      Match match =
-          Recall.classify(entry.getValue(), batch.variantId(), batch.batchNo(), batch.expiryDate());
+      if (letGo.contains(entry.getKey())) {
+        continue;
+      }
+      Match match = Recall.classify(entry.getValue(), batch.variantId(), lots);
       if (match != null) {
         heldFor = holdReason(referenceByRecall.get(entry.getKey()));
         hold(c, batch.tenantId(), entry.getKey(), candidate, match, QuarantinedOn.ARRIVAL, heldFor);
       }
     }
     return heldFor;
+  }
+
+  /**
+   * The status a batch had before the open recalls that hold it took it off sale, or null when no
+   * open recall holds it. The first recall's record is the one that says so: a recall that joins
+   * later carries it.
+   */
+  static String statusBeforeRecalls(Connection c, UUID tenantId, UUID batchId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT rb.prior_material_status FROM recall_batches rb JOIN recalls r"
+                + " ON r.tenant_id = rb.tenant_id AND r.id = rb.recall_id"
+                + " WHERE rb.tenant_id = ? AND rb.batch_id = ? AND r.status = 'OPEN' AND"
+                + NOT_RELEASED
+                + " ORDER BY rb.quarantined_at, rb.recall_id LIMIT 1")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, batchId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
+    }
+  }
+
+  /**
+   * Makes {@code to} held by every open recall that holds {@code from} and has not let it go: the
+   * stock moved from one batch to the other, so whatever a recall holds of the one it holds of the
+   * other. Each recall keeps the source's record of the status to restore, so ending the recall
+   * puts the stock back as it was before, not as RECALLED. A recall that already holds {@code to}
+   * is left as it is.
+   *
+   * @param to the batch as it now stands, its quantity being what each recall records as held
+   */
+  static void inheritHolds(Connection c, UUID tenantId, UUID from, Batch to) throws SQLException {
+    record Held(UUID recallId, String reference, Match match, String prior) {}
+    List<Held> held = new ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT rb.recall_id, r.reference, rb.match_type, rb.prior_material_status"
+                + " FROM recall_batches rb JOIN recalls r"
+                + " ON r.tenant_id = rb.tenant_id AND r.id = rb.recall_id"
+                + " WHERE rb.tenant_id = ? AND rb.batch_id = ? AND r.status = 'OPEN' AND"
+                + NOT_RELEASED
+                + " ORDER BY rb.quarantined_at, rb.recall_id")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, from);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          held.add(
+              new Held(
+                  rs.getObject(1, UUID.class),
+                  rs.getString(2),
+                  Match.valueOf(rs.getString(3)),
+                  rs.getString(4)));
+        }
+      }
+    }
+    for (Held h : held) {
+      var candidate =
+          new Candidate(
+              to.id(),
+              to.storeId(),
+              to.variantId(),
+              to.batchNo(),
+              to.expiryDate(),
+              to.remainingQty(),
+              h.prior());
+      hold(
+          c,
+          tenantId,
+          h.recallId(),
+          candidate,
+          h.match(),
+          QuarantinedOn.ARRIVAL,
+          holdReason(h.reference()));
+    }
+  }
+
+  /** The recalls that let any of these batches go, after a person checked them. */
+  private static Set<UUID> recallsThatReleased(Connection c, UUID tenantId, List<UUID> batchIds)
+      throws SQLException {
+    Set<UUID> out = new java.util.HashSet<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT DISTINCT recall_id FROM recall_batch_releases"
+                + " WHERE tenant_id = ? AND batch_id = ANY (?)")) {
+      ps.setObject(1, tenantId);
+      ps.setArray(2, c.createArrayOf("uuid", batchIds.toArray()));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.add(rs.getObject(1, UUID.class));
+        }
+      }
+    }
+    return out;
+  }
+
+  /** A batch's own lot followed by the lots it carries from the batches it was made from. */
+  private static List<Recall.Lot> lotsOf(
+      String batchNo, LocalDate expiry, List<Recall.Lot> carried) {
+    List<Recall.Lot> lots = new ArrayList<>();
+    lots.add(new Recall.Lot(batchNo, expiry));
+    if (carried != null) {
+      lots.addAll(carried);
+    }
+    return lots;
+  }
+
+  /**
+   * The lots of the stock the given batches hold: each batch's own number and date, and those of
+   * the batches it was split or merged from, at any depth.
+   */
+  private static List<Recall.Lot> lotsOfStockBehind(
+      Connection c, UUID tenantId, List<UUID> batchIds) throws SQLException {
+    List<Recall.Lot> lots = new ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT b.batch_no, b.expiry_date FROM inventory_batches b"
+                + " WHERE b.tenant_id = ? AND b.id = ANY (?)")) {
+      ps.setObject(1, tenantId);
+      ps.setArray(2, c.createArrayOf("uuid", batchIds.toArray()));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          lots.add(new Recall.Lot(rs.getString(1), rs.getObject(2, LocalDate.class)));
+        }
+      }
+    }
+    for (List<Recall.Lot> behind : ancestry(c, tenantId, batchIds).values()) {
+      lots.addAll(behind);
+    }
+    return lots;
+  }
+
+  /**
+   * For each batch, the lots of the batches whose stock it holds: those it was split from or merged
+   * into it from, and theirs in turn, as the lot genealogy says. Only links between batches of one
+   * variant count, and a batch with none has no entry. A transfer, a return and a lot split are
+   * written as SPLIT links and a merge as a MERGE one; a cut made from a primal (TRANSFORM) is a
+   * different product and is not followed.
+   */
+  private static Map<UUID, List<Recall.Lot>> ancestry(
+      Connection c, UUID tenantId, List<UUID> batchIds) throws SQLException {
+    Map<UUID, List<Recall.Lot>> out = new LinkedHashMap<>();
+    if (batchIds.isEmpty()) {
+      return out;
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "WITH RECURSIVE lineage (batch_id, ancestor_id) AS ("
+                + " SELECT g.child_batch_id, g.parent_batch_id FROM lot_genealogy g"
+                + " JOIN inventory_batches k ON k.tenant_id = g.tenant_id"
+                + "  AND k.id = g.child_batch_id"
+                + " JOIN inventory_batches p ON p.tenant_id = g.tenant_id"
+                + "  AND p.id = g.parent_batch_id AND p.variant_id = k.variant_id"
+                + " WHERE g.tenant_id = ? AND g.child_batch_id = ANY (?)"
+                + "  AND g.relation_type IN ('SPLIT', 'MERGE')"
+                + " UNION"
+                + " SELECT l.batch_id, g.parent_batch_id FROM lineage l"
+                + " JOIN lot_genealogy g ON g.tenant_id = ? AND g.child_batch_id = l.ancestor_id"
+                + "  AND g.relation_type IN ('SPLIT', 'MERGE')"
+                + " JOIN inventory_batches k ON k.tenant_id = g.tenant_id"
+                + "  AND k.id = g.child_batch_id"
+                + " JOIN inventory_batches p ON p.tenant_id = g.tenant_id"
+                + "  AND p.id = g.parent_batch_id AND p.variant_id = k.variant_id)"
+                + " SELECT l.batch_id, a.batch_no, a.expiry_date FROM lineage l"
+                + " JOIN inventory_batches a ON a.tenant_id = ? AND a.id = l.ancestor_id")) {
+      ps.setObject(1, tenantId);
+      ps.setArray(2, c.createArrayOf("uuid", batchIds.toArray()));
+      ps.setObject(3, tenantId);
+      ps.setObject(4, tenantId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.computeIfAbsent(rs.getObject(1, UUID.class), k -> new ArrayList<>())
+              .add(new Recall.Lot(rs.getString(2), rs.getObject(3, LocalDate.class)));
+        }
+      }
+    }
+    return out;
   }
 
   // ── reads ──────────────────────────────────────────────────────────────────

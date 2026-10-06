@@ -50,7 +50,7 @@ A supermarket's finance team starts every morning with the same question: *did y
   - *Location-neutral:* the day is the store's local day; money in the business's home currency; no tolerance, ceiling or hour is assumed.
 - **Out, on purpose:**
   - **A transaction-by-transaction audit screen with a re-total of every sale.** Oracle's audit re-derives each transaction's total. StoreQL's sale total is computed and stored once by order-svc; the audit compares the day's aggregates and the tenders per sale. A per-line recompute would duplicate order-svc's pricing rules.
-  - **Missing receipt numbers (a gap in the sequence).** Receipt numbers are numbered gaplessly and hash-chained by order-svc's fiscal receipts (V16, `V16__fiscal_receipts.sql` (folded)), which already prove no gap; a second check here would say the same thing.
+  - **Missing receipt numbers (a gap in the sequence).** Receipt numbers are numbered gaplessly and hash-chained by order-svc's fiscal receipts (`V16__fiscal_receipts.sql`), which already prove no gap; a second check here would say the same thing.
   - **Auditing online orders' tenders against the sale.** An online order is paid at capture through the payment intent and reconciled by the ledger's clearing report and card settlement; the audit rules cover the POS channel, and an online order appears in the totals only.
   - **Tolerances shipped as defaults.** With no tolerance set the over/short and declaration-difference rules are off; the day still shows every difference.
   - **Posting a till's over/short at the till's close.** It is posted once, at release, when a person has looked; a per-close posting would post what the audit may still explain.

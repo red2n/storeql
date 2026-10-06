@@ -505,16 +505,23 @@ String transferStatusLabel(String status) => switch (status.toUpperCase()) {
       _ => humanizeCode(status),
     };
 
-/// A stock movement's kind in words.
+/// A stock movement's kind in words: one for each type inventory-svc writes
+/// to its ledger (`stock_movements.type`). The quantity beside it says which
+/// way the stock went (`+` in, `-` out), so a transfer is one word, not two.
+/// A customer's return or a voided sale comes back as a `RECEIVE`, so it reads
+/// as a receipt; the ledger has no types of its own for them.
 String movementTypeLabel(String type) => switch (type.toUpperCase()) {
+      'RECEIVE' => 'Receipt',
       'SALE' => 'Sale',
-      'RECEIPT' => 'Receipt',
       'ADJUST' => 'Adjustment',
-      'TRANSFER_OUT' => 'Transfer out',
-      'TRANSFER_IN' => 'Transfer in',
-      'RETURN' => 'Return',
-      'YIELD' => 'Breakdown',
+      'TRANSFER' => 'Transfer',
+      'RTV' => 'Return to supplier',
+      'RESERVE' => 'Hold placed',
+      'RELEASE' => 'Hold released',
       'BOND_RELEASE' => 'Released from bond',
+      'YIELD' => 'Breakdown',
+      'LOT_SPLIT' => 'Lot split',
+      'LOT_MERGE' => 'Lot merge',
       _ => humanizeCode(type),
     };
 

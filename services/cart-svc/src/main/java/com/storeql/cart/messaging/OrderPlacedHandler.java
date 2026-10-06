@@ -17,9 +17,12 @@ import java.util.UUID;
  * cart: at any store for an online order, at the order's own store for a till sale. Guest orders
  * and till sales naming no customer (no customerId in the event) are silently skipped.
  *
- * <p>Not deduplicated: cart-svc keeps no processed_events table, so a redelivered event runs the
- * update again. That is a no-op on a cart already CHECKED_OUT, but it closes an ACTIVE cart the
- * shopper opened after the first delivery.
+ * <p>Idempotent (golden rule 7): the event is recorded in {@code processed_events} on the same
+ * transaction that closes the cart, so a redelivery does nothing, and in particular does not close
+ * an ACTIVE cart the shopper opened after the first delivery. The key is the event's {@code
+ * eventId}; an event published without one is keyed by its order, which places once. A payload with
+ * neither is malformed and skipped. A failed write propagates, so the consumer loop redelivers the
+ * record, and nothing was recorded to stop it.
  */
 @ApplicationScoped
 class OrderPlacedHandler {
@@ -29,12 +32,14 @@ class OrderPlacedHandler {
   @Inject CartService cartService;
 
   void handle(String json) {
+    UUID eventId;
     UUID tenantId;
     UUID customerId;
     UUID storeId;
     boolean online;
     try (var reader = Json.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
+      eventId = dedupeKey(obj);
       tenantId = Ids.parse(obj.getString("tenantId"));
       online = "ONLINE".equals(obj.getString("channel", null));
       // A cart is held under the login the shopper signed in with, which is not the shop's
@@ -55,16 +60,38 @@ class OrderPlacedHandler {
     // An online order closes the shopper's cart whichever store it went to: a delivery resolves
     // to the store serving the postcode, and a split one goes to several (order orchestration).
     if (online && customerId != null) {
-      cartService.onOnlineOrderPlaced(tenantId, customerId);
-      LOG.log(Level.INFO, "Cart marked CHECKED_OUT for shopper {0}", customerId);
+      announce(eventId, customerId, cartService.onOnlineOrderPlaced(eventId, tenantId, customerId));
       return;
     }
     if (customerId == null || storeId == null) {
       return; // POS or anonymous order — no cart to close
     }
 
-    cartService.onOrderPlaced(tenantId, customerId, storeId);
-    LOG.log(
-        Level.INFO, "Cart marked CHECKED_OUT for customer {0} at store {1}", customerId, storeId);
+    announce(
+        eventId, customerId, cartService.onOrderPlaced(eventId, tenantId, customerId, storeId));
+  }
+
+  /**
+   * What the event is recorded under: its {@code eventId}, or, for one published without it, an id
+   * derived from its order. Every order is placed once, and each part of a split order is an order
+   * of its own with its own event.
+   */
+  private static UUID dedupeKey(JsonObject obj) {
+    if (obj.containsKey("eventId") && !obj.isNull("eventId")) {
+      return Ids.parse(obj.getString("eventId"));
+    }
+    return Ids.derived(Ids.parse(obj.getString("orderId")), "cart-order-placed");
+  }
+
+  private static void announce(UUID eventId, UUID customerId, boolean first) {
+    if (first) {
+      LOG.log(
+          Level.INFO,
+          "OrderPlaced {0} handled: any ACTIVE cart of shopper {1} marked CHECKED_OUT",
+          eventId,
+          customerId);
+    } else {
+      LOG.log(Level.INFO, "OrderPlaced {0} already handled, skipped", eventId);
+    }
   }
 }

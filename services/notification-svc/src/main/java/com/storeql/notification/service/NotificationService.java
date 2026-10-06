@@ -1,6 +1,7 @@
 package com.storeql.notification.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.notification.channel.Channels;
 import com.storeql.notification.domain.Domain.NotificationLog;
 import com.storeql.notification.domain.Domain.PushDevice;
 import com.storeql.notification.domain.Domain.ShortageAlert;
@@ -25,6 +26,7 @@ import java.util.UUID;
 public class NotificationService {
 
   @Inject NotificationRepository repo;
+  @Inject Channels channels;
 
   /** Record a shortage alert, deduped on eventId atomically with the insert. */
   public boolean recordShortageAlertOnce(
@@ -128,9 +130,17 @@ public class NotificationService {
     return listNotifications(tenantId, recipient, null, limit);
   }
 
+  /**
+   * The tenant's notification feed, newest first.
+   *
+   * @param channel a channel or carrier name to narrow the feed to, in any case, or {@code null} or
+   *     blank for every channel. The log holds the carrier that carried each message, so a channel
+   *     name is turned into its carrier first ({@link Channels#carrierOf}): EMAIL finds the rows of
+   *     the deployment's default channel, and a carrier's own name (SMTP, SMS…) finds itself.
+   */
   public List<NotificationLog> listNotifications(
       UUID tenantId, String recipient, String channel, int limit) {
     int cap = Math.min(limit, 100);
-    return repo.listRecent(tenantId, recipient, channel, cap);
+    return repo.listRecent(tenantId, recipient, channels.carrierOf(channel), cap);
   }
 }

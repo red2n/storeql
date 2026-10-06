@@ -161,7 +161,7 @@ class PasswordResetRequestedHandlerTest {
 
     assertNull(repo.tenantId, "the reset belongs to no business");
     assertEquals(EMAIL, repo.recipient);
-    assertEquals("EMAIL", repo.channel);
+    assertEquals("SMTP", repo.channel, "the channel that carried it, as every email is logged");
     assertEquals("SENT", repo.lastStatus);
     assertFalse(repo.body.contains("http"), repo.body);
     assertFalse(repo.body.contains("tok-shopper-abc123"), repo.body);
@@ -237,6 +237,13 @@ class PasswordResetRequestedHandlerTest {
   }
 
   @Test
+  void theRowNamesWhateverChannelTheSenderCarriesItOn() {
+    sender.channel = "SOMEWHERE-ELSE";
+    handler.handle(event(Ids.newId(), EMAIL, "en", shopper(LINK_1)));
+    assertEquals("SOMEWHERE-ELSE", repo.channel);
+  }
+
+  @Test
   void sentOnlyThroughTheEmailTransportNeverInAppOrMqtt() {
     handler.handle(event(Ids.newId(), EMAIL, "en", shopper(LINK_1)));
 
@@ -253,6 +260,7 @@ class PasswordResetRequestedHandlerTest {
     assertEquals(0, sender.sends());
     assertEquals(1, repo.records);
     assertEquals("NOT_SENT", repo.lastStatus);
+    assertEquals("SMTP", repo.channel, "the row names the channel it would have gone on");
   }
 
   @Test
@@ -264,6 +272,7 @@ class PasswordResetRequestedHandlerTest {
     assertEquals(0, sender.sends());
     assertEquals(1, repo.records);
     assertEquals("NOT_SENT", repo.lastStatus);
+    assertEquals("SMTP", repo.channel);
 
     // A redelivery of the very same event does not try again — even were the transport fixed by
     // then, this build never re-sends on replay: the row already exists for this event and type.

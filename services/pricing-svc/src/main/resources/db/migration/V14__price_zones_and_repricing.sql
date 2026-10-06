@@ -7,10 +7,11 @@
 -- a till charges is never a toss-up between two lists.
 --
 -- The rival across the road is the second half. What a competitor charges is observed — typed in
--- by staff or imported in bulk — and kept as an append-only record per variant, optionally per
--- zone. A repricing rule on a price list turns the freshest observation of each rival into a
--- proposal (match the lowest, undercut it by a percentage or an amount, rounded to a .99 or not,
--- never below a floor), and management applies the proposal into that list or dismisses it.
+-- by staff or imported in bulk — and kept as an append-only record per variant (tenant erasure
+-- apart), optionally per zone. A repricing rule on a price list turns the freshest observation of
+-- each rival into a proposal (match the lowest, undercut it by a percentage or an amount, rounded
+-- to a .99 or not, never below a floor), and management applies the proposal into that list or
+-- dismisses it.
 -- pricing-svc holds no cost, so the floor is a percentage of the current price and the rule says
 -- so; margin protection proper lives with the buyer's cost in purchase-svc.
 
@@ -24,7 +25,7 @@ CREATE TABLE price_zone_stores (
 );
 CREATE INDEX ix_price_zone_stores_zone ON price_zone_stores (tenant_id, zone_id);
 
--- What a rival charged, as seen: append-only, except tenant erasure (21.14), in the business's own
+-- What a rival charged, as seen: append-only, except tenant erasure, in the business's own
 -- currency (like for like).
 CREATE TABLE competitor_prices (
     id          UUID          PRIMARY KEY,

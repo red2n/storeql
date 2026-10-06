@@ -6,7 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
+import com.storeql.service.OutboxStore;
 import com.storeql.test.PostgresSupport;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -18,6 +22,9 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -30,10 +37,13 @@ import org.postgresql.ds.PGSimpleDataSource;
  * The outbox's drain and the scheduled purge of delivered outbox rows and old consumer dedupe rows,
  * on the schema purchase-svc migrates: the purge deletes only what is past its cutoff, in bounded
  * batches, and the outbox indexes of V1__init.sql and the processed_events index of
- * V11__sales_postings.sql are what let a batch find its rows without reading the table. The drain
- * is planned here as one query over the waiting rows. The relay runs BaseOutboxRepository.claim,
- * which adds the dead-letter and backoff filters (its index is idx_outbox_claim, in V1__init.sql);
- * no test here plans that query.
+ * V11__sales_postings.sql are what let a batch find its rows without reading the table. The relay's
+ * claim is planned here as BaseOutboxRepository prepares it, with its dead-letter and backoff
+ * conditions: the test reads the statement off the repository's own connection, so there is no copy
+ * of it to drift, and asserts that idx_outbox_claim serves its ordered scan; the claim's check for
+ * an earlier waiting row of the same aggregate is served by idx_outbox_aggregate_pending, which the
+ * test asserts exists. No index of every waiting row by created_at (idx_outbox_unpublished) is
+ * kept.
  */
 class OutboxPurgeIndexIT {
 
@@ -54,7 +64,7 @@ class OutboxPurgeIndexIT {
         .migrate();
   }
 
-  /** The shared purge, over this test's database. */
+  /** The shared claim and purge, over this test's database. */
   private static final class Outbox extends BaseOutboxRepository {
     Outbox(DataSource ds) {
       this.dataSource = ds;
@@ -87,22 +97,43 @@ class OutboxPurgeIndexIT {
   }
 
   private static void outbox(Instant createdAt, Instant publishedAt) throws SQLException {
+    outbox(Ids.newId(), createdAt, publishedAt, null, null);
+  }
+
+  /**
+   * One outbox row. A null {@code deadAt} is a row still in play; a null {@code nextAttemptAt} is
+   * due at once (the column's default, now).
+   */
+  private static void outbox(
+      UUID aggregateId,
+      Instant createdAt,
+      Instant publishedAt,
+      Instant deadAt,
+      Instant nextAttemptAt)
+      throws SQLException {
     try (Connection c = dataSource().getConnection();
         PreparedStatement ps =
             c.prepareStatement(
                 "INSERT INTO outbox (id, event_type, topic, tenant_id, aggregate_id, payload,"
-                    + " created_at, published_at) VALUES (?, 'Probe', 'storeql.test', ?, ?, '{}',"
-                    + " ?, ?)")) {
+                    + " created_at, published_at, dead_at, next_attempt_at)"
+                    + " VALUES (?, 'Probe', 'storeql.test', ?, ?, '{}', ?, ?, ?,"
+                    + " coalesce(?, now()))")) {
       ps.setObject(1, Ids.newId());
       ps.setObject(2, Ids.newId());
-      ps.setObject(3, Ids.newId());
+      ps.setObject(3, aggregateId);
       ps.setObject(4, createdAt.atOffset(ZoneOffset.UTC));
-      if (publishedAt == null) {
-        ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
-      } else {
-        ps.setObject(5, publishedAt.atOffset(ZoneOffset.UTC));
-      }
+      setInstant(ps, 5, publishedAt);
+      setInstant(ps, 6, deadAt);
+      setInstant(ps, 7, nextAttemptAt);
       ps.executeUpdate();
+    }
+  }
+
+  private static void setInstant(PreparedStatement ps, int index, Instant at) throws SQLException {
+    if (at == null) {
+      ps.setNull(index, Types.TIMESTAMP_WITH_TIMEZONE);
+    } else {
+      ps.setObject(index, at.atOffset(ZoneOffset.UTC));
     }
   }
 
@@ -146,10 +177,72 @@ class OutboxPurgeIndexIT {
     }
   }
 
+  /**
+   * The plan of a statement with one int parameter (its LIMIT), with sequential and bitmap scans
+   * off, as {@link #plan(String)}.
+   */
+  private static String plan(String query, int limit) throws SQLException {
+    try (Connection c = dataSource().getConnection();
+        Statement st = c.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      st.execute("SET enable_bitmapscan = off");
+      StringBuilder out = new StringBuilder();
+      try (PreparedStatement ps = c.prepareStatement("EXPLAIN " + query)) {
+        ps.setInt(1, limit);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) out.append(rs.getString(1)).append('\n');
+        }
+      }
+      return out.toString();
+    }
+  }
+
+  /**
+   * A data source that hands out the real connections and writes down every SQL string prepared on
+   * them, so a test can read the statements a repository really runs instead of copying them.
+   */
+  private static DataSource recording(DataSource real, List<String> prepared) {
+    return (DataSource)
+        Proxy.newProxyInstance(
+            DataSource.class.getClassLoader(),
+            new Class<?>[] {DataSource.class},
+            (proxy, method, args) -> {
+              Object result = invoke(method, real, args);
+              if ("getConnection".equals(method.getName())) {
+                return recording((Connection) result, prepared);
+              }
+              return result;
+            });
+  }
+
+  private static Connection recording(Connection real, List<String> prepared) {
+    return (Connection)
+        Proxy.newProxyInstance(
+            Connection.class.getClassLoader(),
+            new Class<?>[] {Connection.class},
+            (proxy, method, args) -> {
+              if ("prepareStatement".equals(method.getName())
+                  && args != null
+                  && args.length > 0
+                  && args[0] instanceof String sql) {
+                prepared.add(sql);
+              }
+              return invoke(method, real, args);
+            });
+  }
+
+  private static Object invoke(Method method, Object target, Object[] args) throws Throwable {
+    try {
+      return method.invoke(target, args);
+    } catch (InvocationTargetException e) {
+      throw e.getCause();
+    }
+  }
+
   @Test
   @DisplayName(
-      "The drain and the purge each have an index of their own, the outbox's partial, and the"
-          + " index nothing could use is gone")
+      "The claim, its per-aggregate check and the purge each have an index of their own, the"
+          + " outbox's partial, and the index of every waiting row by created_at is gone")
   void theIndexesExist() throws SQLException {
     List<String> found = new ArrayList<>();
     try (Connection c = dataSource().getConnection();
@@ -169,8 +262,20 @@ class OutboxPurgeIndexIT {
         "holds only delivered rows: " + all);
     assertTrue(all.contains("idx_processed_events_processed_at"), all);
     assertTrue(
-        all.contains("(created_at, id) WHERE (published_at IS NULL)"),
-        "the drain's own index holds only what is waiting, in the drain's order: " + all);
+        all.contains(
+            "idx_outbox_claim ON purchase.outbox USING btree (created_at, id)"
+                + " WHERE ((published_at IS NULL) AND (dead_at IS NULL))"),
+        "the claim's own index holds only the rows still in play, in the claim's order: " + all);
+    assertTrue(
+        all.contains("idx_outbox_aggregate_pending ON purchase.outbox USING btree (aggregate_id,"),
+        "the claim's per-aggregate check has its own index: " + all);
+    assertEquals(
+        0,
+        count(
+            "pg_indexes", "schemaname = '" + SCHEMA + "' AND indexname = 'idx_outbox_unpublished'"),
+        "no index of every waiting row by created_at: it would also hold the dead letters, which"
+            + " the claim's ordered scan never reads: "
+            + all);
     assertEquals(
         0,
         count("pg_indexes", "schemaname = '" + SCHEMA + "' AND indexname = 'outbox_unpublished'"),
@@ -178,23 +283,51 @@ class OutboxPurgeIndexIT {
   }
 
   /**
-   * Plans the drain's query over the waiting rows, without the relay's dead-letter and backoff
-   * filters, and asserts that it uses idx_outbox_unpublished and sorts nothing.
+   * Plans the relay's claim exactly as BaseOutboxRepository prepares it: the dead-letter and
+   * backoff conditions and the per-aggregate NOT EXISTS included. The statement is read off the
+   * repository's own connection while it claims, and the table holds rows of every kind the claim
+   * has to look past: published, dead, backing off, and due.
    */
   @Test
-  @DisplayName("The drain reads the oldest waiting rows through its index, already in order")
-  void theDrainIsServedByItsIndex() throws SQLException {
+  @DisplayName(
+      "The relay's real claim, dead-letter and backoff conditions and all, reads the rows still in"
+          + " play through idx_outbox_claim, already in order")
+  void theRelaysClaimIsServedByItsIndex() throws SQLException {
     Instant now = Instant.now();
-    for (int i = 0; i < 40; i++) {
-      outbox(now.minus(Duration.ofMinutes(i)), null);
-      outbox(now.minus(DAY.multipliedBy(30)), now.minus(DAY.multipliedBy(10)));
+    int due = 40;
+    for (int i = 0; i < due; i++) {
+      Instant at = now.minus(Duration.ofMinutes(i + 10));
+      outbox(Ids.newId(), at, null, null, null);
+      outbox(Ids.newId(), at, now.minus(DAY.multipliedBy(10)), null, null);
+      outbox(Ids.newId(), at, null, now.minus(Duration.ofMinutes(5)), now.minus(DAY));
+      outbox(Ids.newId(), at, null, null, now.plus(Duration.ofMinutes(30)));
     }
-    String drain =
-        plan(
-            "SELECT id, aggregate_id, topic, payload FROM outbox WHERE published_at IS NULL"
-                + " ORDER BY created_at ASC, id ASC LIMIT 100 FOR UPDATE SKIP LOCKED");
-    assertTrue(drain.contains("idx_outbox_unpublished"), drain);
-    assertFalse(drain.contains("Sort"), "the index already holds them in order: " + drain);
+
+    List<String> prepared = new CopyOnWriteArrayList<>();
+    Outbox repo = new Outbox(recording(dataSource(), prepared));
+    List<OutboxStore.PendingOutbox> claimed = new ArrayList<>();
+    try (OutboxStore.DrainLease lease = repo.tryDrainLock().orElseThrow()) {
+      repo.drainOnce(
+          lease,
+          500,
+          rows -> {
+            claimed.addAll(rows);
+            return new OutboxStore.PublishOutcome(List.of(), Map.of());
+          });
+    }
+    assertEquals(
+        due, claimed.size(), "the claim skips the published, the dead and the backing-off rows");
+
+    List<String> claims = prepared.stream().filter(sql -> sql.contains("FROM outbox o")).toList();
+    assertEquals(1, claims.size(), "one statement is the claim: " + prepared);
+    String claim = claims.get(0);
+    assertTrue(claim.contains("dead_at IS NULL"), claim);
+    assertTrue(claim.contains("next_attempt_at <= now()"), claim);
+    assertTrue(claim.contains("NOT EXISTS"), claim);
+
+    String plan = plan(claim, 100);
+    assertTrue(plan.contains("idx_outbox_claim"), plan);
+    assertFalse(plan.contains("Sort"), "the index already holds them in order: " + plan);
   }
 
   @Test

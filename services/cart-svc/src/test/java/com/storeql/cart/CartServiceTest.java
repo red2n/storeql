@@ -1,7 +1,9 @@
 package com.storeql.cart;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.cart.domain.Domain.Cart;
@@ -155,13 +157,18 @@ class CartServiceTest {
   // ── Flow guard ────────────────────────────────────────────────────────────
 
   @Test
-  void createCart_blockedWhenTenantSuspended() {
+  void createCart_blockedWhenTenantSwitchedOff() {
     tenantActive = false;
     var ctx = ctx(TENANT, CUSTOMER);
     var req = new CreateCartRequest(STORE.toString(), null);
 
     ApiException ex = assertThrows(ApiException.class, () -> service.createOrGetCart(ctx, req));
     assertThat(ex.code(), is("TENANT_NOT_OPERATIONAL"));
+    // A business's status is PENDING, ACTIVE or INACTIVE (SUSPENDED is a store status), so the
+    // refusal says "switched off", not "suspended" or "blocked".
+    assertThat(ex.getMessage(), containsString("switched off"));
+    assertThat(ex.getMessage(), not(containsString("suspended")));
+    assertThat(ex.getMessage(), not(containsString("blocked")));
   }
 
   @Test
@@ -175,7 +182,7 @@ class CartServiceTest {
   }
 
   @Test
-  void addItem_blockedWhenTenantSuspended() {
+  void addItem_blockedWhenTenantSwitchedOff() {
     // Pre-create cart in active state.
     insertedCart =
         new Cart(
@@ -389,7 +396,7 @@ class CartServiceTest {
   }
 
   @Test
-  void changeAndRemoveRefuseASuspendedBusinessAndAClosedStore() {
+  void changeAndRemoveRefuseASwitchedOffBusinessAndAClosedStore() {
     Cart cart = cartWithAnItem(Cart.STATUS_ACTIVE);
     var mine = ctx(TENANT, CUSTOMER, Set.of("CUSTOMER"));
     UUID item = insertedItem.id();

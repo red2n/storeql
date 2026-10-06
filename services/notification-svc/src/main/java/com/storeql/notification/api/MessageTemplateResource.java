@@ -52,8 +52,12 @@ public class MessageTemplateResource {
   @Operation(
       summary = "The words a message goes out in now",
       description =
-          "The business's live version and its history, or the platform's words — source DEFAULT —"
-              + " when it has written none in that language.")
+          "The words a message in that language goes out in, and that language's own history. The"
+              + " business's live version (source BUSINESS); or, when it has none in that language"
+              + " (never written, or retired) or its live version there cannot be used"
+              + " (storedWordsUnusable: its words do not parse), its live version in its default"
+              + " language (source DEFAULT_LANGUAGE, wordsLanguage saying which); or the platform's"
+              + " words (source DEFAULT).")
   @APIResponse(responseCode = "404", description = "No such message, or not sent in that form")
   @GET
   @Path(ONE)

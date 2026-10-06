@@ -18,6 +18,9 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -94,6 +97,25 @@ class CatalogGuardsIT {
     return json == null
         ? b.method(method)
         : b.method(method, Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  /**
+   * The status a PATCH is answered with. The JAX-RS client's default connector is {@code
+   * HttpURLConnection}, which refuses the method before the request leaves, so this goes through
+   * the JDK's HTTP client.
+   */
+  private int patchStatus(String path, String json, String tenant, String roles) throws Exception {
+    HttpResponse<String> r =
+        HttpClient.newHttpClient()
+            .send(
+                HttpRequest.newBuilder(target.path(path).getUri())
+                    .header("Content-Type", MediaType.APPLICATION_JSON)
+                    .header("X-Tenant-Id", tenant)
+                    .header("X-Roles", roles)
+                    .method("PATCH", HttpRequest.BodyPublishers.ofString(json))
+                    .build(),
+                HttpResponse.BodyHandlers.ofString());
+    return r.statusCode();
   }
 
   private static String body(Response r, int status) {
@@ -1232,5 +1254,113 @@ class CatalogGuardsIT {
         "no revision was made by asking",
         count("SELECT count(*) FROM product.item_revisions WHERE variant_id = ?::uuid", v),
         is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "A revision is superseded by the next, never rewritten or removed by the service (V4)")
+  void aRevisionIsSupersededByTheNextAndNeverRewrittenOrRemoved() {
+    String v = variantOf(T);
+    String base = "/admin/products/variants/" + v + "/revisions";
+    String first =
+        id(
+            body(
+                send(
+                    "POST",
+                    base,
+                    "{\"revision\":\"A\",\"description\":\"first\",\"effectiveDate\":\"2026-01-01\"}",
+                    T,
+                    "OWNER"),
+                201));
+    String revision =
+        "SELECT count(*) FROM product.item_revisions WHERE id = ?::uuid AND revision = ?"
+            + " AND description = ? AND effective_date = ?::date AND status = ?";
+    assertThat(count(revision, first, "A", "first", "2026-01-01", "ACTIVE"), is(1));
+
+    String second =
+        id(
+            body(
+                send(
+                    "POST",
+                    base,
+                    "{\"revision\":\"B\",\"description\":\"second\",\"effectiveDate\":\"2026-02-01\"}",
+                    T,
+                    "OWNER"),
+                201));
+    // The one thing that moved is the status; what the first revision said is as it was written.
+    assertThat(count(revision, first, "A", "first", "2026-01-01", "SUPERSEDED"), is(1));
+    assertThat(count(revision, second, "B", "second", "2026-02-01", "ACTIVE"), is(1));
+    String held = "SELECT count(*) FROM product.item_revisions WHERE variant_id = ?::uuid";
+    assertThat("nothing was removed", count(held, v), is(2));
+
+    // The service offers no route to rewrite or remove one: a revision's own path answers a read.
+    body(send("DELETE", base + "/" + first, null, T, "OWNER"), 405);
+    body(send("PUT", base + "/" + first, "{\"description\":\"rewritten\"}", T, "OWNER"), 405);
+    assertThat(count(revision, first, "A", "first", "2026-01-01", "SUPERSEDED"), is(1));
+    assertThat("still two revisions", count(held, v), is(2));
+
+    // Another business, whoever it sends, supersedes and removes nothing of ours and reads none.
+    for (String role : OTHER_MANAGEMENT) {
+      assertRefused(
+          send("POST", base, "{\"revision\":\"C\",\"effectiveDate\":\"2026-03-01\"}", RIVAL, role),
+          404,
+          "VARIANT_NOT_FOUND");
+    }
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertThat(
+          "another business reads none of our revisions",
+          send("GET", base, null, RIVAL, role).readEntity(String.class),
+          not(containsString(first)));
+    }
+    assertThat(count(revision, second, "B", "second", "2026-02-01", "ACTIVE"), is(1));
+    assertThat(count(held, v), is(2));
+  }
+
+  @Test
+  @DisplayName("A link is inserted and deleted, never updated (V7's comment)")
+  void aLinkIsInsertedAndDeletedNeverUpdated() throws Exception {
+    String v0 = variantOf(T);
+    String v1 = variantOf(T);
+    String base = "/admin/products/variants/" + v0 + "/relationships";
+    String held = "SELECT count(*) FROM product.item_relationships WHERE variant_id = ?::uuid";
+    String made =
+        id(
+            body(
+                send(
+                    "POST",
+                    base,
+                    "{\"relatedVariantId\":\"" + v1 + "\",\"relationshipType\":\"SUBSTITUTE\"}",
+                    T,
+                    "OWNER"),
+                201));
+    assertThat(count(held, v0), is(1));
+    // AdminResource declares only a DELETE on a link's own path, so a PUT or PATCH there is a 405.
+    String substitute =
+        "SELECT count(*) FROM product.item_relationships WHERE id = ?::uuid"
+            + " AND relationship_type = 'SUBSTITUTE'";
+    String edit = "{\"relationshipType\":\"COMPLEMENTARY\"}";
+    body(send("PUT", base + "/" + made, edit, T, "OWNER"), 405);
+    assertThat("PATCH", patchStatus(base + "/" + made, edit, T, "OWNER"), is(405));
+    assertThat("the link is as it was made", count(substitute, made), is(1));
+
+    // To change a link, the row goes and another comes: severing it leaves nothing behind.
+    assertThat(send("DELETE", base + "/" + made, null, T, "OWNER").getStatus(), is(204));
+    assertThat(count(held, v0), is(0));
+    body(
+        send(
+            "POST",
+            base,
+            "{\"relatedVariantId\":\"" + v1 + "\",\"relationshipType\":\"COMPLEMENTARY\"}",
+            T,
+            "OWNER"),
+        201);
+    assertThat(count(held, v0), is(1));
+    assertThat(
+        "and it is the new kind, with no trace of the old",
+        count(
+            "SELECT count(*) FROM product.item_relationships WHERE variant_id = ?::uuid"
+                + " AND relationship_type = 'COMPLEMENTARY'",
+            v0),
+        is(1));
   }
 }

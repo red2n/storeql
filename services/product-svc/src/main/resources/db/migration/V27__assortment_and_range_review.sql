@@ -88,9 +88,14 @@ COMMENT ON TABLE range_reviews IS
 --
 -- product_stores stays exactly as it is: the range as it stands today, which is what the till and the
 -- storefront ask. This table is the decision log in front of it. A decision (the line, the action, its
--- date, the reason and who decided) is written once and its facts are never edited, so the question "who took this
--- line out of the Scottish shops, when, and why" can be answered months later. Only the sweep stamps
--- an outcome on it: applied_at when the change is pushed, or refused_at when it is closed for good.
+-- date, the reason and who decided) is written once and its facts are never edited, so the question
+-- "who took this line out of the Scottish shops, when, and why" can be answered months later. The
+-- sweep stamps an outcome on it: applied_at when the change is pushed, or refused_at when it is
+-- closed for good (AssortmentRepository.apply, run by the AssortmentSweeper and by
+-- POST /admin/assortment/changes/apply). What the table enforces (trg_assortment_changes_guard,
+-- below) is that no UPDATE edits a decision and that a row with an outcome is not updated again. It
+-- does not know who is updating: an UPDATE of a row with no outcome yet may stamp one, with any
+-- values its checks allow, and that only the sweep does so is the code's doing, not the table's.
 --
 -- Two things follow from having dates. A change can be recorded BEFORE it takes effect, which is how a
 -- range is planned rather than typed on the morning it happens; and applying it is a separate step, so
@@ -164,10 +169,36 @@ CREATE INDEX idx_assortment_changes_pending
     ON assortment_changes (tenant_id, effective_from)
     WHERE applied_at IS NULL AND refused_at IS NULL;
 
--- Not append-only: the sweep stamps applied_at, refused_at and the refusal columns on a row after it
--- is written (AssortmentRepository), and no trigger, rule or grant stops an UPDATE.
+-- Not append-only: the sweep stamps applied_at, or refused_at with its refusal, on a row after it is
+-- written (AssortmentRepository). A trigger holds the table to that, so no UPDATE the application
+-- sends can do more (the table's owner or a superuser can still disable a trigger). An UPDATE may not
+-- change anything the decision recorded (the target, the action, its date, the reason, who decided and
+-- when, the review, whether a held manager decided it), and may not touch a row that already carries
+-- an outcome, so a change is applied or closed once and stays so. Only UPDATE is guarded: a row still
+-- goes with its product (ON DELETE CASCADE) and with its business's erasure.
+CREATE FUNCTION assortment_changes_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.id, NEW.tenant_id, NEW.product_id, NEW.store_id, NEW.cluster_id, NEW.action,
+        NEW.effective_from, NEW.reason, NEW.decided_by, NEW.created_at, NEW.review_id,
+        NEW.held_to_stores)
+       IS DISTINCT FROM
+       (OLD.id, OLD.tenant_id, OLD.product_id, OLD.store_id, OLD.cluster_id, OLD.action,
+        OLD.effective_from, OLD.reason, OLD.decided_by, OLD.created_at, OLD.review_id,
+        OLD.held_to_stores) THEN
+        RAISE EXCEPTION '%: a decision is not edited', TG_TABLE_NAME;
+    END IF;
+    IF OLD.applied_at IS NOT NULL OR OLD.refused_at IS NOT NULL THEN
+        RAISE EXCEPTION '%: an outcome is stamped once', TG_TABLE_NAME;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER trg_assortment_changes_guard
+    BEFORE UPDATE ON assortment_changes
+    FOR EACH ROW EXECUTE FUNCTION assortment_changes_guard();
+
 COMMENT ON TABLE assortment_changes IS
-    'The dated, reasoned decision log in front of product_stores. The sweep stamps applied_at and refused_at in place.';
+    'The dated, reasoned decision log in front of product_stores. A decision is never edited (a trigger refuses it); the sweep stamps applied_at, or refused_at with its refusal, once.';
 COMMENT ON COLUMN assortment_changes.held_to_stores IS
     'Decided by a manager held to stores: never applied so as to move the line to or from every store.';
 COMMENT ON COLUMN assortment_changes.refused_at IS
@@ -218,7 +249,7 @@ CREATE TABLE range_review_lines (
         (revenue IS NULL AND margin IS NULL) = (currency IS NULL)
     )
 );
-CREATE INDEX idx_range_review_lines_tenant_review ON range_review_lines (tenant_id, review_id);
+CREATE INDEX idx_review_lines_tenant_review ON range_review_lines (tenant_id, review_id);
 
 -- A variant appears once in a review: two rows for one line would be two rankings of the same thing.
 CREATE UNIQUE INDEX uq_review_line ON range_review_lines (review_id, variant_id);

@@ -19,11 +19,13 @@ import com.storeql.pricing.repo.RepricingRepository;
 import com.storeql.service.Fx;
 import com.storeql.service.TenantProfiles;
 import com.storeql.web.ApiException;
+import com.storeql.web.ErrorCodes;
 import com.storeql.web.Parsing;
 import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -49,6 +51,10 @@ import java.util.UUID;
 public class RepricingService {
 
   private static final LocalDate EARLIEST_OBSERVATION = LocalDate.of(2000, 1, 1);
+
+  /** The decimal places {@code competitor_prices.price} (NUMERIC(19,4)) keeps. */
+  static final int OBSERVED_PRICE_PLACES = 4;
+
   private static final BigDecimal HUNDRED = new BigDecimal("100");
 
   @Inject RepricingRepository repo;
@@ -152,7 +158,9 @@ public class RepricingService {
         ctx.tenantId(),
         Parsing.uuid(req.variantId(), "variantId"),
         req.competitor().trim(),
-        req.price(),
+        // An observation, not a price the business sets: kept as seen at the column's four places,
+        // finer than the currency if that is what was seen; a fifth place is refused, not rounded.
+        rivalPriceIn(req.price(), home),
         currency,
         zoneId,
         observedOn,
@@ -183,7 +191,15 @@ public class RepricingService {
                         "PRICING_LIST_UNKNOWN",
                         "price list " + req.priceListId() + " is not one of this business's"));
     Repricing.Strategy strategy = strategy(req.strategy());
-    BigDecimal value = req.value() == null ? BigDecimal.ZERO : req.value();
+    // The business's currency is read only for an amount: a percentage, or nothing at all
+    // (MATCH_LOWEST), is no money. The rival's price the amount comes off is in that currency.
+    BigDecimal value =
+        ruleValueIn(
+            strategy,
+            req.value() == null ? BigDecimal.ZERO : req.value(),
+            strategy == Repricing.Strategy.UNDERCUT_AMOUNT
+                ? profiles.requireCurrency(ctx.tenantId())
+                : null);
     if (strategy == Repricing.Strategy.UNDERCUT_PERCENT && value.compareTo(HUNDRED) >= 0) {
       throw ApiException.badRequest(
           "REPRICING_VALUE_INVALID", "an undercut percentage must be below 100; got " + value);
@@ -204,6 +220,54 @@ public class RepricingService {
             new Repricing.Rule(strategy, value, req.floorPercent(), rounding, maxAge),
             true,
             Instant.now()));
+  }
+
+  /**
+   * A rival's price as it is kept: an observation of what a competitor charges, not a price the
+   * business sets, so it is kept as seen at the column's four places and may be finer than the
+   * business's currency (forecourt fuel to a tenth of a penny; intent/repricing-automation.md). It
+   * is never rounded: a price that fits within the currency's units is shown at them ({@code 8.5}
+   * pounds as {@code 8.50}), a finer one as it was seen ({@code 1.4599}), and one finer than the
+   * column holds is refused, because the database would round it without a word.
+   *
+   * @param price what the rival was seen to charge
+   * @param currency the business's own currency, whose minor units a price that fits is shown at
+   * @throws ApiException 400 {@code VALIDATION_FAILED} for a price of more than {@link
+   *     #OBSERVED_PRICE_PLACES} decimals, or more whole digits than the column holds
+   */
+  static BigDecimal rivalPriceIn(BigDecimal price, String currency) {
+    PricingService.requireWholeDigits(price, "price", PricingService.FOUR_PLACE_WHOLE_DIGITS);
+    BigDecimal seen = price.stripTrailingZeros();
+    if (seen.scale() > OBSERVED_PRICE_PLACES) {
+      // The price as written, by toString: 1E-80000000 in full is eighty million digits.
+      String why =
+          "price "
+              + price
+              + " has more decimals than a rival's price is kept to (four places): it is refused,"
+              + " never rounded";
+      throw new ApiException(400, ErrorCodes.VALIDATION_FAILED, why, List.of("price: " + why));
+    }
+    int units = Fx.minorUnits(currency);
+    return seen.scale() < units ? seen.setScale(units, RoundingMode.UNNECESSARY) : seen;
+  }
+
+  /**
+   * A rule's {@code value} as it is handed to the column. For UNDERCUT_AMOUNT it is an amount taken
+   * off the rival's price, so it is returned at the business's currency's minor units, and a value
+   * finer than they are is refused by name, not rounded. For UNDERCUT_PERCENT (a percentage) and
+   * MATCH_LOWEST (no value) it is no money and is returned as typed. For any strategy, a value of
+   * more than {@link PricingService#FOUR_PLACE_WHOLE_DIGITS} whole digits is refused.
+   *
+   * @throws ApiException 400 {@code VALIDATION_FAILED} for an amount with more decimals than the
+   *     currency has, or any value with more whole digits than the column holds
+   */
+  static BigDecimal ruleValueIn(Repricing.Strategy strategy, BigDecimal value, String currency) {
+    if (strategy == Repricing.Strategy.UNDERCUT_AMOUNT) {
+      return PricingService.amountIn(
+          value, currency, "value", PricingService.FOUR_PLACE_WHOLE_DIGITS);
+    }
+    PricingService.requireWholeDigits(value, "value", PricingService.FOUR_PLACE_WHOLE_DIGITS);
+    return value;
   }
 
   private static Repricing.Strategy strategy(String text) {

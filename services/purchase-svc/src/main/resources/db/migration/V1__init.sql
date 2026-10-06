@@ -198,11 +198,10 @@ CREATE TABLE goods_receipts (
   idempotency_key VARCHAR(255)
 );
 CREATE INDEX gr_tenant ON goods_receipts(tenant_id);
-CREATE INDEX gr_po     ON goods_receipts(tenant_id, po_id);
--- The outstanding-quantity query joins receipt lines to their receipt to reach the PO, and does it
--- inside the receive transaction, so it is on the hot path of every delivery. gr_po above is on the
--- same two columns and serves that lookup equally: this index duplicates it. Dropping one is a
--- schema change for a later, deliberate migration.
+-- The receipts of one order. The outstanding-quantity query joins receipt lines to their receipt to
+-- reach the PO, and does it inside the receive transaction, so it is on the hot path of every
+-- delivery; the three-way match, the order's list of deliveries and the supplier scorecard read the
+-- same pair.
 CREATE INDEX idx_goods_receipts_po ON goods_receipts (tenant_id, po_id);
 CREATE UNIQUE INDEX uq_goods_receipt_idempotency
     ON goods_receipts (tenant_id, idempotency_key)
@@ -307,6 +306,9 @@ CREATE INDEX nle_tenant_store_date ON nominal_ledger_entries (tenant_id, store_i
 CREATE INDEX nle_tenant_code_source ON nominal_ledger_entries (tenant_id, nominal_code, source_ref);
 
 -- ── Outbox ────────────────────────────────────────────────────────────────────
+-- The outbox is cross-tenant on purpose: the relay drains every business's rows in one created_at
+-- order, so none of its indexes starts with tenant_id.
+--
 -- A row that fails to publish is retried after a backoff (storeql.outbox.backoff-base-seconds,
 -- doubling, capped at storeql.outbox.backoff-cap-seconds), and only that row's aggregate waits for
 -- it. After storeql.outbox.max-attempts it is a dead letter: never claimed again, kept for an
@@ -343,18 +345,20 @@ CREATE TABLE outbox (
 -- The relay marks published_at and leaves published false, so the partial indexes test published_at,
 -- not the boolean.
 --
--- idx_outbox_unpublished is broader than the claim: every row still waiting, dead letters included,
--- in the same order. It is kept; dropping it is a schema change for a later migration.
-CREATE INDEX idx_outbox_unpublished
-    ON outbox (created_at, id) WHERE published_at IS NULL;
-
 -- The claim's index: the waiting rows that are not dead, in the order the claim's ORDER BY asks for,
--- so the rows of a batch come out in that order.
+-- so the rows of a batch come out in that order. The claim is the one statement that reads waiting
+-- rows in that order: its check for an earlier row of the same aggregate reads the index below, the
+-- relay marks a row published, and records a failure, by its id, and the purge reads only published
+-- rows (idx_outbox_published, below). No index of every unpublished row by created_at
+-- (idx_outbox_unpublished) is kept: it would also hold the dead letters, which the claim's ordered scan
+-- never reads. OutboxPurgeIndexIT plans the claim as the repository prepares it and asserts this
+-- index.
 CREATE INDEX idx_outbox_claim
     ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;
 
--- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off.
+-- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is dead or
+-- backing off.
 CREATE INDEX idx_outbox_aggregate_pending
     ON outbox (aggregate_id, created_at, id)
     WHERE published_at IS NULL;
@@ -367,7 +371,7 @@ CREATE INDEX idx_outbox_aggregate_pending
 --     WHERE published_at IS NOT NULL AND published_at < ? ORDER BY published_at ASC LIMIT ?
 --     FOR UPDATE SKIP LOCKED)
 --
--- A published row is the one the drain index has let go of; a partial index on published_at holds
--- exactly those. The drain never reads it, and each row it publishes writes one entry into it.
+-- A published row is the one the claim's index has let go of; a partial index on published_at holds
+-- exactly those. The claim never reads it, and each row the relay publishes writes one entry into it.
 CREATE INDEX idx_outbox_published
     ON outbox (published_at) WHERE published_at IS NOT NULL;

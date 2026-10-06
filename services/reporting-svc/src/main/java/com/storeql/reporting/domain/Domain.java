@@ -30,10 +30,16 @@ public final class Domain {
       BigDecimal qtyChange,
       Instant occurredAt) {}
 
-  /** Open transfer order line in transit (supply side of netting). */
+  /**
+   * Open transfer order line in transit (supply side of netting).
+   *
+   * @param transferOrderId inventory-svc's transfer order: what its receipt retires the line by
+   * @param eventId the {@code TransferOrderShipped} that opened the line
+   */
   public record OpenSupplyLine(
       UUID id,
       UUID tenantId,
+      UUID transferOrderId,
       UUID fromStoreId,
       UUID toStoreId,
       UUID variantId,

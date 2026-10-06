@@ -23,14 +23,14 @@ CREATE TABLE vat_registrations (
 );
 
 -- Every return filed, as filed. Append-only: a filed return is a legal record, and only tenant
--- erasure (21.14) deletes one; a correction is HMRC's error-correction process, never an edit
+-- erasure deletes one; a correction is HMRC's error-correction process, never an edit
 -- here. The nine boxes are stored as sent. Boxes 1 to 5 are to the penny and boxes 6 to 9 are whole
 -- pounds, as HMRC's MTD VAT return requires. The return is in pounds under UK law, so these columns
 -- keep NUMERIC(18,2) whatever the business's currency. The figures are the tax transactions'
--- amounts summed as recorded: nothing converts them to pounds. MtdService.submit checks neither
--- the business's currency nor its country, so a business that is not in the UK can register and
--- file its own currency's sums as pounds. That is a known gap (CLAUDE.md: UK-only law applies only
--- to a business that uses it), not a design.
+-- amounts summed as recorded: nothing converts them to pounds. So MtdService registers a business
+-- for the return, and files it, only when the business's own profile says its home country is GB
+-- and its currency GBP; any other business is refused (VAT_RETURN_NOT_AVAILABLE), and so is one
+-- whose profile cannot be read.
 CREATE TABLE vat_return_submissions (
     id                 UUID PRIMARY KEY,
     tenant_id          UUID NOT NULL,

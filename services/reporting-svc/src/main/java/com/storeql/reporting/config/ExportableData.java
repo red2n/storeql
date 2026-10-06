@@ -6,8 +6,9 @@ import java.util.Set;
 
 /**
  * What reporting-svc holds for a business, and how it leaves (21.14, EU Data Act ch.VI): the
- * reporting projections built from other services' events. Every table and column of the reporting
- * schema is exported except what is named here, with the reason the register gives.
+ * reporting projections built from other services' events, each exported as derived output data.
+ * Its outbox, processed_events and migration history are left out as {@link
+ * TenantDataSpec#INFRASTRUCTURE} says; this class names no other exclusion.
  */
 @ApplicationScoped
 public class ExportableData extends TenantDataSpec {
@@ -23,6 +24,7 @@ public class ExportableData extends TenantDataSpec {
         "inventory_projection",
         "movement_events",
         "open_supply_lines",
+        "labour_facts",
         "sales_facts",
         "sales_line_facts",
         "sales_voids",

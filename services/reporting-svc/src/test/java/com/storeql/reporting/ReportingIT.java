@@ -1,15 +1,21 @@
 package com.storeql.reporting;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.storeql.ids.Ids;
 import com.storeql.reporting.service.ReportingService;
 import com.storeql.test.PostgresSupport;
+import com.storeql.test.TenantDataChecks;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
+import jakarta.json.JsonObject;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
@@ -23,6 +29,7 @@ import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -290,6 +297,7 @@ class ReportingIT {
         () ->
             reporting.applyTransferShippedOnce(
                 tenant,
+                Ids.newId(),
                 event,
                 "test/transfers",
                 Ids.newId(),
@@ -299,6 +307,90 @@ class ReportingIT {
 
     assertThat("no mark for the failed event", rows("processed_events", "event_id", event), is(0));
     assertThat("no supply line either", rows("open_supply_lines", "event_id", event), is(0));
+  }
+
+  /**
+   * The relay's claim, the statement BaseOutboxRepository.claim runs (copied from it, with its
+   * dead-letter and backoff conditions), is served by idx_outbox_claim, and the per-aggregate check
+   * inside it by idx_outbox_aggregate_pending. idx_outbox_unpublished, an index of every
+   * unpublished row by created_at, is not created: it would also hold the dead letters, which the
+   * claim's ordered scan never reads, and the claim is the one statement on the outbox that reads
+   * waiting rows in that order.
+   */
+  @Test
+  void theRelaysClaimIsServedByItsOwnIndexAndNoUnpublishedIndexIsKept() throws SQLException {
+    String claim =
+        "SELECT o.id, o.aggregate_id, o.topic, o.payload FROM reporting.outbox o"
+            + " WHERE o.published_at IS NULL AND o.dead_at IS NULL"
+            + " AND o.next_attempt_at <= now()"
+            + " AND NOT EXISTS (SELECT 1 FROM reporting.outbox p"
+            + "   WHERE p.aggregate_id = o.aggregate_id AND p.published_at IS NULL"
+            + "   AND (p.dead_at IS NOT NULL OR p.next_attempt_at > now())"
+            + "   AND (p.created_at, p.id) < (o.created_at, o.id))"
+            + " ORDER BY o.created_at, o.id LIMIT 100";
+    String plan = planOf(claim);
+    assertThat(plan, containsString("idx_outbox_claim"));
+    assertThat(plan, containsString("idx_outbox_aggregate_pending"));
+    assertThat(plan, not(containsString("idx_outbox_unpublished")));
+
+    assertThat(
+        "idx_outbox_unpublished is not created: the outbox has the claim's, the per-aggregate"
+            + " check's and the purge's indexes and its primary key",
+        indexNames("outbox"),
+        containsInAnyOrder(
+            "outbox_pkey",
+            "idx_outbox_claim",
+            "idx_outbox_aggregate_pending",
+            "idx_outbox_published"));
+  }
+
+  /**
+   * A transfer's receipt deletes the lines of one business's transfer, the business first (the
+   * statement ReportingRepository.retireSupplyLines runs, planned, not run), and an index that
+   * leads with both serves it: no table scan.
+   */
+  @Test
+  void aReceiptsDeleteIsFoundThroughItsIndex() throws SQLException {
+    assertThat(
+        planOf(
+            "DELETE FROM reporting.open_supply_lines"
+                + " WHERE tenant_id = '01a090ae-611e-700f-b645-a14095230b77'"
+                + " AND transfer_order_id = '01a090ae-611e-701d-9d60-a9d7516ed03b'"),
+        containsString("idx_supply_tenant_transfer"));
+  }
+
+  /**
+   * Every table in the export manifest is marked derived, and labour_facts (from tenant-svc's
+   * LabourRecorded) is among them.
+   */
+  @Test
+  void everyExportedReportingTableIsMarkedDerived() {
+    var manifest =
+        TenantDataChecks.assertExportable(target, "01a090ae-611e-702c-a97b-d1b8025478e1");
+    List<String> notDerived = new ArrayList<>();
+    List<String> names = new ArrayList<>();
+    for (var t : manifest.getJsonArray("tables").getValuesAs(JsonObject.class)) {
+      names.add(t.getString("name"));
+      if (!t.getBoolean("derived")) notDerived.add(t.getString("name"));
+    }
+    assertThat("the projection of tenant-svc's clock is exported", names, hasItem("labour_facts"));
+    assertThat("every exported table is marked derived", notDerived, is(empty()));
+  }
+
+  /** The names of a reporting table's indexes. */
+  private static List<String> indexNames(String table) throws SQLException {
+    List<String> out = new ArrayList<>();
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = 'reporting'"
+                    + " AND tablename = ?")) {
+      ps.setString(1, table);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) out.add(rs.getString(1));
+      }
+    }
+    return out;
   }
 
   private static void outboxRow(UUID id, UUID tenant, Instant createdAt, Instant publishedAt)

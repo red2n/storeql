@@ -35,8 +35,9 @@ import org.junit.jupiter.api.Test;
  * A payment provider that cannot be reached, that refuses, or that is not deployed here, against
  * real Postgres: Stripe is a stand-in for its API that answers as the test tells it to, and the
  * order service is a stub. Each answer is read back as what moved: the attempt is kept where the
- * design keeps it (an authorisation that failed stays on record as FAILED, so a hold the provider
- * did place can be reconciled), and nothing else is taken, recorded or announced.
+ * design keeps it (an authorisation that failed stays on record as FAILED, with no provider
+ * reference, and the provider was sent its id, so an event for a hold it did place all the same is
+ * matched to it: WebhookOrderingIT), and nothing else is taken, recorded or announced.
  *
  * <p>The provider here is Stripe, not the MANUAL default the other classes run with, so this one
  * sets it for its own deployment and clears it after.
@@ -191,6 +192,60 @@ class ProviderFailureIT {
       assertThat("no money was recorded", tenders(order), is("0"));
       assertThat("nothing was announced", captures(order), is("0"));
     }
+  }
+
+  @Test
+  @DisplayName(
+      "A refused authorisation leaves the intent FAILED with no provider reference, and Stripe"
+          + " was told the intent's id, so an event for a hold it placed all the same is matched"
+          + " to it")
+  void aFailedAuthorisationIsFoundAtTheProviderByItsIntentId() {
+    UUID tenant = Ids.newId();
+    UUID shopper = Ids.newId();
+    UUID order = Ids.newId();
+    ORDERS.on(
+        "GET",
+        "/orders/" + order,
+        200,
+        "{\"data\":{\"id\":\""
+            + order
+            + "\",\"loginId\":\""
+            + shopper
+            + "\",\"channel\":\"ONLINE\",\"status\":\"PENDING\",\"total\":3.37,"
+            + "\"currency\":\"GBP\"}}");
+    stripeAnswers(500);
+    int asked = STRIPE.count();
+
+    Answer a =
+        call(
+            target,
+            "POST",
+            "/payments/intents",
+            new Caller(tenant, shopper, "CUSTOMER"),
+            "{\"orderId\":\"" + order + "\",\"amount\":3.37}",
+            Ids.newId().toString());
+
+    assertThat(a.body().toString(), a.status(), is(503));
+    assertThat(STRIPE.count(), is(asked + 1));
+    String intentId =
+        scalar(PG, "SELECT id FROM payment.payment_intents WHERE order_id = '" + order + "'");
+    assertThat(
+        "the provider's error carries no reference, so none is stored: a webhook for a hold it"
+            + " placed is matched by the intent's id instead (WebhookOrderingIT)",
+        scalar(
+            PG,
+            "SELECT coalesce(provider_ref, 'none') FROM payment.payment_intents WHERE id = '"
+                + intentId
+                + "'"),
+        is("none"));
+    DriverStub.Recorded sent = STRIPE.last();
+    assertThat(sent.route(), is("/v1/payment_intents"));
+    assertThat(
+        "what a webhook names the intent by, and a person looks a hold up by at the provider",
+        sent.form().get("metadata[intentId]").get(0),
+        is(intentId));
+    assertThat(sent.form().get("metadata[orderId]").get(0), is(order.toString()));
+    assertThat(sent.form().get("metadata[tenantId]").get(0), is(tenant.toString()));
   }
 
   @Test

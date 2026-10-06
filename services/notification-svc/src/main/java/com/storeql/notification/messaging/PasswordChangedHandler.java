@@ -20,7 +20,8 @@ import java.util.UUID;
  * notice must never be a way into the login. Belongs to no business ({@code tenant_id} null),
  * recorded against the login's own id so {@code AccountDeleted} erases it, and purged with the
  * reset rows after the platform's retention period. Once per event; with no transport, or a failed
- * send, the row says NOT_SENT and nothing retries.
+ * send, the row says NOT_SENT and nothing retries. The row names the channel the sender carries it
+ * on ({@link AccountEmailSender#channel}, {@code SMTP}), as every email in the log does.
  *
  * <p>Payload (documented in {@code PasswordChanged}, iam-svc): {@code eventId, email, language?,
  * kind (SHOPPER|STAFF), businessName? (staff only), userId, changedAt, via (CHANGE|RESET)}.
@@ -77,7 +78,7 @@ class PasswordChangedHandler {
         userId,
         eventId,
         TYPE,
-        "EMAIL",
+        sender.channel(),
         email,
         words.subject(),
         words.body(),

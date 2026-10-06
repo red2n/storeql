@@ -16,9 +16,19 @@ public final class RecordingAccountEmailSender implements AccountEmailSender {
   public boolean live = true;
   public boolean fail;
 
+  /**
+   * What this sender says it carries email on; the real one's own name unless a test changes it.
+   */
+  public String channel = SmtpChannel.NAME;
+
   public final List<String> recipients = new ArrayList<>();
   public final List<String> subjects = new ArrayList<>();
   public final List<String> bodies = new ArrayList<>();
+
+  @Override
+  public String channel() {
+    return channel;
+  }
 
   @Override
   public boolean live() {

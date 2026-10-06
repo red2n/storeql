@@ -128,6 +128,14 @@
             <artifactId>junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- FlywayRunnerTest migrates a real Postgres through common-test's PostgresSupport, the
+             Testcontainers support the services' integration tests use. common-test does not depend
+             on this module, so there is no cycle. -->
+        <dependency>
+            <groupId>com.storeql</groupId>
+            <artifactId>common-test</artifactId>
+            <scope>test</scope>
+        </dependency>
         <!-- JSON-P implementation for tests only (the -api above is provided at runtime by the host
              service's Helidon runtime; a unit test that parses a config-svc response needs a real
              provider on the test classpath). Version matches Helidon 4.4.1's jakarta.json-api 2.1.3. -->

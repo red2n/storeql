@@ -42,6 +42,7 @@ class PricingIT {
             .with(PricingIT.YEN, "JPY", "JP")
             .with(PricingIT.YEN_BUSY, "JPY", "JP")
             .with(PricingIT.RUPEE, "INR", "IN")
+            .with(PricingIT.DINAR, "KWD", "KW")
             // The other business the isolation checks act as: a real business has a profile,
             // and its tax summary is counted in its own currency.
             .with("01a090ae-611e-701d-9d60-a9d7516ed03b", "EUR", "DE");
@@ -59,6 +60,7 @@ class PricingIT {
   private static final String YEN_BUSY = "01a090ae-611e-70f0-8a00-0000000000a2";
   private static final String NOBODY = "01a090ae-611e-70f0-8a00-0000000000a3";
   private static final String RUPEE = "01a090ae-611e-70f0-8a00-0000000000a4";
+  private static final String DINAR = "01a090ae-611e-70f0-8a00-0000000000a5";
   private static final String V = "01a090ae-611e-7037-a4b7-c854f0266ace";
   private static final String S = "01a090ae-611e-703c-a378-a4972ea461c8";
   private static final String ORDER_ID = "01a090ae-611e-7056-8f30-ecdbb48160eb";
@@ -2429,5 +2431,153 @@ class PricingIT {
     String yen = getAs("/prices/currencies", YEN, "CASHIER").readEntity(String.class);
     assertThat(yen, containsString("\"home\":\"JPY\""));
     assertThat(yen, not(containsString("GBP")));
+  }
+
+  // ── a promotion's typed amount is no finer than the business's currency ────
+
+  private static String promotionJson(String type, String value) {
+    String shape =
+        switch (type) {
+          case "SPEND_THRESHOLD" -> ",\"minOrderAmount\":100";
+          case "MIX_MATCH" -> ",\"buyQty\":3";
+          default -> "";
+        };
+    return "{\"name\":\"p-"
+        + type
+        + "-"
+        + value
+        + "\",\"type\":\""
+        + type
+        + "\",\"value\":"
+        + value
+        + shape
+        + ",\"startsAt\":\"2020-01-01T00:00:00Z\"}";
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A promotion's amount finer than the business's currency is refused by name, never rounded;"
+          + " a percentage is no money")
+  void aPromotionsAmountIsNoFinerThanTheBusinessCurrency() {
+    String[] amountTypes = {"FLAT", "BASKET_FLAT", "SPEND_THRESHOLD", "MIX_MATCH"};
+    // tenant, a value one place too fine, a value at the currency's own places, and as it is kept
+    String[][] markets = {
+      {DINAR, "1.2345", "1.235", "1.235"}, // three places: the fils
+      {YEN, "100.5", "100", "100"}, // none: whole yen
+      {T, "1.999", "1.99", "1.99"}, // two: pence
+    };
+    for (String[] m : markets) {
+      int kept = 0;
+      for (String type : amountTypes) {
+        Response refused = post("/admin/promotions", promotionJson(type, m[1]), m[0]);
+        String body = refused.readEntity(String.class);
+        assertThat(type + " " + m[1] + ": " + body, refused.getStatus(), is(400));
+        assertThat(body, containsString("VALIDATION_FAILED"));
+        assertThat("names the field: " + body, body, containsString("value:"));
+        assertThat("a refusal keeps nothing", count("promotions", m[0]), is("" + kept));
+
+        Response made = post("/admin/promotions", promotionJson(type, m[2]), m[0]);
+        String madeBody = made.readEntity(String.class);
+        assertThat(type + " " + m[2] + ": " + madeBody, made.getStatus(), is(201));
+        assertThat(
+            type + " is kept as the business's currency counts it",
+            Envelopes.parse(madeBody)
+                .getJsonObject("data")
+                .getJsonNumber("value")
+                .bigDecimalValue(),
+            comparesEqualTo(new BigDecimal(m[3])));
+        kept++;
+        assertThat(count("promotions", m[0]), is("" + kept));
+      }
+    }
+    // A figure the column cannot hold is refused at the door too, not left to overflow (a 500).
+    Response huge = post("/admin/promotions", promotionJson("FLAT", "100000000000000"), YEN);
+    assertThat(huge.readEntity(String.class), huge.getStatus(), is(400));
+    assertThat(count("promotions", YEN), is("4"));
+    // A percentage is not money: a yen business may give 12.5% and a dinar business 12.3456%.
+    for (String type : new String[] {"PERCENT", "BASKET_PERCENT"}) {
+      assertThat(
+          type, post("/admin/promotions", promotionJson(type, "12.5"), YEN).getStatus(), is(201));
+      assertThat(
+          type,
+          post("/admin/promotions", promotionJson(type, "12.3456"), DINAR).getStatus(),
+          is(201));
+    }
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A promotion amount's refusal is management's to see, and another business cannot stop the"
+          + " promotion it let through")
+  void aPromotionAmountRefusalLeavesNothingAndNoOneElseTouchesWhatPassed() {
+    String tooFine = promotionJson("FLAT", "1.2345");
+    String fine = promotionJson("FLAT", "1.235");
+    // A cashier, a storekeeper or a shopper never reaches the amount: the door is management's.
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, postAs("/admin/promotions", tooFine, DINAR, role).getStatus(), is(403));
+      assertThat(role, postAs("/admin/promotions", fine, DINAR, role).getStatus(), is(403));
+    }
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(role, postAs("/admin/promotions", tooFine, DINAR, role).getStatus(), is(400));
+    }
+    assertThat(count("promotions", DINAR), is("0"));
+    String id =
+        extractId(postAs("/admin/promotions", fine, DINAR, "MANAGER").readEntity(String.class));
+    assertThat(count("promotions", DINAR), is("1"));
+    // Another business's staff, naming its id, find nothing to stop.
+    for (String other : new String[] {T, YEN}) {
+      for (String role : new String[] {"OWNER", "MANAGER"}) {
+        assertThat(
+            role,
+            codeOf(
+                postAs(
+                    "/admin/promotions/" + id + "/deactivate",
+                    "{\"reason\":\"not mine\"}",
+                    other,
+                    role),
+                404),
+            is("PRICING_SUBJECT_NOT_FOUND"));
+      }
+      assertThat(count("promotions", other), is("0"));
+    }
+    assertThat(
+        "the promotion is still on",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.promotions WHERE id = '" + id + "'"),
+        is("true"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A promotion is scoped only by its own business: another's staff, naming its id, find"
+          + " nothing and write nothing")
+  void aPromotionIsScopedOnlyByItsOwnBusiness() {
+    String id =
+        extractId(
+            post("/admin/promotions", promotionJson("BASKET_PERCENT", "10"), DINAR)
+                .readEntity(String.class));
+    String scope = "{\"scopeType\":\"ALL\"}";
+    assertThat(post("/admin/promotions/" + id + "/items", scope, DINAR).getStatus(), is(201));
+    assertThat(count("promotion_items", DINAR), is("1"));
+
+    for (String other : new String[] {T, YEN}) {
+      for (String role : new String[] {"OWNER", "MANAGER"}) {
+        assertThat(
+            role,
+            codeOf(postAs("/admin/promotions/" + id + "/items", scope, other, role), 404),
+            is("PRICING_SUBJECT_NOT_FOUND"));
+      }
+      for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+        assertThat(
+            role,
+            postAs("/admin/promotions/" + id + "/items", scope, other, role).getStatus(),
+            is(403));
+      }
+      assertThat("nothing was written for them", count("promotion_items", other), is("0"));
+    }
+    // A promotion nobody has is as absent to its own business's staff.
+    assertThat(
+        codeOf(postAs("/admin/promotions/" + Ids.newId() + "/items", scope, DINAR, "OWNER"), 404),
+        is("PRICING_SUBJECT_NOT_FOUND"));
+    assertThat("and nothing was written for it either", count("promotion_items", DINAR), is("1"));
   }
 }

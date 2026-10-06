@@ -35,6 +35,11 @@ class _Server implements HttpClientAdapter {
   bool refuse = false;
   bool zonesMade = false;
 
+  /// The `data` array of the sightings or the proposals, when a test answers
+  /// its own instead of the default.
+  String? sightings;
+  String? proposals;
+
   @override
   void close({bool force = false}) {}
 
@@ -76,7 +81,8 @@ class _Server implements HttpClientAdapter {
     }
     if (path.endsWith('/admin/competitor-prices') && o.method == 'GET') {
       return _json(
-          '{"data":[{"id":"01a0b000-0000-7000-8000-000000000010","variantId":"$_variant","competitor":"Rival A","price":8.5,"currency":"GBP","zoneId":"$_north","observedOn":"2026-09-24","source":"MANUAL"}]}',
+          sightings ??
+              '{"data":[{"id":"01a0b000-0000-7000-8000-000000000010","variantId":"$_variant","competitor":"Rival A","price":8.5,"currency":"GBP","zoneId":"$_north","observedOn":"2026-09-24","source":"MANUAL"}]}',
           200);
     }
     if (path.endsWith('/admin/repricing/rules') && o.method == 'GET') {
@@ -86,7 +92,8 @@ class _Server implements HttpClientAdapter {
     }
     if (path.endsWith('/admin/repricing/proposals') && o.method == 'GET') {
       return _json(
-          '{"data":[{"id":"$_proposal","ruleId":"$_rule","priceListId":"$_list","zoneId":"$_north","variantId":"$_variant","currentPrice":9.0,"competitor":"Rival A","competitorPrice":8.5,"observedOn":"2026-09-24","proposedPrice":7.99,"currency":"GBP","status":"PROPOSED"}]}',
+          proposals ??
+              '{"data":[{"id":"$_proposal","ruleId":"$_rule","priceListId":"$_list","zoneId":"$_north","variantId":"$_variant","currentPrice":9.0,"competitor":"Rival A","competitorPrice":8.5,"observedOn":"2026-09-24","proposedPrice":7.99,"currency":"GBP","status":"PROPOSED"}]}',
           200);
     }
     if (path.endsWith('/apply') && o.method == 'POST') {
@@ -104,12 +111,21 @@ class _Server implements HttpClientAdapter {
       headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
 }
 
-Future<_Server> _pump(WidgetTester tester, {bool management = true, bool refuse = false}) async {
+Future<_Server> _pump(
+  WidgetTester tester, {
+  bool management = true,
+  bool refuse = false,
+  String? sightings,
+  String? proposals,
+}) async {
   tester.view.physicalSize = const Size(1100, 1400);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  final server = _Server()..refuse = refuse;
+  final server = _Server()
+    ..refuse = refuse
+    ..sightings = sightings
+    ..proposals = proposals;
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
   await tester.pumpWidget(ProviderScope(
     overrides: [apiClientProvider.overrideWithValue(_FakeApiClient(dio))],
@@ -144,6 +160,28 @@ void main() {
     expect(find.textContaining('Oat milk 1L · seen 24 Sept 2026'), findsOneWidget);
     expect(find.textContaining('variant '), findsNothing);
     expect(find.text('Rival A · £8.50'), findsOneWidget);
+  });
+
+  // A rival's price is an observation the API keeps to four places and answers
+  // unrounded, so the list and the proposal show it as it was seen: 1.4599, not
+  // 1.46, and a fraction of a yen. A business's own prices stay at the units.
+  testWidgets('a rival\'s price finer than the currency is shown as seen, the business\'s own is not',
+      (tester) async {
+    await _pump(
+      tester,
+      sightings: '{"data":['
+          '{"id":"01a0b000-0000-7000-8000-000000000011","variantId":"$_variant","competitor":"Rival C","price":1.4599,"currency":"GBP","zoneId":null,"observedOn":"2026-09-25","source":"MANUAL"},'
+          '{"id":"01a0b000-0000-7000-8000-000000000012","variantId":"$_variant","competitor":"Rival D","price":1250.5,"currency":"JPY","zoneId":null,"observedOn":"2026-09-26","source":"MANUAL"},'
+          '{"id":"01a0b000-0000-7000-8000-000000000013","variantId":"$_variant","competitor":"Rival E","price":1250,"currency":"JPY","zoneId":null,"observedOn":"2026-09-27","source":"MANUAL"}]}',
+      proposals: '{"data":['
+          '{"id":"$_proposal","ruleId":"$_rule","priceListId":"$_list","zoneId":"$_north","variantId":"$_variant","currentPrice":1.6,"competitor":"Rival C","competitorPrice":1.4599,"observedOn":"2026-09-25","proposedPrice":1.46,"currency":"GBP","status":"PROPOSED"}]}',
+    );
+    expect(find.text('Rival C · £1.4599'), findsOneWidget);
+    expect(find.text('Rival D · ¥1,250.5'), findsOneWidget);
+    expect(find.text('Rival E · ¥1,250'), findsOneWidget);
+    // The proposal: the business's own two prices at the units, the rival's as seen.
+    expect(find.text('£1.60 → £1.46'), findsOneWidget);
+    expect(find.textContaining('Rival C at £1.4599, seen 25 Sept 2026'), findsOneWidget);
   });
 
   testWidgets('New zone posts the name and description and the list refreshes', (tester) async {

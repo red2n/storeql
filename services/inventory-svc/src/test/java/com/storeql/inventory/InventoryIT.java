@@ -1247,22 +1247,63 @@ class InventoryIT {
   /**
    * System-caused movements stay unattributed on purpose: they already cite the record that caused
    * them. Asserting this pins the distinction, so a later change cannot quietly start stamping the
-   * requesting user onto a sale and make "who adjusted this" ambiguous again.
+   * requesting user onto a sale and make "who adjusted this" ambiguous again. A manual receipt is
+   * not one of them (a person entered it, and ManualReceiptActorIT pins that it names them), so the
+   * movements asserted here are the hold and the sale a request carrying a user caused, and the
+   * receipt a goods-received event caused.
    */
   @Test
   void systemCausedMovementsCarryNoActor() {
     String variant = "01a090ae-611e-7030-aa2a-8c96cf019044";
+    String grnVariant = "01a090ae-611e-7030-aa2a-8c96cf019045";
     String actor = "01a090ae-611e-7039-b9af-f03ae3b76991";
     assertThat(
         postAs("/admin/inventory/receive", receiveJson(variant, "7"), T, actor).getStatus(),
         is(201));
+    Response held =
+        postAs(
+            "/inventory/reservations",
+            "{\"storeId\":\"" + S + "\",\"variantId\":\"" + variant + "\",\"qty\":3}",
+            T,
+            actor);
+    assertThat(held.getStatus(), is(201));
+    assertThat(
+        postAs(
+                "/inventory/reservations/"
+                    + field(held.readEntity(String.class), "id")
+                    + "/consume",
+                "",
+                T,
+                actor)
+            .getStatus(),
+        is(200));
 
-    String movements = movements(variant, "RECEIVE");
-    assertThat(movements, containsString("RECEIVE"));
-    // The requesting user must not be stamped onto a system-caused movement: attribution here
-    // would be misleading, since the receipt is explained by its refType/refId, not by whoever
-    // happened to call the endpoint.
-    assertThat(movements, not(containsString(actor)));
+    // The user who made the request must not be stamped onto the hold or the sale it caused:
+    // attribution here would be misleading, since each is explained by its refType/refId, not by
+    // whoever happened to call the endpoint.
+    for (String type : new String[] {"RESERVE", "SALE"}) {
+      String movements = movements(variant, type);
+      assertThat(type, movements, containsString(type));
+      assertThat(type, movements, not(containsString(actor)));
+    }
+
+    // Nor does a receipt an event caused name anyone: it cites the goods receipt (the path the
+    // GoodsReceived consumer takes for each line).
+    inventoryService.receiveOnce(
+        Ids.newId(),
+        "goods-received",
+        Ids.parse(T),
+        Ids.parse(S),
+        Ids.parse(grnVariant),
+        new java.math.BigDecimal("5"),
+        null,
+        null,
+        null,
+        "GRN",
+        Ids.newId());
+    String received = movements(grnVariant, "RECEIVE");
+    assertThat(received, containsString("\"refType\":\"GRN\""));
+    assertThat(received, not(containsString("\"actorId\":\"")));
   }
 
   /** Like {@link #post} but with an authenticated user id, as the gateway would stamp it. */
@@ -1703,7 +1744,7 @@ class InventoryIT {
   private String movements(String variantId, String type) {
     return target
         .path("/admin/inventory/movements")
-        .queryParam("variantId", variantId)
+        .queryParam("variant", variantId)
         .queryParam("type", type)
         .request()
         .header("X-Tenant-Id", T)

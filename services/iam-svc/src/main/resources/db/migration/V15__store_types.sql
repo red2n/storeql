@@ -2,9 +2,10 @@
 -- iam-svc keeps each store's type beside its status, from tenant-svc's StoreStatusChanged (which
 -- carries the type), so a till session at a dark store — a shop with no shop floor — is refused
 -- without a cross-service call at clock-in. Absence of a row = a shop.
--- The index leads with tenant_id, as CLAUDE.md asks of every tenant table; export and erasure
--- filter by it, and a read by business and store uses it. The type is read by store_id, the
--- primary key.
+-- The index leads with tenant_id, as CLAUDE.md asks of every tenant table: a business's export reads
+-- its rows a page at a time by store_id, and its erasure deletes them, each WHERE tenant_id = ?
+-- (common-service TenantDataRepository). The type itself is read by business and store, which the
+-- primary key on store_id answers.
 CREATE TABLE store_types (
     store_id   UUID        PRIMARY KEY,
     tenant_id  UUID        NOT NULL,

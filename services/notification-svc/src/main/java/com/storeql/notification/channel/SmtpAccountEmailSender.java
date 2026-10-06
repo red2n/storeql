@@ -63,6 +63,11 @@ public class SmtpAccountEmailSender implements AccountEmailSender {
   int senderThreads;
 
   @Override
+  public String channel() {
+    return SmtpChannel.NAME;
+  }
+
+  @Override
   public boolean live() {
     return "email".equalsIgnoreCase(channelName) || "smtp".equalsIgnoreCase(channelName);
   }

@@ -3,6 +3,7 @@ package com.storeql.product;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
@@ -108,6 +109,28 @@ class ImageStorageCapIT {
     }
   }
 
+  @Test
+  @DisplayName("The table itself holds every image under 256 KB, whoever writes it (V14)")
+  void theTableRefusesAnImageOf256KbOrMoreWhateverTheService() throws Exception {
+    String small = product(FREE, "Table small " + Ids.newId());
+    String edge = product(FREE, "Table edge " + Ids.newId());
+    String big = product(FREE, "Table big " + Ids.newId());
+
+    // One byte under 256 KB is taken, straight into the table behind the application.
+    assertThat(insertImage(small, FREE, 262143), nullValue());
+    assertThat(imageRows(small), is(1));
+
+    // Exactly 256 KB, and a megabyte, are refused by the CHECK created with the table.
+    for (String product : new String[] {edge, big}) {
+      int size = product.equals(edge) ? 262144 : 1024 * 1024;
+      assertThat(
+          "a " + size + "-byte image",
+          insertImage(product, FREE, size),
+          containsString("product_images_size_under_256kb"));
+      assertThat("nothing of it was kept", imageRows(product), is(0));
+    }
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────────
 
   private String product(String tenant, String name) {
@@ -142,6 +165,27 @@ class ImageStorageCapIT {
       }
     } catch (java.sql.SQLException e) {
       throw new IllegalStateException("counting image rows", e);
+    }
+  }
+
+  /**
+   * Writes an image row straight into the table.
+   *
+   * @return the database's refusal, or {@code null} when the row went in
+   */
+  private static String insertImage(String productId, String tenant, int size) {
+    try (var c = PG.dataSource().getConnection();
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO product.product_images (product_id, tenant_id, content_type, bytes)"
+                    + " VALUES (?::uuid, ?::uuid, 'image/png', ?)")) {
+      ps.setString(1, productId);
+      ps.setString(2, tenant);
+      ps.setBytes(3, new byte[size]);
+      ps.executeUpdate();
+      return null;
+    } catch (java.sql.SQLException e) {
+      return e.getMessage();
     }
   }
 

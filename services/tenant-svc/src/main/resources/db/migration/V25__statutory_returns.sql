@@ -35,8 +35,11 @@ CREATE TABLE statutory_returns (
     -- "correct" P1M6D to P1M7D: seven days from the day after the period is the 8th, not the 7th.
     due_after      TEXT NOT NULL,
     -- Where the export that answers this return lives. A link, never a proxy: the service that owns
-    -- the data serves the bytes. Null where the platform cannot produce it at all, which the calendar
-    -- shows as such — a gap the business must close with an accountant is worth seeing.
+    -- the data serves the bytes. The path is the route as that service itself serves it — not the
+    -- gateway's /api/v1/{service} form, and not assumed to sit under /admin/: pricing-svc's VAT return
+    -- is /vat-return, order-svc's exports are under /admin. Null where the platform cannot produce it
+    -- at all, which the calendar shows as such — a gap the business must close with an accountant is
+    -- worth seeing.
     export_service TEXT,
     export_path    TEXT,
     citation       TEXT NOT NULL,
@@ -84,7 +87,7 @@ VALUES
 
 -- The United Kingdom: VAT under Making Tax Digital, one month and seven days after the quarter.
     ('VAT_RETURN_UK', 'COUNTRY', 'GB', 'VAT return (Making Tax Digital)', 'QUARTERLY', 'P1M6D',
-     'pricing-svc', '/admin/vat-return',
+     'pricing-svc', '/vat-return',
      'VATA 1994 sch.11 para.2; SI 1995/2518 reg.25', '2019-04-01'),
 
 -- The EU: the recapitulative statement for cross-border B2B supplies, by the 20th of the month after

@@ -26,6 +26,25 @@ import java.util.UUID;
 public class NotificationRepository extends BaseJdbcRepository {
 
   /**
+   * The erasure of one shop's messages about one customer. Filters by the tenant first and then the
+   * subject, which is what {@code idx_notification_log_tenant_subject} (V2) is made for; the plan
+   * test reads this very text, not a copy of it.
+   */
+  static final String REDACT_FOR_CUSTOMER =
+      "UPDATE notification_log SET recipient = '[erased]', subject = '[erased]', body = '',"
+          + " redacted_at = now()"
+          + " WHERE tenant_id = ? AND subject_id = ? AND redacted_at IS NULL";
+
+  /**
+   * The erasure of the platform's own messages about a deleted account: the rows that belong to no
+   * business ({@code tenant_id IS NULL}), which the same index serves through its leading column.
+   */
+  static final String REDACT_FOR_ACCOUNT =
+      "UPDATE notification_log SET recipient = '[erased]', subject = '[erased]', body = '',"
+          + " redacted_at = now()"
+          + " WHERE tenant_id IS NULL AND subject_id = ? AND redacted_at IS NULL";
+
+  /**
    * Insert a shortage alert, deduped on its eventId: the processed_events mark and the insert
    * commit in ONE transaction so a redelivered event is skipped and a crashed write is retried —
    * never duplicated and never lost. Returns false if the event was already processed.
@@ -198,12 +217,7 @@ public class NotificationRepository extends BaseJdbcRepository {
    * touched again.
    */
   public int redactForCustomer(UUID tenantId, UUID customerId) {
-    return redact(
-        "UPDATE notification_log SET recipient = '[erased]', subject = '[erased]', body = '',"
-            + " redacted_at = now()"
-            + " WHERE tenant_id = ? AND subject_id = ? AND redacted_at IS NULL",
-        tenantId,
-        customerId);
+    return redact(REDACT_FOR_CUSTOMER, tenantId, customerId);
   }
 
   /**
@@ -211,11 +225,7 @@ public class NotificationRepository extends BaseJdbcRepository {
    * as WELCOME. Messages a shop sent stay with that shop, which erases them itself.
    */
   public int redactForAccount(UUID userId) {
-    return redact(
-        "UPDATE notification_log SET recipient = '[erased]', subject = '[erased]', body = '',"
-            + " redacted_at = now()"
-            + " WHERE tenant_id IS NULL AND subject_id = ? AND redacted_at IS NULL",
-        userId);
+    return redact(REDACT_FOR_ACCOUNT, userId);
   }
 
   /**

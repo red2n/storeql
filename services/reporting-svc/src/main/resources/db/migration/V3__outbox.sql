@@ -6,6 +6,11 @@
 -- (storeql.outbox.backoff-base-seconds, doubling, capped at storeql.outbox.backoff-cap-seconds), and
 -- only that row's aggregate waits for it. After storeql.outbox.max-attempts it is a dead letter: never
 -- claimed again, kept for an operator, and it holds back its own aggregate only.
+--
+-- The outbox is deliberately cross-tenant: the relay drains every business's rows, oldest first, and
+-- no statement on the table filters by tenant_id, so no index here leads with it. The column says
+-- whose event a row is; the only code that reads it is the relay's dead-letter warning
+-- (BaseOutboxRepository.recordFailures).
 CREATE TABLE outbox (
     id              UUID        PRIMARY KEY,
     event_type      TEXT        NOT NULL,
@@ -24,16 +29,17 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 
--- The rows still waiting to publish, oldest first. Broader than the relay's claim below, which also
--- excludes dead letters: idx_outbox_claim is the index that claim matches exactly.
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
-
--- The claim: rows that may publish now, in the order they were written.
+-- The claim (common-service BaseOutboxRepository.claim): rows that may publish now, in the order they
+-- were written. This index serves its ordered scan (ORDER BY created_at, id LIMIT n); a dead letter
+-- is not in it. Marking a row published and recording a failure go by primary key. No index of every
+-- unpublished row by created_at (idx_outbox_unpublished) is kept: it would also hold the dead
+-- letters, which the claim's ordered scan never reads.
 CREATE INDEX idx_outbox_claim
     ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;
 
--- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off.
+-- The per-aggregate check, the claim's NOT EXISTS: an aggregate's earlier unpublished rows, and
+-- whether any is dead or backing off.
 CREATE INDEX idx_outbox_aggregate_pending
     ON outbox (aggregate_id, created_at, id)
     WHERE published_at IS NULL;
@@ -45,8 +51,8 @@ CREATE INDEX idx_outbox_aggregate_pending
 --      WHERE published_at IS NOT NULL AND published_at < ?
 --      ORDER BY published_at ASC LIMIT ? FOR UPDATE SKIP LOCKED)
 --
--- idx_outbox_published serves that search. Partial, so it holds only what the purge can take and
--- shrinks as it takes it; the unpublished backlog is never in it.
+-- idx_outbox_published serves that search. Partial, so it holds only published rows and shrinks as
+-- the purge takes them; the unpublished backlog is never in it.
 CREATE INDEX idx_outbox_published
     ON outbox (published_at)
     WHERE published_at IS NOT NULL;

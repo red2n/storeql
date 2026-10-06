@@ -17,7 +17,10 @@ CREATE TABLE inventory_batches (
     cost_price                 NUMERIC(18,4),
     expiry_date                DATE,
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Lifecycle status. Only ACTIVE is written today; no code sets DEPLETED or EXPIRED.
+    -- Lifecycle status. ACTIVE is the only value any code writes, and the CHECK below says so: a batch
+    -- that runs out keeps its status and says so through remaining_qty = 0, and one past its date is
+    -- judged by the store's own day (Expiry), never by a status of its own. A status that something
+    -- starts to write is added to the CHECK by the change that writes it.
     status                     TEXT NOT NULL DEFAULT 'ACTIVE',
     -- Physical condition, orthogonal to the lifecycle status:
     -- AVAILABLE | QUARANTINE | INSPECTION | DAMAGED | RECALLED.
@@ -43,6 +46,7 @@ CREATE TABLE inventory_batches (
     -- is on hand but never available (no hold, no sale, no transfer draws it), and it is valued at cost
     -- without the duty, which crystallises only on release to home use.
     duty_status                TEXT NOT NULL DEFAULT 'DUTY_PAID',
+    CONSTRAINT chk_batch_status CHECK (status IN ('ACTIVE')),
     CONSTRAINT chk_material_status CHECK (
         material_status IN ('AVAILABLE', 'QUARANTINE', 'INSPECTION', 'DAMAGED', 'RECALLED')
     ),
@@ -52,8 +56,8 @@ CREATE TABLE inventory_batches (
 );
 -- FIFO scan order: soonest expiry first, then oldest. Index supports the deduction query.
 CREATE INDEX idx_batches_fifo ON inventory_batches (tenant_id, store_id, variant_id, expiry_date NULLS LAST, created_at);
--- ACTIVE batches (every batch, today). listExpiringBatches reads them; the draw and level queries
--- filter on material_status, not on status.
+-- ACTIVE batches (every batch: ACTIVE is the only status). listExpiringBatches reads them; the draw and
+-- level queries filter on material_status, not on status.
 CREATE INDEX idx_batches_active ON inventory_batches (tenant_id, store_id, variant_id)
     WHERE status = 'ACTIVE';
 -- Availability: stock levels count only AVAILABLE batches (the levels query filters on material_status).
@@ -86,7 +90,9 @@ CREATE TABLE stock_movements (
     store_id    UUID NOT NULL,
     variant_id  UUID NOT NULL,
     batch_id    UUID,
-    type        TEXT NOT NULL,                         -- RECEIVE|SALE|ADJUST|TRANSFER|RETURN|RTV|RESERVE|BOND_RELEASE|YIELD|RELEASE
+    -- Domain.MoveType is the whole vocabulary: what the code writes, no more. A customer return or a void
+    -- is not a type of its own; it is a RECEIVE whose ref_type says RETURN or VOID.
+    type        TEXT NOT NULL,                         -- RECEIVE|SALE|ADJUST|TRANSFER|RTV|RESERVE|BOND_RELEASE|YIELD|RELEASE|LOT_SPLIT|LOT_MERGE
     qty         NUMERIC(18,3) NOT NULL,                -- signed: +in / -out
     ref_type    TEXT,                                  -- e.g. GRN, ORDER, ADJUSTMENT
     ref_id      UUID,
@@ -96,11 +102,13 @@ CREATE TABLE stock_movements (
     reason_code TEXT,
     -- Who made the movement, where the movement does not name them. A person's adjustment is
     -- attributed here (InventoryRepository.adjustTx, cycle counts, physical inventory, recall
-    -- withdrawals), as is a yield a person recorded: a negative ADJUST of -50 units must be
-    -- attributable to someone, because shrinkage is the highest-value audit case in retail. A system
-    -- flow names its cause through ref_type/ref_id and leaves this NULL. A manual receipt is the gap:
-    -- it is written as ref_type 'MANUAL' with ref_id and actor both NULL, so the ledger does not say
-    -- who received that stock.
+    -- withdrawals), as is a yield a person recorded, a lot split or merge a person made (the lot action
+    -- it cites names no one) and a receipt a person entered by hand
+    -- (ref_type 'MANUAL', ref_id NULL, actor_id the signed-in user): a negative ADJUST of -50 units
+    -- must be attributable to someone, because shrinkage is the highest-value audit case in retail.
+    -- A system flow, or a receipt an event caused, names its cause through ref_type/ref_id and
+    -- leaves this NULL. A manual receipt, lot split or lot merge made with no signed-in user on the
+    -- request (a call between services) is NULL too.
     actor_id    UUID
 );
 CREATE INDEX idx_movements_tenant ON stock_movements (tenant_id, store_id, variant_id, created_at DESC);
@@ -184,7 +192,11 @@ CREATE TABLE processed_events (
 CREATE INDEX idx_processed_events_processed_at
     ON processed_events (processed_at);
 
--- Transactional outbox.
+-- Transactional outbox. It is deliberately cross-tenant: the relay drains every business's rows in the
+-- order they were written, and no statement on the table filters by tenant_id, so none of its indexes
+-- leads with it. The column is not a lookup key: the relay's claim does not select it, and the only
+-- production code that reads it is the dead-letter warning (BaseOutboxRepository.recordFailures),
+-- which names whose event could not be published.
 CREATE TABLE outbox (
     id           UUID PRIMARY KEY,
     event_type   TEXT NOT NULL,
@@ -205,9 +217,6 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
--- Unpublished rows by age, dead letters included. The claim (BaseOutboxRepository) filters on the
--- predicate of idx_outbox_claim below, which leaves the dead letters out; no query here names this index.
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
 -- Published outbox rows older than the retention (BaseOutboxRepository.purgePublished):
 --   DELETE FROM outbox WHERE id IN (SELECT id FROM outbox
 --     WHERE published_at IS NOT NULL AND published_at < ?
@@ -217,8 +226,13 @@ CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS
 CREATE INDEX idx_outbox_published
     ON outbox (published_at)
     WHERE published_at IS NOT NULL;
--- The claim (BaseOutboxRepository): unpublished, not dead, in the order they were written. The index
--- does not cover next_attempt_at, which the claim reads from the row (the backoff).
+-- The claim (BaseOutboxRepository.claim): unpublished, not dead, in the order they were written. This
+-- index serves its ordered scan (ORDER BY created_at, id LIMIT n); it does not cover next_attempt_at,
+-- which the claim reads from the row (the backoff). The claim's check for an earlier waiting row of the
+-- same aggregate reads the per-aggregate index below. Marking a row published and recording a failure go
+-- by id, and the purge by published_at (above). No index of every unpublished row by created_at
+-- (idx_outbox_unpublished) is kept: it would also hold the dead letters, which the claim's ordered scan
+-- never reads, and the claim is the one statement that reads waiting rows in that order.
 CREATE INDEX idx_outbox_claim
     ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;

@@ -1,13 +1,17 @@
 -- payment-svc schema
 -- Golden rule #8: payments and refunds are append-only.
+--
+-- The outbox is the one table here with no index led by tenant_id, and that is on purpose: the
+-- relay drains every business's rows together, in the order they were written, so its indexes
+-- lead with created_at, aggregate_id or published_at.
 
 CREATE TABLE IF NOT EXISTS payment_tenders (
     id              UUID        NOT NULL,
     tenant_id       UUID        NOT NULL,
     order_id        UUID        NOT NULL,
     amount          NUMERIC(14,4) NOT NULL,
-    -- CASH | CARD | UPI | WALLET | GIFT_CARD | VOUCHER | STORE_CREDIT | EXCHANGE. No CHECK holds
-    -- it; the service writes only these.
+    -- How the money moved: CASH | CARD | UPI | WALLET | GIFT_CARD | VOUCHER | STORE_CREDIT |
+    -- EXCHANGE, exactly the set the service writes, held by ck_payment_tenders_method below.
     method          VARCHAR(30) NOT NULL,
     reference       VARCHAR(255),           -- card auth code, gift-card code, etc.
     idempotency_key VARCHAR(255),
@@ -17,7 +21,11 @@ CREATE TABLE IF NOT EXISTS payment_tenders (
     -- The store the money was taken at, so Z-reports aggregate by store without joining order-svc
     -- (database-per-service). Null where the payment named no store.
     store_id        UUID,
-    PRIMARY KEY (tenant_id, id)
+    PRIMARY KEY (tenant_id, id),
+    CONSTRAINT ck_payment_tenders_method CHECK (
+        method IN ('CASH', 'CARD', 'UPI', 'WALLET', 'GIFT_CARD', 'VOUCHER', 'STORE_CREDIT',
+                   'EXCHANGE')
+    )
 );
 
 CREATE TABLE IF NOT EXISTS refund_tenders (
@@ -26,6 +34,15 @@ CREATE TABLE IF NOT EXISTS refund_tenders (
     order_id        UUID        NOT NULL,
     payment_id      UUID        NOT NULL,
     amount          NUMERIC(14,4) NOT NULL,
+    -- How the value went back, from the set of payment_tenders.method (held by
+    -- ck_refund_tenders_method below). A refund a person records (POST /payments/by-order/{id}/
+    -- refunds) is under the method the request names. A refund of an order's tenders (a
+    -- cancellation, a void, a return to the original tender, an exchange's cash-back) is under the
+    -- method of the tender refunded, except that a return whose value goes to a liability writes
+    -- STORE_CREDIT or GIFT_CARD, and an exchange's own refund EXCHANGE. A card payment taken on a
+    -- terminal is refunded as CARD when the machine put it back, or, when it was given back another
+    -- way, as that way (CASH, CARD for the acquirer's own refund, UPI or WALLET): so a refund of a
+    -- CARD tender may carry any of those, and payment_id says which tender it is of.
     method          VARCHAR(30) NOT NULL,
     reference       VARCHAR(255),
     idempotency_key VARCHAR(255),
@@ -35,7 +52,11 @@ CREATE TABLE IF NOT EXISTS refund_tenders (
     -- store. A store's reads take it from the refund alone, so every write path sets it wherever the
     -- payment named one.
     store_id        UUID,
-    PRIMARY KEY (tenant_id, id)
+    PRIMARY KEY (tenant_id, id),
+    CONSTRAINT ck_refund_tenders_method CHECK (
+        method IN ('CASH', 'CARD', 'UPI', 'WALLET', 'GIFT_CARD', 'VOUCHER', 'STORE_CREDIT',
+                   'EXCHANGE')
+    )
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
@@ -93,7 +114,8 @@ CREATE INDEX IF NOT EXISTS idx_refund_tenders_store
 CREATE INDEX IF NOT EXISTS idx_refund_tenders_tenant_reference
     ON refund_tenders (tenant_id, reference) WHERE reference IS NOT NULL;
 
--- Indexes for the scheduled purge (common-service OutboxPublisher -> BaseOutboxRepository).
+-- Indexes for the relay and the scheduled purge (common-service OutboxPublisher ->
+-- BaseOutboxRepository).
 --
 -- Once an hour the purge deletes, in batches of a thousand, the outbox rows that were published
 -- more than a retention ago and the processed_events rows older than the dedupe window. Each batch
@@ -106,20 +128,24 @@ CREATE INDEX IF NOT EXISTS idx_refund_tenders_tenant_reference
 --     FROM processed_events WHERE processed_at < ? ORDER BY processed_at ASC LIMIT ?
 --     FOR UPDATE SKIP LOCKED)
 --
--- A published row is one the drain index below does not hold, so a partial index on published_at
--- holds exactly the rows the purge wants and costs the drain nothing.
-CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
-    ON outbox (created_at) WHERE published_at IS NULL;
-
+-- A published row is in neither of the claim's indexes below, which hold only waiting rows, so
+-- this partial index on published_at holds the published rows and no others.
 CREATE INDEX IF NOT EXISTS idx_outbox_published
     ON outbox (published_at) WHERE published_at IS NOT NULL;
 
--- The claim: rows that may publish now, in the order they were written.
+-- The claim (common-service BaseOutboxRepository.claim): rows that may publish now, in the order
+-- they were written. This index serves its ordered scan (ORDER BY created_at, id LIMIT n); a dead
+-- letter is not in it. The claim's check for an earlier waiting row of the same aggregate reads the
+-- index below, and marking a row published and recording a failure go by primary key. No index of
+-- every unpublished row by created_at (idx_outbox_unpublished) is kept: it would also hold the dead
+-- letters, which the claim's ordered scan never reads, and the claim is the one statement that reads
+-- waiting rows in that order. OutboxPurgeIndexIT plans the claim as the shared repository runs it.
 CREATE INDEX IF NOT EXISTS idx_outbox_claim
     ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;
 
--- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off.
+-- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is dead or
+-- backing off.
 CREATE INDEX IF NOT EXISTS idx_outbox_aggregate_pending
     ON outbox (aggregate_id, created_at, id)
     WHERE published_at IS NULL;

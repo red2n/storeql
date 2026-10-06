@@ -133,13 +133,20 @@ public final class SmtpChannel implements NotificationChannel {
   }
 
   /**
+   * What the notification log calls email sent by SMTP, wherever it is sent from: the deployment's
+   * own default channel, and the account emails ({@link AccountEmailSender}), which never go
+   * through it.
+   */
+  public static final String NAME = "SMTP";
+
+  /**
    * {@inheritDoc}
    *
    * @return always {@code SMTP}
    */
   @Override
   public String name() {
-    return "SMTP";
+    return NAME;
   }
 
   /**

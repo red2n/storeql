@@ -138,7 +138,9 @@ public class PaymentIntentResource {
    * @param provider provider name in the path
    * @param headers request headers; the provider names which one carries its signature
    * @param rawBody the exact bytes received
-   * @return 200 once applied, or once recognised as a redelivery
+   * @return 200 once applied, once recognised as a redelivery, or once judged not to be about an
+   *     intent of ours; 404 for an event that names an intent of ours that is not known (yet), so
+   *     that the provider delivers it again
    */
   @Operation(
       summary = "Provider webhook",
@@ -148,7 +150,12 @@ public class PaymentIntentResource {
               + " is applied at most once.")
   @APIResponse(responseCode = "200", description = "Applied, or already applied")
   @APIResponse(responseCode = "400", description = "Signature missing or did not verify")
-  @APIResponse(responseCode = "404", description = "No such provider is deployed")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "No such provider is deployed (PAYMENT_PROVIDER_UNKNOWN), or the event names a payment"
+              + " intent of ours that is not known here (PAYMENT_WEBHOOK_INTENT_UNKNOWN): it is not"
+              + " recorded as seen, so the provider delivers it again")
   @POST
   @Path("/webhooks/{provider}")
   @Consumes(MediaType.WILDCARD)

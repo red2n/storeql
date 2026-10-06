@@ -8,6 +8,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
+import com.storeql.customer.repo.LoyaltyProgrammeRepository;
 import com.storeql.customer.service.CustomerService;
 import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
@@ -25,10 +26,19 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -748,5 +758,104 @@ class LoyaltyProgrammeIT {
     assertThat(still.getJsonArray("tiers").size(), is(3));
     assertThat(
         sql("SELECT COUNT(*) FROM customer.loyalty_tiers WHERE tenant_id = ?", tenant), is("3"));
+  }
+
+  // ── the sweep's index ───────────────────────────────────────────────────────
+
+  /**
+   * Five lots for each of 300 customers of one business; when {@code someDead}, the first lot of
+   * every 15th customer has died. Returns the customers with a dead lot.
+   */
+  private static Set<UUID> seedLots(PreparedStatement ps, UUID business, boolean someDead)
+      throws SQLException {
+    Set<UUID> dead = new HashSet<>();
+    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+    for (int i = 0; i < 300; i++) {
+      UUID customer = Ids.newId();
+      for (int lot = 0; lot < 5; lot++) {
+        boolean due = someDead && lot == 0 && i % 15 == 0;
+        if (due) dead.add(customer);
+        ps.setObject(1, Ids.newId());
+        ps.setObject(2, business);
+        ps.setObject(3, customer);
+        ps.setBigDecimal(4, BigDecimal.TEN);
+        ps.setBigDecimal(5, BigDecimal.TEN);
+        ps.setObject(6, now.minusYears(1));
+        ps.setObject(7, due ? now.minusDays(1) : now.plusMonths(6).plusHours(lot));
+        ps.addBatch();
+      }
+    }
+    ps.executeBatch();
+    return dead;
+  }
+
+  @Test
+  @DisplayName(
+      "The expiry sweep finds one business's dead lots through an index that starts with that"
+          + " business, and never another's")
+  void theSweepIsServedByATenantLedIndex() throws SQLException {
+    UUID alsoBusy = Ids.newId();
+    UUID quiet = Ids.newId();
+    Set<UUID> ours;
+    try (Connection c = PG.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "INSERT INTO customer.loyalty_point_lots (id, tenant_id, customer_id, points,"
+                    + " remaining, earned_at, expires_at) VALUES (?,?,?,?,?,?,?)")) {
+      ours = seedLots(ps, tenant, true);
+      // Another business with dead lots of its own, and one with none: the sweep must not see them.
+      seedLots(ps, alsoBusy, true);
+      seedLots(ps, quiet, false);
+    }
+    assertThat("twenty customers of ours have a dead lot", ours.size(), is(20));
+
+    String definition = null;
+    StringBuilder plan = new StringBuilder();
+    Set<UUID> found = new HashSet<>();
+    try (Connection c = PG.dataSource().getConnection();
+        Statement st = c.createStatement()) {
+      st.execute("SET search_path TO customer");
+      st.execute("ANALYZE loyalty_point_lots");
+      try (ResultSet rs =
+          st.executeQuery(
+              "SELECT indexdef FROM pg_indexes WHERE schemaname = 'customer'"
+                  + " AND indexname = 'idx_loyalty_lots_due'")) {
+        if (rs.next()) definition = rs.getString(1);
+      }
+      OffsetDateTime dueBy = OffsetDateTime.now(ZoneOffset.UTC);
+      try (PreparedStatement ps =
+          c.prepareStatement(LoyaltyProgrammeRepository.DUE_CUSTOMERS_SQL)) {
+        ps.setObject(1, tenant);
+        ps.setObject(2, dueBy);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) found.add(rs.getObject(1, UUID.class));
+        }
+      }
+      // What Postgres does with the sweep's own statement when it need not read the whole table.
+      st.execute("SET enable_seqscan = off");
+      try (PreparedStatement ps =
+          c.prepareStatement("EXPLAIN " + LoyaltyProgrammeRepository.DUE_CUSTOMERS_SQL)) {
+        ps.setObject(1, tenant);
+        ps.setObject(2, dueBy);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) plan.append(rs.getString(1)).append('\n');
+        }
+      }
+    }
+
+    assertThat("the customers it finds are ours and all of ours", found, is(ours));
+    assertThat(
+        "idx_loyalty_lots_due is (tenant_id, expires_at): " + definition,
+        definition != null && definition.contains("(tenant_id, expires_at) WHERE"),
+        is(true));
+    String text = plan.toString();
+    assertThat(text, text, containsString("idx_loyalty_lots_due"));
+    assertThat(
+        "the business is in the index condition, not left to a filter after it: " + text,
+        Pattern.compile("idx_loyalty_lots_due[^\\n]*\\n\\s*Index Cond: \\(\\(tenant_id = ")
+            .matcher(text)
+            .find(),
+        is(true));
+    assertThat(text, text, not(containsString("Filter: (tenant_id")));
   }
 }

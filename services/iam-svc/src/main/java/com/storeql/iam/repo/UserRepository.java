@@ -298,7 +298,7 @@ public class UserRepository extends BaseOutboxRepository {
             return false;
           }
           stampTenant(c, userId, tenantId);
-          if (!belongsTo(c, userId, tenantId)) {
+          if (!lockIfTenants(c, userId, tenantId)) {
             auditTx(
                 c,
                 tenantId,
@@ -358,10 +358,13 @@ public class UserRepository extends BaseOutboxRepository {
    * pull that shopper's account into its staff without their say, after which the storefront
    * refused their token everywhere; it could equally capture a founder's sign-up before they had
    * set their business up. A login of no business, another business's login and an id nobody holds
-   * are all refused, marked and audited, never a failing event. Another business's login matters
-   * most: a role row does not say which business granted it, so bound anyway it would count in that
-   * other business — a cashier who starts a business of their own could assign their employed login
-   * OWNER at their own store and sign in as their employer's owner.
+   * are all refused, marked and audited against the assigning business and no login ({@link
+   * #auditRefusedTx}), never a failing event. The login's row is locked under the tenant before any
+   * role row is written ({@link #lockIfTenants}), so a login leaving the business waits until the
+   * write has committed. Another business's login matters most: a role row does not say which
+   * business granted it, so bound anyway it would count in that other business — a cashier who
+   * starts a business of their own could assign their employed login OWNER at their own store and
+   * sign in as their employer's owner.
    *
    * @param roleCode the tenant's code for the custom role, or {@code null} for a plain tier
    * @param permissions the custom role's permissions, or {@code null} for a plain tier
@@ -382,21 +385,18 @@ public class UserRepository extends BaseOutboxRepository {
           if (!markProcessedIfNewTx(c, eventId, consumerName)) {
             return false;
           }
-          if (!belongsTo(c, userId, tenantId)) {
-            auditTx(
+          if (!lockIfTenants(c, userId, tenantId)) {
+            auditRefusedTx(
                 c,
                 tenantId,
                 userId,
                 "STAFF_BIND_REFUSED",
-                roleName
-                    + " @ store "
-                    + storeId
-                    + ": "
-                    + notThisTenantsBecause(
-                        c,
-                        userId,
-                        "login belongs to no business: staff are provisioned in the business,"
-                            + " never taken on by id"));
+                roleName + (storeId == null ? " @ business-wide" : " @ store " + storeId),
+                notThisTenantsBecause(
+                    c,
+                    userId,
+                    "login belongs to no business: staff are provisioned in the business,"
+                        + " never taken on by id"));
             return true;
           }
           UUID roleId = roleIdByName(c, roleName);
@@ -495,11 +495,22 @@ public class UserRepository extends BaseOutboxRepository {
     }
   }
 
-  /** Whether the login's row names this tenant, read on the binding's own transaction. */
-  private static boolean belongsTo(java.sql.Connection c, UUID userId, UUID tenantId)
+  /**
+   * Whether the login's row names this tenant, read on the caller's own transaction with the row
+   * locked ({@code FOR NO KEY UPDATE}) until that transaction ends.
+   *
+   * <p>A login goes from this tenant to another's in two steps, {@link #leaveTheBusiness} and then
+   * {@link #stampTenant}: the two statements in this service that set {@code users.tenant_id} on an
+   * existing row. With the row locked, the first waits for the caller's transaction, and a leaving
+   * that committed first is seen here: the row no longer names this tenant and the caller refuses
+   * the login. Without the lock the check and the caller's writes to {@code user_roles} would be
+   * separate statements, and the leaving could commit between them.
+   */
+  private static boolean lockIfTenants(java.sql.Connection c, UUID userId, UUID tenantId)
       throws SQLException {
     try (PreparedStatement ps =
-        c.prepareStatement("SELECT 1 FROM users WHERE tenant_id = ? AND id = ?")) {
+        c.prepareStatement(
+            "SELECT 1 FROM users WHERE tenant_id = ? AND id = ? FOR NO KEY UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, userId);
       try (ResultSet rs = ps.executeQuery()) {
@@ -526,10 +537,45 @@ public class UserRepository extends BaseOutboxRepository {
   }
 
   /**
+   * Audits a refused role event against the business that announced it, with no login as the
+   * subject; the login the event named is in the detail.
+   *
+   * <p>The security-events trail gives a row with a login to that login's business, and a row with
+   * none to the business it was recorded against ({@link SecurityEventRepository#list}). A refusal
+   * written with the named login's id would therefore read, when that login is another business's,
+   * in that business's trail, which did nothing, and not in the trail of the business that sent the
+   * event.
+   *
+   * @param action the refusal's action code
+   * @param what the role and where the event named it, e.g. {@code CASHIER @ store <id>}
+   * @param reason why the login was refused, from {@link #notThisTenantsBecause}
+   */
+  private static void auditRefusedTx(
+      java.sql.Connection c,
+      UUID tenantId,
+      UUID namedLogin,
+      String action,
+      String what,
+      String reason)
+      throws SQLException {
+    auditTx(c, tenantId, null, action, what + ": " + reason + " (login " + namedLogin + ")");
+  }
+
+  /**
    * Takes a staff role at a store away, once per event: what {@code StaffRemoved} asks for.
    *
    * <p>Before this, removing an assignment in tenant-svc left the role on the login for good
    * (SJ-D51): a cashier taken off a store could sign in as its cashier the next morning.
+   *
+   * <p>Only a login that is this tenant's loses a role. A role row does not say which business
+   * granted it, so the removal first locks the login's row under the tenant ({@link
+   * #lockIfTenants}), and the statements it then runs on {@code user_roles} (the delete, the count
+   * of staff roles left, the check for a shopper's CUSTOMER role) join {@code users} on the tenant
+   * as well. An event for one business that names another business's login, a shopper's, a login of
+   * no business (the platform administrator, a founder not yet onboarded) or an id nobody holds is
+   * marked, audited {@code STAFF_UNBIND_REFUSED} against the event's own tenant and no login
+   * ({@link #auditRefusedTx}), and takes nothing from it, as {@link #bindStaffOnce} refuses a login
+   * that is not the tenant's.
    *
    * @return {@code true} when this event was processed now
    */
@@ -545,15 +591,28 @@ public class UserRepository extends BaseOutboxRepository {
           if (!markProcessedIfNewTx(c, eventId, consumerName)) {
             return false;
           }
+          if (!lockIfTenants(c, userId, tenantId)) {
+            auditRefusedTx(
+                c,
+                tenantId,
+                userId,
+                "STAFF_UNBIND_REFUSED",
+                roleName + (storeId == null ? " @ business-wide" : " @ store " + storeId),
+                notThisTenantsBecause(c, userId, "login belongs to no business"));
+            return true;
+          }
           UUID roleId = roleIdByName(c, roleName);
           int removed;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "DELETE FROM user_roles WHERE user_id = ? AND role_id = ?"
-                      + (storeId == null ? " AND store_id IS NULL" : " AND store_id = ?"))) {
-            ps.setObject(1, userId);
-            ps.setObject(2, roleId);
-            if (storeId != null) ps.setObject(3, storeId);
+                  "DELETE FROM user_roles ur USING users u"
+                      + " WHERE u.tenant_id = ? AND u.id = ur.user_id AND ur.user_id = ?"
+                      + " AND ur.role_id = ?"
+                      + (storeId == null ? " AND ur.store_id IS NULL" : " AND ur.store_id = ?"))) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, userId);
+            ps.setObject(3, roleId);
+            if (storeId != null) ps.setObject(4, storeId);
             removed = ps.executeUpdate();
           }
           // The last staff role gone: who the login goes back to being depends on how it came to
@@ -561,18 +620,18 @@ public class UserRepository extends BaseOutboxRepository {
           int staffRolesLeft;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "SELECT count(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id"
-                      + " WHERE ur.user_id = ? AND r.name NOT IN ('CUSTOMER', 'PLATFORM_ADMIN')")) {
-            ps.setObject(1, userId);
+                  "SELECT count(*) FROM users u JOIN user_roles ur ON ur.user_id = u.id"
+                      + " JOIN roles r ON r.id = ur.role_id"
+                      + " WHERE u.tenant_id = ? AND u.id = ?"
+                      + " AND r.name NOT IN ('CUSTOMER', 'PLATFORM_ADMIN')")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, userId);
             try (ResultSet rs = ps.executeQuery()) {
               rs.next();
               staffRolesLeft = rs.getInt(1);
             }
           }
-          String outcome = "";
-          if (staffRolesLeft == 0 && belongsTo(c, userId, tenantId)) {
-            outcome = leaveTheBusiness(c, userId, tenantId);
-          }
+          String outcome = staffRolesLeft == 0 ? leaveTheBusiness(c, userId, tenantId) : "";
           auditTx(
               c,
               tenantId,
@@ -611,9 +670,11 @@ public class UserRepository extends BaseOutboxRepository {
     boolean shopper = false;
     try (PreparedStatement ps =
         c.prepareStatement(
-            "SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id"
-                + " WHERE ur.user_id = ? AND r.name = 'CUSTOMER'")) {
-      ps.setObject(1, userId);
+            "SELECT 1 FROM users u JOIN user_roles ur ON ur.user_id = u.id"
+                + " JOIN roles r ON r.id = ur.role_id"
+                + " WHERE u.tenant_id = ? AND u.id = ? AND r.name = 'CUSTOMER'")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, userId);
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
           shopper = true;

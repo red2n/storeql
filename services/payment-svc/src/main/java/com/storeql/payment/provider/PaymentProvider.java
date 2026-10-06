@@ -130,6 +130,9 @@ public interface PaymentProvider {
    * @param capturedAmount amount captured, when the event reports one; null otherwise
    * @param failureCode provider failure code, when the event reports a failure
    * @param failureMessage human-readable failure reason, when the event reports one
+   * @param ours the intent of ours the event names in the metadata this service sent with the
+   *     request, or null when it names none: absent, malformed, not a UUIDv7, or an event about
+   *     something other than a payment intent
    */
   record WebhookEvent(
       String providerEventId,
@@ -139,7 +142,8 @@ public interface PaymentProvider {
       BigDecimal capturedAmount,
       String failureCode,
       String failureMessage,
-      DisputeNotice dispute) {
+      DisputeNotice dispute,
+      OurIntent ours) {
 
     /** An event about a payment intent, as every event was before disputes (11.9). */
     public WebhookEvent(
@@ -158,9 +162,44 @@ public interface PaymentProvider {
           capturedAmount,
           failureCode,
           failureMessage,
+          null,
+          null);
+    }
+
+    /** An event that names no intent of ours: a dispute, or one the provider did not tag. */
+    public WebhookEvent(
+        String providerEventId,
+        String type,
+        String providerRef,
+        String status,
+        BigDecimal capturedAmount,
+        String failureCode,
+        String failureMessage,
+        DisputeNotice dispute) {
+      this(
+          providerEventId,
+          type,
+          providerRef,
+          status,
+          capturedAmount,
+          failureCode,
+          failureMessage,
+          dispute,
           null);
     }
   }
+
+  /**
+   * The intent of ours a provider event names: the ids this service sent as metadata when it asked
+   * the provider to authorise, which come back with the provider's own object. Both ids travel
+   * together, because an intent is keyed by its business and its id: the pair is looked up in the
+   * business it names, so an id that belongs to another business is not found there. (The other way
+   * to find an intent, by the provider's reference, is looked up across businesses.)
+   *
+   * @param tenantId the business the intent was opened for
+   * @param intentId this service's id for the intent
+   */
+  record OurIntent(UUID tenantId, UUID intentId) {}
 
   /**
    * What a provider says about a dispute (11.9), in the provider-neutral shape. {@link

@@ -1,7 +1,9 @@
 -- product-svc schema: catalog (products, variants, categories tree, brands, media). README §9.3.
--- Every tenant table: tenant_id NOT NULL + an index starting with tenant_id. One table is the
--- exception: outbox is the relay's table, not a tenant table. Its tenant_id is nullable, it has no
--- tenant-led index, and the relay drains it across tenants (BaseOutboxRepository).
+-- Every tenant table: tenant_id NOT NULL + an index starting with tenant_id. The one exception is
+-- outbox, which is deliberately cross-tenant: the relay publishes every business's events in one
+-- pass, in the order they were written, so none of its queries filters by tenant. Its tenant_id is
+-- therefore nullable and not a lookup key: the only code that reads it is the relay's dead-letter
+-- warning (BaseOutboxRepository.recordFailures), and none of the table's indexes starts with it.
 
 -- ── brands ──────────────────────────────────────────────────────────────────────────────────────────
 
@@ -316,9 +318,6 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 
--- The relay's half of the table: the rows that are still waiting.
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
-
 -- The scheduled outbox purge (common-service OutboxPublisher -> BaseOutboxRepository.purgePublished)
 -- takes the rows that were published before the retention cutoff, a batch at a time:
 --
@@ -329,17 +328,24 @@ CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS
 --
 -- This partial index serves the purge's half of the table, so each batch finds its rows without
 -- reading the whole table. The relay reads this same table on every tick, so the index stays out of
--- its way: it is partial, holding only the rows the purge can take, and it shrinks as they are
--- taken. Rows enter it when the relay marks them published and leave it when the purge deletes
--- them; the unpublished backlog, the part the relay keeps hot, is never in it.
+-- its way: it is partial, holding only published rows, and it shrinks as the purge takes them. Rows
+-- enter it when the relay marks them published and leave it when the purge deletes them; the
+-- unpublished backlog, the part the relay keeps hot, is never in it.
 --
 -- product-svc has no processed_events table: its one consumer, the erasure of a departed business,
 -- is idempotent by construction (erasing twice finds nothing the second time), so it keeps no
 -- dedupe rows. The purge's second statement finds no table and has nothing here to index.
 CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
 
--- The claim: rows that may publish now, in the order they were written.
+-- The claim: rows that may publish now, in the order they were written. The relay's claim
+-- (BaseOutboxRepository.claim) walks it for its ORDER BY created_at, id LIMIT n; the same statement's
+-- check of an aggregate's earlier rows reads idx_outbox_aggregate_pending, below. No index of every
+-- unpublished row by created_at (idx_outbox_unpublished) is kept: it would also hold the dead letters,
+-- which the claim's ordered scan never reads, and the other statements on the table are the insert, the
+-- outcome writes (by primary key) and the purge (idx_outbox_published, above), none of which reads
+-- waiting rows in that order (CatalogIT plans the claim as the relay runs it).
 CREATE INDEX idx_outbox_claim ON outbox (created_at, id) WHERE published_at IS NULL AND dead_at IS NULL;
 
--- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off.
+-- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is dead or
+-- backing off.
 CREATE INDEX idx_outbox_aggregate_pending ON outbox (aggregate_id, created_at, id) WHERE published_at IS NULL;

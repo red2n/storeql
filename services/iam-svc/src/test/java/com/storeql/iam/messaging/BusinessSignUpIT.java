@@ -23,11 +23,21 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -313,7 +323,7 @@ class BusinessSignUpIT {
     assertThat(storeRoleCount(employed, ownStore), is("0"));
     assertThat(
         "once per event, however often delivered",
-        auditCount(employed, "STAFF_BIND_REFUSED"),
+        refusedCount(own, employed, "STAFF_BIND_REFUSED"),
         is("6"));
 
     // A login of no business is not theirs to take on by id either: a shopper's account stays the
@@ -324,7 +334,7 @@ class BusinessSignUpIT {
     assertThat(rowsOf(shopper), is(shopperBefore));
     assertThat(userColumn(shopper, "tenant_id"), is(nullValue()));
     assertThat(userColumn(shopper, "type"), is("CUSTOMER"));
-    assertThat(auditCount(shopper, "STAFF_BIND_REFUSED"), is("1"));
+    assertThat(refusedCount(own, shopper, "STAFF_BIND_REFUSED"), is("1"));
     // Their own staff are the logins they provision, and the founder is their own already.
     Caller boss = new Caller(founder, "OWNER", own);
     UUID recruit = provisioned(boss, "recruit-" + suffix() + "@example.com", WORKING);
@@ -338,7 +348,7 @@ class BusinessSignUpIT {
     staff.handle(
         staffAssigned(Ids.newId(), employer, employed, employerSecond, "STOREKEEPER", null));
     assertThat(storeRoleCount(employed, employerSecond), is("1"));
-    assertThat(auditCount(employed, "STAFF_BIND_REFUSED"), is("6"));
+    assertThat(refusedCount(own, employed, "STAFF_BIND_REFUSED"), is("6"));
   }
 
   // ── nobody else's business ─────────────────────────────────────────────────
@@ -536,7 +546,7 @@ class BusinessSignUpIT {
     staff.handle(assigned);
     assertThat(storeRoleCount(hired, ours.store()), is("1"));
     assertThat(auditCount(hired, "STAFF_BOUND"), is("1"));
-    assertThat(auditCount(hired, "STAFF_BIND_REFUSED"), is("0"));
+    assertThat(refusedCount(ours.tenant(), hired, "STAFF_BIND_REFUSED"), is("0"));
     DecodedJWT atTheTill = token(signIn(email, WORKING, "STAFF"));
     assertThat(atTheTill.getSubject(), is(hired.toString()));
     assertThat(atTheTill.getClaim("tenant").asString(), is(ours.tenant().toString()));
@@ -659,7 +669,7 @@ class BusinessSignUpIT {
       }
     }
     assertThat(rowsOf(mine, shopper), is(before));
-    assertThat(auditCount(mine, "STAFF_BIND_REFUSED"), is("4"));
+    assertThat(refusedCount(other.tenant(), mine, "STAFF_BIND_REFUSED"), is("4"));
     assertThat(loginsInBusiness(ours.tenant(), email), is(mine.toString()));
 
     // Each password opens its own login: ours at our till, theirs at theirs, the shopper's at the
@@ -706,7 +716,7 @@ class BusinessSignUpIT {
     assertThat(rivalStaffCount(ours), is(staffBefore));
     for (UUID id : List.of(shopper, founder, nobody)) {
       // Once per event, however often delivered — and never a failing event.
-      assertThat(auditCount(id, "STAFF_BIND_REFUSED"), is("4"));
+      assertThat(refusedCount(ours.tenant(), id, "STAFF_BIND_REFUSED"), is("4"));
     }
     // Nothing is made for an id nobody holds.
     assertThat(userColumn(nobody, "id"), is(nullValue()));
@@ -745,7 +755,7 @@ class BusinessSignUpIT {
     assertThat(userColumn(shopper, "tenant_id"), is(nullValue()));
     assertThat(userColumn(shopper, "type"), is("CUSTOMER"));
     assertThat(roleCount(shopper), is("1"));
-    assertThat(auditCount(shopper, "STAFF_BIND_REFUSED"), is("1"));
+    assertThat(refusedCount(ours.tenant(), shopper, "STAFF_BIND_REFUSED"), is("1"));
   }
 
   @Test
@@ -846,6 +856,386 @@ class BusinessSignUpIT {
     assertThat(rehired.getClaim("roles").asList(String.class), contains("STOREKEEPER"));
     assertThat(userColumn(founder, "tenant_id"), is(nullValue()));
     assertThat(roleCount(founder), is("0"));
+  }
+
+  @Test
+  @DisplayName(
+      "A removal one business announces that names another business's login takes nothing from it,"
+          + " whatever tier the login holds and whichever store the event names; a shopper's login"
+          + " is as safe; the business's own removal still works")
+  void aRemovalNeverReachesAnotherBusinesssLogin() {
+    Rival ours = rival();
+    Rival theirs = rival();
+    UUID shopper = signedUp(SHOPPER, "removal-shopper-" + suffix() + "@example.com");
+    // Their staff of every tier, with the tier each holds: the owner's role is business-wide, the
+    // others are at their store.
+    java.util.Map<UUID, String> theirStaff = new java.util.LinkedHashMap<>();
+    theirStaff.put(theirs.owner(), "OWNER");
+    theirStaff.put(theirs.manager(), "MANAGER");
+    theirStaff.put(theirs.storekeeper(), "STOREKEEPER");
+    theirStaff.put(theirs.cashier(), "CASHIER");
+    UUID[] theirLogins = theirStaff.keySet().toArray(new UUID[0]);
+    String theirsBefore = rowsOf(theirLogins);
+    String shopperBefore = rowsOf(shopper);
+    String oursBefore = rowsOf(ours.owner(), ours.manager(), ours.storekeeper());
+    String theirAuditBefore =
+        scalar("SELECT count(*) FROM iam.audit_log WHERE tenant_id = '" + theirs.tenant() + "'");
+    assertThat(
+        "their cashier holds the one role at their store",
+        storeRoleCount(theirs.cashier(), theirs.store()),
+        is("1"));
+
+    // Our business announces the removal, naming their login: at their store, at ours, and as a
+    // business-wide role, every tier of theirs; each delivered twice.
+    int events = 0;
+    for (var person : theirStaff.entrySet()) {
+      String atTheirs =
+          staffRemoved(
+              Ids.newId(), ours.tenant(), person.getKey(), theirs.store(), person.getValue());
+      String atOurs =
+          staffRemoved(
+              Ids.newId(), ours.tenant(), person.getKey(), ours.store(), person.getValue());
+      String wide =
+          staffRemoved(Ids.newId(), ours.tenant(), person.getKey(), ours.store(), person.getValue())
+              .replace(
+                  "\"eventType\":\"StaffRemoved\"",
+                  "\"eventType\":\"StaffRemoved\",\"businessWide\":true");
+      for (String event : List.of(atTheirs, atOurs, wide)) {
+        letGo.handle(event);
+        letGo.handle(event);
+        events++;
+      }
+    }
+    // A shopper's login, naming the one role it holds: the shopper's account belongs to no
+    // business.
+    String shoppers =
+        staffRemoved(Ids.newId(), ours.tenant(), shopper, ours.store(), "CUSTOMER")
+            .replace(
+                "\"eventType\":\"StaffRemoved\"",
+                "\"eventType\":\"StaffRemoved\",\"businessWide\":true");
+    letGo.handle(shoppers);
+    letGo.handle(shoppers);
+
+    assertThat(
+        "their staff, rows and roles, exactly as they were", rowsOf(theirLogins), is(theirsBefore));
+    assertThat("the shopper, exactly as they were", rowsOf(shopper), is(shopperBefore));
+    assertThat(rowsOf(ours.owner(), ours.manager(), ours.storekeeper()), is(oursBefore));
+    assertThat(storeRoleCount(theirs.cashier(), theirs.store()), is("1"));
+    assertThat(ownerRoleCount(theirs.owner()), is("1"));
+    assertThat(roleCount(shopper), is("1"));
+    for (UUID person : theirLogins) {
+      assertThat(userColumn(person, "tenant_id"), is(theirs.tenant().toString()));
+      assertThat(
+          "refused against our business, once per event however often it came",
+          refusedCount(ours.tenant(), person, "STAFF_UNBIND_REFUSED"),
+          is("3"));
+      assertThat("not removed", auditCount(person, "STAFF_UNBOUND"), is("0"));
+    }
+    assertThat(refusedCount(ours.tenant(), shopper, "STAFF_UNBIND_REFUSED"), is("1"));
+    assertThat(auditCount(shopper, "STAFF_UNBOUND"), is("0"));
+    assertThat(events, is(12));
+    assertThat(
+        "no audit_log row gained their business's tenant_id",
+        scalar("SELECT count(*) FROM iam.audit_log WHERE tenant_id = '" + theirs.tenant() + "'"),
+        is(theirAuditBefore));
+    assertThat(
+        "no refusal row names one of their logins or the shopper as its subject",
+        scalar(
+            "SELECT count(*) FROM iam.audit_log WHERE action = 'STAFF_UNBIND_REFUSED'"
+                + " AND user_id IN ("
+                + String.join(
+                    ",",
+                    Stream.concat(Arrays.stream(theirLogins), Stream.of(shopper))
+                        .map(id -> "'" + id + "'")
+                        .toList())
+                + ")"),
+        is("0"));
+    // The trail a business reads: theirs holds none of the refusals; ours holds all thirteen
+    // (twelve of their logins' events, one of the shopper's).
+    assertThat(
+        "their owner's security events hold no refusal",
+        feed(new Caller(theirs.owner(), "OWNER", theirs.tenant()), "STAFF_UNBIND_REFUSED").size(),
+        is(0));
+    assertThat(
+        "our owner's security events hold each refusal once",
+        feed(new Caller(ours.owner(), "OWNER", ours.tenant()), "STAFF_UNBIND_REFUSED").size(),
+        is(13));
+
+    // They still sign in as what they were.
+    DecodedJWT cashier = token(signIn(userColumn(theirs.cashier(), "email"), PASSWORD, null));
+    assertThat(cashier.getSubject(), is(theirs.cashier().toString()));
+    assertThat(cashier.getClaim("tenant").asString(), is(theirs.tenant().toString()));
+    assertThat(cashier.getClaim("roles").asList(String.class), contains("CASHIER"));
+    assertThat(
+        cashier.getClaim("storeIds").asList(String.class), contains(theirs.store().toString()));
+
+    // And their own business's removal, the same event shape, still takes the role away.
+    letGo.handle(
+        staffRemoved(Ids.newId(), theirs.tenant(), theirs.cashier(), theirs.store(), "CASHIER"));
+    assertThat(storeRoleCount(theirs.cashier(), theirs.store()), is("0"));
+    assertThat(roleCount(theirs.cashier()), is("0"));
+    assertThat(userColumn(theirs.cashier(), "tenant_id"), is(theirs.tenant().toString()));
+    assertThat(auditCount(theirs.cashier(), "STAFF_UNBOUND"), is("1"));
+    assertThat(roleCount(theirs.storekeeper()), is("1"));
+    assertThat(roleCount(theirs.manager()), is("1"));
+    assertThat(ownerRoleCount(theirs.owner()), is("1"));
+  }
+
+  @Test
+  @DisplayName(
+      "A removal one business announces that names the platform administrator, a founder's sign-up"
+          + " of no business or an id nobody holds takes nothing from it and makes nothing, as a"
+          + " business-wide role or at a store; each is refused and audited against the business"
+          + " that sent it, and the administrator still signs in")
+  void aRemovalLeavesTheLoginsOfNoBusinessAlone() {
+    Rival ours = rival();
+    String adminEmail = "removal-admin-" + suffix() + "@example.com";
+    UUID admin = signedUp(BUSINESS, adminEmail);
+    Envelopes.exec(
+        PG,
+        "INSERT INTO iam.user_roles (id, user_id, role_id, store_id) SELECT '"
+            + Ids.newId()
+            + "', '"
+            + admin
+            + "', id, NULL FROM iam.roles WHERE name = 'PLATFORM_ADMIN'");
+    String founderEmail = "removal-founder-" + suffix() + "@example.com";
+    UUID founder = signedUp(BUSINESS, founderEmail);
+    UUID nobody = Ids.newId();
+    String before = rowsOf(admin, founder);
+    assertThat("the administrator holds one role", roleCount(admin), is("1"));
+    assertThat(
+        "and signs in at the platform console",
+        call("POST", "/auth/platform-login", Caller.NOBODY, signUpBody(adminEmail, PASSWORD))
+            .status(),
+        is(200));
+
+    // Each login is named with three roles, each as a business-wide role and at one of our
+    // stores; every event delivered twice.
+    for (UUID named : List.of(admin, founder, nobody)) {
+      for (String role : List.of("PLATFORM_ADMIN", "OWNER", "CASHIER")) {
+        String atAStore = staffRemoved(Ids.newId(), ours.tenant(), named, ours.store(), role);
+        String wide =
+            staffRemoved(Ids.newId(), ours.tenant(), named, ours.store(), role)
+                .replace(
+                    "\"eventType\":\"StaffRemoved\"",
+                    "\"eventType\":\"StaffRemoved\",\"businessWide\":true");
+        for (String event : List.of(atAStore, wide)) {
+          letGo.handle(event);
+          letGo.handle(event);
+        }
+      }
+    }
+
+    assertThat(
+        "the administrator and the founder, exactly as they were",
+        rowsOf(admin, founder),
+        is(before));
+    assertThat(roleCount(admin), is("1"));
+    assertThat(userColumn(admin, "tenant_id"), is(nullValue()));
+    assertThat(userColumn(founder, "tenant_id"), is(nullValue()));
+    assertThat(roleCount(founder), is("0"));
+    assertThat(
+        "an id nobody holds is not made a login",
+        scalar("SELECT count(*) FROM iam.users WHERE id = '" + nobody + "'"),
+        is("0"));
+    assertThat(roleCount(nobody), is("0"));
+    for (UUID named : List.of(admin, founder, nobody)) {
+      assertThat(
+          "refused against our business: three roles, two shapes",
+          refusedCount(ours.tenant(), named, "STAFF_UNBIND_REFUSED"),
+          is("6"));
+      assertThat("not removed", auditCount(named, "STAFF_UNBOUND"), is("0"));
+      assertThat("and against no login", auditCount(named, "STAFF_UNBIND_REFUSED"), is("0"));
+    }
+    assertThat(
+        "the two logins that exist are said to belong to no business",
+        scalar(
+            "SELECT count(*) FROM iam.audit_log WHERE tenant_id = '"
+                + ours.tenant()
+                + "' AND action = 'STAFF_UNBIND_REFUSED' AND detail LIKE '%login belongs to no"
+                + " business%'"),
+        is("12"));
+    assertThat(
+        "and the id nobody holds is said to be no login",
+        scalar(
+            "SELECT count(*) FROM iam.audit_log WHERE tenant_id = '"
+                + ours.tenant()
+                + "' AND action = 'STAFF_UNBIND_REFUSED' AND detail LIKE '%no such login%'"),
+        is("6"));
+    assertThat(
+        "our owner's security events hold each refusal once",
+        feed(new Caller(ours.owner(), "OWNER", ours.tenant()), "STAFF_UNBIND_REFUSED").size(),
+        is(18));
+
+    // Nothing was taken from them: the administrator still signs in at the platform console, and
+    // the founder still founds a business of its own and owns it.
+    assertThat(
+        "the administrator still signs in at the platform console",
+        call("POST", "/auth/platform-login", Caller.NOBODY, signUpBody(adminEmail, PASSWORD))
+            .status(),
+        is(200));
+    UUID founded = Ids.newId();
+    tenants.handle(tenantCreated(Ids.newId(), founded, founder));
+    assertThat(userColumn(founder, "tenant_id"), is(founded.toString()));
+    assertThat(ownerRoleCount(founder), is("1"));
+  }
+
+  @Test
+  @DisplayName(
+      "A removal waits for a login that is moving to another business, and once the move has"
+          + " committed refuses the login: its roles are left as they were")
+  void aRemovalWaitsForALoginThatIsMoving() throws Exception {
+    Rival mine = rival();
+    Rival other = rival();
+    UUID moving = mine.cashier();
+    assertThat(storeRoleCount(moving, mine.store()), is("1"));
+
+    handledWhileTheLoginMovesTo(
+        moving,
+        other.tenant(),
+        () ->
+            letGo.handle(
+                staffRemoved(Ids.newId(), mine.tenant(), moving, mine.store(), "CASHIER")));
+
+    assertThat(userColumn(moving, "tenant_id"), is(other.tenant().toString()));
+    assertThat("the removal took nothing", storeRoleCount(moving, mine.store()), is("1"));
+    assertThat(auditCount(moving, "STAFF_UNBOUND"), is("0"));
+    assertThat(refusedCount(mine.tenant(), moving, "STAFF_UNBIND_REFUSED"), is("1"));
+  }
+
+  @Test
+  @DisplayName(
+      "An assignment waits for a login that is moving to another business, and once the move has"
+          + " committed refuses the login: no role is written for it")
+  void anAssignmentWaitsForALoginThatIsMoving() throws Exception {
+    Rival mine = rival();
+    Rival other = rival();
+    UUID moving =
+        provisioned(
+            new Caller(mine.owner(), "OWNER", mine.tenant()),
+            "moving-" + suffix() + "@example.com",
+            PASSWORD);
+
+    handledWhileTheLoginMovesTo(
+        moving,
+        other.tenant(),
+        () ->
+            staff.handle(
+                staffAssigned(Ids.newId(), mine.tenant(), moving, mine.store(), "CASHIER", null)));
+
+    assertThat(userColumn(moving, "tenant_id"), is(other.tenant().toString()));
+    assertThat("no role was written", roleCount(moving), is("0"));
+    assertThat(auditCount(moving, "STAFF_BOUND"), is("0"));
+    assertThat(refusedCount(mine.tenant(), moving, "STAFF_BIND_REFUSED"), is("1"));
+  }
+
+  @Test
+  @DisplayName(
+      "A business-wide assignment waits for a login that is moving to another business too, and"
+          + " writes no role for it once the move has committed")
+  void aBusinessWideAssignmentWaitsForALoginThatIsMoving() throws Exception {
+    Rival mine = rival();
+    Rival other = rival();
+    UUID moving =
+        provisioned(
+            new Caller(mine.owner(), "OWNER", mine.tenant()),
+            "moving-wide-" + suffix() + "@example.com",
+            PASSWORD);
+
+    handledWhileTheLoginMovesTo(
+        moving,
+        other.tenant(),
+        () ->
+            staff.handle(
+                staffAssigned(Ids.newId(), mine.tenant(), moving, mine.store(), "MANAGER", null)
+                    .replace(
+                        "\"eventType\":\"StaffAssigned\"",
+                        "\"eventType\":\"StaffAssigned\",\"businessWide\":true")));
+
+    assertThat(userColumn(moving, "tenant_id"), is(other.tenant().toString()));
+    assertThat("no role was written", roleCount(moving), is("0"));
+    assertThat(refusedCount(mine.tenant(), moving, "STAFF_BIND_REFUSED"), is("1"));
+  }
+
+  @Test
+  @DisplayName(
+      "An owner binding waits for a login that is moving to another business, and once the move"
+          + " has committed refuses it: the login is not made an owner")
+  void anOwnerBindingWaitsForALoginThatIsMoving() throws Exception {
+    Rival mine = rival();
+    Rival other = rival();
+    UUID moving =
+        provisioned(
+            new Caller(mine.owner(), "OWNER", mine.tenant()),
+            "moving-owner-" + suffix() + "@example.com",
+            PASSWORD);
+
+    handledWhileTheLoginMovesTo(
+        moving,
+        other.tenant(),
+        () -> tenants.handle(tenantCreated(Ids.newId(), mine.tenant(), moving)));
+
+    assertThat(userColumn(moving, "tenant_id"), is(other.tenant().toString()));
+    assertThat("no role was written", roleCount(moving), is("0"));
+    assertThat(auditCount(moving, "OWNER_BOUND"), is("0"));
+    assertThat(auditCount(moving, "OWNER_BIND_REFUSED"), is("1"));
+  }
+
+  @Test
+  @DisplayName(
+      "An assignment one business announces that names another business's login, or a shopper's,"
+          + " grants it nothing and moves nothing, at every tier and store")
+  void anAssignmentNeverReachesAnotherBusinesssLogin() {
+    Rival ours = rival();
+    Rival theirs = rival();
+    UUID shopper = signedUp(SHOPPER, "assignment-shopper-" + suffix() + "@example.com");
+    UUID[] named = {
+      theirs.owner(), theirs.manager(), theirs.storekeeper(), theirs.cashier(), shopper
+    };
+    String before = rowsOf(named);
+    List<String> boundBefore = Arrays.stream(named).map(p -> auditCount(p, "STAFF_BOUND")).toList();
+
+    for (UUID person : named) {
+      for (String tier : List.of("OWNER", "MANAGER", "STOREKEEPER", "CASHIER")) {
+        for (UUID store : List.of(theirs.store(), ours.store())) {
+          String event =
+              staffAssigned(Ids.newId(), ours.tenant(), person, store, tier, "SHIFT_LEAD");
+          staff.handle(event);
+          staff.handle(event);
+        }
+      }
+      // A business-wide MANAGER assignment: no store.
+      String wide =
+          staffAssigned(Ids.newId(), ours.tenant(), person, ours.store(), "MANAGER", null)
+              .replace(
+                  "\"eventType\":\"StaffAssigned\"",
+                  "\"eventType\":\"StaffAssigned\",\"businessWide\":true");
+      staff.handle(wide);
+      staff.handle(wide);
+    }
+
+    assertThat("nobody's rows or roles moved", rowsOf(named), is(before));
+    for (UUID person : named) {
+      assertThat(
+          "refused against our business once per event: four tiers at two stores, and the"
+              + " business-wide manager",
+          refusedCount(ours.tenant(), person, "STAFF_BIND_REFUSED"),
+          is("9"));
+      assertThat("and against no login", auditCount(person, "STAFF_BIND_REFUSED"), is("0"));
+    }
+    assertThat(
+        "their owner's security events hold no refusal",
+        feed(new Caller(theirs.owner(), "OWNER", theirs.tenant()), "STAFF_BIND_REFUSED").size(),
+        is(0));
+    assertThat(
+        "our owner's security events hold each refusal once: five logins, nine events each",
+        feed(new Caller(ours.owner(), "OWNER", ours.tenant()), "STAFF_BIND_REFUSED").size(),
+        is(45));
+    assertThat(
+        "none was bound: no new STAFF_BOUND beside the ones their own business made",
+        Arrays.stream(named).map(p -> auditCount(p, "STAFF_BOUND")).toList(),
+        is(boundBefore));
+    assertThat(userColumn(shopper, "tenant_id"), is(nullValue()));
   }
 
   @Test
@@ -1299,6 +1689,85 @@ class BusinessSignUpIT {
             + " WHERE u.tenant_id = '"
             + rival.tenant()
             + "'");
+  }
+
+  /**
+   * How many audit rows of a refusal action the business has whose detail names the login: a
+   * refusal is written against the business that announced the event, with the login in its detail
+   * and not in {@code user_id}.
+   */
+  private static String refusedCount(UUID tenantId, UUID login, String action) {
+    return scalar(
+        "SELECT count(*) FROM iam.audit_log WHERE tenant_id = '"
+            + tenantId
+            + "' AND action = '"
+            + action
+            + "' AND detail LIKE '%(login "
+            + login
+            + ")'");
+  }
+
+  /**
+   * Up to 100 security events of one type, as {@code GET /auth/admin/security-events} gives them.
+   */
+  private List<JsonObject> feed(Caller who, String type) {
+    Answer a = call("GET", "/auth/admin/security-events?type=" + type + "&limit=100", who, null);
+    assertThat(a.body().toString(), a.status(), is(200));
+    return a.data().getJsonArray("items").getValuesAs(JsonObject.class);
+  }
+
+  /**
+   * Runs the handler while another transaction has set the login's tenant to another business and
+   * not yet committed: where leaving one business and being stamped into the next ends. Waits until
+   * the handler is blocked behind that transaction, then commits it and waits for the handler to
+   * finish.
+   *
+   * @throws AssertionError when the handler finishes, or does not block, before the move commits
+   */
+  private static void handledWhileTheLoginMovesTo(UUID login, UUID toTenant, Runnable handler)
+      throws Exception {
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection mover =
+        DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
+      mover.setAutoCommit(false);
+      int moverPid;
+      try (Statement st = mover.createStatement();
+          ResultSet rs = st.executeQuery("SELECT pg_backend_pid()")) {
+        rs.next();
+        moverPid = rs.getInt(1);
+      }
+      try (PreparedStatement ps =
+          mover.prepareStatement("UPDATE iam.users SET tenant_id = ? WHERE id = ?")) {
+        ps.setObject(1, toTenant);
+        ps.setObject(2, login);
+        assertThat("the move found the login", ps.executeUpdate(), is(1));
+      }
+      Future<?> handled = pool.submit(handler);
+      boolean blocked = false;
+      long giveUp = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+      while (!handled.isDone() && !blocked && System.nanoTime() < giveUp) {
+        blocked =
+            !"0"
+                .equals(
+                    scalar(
+                        "SELECT count(*) FROM pg_stat_activity WHERE "
+                            + moverPid
+                            + " = ANY(pg_blocking_pids(pid))"));
+        if (!blocked) Thread.sleep(20);
+      }
+      boolean finishedEarly = handled.isDone();
+      mover.commit();
+      handled.get(20, TimeUnit.SECONDS);
+      assertThat(
+          "the handler waited for the moving login's row (it had finished before the move"
+              + " committed: "
+              + finishedEarly
+              + ")",
+          blocked && !finishedEarly,
+          is(true));
+    } finally {
+      pool.shutdownNow();
+    }
   }
 
   private static String scalar(String sql) {

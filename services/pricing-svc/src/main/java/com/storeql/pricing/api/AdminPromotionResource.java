@@ -130,14 +130,16 @@ public class AdminPromotionResource {
       description =
           "PRICING_INVALID_PROMOTION_TYPE, PRICING_INCOMPLETE_BOGO, PRICING_INVALID_PROMOTION_SHAPE,"
               + " PRICING_MISSING_THRESHOLD, PRICING_INVALID_PERCENT, PRICING_INVALID_LIMIT;"
-              + " VALIDATION_FAILED for a bad body or a minOrderAmount with more decimals than the"
-              + " business's currency has")
+              + " VALIDATION_FAILED for a bad body, or an amount with more decimals than the"
+              + " business's currency has: the value of a FLAT, BASKET_FLAT, SPEND_THRESHOLD or"
+              + " MIX_MATCH promotion, or a minOrderAmount (a percentage is no money)")
   @APIResponse(responseCode = "403", description = "Caller is not management")
   @APIResponse(
       responseCode = "503",
       description =
-          "TENANT_PROFILE_UNAVAILABLE: a minOrderAmount is kept to the business currency's minor"
-              + " units, and the currency could not be read")
+          "TENANT_PROFILE_UNAVAILABLE: an amount (the value of an amount-typed promotion, or a"
+              + " minOrderAmount) is kept to the business currency's minor units, and the currency"
+              + " could not be read")
   @POST
   public Response create(CreatePromotionRequest req) {
     Validations.validate(req);
@@ -157,12 +159,13 @@ public class AdminPromotionResource {
    *     and CATEGORY, the variant or category id
    * @return the stored scope row
    * @throws com.storeql.web.ApiException {@code 400} when the scope is unknown, or a VARIANT or
-   *     CATEGORY scope names no id
+   *     CATEGORY scope names no id; {@code 404} when the promotion is not this tenant's
    */
   @Operation(
       summary = "Add a scope item to a promotion",
       description = "Attaches the promotion to a scope (ALL, VARIANT or CATEGORY).")
   @APIResponse(responseCode = "201", description = "Promotion item added")
+  @APIResponse(responseCode = "404", description = "No such promotion for this tenant")
   @POST
   @Path("/{id}/items")
   public Response addItem(@PathParam("id") UUID id, AddPromotionItemRequest req) {

@@ -4,6 +4,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -65,6 +66,9 @@ class AssortmentIT {
   /** A business whose plans are recorded in awkward orders, swept apart from the rest. */
   private static final String T_PLAN = Ids.newId().toString();
 
+  /** A business whose decision log is edited behind the application's back (the table's guard). */
+  private static final String T_GUARD = Ids.newId().toString();
+
   private static final String STORE_A = Ids.newId().toString();
   private static final String STORE_B = Ids.newId().toString();
 
@@ -101,6 +105,7 @@ class AssortmentIT {
         .with(T_TICK, "GBP", "GB")
         .with(T_HELD, "GBP", "GB")
         .with(T_PLAN, "GBP", "GB")
+        .with(T_GUARD, "GBP", "GB")
         .withStore(T, STORE_A, "GB")
         .withStore(T, STORE_B, "GB")
         .withStore(T_SWEEP, STORE_A, "GB")
@@ -113,6 +118,8 @@ class AssortmentIT {
         .withStore(T_HELD, STORE_B, "GB")
         .withStore(T_PLAN, STORE_A, "GB")
         .withStore(T_PLAN, STORE_B, "GB")
+        .withStore(T_GUARD, STORE_A, "GB")
+        .withStore(T_GUARD, STORE_B, "GB")
         .withStore(RIVAL, RIVAL_STORE, "GB");
   }
 
@@ -1182,6 +1189,215 @@ class AssortmentIT {
     }
     body(
         send("PUT", "/admin/products/" + productId + "/stores", json + "]}", tenant, "OWNER"), 200);
+  }
+
+  // ── the decision log is guarded in the database, behind the application ──────────
+
+  /**
+   * Runs one UPDATE of a change's row straight against the database, behind the application.
+   *
+   * @return the database's refusal, or {@code null} when the row was updated
+   */
+  private static String edit(String changeId, String set) {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "UPDATE product.assortment_changes SET " + set + " WHERE id = ?::uuid")) {
+      ps.setString(1, changeId);
+      return ps.executeUpdate() == 1 ? null : "no row";
+    } catch (SQLException e) {
+      return e.getMessage();
+    }
+  }
+
+  @Test
+  @DisplayName("A decision's facts are never edited and its outcome is stamped once, by the table")
+  void aDecisionIsNeverEditedAndItsOutcomeIsStampedOnce() {
+    String later = LocalDate.now().plusDays(400).toString();
+    String p = product(T_GUARD, null);
+    String other = product(T_GUARD, null);
+    String open = recordChange(T_GUARD, p, STORE_A, false, "LIST", later);
+    String onTheRow =
+        "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid AND reason ="
+            + " 'Range review' AND action = 'LIST' AND store_id = '"
+            + STORE_A
+            + "'::uuid AND applied_at IS NULL AND refused_at IS NULL";
+
+    // Each of the twelve columns the guard compares, one at a time: the table refuses each, and the
+    // row stays. store_id is edited on a decision aimed at a store, cluster_id (below) on one aimed
+    // at a cluster, because a decision has exactly one of the two.
+    String[] facts = {
+      "reason = 'a better story'",
+      "action = 'DELIST'",
+      "effective_from = effective_from + 1",
+      "decided_by = '" + Ids.newId() + "'::uuid",
+      "created_at = created_at + interval '1 day'",
+      "store_id = '" + STORE_B + "'::uuid",
+      "product_id = '" + other + "'::uuid",
+      "tenant_id = '" + RIVAL + "'::uuid",
+      "id = '" + Ids.newId() + "'::uuid",
+      "held_to_stores = NOT held_to_stores",
+      "review_id = '" + Ids.newId() + "'::uuid"
+    };
+    for (String set : facts) {
+      assertThat(
+          set, edit(open, set), containsString("assortment_changes: a decision is not edited"));
+    }
+    assertThat("nothing about the decision moved", count(onTheRow, open), is(1));
+
+    // A decision aimed at a cluster: moving it to another cluster of the business keeps both
+    // the foreign key and the one-target check satisfied, so only the guard can refuse it. Dated
+    // beyond the sweeps of this business (400 days at most), so it is still unsettled when edited.
+    String aimedAt = cluster(T_GUARD, STORE_A);
+    String movedTo = cluster(T_GUARD);
+    String farOff = LocalDate.now().plusDays(800).toString();
+    String aimed = recordChange(T_GUARD, product(T_GUARD, null), aimedAt, true, "LIST", farOff);
+    String stillAimed =
+        "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid AND cluster_id = '"
+            + aimedAt
+            + "'::uuid AND store_id IS NULL AND applied_at IS NULL AND refused_at IS NULL";
+    assertThat("the cluster decision is recorded unsettled", count(stillAimed, aimed), is(1));
+    assertThat(
+        "cluster_id",
+        edit(aimed, "cluster_id = '" + movedTo + "'::uuid"),
+        containsString("assortment_changes: a decision is not edited"));
+    assertThat("it still aims at its cluster", count(stillAimed, aimed), is(1));
+
+    // Another business, whatever it is and whoever asks, moves nothing of ours: its sweep leaves
+    // our change unsettled, and its staff below the managers are refused.
+    String ofRival = sweep(RIVAL, later);
+    assertThat(ofRival, not(containsString(open)));
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertRefused(
+          send("POST", "/admin/assortment/changes/apply", "{}", RIVAL, role), 403, "FORBIDDEN");
+    }
+    assertThat(
+        "another business reads none of our log",
+        body(get("/admin/assortment/changes", "product", p, RIVAL), 200),
+        not(containsString(open)));
+    assertThat("our change is still unsettled", count(onTheRow, open), is(1));
+
+    // The sweep's own stamp is what the table lets through, once.
+    assertThat(sweep(T_GUARD, later), containsString("\"applied\":"));
+    String applied =
+        "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid"
+            + " AND applied_at IS NOT NULL AND refused_at IS NULL";
+    assertThat(count(applied, open), is(1));
+    for (String set :
+        new String[] {
+          "applied_at = NULL",
+          "applied_at = now()",
+          "applied_at = applied_at + interval '1 day'",
+          "refused_at = now(), refusal_code = 'LATE', refusal_detail = 'too late'"
+        }) {
+      assertThat(
+          set, edit(open, set), containsString("assortment_changes: an outcome is stamped once"));
+    }
+    assertThat("the applied change stays applied", count(applied, open), is(1));
+  }
+
+  @Test
+  @DisplayName("A change the sweep closed as refused stays closed, with the refusal it was given")
+  void aClosedChangeStaysClosed() {
+    String p = product(T_GUARD, null);
+    rangeTo(T_GUARD, p, STORE_A, STORE_B);
+    String delist = recordChange(T_GUARD, p, STORE_A, false, "DELIST", "2026-01-01");
+    rangeTo(T_GUARD, p, STORE_A);
+    assertThat(sweep(T_GUARD, null), containsString("ASSORTMENT_LAST_STORE"));
+    String closed =
+        "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid"
+            + " AND refused_at IS NOT NULL AND applied_at IS NULL"
+            + " AND refusal_code = 'ASSORTMENT_LAST_STORE'";
+    assertThat(count(closed, delist), is(1));
+
+    for (String set :
+        new String[] {
+          "refused_at = NULL, refusal_code = NULL, refusal_detail = NULL",
+          "refusal_code = 'SOMETHING_ELSE'",
+          "refusal_detail = 'rewritten'",
+          "refused_at = refused_at + interval '1 day'",
+          "applied_at = now()"
+        }) {
+      assertThat(
+          set, edit(delist, set), containsString("assortment_changes: an outcome is stamped once"));
+    }
+    assertThat("it is still closed with its refusal", count(closed, delist), is(1));
+  }
+
+  @Test
+  @DisplayName(
+      "The table lets exactly a stamp through: nothing rides with it, and a settled row is left")
+  void theTableLetsOnlyAStampThrough() {
+    // Dated beyond every sweep the other tests in this business make (400 days at most).
+    String farOff = LocalDate.now().plusDays(800).toString();
+    String applied = recordChange(T_GUARD, product(T_GUARD, null), STORE_A, false, "LIST", farOff);
+    String closed = recordChange(T_GUARD, product(T_GUARD, null), STORE_B, false, "LIST", farOff);
+    String openOf =
+        "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid"
+            + " AND reason = 'Range review' AND applied_at IS NULL AND refused_at IS NULL";
+    String stampedApplied =
+        "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid"
+            + " AND applied_at IS NOT NULL AND refused_at IS NULL AND reason = 'Range review'";
+    String stampedClosed =
+        "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid"
+            + " AND refused_at IS NOT NULL AND applied_at IS NULL"
+            + " AND refusal_code = 'ASSORTMENT_LAST_STORE' AND refusal_detail = 'closed'";
+
+    // A stamp cannot carry an edit of the decision in with it, on either outcome.
+    assertThat(
+        edit(applied, "applied_at = now(), reason = 'smuggled in with the stamp'"),
+        containsString("assortment_changes: a decision is not edited"));
+    assertThat(
+        edit(
+            closed,
+            "refused_at = now(), refusal_code = 'ASSORTMENT_LAST_STORE', refusal_detail ="
+                + " 'closed', action = 'DELIST'"),
+        containsString("assortment_changes: a decision is not edited"));
+    assertThat("neither row took its stamp", count(openOf, applied) + count(openOf, closed), is(2));
+
+    // What the table compares is the decision's values, not the columns an UPDATE names: writing a
+    // fact back as it stands is not an edit, and a row with no outcome yet may be written so.
+    assertThat(edit(applied, "reason = reason, effective_from = effective_from"), nullValue());
+
+    // Each outcome the sweep stamps goes through, straight from the database as well.
+    assertThat(edit(applied, "applied_at = now()"), nullValue());
+    assertThat(
+        edit(
+            closed,
+            "refused_at = now(), refusal_code = 'ASSORTMENT_LAST_STORE', refusal_detail ="
+                + " 'closed'"),
+        nullValue());
+    assertThat(count(stampedApplied, applied), is(1));
+    assertThat(count(stampedClosed, closed), is(1));
+
+    // Once a row carries an outcome even a write that changes nothing is refused.
+    assertThat(
+        edit(applied, "reason = reason"),
+        containsString("assortment_changes: an outcome is stamped once"));
+    assertThat(
+        edit(closed, "refusal_detail = refusal_detail"),
+        containsString("assortment_changes: an outcome is stamped once"));
+    assertThat(count(stampedApplied, applied), is(1));
+    assertThat(count(stampedClosed, closed), is(1));
+  }
+
+  @Test
+  @DisplayName("The guard is on edits: a row can still go with its product or its business")
+  void aRowCanStillBeDeleted() {
+    String p = product(T_GUARD, null);
+    String change =
+        recordChange(T_GUARD, p, STORE_A, false, "LIST", LocalDate.now().plusDays(400).toString());
+    String exists = "SELECT count(*) FROM product.assortment_changes WHERE id = ?::uuid";
+    assertThat(count(exists, change), is(1));
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement("DELETE FROM product.assortment_changes WHERE id = ?::uuid")) {
+      ps.setString(1, change);
+      assertThat("erasure's DELETE is not held back", ps.executeUpdate(), is(1));
+    } catch (SQLException e) {
+      throw new AssertionError(e);
+    }
+    assertThat(count(exists, change), is(0));
   }
 
   // ── a held manager never moves a line to or from every store (2 Oct 2026) ────────

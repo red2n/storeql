@@ -41,7 +41,7 @@ cache — pre-existing, unrelated). Build without it.
 
 ## 2. Decisions to confirm
 
-Two deliberate calls that a second opinion should ratify. Both are cheap to reverse.
+One deliberate call (2a) that a second opinion should ratify; it is cheap to reverse. 2b is settled and stays only because the comment in `V14__product_images.sql` points here.
 
 ### 2a. Brute-force protection fails open
 
@@ -58,30 +58,14 @@ last line.
 the only line that changes. Rate limiting also fails open, but that one is the uncontroversial
 industry default and needs no decision.
 
-### 2b. Legacy product images above 256 KB
+### 2b. Product images above 256 KB (settled)
 
-`V14__product_images.sql` (folded) creates the size constraint with the table, so it is validated from
-the first row: no row can predate it. The fold replaced the earlier V15 (a `NOT VALID` constraint) and
-V16 (a pre-check, then `VALIDATE`), and the pre-check went with them. A database built from the
-migrations before the fold cannot take the folded set, because V14's checksum has changed and V15 and
-V16 are no longer on the classpath; it needs a reset. A database that never applied the old V16 may
-still hold rows written under the old 512 KB cap, which were never re-checked, so any that exist are
-still serving. Flyway cannot take the folded set, so for that database either reset it or run the
-queries below by hand.
-
-```sql
--- Find rows still in breach:
-SELECT tenant_id, product_id, octet_length(bytes) AS size_bytes
-  FROM product_images
- WHERE octet_length(bytes) >= 262144
- ORDER BY size_bytes DESC;
-
--- Once that returns nothing, promote to fully enforced:
-ALTER TABLE product_images VALIDATE CONSTRAINT product_images_size_under_256kb;
-```
-
-For a database built from the folded set, "no image over 256 KB in the system" is true retroactively
-as well: the table was empty when the check was created.
+Nothing is pending. `V14__product_images.sql` creates `product_images` with
+`CONSTRAINT product_images_size_under_256kb CHECK (octet_length(bytes) < 262144)` inside the CREATE
+TABLE. The constraint is validated, not `NOT VALID`: it holds for every row from the first, so "no
+image over 256 KB in the system" is true of the table itself and needs no pre-check and no later
+`VALIDATE` step. A local database that ran an older copy of the migrations is reset, not repaired (the
+DEV rule in [ARCHITECTURE](ARCHITECTURE.md): migrations only CREATE).
 
 ---
 
@@ -156,7 +140,7 @@ one move. This is the real fix for the whole class of problem; the client compre
 | Commit | Change |
 |---|---|
 | `ad10044` | Client-side image compression to a 256 KB budget (web canvas / `package:image`) |
-| `47d0518` | 256 KB enforced as a system invariant: service cap + `V14__product_images.sql` (folded) CHECK constraint |
+| `47d0518` | 256 KB enforced as a system invariant: service cap + a validated `CHECK` constraint on `product_images` (`V14__product_images.sql`) |
 | `21b980e` | Thumbnails decode to their layout box — ~4.9 MB → ~114 KB for the 72×72 tile |
 | `3d95c66` | Product image byte cache bounded by an LRU (16 MB / 200 entries) |
 | `2244d13` | Redis fails open; Lettuce command timeout 60s → 250ms |

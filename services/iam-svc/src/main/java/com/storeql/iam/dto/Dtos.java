@@ -289,7 +289,10 @@ public final class Dtos {
   @Schema(name = "MeResponse", description = "The authenticated caller's identity and roles.")
   public record MeResponse(
       String userId,
-      @Schema(description = "Null for platform-admin users, who are not tenant-scoped.")
+      @Schema(
+              description =
+                  "Null for a shopper's account, for a login of no business yet and for"
+                      + " platform-admin users: none of them belongs to a tenant.")
           String tenantId,
       @Schema(description = "CUSTOMER, STAFF, or PLATFORM_ADMIN.") String type,
       @Schema(description = "Role names granted to this user, e.g. OWNER, MANAGER, PLATFORM_ADMIN.")
@@ -302,7 +305,11 @@ public final class Dtos {
           java.util.List<String> permissions,
       String email,
       String phone,
-      @Schema(description = "Account status, e.g. ACTIVE, DISABLED.") String status,
+      @Schema(
+              description =
+                  "Account status: ACTIVE, or DELETED once a shopper has deleted their own"
+                      + " account. Only an ACTIVE login can sign in.")
+          String status,
       String createdAt) {}
 
   // ── Gap #45: POS session idle timeout ─────────────────────────────────────

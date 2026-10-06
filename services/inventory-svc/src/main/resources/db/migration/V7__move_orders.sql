@@ -32,5 +32,7 @@ CREATE TABLE move_order_lines (
     CONSTRAINT pk_move_order_lines PRIMARY KEY (id),
     CONSTRAINT fk_mol_order FOREIGN KEY (move_order_id) REFERENCES move_orders(id)
 );
-CREATE INDEX idx_move_order_lines_tenant_order ON move_order_lines (tenant_id, move_order_id);
-CREATE INDEX idx_mol_order ON move_order_lines (move_order_id);
+-- Every read and write of a line leads with tenant_id (InventoryRepository.listMoveOrderLinesTx and the
+-- pick's update), so this is the only lookup index the lines need. A move order is never deleted, so the
+-- foreign key to move_orders needs none of its own.
+CREATE INDEX idx_move_order_lines_tenant ON move_order_lines (tenant_id, move_order_id);

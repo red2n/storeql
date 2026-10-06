@@ -1,5 +1,6 @@
 -- Gap #32: item relationships — substitute and complementary links between variants.
--- Append-only link table; remove the row to sever the link (no soft-delete needed).
+-- Not append-only: a link is inserted and deleted, never updated. Remove the row to sever the link
+-- (no soft-delete needed); to change a link, remove it and add the other.
 CREATE TABLE item_relationships (
     id                  UUID        PRIMARY KEY,
     tenant_id           UUID        NOT NULL,

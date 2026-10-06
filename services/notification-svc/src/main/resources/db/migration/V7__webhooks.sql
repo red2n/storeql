@@ -60,5 +60,11 @@ CREATE TABLE webhook_attempts (
     response_snippet TEXT,                      -- the first kilobytes of what came back
     duration_ms      INT NOT NULL
 );
+-- The tenant-led index: a business's attempts leave with the rest of its data and are erased with
+-- it by tenant (common-service TenantDataRepository: WHERE tenant_id = ? AND (id) > ... ORDER BY id
+-- LIMIT ?, and DELETE ... WHERE tenant_id = ?), which only this index serves. NotificationIndexesIT
+-- plans both so it is not dropped as unused.
 CREATE INDEX idx_webhook_attempts_tenant ON webhook_attempts (tenant_id, id);
+-- One delivery's tries (WebhookRepository.ATTEMPTS: tenant_id = ? AND delivery_id = ? ORDER BY
+-- attempt), and the cascade that removes them when their delivery is pruned or deleted.
 CREATE INDEX idx_webhook_attempts_delivery ON webhook_attempts (delivery_id, attempt);

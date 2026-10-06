@@ -16,17 +16,39 @@ import java.util.UUID;
  *
  * <pre>{@code
  * CREATE TABLE outbox (
- *   id           UUID PRIMARY KEY,
- *   event_type   TEXT NOT NULL,
- *   topic        TEXT NOT NULL,
- *   tenant_id    UUID NOT NULL,
- *   aggregate_id UUID NOT NULL,
- *   payload      JSONB NOT NULL,
- *   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
- *   published_at TIMESTAMPTZ
+ *   id              UUID PRIMARY KEY,
+ *   event_type      TEXT NOT NULL,
+ *   topic           TEXT NOT NULL,
+ *   tenant_id       UUID NOT NULL,
+ *   aggregate_id    UUID NOT NULL,
+ *   payload         JSONB NOT NULL,
+ *   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+ *   published_at    TIMESTAMPTZ,
+ *   attempts        INT NOT NULL DEFAULT 0,
+ *   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ *   last_error      TEXT,
+ *   dead_at         TIMESTAMPTZ
  * );
- * CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
+ * -- the relay's claim: its ordered scan, ORDER BY created_at, id LIMIT n
+ * CREATE INDEX idx_outbox_claim ON outbox (created_at, id)
+ *   WHERE published_at IS NULL AND dead_at IS NULL;
+ * -- the claim's NOT EXISTS check for an earlier waiting row of the same aggregate
+ * CREATE INDEX idx_outbox_aggregate_pending ON outbox (aggregate_id, created_at, id)
+ *   WHERE published_at IS NULL;
+ * -- the scheduled purge of delivered rows, oldest first
+ * CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
  * }</pre>
+ *
+ * <p>The relay (common-service {@code BaseOutboxRepository}) claims the waiting rows in {@code
+ * created_at, id} order; marking a row published and recording a failure go by primary key, and the
+ * purge reads the published rows through {@code idx_outbox_published}. A row that fails is retried
+ * after a backoff, and once it has failed {@code storeql.outbox.max-attempts} times it is a dead
+ * letter ({@code dead_at}): never claimed again, kept for an operator, and it holds back its own
+ * aggregate only.
+ *
+ * <p>The table is deliberately cross-tenant: one relay drains every business's rows and no outbox
+ * statement filters by {@code tenant_id}, so no index starts with it. The row's {@code tenant_id}
+ * is read only by the relay's dead-letter warning, which names whose event could not be published.
  *
  * @param id primary key of the outbox row; also becomes the Kafka record's dedupe/idempotency key
  * @param eventType PascalCase past-tense event type, e.g. {@code "OrderPlaced"}

@@ -6,7 +6,8 @@ import java.util.UUID;
 
 /**
  * A user — STAFF (belongs to a tenant, or to none: a business sign-up not yet onboarded, the
- * platform administrator) or CUSTOMER (tenantId null/global). See V1__init.sql for the tenant note.
+ * platform administrator) or CUSTOMER (a shopper's account, which belongs to no business: tenantId
+ * null). See V1__init.sql for the tenant note.
  *
  * <p>The type is also the kind of account: a shopper's account (CUSTOMER) and a business account
  * (STAFF) are separate identities, so one address may hold one of each outside any business (the
@@ -14,12 +15,12 @@ import java.util.UUID;
  */
 public record User(
     UUID id,
-    UUID tenantId, // null for CUSTOMER
+    UUID tenantId, // null for a shopper (CUSTOMER) and for a login of no business yet
     String type, // STAFF | CUSTOMER
     String email,
     String phone,
     String passwordHash,
-    String status, // ACTIVE | DELETED
+    String status, // ACTIVE | DELETED, the only values written; sign-in admits ACTIVE only
     Instant createdAt,
     Instant updatedAt) {
   public static final String TYPE_STAFF = "STAFF";

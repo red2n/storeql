@@ -50,7 +50,8 @@ INSERT INTO transaction_source_types (id, tenant_id, code, description) VALUES
   -- back are never confused with a customer's return coming in (RETURN) or a write-off (ADJUST).
   ('01a09650-2b3c-7001-8f6a-2a6d1d9e5c11', NULL, 'RTV',        'Return to vendor');
 
--- 23 Lot action codes — lot_actions table (split/merge create new batches)
+-- 23 Lot action codes — lot_actions table. A split makes the result batch; a merge names the existing
+-- batch the quantity went into.
 CREATE TABLE lot_actions (
     id              UUID PRIMARY KEY,
     tenant_id       UUID        NOT NULL,
@@ -59,11 +60,16 @@ CREATE TABLE lot_actions (
     result_batch_id UUID        NOT NULL,
     qty             NUMERIC(18,3) NOT NULL,
     notes           TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- The Idempotency-Key the split or merge was sent under; NULL when it was sent with none. A retry
+    -- under the same key finds this row and answers it instead of moving the stock again.
+    idempotency_key TEXT
 );
 CREATE INDEX idx_lot_actions_tenant   ON lot_actions (tenant_id, created_at DESC);
 CREATE INDEX idx_lot_actions_source   ON lot_actions (tenant_id, source_batch_id);
 CREATE INDEX idx_lot_actions_result   ON lot_actions (tenant_id, result_batch_id);
+CREATE UNIQUE INDEX uq_lot_actions_idempotency ON lot_actions (tenant_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 -- 26 Lot-specific UOM conversions
 CREATE TABLE lot_uom_conversions (

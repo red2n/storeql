@@ -45,6 +45,16 @@ public class LoyaltyProgrammeRepository extends BaseOutboxRepository {
 
   private static final DateTimeFormatter DAY = DateTimeFormatter.ISO_LOCAL_DATE;
 
+  /**
+   * The customers of one business with a lot that has died: the first statement of the expiry
+   * sweep. Binds the business, then the instant the lots are due by. Public so the plan test plans
+   * this very text (V8's idx_loyalty_lots_due is built for it: tenant first, then the expiry).
+   */
+  public static final String DUE_CUSTOMERS_SQL =
+      "SELECT customer_id FROM loyalty_point_lots"
+          + " WHERE tenant_id = ? AND remaining > 0 AND expires_at IS NOT NULL"
+          + " AND expires_at <= ? GROUP BY customer_id ORDER BY customer_id";
+
   /** The business's programme, or the platform's default when it never set one. */
   public LoyaltyProgramme programme(UUID tenantId) {
     return inTx(c -> programme(c, tenantId), "read loyalty programme");
@@ -324,11 +334,7 @@ public class LoyaltyProgrammeRepository extends BaseOutboxRepository {
             c -> {
               LoyaltyProgramme p = programme(c, tenantId);
               List<UUID> customers = new ArrayList<>();
-              try (PreparedStatement ps =
-                  c.prepareStatement(
-                      "SELECT customer_id FROM loyalty_point_lots"
-                          + " WHERE tenant_id = ? AND remaining > 0 AND expires_at IS NOT NULL"
-                          + " AND expires_at <= ? GROUP BY customer_id ORDER BY customer_id")) {
+              try (PreparedStatement ps = c.prepareStatement(DUE_CUSTOMERS_SQL)) {
                 ps.setObject(1, tenantId);
                 ps.setObject(2, LoyaltyLots.odt(now));
                 try (ResultSet rs = ps.executeQuery()) {

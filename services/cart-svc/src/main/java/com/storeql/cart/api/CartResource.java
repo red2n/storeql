@@ -48,7 +48,7 @@ public class CartResource {
   @APIResponse(responseCode = "200", description = "Existing or newly created active cart")
   @APIResponse(
       responseCode = "409",
-      description = "Tenant is suspended/blocked or store is closed/suspended")
+      description = "The business is switched off, or the store is closed or suspended")
   @POST
   public ApiResponse<CartResponse> createOrGet(CreateCartRequest req) {
     Validations.validate(req);
@@ -85,7 +85,8 @@ public class CartResource {
   @APIResponse(responseCode = "404", description = "Cart not found or not owned by caller")
   @APIResponse(
       responseCode = "409",
-      description = "Cart is not active, or tenant/store is suspended")
+      description =
+          "Cart is not active, the business is switched off, or the store is closed or suspended")
   @POST
   @Path("/items")
   public ApiResponse<CartItemResponse> addItem(AddItemRequest req) {

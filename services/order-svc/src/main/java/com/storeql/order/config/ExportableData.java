@@ -19,13 +19,6 @@ public class ExportableData extends TenantDataSpec {
   }
 
   @Override
-  public Map<String, String> excludedTables() {
-    return Map.of(
-        "idempotency_keys",
-        "cached responses to retried requests: delivery machinery, kept for a day");
-  }
-
-  @Override
   public Map<String, String> excludedColumns() {
     return Map.of(
         "tse_devices.private_key",

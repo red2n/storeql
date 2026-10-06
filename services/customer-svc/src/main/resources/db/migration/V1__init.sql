@@ -1,6 +1,9 @@
 -- customer-svc schema: customer profiles, addresses, loyalty, store credit, transactional outbox.
 -- Multi-tenancy (CLAUDE.md, the two ideas): every table of tenant data here carries tenant_id NOT NULL
 -- and leads its composite indexes with it, except where a comment at the index says otherwise.
+-- The outbox is cross-tenant on purpose: the relay drains every business's rows in one order (oldest
+-- first), so none of its indexes is led by tenant_id, and its tenant_id may be null (an event can
+-- belong to no business).
 -- Golden rule #8: loyalty_ledger and store_credit_ledger are append-only — no UPDATE/DELETE.
 
 CREATE TABLE customers (
@@ -67,9 +70,8 @@ CREATE UNIQUE INDEX uq_customers_login
 -- here may stop the service starting. The operator class is looked up in the schema the extension lives in
 -- and written qualified, so the indexes survive a restore that runs with an empty search path.
 --
--- These four, like the outbox's indexes below, are not led by tenant_id: each is keyed on the
--- expression alone, so one index serves every business's rows, and the search query's own
--- tenant_id condition does the filtering.
+-- These four are not led by tenant_id: each is keyed on the expression alone, so one index serves
+-- every business's rows, and the search query's own tenant_id condition does the filtering.
 DO $$
 DECLARE
     ext_schema text;
@@ -224,20 +226,26 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
--- The outbox's indexes are not led by tenant_id: the relay drains every business's rows in one order
--- (created_at, id), and tenant_id here is nullable, since an event may belong to no business.
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
+-- The relay's claim reads two indexes, its ordered scan's and its per-aggregate check's (below); the
+-- purge reads a third; marking a row published and recording a failure go by primary key. No index
+-- of every unpublished row by created_at (idx_outbox_unpublished) is kept: the claim's ordered scan
+-- excludes dead letters, and the per-aggregate check, which does look for them, is keyed on the
+-- aggregate.
 -- The scheduled purge (common-service OutboxPublisher, hourly, in bounded batches) deletes published
 -- rows older than storeql.outbox.retention-days, ordered by published_at. This index serves that scan.
 -- It is partial on what the purge reads and nothing else, so the unpublished rows the drain reads stay
 -- out of it and it costs nothing while the relay keeps up.
 CREATE INDEX idx_outbox_published
     ON outbox (published_at) WHERE published_at IS NOT NULL;
--- The claim: rows that may publish now, in the order they were written.
+-- The claim: rows that may publish now, in the order they were written. A dead letter is never
+-- claimed again, so it stays out of this index, and a backlog is read oldest first straight off it,
+-- with no sort (common-service BaseOutboxRepository.claim; OutboxPurgeIT plans its real statement).
+-- The claim's check for an earlier waiting row of the same aggregate reads the index below.
 CREATE INDEX idx_outbox_claim
     ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;
--- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off.
+-- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is dead or
+-- backing off.
 CREATE INDEX idx_outbox_aggregate_pending
     ON outbox (aggregate_id, created_at, id)
     WHERE published_at IS NULL;

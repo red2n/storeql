@@ -17,7 +17,11 @@ CREATE TABLE password_reset_tokens (
     replaced_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX idx_password_reset_tokens_tenant_user ON password_reset_tokens (tenant_id, user_id);
+-- The tenant index serves a business's erasure, DELETE ... WHERE tenant_id = ? (the table is kept out
+-- of the export, so nothing else reads it by business); a shopper's token has no tenant_id and is
+-- found by its hash or its user. A token is otherwise read by its hash (the unique index), its user,
+-- or its expiry.
+CREATE INDEX idx_password_reset_tokens_tenant ON password_reset_tokens (tenant_id);
 CREATE INDEX idx_password_reset_tokens_user ON password_reset_tokens (user_id);
 CREATE INDEX idx_password_reset_tokens_expires ON password_reset_tokens (expires_at);
 

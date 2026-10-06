@@ -48,6 +48,7 @@ import com.storeql.inventory.domain.Domain.TransferOrderLine;
 import com.storeql.inventory.domain.Domain.ValuationGrouping;
 import com.storeql.inventory.domain.Domain.ValuationRow;
 import com.storeql.inventory.domain.Domain.ZoneGlMapping;
+import com.storeql.inventory.domain.LotMerges;
 import com.storeql.inventory.domain.ReturnDisposition;
 import com.storeql.inventory.domain.SerialNumbers;
 import com.storeql.inventory.repo.AbcAnalysisRepository;
@@ -69,6 +70,7 @@ import com.storeql.inventory.repo.SafetyStockRepository;
 import com.storeql.inventory.repo.SerialRepository;
 import com.storeql.inventory.repo.SuggestionRepository;
 import com.storeql.inventory.repo.ThresholdRepository;
+import com.storeql.service.Fx;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -236,6 +238,48 @@ public class InventoryService {
       String ownership,
       UUID ownerSupplierId,
       String dutyStatus) {
+    return receive(
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        batchNo,
+        costPrice,
+        expiry,
+        refType,
+        refId,
+        zoneId,
+        idempotencyKey,
+        ownership,
+        ownerSupplierId,
+        dutyStatus,
+        null);
+  }
+
+  /**
+   * As above, for a receipt a person entered by hand: {@code actorId} is the signed-in user, kept
+   * on the receipt's movement ({@code stock_movements.actor_id}) so the ledger says who received
+   * the stock. A {@code null} actor (no signed-in user on the request) leaves the movement
+   * unattributed; a receipt an event causes goes through {@code receiveOnce} and never names one.
+   *
+   * @param actorId the authenticated user who entered the receipt, or {@code null}
+   */
+  public Batch receive(
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String batchNo,
+      BigDecimal costPrice,
+      LocalDate expiry,
+      String refType,
+      UUID refId,
+      UUID zoneId,
+      String idempotencyKey,
+      String ownership,
+      UUID ownerSupplierId,
+      String dutyStatus,
+      UUID actorId) {
     String owned = ownershipOf(ownership, ownerSupplierId);
     String duty = dutyStatusOf(dutyStatus);
     if (Batch.DUTY_SUSPENDED.equals(duty) && !bonds.isBonded(tenantId, storeId)) {
@@ -272,7 +316,13 @@ public class InventoryService {
             batchId,
             Events.stockReceived(tenantId, storeId, variantId, batchId, qty));
     try {
-      return repo.receive(batch, refType, refId, event, idempotencyKey);
+      return repo.receive(
+          batch,
+          refType,
+          refId,
+          event,
+          idempotencyKey,
+          actorId == null ? MovementAttribution.system() : MovementAttribution.by(actorId, null));
     } catch (ApiException e) {
       // Idempotent replay: a retried receipt with the same key gets the original batch back
       // instead of double-counting stock (golden rule #11).
@@ -1747,7 +1797,7 @@ public class InventoryService {
     MoveOrder order =
         repo.findMoveOrder(tenantId, id)
             .orElseThrow(() -> ApiException.notFound("MOVE_ORDER_NOT_FOUND", "No such move order"));
-    return new MoveOrderWithLines(order, repo.listMoveOrderLines(id));
+    return new MoveOrderWithLines(order, repo.listMoveOrderLines(tenantId, id));
   }
 
   /**
@@ -1774,7 +1824,7 @@ public class InventoryService {
                 id,
                 Events.moveOrderCompleted(
                     tenantId, id, existing.fromStoreId(), existing.toStoreId())));
-    return new MoveOrderWithLines(picked, repo.listMoveOrderLines(id));
+    return new MoveOrderWithLines(picked, repo.listMoveOrderLines(tenantId, id));
   }
 
   /**
@@ -1933,6 +1983,7 @@ public class InventoryService {
                     id,
                     existing.fromStoreId(),
                     existing.toStoreId(),
+                    existing.transferType(),
                     repo.listTransferOrderLines(tenantId, id))));
     return new TransferOrderWithLines(shipped, repo.listTransferOrderLines(tenantId, id));
   }
@@ -3149,49 +3200,38 @@ public class InventoryService {
   /**
    * Splits part of a batch into a new one, recording the genealogy link.
    *
-   * <p>The child inherits the parent's cost and expiry, and the link is what lets a recall trace
-   * from either end.
+   * <p>The quantity moves: it leaves the source batch and arrives in the child, which is the
+   * source's own stock (same store, variant, cost, expiry, grade, zone, ownership, duty and
+   * condition) under the source's lot number, or the one the caller names. Nothing is received or
+   * sold, so the business holds the same as before and the ledger shows the move as two {@code
+   * LOT_SPLIT} movements that net to zero. The child, both movements, the genealogy link, the lot
+   * action and the event are one transaction. The link is what lets a trace follow the stock from
+   * either end (the lot genealogy's ancestors and descendants), and what lets a recall of the
+   * source's lot reach a child given a number of its own. A child joins the recalls that hold its
+   * source.
    *
    * @param tenantId owning tenant
    * @param sourceBatchId the batch to split from
    * @param qty the quantity to move into the new batch
-   * @param batchNo the new batch's number, or {@code null} to mint one
+   * @param batchNo the new batch's number, or {@code null} or blank to keep the source's
    * @param notes free-text note recorded against the split
-   * @return the source and new batches as they now stand
-   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when the source does not exist; a conflict
-   *     when the quantity exceeds what the source holds
+   * @param actorId the user performing the split, or {@code null} for a call with no signed-in user
+   * @param idempotencyKey the request's Idempotency-Key, or {@code null}; a request sent again with
+   *     the same key gets the first split's result and moves nothing
+   * @return the new batch as it now stands, and the action that records the split
+   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when the source does not exist in this
+   *     tenant; {@code INSUFFICIENT_QTY} (422) when the quantity exceeds what the source holds;
+   *     {@code IDEMPOTENCY_KEY_REUSED} (409) when the key made a different action
    */
   public LotSplitResult splitLot(
-      UUID tenantId, UUID sourceBatchId, BigDecimal qty, String batchNo, String notes) {
-    Batch source =
-        repo.getBatch(tenantId, sourceBatchId)
-            .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Source batch not found"));
-    if (source.remainingQty().compareTo(qty) < 0) {
-      throw ApiException.unprocessable(
-          "INSUFFICIENT_QTY", "Split qty exceeds remaining qty on source batch");
-    }
-    String newBatchNo =
-        batchNo != null ? batchNo : source.batchNo() + "-SPLIT-" + Ids.shortRef(Ids.newId());
+      UUID tenantId,
+      UUID sourceBatchId,
+      BigDecimal qty,
+      String batchNo,
+      String notes,
+      UUID actorId,
+      String idempotencyKey) {
     UUID newBatchId = Ids.newId();
-    Batch splitBatch =
-        new Batch(
-            newBatchId,
-            tenantId,
-            source.storeId(),
-            source.variantId(),
-            newBatchNo,
-            qty,
-            qty,
-            source.costPrice(),
-            source.expiryDate(),
-            Instant.now(),
-            Batch.STATUS_ACTIVE,
-            Batch.MATERIAL_AVAILABLE,
-            null,
-            source.grade(),
-            source.zoneId(),
-            source.ownership(),
-            source.ownerSupplierId());
     OutboxRow splitEvent =
         new OutboxRow(
             "LotSplit",
@@ -3199,11 +3239,19 @@ public class InventoryService {
             tenantId,
             sourceBatchId,
             Events.lotSplit(tenantId, sourceBatchId, newBatchId, qty));
-    Batch newBatch = repo.receive(splitBatch, "LOT_SPLIT", sourceBatchId, splitEvent, null);
-    LotAction action =
-        lotActionRepo.insertLotAction(
-            tenantId, LotAction.SPLIT, sourceBatchId, newBatch.id(), qty, notes);
-    return new LotSplitResult(newBatch, action);
+    InventoryRepository.Split split =
+        repo.splitBatch(
+            tenantId,
+            sourceBatchId,
+            newBatchId,
+            Ids.newId(),
+            qty,
+            batchNo,
+            notes,
+            MovementAttribution.by(actorId, null),
+            idempotencyKey,
+            splitEvent);
+    return new LotSplitResult(split.child(), split.action());
   }
 
   public record LotMergeResult(Batch targetBatch, LotAction action) {}
@@ -3211,18 +3259,32 @@ public class InventoryService {
   /**
    * Merges quantity from one batch into another, recording the genealogy link.
    *
-   * <p>Merging mixes provenance, so the link matters: after this, a recall on either source has to
-   * reach the merged batch.
+   * <p>The quantity moves: it leaves the source batch and joins the target, which must be at the
+   * same store, of the same variant, in the same material status and grade and with the same
+   * ownership and duty status. Nothing is received, written off or sold, so the business holds the
+   * same as before and the ledger shows the move as two {@code LOT_MERGE} movements that net to
+   * zero. The target's unit cost becomes the average of the two weighted by quantity, rounded to
+   * the business currency's minor units, and its use-by date the earlier of the two. The movements,
+   * the {@code MERGE} link in the genealogy, the lot action and the event are one transaction.
+   *
+   * <p>Merging mixes provenance, so the link matters: a recall of either batch's lot reaches the
+   * merged batch, and the merged batch joins the recalls that hold the source.
    *
    * @param tenantId owning tenant
    * @param sourceBatchId the batch to take stock from
    * @param targetBatchId the batch to merge it into
    * @param qty the quantity to move
    * @param notes free-text note recorded against the merge
-   * @param actorId the user performing the merge
-   * @return both batches as they now stand
-   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when either batch does not exist; a conflict
-   *     when the quantity exceeds what the source holds
+   * @param actorId the user performing the merge, or {@code null} for a call with no signed-in user
+   * @param idempotencyKey the request's Idempotency-Key, or {@code null}; a request sent again with
+   *     the same key gets the first merge's result and moves nothing
+   * @return the target as it now stands, and the action that records the merge
+   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when either batch does not exist in this
+   *     tenant; 422 {@code INSUFFICIENT_QTY} when the quantity exceeds what the source holds, or
+   *     {@code INVENTORY_LOT_MERGE_*} when the two cannot be merged ({@link
+   *     InventoryRepository#mergeBatches}); 503 {@code TENANT_PROFILE_UNAVAILABLE} when their costs
+   *     differ and the business's currency cannot be read; {@code IDEMPOTENCY_KEY_REUSED} (409)
+   *     when the key made a different action
    */
   public LotMergeResult mergeLot(
       UUID tenantId,
@@ -3230,17 +3292,21 @@ public class InventoryService {
       UUID targetBatchId,
       BigDecimal qty,
       String notes,
-      UUID actorId) {
+      UUID actorId,
+      String idempotencyKey) {
     Batch source =
         repo.getBatch(tenantId, sourceBatchId)
             .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Source batch not found"));
     Batch target =
         repo.getBatch(tenantId, targetBatchId)
             .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Target batch not found"));
-    if (source.remainingQty().compareTo(qty) < 0) {
-      throw ApiException.unprocessable(
-          "INSUFFICIENT_QTY", "Merge qty exceeds remaining qty on source batch");
-    }
+    // The currency is read before the transaction, not inside it: the merge holds row locks while
+    // it runs, and a call to tenant-svc would be made under them. Equal costs are left as they are
+    // and need no currency.
+    Integer minorUnits =
+        LotMerges.needsBlend(source.costPrice(), target.costPrice())
+            ? Integer.valueOf(Fx.minorUnits(tenantProfiles.requireCurrency(tenantId)))
+            : null;
     OutboxRow mergeEvent =
         new OutboxRow(
             "LotMerge",
@@ -3248,31 +3314,19 @@ public class InventoryService {
             tenantId,
             sourceBatchId,
             Events.lotMerge(tenantId, sourceBatchId, targetBatchId, qty));
-    OutboxRow addEvent =
-        new OutboxRow(
-            "LotMergeIn",
-            "storeql.inventory.lot-merge-in",
+    InventoryRepository.Merge merged =
+        repo.mergeBatches(
             tenantId,
+            sourceBatchId,
             targetBatchId,
-            Events.lotMerge(tenantId, sourceBatchId, targetBatchId, qty));
-    // Deduct from source and add to target atomically — see mergeLotAdjust's Javadoc.
-    repo.mergeLotAdjust(
-        tenantId,
-        source.storeId(),
-        source.variantId(),
-        mergeEvent,
-        target.storeId(),
-        target.variantId(),
-        addEvent,
-        qty,
-        MovementAttribution.by(actorId, null));
-    Batch updated =
-        repo.getBatch(tenantId, targetBatchId)
-            .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Target batch not found"));
-    LotAction action =
-        lotActionRepo.insertLotAction(
-            tenantId, LotAction.MERGE, sourceBatchId, targetBatchId, qty, notes);
-    return new LotMergeResult(updated, action);
+            Ids.newId(),
+            qty,
+            notes,
+            MovementAttribution.by(actorId, null),
+            idempotencyKey,
+            minorUnits,
+            mergeEvent);
+    return new LotMergeResult(merged.target(), merged.action());
   }
 
   /**

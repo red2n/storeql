@@ -278,37 +278,44 @@ public class CartService {
 
   // ── Called by OrderPlacedHandler ─────────────────────────────────────────
 
+  /** The key an {@code OrderPlaced} is recorded under in {@code processed_events}. */
+  public static final String ORDER_PLACED_CONSUMER = "cart-svc/order-placed";
+
   /**
-   * Marks the customer's active cart at a store as checked out once their order is placed.
+   * Marks the customer's active cart at a store as checked out once their order is placed, once per
+   * event: the event is recorded on the transaction that closes the cart, so a redelivered {@code
+   * OrderPlaced} changes nothing and leaves a newer {@code ACTIVE} cart the customer opened since
+   * untouched (golden rule 7). Guest orders and till sales naming no customer carry no customer id
+   * and are ignored: they have no server-side cart to retire.
    *
-   * <p>Not deduplicated: cart-svc keeps no dedupe table, so a redelivered {@code OrderPlaced} runs
-   * the update again. A cart already moved out of {@code ACTIVE} is left untouched, but a newer
-   * {@code ACTIVE} cart the customer opened at that store since the first delivery is closed. Guest
-   * orders and till sales naming no customer carry no customer id and are ignored: they have no
-   * server-side cart to retire.
-   *
+   * @param eventId the event's id, or an id derived from its order when it carries none
    * @param tenantId owning tenant
    * @param customerId the ordering customer, or {@code null} for a guest order or a till sale that
    *     names none
    * @param storeId the store the order was placed against
+   * @return {@code true} when the event was new and is now recorded; {@code false} for a
+   *     redelivery, which changed nothing, and for an order naming no customer
    */
-  public void onOrderPlaced(UUID tenantId, UUID customerId, UUID storeId) {
-    if (customerId == null) return; // guest order, or a till sale naming no customer
-    repo.markCheckedOutByCustomerAndStore(tenantId, customerId, storeId);
+  public boolean onOrderPlaced(UUID eventId, UUID tenantId, UUID customerId, UUID storeId) {
+    if (customerId == null) return false; // guest order, or a till sale naming no customer
+    return repo.markCheckedOutOnce(eventId, ORDER_PLACED_CONSUMER, tenantId, customerId, storeId);
   }
 
   /**
    * Marks the shopper's active cart checked out once their online order is placed, whichever store
    * the order went to: a delivery resolves to the store serving the postcode and may be split
    * across several (order orchestration), none of which need be the store the cart was filled at.
-   * Not deduplicated (see {@code onOrderPlaced}): each part of a split announces itself and closes
-   * the shopper's ACTIVE cart, so a redelivery closes an ACTIVE cart the shopper opened since.
+   * Once per event, as {@link #onOrderPlaced}: each part of a split announces itself, and so closes
+   * the shopper's ACTIVE cart, but a part's redelivery closes nothing.
    *
+   * @param eventId the event's id, or an id derived from its order when it carries none
    * @param loginId the shopper's login, which is what holds a cart
+   * @return {@code true} when the event was new and is now recorded; {@code false} for a
+   *     redelivery, which changed nothing, and for an order naming no login
    */
-  public void onOnlineOrderPlaced(UUID tenantId, UUID loginId) {
-    if (loginId == null) return; // a guest checkout has no server-side cart
-    repo.markCheckedOutByCustomer(tenantId, loginId);
+  public boolean onOnlineOrderPlaced(UUID eventId, UUID tenantId, UUID loginId) {
+    if (loginId == null) return false; // a guest checkout has no server-side cart
+    return repo.markCheckedOutOnce(eventId, ORDER_PLACED_CONSUMER, tenantId, loginId, null);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -316,8 +323,7 @@ public class CartService {
   private void guardTenantAndStore(UUID tenantId, UUID storeId) {
     if (!tenantStatusRepo.isActive(tenantId))
       throw ApiException.conflict(
-          "TENANT_NOT_OPERATIONAL",
-          "Tenant is suspended or blocked — cart operations are unavailable");
+          "TENANT_NOT_OPERATIONAL", "Business is switched off — cart operations are unavailable");
     if (!storeStatusRepo.isActive(tenantId, storeId))
       throw ApiException.conflict(
           "STORE_NOT_OPERATIONAL",

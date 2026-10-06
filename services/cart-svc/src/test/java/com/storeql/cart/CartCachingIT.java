@@ -161,10 +161,10 @@ class CartCachingIT {
   }
 
   /**
-   * markCheckedOutByCustomerAndStore is what the OrderPlaced event handler calls; it didn't use to
-   * know the cart's id (only customerId/storeId), so it could only evict the pointer cache and the
-   * items cache self-corrected within the TTL instead of immediately. It now captures the affected
-   * cart's id via {@code RETURNING id} and evicts both caches right away.
+   * markCheckedOutOnce is what the OrderPlaced event handler calls; it didn't use to know the
+   * cart's id (only customerId/storeId), so it could only evict the pointer cache and the items
+   * cache self-corrected within the TTL instead of immediately. It now captures the affected cart's
+   * id via {@code RETURNING id} and evicts both caches right away.
    */
   @Test
   void markCheckedOutEvictsTheItemsCacheImmediately() {
@@ -185,11 +185,11 @@ class CartCachingIT {
 
     // simulate the OrderPlaced handler marking the cart checked out, then a raw mutation (as if a
     // human inspected the now-archived cart's data directly)
-    repo.markCheckedOutByCustomerAndStore(
-        Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A), Ids.parse(STORE_A));
+    repo.markCheckedOutOnce(
+        Ids.newId(), "test", Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A), Ids.parse(STORE_A));
     rawUpdateItemQty(itemId, "99");
 
-    // the items cache was evicted by markCheckedOutByCustomerAndStore itself, not left to expire —
+    // the items cache was evicted by markCheckedOutOnce itself, not left to expire —
     // a direct repo read reflects the raw mutation immediately. (Other tests share this customer's
     // cart, so find the item we just mutated by id rather than assuming list position.)
     var freshItems = repo.findItemsByCart(Ids.parse(TENANT_A), Ids.parse(cartId));
@@ -209,12 +209,13 @@ class CartCachingIT {
     String cartId = field(c.readEntity(String.class), "id");
     UUID elsewhere = Ids.newId();
     // At another store, the store-matched close finds nothing to close.
-    repo.markCheckedOutByCustomerAndStore(Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A), elsewhere);
+    repo.markCheckedOutOnce(
+        Ids.newId(), "test", Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A), elsewhere);
     assertThat(cartStatus(cartId), is("ACTIVE"));
-    repo.markCheckedOutByCustomer(Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A));
+    repo.markCheckedOutOnce(Ids.newId(), "test", Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A), null);
     assertThat(cartStatus(cartId), is("CHECKED_OUT"));
     // A second part of the same checkout finds nothing left to close.
-    repo.markCheckedOutByCustomer(Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A));
+    repo.markCheckedOutOnce(Ids.newId(), "test", Ids.parse(TENANT_A), Ids.parse(CUSTOMER_A), null);
     assertThat(cartStatus(cartId), is("CHECKED_OUT"));
   }
 

@@ -6,6 +6,7 @@ import com.storeql.inventory.domain.Domain.BondRelease;
 import com.storeql.inventory.domain.Domain.CycleCountLine;
 import com.storeql.inventory.domain.Domain.Level;
 import com.storeql.inventory.domain.Domain.LevelSummary;
+import com.storeql.inventory.domain.Domain.LotAction;
 import com.storeql.inventory.domain.Domain.MoveOrder;
 import com.storeql.inventory.domain.Domain.MoveOrderLine;
 import com.storeql.inventory.domain.Domain.MoveType;
@@ -16,6 +17,7 @@ import com.storeql.inventory.domain.Domain.Reservation;
 import com.storeql.inventory.domain.Domain.TransferOrder;
 import com.storeql.inventory.domain.Domain.TransferOrderLine;
 import com.storeql.inventory.domain.Expiry;
+import com.storeql.inventory.domain.LotMerges;
 import com.storeql.inventory.domain.Provenance;
 import com.storeql.inventory.domain.Provenance.Drawn;
 import com.storeql.inventory.domain.ReturnDisposition;
@@ -63,6 +65,22 @@ public class InventoryRepository extends BaseOutboxRepository {
    */
   public Batch receive(
       Batch batch, String refType, UUID refId, OutboxRow event, String idempotencyKey) {
+    return receive(batch, refType, refId, event, idempotencyKey, MovementAttribution.system());
+  }
+
+  /**
+   * As above, with the movement attributed: a receipt a person enters by hand passes who, so the
+   * ledger answers "who received this stock"; one an event or a system flow causes passes {@link
+   * MovementAttribution#system()}, because its {@code refType}/{@code refId} cite the record that
+   * names its own actor.
+   */
+  public Batch receive(
+      Batch batch,
+      String refType,
+      UUID refId,
+      OutboxRow event,
+      String idempotencyKey,
+      MovementAttribution attribution) {
     return inTx(
         c -> {
           String recallHold;
@@ -84,7 +102,7 @@ public class InventoryRepository extends BaseOutboxRepository {
               batch.receivedQty(),
               refType,
               refId,
-              MovementAttribution.system());
+              attribution);
           insertOutbox(c, event);
           return recallHold == null ? batch : recalledCopy(batch, recallHold);
         },
@@ -220,7 +238,7 @@ public class InventoryRepository extends BaseOutboxRepository {
   }
 
   // `reason` is accepted from the API down to here but not yet persisted: stock_movements has no
-  // free-text column for it, and ref_type below is a fixed small tag set ("ORDER", "LOT_MERGE_IN",
+  // free-text column for it, and ref_type below is a fixed small tag set ("ORDER", "ADJUSTMENT",
   // ...), not a place to put arbitrary caller-supplied text. Kept as a parameter (rather than
   // dropped from the call chain) so a future migration adding a notes column has it ready to wire
   // up instead of re-threading it back through every caller.
@@ -290,45 +308,482 @@ public class InventoryRepository extends BaseOutboxRepository {
     insertOutbox(c, event);
   }
 
+  // ---------------------------------------------------------------- lot split
   /**
-   * Lot merge: deduct {@code qty} from the source batch's (store, variant) and add it to the
-   * target's, in one transaction. The two legs used to be separate {@link #adjust} calls in
-   * separate transactions — a crash between them could silently lose stock with no compensating
-   * event. Doing both within a single {@code inTx} makes the merge all-or-nothing.
+   * What a split made: the child batch as it now stands (held, if a recall holds it) and the lot
+   * action that records the split.
    */
-  public void mergeLotAdjust(
+  public record Split(Batch child, LotAction action) {}
+
+  /**
+   * Splits {@code qty} out of a batch into a new batch of its own, on one transaction: the source
+   * is locked and loses {@code qty}, the child is made from what the source is (same store,
+   * variant, cost, date, grade, zone, ownership, duty and condition), two {@link
+   * MoveType#LOT_SPLIT} movements say so (out of the source, into the child, so the ledger nets to
+   * zero), and the genealogy link, the lot action and the {@code LotSplit} event are written with
+   * them. Nothing is received and nothing is sold: what the business holds of the variant is the
+   * same after.
+   *
+   * <p>The child joins every open recall that holds the source (to be put back as the source was
+   * before the recall), and is held too by a recall that covers its own lot or the lot of the stock
+   * it is made from. A source still awaiting putaway has its task cut to what it now holds (removed
+   * when it holds nothing), and its child waits to be placed too, or is placed by the store's
+   * putaway rule.
+   *
+   * <p>A request sent again under the same {@code idempotencyKey} answers the split that key made
+   * first and moves nothing.
+   *
+   * @param childId the id the child batch is made under
+   * @param actionId the id the lot action is written under; both movements cite it
+   * @param batchNo the child's lot number, or {@code null}/blank to give it the source's
+   * @param by who split, kept on both movements (the lot action names no one)
+   * @param idempotencyKey the key the request came with, or null
+   * @param event the {@code LotSplit} event, announced with the rest
+   * @throws ApiException 404 {@code BATCH_NOT_FOUND} when the tenant has no such source batch; 422
+   *     {@code INSUFFICIENT_QTY} when the source holds less than {@code qty}; 409 {@code
+   *     IDEMPOTENCY_KEY_REUSED} when the key made a different action
+   */
+  public Split splitBatch(
       UUID tenantId,
-      UUID sourceStoreId,
-      UUID sourceVariantId,
-      OutboxRow outEvent,
-      UUID targetStoreId,
-      UUID targetVariantId,
-      OutboxRow inEvent,
+      UUID sourceBatchId,
+      UUID childId,
+      UUID actionId,
       BigDecimal qty,
-      MovementAttribution attribution) {
-    inTx(
+      String batchNo,
+      String notes,
+      MovementAttribution by,
+      String idempotencyKey,
+      OutboxRow event) {
+    return inTx(
         c -> {
-          adjustTx(
+          Batch source = lockBatchTx(c, tenantId, sourceBatchId, "Source batch not found");
+          LotAction earlier = lotActionOfKeyTx(c, tenantId, idempotencyKey);
+          if (earlier != null) {
+            if (!LotAction.SPLIT.equals(earlier.actionType())
+                || !sourceBatchId.equals(earlier.sourceBatchId())
+                || earlier.qty().compareTo(qty) != 0) {
+              throw keyReused();
+            }
+            return new Split(readBatchTx(c, tenantId, earlier.resultBatchId()), earlier);
+          }
+          if (source.remainingQty().compareTo(qty) < 0) {
+            throw ApiException.unprocessable(
+                "INSUFFICIENT_QTY", "Split qty exceeds remaining qty on source batch");
+          }
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE inventory_batches SET remaining_qty = remaining_qty - ?"
+                      + " WHERE tenant_id = ? AND id = ?")) {
+            ps.setBigDecimal(1, qty);
+            ps.setObject(2, tenantId);
+            ps.setObject(3, sourceBatchId);
+            ps.executeUpdate();
+          }
+          String statusBeforeRecalls =
+              Batch.MATERIAL_RECALLED.equals(source.materialStatus())
+                  ? RecallRepository.statusBeforeRecalls(c, tenantId, sourceBatchId)
+                  : null;
+          Batch child = splitChild(source, childId, qty, batchNo, statusBeforeRecalls);
+          insertBatch(
+              c,
+              child,
+              null,
+              PutawayRepository.hasOpenTaskTx(c, tenantId, sourceBatchId),
+              List.of(sourceBatchId));
+          RecallRepository.inheritHolds(c, tenantId, sourceBatchId, child);
+          PutawayRepository.syncOpenTaskTx(c, tenantId, sourceBatchId);
+          Batch made = readBatchTx(c, tenantId, childId);
+          announceOffSale(c, made);
+          insertMovement(
               c,
               tenantId,
-              sourceStoreId,
-              sourceVariantId,
+              source.storeId(),
+              source.variantId(),
+              sourceBatchId,
+              MoveType.LOT_SPLIT,
               qty.negate(),
-              "LOT_MERGE_OUT",
-              outEvent,
-              attribution);
-          adjustTx(
+              "LOT_SPLIT",
+              actionId,
+              by);
+          insertMovement(
               c,
               tenantId,
-              targetStoreId,
-              targetVariantId,
+              source.storeId(),
+              source.variantId(),
+              childId,
+              MoveType.LOT_SPLIT,
               qty,
-              "LOT_MERGE_IN",
-              inEvent,
-              attribution);
-          return null;
+              "LOT_SPLIT",
+              actionId,
+              by);
+          insertGenealogy(c, tenantId, sourceBatchId, childId, qty, "LOT_SPLIT " + actionId);
+          LotAction action =
+              insertLotActionOnceTx(
+                  c,
+                  actionId,
+                  tenantId,
+                  LotAction.SPLIT,
+                  sourceBatchId,
+                  childId,
+                  qty,
+                  notes,
+                  idempotencyKey);
+          insertOutbox(c, event);
+          return new Split(made, action);
+        },
+        "split lot");
+  }
+
+  /**
+   * The batch a split makes: the source's own stock, with the source's cost, use-by date, grade,
+   * zone, ownership, supplier, duty status and material status. Splitting must not turn held,
+   * bonded or consignment stock into stock that can be sold, or the supplier's into the business's
+   * own.
+   *
+   * <p>With no number named the child keeps the source's, as stock moved by a transfer does ({@link
+   * Provenance#arrival}): it is the same stock under the same lot, so a recall of that lot reaches
+   * it. A number a person names is the child's own, and the recall still reaches it through the
+   * genealogy link to its source.
+   *
+   * @param statusBeforeRecalls what the source was before the open recalls that hold it took it off
+   *     sale, or null when no open recall holds it. The child is made with that status and joins
+   *     those recalls afterwards, so they put it back as it was; otherwise it is made in the
+   *     source's own status and reason.
+   */
+  private static Batch splitChild(
+      Batch source, UUID childId, BigDecimal qty, String batchNo, String statusBeforeRecalls) {
+    String number = batchNo == null || batchNo.isBlank() ? source.batchNo() : batchNo;
+    String status = statusBeforeRecalls == null ? source.materialStatus() : statusBeforeRecalls;
+    String reason = statusBeforeRecalls == null ? source.materialStatusReason() : null;
+    return new Batch(
+        childId,
+        source.tenantId(),
+        source.storeId(),
+        source.variantId(),
+        number,
+        qty,
+        qty,
+        source.costPrice(),
+        source.expiryDate(),
+        Instant.now(),
+        Batch.STATUS_ACTIVE,
+        status,
+        reason,
+        source.grade(),
+        source.zoneId(),
+        source.ownership(),
+        source.ownerSupplierId(),
+        source.dutyStatus());
+  }
+
+  // ---------------------------------------------------------------- lot merge
+  /**
+   * What a merge made: the target batch as it now stands and the lot action that records the merge.
+   */
+  public record Merge(Batch target, LotAction action) {}
+
+  /**
+   * Merges {@code qty} of one batch into another, on one transaction: both batches are locked (in
+   * id order, so two merges the opposite way round cannot wait on each other), the source loses
+   * {@code qty} and the target gains it, two {@link MoveType#LOT_MERGE} movements say so (out of
+   * the source, into the target, so the ledger nets to zero and the shrinkage report, which reads
+   * {@code ADJUST} movements, does not count them), and the {@code MERGE} link in the genealogy,
+   * the lot action and the {@code LotMerge} event are written with them. Nothing is received,
+   * written off, found or sold.
+   *
+   * <p>The two must be at one store, of one variant, in one material status and grade, and have the
+   * same ownership and duty status ({@link LotMerges#mismatch}). The target's unit cost becomes the
+   * average of the two weighted by quantity, rounded to {@code minorUnits}; its use-by date the
+   * earlier of the two; and its received quantity grows by {@code qty}, so what it holds stays
+   * within what it has received. The target joins every open recall that holds the source, and a
+   * recall opened later for either's lot reaches it through the link. An open putaway task of
+   * either batch is brought in line with what the batch now holds.
+   *
+   * <p>A request sent again under the same {@code idempotencyKey} answers the merge that key made
+   * first and moves nothing.
+   *
+   * @param minorUnits the business currency's minor units, which the blended cost is rounded to;
+   *     null when the caller found no blending to be needed, and so no currency to read
+   * @param event the {@code LotMerge} event, announced with the rest
+   * @throws ApiException 404 {@code BATCH_NOT_FOUND} when the tenant has no such source or target;
+   *     422 {@code INSUFFICIENT_QTY}, {@code INVENTORY_LOT_MERGE_SAME_BATCH}, {@code
+   *     INVENTORY_LOT_MERGE_STORE_MISMATCH}, {@code INVENTORY_LOT_MERGE_VARIANT_MISMATCH}, {@code
+   *     INVENTORY_LOT_MERGE_CONDITION_MISMATCH} or {@code INVENTORY_LOT_MERGE_COST_UNKNOWN}; 409
+   *     {@code INVENTORY_LOT_MERGE_COST_CHANGED} when a cost changed since the caller looked, or
+   *     {@code IDEMPOTENCY_KEY_REUSED} when the key made a different action
+   */
+  public Merge mergeBatches(
+      UUID tenantId,
+      UUID sourceBatchId,
+      UUID targetBatchId,
+      UUID actionId,
+      BigDecimal qty,
+      String notes,
+      MovementAttribution by,
+      String idempotencyKey,
+      Integer minorUnits,
+      OutboxRow event) {
+    return inTx(
+        c -> {
+          Map<UUID, Batch> locked = lockBatchesTx(c, tenantId, sourceBatchId, targetBatchId);
+          Batch source = locked.get(sourceBatchId);
+          Batch target = locked.get(targetBatchId);
+          if (source == null) {
+            throw ApiException.notFound("BATCH_NOT_FOUND", "Source batch not found");
+          }
+          if (target == null) {
+            throw ApiException.notFound("BATCH_NOT_FOUND", "Target batch not found");
+          }
+          LotAction earlier = lotActionOfKeyTx(c, tenantId, idempotencyKey);
+          if (earlier != null) {
+            if (!LotAction.MERGE.equals(earlier.actionType())
+                || !sourceBatchId.equals(earlier.sourceBatchId())
+                || !targetBatchId.equals(earlier.resultBatchId())
+                || earlier.qty().compareTo(qty) != 0) {
+              throw keyReused();
+            }
+            return new Merge(target, earlier);
+          }
+          if (sourceBatchId.equals(targetBatchId)) {
+            throw ApiException.unprocessable(
+                "INVENTORY_LOT_MERGE_SAME_BATCH", "A batch cannot be merged into itself");
+          }
+          LotMerges.Mismatch mismatch = LotMerges.mismatch(source, target);
+          if (mismatch != null) {
+            throw refusal(mismatch);
+          }
+          if (source.remainingQty().compareTo(qty) < 0) {
+            throw ApiException.unprocessable(
+                "INSUFFICIENT_QTY", "Merge qty exceeds remaining qty on source batch");
+          }
+          BigDecimal cost = target.costPrice();
+          if (LotMerges.needsBlend(source.costPrice(), target.costPrice())) {
+            if (minorUnits == null) {
+              throw ApiException.conflict(
+                  "INVENTORY_LOT_MERGE_COST_CHANGED",
+                  "A batch's cost changed while the merge was being made: send it again");
+            }
+            cost =
+                LotMerges.blendedCost(
+                    target.remainingQty(), target.costPrice(), qty, source.costPrice(), minorUnits);
+          }
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE inventory_batches SET remaining_qty = remaining_qty - ?"
+                      + " WHERE tenant_id = ? AND id = ?")) {
+            ps.setBigDecimal(1, qty);
+            ps.setObject(2, tenantId);
+            ps.setObject(3, sourceBatchId);
+            ps.executeUpdate();
+          }
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE inventory_batches SET remaining_qty = remaining_qty + ?,"
+                      + " received_qty = received_qty + ?, cost_price = ?, expiry_date = ?"
+                      + " WHERE tenant_id = ? AND id = ?")) {
+            ps.setBigDecimal(1, qty);
+            ps.setBigDecimal(2, qty);
+            ps.setBigDecimal(3, cost);
+            ps.setObject(4, LotMerges.earlierExpiry(source.expiryDate(), target.expiryDate()));
+            ps.setObject(5, tenantId);
+            ps.setObject(6, targetBatchId);
+            ps.executeUpdate();
+          }
+          insertMovement(
+              c,
+              tenantId,
+              source.storeId(),
+              source.variantId(),
+              sourceBatchId,
+              MoveType.LOT_MERGE,
+              qty.negate(),
+              "LOT_MERGE",
+              actionId,
+              by);
+          insertMovement(
+              c,
+              tenantId,
+              source.storeId(),
+              source.variantId(),
+              targetBatchId,
+              MoveType.LOT_MERGE,
+              qty,
+              "LOT_MERGE",
+              actionId,
+              by);
+          insertMergeLink(c, tenantId, sourceBatchId, targetBatchId, qty, actionId);
+          PutawayRepository.syncOpenTaskTx(c, tenantId, sourceBatchId);
+          PutawayRepository.syncOpenTaskTx(c, tenantId, targetBatchId);
+          RecallRepository.inheritHolds(
+              c, tenantId, sourceBatchId, readBatchTx(c, tenantId, targetBatchId));
+          LotAction action =
+              insertLotActionOnceTx(
+                  c,
+                  actionId,
+                  tenantId,
+                  LotAction.MERGE,
+                  sourceBatchId,
+                  targetBatchId,
+                  qty,
+                  notes,
+                  idempotencyKey);
+          insertOutbox(c, event);
+          return new Merge(readBatchTx(c, tenantId, targetBatchId), action);
         },
         "merge lot");
+  }
+
+  private static ApiException refusal(LotMerges.Mismatch mismatch) {
+    return switch (mismatch) {
+      case STORE ->
+          ApiException.unprocessable(
+              "INVENTORY_LOT_MERGE_STORE_MISMATCH", "The two batches are at different stores");
+      case VARIANT ->
+          ApiException.unprocessable(
+              "INVENTORY_LOT_MERGE_VARIANT_MISMATCH", "The two batches are of different variants");
+      case CONDITION ->
+          ApiException.unprocessable(
+              "INVENTORY_LOT_MERGE_CONDITION_MISMATCH",
+              "The two batches differ in material status, grade, ownership or duty status");
+      case COST_UNKNOWN ->
+          ApiException.unprocessable(
+              "INVENTORY_LOT_MERGE_COST_UNKNOWN",
+              "One batch has a unit cost and the other has none");
+    };
+  }
+
+  private static ApiException keyReused() {
+    return ApiException.conflict(
+        "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
+  }
+
+  /** The lot action an Idempotency-Key made, or null when there is no key or it made none. */
+  private static LotAction lotActionOfKeyTx(Connection c, UUID tenantId, String idempotencyKey)
+      throws SQLException {
+    return idempotencyKey == null
+        ? null
+        : LotActionRepository.findByKeyTx(c, tenantId, idempotencyKey);
+  }
+
+  /**
+   * Writes the lot action; a key that another action took between the lookup and here (two requests
+   * for different batches under one key) is refused as reused.
+   */
+  private static LotAction insertLotActionOnceTx(
+      Connection c,
+      UUID id,
+      UUID tenantId,
+      String actionType,
+      UUID sourceBatchId,
+      UUID resultBatchId,
+      BigDecimal qty,
+      String notes,
+      String idempotencyKey)
+      throws SQLException {
+    try {
+      return LotActionRepository.insertLotActionTx(
+          c, id, tenantId, actionType, sourceBatchId, resultBatchId, qty, notes, idempotencyKey);
+    } catch (SQLException e) {
+      if (UNIQUE_VIOLATION.equals(e.getSQLState()) && idempotencyKey != null) {
+        throw keyReused();
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * The MERGE link from source to target; a second merge between the same two adds its quantity to
+   * the link already there (the genealogy holds one link for a pair of batches).
+   */
+  private void insertMergeLink(
+      Connection c, UUID tenantId, UUID parentId, UUID childId, BigDecimal qty, UUID actionId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO lot_genealogy"
+                + " (id, tenant_id, parent_batch_id, child_batch_id, qty, relation_type, notes)"
+                + " VALUES (?,?,?,?,?,'MERGE',?)"
+                + " ON CONFLICT (tenant_id, parent_batch_id, child_batch_id)"
+                + " DO UPDATE SET qty = lot_genealogy.qty + EXCLUDED.qty")) {
+      ps.setObject(1, Ids.newId());
+      ps.setObject(2, tenantId);
+      ps.setObject(3, parentId);
+      ps.setObject(4, childId);
+      ps.setBigDecimal(5, qty);
+      ps.setString(6, "LOT_MERGE " + actionId);
+      ps.executeUpdate();
+    }
+  }
+
+  private static final String BATCH_COLUMNS =
+      "id, tenant_id, store_id, variant_id, batch_no, received_qty, remaining_qty,"
+          + " cost_price, expiry_date, created_at, status, material_status,"
+          + " material_status_reason, grade, zone_id, ownership, owner_supplier_id, duty_status";
+
+  /**
+   * Reads a batch of the tenant and holds its row until the transaction ends, so what a split
+   * checks against is what it takes from.
+   *
+   * @param missing the message of the 404 when the tenant has no such batch
+   * @throws ApiException 404 {@code BATCH_NOT_FOUND}
+   */
+  private static Batch lockBatchTx(Connection c, UUID tenantId, UUID batchId, String missing)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT "
+                + BATCH_COLUMNS
+                + " FROM inventory_batches WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, batchId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw ApiException.notFound("BATCH_NOT_FOUND", missing);
+        }
+        return mapBatch(rs);
+      }
+    }
+  }
+
+  /**
+   * Locks two batches of the tenant in id order and returns those that exist, by id. A batch named
+   * twice is locked once.
+   */
+  private static Map<UUID, Batch> lockBatchesTx(Connection c, UUID tenantId, UUID a, UUID b)
+      throws SQLException {
+    Map<UUID, Batch> out = new HashMap<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT "
+                + BATCH_COLUMNS
+                + " FROM inventory_batches WHERE tenant_id = ? AND id = ANY (?)"
+                + " ORDER BY id FOR UPDATE")) {
+      ps.setObject(1, tenantId);
+      ps.setArray(2, c.createArrayOf("uuid", new Object[] {a, b}));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          Batch batch = mapBatch(rs);
+          out.put(batch.id(), batch);
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Reads a batch of the tenant as it stands in this transaction. */
+  private static Batch readBatchTx(Connection c, UUID tenantId, UUID batchId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT " + BATCH_COLUMNS + " FROM inventory_batches WHERE tenant_id = ? AND id = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, batchId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw ApiException.notFound("BATCH_NOT_FOUND", "No such batch");
+        }
+        return mapBatch(rs);
+      }
+    }
   }
 
   // ---------------------------------------------------------------- reserve
@@ -2211,6 +2666,16 @@ public class InventoryRepository extends BaseOutboxRepository {
 
   private String insertBatch(Connection c, Batch b, String idempotencyKey, boolean putaway)
       throws SQLException {
+    return insertBatch(c, b, idempotencyKey, putaway, List.of());
+  }
+
+  /**
+   * As above for a batch made from other batches: a recall is judged against the lots of the stock
+   * it is made from too, and does not hold it where it let one of them go.
+   */
+  private String insertBatch(
+      Connection c, Batch b, String idempotencyKey, boolean putaway, List<UUID> parents)
+      throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO inventory_batches"
@@ -2248,7 +2713,7 @@ public class InventoryRepository extends BaseOutboxRepository {
         && b.remainingQty().signum() > 0) {
       PutawayRepository.directTx(c, b);
     }
-    return RecallRepository.holdOnArrival(c, b);
+    return RecallRepository.holdOnArrival(c, b, parents);
   }
 
   private static Batch recalledCopy(Batch b, String reason) {
@@ -2304,8 +2769,9 @@ public class InventoryRepository extends BaseOutboxRepository {
    * that caused them, and that record names its own actor. For those movements NULL means "see the
    * referenced record", not "unknown". Adjustments are the exception: a person's adjustment passes
    * its actor and reason (SJ-D4), so a stock correction is attributable to a person and a reason
-   * even where {@code refId} is null (the plain adjust writes none). A manual receipt passes a null
-   * {@code refId} with system attribution, so it names neither a record nor a person.
+   * even where {@code refId} is null (the plain adjust writes none). A manual receipt is a person's
+   * act too: it passes a null {@code refId} (there is no record to cite) with the person who
+   * entered it.
    */
   static void insertMovement(
       Connection c,
@@ -2616,24 +3082,29 @@ public class InventoryRepository extends BaseOutboxRepository {
   /**
    * Lists the tenant's move order lines.
    *
+   * @param tenantId owning tenant; the first condition of the query, so a row of another business
+   *     that names this order is never read as its line
    * @param moveOrderId the move order id
    * @return the matching rows
    */
-  public List<MoveOrderLine> listMoveOrderLines(UUID moveOrderId) {
+  public List<MoveOrderLine> listMoveOrderLines(UUID tenantId, UUID moveOrderId) {
     try (Connection c = dataSource.getConnection()) {
-      return listMoveOrderLinesTx(c, moveOrderId);
+      return listMoveOrderLinesTx(c, tenantId, moveOrderId);
     } catch (SQLException e) {
       throw dbError("list move order lines", e);
     }
   }
 
   /** The same read on the caller's own transaction connection. */
-  List<MoveOrderLine> listMoveOrderLinesTx(Connection c, UUID moveOrderId) {
+  List<MoveOrderLine> listMoveOrderLinesTx(Connection c, UUID tenantId, UUID moveOrderId) {
     return queryTx(
         c,
         "SELECT id, tenant_id, move_order_id, variant_id, requested_qty, picked_qty"
-            + " FROM move_order_lines WHERE move_order_id = ? ORDER BY id",
-        ps -> ps.setObject(1, moveOrderId),
+            + " FROM move_order_lines WHERE tenant_id = ? AND move_order_id = ? ORDER BY id",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, moveOrderId);
+        },
         InventoryRepository::mapMoveOrderLine,
         "list move order lines");
   }
@@ -2651,7 +3122,7 @@ public class InventoryRepository extends BaseOutboxRepository {
             throw ApiException.unprocessable(
                 "MOVE_ORDER_NOT_PICKABLE", "Move order is " + order.status());
           }
-          List<MoveOrderLine> lines = listMoveOrderLinesTx(c, orderId);
+          List<MoveOrderLine> lines = listMoveOrderLinesTx(c, tenantId, orderId);
           for (MoveOrderLine line : lines) {
             // A move that names its from-zone draws what sits there and nothing else.
             List<Drawn> drawn =
@@ -2703,8 +3174,9 @@ public class InventoryRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE move_order_lines SET picked_qty = requested_qty"
-                      + " WHERE move_order_id = ?")) {
-            ps.setObject(1, orderId);
+                      + " WHERE tenant_id = ? AND move_order_id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, orderId);
             ps.executeUpdate();
           }
           insertOutbox(c, event);
@@ -3002,10 +3474,11 @@ public class InventoryRepository extends BaseOutboxRepository {
                   isDirect
                       ? "UPDATE transfer_order_lines"
                           + " SET shipped_qty = requested_qty, received_qty = requested_qty"
-                          + " WHERE transfer_order_id = ?"
+                          + " WHERE tenant_id = ? AND transfer_order_id = ?"
                       : "UPDATE transfer_order_lines SET shipped_qty = requested_qty"
-                          + " WHERE transfer_order_id = ?")) {
-            ps.setObject(1, orderId);
+                          + " WHERE tenant_id = ? AND transfer_order_id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, orderId);
             ps.executeUpdate();
           }
 
@@ -3097,8 +3570,9 @@ public class InventoryRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE transfer_order_lines SET received_qty = shipped_qty"
-                      + " WHERE transfer_order_id = ?")) {
-            ps.setObject(1, orderId);
+                      + " WHERE tenant_id = ? AND transfer_order_id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, orderId);
             ps.executeUpdate();
           }
           TransferOrder received;

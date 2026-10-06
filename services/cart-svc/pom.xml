@@ -15,9 +15,10 @@
     <name>StoreQL :: services :: cart-svc</name>
     <description>
         Storefront shopping cart. Works for guest (session) and authenticated customers.
-        Owns carts and cart_items. Consumes OrderPlaced to mark carts CHECKED_OUT.
-        Flow-guard: consumes TenantStatusChanged and StoreStatusChanged to block addItem
-        for suspended/closed tenants or stores. No outbox — cart-svc publishes no events.
+        Owns carts and cart_items. Consumes OrderPlaced (once per event) to mark carts CHECKED_OUT.
+        Flow-guard: consumes TenantStatusChanged and StoreStatusChanged to block cart changes
+        for a switched-off business or a suspended or closed store. Its outbox carries only the
+        evidence of a departed business's erasure.
     </description>
 
     <properties>

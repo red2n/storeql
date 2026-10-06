@@ -20,9 +20,21 @@ import java.util.UUID;
 import java.util.function.Function;
 
 /**
- * Extends {@link BaseJdbcRepository} with the three outbox operations every repo that emits domain
- * events needs: write a row inside a transaction, drain unpublished rows, and mark them published.
- * Repos without an outbox (e.g. RefreshTokenRepository) extend {@link BaseJdbcRepository} directly.
+ * Extends {@link BaseJdbcRepository} with the outbox operations every repo that emits domain events
+ * needs: write a row inside a transaction, claim the rows that may publish and record what became
+ * of them, and purge delivered rows and old consumer dedupe rows. Repos without an outbox (e.g.
+ * RefreshTokenRepository) extend {@link BaseJdbcRepository} directly.
+ *
+ * <p>Each service's own migration creates the table and its indexes. The claim's ordered scan
+ * ({@code ORDER BY created_at, id LIMIT n}) reads {@code idx_outbox_claim}, partial on not
+ * published and not dead; the claim's check for an earlier waiting row of the same aggregate reads
+ * {@code idx_outbox_aggregate_pending}, partial on not published, so it holds the dead letters the
+ * check looks for; marking a row published and recording a failure go by primary key; and the purge
+ * reads the published rows through {@code idx_outbox_published}.
+ *
+ * <p>No statement here filters by {@code tenant_id}: one relay drains every business's rows, so the
+ * table is deliberately cross-tenant and has no index that starts with it. The row's {@code
+ * tenant_id} is read only by the dead-letter warning in {@code recordFailures}.
  */
 public abstract class BaseOutboxRepository extends BaseJdbcRepository implements OutboxStore {
 

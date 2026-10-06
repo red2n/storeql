@@ -50,7 +50,9 @@ public class RepricingResource {
       responseCode = "400",
       description =
           "PRICING_LIST_UNKNOWN, REPRICING_STRATEGY_INVALID, REPRICING_VALUE_INVALID,"
-              + " REPRICING_ROUNDING_INVALID, REPRICING_MAX_AGE_INVALID")
+              + " REPRICING_ROUNDING_INVALID, REPRICING_MAX_AGE_INVALID; VALIDATION_FAILED for an"
+              + " UNDERCUT_AMOUNT value with more decimals than the business's currency has (it is"
+              + " refused, never rounded; a percentage is no money)")
   @APIResponse(responseCode = "409", description = "REPRICING_RULE_NAME_EXISTS")
   @POST
   @Path("/rules")

@@ -32,6 +32,9 @@ class _Server implements HttpClientAdapter {
   /// The stock levels list; empty when unset.
   String levels = '[]';
 
+  /// The batches list; two batches, one on sale and one in quarantine, when unset.
+  String? batches;
+
   @override
   void close({bool force = false}) {}
 
@@ -54,6 +57,9 @@ class _Server implements HttpClientAdapter {
     if (path.endsWith('/admin/inventory/batches/expiring')) {
       return jsonResponse('{"data":[{"id":"b2","storeId":"$_store","variantId":"$_plate",'
           '"batchNo":"B-002","remainingQty":4,"expiryDate":"2026-10-04","daysUntilExpiry":9}]}');
+    }
+    if (path.endsWith('/admin/inventory/batches') && batches != null) {
+      return jsonResponse(batches!);
     }
     if (path.endsWith('/admin/inventory/batches')) {
       return jsonResponse('{"data":['
@@ -136,6 +142,58 @@ void main() {
       expect(find.widgetWithText(StatusBadge, 'In quarantine'), findsOneWidget);
       expect(find.widgetWithText(DataTable, '4 Oct 2026'), findsOneWidget);
       _expectNoCodesOrIsoDates();
+    });
+
+    testWidgets('the status filter offers the five statuses the API accepts, in words',
+        (tester) async {
+      String row(String id, String status) => '{"id":"$id","storeId":"$_store","variantId":"$_mug",'
+          '"batchNo":"B-$id","receivedQty":10,"remainingQty":6,"createdAt":"2026-09-01T09:00:00Z",'
+          '"status":"ACTIVE","materialStatus":"$status","zoneId":"$_zone"}';
+      await _pump(tester, setUp: (s) {
+        s.batches = '{"data":[${[
+          row('b1', 'AVAILABLE'),
+          row('b2', 'QUARANTINE'),
+          row('b3', 'INSPECTION'),
+          row('b4', 'DAMAGED'),
+          row('b5', 'RECALLED'),
+        ].join(',')}]}';
+      });
+      await _batchesAtLeeds(tester);
+      for (final words in [
+        'Available',
+        'In quarantine',
+        'Under inspection',
+        'Damaged',
+        'Recalled',
+      ]) {
+        expect(find.widgetWithText(StatusBadge, words), findsOneWidget, reason: words);
+      }
+
+      await tester.tap(find.widgetWithText(DropdownButtonFormField<String?>, 'Material status'));
+      await tester.pumpAndSettle();
+      for (final words in [
+        'Any status',
+        'Available',
+        'In quarantine',
+        'Under inspection',
+        'Damaged',
+        'Recalled',
+      ]) {
+        expect(find.text(words), findsWidgets, reason: words);
+      }
+      // The two the API refuses are not offered.
+      expect(find.text('On hold'), findsNothing);
+      expect(find.text('Rejected'), findsNothing);
+
+      // Picking one leaves the batches in that status, and its badge in words.
+      await tester.tap(find.text('Recalled').last);
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(StatusBadge, 'Recalled'), findsOneWidget);
+      expect(find.widgetWithText(StatusBadge, 'Damaged'), findsNothing);
+      expect(find.widgetWithText(StatusBadge, 'Available'), findsNothing);
+      for (final code in ['INSPECTION', 'DAMAGED', 'RECALLED']) {
+        expect(find.text(code), findsNothing, reason: code);
+      }
     });
 
     testWidgets('each batch is named by its product, not its variant id', (tester) async {

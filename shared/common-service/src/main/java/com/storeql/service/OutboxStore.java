@@ -7,9 +7,10 @@ import java.util.UUID;
 import java.util.function.Function;
 
 /**
- * What the shared {@link OutboxPublisher} needs from a service's repository: atomically claim a
- * batch of unpublished rows and mark delivered. The service's repo implements this (it already has
- * the outbox table). Keeps the publisher generic.
+ * What the shared {@link OutboxPublisher} needs from a service's repository: take the drain right,
+ * claim a batch of the rows that may publish now and record what became of each, and purge
+ * delivered rows and old dedupe rows. The service's repo implements this (it already has the outbox
+ * table). Keeps the publisher generic.
  */
 @FunctionalInterface
 public interface OutboxStore {
@@ -33,9 +34,10 @@ public interface OutboxStore {
    * backoff before its next try, and after the configured attempts a dead letter. Only the holder
    * of {@code lease} may call this.
    *
-   * <p>A row is claimable only when no earlier row of its aggregate is still unpublished, so a row
-   * that keeps failing holds back its own aggregate and nothing else. No transaction is open while
-   * {@code publish} runs.
+   * <p>A row is claimable only when no earlier row of its aggregate is dead or backing off (an
+   * earlier row that is merely waiting is claimed ahead of it, in the same batch), so a row that
+   * keeps failing holds back its own aggregate and no other. No transaction is open while {@code
+   * publish} runs.
    *
    * @param lease the drain right from {@link #tryDrainLock()}
    * @param limit the most rows to claim in this call

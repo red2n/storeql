@@ -33,6 +33,18 @@ public class MessageTemplateService {
 
   private static final int HISTORY = 20;
 
+  /** The business's own words in the language asked for. */
+  static final String SOURCE_BUSINESS = "BUSINESS";
+
+  /**
+   * The business's words in its default language, in place of this language's: it has no live
+   * version in this one, or its live version cannot be used.
+   */
+  static final String SOURCE_DEFAULT_LANGUAGE = "DEFAULT_LANGUAGE";
+
+  /** No words of the business's to go out in: the platform's. */
+  static final String SOURCE_DEFAULT = "DEFAULT";
+
   /**
    * The platform's own neutral stand-in for a preview or a check when the business's currency
    * cannot be read — never a country's currency, and never a literal like the GBP the sample used
@@ -96,17 +108,20 @@ public class MessageTemplateService {
   }
 
   /**
-   * The words one message, form and language goes out in now: the business's live version, or the
-   * platform's words when it has none — the draft an editor starts from.
+   * The words one message, form and language goes out in now — the draft an editor starts from.
+   * They are the ones {@link Messages#compose} would send, chosen by the same rule ({@link
+   * Messages#ownWords}): the business's live version in the language, else its live version in its
+   * default language (a retired, never-written or unusable language goes out in those), else the
+   * platform's words. {@code storedWordsUnusable} says when this language's own live version is
+   * there but cannot be used. {@code history} is this language's own.
    */
   public TemplateDtos.TemplateView get(UUID tenantId, String type, String form, String language) {
     Catalogue.MessageType t = type(type);
     Catalogue.FormSpec spec = form(t, form);
     String lang = language(language);
-    var history = repo.history(tenantId, t.key(), spec.form(), lang, HISTORY);
-    var live = history.stream().filter(s -> s.retiredAt() == null).findFirst();
+    boolean unusable = messages.ownWordsUnusable(tenantId, t.key(), spec.form(), lang);
     var versions =
-        history.stream()
+        repo.history(tenantId, t.key(), spec.form(), lang, HISTORY).stream()
             .map(
                 s ->
                     new TemplateDtos.Version(
@@ -116,13 +131,17 @@ public class MessageTemplateService {
                         s.createdAt().toString(),
                         s.retiredAt() == null ? null : s.retiredAt().toString()))
             .toList();
-    return live.map(
+    return messages
+        .ownWords(tenantId, t.key(), spec.form(), lang)
+        .map(
             s ->
                 new TemplateDtos.TemplateView(
                     t.key(),
                     spec.form().name(),
                     lang,
-                    "BUSINESS",
+                    s.language(),
+                    s.language().equals(lang) ? SOURCE_BUSINESS : SOURCE_DEFAULT_LANGUAGE,
+                    unusable,
                     s.version(),
                     s.subject(),
                     s.body(),
@@ -133,7 +152,9 @@ public class MessageTemplateService {
                     t.key(),
                     spec.form().name(),
                     lang,
-                    "DEFAULT",
+                    Messages.PLATFORM_LANGUAGE,
+                    SOURCE_DEFAULT,
+                    unusable,
                     null,
                     spec.form().hasSubject() ? spec.subject() : "",
                     spec.body(),

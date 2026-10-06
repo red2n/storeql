@@ -1,5 +1,6 @@
 package com.storeql.inventory.api;
 
+import com.storeql.inventory.domain.Domain.Batch;
 import com.storeql.inventory.dto.Dtos.AdjustRequest;
 import com.storeql.inventory.dto.Dtos.BatchReceiveRequest;
 import com.storeql.inventory.dto.Dtos.BatchReceiveResult;
@@ -110,7 +111,8 @@ public class AdminResource {
             req.supplierId() == null || req.supplierId().isBlank()
                 ? null
                 : uuid(req.supplierId(), "supplierId"),
-            req.dutyStatus());
+            req.dutyStatus(),
+            ctx.userId());
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toBatch(batch)))
         .build();
@@ -143,6 +145,7 @@ public class AdminResource {
           "a bulk receive takes at most " + bulkReceiveMaxLines + " lines");
     }
     UUID tenantId = ctx.requireTenantId();
+    UUID actorId = ctx.userId();
     int received = 0;
     var errors = new java.util.ArrayList<String>();
     for (var item : req.items()) {
@@ -158,7 +161,11 @@ public class AdminResource {
             "MANUAL",
             null,
             null,
-            null);
+            null,
+            Batch.OWNERSHIP_OWNED,
+            null,
+            Batch.DUTY_PAID,
+            actorId);
         received++;
       } catch (Exception e) {
         errors.add(item.variantId() + ": " + e.getMessage());

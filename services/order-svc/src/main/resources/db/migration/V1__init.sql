@@ -439,6 +439,9 @@ CREATE UNIQUE INDEX uq_gct_idempotency_key
     ON gift_card_transactions (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- ── Outbox (transactional events) ─────────────────────────────────────────────
+-- The outbox is deliberately cross-tenant: the relay drains every business's rows in the order they were
+-- written, and the hourly purge trims every business's sent rows by age, so neither reads by tenant and
+-- no index here starts with tenant_id.
 -- A row that fails to publish is retried after a backoff (storeql.outbox.backoff-base-seconds, doubling,
 -- capped at storeql.outbox.backoff-cap-seconds), and only that row's aggregate waits for it. After
 -- storeql.outbox.max-attempts it is a dead letter: never claimed again, kept for an operator, and it
@@ -460,24 +463,16 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
--- Rows still to send.
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
--- The claim: rows that may publish now, in the order they were written.
+-- The claim (common-service BaseOutboxRepository.claim): rows that may publish now, in the order they
+-- were written. This index serves its ordered scan (ORDER BY created_at, id LIMIT n); its predicate
+-- leaves out dead letters, as the claim does. The claim's check for an earlier waiting row of the same
+-- aggregate reads idx_outbox_aggregate_pending, below, and marking a row published and recording a
+-- failure go by primary key. No index of every unsent row by created_at (idx_outbox_unpublished) is
+-- kept: it would also hold the dead letters, which the claim's ordered scan never reads.
 CREATE INDEX idx_outbox_claim ON outbox (created_at, id) WHERE published_at IS NULL AND dead_at IS NULL;
--- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off.
+-- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off or dead.
 CREATE INDEX idx_outbox_aggregate_pending ON outbox (aggregate_id, created_at, id) WHERE published_at IS NULL;
 -- The hourly purge (common-service OutboxPublisher) trims rows already sent, oldest first, in batches.
--- Partial, like the drain's: this index holds the rows already sent, so it stays as small as the
+-- Partial, like the claim's: this index holds the rows already sent, so it stays as small as the
 -- retention window once the purge keeps up.
 CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
-
--- ── Idempotency keys ──────────────────────────────────────────────────────────
-
-CREATE TABLE idempotency_keys (
-    key          TEXT,
-    tenant_id    UUID NOT NULL,
-    response     TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (key, tenant_id)
-);
-CREATE INDEX idx_idempotency_keys_tenant ON idempotency_keys (tenant_id, created_at);

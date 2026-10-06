@@ -128,7 +128,12 @@ public final class Dtos {
 
   @Schema(name = "MaterialStatusRequest", description = "Hold/release-style batch material status.")
   public record MaterialStatusRequest(
-      @Schema(description = "e.g. AVAILABLE, QUARANTINE, HOLD, REJECTED.") @NotBlank
+      @Schema(
+              description =
+                  "The batch's physical condition: AVAILABLE, QUARANTINE, INSPECTION, DAMAGED or"
+                      + " RECALLED. Any other non-blank value is refused with 400"
+                      + " INVALID_MATERIAL_STATUS.")
+          @NotBlank
           String materialStatus,
       String reason) {}
 
@@ -170,8 +175,17 @@ public final class Dtos {
       @Schema(description = "Unit cost of this batch.") BigDecimal costPrice,
       @Schema(description = "ISO expiry date, if perishable.") String expiryDate,
       String createdAt,
-      @Schema(description = "e.g. ACTIVE, DEPLETED, CANCELLED.") String status,
-      @Schema(description = "e.g. AVAILABLE, QUARANTINE, HOLD, REJECTED.") String materialStatus,
+      @Schema(
+              description =
+                  "The batch's lifecycle status: ACTIVE, the only one. A batch that has run out says"
+                      + " so through remainingQty, and one past its date through the levels'"
+                      + " expired quantity; its physical condition is materialStatus.")
+          String status,
+      @Schema(
+              description =
+                  "The batch's physical condition: AVAILABLE, QUARANTINE, INSPECTION, DAMAGED or"
+                      + " RECALLED.")
+          String materialStatus,
       String materialStatusReason,
       String grade,
       @Schema(description = "UUID of the zone the batch is placed in.") String zoneId,
@@ -519,7 +533,12 @@ public final class Dtos {
           String batchId,
       @Schema(
               description =
-                  "RECEIVE, SALE, ADJUST, TRANSFER_OUT or TRANSFER_IN (a manual adjustment is ADJUST with refType ADJUSTMENT).")
+                  "RECEIVE, SALE, ADJUST, TRANSFER, RTV, RESERVE, RELEASE, BOND_RELEASE, YIELD,"
+                      + " LOT_SPLIT or LOT_MERGE. A manual adjustment is ADJUST with refType"
+                      + " ADJUSTMENT; a return or a void is a RECEIVE with refType RETURN or VOID;"
+                      + " a lot split is a LOT_SPLIT out of the source batch and a LOT_SPLIT into"
+                      + " the new one, and a lot merge a LOT_MERGE out of the source and a"
+                      + " LOT_MERGE into the target, each pair netting to zero.")
           String type,
       @Schema(description = "Signed movement quantity.") BigDecimal qty,
       String refType,
@@ -531,7 +550,8 @@ public final class Dtos {
           String reasonCode,
       @Schema(
               description =
-                  "UUID of the user who made this adjustment. Null for system-caused movements --"
+                  "UUID of the user who made this movement by hand: an adjustment, a count, a lot"
+                      + " split, or a receipt entered manually. Null for system-caused movements --"
                       + " trace those through refType/refId to the record that names its actor.")
           String actorId,
       String createdAt) {}
@@ -1122,7 +1142,11 @@ public final class Dtos {
           @Positive
           @Fits(integer = 15, fraction = 3)
           BigDecimal qty,
-      String batchNo,
+      @Schema(
+              description =
+                  "The new batch's lot number. Left out or blank, the new batch keeps the"
+                      + " source's, so a recall of that lot reaches it.")
+          String batchNo,
       String notes) {}
 
   @Schema(

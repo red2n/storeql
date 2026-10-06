@@ -386,6 +386,15 @@ public class PricingService {
   /** The most whole digits typed money may have: more than any money column holds is a typo. */
   static final int MOST_WHOLE_DIGITS = 18;
 
+  /** Whole digits of promotions.value, NUMERIC(18,4): what the column holds, no more. */
+  static final int PROMOTION_VALUE_WHOLE_DIGITS = 14;
+
+  /**
+   * Whole digits of competitor_prices.price and repricing_rules.value, NUMERIC(19,4): what the
+   * columns hold, no more.
+   */
+  static final int FOUR_PLACE_WHOLE_DIGITS = 15;
+
   /**
    * A list price checked against the list's currency and kept at its own minor units: no finer than
    * the currency can be paid in (a yen price is whole yen, a dinar price has at most three
@@ -408,14 +417,19 @@ public class PricingService {
    *     currency has, or more than {@link #MOST_WHOLE_DIGITS} whole digits
    */
   static BigDecimal amountIn(BigDecimal amount, String currency, String field) {
+    return amountIn(amount, currency, field, MOST_WHOLE_DIGITS);
+  }
+
+  /**
+   * As {@link #amountIn(BigDecimal, String, String)}, for a column that holds fewer whole digits
+   * than any money column does ({@code NUMERIC(18,4)} holds fourteen): a figure it cannot hold is
+   * refused here, by name, and never left to the database's overflow, which answers 500.
+   *
+   * @param wholeDigits the most whole digits the column holds
+   */
+  static BigDecimal amountIn(BigDecimal amount, String currency, String field, int wholeDigits) {
     if (amount == null) return null;
-    // More whole digits than any money column holds is no price, refused before it is scaled:
-    // scaling 1E+80000000 to pence builds an eighty-million-digit number first.
-    if ((long) amount.precision() - amount.scale() > MOST_WHOLE_DIGITS) {
-      String why = field + " has more than " + MOST_WHOLE_DIGITS + " whole digits";
-      throw new ApiException(
-          400, com.storeql.web.ErrorCodes.VALIDATION_FAILED, why, List.of(field + ": " + why));
-    }
+    requireWholeDigits(amount, field, wholeDigits);
     int units = com.storeql.service.Fx.minorUnits(currency);
     if (amount.stripTrailingZeros().scale() > units) {
       // toString, not toPlainString: 1E-80000000 written out in full is eighty million digits.
@@ -425,6 +439,43 @@ public class PricingService {
           400, com.storeql.web.ErrorCodes.VALIDATION_FAILED, why, List.of(field + ": " + why));
     }
     return amount.setScale(units, RoundingMode.UNNECESSARY);
+  }
+
+  /**
+   * A typed figure of no more than {@code wholeDigits} whole digits. More than any column holds is
+   * no figure, refused before it is scaled: scaling 1E+80000000 to pence builds an eighty-million-
+   * digit number first.
+   *
+   * @throws ApiException 400 {@code VALIDATION_FAILED} naming {@code field}
+   */
+  static void requireWholeDigits(BigDecimal amount, String field, int wholeDigits) {
+    if (amount != null && (long) amount.precision() - amount.scale() > wholeDigits) {
+      String why = field + " has more than " + wholeDigits + " whole digits";
+      throw new ApiException(
+          400, com.storeql.web.ErrorCodes.VALIDATION_FAILED, why, List.of(field + ": " + why));
+    }
+  }
+
+  /**
+   * A promotion's {@code value} as it is handed to the column. For the types whose value is money
+   * (FLAT, BASKET_FLAT, SPEND_THRESHOLD, MIX_MATCH) it is returned at the business's currency's
+   * minor units, and a value finer than they are is refused by name, not rounded. For a percentage,
+   * or a BOGO (described by its quantities), it is no money and is returned as typed. For any type,
+   * a value of more than {@link #PROMOTION_VALUE_WHOLE_DIGITS} whole digits is refused, not left to
+   * overflow the column.
+   *
+   * @param type the promotion's type, upper case
+   * @param value as typed
+   * @param currency the business's own currency; read only for a type whose value is money
+   * @throws ApiException 400 {@code VALIDATION_FAILED} for an amount with more decimals than the
+   *     currency has, or a value of more than {@link #PROMOTION_VALUE_WHOLE_DIGITS} whole digits
+   */
+  static BigDecimal promotionValueIn(String type, BigDecimal value, String currency) {
+    if (Promotion.isAmountValued(type)) {
+      return amountIn(value, currency, "value", PROMOTION_VALUE_WHOLE_DIGITS);
+    }
+    requireWholeDigits(value, "value", PROMOTION_VALUE_WHOLE_DIGITS);
+    return value;
   }
 
   /**
@@ -1363,6 +1414,13 @@ public class PricingService {
     String type = req.type().toUpperCase(java.util.Locale.ROOT);
     validatePromotionShape(type, req);
 
+    // The business's currency is read only when something typed is money: an amount-valued type or
+    // a spend threshold. A percentage promotion needs no currency, and so none to fail to read.
+    String currency =
+        Promotion.isAmountValued(type) || req.minOrderAmount() != null
+            ? profiles.requireCurrency(ctx.requireTenantId())
+            : null;
+
     Promotion p =
         new Promotion(
             Ids.newId(),
@@ -1370,15 +1428,10 @@ public class PricingService {
             req.storeId() != null ? Ids.parse(req.storeId()) : null,
             req.name(),
             type,
-            req.value(),
-            // A spend threshold is typed money in the business's own currency: no finer than it,
-            // kept at its minor units.
-            req.minOrderAmount() == null
-                ? null
-                : amountIn(
-                    req.minOrderAmount(),
-                    profiles.requireCurrency(ctx.requireTenantId()),
-                    "minOrderAmount"),
+            // The value is money for the amount types: no finer than the currency.
+            promotionValueIn(type, req.value(), currency),
+            // A spend threshold is typed money in the business's own currency too.
+            amountIn(req.minOrderAmount(), currency, "minOrderAmount"),
             req.channel() != null
                 ? req.channel().toUpperCase(java.util.Locale.ROOT)
                 : PriceList.CHANNEL_ALL,
@@ -1604,7 +1657,8 @@ public class PricingService {
    *     and CATEGORY, the variant or category id
    * @return the stored scope row
    * @throws ApiException {@code PRICING_INVALID_SCOPE} (400) when the scope is unknown, or a
-   *     VARIANT or CATEGORY scope names no id
+   *     VARIANT or CATEGORY scope names no id; {@code PRICING_SUBJECT_NOT_FOUND} (404) when the
+   *     promotion is not this business's
    */
   public PromotionItem addPromotionItem(
       TenantContext ctx, UUID promotionId, AddPromotionItemRequest req) {
@@ -1629,7 +1683,12 @@ public class PricingService {
     PromotionItem pi =
         new PromotionItem(
             Ids.newId(), ctx.tenantId(), promotionId, scopeType, scopeId, Instant.now());
-    return repo.addPromotionItem(pi);
+    PromotionItem stored = repo.addPromotionItem(pi);
+    // A promotion that is not this business's is not found, whoever else's it is.
+    if (stored == null)
+      throw ApiException.notFound(
+          "PRICING_SUBJECT_NOT_FOUND", "promotion not found: " + promotionId);
+    return stored;
   }
 
   // ── Tax Transactions ──────────────────────────────────────────────────────

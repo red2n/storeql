@@ -20,9 +20,15 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -179,6 +185,41 @@ class StatutoryReturnsIT {
         "and a return the platform cannot produce says so rather than offering an empty export",
         statement.get("exportService"),
         is(nullValue()));
+  }
+
+  @Test
+  @DisplayName("Every seeded export names a route its own service serves, spelled as it serves it")
+  void everySeededExportIsARealRoute() throws SQLException {
+    // The link is service + path, and the path is the one the owning service itself serves, not a
+    // gateway path and not a guess: a route that is not there 404s quietly. Each is read off the
+    // resource that serves it:
+    //   order-svc   FiscalReceiptResource  @Path("/admin") + GET /fiscal-receipts/export?format=
+    //                                       dsfinvk | saft-pt
+    //   order-svc   EReportingResource      @Path("/admin/ereporting") + GET and POST /submissions
+    //   pricing-svc VatReturnResource       @Path("/vat-return"), GET, and not under /admin/
+    Map<String, String> expected = new LinkedHashMap<>();
+    expected.put("DSFINVK_DE", "order-svc /admin/fiscal-receipts/export?format=dsfinvk");
+    expected.put("EC_SALES_LIST", "none");
+    expected.put("EREPORTING_PAY_FR", "order-svc /admin/ereporting/submissions");
+    expected.put("EREPORTING_TX_FR", "order-svc /admin/ereporting/submissions");
+    expected.put("SAFT_PT", "order-svc /admin/fiscal-receipts/export?format=saft-pt");
+    expected.put("VAT_RETURN_UK", "pricing-svc /vat-return");
+
+    Map<String, String> seeded = new LinkedHashMap<>();
+    try (Connection c = PG.dataSource().getConnection();
+        Statement st = c.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT code, export_service, export_path FROM tenant.statutory_returns"
+                    + " ORDER BY code")) {
+      while (rs.next()) {
+        String service = rs.getString("export_service");
+        seeded.put(
+            rs.getString("code"),
+            service == null ? "none" : service + " " + rs.getString("export_path"));
+      }
+    }
+    assertThat(seeded, is(expected));
   }
 
   @Test

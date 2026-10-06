@@ -238,6 +238,9 @@ CREATE UNIQUE INDEX uq_staff_business_wide
     ON staff_assignments (tenant_id, user_id, role) WHERE store_id IS NULL;
 
 -- Transactional outbox.
+-- The outbox is deliberately cross-tenant: the relay drains every business's rows in one order
+-- (created_at, id), the purge reads every business's delivered rows, and tenant_id here is nullable,
+-- since an event may belong to no business. So no index of this table is led by tenant_id.
 CREATE TABLE outbox (
     id           UUID PRIMARY KEY,
     event_type   TEXT NOT NULL,
@@ -259,16 +262,23 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
 -- The scheduled purge of delivered outbox rows (common-service OutboxPublisher, through
 -- BaseOutboxRepository.purgePublished) deletes in batches of the oldest ones:
 --   WHERE published_at IS NOT NULL AND published_at < ? ORDER BY published_at LIMIT n
 -- With no index each batch reads the whole table to find them. The index is partial: it holds only
--- delivered rows, so it stays small and the drain (idx_outbox_unpublished) is untouched.
+-- delivered rows, so it stays small, and the claim's two indexes, which hold only waiting rows,
+-- never carry them.
 -- tenant-svc keeps no processed_events table (its consumers dedupe on unique keys of their own,
 -- such as usage_records' source_ref), so the purge of those has nothing to scan and needs no index.
 CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
--- The claim: rows that may publish now, in the order they were written.
+-- The claim (common-service BaseOutboxRepository.claim): the rows that may publish now, in the order
+-- they were written. Its ordered scan, ORDER BY o.created_at, o.id LIMIT n, is served by this index;
+-- its per-aggregate check (the NOT EXISTS over an aggregate's earlier unpublished rows) is served by
+-- idx_outbox_aggregate_pending below. Marking a row published and recording a failure go by primary
+-- key. No index of every unpublished row by created_at (idx_outbox_unpublished) is kept: it would
+-- also hold the dead letters, which the claim's ordered scan never reads, and the claim is the one
+-- statement that reads waiting rows in that order (OutboxPurgeIndexIT plans the claim as the
+-- repository really prepares it, and checks that idx_outbox_unpublished does not exist).
 CREATE INDEX idx_outbox_claim
     ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;

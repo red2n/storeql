@@ -10,6 +10,7 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 import com.storeql.ids.Ids;
+import com.storeql.notification.repo.WebhookRepository;
 import com.storeql.notification.service.WebhookDeliverer;
 import com.storeql.notification.service.WebhookFanout;
 import com.storeql.notification.service.WebhookSigner;
@@ -136,6 +137,7 @@ class WebhookIT {
   @Inject WebTarget target;
   @Inject WebhookFanout fanout;
   @Inject WebhookDeliverer deliverer;
+  @Inject WebhookRepository webhooks;
 
   @AfterAll
   static void stop() {
@@ -521,6 +523,11 @@ class WebhookIT {
         call("GET", "/admin/webhooks/deliveries/" + d.getString("id"), owner(Ids.newId()), null)
             .status(),
         is(404));
+    // The tries are read by the business first, so another business naming our delivery's id to
+    // the repository itself is shown none of them.
+    UUID delivery = Ids.parse(d.getString("id"));
+    assertThat(webhooks.attempts(tenant, delivery), hasSize(1));
+    assertThat(webhooks.attempts(Ids.newId(), delivery), hasSize(0));
 
     // Switched off: a matching event is not even queued.
     assertThat(

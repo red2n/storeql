@@ -11,6 +11,7 @@ import com.storeql.pricing.provider.VatSubmissionProvider;
 import com.storeql.pricing.provider.VatSubmissionProviders;
 import com.storeql.pricing.provider.Vrn;
 import com.storeql.pricing.repo.MtdRepository;
+import com.storeql.service.TenantProfiles;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -29,6 +30,12 @@ import java.util.UUID;
  * connects HMRC's grant once; a filing takes the boxes from {@link PricingService#computeVatReturn}
  * as they are, sends them, and records the answer — accepted or refused — where nothing can edit
  * it.
+ *
+ * <p>The return is UK law and in pounds: its boxes are the tax transactions' amounts summed as
+ * recorded, with nothing converting them. So only a business that uses UK law may register for it
+ * or file it — one whose own profile (tenant-svc's, never a request) says its home country is GB
+ * and its currency GBP — and a profile that cannot be read refuses, because what goes to a tax
+ * authority fails closed. Every other business is told {@code VAT_RETURN_NOT_AVAILABLE}.
  */
 @ApplicationScoped
 public class MtdService {
@@ -36,11 +43,17 @@ public class MtdService {
   private static final System.Logger LOG = System.getLogger(MtdService.class.getName());
   private static final int TOKEN_LEEWAY_SECONDS = 60;
 
+  /** HMRC's return is filed by a business whose home country is this, in this currency. */
+  static final String RETURN_COUNTRY = "GB";
+
+  static final String RETURN_CURRENCY = "GBP";
+
   @Inject MtdRepository repo;
   @Inject PricingService pricing;
   @Inject VatSubmissionProviders providers;
   @Inject HmrcMtdVatProvider hmrc;
   @Inject TokenCipher cipher;
+  @Inject TenantProfiles profiles;
 
   /** A registration and what the deployment can offer beside it. */
   public record RegistrationView(
@@ -60,12 +73,15 @@ public class MtdService {
    * Registers the VAT number a tenant files under and the path it files through. HMRC's grant is
    * kept when the provider stays HMRC and dropped when it changes: a grant is for one number.
    *
-   * @throws ApiException {@code MTD_VRN_INVALID} (400) when the number fails HMRC's check digit;
-   *     {@code MTD_PROVIDER_UNKNOWN} (400); {@code MTD_PROVIDER_NOT_CONFIGURED} (409) when the
-   *     deployment lacks what the provider needs
+   * @throws ApiException {@code VAT_RETURN_NOT_AVAILABLE} (409) for a business that is not a UK
+   *     one, and {@code TENANT_PROFILE_UNAVAILABLE} (503) when that cannot be told; {@code
+   *     MTD_VRN_INVALID} (400) when the number fails HMRC's check digit; {@code
+   *     MTD_PROVIDER_UNKNOWN} (400); {@code MTD_PROVIDER_NOT_CONFIGURED} (409) when the deployment
+   *     lacks what the provider needs
    */
   public RegistrationView register(
       UUID tenantId, String vrnInput, String providerInput, UUID userId) {
+    requireUkBusiness(tenantId);
     String vrn = Vrn.normalise(vrnInput);
     if (vrn == null) {
       throw ApiException.badRequest(
@@ -197,9 +213,12 @@ public class MtdService {
    * requires, {@code finalised} because HMRC accepts nothing else. What HMRC answers is recorded
    * whether it accepted or refused; a refusal is also thrown, with HMRC's code.
    *
-   * @throws ApiException {@code MTD_NOT_FINALISED} (400); {@code MTD_PERIOD_KEY_INVALID} (400);
-   *     {@code MTD_DUPLICATE_SUBMISSION} (409) when this period is already filed and accepted;
-   *     HMRC's own code (422) when it refused; {@code HMRC_UNREACHABLE} (503)
+   * @throws ApiException {@code MTD_NOT_REGISTERED} (404); {@code VAT_RETURN_NOT_AVAILABLE} (409)
+   *     for a business that is not a UK one, even with a registration on file, and {@code
+   *     TENANT_PROFILE_UNAVAILABLE} (503) when that cannot be told; {@code MTD_NOT_FINALISED}
+   *     (400); {@code MTD_PERIOD_KEY_INVALID} (400); {@code MTD_DUPLICATE_SUBMISSION} (409) when
+   *     this period is already filed and accepted; HMRC's own code (422) when it refused; {@code
+   *     HMRC_UNREACHABLE} (503)
    */
   public VatReturnSubmission submit(
       UUID tenantId,
@@ -210,6 +229,9 @@ public class MtdService {
       ClientFingerprint client,
       UUID userId) {
     VatRegistration reg = requireRegistration(tenantId);
+    // A registration on file does not make the business a UK one: the gate is asked again here,
+    // where the figures would leave for HMRC, so a registration that predates it files nothing.
+    requireUkBusiness(tenantId);
     if (!finalised) {
       throw ApiException.badRequest(
           "MTD_NOT_FINALISED", "A return is filed only when the taxpayer declares it final");
@@ -328,6 +350,30 @@ public class MtdService {
   /** HMRC's rule for boxes 6–9: whole pounds, rounded down. */
   static BigDecimal wholePounds(BigDecimal v) {
     return v.setScale(0, RoundingMode.DOWN);
+  }
+
+  /**
+   * The business's own profile must say it uses UK law: home country GB and currency GBP.
+   *
+   * @throws ApiException {@code VAT_RETURN_NOT_AVAILABLE} (409) for any other business; {@code
+   *     TENANT_PROFILE_UNAVAILABLE} (503) when tenant-svc cannot say, because nothing is assumed
+   *     and nothing goes to a tax authority on a guess
+   */
+  private void requireUkBusiness(UUID tenantId) {
+    String country = profiles.requireCountry(tenantId);
+    String currency = profiles.requireCurrency(tenantId);
+    if (!RETURN_COUNTRY.equals(country) || !RETURN_CURRENCY.equals(currency)) {
+      throw ApiException.conflict(
+          "VAT_RETURN_NOT_AVAILABLE",
+          "The VAT return is HMRC's, in pounds, for a business whose home country is "
+              + RETURN_COUNTRY
+              + " and whose currency is "
+              + RETURN_CURRENCY
+              + "; this business's is "
+              + country
+              + " and "
+              + currency);
+    }
   }
 
   private VatRegistration requireRegistration(UUID tenantId) {

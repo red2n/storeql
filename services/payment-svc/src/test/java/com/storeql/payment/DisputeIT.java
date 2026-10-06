@@ -372,7 +372,9 @@ class DisputeIT {
     UUID tenant = Ids.newId();
     UUID order = Ids.newId();
     Caller me = owner(tenant);
-    UUID payment = tender(tenant, order, null, "STRIPE", "80.00");
+    // A provider's capture is written as CARD (PaymentIntentService.writeCapture), never under the
+    // provider's name: ck_payment_tenders_method holds the set.
+    UUID payment = tender(tenant, order, null, "CARD", "80.00");
     PaymentIntent intent =
         new PaymentIntent(
             Ids.newId(),
@@ -485,7 +487,7 @@ class DisputeIT {
     UUID tenant = Ids.newId();
     UUID order = Ids.newId();
     Caller me = owner(tenant);
-    UUID payment = tender(tenant, order, null, "STRIPE", "5000");
+    UUID payment = tender(tenant, order, null, "CARD", "5000");
     PaymentIntent intent =
         new PaymentIntent(
             Ids.newId(),

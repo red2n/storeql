@@ -1,5 +1,9 @@
 -- Gap #12: Item Revisions (Oracle Inventory Ch. 5)
--- Tracks design/spec versions of a product variant over time. Append-only.
+-- Tracks design/spec versions of a product variant over time. Not append-only: a revision's number,
+-- description and date are written once, but its status moves ACTIVE -> SUPERSEDED when a revision
+-- effective on or after its date is recorded for the variant (ItemRevisionRepository). The service's
+-- own code never deletes one; only a departed business's erasure does, because ExportableData
+-- neither leaves this table out of the export nor keeps it at erasure.
 
 CREATE TABLE item_revisions (
     id             UUID         NOT NULL,

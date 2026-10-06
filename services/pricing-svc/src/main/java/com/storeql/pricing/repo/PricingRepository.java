@@ -1215,10 +1215,13 @@ public class PricingRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Records what a promotion applies to.
+   * Records what a promotion applies to, when the promotion is the tenant's own: the row is written
+   * in the same statement that finds the promotion under the tenant, so a promotion of another
+   * business is never scoped, and no scope row names one.
    *
    * @param pi the scope row to persist; its {@code id} must already be a UUIDv7
-   * @return the scope row as stored
+   * @return the scope row as stored, or {@code null} when the tenant has no such promotion (nothing
+   *     was written)
    */
   public PromotionItem addPromotionItem(PromotionItem pi) {
     return inTx(
@@ -1228,13 +1231,16 @@ public class PricingRepository extends BaseOutboxRepository {
           try (var ps =
               c.prepareStatement(
                   "INSERT INTO promotion_items (id,tenant_id,promotion_id,scope_type,scope_id)"
-                      + " VALUES (?,?,?,?,?)")) {
+                      + " SELECT ?,?,?,?,? WHERE EXISTS"
+                      + " (SELECT 1 FROM promotions WHERE tenant_id = ? AND id = ?)")) {
             ps.setObject(1, pi.id());
             ps.setObject(2, pi.tenantId());
             ps.setObject(3, pi.promotionId());
             ps.setString(4, pi.scopeType());
             ps.setObject(5, pi.scopeId());
-            ps.executeUpdate();
+            ps.setObject(6, pi.tenantId());
+            ps.setObject(7, pi.promotionId());
+            if (ps.executeUpdate() == 0) return null;
           }
           com.storeql.pricing.repo.AppliedPriceRepository.enqueue(
               c, pi.tenantId(), null, Instant.now(), "PROMOTION_SCOPED");

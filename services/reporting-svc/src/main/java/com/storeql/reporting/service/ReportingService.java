@@ -136,17 +136,16 @@ public class ReportingService {
   /**
    * Opens an in-transit supply line per variant when a stock transfer ships.
    *
-   * <p>Today no line opens: StockEventDispatcher passes empty lists, though TransferOrderShipped
-   * carries the lines and the dispatcher does not read them yet.
-   *
-   * <p>The lines are keyed by {@code eventId} so {@link #applyTransferReceived} can retire exactly
-   * this shipment's lines when the goods land.
+   * <p>The lines are keyed by the transfer order, which {@code TransferOrderReceived} names too, so
+   * {@link #applyTransferReceived} retires exactly this shipment's lines when the goods land. A
+   * transfer that has already landed (its receipt was read first) opens none.
    *
    * <p>Deduped on the event for this consumer, in the same transaction as the lines (see {@link
    * ReportingRepository#applyTransferShippedOnce}).
    *
    * @param tenantId owning tenant
-   * @param eventId the {@code TransferOrderShipped} event id, retained as the retirement key
+   * @param transferOrderId the transfer order, the key its receipt retires the lines by
+   * @param eventId the {@code TransferOrderShipped} event id, the dedupe key
    * @param consumerName this consumer's dedupe name
    * @param fromStoreId store the stock left
    * @param toStoreId store the stock is bound for
@@ -156,6 +155,7 @@ public class ReportingService {
    */
   public boolean applyTransferShippedOnce(
       UUID tenantId,
+      UUID transferOrderId,
       UUID eventId,
       String consumerName,
       UUID fromStoreId,
@@ -163,18 +163,22 @@ public class ReportingService {
       List<UUID> variantIds,
       List<BigDecimal> qtys) {
     return repo.applyTransferShippedOnce(
-        tenantId, eventId, consumerName, fromStoreId, toStoreId, variantIds, qtys);
+        tenantId, transferOrderId, eventId, consumerName, fromStoreId, toStoreId, variantIds, qtys);
   }
 
   /**
-   * Closes the in-transit supply lines opened by the matching shipment.
+   * Closes the in-transit supply lines of a transfer that has landed.
    *
-   * <p>Idempotent by construction: a redelivered event deletes rows that are already gone.
+   * <p>Idempotent without a mark on the receipt's own event id: a redelivered event deletes rows
+   * that are already gone. It also notes that the transfer landed, so a shipment read after its
+   * receipt opens no line (see {@link ReportingRepository#retireSupplyLines}). Only this business's
+   * lines are found, whatever transfer order id another business's event names.
    *
-   * @param eventId the {@code TransferOrderShipped} event id the lines were opened under
+   * @param tenantId owning tenant, from the event
+   * @param transferOrderId the transfer order that was received
    */
-  public void applyTransferReceived(UUID eventId) {
-    repo.deleteSupplyLinesByEvent(eventId);
+  public void applyTransferReceived(UUID tenantId, UUID transferOrderId) {
+    repo.retireSupplyLines(tenantId, transferOrderId);
   }
 
   // ── N4: Sales reporting ──────────────────────────────────────────────────

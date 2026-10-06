@@ -314,6 +314,27 @@ public final class Recall {
     return best;
   }
 
+  /** One lot a batch's stock is of: its number and its use-by date. */
+  public record Lot(String batchNo, LocalDate expiry) {}
+
+  /**
+   * The most certain match of any line of a recall's scope for stock of several lots, as a batch is
+   * that was split or merged: the lots it carries beside its own. Each lot is judged as {@link
+   * #classify(List, UUID, String, LocalDate)} judges one, and the most certain verdict stands, so
+   * adding a lot to a batch cannot weaken the verdict.
+   *
+   * @param lots the lots the batch carries, its own and those of the stock it is made from; none
+   *     yields {@code null}
+   * @return null when no lot of the batch matches any line
+   */
+  public static Match classify(List<Scope> scope, UUID variantId, List<Lot> lots) {
+    Match best = null;
+    for (Lot lot : lots) {
+      best = Match.moreCertain(best, classify(scope, variantId, lot.batchNo(), lot.expiry()));
+    }
+    return best;
+  }
+
   public record Release(String reason, UUID releasedBy, Instant releasedAt) {}
 
   public record HeldBatch(

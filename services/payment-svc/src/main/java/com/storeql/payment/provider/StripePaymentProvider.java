@@ -1,5 +1,6 @@
 package com.storeql.payment.provider;
 
+import com.storeql.ids.Ids;
 import com.storeql.payment.config.Jsons;
 import com.storeql.payment.domain.Domain.PaymentIntent;
 import com.storeql.service.Fx;
@@ -11,6 +12,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
+import jakarta.json.JsonString;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -23,6 +25,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -294,9 +297,40 @@ public class StripePaymentProvider implements PaymentProvider {
           statusForEvent(type, intent.getString("status", "")),
           captured,
           failureCode,
-          failureMessage);
+          failureMessage,
+          null,
+          type.startsWith("payment_intent.") ? ourIntent(intent) : null);
     } catch (RuntimeException e) {
       throw new ProviderException("could not parse Stripe event", false, e);
+    }
+  }
+
+  /**
+   * The intent of ours a PaymentIntent names in the metadata {@link #authorize} sent with it:
+   * {@code intentId} and {@code tenantId}, which are part of the PaymentIntent object the event
+   * carries. Only the pair is a correlation, and each is read as every id is ({@link Ids#parse}:
+   * canonical, UUIDv7). Anything else — no metadata, one id of the two, text that is not an id, an
+   * id of another version, a value that is not a string — names no intent of ours (null), and costs
+   * the event nothing else: such an event is one this service did not tag, which is a fact about
+   * the event and never a failure to read it.
+   *
+   * <p>Called only for {@code payment_intent.*} events, whose object id is the intent's reference:
+   * the metadata of another kind of object (a charge, whose id is {@code ch_…}) says nothing about
+   * the reference the event carries.
+   */
+  private static OurIntent ourIntent(JsonObject paymentIntent) {
+    if (!(paymentIntent.get("metadata") instanceof JsonObject metadata)) return null;
+    UUID tenantId = metadataId(metadata, "tenantId");
+    UUID intentId = metadataId(metadata, "intentId");
+    return tenantId == null || intentId == null ? null : new OurIntent(tenantId, intentId);
+  }
+
+  private static UUID metadataId(JsonObject metadata, String key) {
+    if (!(metadata.get(key) instanceof JsonString text)) return null;
+    try {
+      return Ids.parse(text.getString());
+    } catch (IllegalArgumentException e) {
+      return null;
     }
   }
 
@@ -447,11 +481,19 @@ public class StripePaymentProvider implements PaymentProvider {
    * case that matters: {@code payment_intent.amount_capturable_updated} carries status {@code
    * requires_capture}, which is Stripe's way of saying authorised.
    *
+   * <p>An event about another kind of object than a PaymentIntent (a charge, say) implies none:
+   * {@link PaymentIntent#STATUS_REQUIRES_ACTION}, which {@code handleWebhook} applies as nothing.
+   * The status such an object carries is its own ({@code succeeded} for a charge), not the
+   * intent's, and the reference the event carries is not an intent's.
+   *
    * @param type the event type
-   * @param intentStatus the intent's own status
+   * @param intentStatus the status of the object the event is about
    * @return the corresponding {@code Domain.PaymentIntent} status
    */
   static String statusForEvent(String type, String intentStatus) {
+    if (!type.startsWith("payment_intent.")) {
+      return PaymentIntent.STATUS_REQUIRES_ACTION;
+    }
     return switch (type) {
       case "payment_intent.succeeded" -> PaymentIntent.STATUS_CAPTURED;
       case "payment_intent.payment_failed" -> PaymentIntent.STATUS_FAILED;

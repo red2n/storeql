@@ -111,4 +111,37 @@ class RecallTest {
     assertFalse(Match.IN_SCOPE.isReleasable());
     assertTrue(Match.DATE_UNKNOWN.isReleasable());
   }
+
+  @Test
+  void stockOfSeveralLotsIsJudgedByTheMostCertainOfThem() {
+    List<Scope> byLot = List.of(new Scope(Ids.newId(), VARIANT, "L1", null, null));
+    Recall.Lot own = new Recall.Lot("L2", OCT_1);
+    Recall.Lot merged = new Recall.Lot("L1", OCT_31);
+    Recall.Lot unnumbered = new Recall.Lot(null, OCT_1);
+
+    assertNull(Recall.classify(byLot, VARIANT, List.of(own)), "its own lot rules it out");
+    assertEquals(
+        Match.IN_SCOPE,
+        Recall.classify(byLot, VARIANT, List.of(own, merged)),
+        "a lot merged into it brings it in scope, whatever order the lots are in");
+    assertEquals(Match.IN_SCOPE, Recall.classify(byLot, VARIANT, List.of(merged, own)));
+    assertEquals(
+        Match.LOT_UNKNOWN,
+        Recall.classify(byLot, VARIANT, List.of(own, unnumbered)),
+        "a lot nobody can name cannot rule the stock out");
+    assertNull(Recall.classify(byLot, VARIANT, List.of()), "no lot, no verdict");
+  }
+
+  @Test
+  void eachLotIsJudgedWithItsOwnDate() {
+    List<Scope> window = List.of(new Scope(Ids.newId(), VARIANT, "L1", OCT_1, OCT_1.plusDays(5)));
+
+    assertNull(
+        Recall.classify(window, VARIANT, List.of(new Recall.Lot("L1", OCT_31))),
+        "the merged-in lot's date is outside the window");
+    assertEquals(
+        Match.IN_SCOPE,
+        Recall.classify(
+            window, VARIANT, List.of(new Recall.Lot("L2", OCT_1), new Recall.Lot("L1", OCT_1))));
+  }
 }

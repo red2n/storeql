@@ -98,8 +98,15 @@ String channelLabel(String? channel) =>
       _ => humanizeCode(channel),
     };
 
-/// The material statuses a batch can be in, in the order a person picks from.
-const batchMaterialStatuses = ['AVAILABLE', 'QUARANTINE', 'HOLD', 'REJECTED'];
+/// The material statuses a batch can be in, in the order a person picks from:
+/// the five inventory-svc accepts and its database holds a batch to.
+const batchMaterialStatuses = [
+  'AVAILABLE',
+  'QUARANTINE',
+  'INSPECTION',
+  'DAMAGED',
+  'RECALLED',
+];
 
 /// A batch's material status in words — the same on the Batches badges, in
 /// their filter and in the dialog that changes it.
@@ -107,18 +114,21 @@ String materialStatusLabel(String? status) =>
     switch ((status ?? '').toUpperCase()) {
       'AVAILABLE' => 'Available',
       'QUARANTINE' => 'In quarantine',
-      'HOLD' => 'On hold',
-      'REJECTED' => 'Rejected',
+      'INSPECTION' => 'Under inspection',
+      'DAMAGED' => 'Damaged',
+      'RECALLED' => 'Recalled',
       _ => humanizeCode(status),
     };
 
-/// Green when the batch can be sold, amber while it is held back, red once it
-/// is rejected; grey for anything else.
+/// Green when the batch can be sold, amber while it is held back, blue while
+/// it waits to be checked, red once it is damaged or recalled; grey for
+/// anything else.
 StatusTone materialStatusTone(String? status) =>
     switch ((status ?? '').toUpperCase()) {
       'AVAILABLE' => StatusTone.success,
-      'QUARANTINE' || 'HOLD' => StatusTone.warning,
-      'REJECTED' => StatusTone.error,
+      'QUARANTINE' => StatusTone.warning,
+      'INSPECTION' => StatusTone.info,
+      'DAMAGED' || 'RECALLED' => StatusTone.error,
       _ => StatusTone.neutral,
     };
 

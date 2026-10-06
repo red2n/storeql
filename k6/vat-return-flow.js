@@ -11,13 +11,15 @@ export const options = { vus: 1, iterations: 1, thresholds: ALL_CHECKS_PASS };
 export function setup() {
   const tenant = onboardTenant('vat', { country: 'GB', currency: 'GBP' });
   const rival = onboardTenant('vat-rival', { country: 'GB', currency: 'GBP' });
+  // The return is HMRC's, in pounds: a business outside the UK is not offered it.
+  const yen = onboardTenant('vat-yen', { country: 'JP', currency: 'JPY' });
   const store = tenant.stores[0];
   const { variantId } = sellableVariant(tenant, 'Invoiced widget');
   const cashier = staffUser(tenant, 'CASHIER', [store.id]);
-  return { tenant, rival, store, variantId, cashier };
+  return { tenant, rival, yen, store, variantId, cashier };
 }
 
-export default function ({ tenant, rival, store, variantId, cashier }) {
+export default function ({ tenant, rival, yen, store, variantId, cashier }) {
   const owner = tenant.owner.token;
   const period = { from: '2026-09-01T00:00:00Z', to: '2026-10-01T00:00:00Z' };
   const vatReturn = (token) => call('GET', `/api/pricing-svc/vat-return?from=${period.from}&to=${period.to}`, { token });
@@ -55,6 +57,9 @@ export default function ({ tenant, rival, store, variantId, cashier }) {
   expect(call('PUT', `${mtd}/registration`, { token: owner, body: { vrn: '123456783', provider: 'SIMULATED' } }), 'a VAT number with a wrong check digit is refused', 400, 'MTD_VRN_INVALID');
   expect(call('PUT', `${mtd}/registration`, { token: owner, body: { vrn: '123456782', provider: 'SAGE' } }), 'an unknown provider is refused', 400, 'MTD_PROVIDER_UNKNOWN');
   expect(call('PUT', `${mtd}/registration`, { token: cashier.token, body: { vrn: '123456782', provider: 'SIMULATED' } }), 'a cashier cannot register', 403);
+  expect(call('PUT', `${mtd}/registration`, { token: yen.owner.token, body: { vrn: '123456782', provider: 'SIMULATED' } }), 'a business outside the UK cannot register for the UK return', 409, 'VAT_RETURN_NOT_AVAILABLE');
+  expect(call('GET', `${mtd}/registration`, { token: yen.owner.token }), 'and is offered no registration', 200);
+  truthy('nothing was registered for it', data(call('GET', `${mtd}/registration`, { token: yen.owner.token })).registered === false);
   const hmrc = call('PUT', `${mtd}/registration`, { token: owner, body: { vrn: '123456782', provider: 'HMRC' } });
   truthy('HMRC is refused unless the deployment is configured for it, and accepted when it is', hmrc.status === 200 ? data(hmrc).provider === 'HMRC' : hmrc.status === 409, hmrc.body);
   const registered = call('PUT', `${mtd}/registration`, { token: owner, body: { vrn: 'GB 123 4567 82', provider: 'simulated' } });

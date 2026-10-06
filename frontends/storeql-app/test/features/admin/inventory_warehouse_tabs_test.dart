@@ -41,7 +41,24 @@ class _Resolve implements HttpClientAdapter {
   }
 }
 
-Future<_Resolve> _pump(WidgetTester tester, Widget tab, {Size size = const Size(1200, 900)}) async {
+/// The movements the Movements tab opens on: one sale, unless a test names its own.
+const _oneSale = [
+  StockMovement(
+    id: 'm-1',
+    storeId: _leeds,
+    variantId: _mug,
+    type: 'SALE',
+    qty: -2,
+    createdAt: '2026-09-25T09:30:00Z',
+  ),
+];
+
+Future<_Resolve> _pump(
+  WidgetTester tester,
+  Widget tab, {
+  Size size = const Size(1200, 900),
+  List<StockMovement> movements = _oneSale,
+}) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -63,16 +80,7 @@ Future<_Resolve> _pump(WidgetTester tester, Widget tab, {Size size = const Size(
               lines: [TransferOrderLine(variantId: _mug, requestedQty: 4)],
             ),
           ]),
-      stockMovementsProvider('').overrideWith((ref) async => const [
-            StockMovement(
-              id: 'm-1',
-              storeId: _leeds,
-              variantId: _mug,
-              type: 'SALE',
-              qty: -2,
-              createdAt: '2026-09-25T09:30:00Z',
-            ),
-          ]),
+      stockMovementsProvider('').overrideWith((ref) async => movements),
     ],
     child: MaterialApp(home: Scaffold(body: tab)),
   ));
@@ -136,6 +144,63 @@ void main() {
     expect(find.textContaining('SALE'), findsNothing);
     expect(find.textContaining('2026-09-25'), findsNothing);
   });
+  // The words for each type inventory-svc writes to stock_movements.type
+  // (Domain.MoveType: RECEIVE, SALE, ADJUST, TRANSFER, RTV, RESERVE, RELEASE,
+  // BOND_RELEASE, YIELD, LOT_SPLIT and LOT_MERGE). A type the ledger never holds is not
+  // listed here, and one it does hold never falls through to its code.
+  group('every movement type the ledger holds reads in words', () {
+    const kinds = {
+      'RECEIVE': 'Receipt',
+      'SALE': 'Sale',
+      'ADJUST': 'Adjustment',
+      'TRANSFER': 'Transfer',
+      'RTV': 'Return to supplier',
+      'RESERVE': 'Hold placed',
+      'RELEASE': 'Hold released',
+      'BOND_RELEASE': 'Released from bond',
+      'YIELD': 'Breakdown',
+      'LOT_SPLIT': 'Lot split',
+      'LOT_MERGE': 'Lot merge',
+    };
+
+    test('each type has its own label, and no two read alike', () {
+      for (final e in kinds.entries) {
+        expect(movementTypeLabel(e.key), e.value, reason: e.key);
+      }
+      expect(kinds.keys.map(movementTypeLabel).toSet(), hasLength(kinds.length));
+    });
+
+    test('a code that is not a type of the ledger is still words, never raw', () {
+      expect(movementTypeLabel('TRANSFER_OUT'), 'Transfer out');
+      expect(movementTypeLabel('cycle_count'), 'Cycle count');
+    });
+
+    testWidgets('the Movements tab shows each with its quantity, in words', (tester) async {
+      final rows = [
+        for (final (i, e) in kinds.keys.indexed)
+          StockMovement(
+            id: 'm-$i',
+            storeId: _leeds,
+            variantId: _mug,
+            type: e,
+            qty: i.isEven ? 3 : -3,
+            createdAt: '2026-09-25T09:30:00Z',
+          ),
+      ];
+      await _pump(
+        tester,
+        const InventoryMovementsTab(),
+        size: const Size(1200, 1800),
+        movements: rows,
+      );
+      for (final (i, e) in kinds.entries.indexed) {
+        final sign = i.isEven ? '+' : '-';
+        expect(find.text('${e.value}  ${sign}3'), findsOneWidget, reason: e.key);
+        expect(find.textContaining(e.key), findsNothing, reason: 'never the raw code ${e.key}');
+      }
+    });
+  });
+
   // What a transfer moves is a quantity to three places: read the way the
   // app's language writes a number and sent as the decimal typed, or refused
   // under its field with no transfer raised. Parsed with a point, Romanian's

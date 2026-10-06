@@ -845,4 +845,386 @@ class PriceZonesIT {
     assertThat(count("repricing_proposals", RIVAL_TENANT), is(0));
     assertThat(resolvedAt(null), comparesEqualTo(new BigDecimal("10.00")));
   }
+
+  // ── typed money: a business's price is no finer than its currency, a rival's is as seen ──
+
+  private static String sighting(String price) {
+    return "{\"variantId\":\"" + V + "\",\"competitor\":\"Rival A\",\"price\":" + price + "}";
+  }
+
+  private static String ruleJson(String list, String name, String strategy, String value) {
+    return "{\"name\":\""
+        + name
+        + "\",\"priceListId\":\""
+        + list
+        + "\",\"strategy\":\""
+        + strategy
+        + "\",\"value\":"
+        + value
+        + ",\"floorPercent\":50,\"rounding\":\"NONE\",\"maxAgeDays\":14}";
+  }
+
+  /**
+   * A rival's price is an observation, not a price the business sets: kept as seen at the column's
+   * four places even where that is finer than the business's currency (forecourt fuel to a tenth of
+   * a penny). One the column cannot hold is refused: a fifth place, which it would round, or more
+   * whole digits than it has, which would overflow it. So is one that is not above zero.
+   */
+  @Test
+  void aRivalsPriceIsKeptAsSeenAndRefusedWhereTheColumnCannotHoldIt() throws Exception {
+    // tenant, a price finer than its currency but within four places, one past four places
+    String[][] markets = {
+      {DINAR_TENANT, "9.0005", "9.00005"}, // finer than a fils
+      {YEN_TENANT, "1250.5", "1250.12345"}, // a fraction of a yen
+      {T, "1.4599", "1.45999"}, // fuel to a tenth of a penny
+    };
+    for (String[] m : markets) {
+      JsonObject seen =
+          Envelopes.created(
+              call("POST", "/admin/competitor-prices", sighting(m[1]), m[0], "OWNER"));
+      assertThat(
+          m[1] + " is echoed as seen",
+          seen.getJsonNumber("price").bigDecimalValue(),
+          comparesEqualTo(new BigDecimal(m[1])));
+      assertThat(count("competitor_prices", m[0]), is(1));
+      assertThat(
+          m[1] + " is kept unrounded",
+          storedRivalPrices(m[0]),
+          is(new BigDecimal(m[1]).setScale(4).toPlainString()));
+
+      // A fifth place is refused by name, because the column holds four, and keeps nothing.
+      Response refused = call("POST", "/admin/competitor-prices", sighting(m[2]), m[0], "OWNER");
+      String body = refused.readEntity(String.class);
+      assertThat(m[2] + ": " + body, refused.getStatus(), is(400));
+      assertThat(Envelopes.parse(body).getString("code"), is("VALIDATION_FAILED"));
+      assertThat("names the field: " + body, body.contains("price:"), is(true));
+      assertThat("says why: " + body, body.contains("four places"), is(true));
+      assertThat("a refusal keeps nothing", count("competitor_prices", m[0]), is(1));
+
+      // The same in a bulk import refuses the lot, the good row with it.
+      assertThat(
+          code(
+              call(
+                  "POST",
+                  "/admin/competitor-prices/batch",
+                  "{\"observations\":[" + sighting(m[1]) + "," + sighting(m[2]) + "]}",
+                  m[0],
+                  "OWNER"),
+              400),
+          is("VALIDATION_FAILED"));
+      assertThat("the good row was not kept", count("competitor_prices", m[0]), is(1));
+
+      // Finer than the currency but within the column is a good row in an import too.
+      assertThat(
+          Envelopes.ok(
+                  call(
+                      "POST",
+                      "/admin/competitor-prices/batch",
+                      "{\"observations\":[" + sighting(m[1]) + "]}",
+                      m[0],
+                      "MANAGER"))
+              .getInt("recorded"),
+          is(1));
+      assertThat(count("competitor_prices", m[0]), is(2));
+
+      // And it is read back as seen, both sightings, never rounded to the currency.
+      JsonArray read =
+          Envelopes.okArray(call("GET", "/admin/competitor-prices", null, m[0], "OWNER"));
+      assertThat(read.size(), is(2));
+      for (int i = 0; i < read.size(); i++) {
+        assertThat(
+            read.getJsonObject(i).getJsonNumber("price").bigDecimalValue(),
+            comparesEqualTo(new BigDecimal(m[1])));
+      }
+    }
+    // A price within the currency's own units is accepted.
+    JsonObject pence =
+        Envelopes.created(call("POST", "/admin/competitor-prices", sighting("8.5"), T, "OWNER"));
+    assertThat(
+        pence.getJsonNumber("price").bigDecimalValue(), comparesEqualTo(new BigDecimal("8.5")));
+    // A price the column cannot hold is refused at the door too, not left to overflow (a 500).
+    assertThat(
+        code(
+            call("POST", "/admin/competitor-prices", sighting("1000000000000000"), T, "OWNER"),
+            400),
+        is("VALIDATION_FAILED"));
+    // A price too small to keep is no price: it would round to nothing in the column's four places.
+    assertThat(
+        code(call("POST", "/admin/competitor-prices", sighting("0.00001"), T, "OWNER"), 400),
+        is("VALIDATION_FAILED"));
+    // A price that is not above zero is refused by name too.
+    for (String notPositive : new String[] {"0", "-1.5"}) {
+      Response refused =
+          call("POST", "/admin/competitor-prices", sighting(notPositive), T, "OWNER");
+      String body = refused.readEntity(String.class);
+      assertThat(notPositive + ": " + body, refused.getStatus(), is(400));
+      assertThat(Envelopes.parse(body).getString("code"), is("VALIDATION_FAILED"));
+      assertThat("names the field: " + body, body.contains("price:"), is(true));
+    }
+    assertThat(count("competitor_prices", T), is(3));
+
+    // Another business's observations are its own: none came to the rival's, and the rival's owner
+    // and manager read none of ours, naming our variant.
+    assertThat(count("competitor_prices", RIVAL_TENANT), is(0));
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          Envelopes.okArray(
+                  call("GET", "/admin/competitor-prices?variantId=" + V, null, RIVAL_TENANT, role))
+              .size(),
+          is(0));
+    }
+    // A storekeeper, a cashier and a shopper may not record or read, in either business.
+    for (String tenant : new String[] {T, RIVAL_TENANT}) {
+      for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+        for (String price : new String[] {"1.4599", "1.45999"}) {
+          assertThat(
+              role,
+              call("POST", "/admin/competitor-prices", sighting(price), tenant, role).getStatus(),
+              is(403));
+        }
+        assertThat(
+            role,
+            call("GET", "/admin/competitor-prices?variantId=" + V, null, tenant, role).getStatus(),
+            is(403));
+      }
+    }
+    assertThat(count("competitor_prices", T), is(3));
+    assertThat(count("competitor_prices", RIVAL_TENANT), is(0));
+  }
+
+  /**
+   * A sighting is listed at the scale the POST answered it at: the currency's own minor units for a
+   * price that fits them (a pound as 8.50, a yen as 1250, a dinar as 8.500), and as it was seen
+   * when finer (1.4599). The column keeps four places in every currency, so the list is where that
+   * scale would show through. Scale is asserted with {@code is}, which compares it; {@code
+   * comparesEqualTo} would not.
+   */
+  @Test
+  void aSightingIsListedAtTheScaleItWasAnsweredAt() throws Exception {
+    // tenant, price as typed, price as answered
+    String[][] sightings = {
+      {T, "8.5", "8.50"}, // two places
+      {T, "1.4599", "1.4599"}, // finer than a penny
+      {T, "1250.0000", "1250.00"}, // zeros past the column are no places
+      {YEN_TENANT, "1250", "1250"}, // none
+      {YEN_TENANT, "1250.5", "1250.5"}, // finer than a yen
+      {DINAR_TENANT, "8.5", "8.500"}, // three places
+      {DINAR_TENANT, "9.0005", "9.0005"}, // finer than a fils
+    };
+    for (String[] s : sightings) {
+      JsonObject echoed =
+          Envelopes.created(
+              call("POST", "/admin/competitor-prices", sighting(s[1]), s[0], "OWNER"));
+      assertThat(
+          s[1] + " is answered at its scale",
+          echoed.getJsonNumber("price").bigDecimalValue(),
+          is(new BigDecimal(s[2])));
+      JsonArray listed =
+          Envelopes.okArray(
+              call("GET", "/admin/competitor-prices?variantId=" + V, null, s[0], "OWNER"));
+      JsonObject row = null;
+      for (int i = 0; i < listed.size(); i++) {
+        if (listed.getJsonObject(i).getString("id").equals(echoed.getString("id"))) {
+          row = listed.getJsonObject(i);
+        }
+      }
+      assertThat(s[0] + " " + s[1] + " is listed", row != null, is(true));
+      assertThat(
+          s[0] + " " + s[1] + " is listed at the scale it was answered at",
+          row.getJsonNumber("price").bigDecimalValue(),
+          is(new BigDecimal(s[2])));
+    }
+
+    // A sighting imported in bulk is listed the same way.
+    assertThat(
+        Envelopes.ok(
+                call(
+                    "POST",
+                    "/admin/competitor-prices/batch",
+                    "{\"observations\":[" + sighting("3") + "]}",
+                    DINAR_TENANT,
+                    "OWNER"))
+            .getInt("recorded"),
+        is(1));
+    JsonArray dinars =
+        Envelopes.okArray(
+            call("GET", "/admin/competitor-prices?variantId=" + V, null, DINAR_TENANT, "OWNER"));
+    assertThat(dinars.size(), is(3));
+    int imported = 0;
+    for (int i = 0; i < dinars.size(); i++) {
+      if (dinars.getJsonObject(i).getString("source").equals("IMPORT")) {
+        imported++;
+        assertThat(
+            dinars.getJsonObject(i).getJsonNumber("price").bigDecimalValue(),
+            is(new BigDecimal("3.000")));
+      }
+    }
+    assertThat(imported, is(1));
+
+    // Another business's owner and manager read none of it, naming our variant or none.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          Envelopes.okArray(
+                  call("GET", "/admin/competitor-prices?variantId=" + V, null, RIVAL_TENANT, role))
+              .size(),
+          is(0));
+      assertThat(
+          role,
+          Envelopes.okArray(call("GET", "/admin/competitor-prices", null, RIVAL_TENANT, role))
+              .size(),
+          is(0));
+    }
+    assertThat(count("competitor_prices", RIVAL_TENANT), is(0));
+  }
+
+  /** What a tenant's observations hold, as the column keeps them, newest first. */
+  private static String storedRivalPrices(String tenant) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            conn.prepareStatement(
+                "SELECT string_agg(price::text, ',' ORDER BY recorded_at DESC, id DESC)"
+                    + " FROM pricing.competitor_prices WHERE tenant_id = ?::uuid")) {
+      ps.setString(1, tenant);
+      try (var rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
+    }
+  }
+
+  /**
+   * A rival seen to a tenth of a penny drives a proposal at the list's own pence: the proposal says
+   * what was seen, unrounded, and the price it proposes is whole pence.
+   */
+  @Test
+  void aRivalSeenToATenthOfAPennyDrivesAProposalAtWholePenceAndIsAnsweredAsSeen() throws Exception {
+    String list = listIn(T, "GBP", "1.60");
+    JsonObject applied = matchAndApply(T, list, "1.4599", "NONE");
+    assertThat(applied.getString("status"), is("APPLIED"));
+    assertThat(
+        applied.getJsonNumber("competitorPrice").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("1.4599")));
+    assertThat(applied.getJsonNumber("competitorPrice").bigDecimalValue().scale(), is(4));
+    assertThat(
+        applied.getJsonNumber("proposedPrice").bigDecimalValue(), is(new BigDecimal("1.46")));
+    assertThat(applied.getJsonNumber("currentPrice").bigDecimalValue(), is(new BigDecimal("1.60")));
+    assertThat(storedPrices(T, list), is("1.46|1.60,1.46"));
+
+    JsonArray decided = Envelopes.okArray(get("/admin/repricing/proposals?status=APPLIED"));
+    assertThat(decided.size(), is(1));
+    assertThat(
+        decided.getJsonObject(0).getJsonNumber("competitorPrice").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("1.4599")));
+    // The other business sees none of it.
+    assertThat(
+        Envelopes.okArray(
+                call(
+                    "GET",
+                    "/admin/repricing/proposals?status=APPLIED",
+                    null,
+                    RIVAL_TENANT,
+                    "OWNER"))
+            .size(),
+        is(0));
+    assertThat(count("price_list_items", RIVAL_TENANT), is(0));
+  }
+
+  @Test
+  void aRepricingRulesAmountIsNoFinerThanTheBusinessCurrencyButAPercentageIsNoMoney()
+      throws Exception {
+    String yen = listIn(YEN_TENANT, "JPY", "1300");
+    String dinar = listIn(DINAR_TENANT, "KWD", "9.500");
+    // tenant, list, an amount one place too fine, one at the currency's own places
+    String[][] markets = {
+      {YEN_TENANT, yen, "0.5", "5"},
+      {DINAR_TENANT, dinar, "0.0005", "0.005"},
+    };
+    for (String[] m : markets) {
+      Response refused =
+          call(
+              "POST",
+              "/admin/repricing/rules",
+              ruleJson(m[1], "cut", "UNDERCUT_AMOUNT", m[2]),
+              m[0],
+              "OWNER");
+      String body = refused.readEntity(String.class);
+      assertThat(m[2] + ": " + body, refused.getStatus(), is(400));
+      assertThat(Envelopes.parse(body).getString("code"), is("VALIDATION_FAILED"));
+      assertThat("names the field: " + body, body.contains("value:"), is(true));
+      assertThat("a refusal keeps nothing", count("repricing_rules", m[0]), is(0));
+
+      JsonObject made =
+          Envelopes.created(
+              call(
+                  "POST",
+                  "/admin/repricing/rules",
+                  ruleJson(m[1], "cut", "UNDERCUT_AMOUNT", m[3]),
+                  m[0],
+                  "MANAGER"));
+      assertThat(
+          made.getJsonNumber("value").bigDecimalValue(), comparesEqualTo(new BigDecimal(m[3])));
+      // A percentage is no money: 12.5% off is as good to a yen business as to any other.
+      Envelopes.created(
+          call(
+              "POST",
+              "/admin/repricing/rules",
+              ruleJson(m[1], "pct", "UNDERCUT_PERCENT", "12.5"),
+              m[0],
+              "OWNER"));
+      assertThat(count("repricing_rules", m[0]), is(2));
+    }
+    // The pound business too: pence and no finer.
+    standardVat();
+    String pounds = priceList("Everywhere", null, "10.00");
+    assertThat(
+        code(
+            post("/admin/repricing/rules", ruleJson(pounds, "cut", "UNDERCUT_AMOUNT", "0.505")),
+            400),
+        is("VALIDATION_FAILED"));
+    Envelopes.created(
+        post("/admin/repricing/rules", ruleJson(pounds, "cut", "UNDERCUT_AMOUNT", "0.50")));
+    assertThat(count("repricing_rules", T), is(1));
+
+    // Another business's staff naming our list are told it is not theirs, whatever the amount;
+    // below management nobody gets as far as the amount.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          code(
+              call(
+                  "POST",
+                  "/admin/repricing/rules",
+                  ruleJson(pounds, "steal", "UNDERCUT_AMOUNT", "0.505"),
+                  RIVAL_TENANT,
+                  role),
+              400),
+          is("PRICING_LIST_UNKNOWN"));
+      assertThat(
+          role,
+          code(
+              call(
+                  "POST",
+                  "/admin/repricing/rules",
+                  ruleJson(pounds, "steal", "UNDERCUT_AMOUNT", "0.50"),
+                  RIVAL_TENANT,
+                  role),
+              400),
+          is("PRICING_LIST_UNKNOWN"));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertThat(
+          role,
+          call(
+                  "POST",
+                  "/admin/repricing/rules",
+                  ruleJson(pounds, "cut2", "UNDERCUT_AMOUNT", "0.505"),
+                  T,
+                  role)
+              .getStatus(),
+          is(403));
+    }
+    assertThat(count("repricing_rules", RIVAL_TENANT), is(0));
+    assertThat(count("repricing_rules", T), is(1));
+  }
 }

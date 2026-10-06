@@ -128,13 +128,6 @@ public final class PostgresSupport implements AutoCloseable {
   }
 
   /**
-   * Run Flyway migrations from the given location (e.g. {@code "classpath:db/migration"}).
-   *
-   * @param location the Flyway migration location to apply
-   * @return this, for chaining after {@link #start()}
-   * @throws org.flywaydb.core.api.FlywayException if a migration fails to apply
-   */
-  /**
    * Points a service's Helidon test at this database and switches discovery and Kafka off: the
    * static block every integration test opens with.
    *
@@ -152,10 +145,21 @@ public final class PostgresSupport implements AutoCloseable {
     return this;
   }
 
+  /**
+   * Run Flyway migrations from the given location (e.g. {@code "classpath:db/migration"}). A file
+   * whose name Flyway cannot read ({@code V2_b.sql}, {@code v3__c.sql}) fails the call instead of
+   * being left out of it.
+   *
+   * @param location the Flyway migration location to apply
+   * @return this, for chaining after {@link #start()}
+   * @throws org.flywaydb.core.api.FlywayException if a migration fails to apply or a file name is
+   *     not one Flyway recognises
+   */
   public PostgresSupport migrate(String location) {
     Flyway.configure()
         .dataSource(container.getJdbcUrl(), container.getUsername(), container.getPassword())
         .locations(location)
+        .validateMigrationNaming(true)
         .load()
         .migrate();
     return this;
@@ -253,8 +257,8 @@ public final class PostgresSupport implements AutoCloseable {
 
   /**
    * @return every column, in any schema, whose default calls a uuid generator — the same check as
-   *     common-service's afterMigrate.sql, made here because a service that fails to migrate only
-   *     logs a warning and keeps running
+   *     common-service's afterMigrate.sql, made here because FlywayRunner logs a failed
+   *     afterMigrate check as a warning and keeps the service running
    */
   public List<String> idGeneratingDefaults() {
     return columnsMatching(ID_GENERATING_DEFAULTS);

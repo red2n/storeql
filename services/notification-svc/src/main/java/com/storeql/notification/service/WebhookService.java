@@ -222,7 +222,7 @@ public class WebhookService {
         repo.delivery(tenantId, id)
             .orElseThrow(
                 () -> ApiException.notFound("WEBHOOK_DELIVERY_NOT_FOUND", "No such delivery"));
-    return new Detail(d, repo.attempts(d.id()));
+    return new Detail(d, repo.attempts(tenantId, d.id()));
   }
 
   /** Sent again by hand, now, whatever state it was in; the tries so far stay on the record. */

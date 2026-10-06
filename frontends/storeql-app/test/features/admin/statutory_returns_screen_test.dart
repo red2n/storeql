@@ -206,7 +206,7 @@ void main() {
         'state': 'DUE',
         'citation': 'VATA 1994 sch.11 para.2',
         'exportService': 'pricing-svc',
-        'exportPath': '/admin/vat-return',
+        'exportPath': '/vat-return',
       })}],"outstanding":[]}}';
     final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = tenant;
     tester.view.physicalSize = const Size(1200, 2200);
@@ -233,7 +233,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('pricing-svc'), findsNothing);
-    expect(find.textContaining('/admin/vat-return'), findsNothing);
+    expect(find.textContaining('/vat-return'), findsNothing);
     await tester.tap(find.text('Export from Pricing › VAT Return'));
     await tester.pumpAndSettle();
     // Straight to the VAT Return tab, not Pricing's first.

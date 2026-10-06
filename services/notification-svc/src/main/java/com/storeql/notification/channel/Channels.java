@@ -39,6 +39,25 @@ public class Channels {
     };
   }
 
+  /**
+   * The name {@code notification_log.channel} holds for a channel asked for by name, for reading
+   * the log by channel. The log records the carrier that carried a message (APP, SMTP, MQTT, SMS or
+   * PUSH), never EMAIL, which is the name of the deployment's configured default channel: so EMAIL
+   * stands for that channel's own carrier ({@code SMTP} or {@code MQTT} where the deployment sends
+   * outside the app, {@code APP} where it keeps the in-app feed alone), and every other name — SMS,
+   * PUSH, APP, or a carrier's own such as SMTP — stands for itself.
+   *
+   * @param name a channel or carrier name in any case, with or without surrounding spaces
+   * @return the name to look for in the log, in upper case; null when no name is given
+   */
+  public String carrierOf(String name) {
+    if (name == null || name.isBlank()) {
+      return null;
+    }
+    String n = name.trim().toUpperCase(Locale.ROOT);
+    return Channel.EMAIL.equals(n) ? configured.name() : n;
+  }
+
   public NotificationChannel configured() {
     return configured;
   }

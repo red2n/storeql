@@ -104,16 +104,18 @@ public class ReportingRepository extends BaseJdbcRepository {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO open_supply_lines"
-                + " (id, tenant_id, from_store_id, to_store_id, variant_id, qty, event_id)"
-                + " VALUES (?,?,?,?,?,?,?)"
+                + " (id, tenant_id, transfer_order_id, from_store_id, to_store_id, variant_id,"
+                + "  qty, event_id)"
+                + " VALUES (?,?,?,?,?,?,?,?)"
                 + " ON CONFLICT (id) DO NOTHING")) {
       ps.setObject(1, line.id());
       ps.setObject(2, line.tenantId());
-      ps.setObject(3, line.fromStoreId());
-      ps.setObject(4, line.toStoreId());
-      ps.setObject(5, line.variantId());
-      ps.setBigDecimal(6, line.qty());
-      ps.setObject(7, line.eventId());
+      ps.setObject(3, line.transferOrderId());
+      ps.setObject(4, line.fromStoreId());
+      ps.setObject(5, line.toStoreId());
+      ps.setObject(6, line.variantId());
+      ps.setBigDecimal(7, line.qty());
+      ps.setObject(8, line.eventId());
       ps.executeUpdate();
     }
   }
@@ -124,8 +126,15 @@ public class ReportingRepository extends BaseJdbcRepository {
    * takes the mark with it, so the redelivered event is applied rather than swallowed. Returns
    * false if this consumer already processed the event.
    *
+   * <p>A transfer that has already landed opens nothing: the receipt and the shipment travel on two
+   * topics, so the receipt can be read first, and lines opened after it would never be retired. The
+   * receipt leaves a mark for exactly that (see {@link #retireSupplyLines}); both sides take the
+   * transfer's lock before they read or write its lines, so a shipment and its receipt handled at
+   * the same moment by two consumers cannot each miss the other.
+   *
    * @param tenantId owning tenant
-   * @param eventId the {@code TransferOrderShipped} event id, retained as the retirement key
+   * @param transferOrderId the transfer order, which the receipt names too and retires its lines by
+   * @param eventId the {@code TransferOrderShipped} event id, the dedupe key
    * @param consumerName this consumer's dedupe name
    * @param fromStoreId the shipping store
    * @param toStoreId the receiving store
@@ -135,6 +144,7 @@ public class ReportingRepository extends BaseJdbcRepository {
    */
   public boolean applyTransferShippedOnce(
       UUID tenantId,
+      UUID transferOrderId,
       UUID eventId,
       String consumerName,
       UUID fromStoreId,
@@ -146,12 +156,17 @@ public class ReportingRepository extends BaseJdbcRepository {
           if (!markProcessedIfNewTx(c, eventId, consumerName)) {
             return false;
           }
+          lockTransfer(c, tenantId, transferOrderId);
+          if (hasLanded(c, tenantId, transferOrderId)) {
+            return true; // received before it was read as shipped: nothing is in transit
+          }
           for (int i = 0; i < variantIds.size(); i++) {
             insertSupplyLineTx(
                 c,
                 new OpenSupplyLine(
                     Ids.newId(),
                     tenantId,
+                    transferOrderId,
                     fromStoreId,
                     toStoreId,
                     variantIds.get(i),
@@ -164,18 +179,67 @@ public class ReportingRepository extends BaseJdbcRepository {
   }
 
   /**
-   * Retires every in-transit line opened by one shipment.
+   * Retires every in-transit line of one transfer, and notes that it has landed.
    *
-   * <p>Not tenant-scoped, unusually for this codebase: {@code event_id} is a globally unique UUIDv7
-   * that already pins the rows to the tenant that emitted the shipment.
+   * <p>Found by the business and the transfer order: a {@code TransferOrderReceived} has an event
+   * id of its own, so it cannot name the shipment's. Another business's receipt naming the same
+   * transfer order id retires nothing, and its note never stops this business's shipment opening.
    *
-   * @param eventId the {@code TransferOrderShipped} event id the lines were opened under
+   * <p>The note is a {@code processed_events} mark under a name of its own, keyed by an id derived
+   * from the business and the transfer, so the scheduled purge of old marks removes it with the
+   * others. Retiring twice finds nothing the second time.
+   *
+   * @param tenantId owning tenant, the first condition of the delete
+   * @param transferOrderId the transfer order that landed
    */
-  public void deleteSupplyLinesByEvent(UUID eventId) {
-    exec(
-        "DELETE FROM open_supply_lines WHERE event_id = ?",
-        ps -> ps.setObject(1, eventId),
-        "delete supply lines by event");
+  public void retireSupplyLines(UUID tenantId, UUID transferOrderId) {
+    inTx(
+        c -> {
+          lockTransfer(c, tenantId, transferOrderId);
+          markProcessedIfNewTx(c, landedKey(tenantId, transferOrderId), TRANSFER_LANDED);
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "DELETE FROM open_supply_lines WHERE tenant_id = ? AND transfer_order_id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, transferOrderId);
+            ps.executeUpdate();
+          }
+          return null;
+        },
+        "retire supply lines");
+  }
+
+  /** The consumer name a landed transfer's note is kept under, apart from every event consumer. */
+  private static final String TRANSFER_LANDED = "reporting-svc/transfer-landed";
+
+  /** The note's key: the same for the same business and transfer, and for no other. */
+  private static UUID landedKey(UUID tenantId, UUID transferOrderId) {
+    return Ids.derived(tenantId, "transfer-landed:" + transferOrderId);
+  }
+
+  private static boolean hasLanded(Connection c, UUID tenantId, UUID transferOrderId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement("SELECT 1 FROM processed_events WHERE event_id = ? AND consumer = ?")) {
+      ps.setObject(1, landedKey(tenantId, transferOrderId));
+      ps.setString(2, TRANSFER_LANDED);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
+  }
+
+  /**
+   * Orders a transfer's shipment and its receipt. Without it, the two handled at the same moment by
+   * two consumers could each miss the other's uncommitted row, and the lines would stay open for a
+   * transfer that had landed.
+   */
+  private static void lockTransfer(Connection c, UUID tenantId, UUID transferOrderId)
+      throws SQLException {
+    try (var ps = c.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")) {
+      ps.setString(1, "transfer|" + tenantId + "|" + transferOrderId);
+      ps.execute();
+    }
   }
 
   // ── Queries ───────────────────────────────────────────────────────────────
@@ -234,8 +298,8 @@ public class ReportingRepository extends BaseJdbcRepository {
   public List<OpenSupplyLine> querySupplyLines(UUID tenantId, Set<UUID> stores, UUID variantId) {
     StringBuilder sb =
         new StringBuilder(
-            "SELECT id, tenant_id, from_store_id, to_store_id, variant_id, qty, event_id"
-                + " FROM open_supply_lines WHERE tenant_id = ?");
+            "SELECT id, tenant_id, transfer_order_id, from_store_id, to_store_id, variant_id, qty,"
+                + " event_id FROM open_supply_lines WHERE tenant_id = ?");
     if (stores != null) sb.append(" AND to_store_id = ANY(?)");
     if (variantId != null) sb.append(" AND variant_id = ?");
     return query(
@@ -739,6 +803,7 @@ public class ReportingRepository extends BaseJdbcRepository {
     return new OpenSupplyLine(
         rs.getObject("id", UUID.class),
         rs.getObject("tenant_id", UUID.class),
+        rs.getObject("transfer_order_id", UUID.class),
         rs.getObject("from_store_id", UUID.class),
         rs.getObject("to_store_id", UUID.class),
         rs.getObject("variant_id", UUID.class),

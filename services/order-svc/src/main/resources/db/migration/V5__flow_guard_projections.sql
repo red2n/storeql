@@ -21,4 +21,4 @@ CREATE TABLE store_status (
     status            TEXT        NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | SUSPENDED | CLOSED
     status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_store_status_tenant ON store_status (tenant_id, store_id);
+CREATE INDEX idx_store_status_tenant_store ON store_status (tenant_id, store_id);

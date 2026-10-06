@@ -49,11 +49,12 @@ CREATE TABLE loyalty_point_lots (
 );
 CREATE INDEX idx_loyalty_lots_open ON loyalty_point_lots (tenant_id, customer_id, expires_at, earned_at)
     WHERE remaining > 0;
--- Not led by tenant_id. The expiry sweep runs one business at a time (LoyaltyProgrammeRepository.sweep,
--- which reads its lots by tenant_id), but this partial index is on expires_at alone: the lots due
--- across every business are read as one range, and the business's own rows are filtered from them.
--- A (tenant_id, expires_at) index would serve each business's sweep on its own. The choice is open:
--- changing the index is a schema change, for the owner to decide.
--- The table's tenant-led index is idx_loyalty_lots_open, which is (tenant_id, customer_id, ...), so
--- the sweep cannot seek into it by expires_at.
-CREATE INDEX idx_loyalty_lots_due ON loyalty_point_lots (expires_at) WHERE remaining > 0 AND expires_at IS NOT NULL;
+-- The expiry sweep runs one business at a time (LoyaltyProgrammeRepository.sweep, whose first
+-- statement is DUE_CUSTOMERS_SQL: tenant_id = ? and expires_at <= ?). This index leads with tenant_id
+-- and then expires_at, so a business's sweep reads only its own dead lots and never visits another
+-- business's; idx_loyalty_lots_open cannot do that, because customer_id sits between its tenant_id
+-- and its expires_at. It is partial, on the lots that can still die (points left, an expiry set), so
+-- spent and expired lots and lots that never expire stay out of it. No query reads lots across
+-- businesses, so no index is kept without tenant_id.
+CREATE INDEX idx_loyalty_lots_due ON loyalty_point_lots (tenant_id, expires_at)
+    WHERE remaining > 0 AND expires_at IS NOT NULL;

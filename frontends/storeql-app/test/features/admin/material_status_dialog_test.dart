@@ -37,9 +37,18 @@ void main() {
     expect(find.text('In quarantine'), findsOneWidget);
     await tester.tap(find.text('In quarantine'));
     await tester.pumpAndSettle();
-    for (final words in ['Available', 'In quarantine', 'On hold', 'Rejected']) {
+    for (final words in [
+      'Available',
+      'In quarantine',
+      'Under inspection',
+      'Damaged',
+      'Recalled',
+    ]) {
       expect(find.text(words), findsWidgets, reason: words);
     }
+    // The two choices the API refuses are not offered.
+    expect(find.text('On hold'), findsNothing);
+    expect(find.text('Rejected'), findsNothing);
     expect(find.text('Quarantine'), findsNothing);
     expect(find.text('Hold'), findsNothing);
   });

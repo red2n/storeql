@@ -70,6 +70,48 @@ public class PutawayRepository extends BaseJdbcRepository {
     }
   }
 
+  /** Whether the batch has a task waiting for a person to place it. */
+  static boolean hasOpenTaskTx(Connection c, UUID tenantId, UUID batchId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT EXISTS (SELECT 1 FROM putaway_tasks WHERE tenant_id = ? AND batch_id = ?"
+                + " AND status = 'OPEN')")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, batchId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() && rs.getBoolean(1);
+      }
+    }
+  }
+
+  /**
+   * Brings the batch's open task in line with what the batch now holds: a task stands for the whole
+   * batch, which a placement puts in one zone, so after stock moves out of it (or into it) the task
+   * says what the batch holds, and a batch left empty has nothing to place. Called inside the
+   * transaction that moved the stock; a batch with no open task is left alone.
+   */
+  static void syncOpenTaskTx(Connection c, UUID tenantId, UUID batchId) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE putaway_tasks t SET qty = b.remaining_qty FROM inventory_batches b"
+                + " WHERE t.tenant_id = ? AND t.batch_id = ? AND t.status = 'OPEN'"
+                + " AND b.tenant_id = t.tenant_id AND b.id = t.batch_id AND b.remaining_qty > 0")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, batchId);
+      ps.executeUpdate();
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "DELETE FROM putaway_tasks t WHERE t.tenant_id = ? AND t.batch_id = ?"
+                + " AND t.status = 'OPEN' AND NOT EXISTS (SELECT 1 FROM inventory_batches b"
+                + " WHERE b.tenant_id = t.tenant_id AND b.id = t.batch_id"
+                + " AND b.remaining_qty > 0)")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, batchId);
+      ps.executeUpdate();
+    }
+  }
+
   // ── Rules ──────────────────────────────────────────────────────────────────
 
   /** Sets the rule, replacing the zone of an earlier one for the same product (or default). */

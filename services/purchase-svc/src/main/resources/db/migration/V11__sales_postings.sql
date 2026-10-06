@@ -15,7 +15,9 @@
 --
 -- The sale, tender and refund postings carry the order as their source, so the receipts clearing
 -- account nets to zero per order once a sale is paid and confirmed; anything left open is listed by
--- GET /nominal-ledger/sales-clearing.
+-- GET /nominal-ledger/sales-clearing. A gift card loaded in a sale (Dr 1105 / Cr 2310), and its
+-- reversal when that sale is voided or cancelled (Dr 2310 / Cr 1105), post to 1105 with the order as
+-- their source too (V13), so they net to zero on the order with the rest.
 
 -- Consumer-level dedupe, as every consuming service keeps it (golden rule #7). The key is
 -- (event_id, consumer), not event_id alone: one consumer's mark must not stop another consumer from

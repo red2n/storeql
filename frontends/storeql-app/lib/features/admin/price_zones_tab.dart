@@ -174,6 +174,12 @@ String _trim(double v) {
 
 String _money(double v, String currency) => AppFormat.money(v, currencyCode: currency);
 
+/// A rival's price as it was seen. It is an observation the API keeps to four
+/// places and answers unrounded, so it can be finer than the currency's units
+/// (fuel to a tenth of a penny): [_money] would round it to a price nobody saw.
+String _rivalMoney(double v, String currency) =>
+    AppFormat.money(v, currencyCode: currency, maxDecimals: 4);
+
 /// The day a price was seen, as a date: `20 Sept 2026`.
 String _seen(String iso) => AppFormat.date(iso);
 
@@ -603,7 +609,7 @@ class _CompetitorSection extends ConsumerWidget {
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(Icons.storefront_outlined, color: cs.onSurfaceVariant),
-                        title: Text('${c.competitor} · ${_money(c.price, c.currency)}'),
+                        title: Text('${c.competitor} · ${_rivalMoney(c.price, c.currency)}'),
                         subtitle: Text(
                           '${variantDisplayName(c.variantId, labels)} · seen ${_seen(c.observedOn)} ${zoneName(c.zoneId)}'
                           '${c.source == 'IMPORT' ? ' · imported' : ''}',
@@ -914,7 +920,7 @@ class _RepricingSection extends ConsumerWidget {
                         ),
                         subtitle: Text(
                           '${variantDisplayName(p.variantId, labels)} · ${p.competitor} at '
-                          '${_money(p.competitorPrice, p.currency)}, seen ${_seen(p.observedOn)}',
+                          '${_rivalMoney(p.competitorPrice, p.currency)}, seen ${_seen(p.observedOn)}',
                         ),
                         trailing: management
                             ? Row(

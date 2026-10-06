@@ -115,8 +115,8 @@ public class WebhookRepository extends BaseJdbcRepository {
 
   private static final String ATTEMPTS =
       "SELECT id, tenant_id, delivery_id, attempt, attempted_at, status_code, error,"
-          + " response_snippet, duration_ms FROM webhook_attempts WHERE delivery_id = ?"
-          + " ORDER BY attempt";
+          + " response_snippet, duration_ms FROM webhook_attempts WHERE tenant_id = ?"
+          + " AND delivery_id = ? ORDER BY attempt";
 
   private static final String REDELIVER =
       "UPDATE webhook_deliveries SET status = 'PENDING', next_attempt_at = ? WHERE tenant_id = ?"
@@ -393,10 +393,14 @@ public class WebhookRepository extends BaseJdbcRepository {
         .findFirst();
   }
 
-  public List<Attempt> attempts(UUID deliveryId) {
+  /** The tries at one delivery of a business, oldest first; another business's are not found. */
+  public List<Attempt> attempts(UUID tenantId, UUID deliveryId) {
     return query(
         ATTEMPTS,
-        ps -> ps.setObject(1, deliveryId),
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, deliveryId);
+        },
         WebhookRepository::readAttempt,
         "webhook attempts");
   }

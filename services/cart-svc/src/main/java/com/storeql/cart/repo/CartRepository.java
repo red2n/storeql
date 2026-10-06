@@ -277,58 +277,57 @@ public class CartRepository extends BaseJdbcRepository {
   }
 
   /**
-   * Marks the customer's ACTIVE cart at the given store as CHECKED_OUT. Called when an OrderPlaced
-   * event arrives for a known customer. No-op if no matching cart exists.
+   * Records an {@code OrderPlaced} as handled and, only the first time this event is seen, marks
+   * the shopper's ACTIVE cart CHECKED_OUT, on one transaction: a close that fails leaves no record,
+   * so the redelivery does the work, and a redelivery of an event that did close one finds its
+   * record and closes nothing (golden rule 7). Without the record, the update would close a newer
+   * ACTIVE cart the shopper opened since the first delivery. A shopper with no cart to close still
+   * has the event recorded.
    *
    * <p>{@code RETURNING id} gives us the affected cart's id (at most one, per the unique
    * active-cart-per-customer index), so both the row cache and the items cache are evicted
    * immediately instead of waiting out {@code CART_TTL_SECONDS}.
+   *
+   * @param eventId the event's {@code eventId}, or an id derived from its order when it has none
+   * @param consumer the name this consumer records its events under
+   * @param tenantId owning tenant; the first condition of the update
+   * @param customerId the shopper's login, which is what holds a cart
+   * @param storeId the store a till sale was made at, which a cart must also name; {@code null} for
+   *     an online order, which closes the shopper's cart whichever store it was filled at: a
+   *     delivery resolves to the store serving the postcode, or is split across several (order
+   *     orchestration), so the store the cart names is not the order's to match
+   * @return {@code true} when this was the first delivery of the event, {@code false} for a
+   *     redelivery, which changed nothing
    */
-  public void markCheckedOutByCustomerAndStore(UUID tenantId, UUID customerId, UUID storeId) {
-    UUID cartId =
+  public boolean markCheckedOutOnce(
+      UUID eventId, String consumer, UUID tenantId, UUID customerId, UUID storeId) {
+    record Outcome(boolean first, UUID cartId) {}
+    Outcome outcome =
         inTx(
             c -> {
-              try (var ps =
-                  c.prepareStatement(
-                      "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
+              if (!markProcessedIfNewTx(c, eventId, consumer)) {
+                return new Outcome(false, null);
+              }
+              String sql =
+                  storeId == null
+                      ? "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
+                          + " WHERE tenant_id = ? AND customer_id = ? AND status = 'ACTIVE'"
+                          + " RETURNING id"
+                      : "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
                           + " WHERE tenant_id = ? AND customer_id = ? AND store_id = ?"
-                          + " AND status = 'ACTIVE' RETURNING id")) {
+                          + " AND status = 'ACTIVE' RETURNING id";
+              try (var ps = c.prepareStatement(sql)) {
                 ps.setObject(1, tenantId);
                 ps.setObject(2, customerId);
-                ps.setObject(3, storeId);
+                if (storeId != null) ps.setObject(3, storeId);
                 try (var rs = ps.executeQuery()) {
-                  return rs.next() ? rs.getObject("id", UUID.class) : null;
+                  return new Outcome(true, rs.next() ? rs.getObject("id", UUID.class) : null);
                 }
               }
             },
             "mark cart checked out");
-    evictCheckedOut(tenantId, customerId, cartId);
-  }
-
-  /**
-   * Marks the shopper's ACTIVE cart checked out, whichever store it was filled at: an online order
-   * is placed at the store its delivery resolves to, or split across several (order orchestration),
-   * and a shopper has one active cart in a tenant (the unique index), so the store the cart names
-   * is not the order's to match.
-   */
-  public void markCheckedOutByCustomer(UUID tenantId, UUID customerId) {
-    UUID cartId =
-        inTx(
-            c -> {
-              try (var ps =
-                  c.prepareStatement(
-                      "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
-                          + " WHERE tenant_id = ? AND customer_id = ? AND status = 'ACTIVE'"
-                          + " RETURNING id")) {
-                ps.setObject(1, tenantId);
-                ps.setObject(2, customerId);
-                try (var rs = ps.executeQuery()) {
-                  return rs.next() ? rs.getObject("id", UUID.class) : null;
-                }
-              }
-            },
-            "mark the shopper's cart checked out");
-    evictCheckedOut(tenantId, customerId, cartId);
+    if (outcome.first()) evictCheckedOut(tenantId, customerId, outcome.cartId());
+    return outcome.first();
   }
 
   private void evictCheckedOut(UUID tenantId, UUID customerId, UUID cartId) {

@@ -12,9 +12,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Item relationships (Gap #32): e.g. substitute/accessory links between variants. Extracted from
- * {@code ProductRepository}: self-contained, no outbox events, no coupling to any other aggregate,
- * so it only needs the JDBC infra inherited from {@link BaseJdbcRepository}.
+ * Item relationships (Gap #32): e.g. substitute/accessory links between variants. A link is
+ * inserted and deleted, never updated; removing the row is how it is severed. Extracted from {@code
+ * ProductRepository}: self-contained, no outbox events, no coupling to any other aggregate, so it
+ * only needs the JDBC infra inherited from {@link BaseJdbcRepository}.
  */
 @ApplicationScoped
 public class ItemRelationshipRepository extends BaseJdbcRepository {

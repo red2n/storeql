@@ -390,6 +390,10 @@ class NetworkIT {
                 + transferId
                 + "'");
     assertThat(shipped, containsString("\"variantId\":\"" + APPLES + "\",\"qty\":19.5"));
+    assertThat(
+        "a proposed transfer is stock in transit until it is received",
+        shipped,
+        containsString("\"transferType\":\"INTRANSIT\""));
     String received =
         Envelopes.scalar(
             PG,
@@ -399,6 +403,68 @@ class NetworkIT {
                 + "'");
     assertThat(received, containsString("\"fromStoreId\":\"" + DC + "\""));
     assertThat(received, containsString("\"qty\":19.5"));
+  }
+
+  /**
+   * reporting-svc holds a shipped transfer as stock in transit until the receipt that closes it, so
+   * the shipment says which kind it is: a DIRECT transfer lands as it ships and no receipt follows.
+   */
+  @Test
+  void aShippedTransferSaysWhetherItIsInTransitOrLandsAsItShips() {
+    receive(DC, APPLES, 50);
+    String direct = transfer(null, "5");
+    String inTransit = transfer("INTRANSIT", "7");
+
+    Envelopes.ok(call("POST", "/admin/inventory/transfers/" + direct + "/ship", "{}", "OWNER"));
+    Envelopes.ok(call("POST", "/admin/inventory/transfers/" + inTransit + "/ship", "{}", "OWNER"));
+
+    String directEvent = shippedEvent(direct);
+    assertThat(directEvent, containsString("\"transferType\":\"DIRECT\""));
+    assertThat(directEvent, containsString("\"variantId\":\"" + APPLES + "\",\"qty\":5"));
+    assertThat(shippedEvent(inTransit), containsString("\"transferType\":\"INTRANSIT\""));
+    // A DIRECT transfer is received as it ships (its status is RECEIVED, not SHIPPED), so there is
+    // nothing to receive and no TransferOrderReceived ever follows it.
+    assertThat(
+        code(call("POST", "/admin/inventory/transfers/" + direct + "/receive", "{}", "OWNER"), 422),
+        is("TRANSFER_ORDER_NOT_RECEIVABLE"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*)::text FROM inventory.outbox WHERE event_type = 'TransferOrderReceived'"
+                + " AND aggregate_id = '"
+                + direct
+                + "'"),
+        is("0"));
+  }
+
+  /** A transfer from the warehouse to Leeds; no type asked for makes a DIRECT one. */
+  private String transfer(String type, String qty) {
+    return Envelopes.created(
+            call(
+                "POST",
+                "/admin/inventory/transfers",
+                "{\"fromStoreId\":\""
+                    + DC
+                    + "\",\"toStoreId\":\""
+                    + LEEDS
+                    + "\","
+                    + (type == null ? "" : "\"transferType\":\"" + type + "\",")
+                    + "\"lines\":[{\"variantId\":\""
+                    + APPLES
+                    + "\",\"requestedQty\":"
+                    + qty
+                    + "}]}",
+                "OWNER"))
+        .getString("id");
+  }
+
+  private static String shippedEvent(String transferId) {
+    return Envelopes.scalar(
+        PG,
+        "SELECT payload FROM inventory.outbox WHERE event_type = 'TransferOrderShipped' AND"
+            + " aggregate_id = '"
+            + transferId
+            + "'");
   }
 
   @Test

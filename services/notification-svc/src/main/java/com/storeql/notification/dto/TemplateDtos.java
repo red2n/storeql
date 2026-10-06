@@ -65,13 +65,31 @@ public final class TemplateDtos {
   public record TemplateView(
       String type,
       String form,
-      String language,
+      @Schema(description = "The language asked for") String language,
       @Schema(
               description =
-                  "BUSINESS for the business's own words, DEFAULT for the platform's — which are"
-                      + " the starting point for writing one")
+                  "The language the words shown are written in: the one asked for, the business's"
+                      + " default language, or the platform's (en)")
+          String wordsLanguage,
+      @Schema(
+              description =
+                  "BUSINESS for the business's own words in this language; DEFAULT_LANGUAGE when a"
+                      + " message in this language goes out in the business's words in its default"
+                      + " language instead, because it has no live version in this one (never"
+                      + " written, or retired) or its live version cannot be used"
+                      + " (storedWordsUnusable); DEFAULT for the platform's. Whichever it is, the"
+                      + " words shown are the ones that go out, and the starting point for writing"
+                      + " the language's own")
           String source,
-      @Schema(description = "The business's version; null for the platform's words")
+      @Schema(
+              description =
+                  "True when the business has a live version in this language whose words do not"
+                      + " parse, so it is passed over and the words shown are the next ones in the"
+                      + " order. It is still in the history; saving a new version replaces it")
+          boolean storedWordsUnusable,
+      @Schema(
+              description =
+                  "The version of the business's words shown; null for the platform's words")
           Integer version,
       String subject,
       String body,

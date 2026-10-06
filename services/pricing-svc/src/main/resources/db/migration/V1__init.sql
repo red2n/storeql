@@ -10,15 +10,23 @@
 -- Three groups declare a scale. promotions.value is NUMERIC(18,4): a percentage for PERCENT and
 -- BASKET_PERCENT, otherwise an amount in the business's currency. competitor_prices.price and the
 -- repricing amounts are NUMERIC(19,4), and the VAT return's boxes are NUMERIC(18,2), in pounds.
--- Known gap, not the rule above: nothing refuses a promotion's value, a repricing rule's value or a
--- competitor price typed finer than its currency. The promotion engine rounds a value half up to the currency's minor
--- units when it applies it, and a competitor price is stored at the column's four places, which
--- rounds one typed finer. Refusing both is a follow-up (a service-layer change).
+-- The service holds the prices a business sets to the rule above before it writes them, so a
+-- column's four places never round one: the value of a FLAT, BASKET_FLAT, SPEND_THRESHOLD or
+-- MIX_MATCH promotion and a repricing rule's UNDERCUT_AMOUNT value are refused when finer than the
+-- business's currency. A rival's price is the exception, on purpose: it is an observation of what
+-- a competitor charges, not a price the business sets, so it is kept as seen at the column's four
+-- places and may be finer than the currency (forecourt fuel to a tenth of a penny); a price finer
+-- than the column's four places is refused, because the column would round it. A percentage
+-- (PERCENT, BASKET_PERCENT, UNDERCUT_PERCENT) is not money and is kept at the column's four
+-- places; the promotion engine rounds the amount it takes off half up to the currency's minor
+-- units when it applies it.
 -- Percentages and VAT rates are not money and keep their scales: NUMERIC(5,2) and NUMERIC(5,4)
 -- (a VAT rate 0.2000 = 20%).
 -- Times: TIMESTAMPTZ UTC. Every row of a business's data carries tenant_id, NOT NULL. Two tables
--- are exceptions: outbox.tenant_id is nullable, and processed_events (V8) is a consumer's dedupe
--- key and has no tenant_id.
+-- are exceptions. processed_events (V8) is a consumer's dedupe key and has no tenant_id. The
+-- outbox is deliberately cross-tenant: its tenant_id is nullable, and the relay drains and purges
+-- every business's rows in one pass, so no query on it names a tenant and it has no tenant-led
+-- index.
 
 -- HMRC VAT rate definitions. code: T1=Standard 20%, T5=Reduced 5%, T0=Zero 0%, TX=Exempt.
 -- Per HMRC VAT Notice 700. Each tenant configures their own rates (supports multi-jurisdiction).
@@ -153,7 +161,7 @@ CREATE TABLE promotions (
     -- NULL = automatic (applies whenever it matches). Non-null = the customer must present it.
     coupon_code      TEXT,
     -- Usage caps. NULL means uncapped. Usage is counted from promotion_redemptions, the append-only
-    -- ledger, never from a counter on this row.
+    -- ledger (V3; tenant erasure apart), never from a counter on this row.
     max_redemptions  INTEGER,
     max_per_customer INTEGER,
     -- BOGO: buy buy_qty of the scoped items, get get_qty at get_discount_pct off (100 = free).
@@ -212,7 +220,7 @@ CREATE INDEX idx_promotion_items_promo ON promotion_items (promotion_id);
 
 -- POSLog-compatible tax capture per order line.
 -- tax_point_date = time of supply per s.6 VATA 1994. Feeds HMRC MTD boxes 1 and 6.
--- Append-only: no UPDATE or DELETE on this table, except tenant erasure (21.14).
+-- Append-only: no UPDATE or DELETE on this table, except tenant erasure.
 CREATE TABLE tax_transactions (
     id             UUID         PRIMARY KEY,
     tenant_id      UUID         NOT NULL,
@@ -254,12 +262,17 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
 -- The scheduled purge (common-service OutboxPublisher) deletes, in batches of a thousand, the
--- published rows older than a retention, oldest first. A published row is one the drain index has
--- already let go of; a partial index on published_at holds exactly those and costs the drain nothing.
+-- published rows older than a retention, oldest first. A published row is in neither of the claim's
+-- indexes (below), which hold only waiting rows; this partial index on published_at holds the
+-- published rows and no others.
 CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
--- The claim: rows that may publish now, in the order they were written.
+-- The claim (common-service BaseOutboxRepository.claim): rows that may publish now, in the order
+-- they were written. This index serves its ordered scan (ORDER BY created_at, id LIMIT n); a row
+-- that is dead or published is not in it. The claim's check for an earlier waiting row of the same
+-- aggregate reads idx_outbox_aggregate_pending, below. Marking a row published and recording a
+-- failure go by primary key. No index of every unpublished row by created_at (idx_outbox_unpublished)
+-- is kept: it would also hold the dead letters, which the claim's ordered scan never reads.
 CREATE INDEX idx_outbox_claim
     ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;

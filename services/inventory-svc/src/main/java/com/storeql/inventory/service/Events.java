@@ -274,12 +274,18 @@ public final class Events {
    * A transfer left its store: what went, line by line, so a consumer can hold it as stock in
    * transit (depot / DC replenishment). A transfer ships all it asked for, so the line's quantity
    * is the requested one.
+   *
+   * <p>It also says which kind of transfer it is: only an {@code INTRANSIT} transfer is stock in
+   * transit until its {@code TransferOrderReceived}. A {@code DIRECT} one is booked into the
+   * receiving store as it ships and is never followed by a receipt, so a consumer holding stock in
+   * transit (reporting-svc) must be able to tell them apart.
    */
   static String transferOrderShipped(
       UUID tenantId,
       UUID orderId,
       UUID fromStoreId,
       UUID toStoreId,
+      String transferType,
       java.util.List<com.storeql.inventory.domain.Domain.TransferOrderLine> lines) {
     return EventPayload.base("TransferOrderShipped", tenantId, orderId)
         + ",\"fromStoreId\":\""
@@ -288,7 +294,9 @@ public final class Events {
         + toStoreId
         + "\","
         + transferLines(lines, true)
-        + "}";
+        + ",\"transferType\":\""
+        + EventPayload.esc(transferType)
+        + "\"}";
   }
 
   /** A transfer arrived: what arrived, line by line, closing what was in transit. */

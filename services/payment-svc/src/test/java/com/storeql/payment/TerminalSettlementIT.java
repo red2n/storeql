@@ -947,6 +947,55 @@ class TerminalSettlementIT {
 
   @Test
   @DisplayName(
+      "A card payment given back another way is written as a refund of that CARD tender under the"
+          + " way it was given back, whichever of CASH, UPI, WALLET or CARD: the schema's set of"
+          + " refund methods holds every one of them")
+  void aCardGivenBackAnotherWayIsARefundUnderThatWay() {
+    String[] ways = {"UPI", "WALLET", "CARD"};
+    for (int i = 0; i < ways.length; i++) {
+      String way = ways[i];
+      UUID lone = LONE.get(5 + i);
+      Caller manager = managerAt(lone);
+      Terminals.Terminal t = machineAt(lone);
+      UUID order = Ids.newId();
+      String tenderId = recordedAt(t, order, "12.00")[1];
+      terminals.retire(BIZ, t.id(), "stolen");
+      payments.refundForOrderEvent(Ids.newId(), CONSUMER, BIZ, order, null, "Order cancelled");
+      String due = dueIdOf(order);
+      assertThat(way, dueOf(order), is("NEEDS_ATTENTION/12.00/" + tenderId));
+
+      Answer given =
+          anotherWay(
+              manager,
+              due,
+              way,
+              "CARD".equals(way) ? "ACQ-" + order : null,
+              "given back as " + way,
+              Ids.newId().toString());
+
+      assertThat(way + " " + given.body(), given.status(), is(200));
+      assertThat(dueOf(order), is("REFUNDED_ANOTHER_WAY/12.00/" + tenderId));
+      assertThat(
+          "one refund in the books, under the way it went back",
+          refundsOf(order),
+          is("1/12.00/" + way));
+      assertThat(
+          "of the card tender, whose own method is CARD",
+          scalar(
+              "SELECT r.payment_id || '/' || r.method || '/' || t.method FROM payment.refund_tenders"
+                  + " r JOIN payment.payment_tenders t ON t.tenant_id = r.tenant_id AND t.id ="
+                  + " r.payment_id WHERE r.tenant_id = '"
+                  + BIZ
+                  + "' AND r.order_id = '"
+                  + order
+                  + "'"),
+          is(tenderId + "/" + way + "/CARD"));
+      assertThat(announcedRefunds(order), is("1"));
+    }
+  }
+
+  @Test
+  @DisplayName(
       "A manager's refund of a recorded card payment is the books' refund too, written once the"
           + " machine has put it back, and never more than the tender has left")
   void aManagersRefundOfARecordedCard() {

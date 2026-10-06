@@ -184,7 +184,7 @@ class RetentionPurgeIT {
             + Ids.newId()
             + "', '"
             + type
-            + "', 'EMAIL', 'a@example.com', 'Reset your password',"
+            + "', 'SMTP', 'a@example.com', 'Reset your password',"
             + "'Shopper account: [link removed]', 'SENT', now() - interval '"
             + age
             + "')");

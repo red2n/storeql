@@ -16,6 +16,10 @@ CREATE TABLE store_status (
     status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- CLAUDE.md asks for a composite index starting with tenant_id on each tenant table. This table
--- has one below; its primary key is store_id alone.
+-- CLAUDE.md asks for a composite index starting with tenant_id on each tenant table, and this
+-- table's primary key is store_id alone. The status check does not read this index: it looks a store
+-- up by store_id, on purpose across businesses, so that a store of another business is told apart
+-- from one not heard of yet (common-service StoreStatusRepository.isActive). What reads it is every
+-- statement that takes one business's rows: its data export (the pages in store_id order, and the
+-- manifest's counts) and the erasure of a departed business.
 CREATE INDEX idx_store_status_tenant_store ON store_status (tenant_id, store_id);

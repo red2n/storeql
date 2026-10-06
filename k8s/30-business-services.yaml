@@ -10,10 +10,11 @@
 # exposes.
 #
 # Flyway migrations run inline at boot (FlywayRunner, shared/common-service) — there is
-# no standalone "migrate-only" entry point in this codebase today, so this mirrors
-# exactly how docker-compose.yml and the storeql.com VPS deployment already run in
-# production. Safe at replicas: 1 (no concurrent-migration race); re-check before ever
-# scaling any of these to >1 replica.
+# no standalone "migrate-only" entry point in this codebase today, so this mirrors how
+# docker-compose.yml and the storeql.com VPS deployment run. Where 05-network-policies.yaml
+# is enforced the inline attempt cannot reach Postgres (see k8s/README.md). Safe at
+# replicas: 1 (no concurrent-migration race); re-check before ever scaling any of these
+# to >1 replica.
 
 ---
 apiVersion: v1

@@ -38,12 +38,13 @@ CREATE TABLE dunning_policy (
     CONSTRAINT ck_dunning_write_off CHECK (uncollectible_after_days BETWEEN 2 AND 730)
 );
 
--- Deliberately not seeded. A seed row would need an updated_by, and the platform's rule is UUIDv7
--- minted with Ids.newId() by the code that writes the row, never a column DEFAULT (the integration-test
--- audit refuses those). So the defaults live in code (Dunning.DEFAULT_POLICY) and an absent row means
--- "the defaults", the same way Entitlements treats a business on no plan as unrestricted. updated_by is
--- then only ever written when a person actually set the policy, which is the only time the question
--- "who?" has an answer.
+-- Deliberately not seeded. A seed row would need an updated_by, which is the id of the person who set
+-- the policy, and a migration has no such person: any id put there would name an actor who never acted
+-- (and a column DEFAULT that fills in a uuid is refused by the integration-test audit). So the
+-- defaults live in code (Dunning.DEFAULT_POLICY) and an absent row means "the defaults", the same way
+-- Entitlements treats a business on no plan as unrestricted. updated_by is then only ever written
+-- when a person actually set the policy (DunningRepository.savePolicy, from the acting person's id),
+-- which is the only time the question "who?" has an answer.
 
 -- What has been done about one overdue invoice, append-only. The unique index is the idempotency:
 -- a run that runs twice, or two replicas running at the same instant, chase once.

@@ -1,5 +1,6 @@
 -- Cash management: till sessions and cash drops.
--- Golden rule #8: cash_drops is append-only; till_sessions are closed (not deleted) by the till close.
+-- Golden rule #8: cash_drops is append-only; till_sessions are closed (not deleted) by the till
+-- close.
 
 CREATE TABLE IF NOT EXISTS till_sessions (
     id              UUID          NOT NULL,

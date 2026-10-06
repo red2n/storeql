@@ -107,6 +107,7 @@ export default function ({ tenant, rival, shopper }) {
   const promo = { name: `Ten off ${uniq()}`, type: 'PERCENT', value: 10, channel: 'ALL', startsAt: YESTERDAY(), priority: 1 };
   expect(call('POST', '/api/pricing-svc/admin/promotions', { token: t, body: { ...promo, type: 'MAGIC' } }), '[-] promotion type must be known', 400, 'PRICING_INVALID_PROMOTION_TYPE');
   expect(call('POST', '/api/pricing-svc/admin/promotions', { token: t, body: { ...promo, value: 0 } }), '[-] promotion value above zero', 400, 'VALIDATION_FAILED');
+  expect(call('POST', '/api/pricing-svc/admin/promotions', { token: t, body: { ...promo, type: 'FLAT', value: 1.999 } }), '[-] a flat amount finer than the currency is refused, never rounded', 400, 'VALIDATION_FAILED');
   expect(call('POST', '/api/pricing-svc/admin/promotions', { token: shopper.token, body: promo }), '[-] a customer cannot create promotions', 403, 'FORBIDDEN');
   const made = call('POST', '/api/pricing-svc/admin/promotions', { token: t, body: promo });
   expect(made, '[+] create a 10% promotion', 201);

@@ -52,4 +52,48 @@ class ChannelsTest {
   void anUnknownNameIsNone() {
     assertNull(emailDeployment().forName("PIGEON"));
   }
+
+  private static Channels deploymentWhoseDefaultIs(String carrier) {
+    Channels c = new Channels();
+    c.configured =
+        new NotificationChannel() {
+          @Override
+          public String name() {
+            return carrier;
+          }
+
+          @Override
+          public void send(UUID tenantId, String recipient, String subject, String body) {}
+        };
+    return c;
+  }
+
+  /**
+   * The log holds the carrier, never EMAIL: reading it by EMAIL means the default channel's
+   * carrier, whichever the deployment chose.
+   */
+  @Test
+  void emailInTheLogIsTheDefaultChannelsCarrier() {
+    assertEquals("SMTP", deploymentWhoseDefaultIs("SMTP").carrierOf("EMAIL"));
+    assertEquals("MQTT", deploymentWhoseDefaultIs("MQTT").carrierOf("EMAIL"));
+    assertEquals("APP", deploymentWhoseDefaultIs("APP").carrierOf("EMAIL"));
+    assertEquals("SMTP", deploymentWhoseDefaultIs("SMTP").carrierOf(" email "));
+  }
+
+  @Test
+  void everyOtherNameInTheLogIsItself() {
+    Channels c = deploymentWhoseDefaultIs("SMTP");
+    for (String name : new String[] {"SMS", "PUSH", "APP", "SMTP", "MQTT", "PIGEON"}) {
+      assertEquals(name, c.carrierOf(name));
+      assertEquals(name, c.carrierOf(" " + name.toLowerCase(java.util.Locale.ROOT) + " "));
+    }
+  }
+
+  @Test
+  void noNameIsNoCarrier() {
+    Channels c = deploymentWhoseDefaultIs("SMTP");
+    assertNull(c.carrierOf(null));
+    assertNull(c.carrierOf(""));
+    assertNull(c.carrierOf("   "));
+  }
 }

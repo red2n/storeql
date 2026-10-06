@@ -1,10 +1,19 @@
 -- iam-svc schema. Identity for BOTH staff and customers.
 --
--- Tenant-scoping note (README §18): a business's staff belong to it (tenant_id set). A customer is
--- global (tenant_id NULL — a customer may shop any storefront), and so is a login that belongs to no
--- business yet (a business sign-up not yet onboarded, the platform administrator). So
--- users.tenant_id is intentionally NULLABLE, a deliberate exception to the usual NOT NULL rule.
--- Staff queries still filter by tenant_id.
+-- Tenant scoping: a business's staff belong to it (users.tenant_id set), and an address or phone is
+-- one login inside a business. A shopper's account (type CUSTOMER) belongs to no business: its
+-- tenant_id is NULL, and the one login signs in at any business's storefront. A login that belongs
+-- to no business yet (a business sign-up not yet onboarded, the platform administrator) is NULL
+-- too. So users.tenant_id is intentionally NULLABLE, a deliberate exception to the usual NOT NULL
+-- rule. What a business does with its own staff names the business before it touches a role:
+-- listing reads users WHERE tenant_id = ? first; assigning (StaffAssigned) and removing
+-- (StaffRemoved) each lock the login's row under the business (tenant_id = ? AND id = ?, FOR NO KEY
+-- UPDATE) before any role is written or deleted, so a login leaving the business waits for them,
+-- and refuse, audited against the business that sent the event and no login, a login that is not
+-- the business's. A removal's delete, its count of the staff roles left and its check for a
+-- shopper's role join users on the tenant as well. A sign-in finds the logins an address holds in
+-- every business and outside any, and a lookup by id reads the tenant off the row, so its caller
+-- checks it.
 --
 -- A shopper's account and a business account are separate identities (as at Shopify,
 -- Square and Stripe): one person may shop with an address or phone and run a business with the same
@@ -14,6 +23,12 @@
 -- share an address or a phone. The phone indexes are split by kind for the same reason: a shopper's
 -- sign-up and a business sign-up may each record a number.
 
+-- users.status holds the two values the code writes: ACTIVE, from the day a login is made, and
+-- DELETED, once a shopper has deleted their own account (the row stays, with no address, phone or
+-- password, so an id kept elsewhere still resolves). A password sign-in, a second-factor step, an
+-- SSO sign-in and a forgotten-password link admit an ACTIVE login only: any other value is refused
+-- (a password sign-in answers 401 INVALID_CREDENTIALS, after the same hashing work as for an
+-- unknown address).
 CREATE TABLE users (
     id            UUID PRIMARY KEY,
     tenant_id     UUID,                              -- a business's STAFF; NULL otherwise (see the header)
@@ -21,7 +36,7 @@ CREATE TABLE users (
     email         TEXT,
     phone         TEXT,
     password_hash TEXT,                              -- Argon2; NULL if OTP-only
-    status        TEXT NOT NULL DEFAULT 'ACTIVE',    -- ACTIVE | DELETED
+    status        TEXT NOT NULL DEFAULT 'ACTIVE',    -- ACTIVE | DELETED (see above)
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()  -- audit timestamp
 );
@@ -117,6 +132,12 @@ CREATE INDEX idx_audit_tenant ON audit_log (tenant_id, created_at DESC);
 
 -- Transactional outbox: events written in the same tx as the state change, drained to Kafka.
 --
+-- The outbox is cross-tenant on purpose: one relay (common-service BaseOutboxRepository) drains the
+-- rows of every business in the order they were written, so no statement the service or the relay
+-- runs on it filters by tenant_id, and it has no index that starts with tenant_id. Its tenant_id
+-- only names the business an event is about (NULL when it is about none, as for a shopper) and is
+-- not a lookup key.
+--
 -- A row that fails to publish is retried after a backoff (storeql.outbox.backoff-base-seconds,
 -- doubling, capped at storeql.outbox.backoff-cap-seconds), and only that row's aggregate waits for
 -- it. After storeql.outbox.max-attempts it is a dead letter: never claimed again, kept for an
@@ -137,17 +158,26 @@ CREATE TABLE outbox (
     CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
     CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
-CREATE INDEX idx_outbox_unpublished ON outbox (created_at) WHERE published_at IS NULL;
--- The scheduled purge (common-service OutboxPublisher, through BaseOutboxRepository) deletes in
--- batches of the oldest delivered rows. The index is partial: it holds only delivered rows, so it
--- stays small and the drain (idx_outbox_unpublished) is untouched.
-CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
--- The claim: rows that may publish now, in the order they were written.
+-- The claim (common-service BaseOutboxRepository.claim): rows that may publish now, in the order
+-- they were written. idx_outbox_claim serves its ordered scan (ORDER BY created_at, id LIMIT n):
+-- partial on not published and not dead, it holds every row the claim can return and no dead
+-- letter, already in the claim's order (the backoff, next_attempt_at, is read from the row).
+-- Marking a row published and recording a failure go by primary key. No index of every waiting row
+-- by created_at (idx_outbox_unpublished) is kept: it would also hold the dead letters, which the
+-- claim's ordered scan never reads, and the claim is the one statement that reads waiting rows in
+-- that order. OutboxPurgeIndexIT plans the claim as BaseOutboxRepository really runs it.
 CREATE INDEX idx_outbox_claim ON outbox (created_at, id)
     WHERE published_at IS NULL AND dead_at IS NULL;
--- The per-aggregate check: an aggregate's earlier unpublished rows, and whether any is backing off.
+-- The claim's per-aggregate check (its NOT EXISTS: is an earlier waiting row of the same aggregate
+-- dead or backing off?) reads waiting rows by aggregate_id, which idx_outbox_claim does not lead
+-- with: idx_outbox_aggregate_pending, partial on not published, serves it, and holds the dead
+-- letters the check looks for.
 CREATE INDEX idx_outbox_aggregate_pending ON outbox (aggregate_id, created_at, id)
     WHERE published_at IS NULL;
+-- The scheduled purge (common-service OutboxPublisher, through BaseOutboxRepository) deletes in
+-- batches of the oldest delivered rows. The index is partial: it holds only delivered rows, so it
+-- stays small, and the claim's two indexes, which hold only waiting rows, never carry them.
+CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
 
 -- Seed the standard roles.
 INSERT INTO roles (id, name) VALUES

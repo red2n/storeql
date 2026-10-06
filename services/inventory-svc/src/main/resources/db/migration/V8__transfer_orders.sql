@@ -43,5 +43,8 @@ CREATE TABLE transfer_order_lines (
     CONSTRAINT pk_transfer_order_lines PRIMARY KEY (id),
     CONSTRAINT fk_tol_order FOREIGN KEY (transfer_order_id) REFERENCES transfer_orders(id)
 );
-CREATE INDEX idx_transfer_order_lines_tenant_order ON transfer_order_lines (tenant_id, transfer_order_id);
-CREATE INDEX idx_tol_order ON transfer_order_lines (transfer_order_id);
+-- Every read and write of a line leads with tenant_id (InventoryRepository.listTransferOrderLinesTx, the
+-- ship and receive updates, and the network's joins on tenant_id and transfer_order_id), so this is the
+-- only lookup index the lines need. A transfer order is never deleted, so the foreign key to
+-- transfer_orders needs none of its own.
+CREATE INDEX idx_transfer_order_lines_tenant ON transfer_order_lines (tenant_id, transfer_order_id);

@@ -84,6 +84,9 @@ public class AdminResource {
    * In-app notifications feed (welcome / order-confirmation / …) for the tenant, newest first.
    *
    * @param recipient restrict to one recipient, or {@code null} for the whole tenant feed
+   * @param channel restrict to one channel, or {@code null} for every channel: EMAIL, SMS or PUSH
+   *     as {@code /admin/notifications/channels} names them, APP for the in-app feed, or a
+   *     carrier's own name such as SMTP
    * @param limit page size; values outside 1..100 fall back to 20 rather than being rejected
    * @return the matching notifications as DTOs
    */
@@ -91,7 +94,9 @@ public class AdminResource {
       summary = "List in-app notifications",
       description =
           "In-app notifications feed (welcome / order-confirmation / shortage alert / …) for the"
-              + " caller's tenant, newest first, optionally filtered by recipient.")
+              + " caller's tenant, newest first, optionally filtered by recipient and by channel"
+              + " (EMAIL is the deployment's default channel; a carrier's own name, such as SMTP,"
+              + " finds the rows it carried).")
   @APIResponse(responseCode = "200", description = "Notifications")
   @GET
   public ApiResponse<Object> listNotifications(
@@ -104,9 +109,7 @@ public class AdminResource {
         service.listNotifications(
             tenantId,
             recipient != null && !recipient.isBlank() ? recipient : null,
-            channel != null && !channel.isBlank()
-                ? channel.trim().toUpperCase(java.util.Locale.ROOT)
-                : null,
+            channel,
             effectiveLimit);
     return ApiResponse.ok(notifications.stream().map(Mappers::toDto).toList());
   }
