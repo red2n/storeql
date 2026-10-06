@@ -244,13 +244,13 @@ class OrderSchemaIT {
 
   @Test
   @DisplayName(
-      "Migration 46 is described by what it creates: the order settings and gift-card loads")
-  void migration46IsNamedForWhatItCreates() throws SQLException {
+      "The last migration is described by what it creates: the order settings and gift-card loads")
+  void theLastMigrationIsNamedForWhatItCreates() throws SQLException {
     try (Connection c = PG.dataSource().getConnection();
         Statement st = c.createStatement();
         ResultSet rs =
-            st.executeQuery("SELECT description FROM flyway_schema_history WHERE version = '46'")) {
-      assertTrue(rs.next(), "version 46 is applied");
+            st.executeQuery("SELECT description FROM flyway_schema_history WHERE version = '23'")) {
+      assertTrue(rs.next(), "version 23 is applied");
       assertEquals("order settings and gift card load lines", rs.getString(1));
     }
   }

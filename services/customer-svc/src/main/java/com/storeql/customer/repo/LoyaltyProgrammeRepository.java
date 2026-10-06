@@ -48,7 +48,7 @@ public class LoyaltyProgrammeRepository extends BaseOutboxRepository {
   /**
    * The customers of one business with a lot that has died: the first statement of the expiry
    * sweep. Binds the business, then the instant the lots are due by. Public so the plan test plans
-   * this very text (V8's idx_loyalty_lots_due is built for it: tenant first, then the expiry).
+   * this very text (V5's idx_loyalty_lots_due is built for it: tenant first, then the expiry).
    */
   public static final String DUE_CUSTOMERS_SQL =
       "SELECT customer_id FROM loyalty_point_lots"

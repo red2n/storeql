@@ -11,7 +11,7 @@
 -- A recall takes stock off sale and tells the stores. It also tells the people who had bought the
 -- product, because every sale drew its stock from a batch this service knows the lot and date of,
 -- under an order id. So a recall finds those sales as it opens and announces each order to order-svc,
--- which knows the buyer; the notice's remedies and contact ride with it (recalls, V27), and the recall
+-- which knows the buyer; the notice's remedies and contact ride with it (recalls, V20), and the recall
 -- keeps the sales it found as evidence of who was reached.
 
 -- Every sale a recall found in its scope: which order drew which batch, and how sure the recall is

@@ -364,7 +364,7 @@ CREATE INDEX idx_outbox_aggregate_pending
     WHERE published_at IS NULL;
 
 -- Once an hour the purge deletes, in batches of a thousand, the outbox rows that were published more
--- than a retention ago, and the processed_events rows past their own cutoff (indexed in V11). Each
+-- than a retention ago, and the processed_events rows past their own cutoff (indexed in V6). Each
 -- outbox batch is this statement, oldest first:
 --
 --   DELETE FROM outbox WHERE id IN (SELECT id FROM outbox

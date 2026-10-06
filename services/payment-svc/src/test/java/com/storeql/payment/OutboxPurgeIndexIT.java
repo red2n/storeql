@@ -33,7 +33,7 @@ import org.junit.jupiter.api.Test;
 /**
  * The relay's and the scheduled purge's statements on the schema payment-svc migrates: the purge
  * deletes only what is past its cutoff, in bounded batches, and the drain claims only what may
- * publish now; the indexes on outbox (V1__init.sql) and processed_events (V6__processed_events.sql)
+ * publish now; the indexes on outbox (V1__init.sql) and processed_events (V4__processed_events.sql)
  * are what let each find its rows without reading the table.
  *
  * <p>Each plan below is of the statement the shared repository ({@link BaseOutboxRepository})

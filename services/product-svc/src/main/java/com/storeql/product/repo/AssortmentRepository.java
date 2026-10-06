@@ -159,7 +159,7 @@ public class AssortmentRepository extends BaseOutboxRepository {
 
   /**
    * A change still open: neither applied nor closed as refused. The same predicate as the partial
-   * index idx_assortment_changes_pending in V27__assortment_and_range_review.sql.
+   * index idx_assortment_changes_pending in V16__assortment_and_range_review.sql.
    */
   private static final String UNSETTLED = " applied_at IS NULL AND refused_at IS NULL";
 

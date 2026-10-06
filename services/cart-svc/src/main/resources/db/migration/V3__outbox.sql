@@ -38,7 +38,7 @@ CREATE TABLE outbox (
 -- so it stays as small as the retention window once the purge keeps up.
 --
 -- The purge's second statement trims processed_events, whose own index is in
--- V8__processed_events.sql.
+-- V5__processed_events.sql.
 CREATE INDEX idx_outbox_published ON outbox (published_at) WHERE published_at IS NOT NULL;
 
 -- The claim (common-service BaseOutboxRepository.claim): rows neither published nor dead, in the

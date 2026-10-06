@@ -7,7 +7,7 @@
 -- writes it, so a yen business keeps whole yen and a dinar business keeps three places. A fixed scale
 -- would round a dinar to two places on every order, return, gift card and deposit without an error.
 -- The exceptions are a commission statement line's amount, threshold_from and rated_commission, which
--- are written as computed, not rounded (V35).
+-- are written as computed, not rounded (V18).
 -- Left at a fixed scale, on purpose:
 --   * sales_invoices and ereporting_submissions: EN 16931 (BR-DEC) and the French e-reporting flux
 --     state amounts to at most two decimals; an invoice or report in those formats is in euros (or
@@ -16,7 +16,7 @@
 --     policy's ceilings NUMERIC(18,4), fiscal receipts' NUMERIC(18,4) totals: already finer than
 --     any currency's minor units.
 --   * Quantities (NUMERIC(18,3) on stock and order lines; NUMERIC(14,3) for the containers on a deposit
---     line, order_deposits.qty in V33): how finely stock is counted has nothing to do with the currency.
+--     line, order_deposits.qty in V16): how finely stock is counted has nothing to do with the currency.
 -- Money-bearing currency columns carry no default: an insert that leaves one out fails with a NOT NULL
 -- violation instead of stamping a currency the business did not choose.
 

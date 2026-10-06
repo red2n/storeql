@@ -36,7 +36,7 @@ class OrderEventConsumer extends BaseKafkaConsumer {
    * A till sale voided after the fact gives back what it took, as a cancelled order does. On this
    * group's existing offsets and {@code earliest}, deliberately: its first read of the topic meets
    * every retained void, and the handler leaves alone those announced before payment-svc began
-   * refunding voids (V18), so history is not refunded twice and no later void is ever missed — a
+   * refunding voids (V11), so history is not refunded twice and no later void is ever missed — a
    * group of its own at {@code latest} commits nothing until its first record, so a restart before
    * then would skip the voids announced while it was down.
    */

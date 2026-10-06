@@ -9,7 +9,7 @@ import java.time.LocalDate;
 import java.util.List;
 
 /**
- * The jurisdiction reference data (V9): which obligations reach a country, directly or through a
+ * The jurisdiction reference data (V6): which obligations reach a country, directly or through a
  * regime it belongs to. Platform-wide, so nothing here filters by tenant — no row belongs to one.
  */
 @ApplicationScoped

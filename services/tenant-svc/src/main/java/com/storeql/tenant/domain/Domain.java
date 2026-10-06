@@ -339,7 +339,7 @@ public final class Domain {
 
   /**
    * A legal obligation as it reaches one country: the obligation's own window, narrowed to the
-   * country's membership of the regime it comes through (V9). A British business is not bound by EU
+   * country's membership of the regime it comes through (V6). A British business is not bound by EU
    * law made after 31 January 2020.
    */
   public record LegalObligation(
@@ -462,7 +462,7 @@ public final class Domain {
       String reference,
       String note) {}
 
-  /** A statutory reporting stage for a kind of incident, as reference data (V11). */
+  /** A statutory reporting stage for a kind of incident, as reference data (V7). */
   public record ReportingStage(
       String incidentKind,
       String stage,

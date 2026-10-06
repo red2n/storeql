@@ -11,7 +11,7 @@
 -- A key is owned by the live business whatever tenant it acts as: a sandbox key (sqk_test_...) has
 -- tenant_id = the sandbox and owner_tenant_id = the live business, so the owner lists and revokes
 -- every key it has, live and sandbox, in one place. The sandbox pairs are kept in tenant_sandboxes
--- (V14).
+-- (V10).
 CREATE TABLE api_keys (
     id              UUID PRIMARY KEY,
     tenant_id       UUID NOT NULL,                -- the business the key acts as: a sandbox for a sandbox key

@@ -6,7 +6,7 @@
 --
 -- A business keeps each class of data for a period it sets, never shorter than the longest period
 -- the law of any country it trades in requires. The floors are platform reference data, like the
--- legal obligations (V9): a change in the law is a migration with its citation. The schedule is the
+-- legal obligations (V6): a change in the law is a migration with its citation. The schedule is the
 -- business's decision, kept as a history so what was set, by whom and when is never lost; a legal
 -- hold stops a subject or a class being purged while a matter is open; and every purge a service
 -- runs is recorded here, whichever service ran it, so one register says what was deleted and when.

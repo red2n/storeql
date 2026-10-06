@@ -17,7 +17,7 @@ import java.util.UUID;
  * Range: which stores carry a line, and the review that decides (07.18).
  *
  * <p>Both halves of this had something already. {@code product_stores} has recorded which stores
- * carry a product (V13__product_store_assortment.sql), and the item lifecycle (V1__init.sql) has
+ * carry a product (V11__product_store_assortment.sql), and the item lifecycle (V1__init.sql) has
  * launched, discontinued and reinstated lines against a date. Neither is replaced here.
  *
  * <p>What was missing was the same thing twice: <b>the decision, with a date and a reason and the

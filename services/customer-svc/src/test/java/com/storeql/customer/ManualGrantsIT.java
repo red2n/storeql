@@ -1233,7 +1233,7 @@ class ManualGrantsIT {
         event.getJsonNumber("points").bigDecimalValue().compareTo(new BigDecimal("-20")), is(0));
     // The grant keeps what was asked, and who asked.
     // The column holds points or store credit, so it is as wide as any currency's minor units
-    // (V12__manual_grants.sql); the value is what counts.
+    // (V6__manual_grants.sql); the value is what counts.
     assertThat(
         new BigDecimal(
                 sql(

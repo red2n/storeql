@@ -6,7 +6,7 @@
 -- 16931 document — KSeF takes and gives only its own structure.
 --
 -- Two consequences, and both are here:
---   * FA(3) is a syntax this inbox accepts (supplier_einvoices.syntax, V15). shared/einvoice's
+--   * FA(3) is a syntax this inbox accepts (supplier_einvoices.syntax, V9). shared/einvoice's
 --     Fa3Reader reads it into the same model a UBL or CII document produces, so the checks, the
 --     supplier matching, the three-way match and the posting all work on a Polish invoice without
 --     knowing it is one.

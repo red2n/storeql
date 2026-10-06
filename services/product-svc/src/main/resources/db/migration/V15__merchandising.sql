@@ -4,7 +4,7 @@
 -- shelf layout, space planning and category resets, and the capacity that drives replenishment. The
 -- brand flag (brands.own_brand) and the shelf width of a unit (product_variants.facing_width_mm) are
 -- columns on the catalogue tables in V1__init.sql. Per-store assortment (product_stores,
--- V13__product_store_assortment.sql) and the new-line half of range review (the item lifecycle in
+-- V11__product_store_assortment.sql) and the new-line half of range review (the item lifecycle in
 -- V1__init.sql) are not duplicated here.
 --
 -- It lives in product-svc because product-svc already answers "what do we range, and where" — it owns

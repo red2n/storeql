@@ -13,7 +13,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.UUID;
 
-/** Persistence for {@link PaymentIntent} and the provider-webhook dedupe table (V7). */
+/** Persistence for {@link PaymentIntent} and the provider-webhook dedupe table (V5). */
 @ApplicationScoped
 public class PaymentIntentRepository extends BaseOutboxRepository {
 

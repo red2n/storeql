@@ -132,7 +132,7 @@ class OrderEventHandler {
       return;
     }
     if ("OrderVoided".equals(eventType)) {
-      // A void announced before payment-svc began refunding voids is history (V18): this group
+      // A void announced before payment-svc began refunding voids is history (V11): this group
       // meets the whole retained topic on its first read, and those were settled by hand.
       service.refundVoidForOrderEvent(eventId, CONSUMER_NAME, tenantId, orderId);
       return;

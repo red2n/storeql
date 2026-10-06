@@ -1,6 +1,6 @@
 -- What an hour costs, so labour can be set against sales (store operations & workforce).
 --
--- The hours are recorded (V27); what they cost is not, and a labour figure without a rate is a count
+-- The hours are recorded (V17); what they cost is not, and a labour figure without a rate is a count
 -- of minutes. This is the rate and nothing else: no salaries, no deductions, no payroll. A platform
 -- that held payroll would owe a great deal more than this one promises, and a shop asking "what did
 -- this Saturday cost me against what it took" does not need it.

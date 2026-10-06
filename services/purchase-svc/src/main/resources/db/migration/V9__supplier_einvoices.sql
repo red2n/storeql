@@ -18,7 +18,7 @@
 -- this platform delivers straight into the receiver's inbox when the receiver is a business here. The
 -- channel says which network it came through, and the network's own reference for the delivery is
 -- kept beside the document, so a question from the network can be answered by it. KSeF is not a
--- delivery network: a Polish buyer fetches its invoices from the system (see V17).
+-- delivery network: a Polish buyer fetches its invoices from the system (see V10).
 --
 -- The document is kept exactly as it arrived. For an e-invoice the file is the invoice: the laws
 -- that make a business accept one make it keep that file, unaltered, for as long as the invoice is
@@ -33,7 +33,7 @@ CREATE TABLE supplier_einvoices (
     tenant_id           UUID        NOT NULL,
     received_at         TIMESTAMPTZ NOT NULL,
     received_by         UUID,
-    channel             TEXT        NOT NULL,      -- UPLOAD, a delivering network, or KSEF (fetched, V17)
+    channel             TEXT        NOT NULL,      -- UPLOAD, a delivering network, or KSEF (fetched, V10)
     -- The network's own reference for the delivery; null for an upload.
     delivery_ref        TEXT,
     content_type        TEXT        NOT NULL,

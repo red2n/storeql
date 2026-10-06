@@ -102,5 +102,5 @@ writes qualified with the extension's schema, so `pg_restore`'s empty search pat
 The whole-database dump carries the extension, so a server restored into must offer `pg_trgm` (the
 Postgres image's contrib modules do). It is the kind of change the drill exists for: run
 `scripts/backup-drill.sh` on a stack that carries it. No other migration creates an extension: the indexes
-in order-svc's, inventory-svc's and iam-svc's `V1__init.sql` and in notification-svc's `V7__webhooks.sql`
+in order-svc's, inventory-svc's and iam-svc's `V1__init.sql` and in notification-svc's `V6__webhooks.sql`
 are plain or partial indexes, each file holding much else beside them.

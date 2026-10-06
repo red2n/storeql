@@ -9,12 +9,12 @@
 -- Two things are deliberately NOT here. There is no due_date column and no DUE status: both are
 -- derived from the return's frequency and its statutory offset against the period, on every read,
 -- because a stored deadline is a deadline that goes stale — the same reasoning as the incident
--- register's clocks (V11). And there are no export bytes: SAF-T belongs to order-svc and the VAT
+-- register's clocks (V7). And there are no export bytes: SAF-T belongs to order-svc and the VAT
 -- return to pricing-svc, so a return names *where* its export lives and the console follows the link.
 -- Serving another service's data from here would be golden rule #1, and proxying a whole fiscal
 -- export synchronously would be a poor shape besides.
 
--- What each jurisdiction requires. Reference data with a citation, like legal_obligations (V9), and
+-- What each jurisdiction requires. Reference data with a citation, like legal_obligations (V6), and
 -- seeded for the same reason: this is the law, not a preference, so it needs no actor to have chosen
 -- it.
 CREATE TABLE statutory_returns (

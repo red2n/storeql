@@ -1258,7 +1258,7 @@ class CatalogGuardsIT {
 
   @Test
   @DisplayName(
-      "A revision is superseded by the next, never rewritten or removed by the service (V4)")
+      "A revision is superseded by the next, never rewritten or removed by the service (V3)")
   void aRevisionIsSupersededByTheNextAndNeverRewrittenOrRemoved() {
     String v = variantOf(T);
     String base = "/admin/products/variants/" + v + "/revisions";
@@ -1317,7 +1317,7 @@ class CatalogGuardsIT {
   }
 
   @Test
-  @DisplayName("A link is inserted and deleted, never updated (V7's comment)")
+  @DisplayName("A link is inserted and deleted, never updated (V5's comment)")
   void aLinkIsInsertedAndDeletedNeverUpdated() throws Exception {
     String v0 = variantOf(T);
     String v1 = variantOf(T);

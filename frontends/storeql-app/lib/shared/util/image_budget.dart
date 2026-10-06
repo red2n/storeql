@@ -2,7 +2,7 @@
 /// product image before it goes over the wire.
 ///
 /// Product images are stored as `BYTEA` rows in product-svc's Postgres (there is no
-/// object store yet — see `V14__product_images.sql`), and the storefront fetches the
+/// object store yet — see `V12__product_images.sql`), and the storefront fetches the
 /// raw bytes per product. So every byte here is paid three times: upload bandwidth,
 /// database size, and again on each catalog render. Compressing on the client is what
 /// keeps that bill small; the server's own cap is only a backstop against clients that

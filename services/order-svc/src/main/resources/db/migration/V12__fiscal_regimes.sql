@@ -1,6 +1,6 @@
 -- 18.5: the fiscal regime a store trades under, and what it stamps on every legal receipt.
 --
--- A gapless, hash-chained register (fiscal_receipts, V16) is what every fiscal regime asks a till to keep.
+-- A gapless, hash-chained register (fiscal_receipts, V9) is what every fiscal regime asks a till to keep.
 -- What differs by market is the stamp each document must also carry: in Germany a signature from a
 -- certified security module (TSE) over the transaction (§146a AO, KassenSichV §2 and §6); in
 -- Portugal an RSA signature over the document's own figures chained to the previous document

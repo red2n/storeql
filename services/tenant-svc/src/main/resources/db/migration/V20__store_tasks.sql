@@ -1,6 +1,6 @@
 -- The work a shop does every day, and the record that it was done (store operations & workforce).
 --
--- The roster says who is in (V27) and the clock says they turned up (V27); neither says what they were
+-- The roster says who is in (V17) and the clock says they turned up (V17); neither says what they were
 -- meant to *do*. Opening up, counting the float, checking the bins, putting the delivery away, locking
 -- the back door — a shop runs on a list, and a manager who cannot see whether the list was finished is
 -- managing by hope.

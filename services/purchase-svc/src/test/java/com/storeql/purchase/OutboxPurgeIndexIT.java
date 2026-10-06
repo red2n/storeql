@@ -37,7 +37,7 @@ import org.postgresql.ds.PGSimpleDataSource;
  * The outbox's drain and the scheduled purge of delivered outbox rows and old consumer dedupe rows,
  * on the schema purchase-svc migrates: the purge deletes only what is past its cutoff, in bounded
  * batches, and the outbox indexes of V1__init.sql and the processed_events index of
- * V11__sales_postings.sql are what let a batch find its rows without reading the table. The relay's
+ * V6__sales_postings.sql are what let a batch find its rows without reading the table. The relay's
  * claim is planned here as BaseOutboxRepository prepares it, with its dead-letter and backoff
  * conditions: the test reads the statement off the repository's own connection, so there is no copy
  * of it to drift, and asserts that idx_outbox_claim serves its ordered scan; the claim's check for

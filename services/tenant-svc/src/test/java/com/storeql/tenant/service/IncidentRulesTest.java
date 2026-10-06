@@ -19,7 +19,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-/** The clocks and rules of the security incident register, against the stages V11 seeds. */
+/** The clocks and rules of the security incident register, against the stages V7 seeds. */
 class IncidentRulesTest {
 
   private static final Instant AWARE = Instant.parse("2026-09-14T08:00:00Z");

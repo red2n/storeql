@@ -47,7 +47,7 @@ import org.postgresql.ds.PGSimpleDataSource;
  * {@code idx_outbox_published}), so the claim is the one statement that reads waiting rows in
  * {@code created_at} order. An index of every waiting row by {@code created_at} ({@code
  * idx_outbox_unpublished}) would also hold the dead letters, which that scan never reads, and
- * V4__outbox.sql creates none. The outbox is read across every business, so it has no tenant-led
+ * V3__outbox.sql creates none. The outbox is read across every business, so it has no tenant-led
  * index.
  */
 class OutboxPurgeIndexIT {

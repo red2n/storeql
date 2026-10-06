@@ -82,7 +82,7 @@ A store receiving a transfer can only say "it all arrived". The receipt copies t
 ## Already there
 
 - Transfers exist with ship/receive/cancel/release, gated by `stock.transfer` and store access (`TransferOrderResource`); receipt reads back each source batch's lot, date and cost (`InventoryRepository.receiveTransferOrder`, 2909) so the arriving stock keeps them.
-- Move orders exist with `picked_qty` on the line (`V7__move_orders.sql`); pick is gated `stock.transfer` (`MoveOrderResource`, SJ-D73).
+- Move orders exist with `picked_qty` on the line (`V5__move_orders.sql`); pick is gated `stock.transfer` (`MoveOrderResource`, SJ-D73).
 - The Transfers tab in the admin app lists transfers.
 - What is not there: any count at receipt, any in-transit figure in inventory-svc's levels or valuation, any loss posting.
 

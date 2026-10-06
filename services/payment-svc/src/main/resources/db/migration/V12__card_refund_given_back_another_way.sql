@@ -6,7 +6,7 @@
 -- no longer has a machine of that vendor, or the card itself can no longer take a refund — the due
 -- stays NEEDS_ATTENTION, and a manager says how it was given back instead: cash, the acquirer's own
 -- refund of the card (outside any machine of ours, with its reference), or a transfer. That closes
--- the due, once. The due's state for it is REFUNDED_ANOTHER_WAY (card_refund_dues, V16).
+-- the due, once. The due's state for it is REFUNDED_ANOTHER_WAY (card_refund_dues, V9).
 
 -- What a person did instead. Append-only: once per due, with who, when and why, and never
 -- updated or deleted. The books' refund written with it (when the money was ever in the books) is

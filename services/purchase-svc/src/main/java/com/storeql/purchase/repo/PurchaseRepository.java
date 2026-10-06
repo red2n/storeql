@@ -151,7 +151,7 @@ public class PurchaseRepository extends BaseOutboxRepository {
                       + " einvoice_id=?, lead_time_days=?, updated_at=now(),"
                       // The service moves the stamp only on a real change of the details, so a
                       // stamp that differs from the one held is a change: the version a payment
-                      // run was approved with moves on, whatever either clock says (V35).
+                      // run was approved with moves on, whatever either clock says (V20).
                       + " bank_details_version = bank_details_version"
                       + " + CASE WHEN bank_details_changed_at IS DISTINCT FROM CAST(? AS timestamptz) THEN 1 ELSE 0 END"
                       + " WHERE tenant_id=? AND id=?")) {

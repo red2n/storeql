@@ -7,7 +7,7 @@
 -- The VAT code and rate each line was quoted at are on order_items (V1__init.sql).
 
 -- One counter per series and year, moved under its row lock inside the issuing transaction, so a
--- rolled-back issue gives its number back: the same gapless guarantee as receipt_series (V16).
+-- rolled-back issue gives its number back: the same gapless guarantee as receipt_series (V9).
 CREATE TABLE sales_invoice_series (
     tenant_id   UUID        NOT NULL,
     series_code TEXT        NOT NULL,   -- INV for invoices, CRN for credit notes

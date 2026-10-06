@@ -1,6 +1,6 @@
 -- Assortment by store, and range review.
 --
--- Both build on what the catalogue already holds. product_stores (V13__product_store_assortment.sql)
+-- Both build on what the catalogue already holds. product_stores (V11__product_store_assortment.sql)
 -- records which stores carry a product, with the sensible default that a product with no rows sells
 -- everywhere. The item lifecycle (products.status, launch_on and discontinued_at in V1__init.sql)
 -- launches, discontinues and reinstates a line against a date. Neither is replaced here.

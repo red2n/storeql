@@ -14,7 +14,7 @@
 
 -- System-wide reference data, no tenant_id -- the fourteen are set by regulation, not by the
 -- business, and a tenant that could edit them could quietly delete one. Same precedent as
--- uom_definitions in V3.
+-- uom_definitions in V2.
 CREATE TABLE allergens (
     code       TEXT NOT NULL,
     name       TEXT NOT NULL,

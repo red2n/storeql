@@ -5,7 +5,7 @@
 -- country (directly or through a regime it belongs to, with the membership dates) and judged in the
 -- store's own zone.
 --
--- Platform reference data, like legal_obligations (V9): no tenant_id, nothing editable through the
+-- Platform reference data, like legal_obligations (V6): no tenant_id, nothing editable through the
 -- API, a change in the law is a migration with its citation.
 --
 -- What ships is only what the code already applied: the eleven-hour daily rest and the break after

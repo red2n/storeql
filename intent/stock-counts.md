@@ -6,7 +6,7 @@
 | **Author** | the user, from the StoreQL Flow Tests catalogue's open findings on counting (cnt-cycle-counts-stocktakes: no screen CNT-12, no blind count, no recount, no approval of a variance) · 2026-09-30 |
 | **Roadmap** | new: the flow catalogue, inventory domain: cnt-cycle-counts-stocktakes |
 | **Services** | inventory-svc owns counts, rounds, settings and the posting · purchase-svc posts the variance value to the ledger · the app gets the Counts tab |
-| **Builds on** | `cycle_count_headers` / `cycle_count_lines` (`V11`), `physical_inventories` / `physical_inventory_tags` (`V13`), `CycleCountResource`, `PhysicalInventoryResource`, `CycleCountAdjusted`, `applyAdjustments`, `transaction_reason_codes` (`FOUND`, `CORRECTION`), `stock.adjust`, ABC analysis |
+| **Builds on** | `cycle_count_headers` / `cycle_count_lines` (`V9`), `physical_inventories` / `physical_inventory_tags` (`V11`), `CycleCountResource`, `PhysicalInventoryResource`, `CycleCountAdjusted`, `applyAdjustments`, `transaction_reason_codes` (`FOUND`, `CORRECTION`), `stock.adjust`, ABC analysis |
 | **Built in** | |
 
 ## Problem

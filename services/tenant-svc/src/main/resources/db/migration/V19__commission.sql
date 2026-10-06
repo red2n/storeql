@@ -1,6 +1,6 @@
 -- What a sale earns the person who made it (store operations & workforce).
 --
--- The hours are recorded (V27) and what they cost is known (V28); what a sale earns is not. In a shop
+-- The hours are recorded (V17) and what they cost is known (V18); what a sale earns is not. In a shop
 -- that pays commission — a butcher's counter, a phone shop, a forecourt — an assistant's pay is part
 -- wage and part what they sold, and a platform that knows the sale and the hours but not the
 -- arrangement between them cannot answer what anybody is owed.

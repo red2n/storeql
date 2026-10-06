@@ -7,7 +7,7 @@ import java.time.LocalDate;
 import java.util.List;
 
 /**
- * The working-time rules (V41): platform reference data, so nothing here filters by tenant — no row
+ * The working-time rules (V26): platform reference data, so nothing here filters by tenant — no row
  * belongs to one. Found the way legal obligations are: a rule made for a regime reaches a country
  * while it is a member, with the window narrowed to the membership.
  */

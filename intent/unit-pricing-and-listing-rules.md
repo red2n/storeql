@@ -109,7 +109,7 @@ Three rules exist as advice, not as a stop:
 ## Decisions
 
 <!-- Filled while building. -->
-- (2026-09-30, built in order-svc) **One row, two routes.** `order_settings` is built once (V46) for both waits; `GET/PUT /admin/orders/settings/pending-limit` and `/price-wait` are two views of it, each PUT changing only its own columns. A limit off is a null, never a number the platform chose; the price wait has no default.
+- (2026-09-30, built in order-svc) **One row, two routes.** `order_settings` is built once (V23) for both waits; `GET/PUT /admin/orders/settings/pending-limit` and `/price-wait` are two views of it, each PUT changing only its own columns. A limit off is a null, never a number the platform chose; the price wait has no default.
 - (2026-09-30) **The wait is counted from the order's creation** (`created_at`), the sweeper flags at the first limit and cancels at the second even when the flag was never reached (both limits are conditions of one scan, so a sweep that was down for a day still cancels). Cancel reason is `PRICE_WAIT_EXPIRED`, actor none, the `OrderCancelled` event carries the order's channel and fulfilment type like any cancel.
 - (2026-09-30) **`OrderPriceOverdue` has no consumer yet** (`storeql.order.price-overdue`: eventId, tenantId, orderId, storeId, awaitingSince, total when known). notification-svc and reporting-svc take it with the alerts block.
 

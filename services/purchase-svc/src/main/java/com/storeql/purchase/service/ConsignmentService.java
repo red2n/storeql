@@ -29,7 +29,7 @@ import java.util.UUID;
 /**
  * Consignment stock, the buyer's side: what inventory-svc sold of a supplier's stock is owed to
  * that supplier at the order's price the moment it sells, and a settlement gathers a period's
- * unsettled sales into one statement. Nothing is owed at the door; see {@code V23__consignment}.
+ * unsettled sales into one statement. Nothing is owed at the door; see {@code V14__consignment}.
  */
 @ApplicationScoped
 public class ConsignmentService {

@@ -145,7 +145,7 @@ CREATE TABLE product_variants (
     -- say it.
     origin_detail        TEXT,
 
-    -- Which age rule applies (age_restriction_rules, V17), or NULL for the overwhelming majority that
+    -- Which age rule applies (age_restriction_rules, V13), or NULL for the overwhelming majority that
     -- are unrestricted.
     restriction_category TEXT,
 

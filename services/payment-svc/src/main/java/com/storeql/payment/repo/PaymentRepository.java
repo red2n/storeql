@@ -798,7 +798,7 @@ public class PaymentRepository extends BaseOutboxRepository {
 
   /**
    * When payment-svc began acting on an event kind it once ignored, as a migration kept it ({@code
-   * events_handled_since}, V18): older events of that kind are history. Not a business's data, so
+   * events_handled_since}, V11): older events of that kind are history. Not a business's data, so
    * no tenant to filter by.
    *
    * @param eventType the event's type, e.g. {@code OrderVoided}

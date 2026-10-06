@@ -1,4 +1,4 @@
--- V17: Tier-1 gap completions (items 21-31)
+-- V15: Tier-1 gap completions (items 21-31)
 -- 21 Transaction reason codes (controlled vocabulary)
 CREATE TABLE transaction_reason_codes (
     id          UUID PRIMARY KEY,

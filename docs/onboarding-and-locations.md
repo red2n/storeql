@@ -1,6 +1,6 @@
 # Client Onboarding & Location Mapping — Design
 
-> **Status:** Core flow implemented (tenant-svc `/onboarding` + `/admin` tenant/store/zone/staff endpoints, the Flutter onboarding wizard). **Delivery areas:** implemented (`delivery_areas` table V6, `POST/GET/DELETE /admin/stores/{id}/delivery-areas`, `GET /fulfilment/resolve`; order-svc resolves pincode on DELIVERY; admin UI on Stores). When no areas are mapped, resolve falls back to the default/first store. Companion: [CLAUDE.md](../CLAUDE.md), [docs/API-GUIDE.md § tenant-svc](API-GUIDE.md#tenant-svc), [ARCHITECTURE §10](ARCHITECTURE.md#10-the-business-services).
+> **Status:** Core flow implemented (tenant-svc `/onboarding` + `/admin` tenant/store/zone/staff endpoints, the Flutter onboarding wizard). **Delivery areas:** implemented (`delivery_areas` table V3, `POST/GET/DELETE /admin/stores/{id}/delivery-areas`, `GET /fulfilment/resolve`; order-svc resolves pincode on DELIVERY; admin UI on Stores). When no areas are mapped, resolve falls back to the default/first store. Companion: [CLAUDE.md](../CLAUDE.md), [docs/API-GUIDE.md § tenant-svc](API-GUIDE.md#tenant-svc), [ARCHITECTURE §10](ARCHITECTURE.md#10-the-business-services).
 
 ---
 

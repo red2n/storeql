@@ -55,7 +55,7 @@ CREATE TABLE supplier_invoices (
     resolved_at       TIMESTAMPTZ,
     resolved_by       UUID,
     resolution_reason TEXT,
-    -- When the payment run that settled it paid it, and the run (payment_runs, V10).
+    -- When the payment run that settled it paid it, and the run (payment_runs, V5).
     paid_at         TIMESTAMPTZ,
     payment_run_id  UUID,
     created_by      UUID,

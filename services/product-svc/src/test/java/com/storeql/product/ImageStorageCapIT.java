@@ -110,7 +110,7 @@ class ImageStorageCapIT {
   }
 
   @Test
-  @DisplayName("The table itself holds every image under 256 KB, whoever writes it (V14)")
+  @DisplayName("The table itself holds every image under 256 KB, whoever writes it (V12)")
   void theTableRefusesAnImageOf256KbOrMoreWhateverTheService() throws Exception {
     String small = product(FREE, "Table small " + Ids.newId());
     String edge = product(FREE, "Table edge " + Ids.newId());

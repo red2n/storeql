@@ -438,7 +438,7 @@ public class PaymentRunService {
   /**
    * Refuses a run whose payee's bank details changed after it was approved (payment diversion).
    * Counted, not timed: the change's stamp is this service's clock and the approval the database's,
-   * and comparing the two missed a change stamped early and refused one stamped late (V35).
+   * and comparing the two missed a change stamped early and refused one stamped late (V20).
    */
   private void requireBankDetailsUnchangedSinceApproval(
       UUID tenantId, PaymentRun run, Map<UUID, Supplier> suppliers) {

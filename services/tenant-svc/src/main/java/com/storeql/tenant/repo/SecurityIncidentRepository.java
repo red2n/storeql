@@ -26,8 +26,8 @@ import java.util.UUID;
 import java.util.function.BiFunction;
 
 /**
- * The security incident register (V11). Incidents and their timelines are platform data; notices
- * are the one table here that belongs to a business, and every read of them filters by its tenant
+ * The security incident register (V7). Incidents and their timelines are platform data; notices are
+ * the one table here that belongs to a business, and every read of them filters by its tenant
  * first.
  */
 @ApplicationScoped

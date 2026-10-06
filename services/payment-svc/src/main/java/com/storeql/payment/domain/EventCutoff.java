@@ -7,7 +7,7 @@ import java.util.UUID;
 
 /**
  * Whether an event is history to payment-svc: announced before payment-svc began acting on its kind
- * (V18, {@code events_handled_since}). Pure.
+ * (V11, {@code events_handled_since}). Pure.
  *
  * <p>payment-svc began giving back what a voided sale took long after order-svc began announcing
  * voids. Its consumer group had never read that topic, so on its first deployment it starts at the

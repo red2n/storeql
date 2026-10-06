@@ -82,7 +82,7 @@ CREATE TABLE customer_vat_status (
 CREATE INDEX idx_customer_vat_tenant ON customer_vat_status (tenant_id, customer_id);
 
 -- Price zones: the groups of stores that price alike. A list bound to a zone (price_lists.zone_id)
--- is what the zone's stores charge instead of the tenant-wide list. Store assignments are in V14.
+-- is what the zone's stores charge instead of the tenant-wide list. Store assignments are in V10.
 CREATE TABLE price_zones (
     id          UUID        PRIMARY KEY,
     tenant_id   UUID        NOT NULL,

@@ -1,10 +1,10 @@
 -- tenant-svc schema: the Tenant → Stores → Zones location model + staff (docs/onboarding-and-locations.md §3).
--- delivery_areas (pincode to fulfilling store) is created in V6__delivery_areas.sql.
+-- delivery_areas (pincode to fulfilling store) is created in V3__delivery_areas.sql.
 
 -- Plans and packaging (21.8). The platform's price list: what a business can be sold, for how much
 -- in which currency, and what it includes. These are the platform's tables, the same for every
 -- business, so they carry no tenant_id. They come before tenants because tenants.plan_id refers to a
--- plan here; how a business came to be on its plan is tenant_plan_changes (V21__plans.sql).
+-- plan here; how a business came to be on its plan is tenant_plan_changes (V13__tenant_plan_changes.sql).
 --
 -- A price is never edited: a new price takes effect from a date and the old one stays, because an
 -- invoice raised last month must still be explicable next year (21.9 bills from this table).
@@ -223,7 +223,7 @@ CREATE TABLE staff_assignments (
     -- owner grants or removes it, and the service allows it for the MANAGER tier alone.
     store_id   UUID REFERENCES stores(id),
     -- The role the assignment names: a built-in tier (OWNER | MANAGER | STOREKEEPER | CASHIER) or the
-    -- business's own custom code (tenant_roles, V8).
+    -- business's own custom code (tenant_roles, V5).
     role       TEXT NOT NULL,
     -- The tier that role stands on, which is what iam-svc binds.
     base_tier  TEXT NOT NULL,

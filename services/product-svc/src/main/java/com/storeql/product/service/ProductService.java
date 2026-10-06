@@ -753,7 +753,7 @@ public class ProductService {
    * back in full on every storefront render.
    *
    * <p>Enforced here at the boundary and again as a CHECK constraint on {@code product_images} (see
-   * V14__product_images.sql), so the invariant holds whichever client writes — the admin app
+   * V12__product_images.sql), so the invariant holds whichever client writes — the admin app
    * compresses to the same budget before uploading, but nothing may depend on a client having done
    * so.
    */

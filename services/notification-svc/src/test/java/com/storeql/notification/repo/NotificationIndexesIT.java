@@ -37,7 +37,7 @@ import org.junit.jupiter.api.Test;
  * <p>A business's webhook attempts are read by the tenant data export and erased with the business
  * (common-service's TenantDataRepository: {@code WHERE tenant_id = ? AND (id) > ... ORDER BY id
  * LIMIT ?} and {@code DELETE ... WHERE tenant_id = ?}), and {@code idx_webhook_attempts_tenant}
- * (V7__webhooks.sql) is the index those two use; no other statement does, so this is the test that
+ * (V6__webhooks.sql) is the index those two use; no other statement does, so this is the test that
  * stops it being dropped as unused.
  */
 @HelidonTest

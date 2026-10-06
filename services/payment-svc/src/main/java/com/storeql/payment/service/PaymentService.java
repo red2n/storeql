@@ -642,14 +642,14 @@ public class PaymentService {
     putBackOnCards(tenantId, orderId);
   }
 
-  /** The event kind payment-svc began acting on late, whose history it leaves alone (V18). */
+  /** The event kind payment-svc began acting on late, whose history it leaves alone (V11). */
   static final String ORDER_VOIDED = "OrderVoided";
 
   /** When payment-svc began giving back what a voided sale took; read once, it never changes. */
   private volatile Instant voidsSinceRead;
 
   /**
-   * When payment-svc began giving back what a voided sale took ({@code events_handled_since}, V18).
+   * When payment-svc began giving back what a voided sale took ({@code events_handled_since}, V11).
    * Read once and kept: a migration writes it and nothing changes it.
    *
    * @throws ApiException 500 {@code PAYMENT_VOIDS_SINCE_UNKNOWN} when no migration recorded it, so
@@ -665,7 +665,7 @@ public class PaymentService {
                       new ApiException(
                           500,
                           "PAYMENT_VOIDS_SINCE_UNKNOWN",
-                          "When voids began to be refunded is not recorded (migration V18)",
+                          "When voids began to be refunded is not recorded (migration V11)",
                           List.of()));
       voidsSinceRead = since;
     }
