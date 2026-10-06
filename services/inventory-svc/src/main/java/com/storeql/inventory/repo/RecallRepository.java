@@ -391,13 +391,18 @@ public class RecallRepository extends BaseOutboxRepository {
   /**
    * Makes {@code to} held by every open recall that holds {@code from} and has not let it go: the
    * stock moved from one batch to the other, so whatever a recall holds of the one it holds of the
-   * other. Each recall keeps the source's record of the status to restore, so ending the recall
-   * puts the stock back as it was before, not as RECALLED. A recall that already holds {@code to}
-   * is left as it is.
+   * other. A recall that already holds {@code to} is left as it is.
+   *
+   * <p>The status the stock is put back to when the recalls end is the one from before they held
+   * it. A batch that was held by one recall and joins stock held by another is a mix of both, so
+   * every open recall that holds it afterwards records the more restrictive of the two statuses
+   * ({@link #moreRestrictive}), so it is not put on sale when part of it was not.
    *
    * @param to the batch as it now stands, its quantity being what each recall records as held
    */
   static void inheritHolds(Connection c, UUID tenantId, UUID from, Batch to) throws SQLException {
+    String fromPrior = statusBeforeRecalls(c, tenantId, from);
+    String toPrior = statusBeforeRecalls(c, tenantId, to.id());
     record Held(UUID recallId, String reference, Match match, String prior) {}
     List<Held> held = new ArrayList<>();
     try (PreparedStatement ps =
@@ -439,6 +444,69 @@ public class RecallRepository extends BaseOutboxRepository {
           h.match(),
           QuarantinedOn.ARRIVAL,
           holdReason(h.reference()));
+    }
+    String restore = moreRestrictive(fromPrior, toPrior);
+    if (restore != null && !held.isEmpty()) {
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "UPDATE recall_batches rb SET prior_material_status = ? WHERE rb.tenant_id = ? AND"
+                  + " rb.batch_id = ? AND prior_material_status <> ? AND EXISTS (SELECT 1 FROM"
+                  + " recalls r WHERE r.tenant_id = rb.tenant_id AND r.id = rb.recall_id AND"
+                  + " r.status = 'OPEN') AND"
+                  + NOT_RELEASED)) {
+        ps.setString(1, restore);
+        ps.setObject(2, tenantId);
+        ps.setObject(3, to.id());
+        ps.setString(4, restore);
+        ps.executeUpdate();
+      }
+    }
+  }
+
+  /** Material statuses from the least to the most restrictive. */
+  private static final List<String> BY_RESTRICTION =
+      List.of(
+          Batch.MATERIAL_AVAILABLE,
+          Batch.MATERIAL_QUARANTINE,
+          Batch.MATERIAL_INSPECTION,
+          Batch.MATERIAL_DAMAGED,
+          Batch.MATERIAL_RECALLED);
+
+  /**
+   * The more restrictive of two material statuses, or the other when one is null. A status this
+   * list does not know counts as the most restrictive.
+   */
+  static String moreRestrictive(String a, String b) {
+    if (a == null || b == null) {
+      return a == null ? b : a;
+    }
+    int ra = BY_RESTRICTION.contains(a) ? BY_RESTRICTION.indexOf(a) : Integer.MAX_VALUE;
+    int rb = BY_RESTRICTION.contains(b) ? BY_RESTRICTION.indexOf(b) : Integer.MAX_VALUE;
+    return ra >= rb ? a : b;
+  }
+
+  /**
+   * Locks, shared and in id order, the open recalls that hold any of these batches or cover their
+   * variants, so a recall's cancel, release or store action (which lock their recall first and then
+   * the batches) and a split or merge (which then lock the batches and join the recalls) take the
+   * locks in one order. Call it before locking a batch.
+   */
+  static void lockRecallsOfTx(Connection c, UUID tenantId, List<UUID> batchIds)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT r.id FROM recalls r WHERE r.tenant_id = ? AND r.status = 'OPEN' AND ("
+                + "EXISTS (SELECT 1 FROM recall_items i WHERE i.tenant_id = r.tenant_id AND"
+                + " i.recall_id = r.id AND i.variant_id IN (SELECT b.variant_id FROM"
+                + " inventory_batches b WHERE b.tenant_id = r.tenant_id AND b.id = ANY (?)))"
+                + " OR EXISTS (SELECT 1 FROM recall_batches h WHERE h.tenant_id = r.tenant_id AND"
+                + " h.recall_id = r.id AND h.batch_id = ANY (?)))"
+                + " ORDER BY r.id FOR SHARE OF r")) {
+      Object[] ids = batchIds.toArray();
+      ps.setObject(1, tenantId);
+      ps.setArray(2, c.createArrayOf("uuid", ids));
+      ps.setArray(3, c.createArrayOf("uuid", ids));
+      ps.executeQuery().close();
     }
   }
 

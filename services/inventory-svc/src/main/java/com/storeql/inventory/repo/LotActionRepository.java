@@ -82,6 +82,19 @@ public class LotActionRepository extends BaseJdbcRepository {
     }
   }
 
+  /** Whether the tenant has a lot action made under this Idempotency-Key. */
+  public boolean keyUsed(UUID tenantId, String idempotencyKey) {
+    return !query(
+            "SELECT 1 FROM lot_actions WHERE tenant_id = ? AND idempotency_key = ?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, idempotencyKey);
+            },
+            rs -> 1,
+            "find lot action by key")
+        .isEmpty();
+  }
+
   /**
    * Lists the tenant's lot actions.
    *

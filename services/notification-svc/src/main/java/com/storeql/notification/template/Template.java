@@ -17,7 +17,8 @@ import java.util.regex.Pattern;
  * <p>Deliberately nothing more. A business writes these, so a template can do no more than fill
  * gaps: no code, no includes, no way to reach anything but the values the platform hands it. It is
  * plain text, never HTML, so there is nothing to escape and nothing to inject. A template that does
- * not parse is refused when it is saved, not when a message is due.
+ * not parse is refused when it is saved; one stored that does not parse is passed over when a
+ * message is due.
  */
 public final class Template {
 

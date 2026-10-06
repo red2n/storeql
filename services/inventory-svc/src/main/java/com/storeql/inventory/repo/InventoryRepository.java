@@ -356,6 +356,7 @@ public class InventoryRepository extends BaseOutboxRepository {
       OutboxRow event) {
     return inTx(
         c -> {
+          RecallRepository.lockRecallsOfTx(c, tenantId, List.of(sourceBatchId));
           Batch source = lockBatchTx(c, tenantId, sourceBatchId, "Source batch not found");
           LotAction earlier = lotActionOfKeyTx(c, tenantId, idempotencyKey);
           if (earlier != null) {
@@ -525,6 +526,7 @@ public class InventoryRepository extends BaseOutboxRepository {
       OutboxRow event) {
     return inTx(
         c -> {
+          RecallRepository.lockRecallsOfTx(c, tenantId, List.of(sourceBatchId, targetBatchId));
           Map<UUID, Batch> locked = lockBatchesTx(c, tenantId, sourceBatchId, targetBatchId);
           Batch source = locked.get(sourceBatchId);
           Batch target = locked.get(targetBatchId);
@@ -693,7 +695,8 @@ public class InventoryRepository extends BaseOutboxRepository {
 
   /**
    * The MERGE link from source to target; a second merge between the same two adds its quantity to
-   * the link already there (the genealogy holds one link for a pair of batches).
+   * the link already there (the genealogy holds one link for a pair of batches). A TRANSFORM link
+   * already there becomes MERGE, which a recall follows; a SPLIT link stays, which it follows too.
    */
   private void insertMergeLink(
       Connection c, UUID tenantId, UUID parentId, UUID childId, BigDecimal qty, UUID actionId)
@@ -704,7 +707,9 @@ public class InventoryRepository extends BaseOutboxRepository {
                 + " (id, tenant_id, parent_batch_id, child_batch_id, qty, relation_type, notes)"
                 + " VALUES (?,?,?,?,?,'MERGE',?)"
                 + " ON CONFLICT (tenant_id, parent_batch_id, child_batch_id)"
-                + " DO UPDATE SET qty = lot_genealogy.qty + EXCLUDED.qty")) {
+                + " DO UPDATE SET qty = lot_genealogy.qty + EXCLUDED.qty,"
+                + " relation_type = CASE WHEN lot_genealogy.relation_type = 'TRANSFORM'"
+                + " THEN 'MERGE' ELSE lot_genealogy.relation_type END")) {
       ps.setObject(1, Ids.newId());
       ps.setObject(2, tenantId);
       ps.setObject(3, parentId);

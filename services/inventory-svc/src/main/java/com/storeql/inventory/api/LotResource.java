@@ -40,7 +40,7 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
  * Lot/batch traceability: genealogy (Gap #11), split/merge (Gap #23), expiry alerts (Gap #24),
  * grade control (Gap #25). Extracted from AdminResource — bundled as one cohesive "lot-level batch
  * operations" theme; none of these share state at the controller layer, so the grouping here is
- * organizational. A write names a batch, and a caller held to stores is held to that batch's store.
+ * organizational. A write that names a batch holds a caller held to stores to that batch's store.
  */
 @Path("/admin/inventory")
 @ApplicationScoped
@@ -59,25 +59,32 @@ public class LotResource {
    *
    * @param req the request body
    * @return genealogy link created ({@code 201})
+   * @throws com.storeql.web.ApiException {@code 403} a batch is at a store the caller is not held
+   *     to; {@code 404} parent or child batch not found
    */
   @Operation(
       summary = "Link a parent and child batch for genealogy",
       description =
           "Records a lot-genealogy relation (e.g. split/merge/repack) between two batches.")
   @APIResponse(responseCode = "201", description = "Genealogy link created")
+  @APIResponse(
+      responseCode = "403",
+      description = "A batch is at a store the caller is not held to")
+  @APIResponse(responseCode = "404", description = "Parent or child batch not found")
   @POST
   @Path("/lot-genealogy")
   public Response createLotLink(CreateLotLinkRequest req) {
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    UUID parentId = uuid(req.parentBatchId(), "parentBatchId");
+    UUID childId = uuid(req.childBatchId(), "childBatchId");
+    var parent = service.getBatch(tenantId, parentId);
+    var child = service.getBatch(tenantId, childId);
+    ctx.requireStoreAccess(parent.storeId());
+    ctx.requireStoreAccess(child.storeId());
     var link =
         service.createLotLink(
-            tenantId,
-            uuid(req.parentBatchId(), "parentBatchId"),
-            uuid(req.childBatchId(), "childBatchId"),
-            req.qty(),
-            req.relationType(),
-            req.notes());
+            tenantId, parentId, childId, req.qty(), req.relationType(), req.notes());
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toLotLink(link), ApiResponse.Meta.of(ctx.requestId())))
         .build();
@@ -177,18 +184,13 @@ public class LotResource {
   public ApiResponse<LotActionResponse> splitLot(
       @HeaderParam(HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey, LotSplitRequest req) {
     Validations.validate(req);
+    String key = IdempotencyKeys.effective(idempotencyKey, null);
     UUID tenantId = ctx.requireTenantId();
     UUID sourceBatchId = Ids.parse(req.sourceBatchId());
     ctx.requireStoreAccess(service.getBatch(tenantId, sourceBatchId).storeId());
     var result =
         service.splitLot(
-            tenantId,
-            sourceBatchId,
-            req.qty(),
-            req.batchNo(),
-            req.notes(),
-            ctx.userId(),
-            IdempotencyKeys.effective(idempotencyKey, null));
+            tenantId, sourceBatchId, req.qty(), req.batchNo(), req.notes(), ctx.userId(), key);
     return ApiResponse.ok(Mappers.toLotAction(result.action()));
   }
 
@@ -235,6 +237,7 @@ public class LotResource {
   public ApiResponse<LotActionResponse> mergeLot(
       @HeaderParam(HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey, LotMergeRequest req) {
     Validations.validate(req);
+    String key = IdempotencyKeys.effective(idempotencyKey, null);
     UUID tenantId = ctx.requireTenantId();
     UUID sourceBatchId = Ids.parse(req.sourceBatchId());
     UUID targetBatchId = Ids.parse(req.targetBatchId());
@@ -242,13 +245,7 @@ public class LotResource {
     ctx.requireStoreAccess(service.getBatch(tenantId, targetBatchId).storeId());
     var result =
         service.mergeLot(
-            tenantId,
-            sourceBatchId,
-            targetBatchId,
-            req.qty(),
-            req.notes(),
-            ctx.userId(),
-            IdempotencyKeys.effective(idempotencyKey, null));
+            tenantId, sourceBatchId, targetBatchId, req.qty(), req.notes(), ctx.userId(), key);
     return ApiResponse.ok(Mappers.toLotAction(result.action()));
   }
 

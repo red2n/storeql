@@ -1289,6 +1289,12 @@ class LotSplitIT {
     assertThat(body, containsString("IDEMPOTENCY_KEY_INVALID"));
 
     assertThat(footprint(f), is(before));
+
+    Lot unknown = new Lot(f.tenant(), f.staff(), f.store(), f.variant(), Ids.newId().toString());
+    Response ofUnknown = keyedSplit(unknown, "2", "not-a-uuid");
+    String unknownBody = ofUnknown.readEntity(String.class);
+    assertThat("a batch no one has: " + unknownBody, ofUnknown.getStatus(), is(400));
+    assertThat(unknownBody, containsString("IDEMPOTENCY_KEY_INVALID"));
   }
 
   @Test

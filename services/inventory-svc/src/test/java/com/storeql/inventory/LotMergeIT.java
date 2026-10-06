@@ -27,10 +27,14 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.Statement;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
@@ -1272,5 +1276,256 @@ class LotMergeIT {
     assertThat(remaining(a).add(remaining(b)), comparesEqualTo(d("40")));
     assertThat(held(s), comparesEqualTo(d("40")));
     assertThat(movements(s, "LOT_MERGE"), is(16L));
+  }
+
+  // ── what a merge of held stock restores to ─────────────────────────────────
+
+  private void quarantine(Stock s, String batch) {
+    assertThat(
+        put(
+                "/admin/inventory/batches/" + batch + "/material-status",
+                "{\"materialStatus\":\"QUARANTINE\",\"reason\":\"Awaiting lab result\"}",
+                s)
+            .getStatus(),
+        is(200));
+  }
+
+  @Test
+  @DisplayName("Held stock merged with held stock is restored to the more restrictive prior status")
+  void aMergeOfHeldBatchesRestoresToTheMoreRestrictivePriorStatus() {
+    for (boolean sourceQuarantined : List.of(true, false)) {
+      Stock s = stock();
+      String source = receive(s, 10, "LOT-A", "1.0000", "2098-01-01");
+      String target = receive(s, 5, "LOT-B", "1.0000", "2098-01-01");
+      quarantine(s, sourceQuarantined ? source : target);
+      String byA = recall(s, "HOLD-A", "LOT-A").getString("id");
+      String byB = recall(s, "HOLD-B", "LOT-B").getString("id");
+
+      mergeOk(s, source, target, "4");
+
+      assertThat(
+          "every recall holding the target records the stricter status",
+          sql(
+              "SELECT string_agg(DISTINCT prior_material_status, ',') FROM"
+                  + " inventory.recall_batches WHERE batch_id = '"
+                  + target
+                  + "'"),
+          is("QUARANTINE"));
+      assertThat(cancelRecall(s, byB).getStatus(), is(200));
+      assertThat(materialStatus(target), is("RECALLED"));
+      assertThat(cancelRecall(s, byA).getStatus(), is(200));
+      assertThat(
+          "never put on sale: part of it was quarantined",
+          materialStatus(target),
+          is("QUARANTINE"));
+    }
+  }
+
+  // ── a merge link a recall can follow ───────────────────────────────────────
+
+  @Test
+  @DisplayName("A merge between two batches already linked as a transform is still a MERGE link")
+  void aMergeUpgradesAnExistingTransformLink() {
+    Stock s = stock();
+    String source = receive(s, 10, "LOT-A", "1.0000", "2098-01-01");
+    String target = receive(s, 5, "LOT-B", "1.0000", "2098-01-01");
+    assertThat(
+        post(
+                "/admin/inventory/lot-genealogy",
+                "{\"parentBatchId\":\""
+                    + source
+                    + "\",\"childBatchId\":\""
+                    + target
+                    + "\",\"qty\":1,\"relationType\":\"TRANSFORM\"}",
+                s.tenant(),
+                s.staff(),
+                "OWNER")
+            .getStatus(),
+        is(201));
+
+    mergeOk(s, source, target, "2");
+
+    assertThat(
+        sql(
+            "SELECT relation_type || '|' || qty FROM inventory.lot_genealogy WHERE parent_batch_id"
+                + " = '"
+                + source
+                + "' AND child_batch_id = '"
+                + target
+                + "'"),
+        is("MERGE|3.000"));
+    assertThat(
+        heldBatches(recall(s, "AFTER-T", "LOT-A")).keySet(), containsInAnyOrder(source, target));
+  }
+
+  // ── POST /lot-genealogy names two batches ──────────────────────────────────
+
+  private Response link(Stock s, String role, String stores, String parent, String child) {
+    Invocation.Builder b =
+        as("/admin/inventory/lot-genealogy", s.tenant(), Ids.newId().toString(), role);
+    if (stores != null) {
+      b = b.header("X-Store-Ids", stores);
+    }
+    return b.post(
+        Entity.entity(
+            "{\"parentBatchId\":\""
+                + parent
+                + "\",\"childBatchId\":\""
+                + child
+                + "\",\"qty\":1,\"relationType\":\"SPLIT\"}",
+            MediaType.APPLICATION_JSON));
+  }
+
+  @Test
+  @DisplayName("A link between two batches is written only by a caller held to both their stores")
+  void aLinkIsHeldToTheStoresOfBothBatches() {
+    Stock here = stock();
+    Stock there = elsewhere(here);
+    String atHere = receive(here, 10, "LOT-A", "1.0000", "2098-01-01");
+    String alsoHere = receive(here, 5, "LOT-B", "1.0000", "2098-01-01");
+    String atThere = receive(there, 5, "LOT-C", "1.0000", "2098-01-01");
+    String notTheirs = Ids.newId().toString();
+
+    refusedForStore(link(here, "MANAGER", notTheirs, atHere, alsoHere), "neither store");
+    refusedForStore(link(here, "MANAGER", here.store(), atHere, atThere), "child not theirs");
+    refusedForStore(link(here, "MANAGER", here.store(), atThere, atHere), "parent not theirs");
+    assertThat(
+        "a batch no one has is a 404 before any 403",
+        link(here, "MANAGER", notTheirs, atHere, Ids.newId().toString()).getStatus(),
+        is(404));
+    assertThat(
+        link(here, "MANAGER", notTheirs, Ids.newId().toString(), atHere).getStatus(), is(404));
+    assertThat(count("lot_genealogy", here), is(0L));
+
+    assertThat(link(here, "MANAGER", here.store(), atHere, alsoHere).getStatus(), is(201));
+    assertThat(link(here, "OWNER", null, atHere, atThere).getStatus(), is(201));
+    assertThat(count("lot_genealogy", here), is(2L));
+  }
+
+  @Test
+  @DisplayName("Another business, of any role, cannot link our batches")
+  void anotherBusinessCannotLinkOurBatches() {
+    Stock mine = stock();
+    Stock theirs = stock();
+    String a = receive(mine, 10, "LOT-A", "1.0000", "2098-01-01");
+    String b = receive(mine, 5, "LOT-B", "1.0000", "2098-01-01");
+
+    for (String role : List.of("OWNER", "MANAGER", "STOREKEEPER", "CASHIER")) {
+      Response r = link(theirs, role, null, a, b);
+      String body = r.readEntity(String.class);
+      assertThat(role + ": " + body, r.getStatus(), is(oneOf(403, 404)));
+    }
+
+    assertThat(count("lot_genealogy", mine), is(0L));
+    assertThat(count("lot_genealogy", theirs), is(0L));
+  }
+
+  // ── Idempotency-Key is read before any batch ───────────────────────────────
+
+  @Test
+  @DisplayName("A malformed Idempotency-Key is refused before any batch is read")
+  void aMalformedKeyIsRefusedBeforeAnyBatchIsRead() {
+    Stock s = stock();
+    String source = receive(s, 10, "LOT-A", "1.0000", "2098-01-01");
+    String target = receive(s, 5, "LOT-B", "1.0000", "2098-01-01");
+    String before = footprint(s, source, target);
+
+    assertThat(
+        refusedWith(keyedMerge(s, source, target, "1", "not-a-uuid"), 400),
+        is("IDEMPOTENCY_KEY_INVALID"));
+    assertThat(
+        "a batch no one has",
+        refusedWith(
+            keyedMerge(s, Ids.newId().toString(), Ids.newId().toString(), "1", "not-a-uuid"), 400),
+        is("IDEMPOTENCY_KEY_INVALID"));
+
+    assertThat(footprint(s, source, target), is(before));
+  }
+
+  @Test
+  @DisplayName("A retried blended merge answers the first merge even when the currency is unread")
+  void aRetriedBlendedMergeNeedsNoCurrency() {
+    Stock s =
+        new Stock(
+            Ids.newId().toString(),
+            Ids.newId().toString(),
+            Ids.newId().toString(),
+            Ids.newId().toString());
+    String source = receive(s, 4, "LOT-A", "3.0000", "2098-01-01");
+    String target = receive(s, 6, "LOT-B", "2.0000", "2098-01-01");
+    String key = Ids.newId().toString();
+    String action = Ids.newId().toString();
+    Envelopes.exec(
+        PG,
+        "INSERT INTO inventory.lot_actions (id, tenant_id, action_type, source_batch_id,"
+            + " result_batch_id, qty, idempotency_key) VALUES ('"
+            + action
+            + "', '"
+            + s.tenant()
+            + "', 'MERGE', '"
+            + source
+            + "', '"
+            + target
+            + "', 4, '"
+            + key
+            + "')");
+    String before = footprint(s, source, target);
+
+    JsonObject again = Envelopes.ok(keyedMerge(s, source, target, "4", key));
+
+    assertThat(again.getString("id"), is(action));
+    assertThat(footprint(s, source, target), is(before));
+    assertThat(
+        "a first attempt still needs the currency",
+        refusedWith(merge(s, source, target, "4"), 503),
+        is("TENANT_PROFILE_UNAVAILABLE"));
+  }
+
+  // ── lock order against a recall's cancel ───────────────────────────────────
+
+  @Test
+  @DisplayName("A split waits for a recall's lock before it takes its batch, so a cancel cannot")
+  void aSplitTakesTheRecallsBeforeTheBatch() throws Exception {
+    Stock s = stock();
+    String source = receive(s, 10, "LOT-A", "1.0000", "2098-01-01");
+    String recall = recall(s, "LOCK-A", "LOT-A").getString("id");
+
+    try (Connection c = PG.dataSource().getConnection();
+        Statement st = c.createStatement()) {
+      c.setAutoCommit(false);
+      // What a cancel does first: lock the recall.
+      st.execute("SELECT id FROM inventory.recalls WHERE id = '" + recall + "' FOR UPDATE");
+      CompletableFuture<Integer> split =
+          CompletableFuture.supplyAsync(
+              () -> {
+                Response r =
+                    post(
+                        "/admin/inventory/lots/split",
+                        "{\"sourceBatchId\":\"" + source + "\",\"qty\":2}",
+                        s.tenant(),
+                        s.staff(),
+                        "OWNER");
+                r.readEntity(String.class);
+                return r.getStatus();
+              });
+      long give = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+      while (!"1".equals(sql("SELECT least(count(*), 1) FROM pg_locks WHERE NOT granted"))) {
+        assertThat("the split reached the recall's lock", System.nanoTime() < give, is(true));
+        Thread.sleep(20);
+      }
+      // Waiting on the recall, the split holds no lock on the batch: what a cancel takes next.
+      st.execute(
+          "SELECT id FROM inventory.inventory_batches WHERE id = '"
+              + source
+              + "' FOR UPDATE NOWAIT");
+      st.executeUpdate(
+          "UPDATE inventory.inventory_batches SET material_status_changed_at = now() WHERE id = '"
+              + source
+              + "'");
+      c.commit();
+
+      assertThat(split.get(30, TimeUnit.SECONDS), is(200));
+    }
+    assertThat(remaining(source), comparesEqualTo(d("8")));
   }
 }

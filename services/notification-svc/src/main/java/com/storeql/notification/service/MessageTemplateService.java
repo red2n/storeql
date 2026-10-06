@@ -23,10 +23,11 @@ import java.util.stream.Collectors;
  * goes out in now, a new version saved, a version retired, a draft previewed, and how the
  * business's messages are signed and in what language they go when the reader's is not known.
  *
- * <p>A template is judged before it is kept, never when a message is due: it must parse, use only
- * the values its message has, keep every part the message may not leave out, and — filled with the
- * message's sample values — fit the form it goes out in. A preview runs the same checks and says
- * what they found instead of refusing, so a draft can be seen half-written.
+ * <p>A template is judged before it is kept: it must parse, use only the values its message has,
+ * keep every part the message may not leave out, and — filled with the message's sample values —
+ * fit the form it goes out in. A preview runs the same checks and says what they found instead of
+ * refusing, so a draft can be seen half-written. A message that is due parses the stored words
+ * again and passes over a version that fails ({@link Messages#compose}).
  */
 @ApplicationScoped
 public class MessageTemplateService {

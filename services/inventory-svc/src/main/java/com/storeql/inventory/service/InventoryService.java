@@ -3283,8 +3283,8 @@ public class InventoryService {
    *     tenant; 422 {@code INSUFFICIENT_QTY} when the quantity exceeds what the source holds, or
    *     {@code INVENTORY_LOT_MERGE_*} when the two cannot be merged ({@link
    *     InventoryRepository#mergeBatches}); 503 {@code TENANT_PROFILE_UNAVAILABLE} when their costs
-   *     differ and the business's currency cannot be read; {@code IDEMPOTENCY_KEY_REUSED} (409)
-   *     when the key made a different action
+   *     differ, the key has made no merge and the business's currency cannot be read; {@code
+   *     IDEMPOTENCY_KEY_REUSED} (409) when the key made a different action
    */
   public LotMergeResult mergeLot(
       UUID tenantId,
@@ -3303,8 +3303,10 @@ public class InventoryService {
     // The currency is read before the transaction, not inside it: the merge holds row locks while
     // it runs, and a call to tenant-svc would be made under them. Equal costs are left as they are
     // and need no currency.
+    // A retry under a key that already made a merge answers it and needs no currency.
+    boolean replay = idempotencyKey != null && lotActionRepo.keyUsed(tenantId, idempotencyKey);
     Integer minorUnits =
-        LotMerges.needsBlend(source.costPrice(), target.costPrice())
+        !replay && LotMerges.needsBlend(source.costPrice(), target.costPrice())
             ? Integer.valueOf(Fx.minorUnits(tenantProfiles.requireCurrency(tenantId)))
             : null;
     OutboxRow mergeEvent =
