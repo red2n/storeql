@@ -64,11 +64,11 @@ CREATE TABLE fulfilment_windows (
     updated_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),
     updated_by      UUID          NOT NULL,
     CONSTRAINT pk_fulfilment_windows PRIMARY KEY (id),
-    CONSTRAINT ck_fulfilment_windows_type CHECK (fulfilment_type IN ('DELIVERY', 'PICKUP')),
-    CONSTRAINT ck_fulfilment_windows_weekday CHECK (weekday BETWEEN 1 AND 7),
-    CONSTRAINT ck_fulfilment_windows_span CHECK (start_time < end_time),
-    CONSTRAINT ck_fulfilment_windows_capacity CHECK (capacity >= 1),
-    CONSTRAINT ck_fulfilment_windows_cutoff CHECK (cutoff_minutes >= 0)
+    CONSTRAINT chk_fulfilment_windows_type CHECK (fulfilment_type IN ('DELIVERY', 'PICKUP')),
+    CONSTRAINT chk_fulfilment_windows_weekday CHECK (weekday BETWEEN 1 AND 7),
+    CONSTRAINT chk_fulfilment_windows_span CHECK (start_time < end_time),
+    CONSTRAINT chk_fulfilment_windows_capacity CHECK (capacity >= 1),
+    CONSTRAINT chk_fulfilment_windows_cutoff CHECK (cutoff_minutes >= 0)
 );
 -- Every read and write is by tenant then store: the admin list, the storefront read and the
 -- overlap check on a write all filter this way first.
@@ -165,18 +165,18 @@ CREATE TABLE orders (
     idempotency_key       TEXT,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT ck_orders_group_part CHECK ((group_id IS NULL) = (group_part IS NULL)),
-    CONSTRAINT ck_orders_slot_shape CHECK (
+    CONSTRAINT chk_orders_group_part CHECK ((group_id IS NULL) = (group_part IS NULL)),
+    CONSTRAINT chk_orders_slot_shape CHECK (
         (slot_window_id IS NULL AND slot_starts_at IS NULL AND slot_ends_at IS NULL AND slot_time_zone IS NULL)
         OR (slot_window_id IS NOT NULL AND slot_starts_at IS NOT NULL AND slot_ends_at IS NOT NULL AND slot_time_zone IS NOT NULL)),
-    CONSTRAINT ck_orders_contact_phone_e164 CHECK (
+    CONSTRAINT chk_orders_contact_phone_e164 CHECK (
         contact_phone_e164 IS NULL OR contact_phone_e164 ~ '^\+[1-9][0-9]{6,14}$'),
-    CONSTRAINT orders_group_id_fkey FOREIGN KEY (group_id) REFERENCES order_groups (id),
-    CONSTRAINT orders_slot_window_id_fkey FOREIGN KEY (slot_window_id) REFERENCES fulfilment_windows (id)
+    CONSTRAINT fk_orders_group_id FOREIGN KEY (group_id) REFERENCES order_groups (id),
+    CONSTRAINT fk_orders_slot_window_id FOREIGN KEY (slot_window_id) REFERENCES fulfilment_windows (id)
 );
 CREATE INDEX idx_orders_tenant     ON orders (tenant_id, store_id, created_at DESC);
 CREATE INDEX idx_orders_customer   ON orders (tenant_id, customer_id) WHERE customer_id IS NOT NULL;
-CREATE UNIQUE INDEX idx_orders_idem ON orders (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX uq_orders_idem ON orders (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 -- Lookup by the shopper's login: an erasure reaches an online order through it.
 CREATE INDEX idx_orders_login ON orders (tenant_id, login_id) WHERE login_id IS NOT NULL;
 -- Partial, because most orders online have no seller and an index over nulls would be mostly empty.
@@ -237,7 +237,7 @@ CREATE TABLE order_items (
     substitutes_item_id UUID REFERENCES order_items (id),
     notes            TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT ck_order_items_short_within CHECK (fulfilled_qty + short_qty <= qty)
+    CONSTRAINT chk_order_items_short_within CHECK (fulfilled_qty + short_qty <= qty)
 );
 CREATE INDEX idx_order_items_tenant   ON order_items (tenant_id, order_id);
 CREATE INDEX idx_order_items_markdown ON order_items (tenant_id, markdown_id) WHERE markdown_id IS NOT NULL;
@@ -294,8 +294,8 @@ CREATE TABLE returns (
     customer_id       UUID,
     -- The phone or email the customer gave, kept for the record and never logged.
     customer_contact  TEXT,
-    CONSTRAINT ck_returns_order_or_no_receipt CHECK (order_id IS NOT NULL OR no_receipt),
-    CONSTRAINT ck_returns_no_receipt_method   CHECK (NOT no_receipt OR refund_method IN ('STORE_CREDIT', 'GIFT_CARD'))
+    CONSTRAINT chk_returns_order_or_no_receipt CHECK (order_id IS NOT NULL OR no_receipt),
+    CONSTRAINT chk_returns_no_receipt_method   CHECK (NOT no_receipt OR refund_method IN ('STORE_CREDIT', 'GIFT_CARD'))
 );
 CREATE INDEX idx_returns_tenant      ON returns (tenant_id, order_id);
 CREATE INDEX idx_returns_tenant_time ON returns (tenant_id, created_at DESC);
@@ -317,7 +317,7 @@ CREATE TABLE return_items (
     -- sale, whose price is the sale's.
     unit_price    NUMERIC(18,4),
     tax_amount    NUMERIC(18,4),
-    CONSTRAINT ck_return_items_condition CHECK (condition IS NULL OR condition IN ('SEALED', 'OPENED', 'DAMAGED', 'FAULTY'))
+    CONSTRAINT chk_return_items_condition CHECK (condition IS NULL OR condition IN ('SEALED', 'OPENED', 'DAMAGED', 'FAULTY'))
 );
 CREATE INDEX idx_return_items_tenant ON return_items (tenant_id, return_id);
 
@@ -460,8 +460,8 @@ CREATE TABLE outbox (
     next_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_error       TEXT,
     dead_at          TIMESTAMPTZ,
-    CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-    CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+    CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+    CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 -- The claim (common-service BaseOutboxRepository.claim): rows that may publish now, in the order they
 -- were written. This index serves its ordered scan (ORDER BY created_at, id LIMIT n); its predicate

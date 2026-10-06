@@ -24,8 +24,8 @@ CREATE TABLE labour_facts (
     recorded_at TIMESTAMPTZ  NOT NULL,
 
     CONSTRAINT pk_labour_facts PRIMARY KEY (tenant_id, entry_id),
-    CONSTRAINT ck_labour_minutes CHECK (minutes >= 0),
-    CONSTRAINT ck_labour_currency CHECK ((cost IS NULL) = (currency IS NULL))
+    CONSTRAINT chk_labour_minutes CHECK (minutes >= 0),
+    CONSTRAINT chk_labour_currency CHECK ((cost IS NULL) = (currency IS NULL))
 );
 
 CREATE INDEX idx_labour_facts_day ON labour_facts (tenant_id, day, store_id);

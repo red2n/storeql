@@ -41,11 +41,11 @@ CREATE TABLE task_templates (
     withdrawn_at   TIMESTAMPTZ,
     withdrawn_by   UUID,
 
-    CONSTRAINT ck_task_kind CHECK (kind IN ('OPENING', 'CLOSING', 'DAILY', 'WEEKLY', 'AD_HOC')),
-    CONSTRAINT ck_task_status CHECK (status IN ('ACTIVE', 'WITHDRAWN')),
-    CONSTRAINT ck_task_grace CHECK (grace_minutes BETWEEN 0 AND 1440),
+    CONSTRAINT chk_task_kind CHECK (kind IN ('OPENING', 'CLOSING', 'DAILY', 'WEEKLY', 'AD_HOC')),
+    CONSTRAINT chk_task_status CHECK (status IN ('ACTIVE', 'WITHDRAWN')),
+    CONSTRAINT chk_task_grace CHECK (grace_minutes BETWEEN 0 AND 1440),
     -- Withdrawn means somebody withdrew it, and an unattributable withdrawal is not a record.
-    CONSTRAINT ck_task_withdrawn CHECK (
+    CONSTRAINT chk_task_withdrawn CHECK (
         (status <> 'WITHDRAWN') OR (withdrawn_at IS NOT NULL AND withdrawn_by IS NOT NULL)
     )
 );
@@ -93,13 +93,13 @@ CREATE TABLE task_instances (
     note            TEXT,
     created_at      TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_instance_status CHECK (status IN ('OPEN', 'DONE', 'SKIPPED', 'MISSED')),
+    CONSTRAINT chk_instance_status CHECK (status IN ('OPEN', 'DONE', 'SKIPPED', 'MISSED')),
     -- Done means somebody did it, at a time. A tick with nobody behind it is what an audit cannot use.
-    CONSTRAINT ck_instance_done CHECK (
+    CONSTRAINT chk_instance_done CHECK (
         (status <> 'DONE') OR (completed_at IS NOT NULL AND completed_by IS NOT NULL)
     ),
     -- A skipped closing check with no reason is precisely what an auditor asks about.
-    CONSTRAINT ck_instance_skipped CHECK (
+    CONSTRAINT chk_instance_skipped CHECK (
         (status <> 'SKIPPED') OR (skipped_reason IS NOT NULL AND completed_by IS NOT NULL)
     ),
     -- One occurrence per list per store per day: generating a day twice would double every report and
@@ -123,7 +123,7 @@ CREATE TABLE task_instance_items (
     ticked_by    UUID,
 
     CONSTRAINT uq_instance_item_position UNIQUE (instance_id, position),
-    CONSTRAINT ck_instance_item_ticked CHECK (
+    CONSTRAINT chk_instance_item_ticked CHECK (
         (ticked_at IS NULL) = (ticked_by IS NULL)
     )
 );

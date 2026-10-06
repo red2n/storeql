@@ -26,7 +26,7 @@ CREATE TABLE given_up_orders (
     reason      TEXT        NOT NULL,
     given_up_at TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_given_up_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
+    CONSTRAINT chk_given_up_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
     -- Given up once: a second event that gives it up changes nothing.
     CONSTRAINT uq_given_up_order UNIQUE (tenant_id, order_id)
 );

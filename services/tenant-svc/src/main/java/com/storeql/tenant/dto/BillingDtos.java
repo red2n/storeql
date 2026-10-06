@@ -43,7 +43,7 @@ public final class BillingDtos {
           @NotBlank
           @Size(max = 12)
           String invoicePrefix,
-      // Held to the table's own checks (ck_billing_profile_terms, ck_billing_profile_rate), which
+      // Held to the table's own checks (chk_billing_profile_terms, chk_billing_profile_rate), which
       // a body past them broke as a 500: terms of 0 to 180 days, a rate below one.
       @Schema(description = "How many days after issue an invoice falls due: 0 to 180.")
           @NotNull
@@ -88,7 +88,7 @@ public final class BillingDtos {
           @NotBlank
           @Size(max = 10)
           String effectiveFrom,
-      // Below one, as ck_platform_vat_rate holds it: 1 to 9.9999 broke it as a 500.
+      // Below one, as chk_platform_vat_rate holds it: 1 to 9.9999 broke it as a 500.
       @Schema(description = "As a fraction below one: 0.2300 for 23%.")
           @NotNull
           @DecimalMin("0.0000")

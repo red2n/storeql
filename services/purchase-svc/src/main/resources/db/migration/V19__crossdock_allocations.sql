@@ -13,6 +13,6 @@ CREATE TABLE purchase_order_line_allocations (
     created_at  TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT pk_po_line_allocations PRIMARY KEY (id),
     CONSTRAINT uq_po_line_allocation UNIQUE (tenant_id, po_line_id, store_id),
-    CONSTRAINT ck_po_line_allocation_qty CHECK (qty > 0)
+    CONSTRAINT chk_po_line_allocation_qty CHECK (qty > 0)
 );
 CREATE INDEX idx_po_line_allocations_po ON purchase_order_line_allocations (tenant_id, po_id);

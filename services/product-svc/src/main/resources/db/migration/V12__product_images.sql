@@ -17,6 +17,6 @@ CREATE TABLE product_images (
     content_type TEXT NOT NULL,
     bytes        BYTEA NOT NULL,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT product_images_size_under_256kb CHECK (octet_length(bytes) < 262144)
+    CONSTRAINT chk_product_images_size_under_256kb CHECK (octet_length(bytes) < 262144)
 );
 CREATE INDEX idx_product_images_tenant ON product_images (tenant_id);

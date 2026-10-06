@@ -61,7 +61,7 @@ industry default and needs no decision.
 ### 2b. Product images above 256 KB (settled)
 
 Nothing is pending. `V12__product_images.sql` creates `product_images` with
-`CONSTRAINT product_images_size_under_256kb CHECK (octet_length(bytes) < 262144)` inside the CREATE
+`CONSTRAINT chk_product_images_size_under_256kb CHECK (octet_length(bytes) < 262144)` inside the CREATE
 TABLE. The constraint is validated, not `NOT VALID`: it holds for every row from the first, so "no
 image over 256 KB in the system" is true of the table itself and needs no pre-check and no later
 `VALIDATE` step. A local database that ran an older copy of the migrations is reset, not repaired (the

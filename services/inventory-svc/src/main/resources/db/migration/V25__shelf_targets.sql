@@ -20,8 +20,8 @@ CREATE TABLE shelf_targets (
     updated_at       TIMESTAMPTZ NOT NULL,
 
     CONSTRAINT pk_shelf_targets PRIMARY KEY (tenant_id, store_id, fixture_id, variant_id),
-    CONSTRAINT ck_shelf_target_capacity CHECK (capacity > 0),
-    CONSTRAINT ck_shelf_target_min CHECK (min_presentation >= 0 AND min_presentation <= capacity)
+    CONSTRAINT chk_shelf_target_capacity CHECK (capacity > 0),
+    CONSTRAINT chk_shelf_target_min CHECK (min_presentation >= 0 AND min_presentation <= capacity)
 );
 
 CREATE INDEX idx_shelf_targets_variant ON shelf_targets (tenant_id, store_id, variant_id);
@@ -42,7 +42,7 @@ CREATE TABLE shelf_target_fixtures (
     updated_at        TIMESTAMPTZ NOT NULL,
 
     CONSTRAINT pk_shelf_target_fixtures PRIMARY KEY (tenant_id, fixture_id),
-    CONSTRAINT ck_shelf_target_version CHECK (planogram_version >= 1)
+    CONSTRAINT chk_shelf_target_version CHECK (planogram_version >= 1)
 );
 
 COMMENT ON TABLE shelf_targets IS

@@ -28,7 +28,7 @@ import org.junit.jupiter.api.function.Executable;
  * What a plan includes, and of each meter, is checked grant by grant and meter by meter (2 Oct
  * 2026). Each list held its records without {@code @Valid}, so {@code Validations.validate} never
  * looked inside one: a grant's {@code limitValue} of -1 passed its {@code @Min(0)} and broke {@code
- * ck_plan_entitlements_limit} as a 500, and a grant or meter with no key reached the service. Now
+ * chk_plan_entitlements_limit} as a 500, and a grant or meter with no key reached the service. Now
  * each is the platform's {@code 400 VALIDATION_FAILED} naming the field, the platform administrator
  * is asked first, and nothing reaches the service. One rule is left to the service on purpose: a
  * meter's {@code included} below nothing is {@code 400 PLAN_METER_INCLUDED_INVALID}, the code the
@@ -106,7 +106,7 @@ class PlanBodyValidationTest {
 
   @Test
   @DisplayName(
-      "A grant's limit below nothing was a 500 from ck_plan_entitlements_limit; each grant and"
+      "A grant's limit below nothing was a 500 from chk_plan_entitlements_limit; each grant and"
           + " each meter is now checked, and only a right one reaches the service")
   void eachGrantAndEachMeterIsChecked() {
     Plans plans = new Plans();

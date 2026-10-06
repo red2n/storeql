@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS processed_events (
     event_id     UUID        NOT NULL,
     consumer     TEXT        NOT NULL,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
+    CONSTRAINT pk_processed_events PRIMARY KEY (event_id, consumer)
 );
 
 -- Written once per event handled and read only by its primary key, except the scheduled purge, which

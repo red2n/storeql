@@ -35,12 +35,12 @@ CREATE TABLE merch_fixtures (
     created_by  UUID        NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_fixture_kind CHECK (
+    CONSTRAINT chk_fixture_kind CHECK (
         kind IN ('GONDOLA', 'END_CAP', 'CHILLER', 'FREEZER', 'SHELF_RUN', 'BIN', 'COUNTER')
     ),
-    CONSTRAINT ck_fixture_status CHECK (status IN ('ACTIVE', 'RETIRED')),
-    CONSTRAINT ck_fixture_shelves CHECK (shelf_count BETWEEN 1 AND 30),
-    CONSTRAINT ck_fixture_width CHECK (shelf_width_mm BETWEEN 100 AND 20000)
+    CONSTRAINT chk_fixture_status CHECK (status IN ('ACTIVE', 'RETIRED')),
+    CONSTRAINT chk_fixture_shelves CHECK (shelf_count BETWEEN 1 AND 30),
+    CONSTRAINT chk_fixture_width CHECK (shelf_width_mm BETWEEN 100 AND 20000)
 );
 
 CREATE INDEX idx_merch_fixtures_store ON merch_fixtures (tenant_id, store_id, status);
@@ -73,14 +73,14 @@ CREATE TABLE planograms (
     published_at   TIMESTAMPTZ,
     published_by   UUID,
 
-    CONSTRAINT ck_planogram_status CHECK (status IN ('DRAFT', 'PUBLISHED', 'SUPERSEDED')),
-    CONSTRAINT ck_planogram_version CHECK (version >= 1),
+    CONSTRAINT chk_planogram_status CHECK (status IN ('DRAFT', 'PUBLISHED', 'SUPERSEDED')),
+    CONSTRAINT chk_planogram_version CHECK (version >= 1),
     -- A published planogram says who published it and when; a draft says neither.
-    CONSTRAINT ck_planogram_published CHECK (
+    CONSTRAINT chk_planogram_published CHECK (
         (status = 'DRAFT') = (published_at IS NULL AND published_by IS NULL)
     ),
-    CONSTRAINT ck_planogram_supersedes_self CHECK (supersedes IS NULL OR supersedes <> id),
-    CONSTRAINT ck_planogram_superseded_self CHECK (superseded_by IS NULL OR superseded_by <> id)
+    CONSTRAINT chk_planogram_supersedes_self CHECK (supersedes IS NULL OR supersedes <> id),
+    CONSTRAINT chk_planogram_superseded_self CHECK (superseded_by IS NULL OR superseded_by <> id)
 );
 
 -- One draft at a time per fixture: two people drawing the same shelf at once is a merge nobody wins.
@@ -122,12 +122,12 @@ CREATE TABLE planogram_positions (
     capacity         INTEGER GENERATED ALWAYS AS (facings * depth) STORED,
     min_presentation INTEGER NOT NULL,
 
-    CONSTRAINT ck_position_shelf CHECK (shelf >= 1),
-    CONSTRAINT ck_position_sequence CHECK (sequence >= 1),
-    CONSTRAINT ck_position_facings CHECK (facings BETWEEN 1 AND 99),
-    CONSTRAINT ck_position_depth CHECK (depth BETWEEN 1 AND 99),
+    CONSTRAINT chk_position_shelf CHECK (shelf >= 1),
+    CONSTRAINT chk_position_sequence CHECK (sequence >= 1),
+    CONSTRAINT chk_position_facings CHECK (facings BETWEEN 1 AND 99),
+    CONSTRAINT chk_position_depth CHECK (depth BETWEEN 1 AND 99),
     -- A presentation minimum above capacity would ask replenishment for more than fits, for ever.
-    CONSTRAINT ck_position_min_presentation CHECK (
+    CONSTRAINT chk_position_min_presentation CHECK (
         min_presentation >= 0 AND min_presentation <= facings * depth
     )
 );
@@ -159,7 +159,7 @@ CREATE TABLE category_space_plans (
     created_by   UUID        NOT NULL,
     updated_at   TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_space_share CHECK (target_share > 0 AND target_share <= 1)
+    CONSTRAINT chk_space_share CHECK (target_share > 0 AND target_share <= 1)
 );
 
 CREATE UNIQUE INDEX uq_space_plan ON category_space_plans (tenant_id, store_id, category_id);
@@ -185,9 +185,9 @@ CREATE TABLE category_resets (
     created_by    UUID        NOT NULL,
     completed_at  TIMESTAMPTZ,
 
-    CONSTRAINT ck_reset_status CHECK (status IN ('PLANNED', 'COMPLETED', 'CANCELLED')),
-    CONSTRAINT ck_reset_cancelled CHECK ((status = 'CANCELLED') = (cancelled_reason IS NOT NULL)),
-    CONSTRAINT ck_reset_completed CHECK ((status = 'COMPLETED') = (completed_at IS NOT NULL))
+    CONSTRAINT chk_reset_status CHECK (status IN ('PLANNED', 'COMPLETED', 'CANCELLED')),
+    CONSTRAINT chk_reset_cancelled CHECK ((status = 'CANCELLED') = (cancelled_reason IS NOT NULL)),
+    CONSTRAINT chk_reset_completed CHECK ((status = 'COMPLETED') = (completed_at IS NOT NULL))
 );
 
 CREATE INDEX idx_resets_tenant ON category_resets (tenant_id, scheduled_for DESC);

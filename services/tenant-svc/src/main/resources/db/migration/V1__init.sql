@@ -24,11 +24,11 @@ CREATE TABLE plans (
     created_at       TIMESTAMPTZ NOT NULL,
     updated_at       TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_plans_status CHECK (status IN ('DRAFT', 'ACTIVE', 'RETIRED')),
-    CONSTRAINT ck_plans_interval CHECK (billing_interval IN ('MONTH', 'YEAR')),
-    CONSTRAINT ck_plans_trial CHECK (trial_days BETWEEN 0 AND 365),
+    CONSTRAINT chk_plans_status CHECK (status IN ('DRAFT', 'ACTIVE', 'RETIRED')),
+    CONSTRAINT chk_plans_interval CHECK (billing_interval IN ('MONTH', 'YEAR')),
+    CONSTRAINT chk_plans_trial CHECK (trial_days BETWEEN 0 AND 365),
     -- Nobody starts on a plan that is not sold.
-    CONSTRAINT ck_plans_default_is_sold CHECK (NOT is_default OR status = 'ACTIVE')
+    CONSTRAINT chk_plans_default_is_sold CHECK (NOT is_default OR status = 'ACTIVE')
 );
 
 CREATE UNIQUE INDEX uq_plans_code ON plans (upper(code));
@@ -45,8 +45,8 @@ CREATE TABLE plan_prices (
     created_by     UUID          NOT NULL,
     created_at     TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_plan_prices_amount CHECK (amount >= 0),
-    CONSTRAINT ck_plan_prices_currency CHECK (currency ~ '^[A-Z]{3}$')
+    CONSTRAINT chk_plan_prices_amount CHECK (amount >= 0),
+    CONSTRAINT chk_plan_prices_currency CHECK (currency ~ '^[A-Z]{3}$')
 );
 
 CREATE UNIQUE INDEX uq_plan_prices_day ON plan_prices (plan_id, currency, effective_from);
@@ -61,9 +61,9 @@ CREATE TABLE plan_entitlements (
     enabled     BOOLEAN,
     PRIMARY KEY (plan_id, key),
 
-    CONSTRAINT ck_plan_entitlements_limit CHECK (limit_value IS NULL OR limit_value >= 0),
+    CONSTRAINT chk_plan_entitlements_limit CHECK (limit_value IS NULL OR limit_value >= 0),
     -- A row is a limit or a feature, never both.
-    CONSTRAINT ck_plan_entitlements_kind CHECK (limit_value IS NULL OR enabled IS NULL)
+    CONSTRAINT chk_plan_entitlements_kind CHECK (limit_value IS NULL OR enabled IS NULL)
 );
 
 -- The plan sandboxes sit on, which the platform keeps for sandboxes alone: sold (ACTIVE, so it can
@@ -129,18 +129,18 @@ CREATE TABLE tenants (
     sandbox_of UUID REFERENCES tenants (id),
 
     CONSTRAINT fk_tenants_plan FOREIGN KEY (plan_id) REFERENCES plans (id),
-    CONSTRAINT ck_tenant_deactivated_reason CHECK (
+    CONSTRAINT chk_tenant_deactivated_reason CHECK (
         deactivated_reason IS NULL OR deactivated_reason IN ('NON_PAYMENT', 'ADMINISTRATOR', 'SANDBOX_DELETED')
     ),
     -- A business that is off has a reason; one that is on has none. Stated here so the pair cannot drift:
     -- a reason left behind on a reactivated business would make the next payment lift a suspension nobody
     -- asked it to lift.
-    CONSTRAINT ck_tenant_deactivated_pair CHECK ((status = 'INACTIVE') OR (deactivated_reason IS NULL)),
+    CONSTRAINT chk_tenant_deactivated_pair CHECK ((status = 'INACTIVE') OR (deactivated_reason IS NULL)),
     -- A business that is on has no note, the same pair rule as the reason.
-    CONSTRAINT ck_tenant_deactivated_note CHECK ((status = 'INACTIVE') OR (deactivated_note IS NULL)),
-    CONSTRAINT ck_tenants_mode CHECK (mode IN ('LIVE', 'SANDBOX')),
+    CONSTRAINT chk_tenant_deactivated_note CHECK ((status = 'INACTIVE') OR (deactivated_note IS NULL)),
+    CONSTRAINT chk_tenants_mode CHECK (mode IN ('LIVE', 'SANDBOX')),
     -- A sandbox always says what it is a sandbox of; a live business never does.
-    CONSTRAINT ck_tenants_sandbox_of CHECK ((mode = 'SANDBOX') = (sandbox_of IS NOT NULL))
+    CONSTRAINT chk_tenants_sandbox_of CHECK ((mode = 'SANDBOX') = (sandbox_of IS NOT NULL))
 );
 -- The e-invoicing address and VAT number are read across businesses, platform-wide, before anything is
 -- read into one business's inbox: an access point delivers to the participant identifier the document
@@ -195,7 +195,7 @@ CREATE TABLE stores (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, code),
-    CONSTRAINT ck_stores_till_phone CHECK (till_phone IN ('REQUIRED', 'OPTIONAL', 'OFF'))
+    CONSTRAINT chk_stores_till_phone CHECK (till_phone IN ('REQUIRED', 'OPTIONAL', 'OFF'))
 );
 CREATE INDEX idx_stores_tenant ON stores (tenant_id, status);
 
@@ -211,7 +211,7 @@ CREATE TABLE zones (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (store_id, code),
-    CONSTRAINT ck_zone_status CHECK (status IN ('ACTIVE', 'OUT_OF_SERVICE', 'RETIRED'))
+    CONSTRAINT chk_zone_status CHECK (status IN ('ACTIVE', 'OUT_OF_SERVICE', 'RETIRED'))
 );
 CREATE INDEX idx_zones_tenant_store ON zones (tenant_id, store_id, status);
 
@@ -259,8 +259,8 @@ CREATE TABLE outbox (
     last_error      TEXT,
     dead_at         TIMESTAMPTZ,
 
-    CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-    CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+    CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+    CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 -- The scheduled purge of delivered outbox rows (common-service OutboxPublisher, through
 -- BaseOutboxRepository.purgePublished) deletes in batches of the oldest ones:

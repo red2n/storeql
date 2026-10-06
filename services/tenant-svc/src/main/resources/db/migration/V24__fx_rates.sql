@@ -18,7 +18,7 @@ CREATE TABLE fx_rates (
     set_by         UUID,
     set_at         TIMESTAMPTZ    NOT NULL,
     CONSTRAINT pk_fx_rates PRIMARY KEY (id),
-    CONSTRAINT ck_fx_currency CHECK (currency ~ '^[A-Z]{3}$'),
-    CONSTRAINT ck_fx_rate CHECK (rate > 0)
+    CONSTRAINT chk_fx_currency CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT chk_fx_rate CHECK (rate > 0)
 );
 CREATE INDEX idx_fx_rates_current ON fx_rates (tenant_id, currency, effective_from DESC, set_at DESC);

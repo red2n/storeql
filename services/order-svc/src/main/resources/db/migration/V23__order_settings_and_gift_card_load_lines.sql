@@ -9,9 +9,9 @@ CREATE TABLE order_settings (
     price_wait_cancel_minutes INTEGER,
     updated_by              UUID,
     updated_at              TIMESTAMPTZ NOT NULL,
-    CONSTRAINT ck_order_settings_pending CHECK (pending_limit_hours IS NULL OR pending_limit_hours >= 1),
-    CONSTRAINT ck_order_settings_price_flag CHECK (price_wait_flag_minutes IS NULL OR price_wait_flag_minutes >= 1),
-    CONSTRAINT ck_order_settings_price_cancel CHECK (
+    CONSTRAINT chk_order_settings_pending CHECK (pending_limit_hours IS NULL OR pending_limit_hours >= 1),
+    CONSTRAINT chk_order_settings_price_flag CHECK (price_wait_flag_minutes IS NULL OR price_wait_flag_minutes >= 1),
+    CONSTRAINT chk_order_settings_price_cancel CHECK (
         price_wait_cancel_minutes IS NULL
         OR (price_wait_cancel_minutes >= 1
             AND (price_wait_flag_minutes IS NULL OR price_wait_cancel_minutes >= price_wait_flag_minutes)))

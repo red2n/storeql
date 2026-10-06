@@ -28,8 +28,8 @@ CREATE TABLE order_deposits (
     CONSTRAINT chk_order_deposits_material CHECK (material IN ('PET', 'ALUMINIUM', 'STEEL', 'GLASS')),
     CONSTRAINT chk_order_deposits_vat CHECK (vat_treatment IN ('OUTSIDE_SCOPE', 'STANDARD'))
 );
-CREATE INDEX ix_order_deposits_tenant_order   ON order_deposits (tenant_id, order_id);
-CREATE INDEX ix_order_deposits_tenant_created ON order_deposits (tenant_id, created_at);
+CREATE INDEX idx_order_deposits_tenant_order   ON order_deposits (tenant_id, order_id);
+CREATE INDEX idx_order_deposits_tenant_created ON order_deposits (tenant_id, created_at);
 
 CREATE TABLE container_refunds (
     id               UUID PRIMARY KEY,
@@ -45,7 +45,7 @@ CREATE TABLE container_refunds (
     created_at       TIMESTAMPTZ NOT NULL,
     CONSTRAINT uq_container_refunds_key UNIQUE (tenant_id, idempotency_key)
 );
-CREATE INDEX ix_container_refunds_tenant_created ON container_refunds (tenant_id, created_at);
+CREATE INDEX idx_container_refunds_tenant_created ON container_refunds (tenant_id, created_at);
 
 CREATE TABLE container_refund_lines (
     id            UUID PRIMARY KEY,
@@ -58,4 +58,4 @@ CREATE TABLE container_refund_lines (
     amount        NUMERIC NOT NULL,
     CONSTRAINT chk_container_refund_lines_count CHECK (count > 0)
 );
-CREATE INDEX ix_container_refund_lines_tenant_refund ON container_refund_lines (tenant_id, refund_id);
+CREATE INDEX idx_container_refund_lines_tenant_refund ON container_refund_lines (tenant_id, refund_id);

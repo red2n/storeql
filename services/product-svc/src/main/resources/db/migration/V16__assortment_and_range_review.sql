@@ -28,7 +28,7 @@ CREATE TABLE store_clusters (
     created_by  UUID        NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_cluster_status CHECK (status IN ('ACTIVE', 'RETIRED'))
+    CONSTRAINT chk_cluster_status CHECK (status IN ('ACTIVE', 'RETIRED'))
 );
 
 CREATE UNIQUE INDEX uq_store_clusters_code
@@ -73,9 +73,9 @@ CREATE TABLE range_reviews (
     decided_at  TIMESTAMPTZ,
     decided_by  UUID,
 
-    CONSTRAINT ck_review_status CHECK (status IN ('OPEN', 'DECIDED', 'ABANDONED')),
-    CONSTRAINT ck_review_period CHECK (period_to > period_from),
-    CONSTRAINT ck_review_decided CHECK ((status = 'DECIDED') = (decided_at IS NOT NULL))
+    CONSTRAINT chk_review_status CHECK (status IN ('OPEN', 'DECIDED', 'ABANDONED')),
+    CONSTRAINT chk_review_period CHECK (period_to > period_from),
+    CONSTRAINT chk_review_decided CHECK ((status = 'DECIDED') = (decided_at IS NOT NULL))
 );
 
 CREATE INDEX idx_range_reviews_category
@@ -143,20 +143,20 @@ CREATE TABLE assortment_changes (
     refusal_code   TEXT,
     refusal_detail TEXT,
 
-    CONSTRAINT ck_assortment_action CHECK (action IN ('LIST', 'DELIST')),
-    CONSTRAINT ck_assortment_target CHECK (
+    CONSTRAINT chk_assortment_action CHECK (action IN ('LIST', 'DELIST')),
+    CONSTRAINT chk_assortment_target CHECK (
         (store_id IS NOT NULL AND cluster_id IS NULL)
         OR (store_id IS NULL AND cluster_id IS NOT NULL)
     ),
-    CONSTRAINT ck_assortment_reason CHECK (length(btrim(reason)) > 0),
+    CONSTRAINT chk_assortment_reason CHECK (length(btrim(reason)) > 0),
     CONSTRAINT fk_assortment_change_review
         FOREIGN KEY (review_id) REFERENCES range_reviews (id),
-    CONSTRAINT ck_assortment_change_refusal CHECK (
+    CONSTRAINT chk_assortment_change_refusal CHECK (
         (refused_at IS NULL AND refusal_code IS NULL AND refusal_detail IS NULL)
         OR (refused_at IS NOT NULL AND length(btrim(refusal_code)) > 0
             AND length(btrim(refusal_detail)) > 0)
     ),
-    CONSTRAINT ck_assortment_change_settled_once CHECK (
+    CONSTRAINT chk_assortment_change_settled_once CHECK (
         refused_at IS NULL OR applied_at IS NULL
     )
 );
@@ -240,12 +240,12 @@ CREATE TABLE range_review_lines (
     -- reason as it applied on the day.
     own_brand     BOOLEAN NOT NULL,
 
-    CONSTRAINT ck_review_line_decision CHECK (
+    CONSTRAINT chk_review_line_decision CHECK (
         decision IS NULL OR decision IN ('KEEP', 'DELIST', 'INTRODUCE')
     ),
-    CONSTRAINT ck_review_line_rank CHECK (rank_in_category IS NULL OR rank_in_category >= 1),
+    CONSTRAINT chk_review_line_rank CHECK (rank_in_category IS NULL OR rank_in_category >= 1),
     -- A currency is needed exactly when there is money to put it against.
-    CONSTRAINT ck_review_line_currency CHECK (
+    CONSTRAINT chk_review_line_currency CHECK (
         (revenue IS NULL AND margin IS NULL) = (currency IS NULL)
     )
 );

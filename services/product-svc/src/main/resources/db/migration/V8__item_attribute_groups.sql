@@ -28,7 +28,7 @@ CREATE TABLE variant_attribute_group_values (
     values      JSONB       NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (tenant_id, variant_id, group_code)
+    CONSTRAINT uq_variant_attribute_group_values UNIQUE (tenant_id, variant_id, group_code)
 );
 CREATE INDEX idx_vagv_tenant_variant ON variant_attribute_group_values (tenant_id, variant_id);
 

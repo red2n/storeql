@@ -428,7 +428,7 @@ class PlanIT {
           is("PLAN_ENTITLEMENT_NOT_ENFORCED"));
     }
 
-    // Each grant and meter is checked: a limit of -1 broke ck_plan_entitlements_limit as a 500.
+    // Each grant and meter is checked: a limit of -1 broke chk_plan_entitlements_limit as a 500.
     // The plan holds a grant and a meter first, so a refusal that wrote anything to either table —
     // an empty list included — shows.
     assertThat(

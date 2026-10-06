@@ -36,15 +36,15 @@ CREATE TABLE offline_sale_flags (
     replayed_by          UUID,
     recorded_at          TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT pk_offline_sale_flags PRIMARY KEY (id),
-    CONSTRAINT ck_offline_sale_flags_kind
+    CONSTRAINT chk_offline_sale_flags_kind
         CHECK (kind IN ('OFFLINE_SALE_OF_RECALLED_ITEM', 'OFFLINE_SALE_ON_UNFIT_SCALE')),
-    CONSTRAINT ck_offline_sale_flags_shape CHECK (
+    CONSTRAINT chk_offline_sale_flags_shape CHECK (
         (kind = 'OFFLINE_SALE_OF_RECALLED_ITEM'
             AND recall_id IS NOT NULL AND instrument_id IS NULL AND instrument_standing IS NULL)
         OR (kind = 'OFFLINE_SALE_ON_UNFIT_SCALE'
             AND instrument_id IS NOT NULL AND recall_id IS NULL AND recall_reference IS NULL
             AND batch_no IS NULL AND expiry IS NULL)),
-    CONSTRAINT ck_offline_sale_flags_line CHECK (line_no > 0),
+    CONSTRAINT chk_offline_sale_flags_line CHECK (line_no > 0),
     CONSTRAINT uq_offline_sale_flags_line UNIQUE (tenant_id, order_id, kind, line_no)
 );
 -- The trail reads newest first per tenant, by when the sale was rung up.

@@ -28,8 +28,8 @@ CREATE TABLE terminal_attempt_decisions (
     decided_by      UUID        NOT NULL,
     decided_at      TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_terminal_decision_outcome CHECK (outcome IN ('APPROVED', 'NOT_TAKEN')),
-    CONSTRAINT ck_terminal_decision_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
+    CONSTRAINT chk_terminal_decision_outcome CHECK (outcome IN ('APPROVED', 'NOT_TAKEN')),
+    CONSTRAINT chk_terminal_decision_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
     -- Decided once: a second word on the same attempt is a different story, not a correction.
     CONSTRAINT uq_terminal_decision_attempt UNIQUE (tenant_id, attempt_id),
     CONSTRAINT uq_terminal_decision_key UNIQUE (tenant_id, idempotency_key)
@@ -74,22 +74,22 @@ CREATE TABLE card_refund_dues (
     created_at        TIMESTAMPTZ   NOT NULL,
     updated_at        TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_card_refund_due_amount CHECK (amount > 0),
-    CONSTRAINT ck_card_refund_due_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
-    CONSTRAINT ck_card_refund_due_source CHECK (source IN ('ORDER_EVENT', 'PERSON')),
+    CONSTRAINT chk_card_refund_due_amount CHECK (amount > 0),
+    CONSTRAINT chk_card_refund_due_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
+    CONSTRAINT chk_card_refund_due_source CHECK (source IN ('ORDER_EVENT', 'PERSON')),
     -- REFUNDED means a machine of ours put it back on the card, and names the refund attempt that did.
     -- REFUNDED_ANOTHER_WAY is a person's close (card_refund_due_closures): cash, the acquirer's own
     -- refund of the card, or a transfer.
-    CONSTRAINT ck_card_refund_due_state CHECK (
+    CONSTRAINT chk_card_refund_due_state CHECK (
         state IN ('OWED', 'REFUNDED', 'NEEDS_ATTENTION', 'NOT_REFUNDED', 'REFUNDED_ANOTHER_WAY')
     ),
     -- Only a person's own refund that the machine refused stops being owed; what the platform owes
     -- stays owed until it is put back.
-    CONSTRAINT ck_card_refund_due_not_refunded CHECK (state <> 'NOT_REFUNDED' OR source = 'PERSON'),
-    CONSTRAINT ck_card_refund_due_refunded CHECK (
+    CONSTRAINT chk_card_refund_due_not_refunded CHECK (state <> 'NOT_REFUNDED' OR source = 'PERSON'),
+    CONSTRAINT chk_card_refund_due_refunded CHECK (
         state <> 'REFUNDED' OR refund_attempt_id IS NOT NULL
     ),
-    CONSTRAINT ck_card_refund_due_person CHECK (source <> 'PERSON' OR requested_by IS NOT NULL),
+    CONSTRAINT chk_card_refund_due_person CHECK (source <> 'PERSON' OR requested_by IS NOT NULL),
     CONSTRAINT fk_card_refund_due_payment
         FOREIGN KEY (tenant_id, payment_id) REFERENCES payment_tenders (tenant_id, id),
     CONSTRAINT fk_card_refund_due_refund

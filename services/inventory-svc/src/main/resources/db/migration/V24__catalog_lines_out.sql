@@ -13,4 +13,4 @@ CREATE TABLE catalog_lines_out (
     PRIMARY KEY (tenant_id, variant_id),
     CONSTRAINT chk_catalog_lines_out_status CHECK (status IN ('DISCONTINUED', 'DELISTED'))
 );
-CREATE INDEX ix_catalog_lines_out_tenant_product ON catalog_lines_out (tenant_id, product_id);
+CREATE INDEX idx_catalog_lines_out_tenant_product ON catalog_lines_out (tenant_id, product_id);

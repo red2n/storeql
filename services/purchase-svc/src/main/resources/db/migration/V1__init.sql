@@ -38,10 +38,10 @@ CREATE TABLE suppliers (
   bank_details_version    INTEGER     NOT NULL DEFAULT 0,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT ck_supplier_lead_time CHECK (lead_time_days IS NULL OR lead_time_days >= 0)
+  CONSTRAINT chk_supplier_lead_time CHECK (lead_time_days IS NULL OR lead_time_days >= 0)
 );
-CREATE INDEX suppliers_tenant     ON suppliers(tenant_id);
-CREATE UNIQUE INDEX suppliers_tenant_name ON suppliers(tenant_id, name);
+CREATE INDEX idx_suppliers_tenant     ON suppliers(tenant_id);
+CREATE UNIQUE INDEX uq_suppliers_tenant_name ON suppliers(tenant_id, name);
 CREATE UNIQUE INDEX uq_suppliers_einvoice_address
     ON suppliers (tenant_id, einvoice_scheme, lower(einvoice_id))
     WHERE einvoice_id IS NOT NULL;
@@ -124,7 +124,7 @@ CREATE TABLE purchase_orders (
   submitted_at      TIMESTAMPTZ,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT po_status CHECK (status IN (
+  CONSTRAINT chk_po_status CHECK (status IN (
       'DRAFT',
       'PENDING_APPROVAL',
       'SUBMITTED',
@@ -133,7 +133,7 @@ CREATE TABLE purchase_orders (
       'CLOSED',
       'CANCELLED'
   )),
-  CONSTRAINT po_cancelled_fields CHECK (
+  CONSTRAINT chk_po_cancelled_fields CHECK (
     (status =  'CANCELLED' AND cancelled_at IS NOT NULL AND cancelled_reason IS NOT NULL)
     OR
     (status <> 'CANCELLED' AND cancelled_at IS NULL     AND cancelled_reason IS NULL)
@@ -141,24 +141,24 @@ CREATE TABLE purchase_orders (
   -- Scoped to the states an approval decision actually produces. SUBMITTED is reachable two ways --
   -- approved, or under the raiser's own authority and never routed for approval -- so the first
   -- branch leaves it out, and the second (no condition on the approval fields) takes it.
-  CONSTRAINT po_approved_fields CHECK (
+  CONSTRAINT chk_po_approved_fields CHECK (
     (status IN ('DRAFT','PENDING_APPROVAL') AND approved_by IS NULL AND approved_at IS NULL)
     OR
     status NOT IN ('DRAFT','PENDING_APPROVAL')
   ),
-  CONSTRAINT ck_po_source CHECK (source IN ('MANUAL', 'PROPOSAL', 'DROPSHIP', 'RFQ')),
-  CONSTRAINT ck_po_ownership CHECK (ownership IN ('OWNED', 'CONSIGNMENT')),
-  CONSTRAINT ck_po_duty_status CHECK (duty_status IN ('DUTY_PAID', 'DUTY_SUSPENDED'))
+  CONSTRAINT chk_po_source CHECK (source IN ('MANUAL', 'PROPOSAL', 'DROPSHIP', 'RFQ')),
+  CONSTRAINT chk_po_ownership CHECK (ownership IN ('OWNED', 'CONSIGNMENT')),
+  CONSTRAINT chk_po_duty_status CHECK (duty_status IN ('DUTY_PAID', 'DUTY_SUSPENDED'))
 );
-CREATE INDEX po_tenant          ON purchase_orders(tenant_id);
-CREATE INDEX po_tenant_supplier ON purchase_orders(tenant_id, supplier_id);
-CREATE INDEX po_tenant_store    ON purchase_orders(tenant_id, store_id);
+CREATE INDEX idx_po_tenant          ON purchase_orders(tenant_id);
+CREATE INDEX idx_po_tenant_supplier ON purchase_orders(tenant_id, supplier_id);
+CREATE INDEX idx_po_tenant_store    ON purchase_orders(tenant_id, store_id);
 
 -- Finding what is waiting for me is the query the approval feature is used through; without it every
 -- approver's landing screen is a full scan of the tenant's purchase orders.
 CREATE INDEX idx_po_pending ON purchase_orders (tenant_id, status) WHERE status = 'PENDING_APPROVAL';
 
-CREATE INDEX ix_po_sales_order ON purchase_orders (tenant_id, sales_order_id)
+CREATE INDEX idx_po_sales_order ON purchase_orders (tenant_id, sales_order_id)
     WHERE sales_order_id IS NOT NULL;
 
 -- ── Purchase Order Lines ──────────────────────────────────────────────────────
@@ -177,8 +177,8 @@ CREATE TABLE purchase_order_lines (
   proposal_reason TEXT,
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT now()
 );
-CREATE INDEX pol_tenant ON purchase_order_lines(tenant_id);
-CREATE INDEX pol_po     ON purchase_order_lines(tenant_id, po_id);
+CREATE INDEX idx_pol_tenant ON purchase_order_lines(tenant_id);
+CREATE INDEX idx_pol_po     ON purchase_order_lines(tenant_id, po_id);
 
 -- Three-way match: the order's lines are compared with receipt lines by variant, which is the same
 -- answer a warehouse would give when counting what arrived.
@@ -197,7 +197,7 @@ CREATE TABLE goods_receipts (
   -- receipt is one receipt.
   idempotency_key VARCHAR(255)
 );
-CREATE INDEX gr_tenant ON goods_receipts(tenant_id);
+CREATE INDEX idx_gr_tenant ON goods_receipts(tenant_id);
 -- The receipts of one order. The outstanding-quantity query joins receipt lines to their receipt to
 -- reach the PO, and does it inside the receive transaction, so it is on the hot path of every
 -- delivery; the three-way match, the order's list of deliveries and the supplier scorecard read the
@@ -219,8 +219,8 @@ CREATE TABLE goods_receipt_lines (
   qty_received  NUMERIC(14,3) NOT NULL,
   created_at    TIMESTAMPTZ   NOT NULL DEFAULT now()
 );
-CREATE INDEX grl_tenant ON goods_receipt_lines(tenant_id);
-CREATE INDEX grl_gr     ON goods_receipt_lines(tenant_id, gr_id);
+CREATE INDEX idx_grl_tenant ON goods_receipt_lines(tenant_id);
+CREATE INDEX idx_grl_gr     ON goods_receipt_lines(tenant_id, gr_id);
 CREATE INDEX idx_goods_receipt_lines_gr ON goods_receipt_lines (tenant_id, gr_id, variant_id);
 
 -- ── Intercompany Invoices (Gap #20: Oracle Inventory Ch. 19) ─────────────────
@@ -247,13 +247,13 @@ CREATE TABLE intercompany_invoices (
   payment_due_date DATE          NOT NULL,
   currency         CHAR(3)       NOT NULL,
   created_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
-  CONSTRAINT ii_type   CHECK (invoice_type IN ('AR','AP')),
-  CONSTRAINT ii_status CHECK (status IN ('RAISED','SETTLED'))
+  CONSTRAINT chk_ii_type   CHECK (invoice_type IN ('AR','AP')),
+  CONSTRAINT chk_ii_status CHECK (status IN ('RAISED','SETTLED'))
 );
-CREATE INDEX ii_tenant      ON intercompany_invoices(tenant_id);
-CREATE INDEX ii_tenant_type ON intercompany_invoices(tenant_id, invoice_type);
-CREATE INDEX ii_tenant_from ON intercompany_invoices(tenant_id, from_store_id);
-CREATE INDEX ii_transfer     ON intercompany_invoices(tenant_id, transfer_ref) WHERE transfer_ref IS NOT NULL;
+CREATE INDEX idx_ii_tenant      ON intercompany_invoices(tenant_id);
+CREATE INDEX idx_ii_tenant_type ON intercompany_invoices(tenant_id, invoice_type);
+CREATE INDEX idx_ii_tenant_from ON intercompany_invoices(tenant_id, from_store_id);
+CREATE INDEX idx_ii_transfer     ON intercompany_invoices(tenant_id, transfer_ref) WHERE transfer_ref IS NOT NULL;
 
 -- ── Nominal Ledger Entries (FRS 102 / UK GAAP, double-entry, append-only) ────
 -- Nominal codes follow Sage/Xero UK standard chart:
@@ -297,13 +297,13 @@ CREATE TABLE nominal_ledger_entries (
   -- tenant-level journal.
   store_id      UUID
 );
-CREATE INDEX nle_tenant      ON nominal_ledger_entries(tenant_id);
-CREATE INDEX nle_tenant_code ON nominal_ledger_entries(tenant_id, nominal_code);
-CREATE INDEX nle_tenant_date ON nominal_ledger_entries(tenant_id, entry_date);
-CREATE INDEX nle_tenant_journal ON nominal_ledger_entries (tenant_id, journal_id);
-CREATE INDEX nle_tenant_store_date ON nominal_ledger_entries (tenant_id, store_id, entry_date);
+CREATE INDEX idx_nle_tenant      ON nominal_ledger_entries(tenant_id);
+CREATE INDEX idx_nle_tenant_code ON nominal_ledger_entries(tenant_id, nominal_code);
+CREATE INDEX idx_nle_tenant_date ON nominal_ledger_entries(tenant_id, entry_date);
+CREATE INDEX idx_nle_tenant_journal ON nominal_ledger_entries (tenant_id, journal_id);
+CREATE INDEX idx_nle_tenant_store_date ON nominal_ledger_entries (tenant_id, store_id, entry_date);
 -- The clearing report groups the clearing account by order.
-CREATE INDEX nle_tenant_code_source ON nominal_ledger_entries (tenant_id, nominal_code, source_ref);
+CREATE INDEX idx_nle_tenant_code_source ON nominal_ledger_entries (tenant_id, nominal_code, source_ref);
 
 -- ── Outbox ────────────────────────────────────────────────────────────────────
 -- The outbox is cross-tenant on purpose: the relay drains every business's rows in one created_at
@@ -327,8 +327,8 @@ CREATE TABLE outbox (
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_error      TEXT,
   dead_at         TIMESTAMPTZ,
-  CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-  CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+  CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+  CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 
 -- The relay claims the oldest rows that may publish now, a batch at a time, on each tick and again

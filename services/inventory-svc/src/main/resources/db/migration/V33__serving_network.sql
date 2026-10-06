@@ -17,8 +17,8 @@ CREATE TABLE serving_relationships (
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT pk_serving_relationships PRIMARY KEY (id),
     CONSTRAINT uq_serving_store UNIQUE (tenant_id, store_id),
-    CONSTRAINT ck_serving_not_self CHECK (store_id <> warehouse_id),
-    CONSTRAINT ck_serving_lead_time CHECK (lead_time_days BETWEEN 0 AND 90)
+    CONSTRAINT chk_serving_not_self CHECK (store_id <> warehouse_id),
+    CONSTRAINT chk_serving_lead_time CHECK (lead_time_days BETWEEN 0 AND 90)
 );
 CREATE INDEX idx_serving_warehouse ON serving_relationships (tenant_id, warehouse_id);
 

@@ -51,10 +51,10 @@ CREATE TABLE commission_statements (
     approved_at    TIMESTAMPTZ,
     approved_by    UUID,
 
-    CONSTRAINT ck_statement_status CHECK (status IN ('DRAFT', 'APPROVED', 'SUPERSEDED')),
-    CONSTRAINT ck_statement_period CHECK (period_end >= period_start),
+    CONSTRAINT chk_statement_status CHECK (status IN ('DRAFT', 'APPROVED', 'SUPERSEDED')),
+    CONSTRAINT chk_statement_period CHECK (period_end >= period_start),
     -- Approved means somebody signed it off, and an approval with no approver is unattributable.
-    CONSTRAINT ck_statement_approved CHECK (
+    CONSTRAINT chk_statement_approved CHECK (
         (status <> 'APPROVED') OR (approved_at IS NOT NULL AND approved_by IS NOT NULL)
     )
 );
@@ -104,8 +104,8 @@ CREATE TABLE commission_statement_lines (
     rate_currency    CHAR(3),
     rated_commission NUMERIC,
 
-    CONSTRAINT ck_line_segment CHECK (segment_to >= segment_from),
-    CONSTRAINT ck_line_rated_commission CHECK (rated_commission IS NULL OR rate_currency IS NOT NULL)
+    CONSTRAINT chk_line_segment CHECK (segment_to >= segment_from),
+    CONSTRAINT chk_line_rated_commission CHECK (rated_commission IS NULL OR rate_currency IS NOT NULL)
 );
 
 CREATE INDEX idx_statement_lines_statement

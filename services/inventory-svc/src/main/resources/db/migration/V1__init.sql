@@ -73,7 +73,7 @@ CREATE INDEX idx_batches_live
     ON inventory_batches (tenant_id, store_id, variant_id, expiry_date NULLS LAST, created_at)
     WHERE remaining_qty > 0 AND material_status = 'AVAILABLE';
 CREATE INDEX idx_batches_zone ON inventory_batches (tenant_id, store_id, zone_id) WHERE zone_id IS NOT NULL;
-CREATE UNIQUE INDEX idx_batches_idem ON inventory_batches (tenant_id, idempotency_key)
+CREATE UNIQUE INDEX uq_batches_idem ON inventory_batches (tenant_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 -- Consignment stock by supplier and variant. No query reads it by supplier yet: the valuation
 -- reports all consignment stock together.
@@ -147,7 +147,7 @@ CREATE TABLE reservations (
     CONSTRAINT chk_reservation_fulfilment CHECK (fulfilment IN ('STOCK', 'DROPSHIP'))
 );
 CREATE INDEX idx_reservations_expiry ON reservations (status, expires_at) WHERE status = 'HELD';
-CREATE UNIQUE INDEX idx_reservations_idem ON reservations (tenant_id, idempotency_key)
+CREATE UNIQUE INDEX uq_reservations_idem ON reservations (tenant_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 -- Every read of what is held for a store and variant, of an order's holds, or of a tenant's newest
 -- holds starts at the tenant.
@@ -182,7 +182,7 @@ CREATE TABLE processed_events (
     event_id     UUID NOT NULL,
     consumer     TEXT NOT NULL,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
+    CONSTRAINT pk_processed_events PRIMARY KEY (event_id, consumer)
 );
 -- Consumer dedupe rows older than their retention (BaseOutboxRepository.purgeProcessedEvents; this
 -- schema's timestamp is processed_at). The batch is chosen by the whole key, (event_id, consumer):
@@ -214,8 +214,8 @@ CREATE TABLE outbox (
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_error      TEXT,
     dead_at         TIMESTAMPTZ,
-    CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-    CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+    CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+    CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 -- Published outbox rows older than the retention (BaseOutboxRepository.purgePublished):
 --   DELETE FROM outbox WHERE id IN (SELECT id FROM outbox

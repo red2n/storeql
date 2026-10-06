@@ -19,7 +19,7 @@ CREATE TABLE yield_templates (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at         TIMESTAMPTZ,
     CONSTRAINT pk_yield_templates PRIMARY KEY (id),
-    CONSTRAINT ck_yield_template_name CHECK (length(trim(name)) > 0)
+    CONSTRAINT chk_yield_template_name CHECK (length(trim(name)) > 0)
 );
 CREATE INDEX idx_yield_templates_tenant ON yield_templates (tenant_id, active, name);
 
@@ -39,9 +39,9 @@ CREATE TABLE yield_template_outputs (
     CONSTRAINT pk_yield_template_outputs PRIMARY KEY (id),
     CONSTRAINT uq_yield_template_output UNIQUE (template_id, variant_id),
     CONSTRAINT fk_yield_template_output FOREIGN KEY (template_id) REFERENCES yield_templates (id) ON DELETE CASCADE,
-    CONSTRAINT ck_yield_output_pct CHECK (expected_pct > 0 AND expected_pct <= 100),
-    CONSTRAINT ck_yield_output_share CHECK (cost_share >= 0),
-    CONSTRAINT ck_yield_output_life CHECK (shelf_life_days IS NULL OR shelf_life_days > 0)
+    CONSTRAINT chk_yield_output_pct CHECK (expected_pct > 0 AND expected_pct <= 100),
+    CONSTRAINT chk_yield_output_share CHECK (cost_share >= 0),
+    CONSTRAINT chk_yield_output_life CHECK (shelf_life_days IS NULL OR shelf_life_days > 0)
 );
 CREATE INDEX idx_yield_template_outputs_tenant ON yield_template_outputs (tenant_id, template_id, sort_order);
 
@@ -67,8 +67,8 @@ CREATE TABLE yield_runs (
     recorded_by       UUID,
     recorded_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT pk_yield_runs PRIMARY KEY (id),
-    CONSTRAINT ck_yield_run_qty CHECK (input_qty > 0 AND output_qty >= 0 AND output_qty <= input_qty),
-    CONSTRAINT ck_yield_run_loss CHECK (loss_qty = input_qty - output_qty)
+    CONSTRAINT chk_yield_run_qty CHECK (input_qty > 0 AND output_qty >= 0 AND output_qty <= input_qty),
+    CONSTRAINT chk_yield_run_loss CHECK (loss_qty = input_qty - output_qty)
 );
 CREATE INDEX idx_yield_runs_tenant ON yield_runs (tenant_id, store_id, recorded_at DESC);
 
@@ -85,6 +85,6 @@ CREATE TABLE yield_run_outputs (
     CONSTRAINT pk_yield_run_outputs PRIMARY KEY (id),
     CONSTRAINT uq_yield_run_output UNIQUE (run_id, variant_id),
     CONSTRAINT fk_yield_run_output FOREIGN KEY (run_id) REFERENCES yield_runs (id) ON DELETE CASCADE,
-    CONSTRAINT ck_yield_run_output_qty CHECK (qty >= 0)
+    CONSTRAINT chk_yield_run_output_qty CHECK (qty >= 0)
 );
 CREATE INDEX idx_yield_run_outputs_tenant ON yield_run_outputs (tenant_id, run_id);

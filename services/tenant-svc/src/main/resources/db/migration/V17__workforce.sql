@@ -27,13 +27,13 @@ CREATE TABLE work_shifts (
     created_by       UUID        NOT NULL,
     updated_at       TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_shift_status CHECK (status IN ('PLANNED', 'PUBLISHED', 'CANCELLED')),
-    CONSTRAINT ck_shift_window CHECK (ends_at > starts_at),
+    CONSTRAINT chk_shift_status CHECK (status IN ('PLANNED', 'PUBLISHED', 'CANCELLED')),
+    CONSTRAINT chk_shift_window CHECK (ends_at > starts_at),
     -- A shift longer than 24 hours is a typo, not a shift.
-    CONSTRAINT ck_shift_length CHECK (ends_at <= starts_at + INTERVAL '24 hours'),
+    CONSTRAINT chk_shift_length CHECK (ends_at <= starts_at + INTERVAL '24 hours'),
     -- Called off with a reason, or not called off: an empty reason on a cancelled shift is the thing
     -- somebody asks about when a week's rota is disputed.
-    CONSTRAINT ck_shift_cancelled CHECK (
+    CONSTRAINT chk_shift_cancelled CHECK (
         (status = 'CANCELLED') = (cancelled_reason IS NOT NULL AND length(btrim(cancelled_reason)) > 0)
     )
 );
@@ -66,16 +66,16 @@ CREATE TABLE time_entries (
     created_at       TIMESTAMPTZ NOT NULL,
     created_by       UUID        NOT NULL,
 
-    CONSTRAINT ck_time_source CHECK (source IN ('CLOCK', 'MANAGER')),
-    CONSTRAINT ck_time_window CHECK (clocked_out_at IS NULL OR clocked_out_at > clocked_in_at),
-    CONSTRAINT ck_time_length CHECK (
+    CONSTRAINT chk_time_source CHECK (source IN ('CLOCK', 'MANAGER')),
+    CONSTRAINT chk_time_window CHECK (clocked_out_at IS NULL OR clocked_out_at > clocked_in_at),
+    CONSTRAINT chk_time_length CHECK (
         clocked_out_at IS NULL OR clocked_out_at <= clocked_in_at + INTERVAL '24 hours'
     ),
     -- A correction says why. Without that the record is an edit with extra steps.
-    CONSTRAINT ck_time_adjusted CHECK (
+    CONSTRAINT chk_time_adjusted CHECK (
         supersedes IS NULL OR (adjusted_reason IS NOT NULL AND length(btrim(adjusted_reason)) > 0)
     ),
-    CONSTRAINT ck_time_self CHECK (supersedes IS NULL OR supersedes <> id)
+    CONSTRAINT chk_time_self CHECK (supersedes IS NULL OR supersedes <> id)
 );
 
 -- One open entry per person: clocking in twice is how somebody gets paid twice for one afternoon.
@@ -99,8 +99,8 @@ CREATE TABLE time_entry_breaks (
     kind          TEXT        NOT NULL,
     paid          BOOLEAN     NOT NULL,
 
-    CONSTRAINT ck_break_kind CHECK (kind IN ('REST', 'MEAL')),
-    CONSTRAINT ck_break_window CHECK (ended_at IS NULL OR ended_at > started_at)
+    CONSTRAINT chk_break_kind CHECK (kind IN ('REST', 'MEAL')),
+    CONSTRAINT chk_break_window CHECK (ended_at IS NULL OR ended_at > started_at)
 );
 
 -- One open break per entry: a second would make the arithmetic of a day undecidable.

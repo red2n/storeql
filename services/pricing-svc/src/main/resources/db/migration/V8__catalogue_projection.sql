@@ -14,7 +14,7 @@ CREATE TABLE processed_events (
     event_id     UUID NOT NULL,
     consumer     TEXT NOT NULL,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
+    CONSTRAINT pk_processed_events PRIMARY KEY (event_id, consumer)
 );
 -- The scheduled purge deletes the rows older than the dedupe window, oldest first, in batches.
 -- A handler reaches processed_events only through its primary key: the insert that marks an event

@@ -82,7 +82,7 @@ public final class PlanDtos {
   @Schema(name = "PlanGrantsRequest")
   public record GrantsRequest(
       // @Valid on each, or a grant's own rules never run: a limit of -1 broke
-      // ck_plan_entitlements_limit as a 500.
+      // chk_plan_entitlements_limit as a 500.
       @NotNull List<@Valid GrantRequest> grants) {
     public GrantsRequest {
       grants = keptAsSent(grants);

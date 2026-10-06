@@ -58,7 +58,7 @@ CREATE TABLE loyalty_events (
     posted_at   TIMESTAMPTZ,
     journal_id  UUID,
     PRIMARY KEY (tenant_id, event_id),
-    CONSTRAINT loyalty_events_kind_check CHECK (kind IN ('EARNED','REDEEMED','ADJUSTED','EXPIRED','REVERSED'))
+    CONSTRAINT chk_loyalty_events_kind CHECK (kind IN ('EARNED','REDEEMED','ADJUSTED','EXPIRED','REVERSED'))
 );
 CREATE INDEX idx_loyalty_events_waiting ON loyalty_events (tenant_id, received_at, event_id)
     WHERE posted_at IS NULL;
@@ -109,5 +109,5 @@ CREATE TABLE gift_card_loads (
     source         TEXT,
     note           TEXT,
     PRIMARY KEY (tenant_id, transaction_id),
-    CONSTRAINT ck_gift_card_loads_journal CHECK (journal_id IS NOT NULL OR paid_by = 'RETURN')
+    CONSTRAINT chk_gift_card_loads_journal CHECK (journal_id IS NOT NULL OR paid_by = 'RETURN')
 );

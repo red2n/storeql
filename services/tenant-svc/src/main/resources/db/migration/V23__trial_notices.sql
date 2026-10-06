@@ -11,7 +11,7 @@ CREATE TABLE trial_notices (
     stage           TEXT        NOT NULL,   -- ENDING | ENDED
     created_at      TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_trial_notices_stage CHECK (stage IN ('ENDING', 'ENDED')),
+    CONSTRAINT chk_trial_notices_stage CHECK (stage IN ('ENDING', 'ENDED')),
     CONSTRAINT uq_trial_notices UNIQUE (subscription_id, stage)
 );
 CREATE INDEX idx_trial_notices_tenant ON trial_notices (tenant_id, created_at);

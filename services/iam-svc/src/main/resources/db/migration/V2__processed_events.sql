@@ -6,7 +6,7 @@ CREATE TABLE processed_events (
     event_id     UUID,
     consumer     TEXT NOT NULL,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
+    CONSTRAINT pk_processed_events PRIMARY KEY (event_id, consumer)
 );
 -- The scheduled purge deletes the oldest marks in batches, ordered by processed_at.
 CREATE INDEX idx_processed_events_processed_at ON processed_events (processed_at);

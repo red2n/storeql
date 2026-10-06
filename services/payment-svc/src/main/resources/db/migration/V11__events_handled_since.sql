@@ -20,7 +20,7 @@ CREATE TABLE events_handled_since (
     handled_since TIMESTAMPTZ NOT NULL,
     why           TEXT        NOT NULL,
 
-    CONSTRAINT ck_events_handled_since_why CHECK (char_length(btrim(why)) BETWEEN 1 AND 500)
+    CONSTRAINT chk_events_handled_since_why CHECK (char_length(btrim(why)) BETWEEN 1 AND 500)
 );
 
 INSERT INTO events_handled_since (event_type, handled_since, why) VALUES (

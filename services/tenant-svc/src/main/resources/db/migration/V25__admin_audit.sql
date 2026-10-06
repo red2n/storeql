@@ -25,7 +25,7 @@ CREATE TABLE tenant_admin_audit (
     from_value   TEXT,
     to_value     TEXT,
     occurred_at  TIMESTAMPTZ NOT NULL,
-    CONSTRAINT ck_tenant_admin_audit_type CHECK (type ~ '^[A-Z][A-Z0-9_]*$')
+    CONSTRAINT chk_tenant_admin_audit_type CHECK (type ~ '^[A-Z][A-Z0-9_]*$')
 );
 
 -- Newest first for a business, and for one store within it.

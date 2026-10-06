@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS settlement_batches (
 
     PRIMARY KEY (tenant_id, id),
 
-    CONSTRAINT ck_settlement_batches_status CHECK (status IN ('EXCEPTIONS', 'READY', 'RECONCILED')),
-    CONSTRAINT ck_settlement_batches_reconciled CHECK (
+    CONSTRAINT chk_settlement_batches_status CHECK (status IN ('EXCEPTIONS', 'READY', 'RECONCILED')),
+    CONSTRAINT chk_settlement_batches_reconciled CHECK (
         (status = 'RECONCILED') = (reconciled_at IS NOT NULL)
     )
 );
@@ -75,19 +75,19 @@ CREATE TABLE IF NOT EXISTS settlement_lines (
 
     PRIMARY KEY (tenant_id, id),
 
-    CONSTRAINT ck_settlement_lines_type CHECK (
+    CONSTRAINT chk_settlement_lines_type CHECK (
         type IN ('SALE', 'REFUND', 'CHARGEBACK', 'CHARGEBACK_REVERSAL', 'FEE', 'ADJUSTMENT')
     ),
-    CONSTRAINT ck_settlement_lines_match CHECK (
+    CONSTRAINT chk_settlement_lines_match CHECK (
         match_status IN ('MATCHED', 'UNMATCHED', 'AMOUNT_MISMATCH', 'DUPLICATE', 'NOT_APPLICABLE')
     ),
-    CONSTRAINT ck_settlement_lines_resolution CHECK (
+    CONSTRAINT chk_settlement_lines_resolution CHECK (
         resolution IS NULL
         OR resolution IN ('MATCHED_BY_HAND', 'DIFFERENCE_ACCEPTED', 'UNALLOCATED')
     ),
-    CONSTRAINT ck_settlement_lines_adds_up CHECK (net_amount = gross_amount - fee_amount),
+    CONSTRAINT chk_settlement_lines_adds_up CHECK (net_amount = gross_amount - fee_amount),
     -- A decision has somebody's name and a time on it.
-    CONSTRAINT ck_settlement_lines_resolved CHECK (
+    CONSTRAINT chk_settlement_lines_resolved CHECK (
         (resolution IS NULL) = (resolved_by IS NULL) AND (resolution IS NULL) = (resolved_at IS NULL)
     )
 );

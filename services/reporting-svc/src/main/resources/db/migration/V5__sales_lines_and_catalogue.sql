@@ -26,7 +26,7 @@ CREATE TABLE sales_line_facts (
     confirmed_at TIMESTAMPTZ   NOT NULL,
 
     CONSTRAINT pk_sales_line_facts PRIMARY KEY (tenant_id, order_id, line_no),
-    CONSTRAINT ck_sales_line_no CHECK (line_no >= 1)
+    CONSTRAINT chk_sales_line_no CHECK (line_no >= 1)
 );
 
 CREATE INDEX idx_sales_line_facts_confirmed ON sales_line_facts (tenant_id, confirmed_at);

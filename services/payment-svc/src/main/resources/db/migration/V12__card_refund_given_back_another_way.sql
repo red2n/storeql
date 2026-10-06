@@ -27,12 +27,12 @@ CREATE TABLE card_refund_due_closures (
     closed_by       UUID        NOT NULL,
     closed_at       TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_card_refund_closure_method CHECK (method IN ('CASH', 'CARD', 'UPI', 'WALLET')),
-    CONSTRAINT ck_card_refund_closure_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
-    CONSTRAINT ck_card_refund_closure_reference CHECK (
+    CONSTRAINT chk_card_refund_closure_method CHECK (method IN ('CASH', 'CARD', 'UPI', 'WALLET')),
+    CONSTRAINT chk_card_refund_closure_reason CHECK (char_length(btrim(reason)) BETWEEN 1 AND 500),
+    CONSTRAINT chk_card_refund_closure_reference CHECK (
         reference IS NULL OR char_length(btrim(reference)) BETWEEN 1 AND 255
     ),
-    CONSTRAINT ck_card_refund_closure_card_reference CHECK (
+    CONSTRAINT chk_card_refund_closure_card_reference CHECK (
         method <> 'CARD' OR reference IS NOT NULL
     ),
     -- Closed once: money given back by hand is not given back by hand again.

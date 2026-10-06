@@ -15,8 +15,8 @@ CREATE TABLE loyalty_programmes (
     set_by             UUID,
     set_at             TIMESTAMPTZ NOT NULL,
     CONSTRAINT pk_loyalty_programmes PRIMARY KEY (tenant_id),
-    CONSTRAINT ck_loyalty_expiry CHECK (expiry_months IS NULL OR expiry_months BETWEEN 1 AND 120),
-    CONSTRAINT ck_loyalty_qualifying CHECK (qualifying_months IS NULL OR qualifying_months BETWEEN 1 AND 36)
+    CONSTRAINT chk_loyalty_expiry CHECK (expiry_months IS NULL OR expiry_months BETWEEN 1 AND 120),
+    CONSTRAINT chk_loyalty_qualifying CHECK (qualifying_months IS NULL OR qualifying_months BETWEEN 1 AND 36)
 );
 
 CREATE TABLE loyalty_tiers (
@@ -29,8 +29,8 @@ CREATE TABLE loyalty_tiers (
     CONSTRAINT pk_loyalty_tiers PRIMARY KEY (id),
     CONSTRAINT uq_loyalty_tier_rank UNIQUE (tenant_id, rank),
     CONSTRAINT uq_loyalty_tier_name UNIQUE (tenant_id, name),
-    CONSTRAINT ck_loyalty_tier_threshold CHECK (threshold >= 0),
-    CONSTRAINT ck_loyalty_tier_multiplier CHECK (multiplier >= 1 AND multiplier <= 10)
+    CONSTRAINT chk_loyalty_tier_threshold CHECK (threshold >= 0),
+    CONSTRAINT chk_loyalty_tier_multiplier CHECK (multiplier >= 1 AND multiplier <= 10)
 );
 
 CREATE TABLE loyalty_point_lots (
@@ -44,8 +44,8 @@ CREATE TABLE loyalty_point_lots (
     expires_at        TIMESTAMPTZ,               -- null: never
     expired_entry_id  UUID,                      -- the EXPIRE entry that closed it
     CONSTRAINT pk_loyalty_point_lots PRIMARY KEY (id),
-    CONSTRAINT ck_loyalty_lot_points CHECK (points > 0),
-    CONSTRAINT ck_loyalty_lot_remaining CHECK (remaining >= 0 AND remaining <= points)
+    CONSTRAINT chk_loyalty_lot_points CHECK (points > 0),
+    CONSTRAINT chk_loyalty_lot_remaining CHECK (remaining >= 0 AND remaining <= points)
 );
 CREATE INDEX idx_loyalty_lots_open ON loyalty_point_lots (tenant_id, customer_id, expires_at, earned_at)
     WHERE remaining > 0;

@@ -8,7 +8,7 @@ CREATE TABLE rfq_series (
     tenant_id   UUID   NOT NULL,
     next_number BIGINT NOT NULL DEFAULT 1,
     CONSTRAINT pk_rfq_series PRIMARY KEY (tenant_id),
-    CONSTRAINT ck_rfq_series_next CHECK (next_number >= 1)
+    CONSTRAINT chk_rfq_series_next CHECK (next_number >= 1)
 );
 
 CREATE TABLE rfqs (
@@ -32,8 +32,8 @@ CREATE TABLE rfqs (
     cancelled_reason TEXT,
     CONSTRAINT pk_rfqs PRIMARY KEY (id),
     CONSTRAINT uq_rfq_reference UNIQUE (tenant_id, reference),
-    CONSTRAINT ck_rfq_status CHECK (status IN ('DRAFT', 'ISSUED', 'AWARDED', 'CANCELLED')),
-    CONSTRAINT ck_rfq_title CHECK (length(trim(title)) > 0)
+    CONSTRAINT chk_rfq_status CHECK (status IN ('DRAFT', 'ISSUED', 'AWARDED', 'CANCELLED')),
+    CONSTRAINT chk_rfq_title CHECK (length(trim(title)) > 0)
 );
 CREATE INDEX idx_rfqs_tenant ON rfqs (tenant_id, status, created_at DESC);
 
@@ -48,7 +48,7 @@ CREATE TABLE rfq_lines (
     CONSTRAINT pk_rfq_lines PRIMARY KEY (id),
     CONSTRAINT uq_rfq_line UNIQUE (rfq_id, variant_id),
     CONSTRAINT fk_rfq_line_rfq FOREIGN KEY (rfq_id) REFERENCES rfqs (id) ON DELETE CASCADE,
-    CONSTRAINT ck_rfq_line_qty CHECK (qty > 0)
+    CONSTRAINT chk_rfq_line_qty CHECK (qty > 0)
 );
 CREATE INDEX idx_rfq_lines_tenant ON rfq_lines (tenant_id, rfq_id, sort_order);
 
@@ -71,8 +71,8 @@ CREATE TABLE rfq_suppliers (
     CONSTRAINT uq_rfq_supplier UNIQUE (rfq_id, supplier_id),
     CONSTRAINT fk_rfq_supplier_rfq FOREIGN KEY (rfq_id) REFERENCES rfqs (id) ON DELETE CASCADE,
     CONSTRAINT fk_rfq_supplier_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers (id),
-    CONSTRAINT ck_rfq_supplier_status CHECK (status IN ('INVITED', 'QUOTED', 'DECLINED')),
-    CONSTRAINT ck_rfq_supplier_lead CHECK (lead_time_days IS NULL OR lead_time_days >= 0)
+    CONSTRAINT chk_rfq_supplier_status CHECK (status IN ('INVITED', 'QUOTED', 'DECLINED')),
+    CONSTRAINT chk_rfq_supplier_lead CHECK (lead_time_days IS NULL OR lead_time_days >= 0)
 );
 CREATE INDEX idx_rfq_suppliers_tenant ON rfq_suppliers (tenant_id, rfq_id);
 CREATE INDEX idx_rfq_suppliers_supplier ON rfq_suppliers (tenant_id, supplier_id);
@@ -87,7 +87,7 @@ CREATE TABLE rfq_quote_lines (
     CONSTRAINT uq_rfq_quote_line UNIQUE (rfq_supplier_id, rfq_line_id),
     CONSTRAINT fk_rfq_quote_supplier FOREIGN KEY (rfq_supplier_id) REFERENCES rfq_suppliers (id) ON DELETE CASCADE,
     CONSTRAINT fk_rfq_quote_line FOREIGN KEY (rfq_line_id) REFERENCES rfq_lines (id) ON DELETE CASCADE,
-    CONSTRAINT ck_rfq_quote_price CHECK (unit_price >= 0)
+    CONSTRAINT chk_rfq_quote_price CHECK (unit_price >= 0)
 );
 CREATE INDEX idx_rfq_quote_lines_tenant ON rfq_quote_lines (tenant_id, rfq_supplier_id);
 

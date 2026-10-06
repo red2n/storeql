@@ -38,17 +38,17 @@ CREATE TABLE IF NOT EXISTS disputes (
 
     PRIMARY KEY (tenant_id, id),
 
-    CONSTRAINT ck_disputes_status CHECK (
+    CONSTRAINT chk_disputes_status CHECK (
         status IN ('NEEDS_RESPONSE', 'UNDER_REVIEW', 'WON', 'LOST', 'ACCEPTED')
     ),
-    CONSTRAINT ck_disputes_reason CHECK (
+    CONSTRAINT chk_disputes_reason CHECK (
         reason IN ('FRAUDULENT', 'PRODUCT_NOT_RECEIVED', 'PRODUCT_UNACCEPTABLE', 'DUPLICATE',
                    'CREDIT_NOT_PROCESSED', 'SUBSCRIPTION_CANCELLED', 'UNRECOGNIZED', 'GENERAL')
     ),
-    CONSTRAINT ck_disputes_amounts CHECK (amount > 0 AND fee_amount >= 0),
-    CONSTRAINT ck_disputes_fee_currency CHECK (fee_currency IS NULL OR fee_currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT chk_disputes_amounts CHECK (amount > 0 AND fee_amount >= 0),
+    CONSTRAINT chk_disputes_fee_currency CHECK (fee_currency IS NULL OR fee_currency ~ '^[A-Z]{3}$'),
     -- Closed means a closing date, and only closed does.
-    CONSTRAINT ck_disputes_closed CHECK (
+    CONSTRAINT chk_disputes_closed CHECK (
         (status IN ('WON', 'LOST', 'ACCEPTED')) = (closed_at IS NOT NULL)
     )
 );

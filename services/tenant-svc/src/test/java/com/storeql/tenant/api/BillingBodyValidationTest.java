@@ -237,8 +237,8 @@ class BillingBodyValidationTest {
   @DisplayName(
       "A VAT rate and the platform's own rate are fractions below one, and payment terms at most"
           + " 180 days, as their tables hold them: 1 and 9.9999 passed @Digits and broke"
-          + " ck_platform_vat_rate or ck_billing_profile_rate as a 500, and 181 days"
-          + " ck_billing_profile_terms; each is refused, and nothing is written")
+          + " chk_platform_vat_rate or chk_billing_profile_rate as a 500, and 181 days"
+          + " chk_billing_profile_terms; each is refused, and nothing is written")
   void ratesAndTermsAreHeldToTheirTables() {
     Billing billing = new Billing();
     PlatformBillingResource r = platform(billing, new Subs(), new Chase(), platformAdmin());

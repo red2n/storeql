@@ -69,7 +69,7 @@ CREATE TABLE pos_log_entries (
 );
 CREATE INDEX idx_pos_log_tenant_order ON pos_log_entries (tenant_id, order_id);
 CREATE INDEX idx_pos_log_tenant_store ON pos_log_entries (tenant_id, store_id, transaction_ts DESC);
-CREATE UNIQUE INDEX idx_pos_log_order_uniq ON pos_log_entries (tenant_id, order_id);
+CREATE UNIQUE INDEX uq_pos_log_order_uniq ON pos_log_entries (tenant_id, order_id);
 -- "What did this cashier ring up?" is the denominator of the staff exception report: a raw count of
 -- exceptions ranks staff by how much they worked, not by how they behaved.
 CREATE INDEX idx_pos_log_tenant_cashier ON pos_log_entries (tenant_id, cashier_id, transaction_ts DESC)

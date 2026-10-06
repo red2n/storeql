@@ -28,14 +28,14 @@ CREATE TABLE dunning_policy (
     updated_by               UUID        NOT NULL,
     updated_at               TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_dunning_singleton CHECK (id = 1),
-    CONSTRAINT ck_dunning_reminders CHECK (reminder_days ~ '^[0-9]+(,[0-9]+)*$'),
+    CONSTRAINT chk_dunning_singleton CHECK (id = 1),
+    CONSTRAINT chk_dunning_reminders CHECK (reminder_days ~ '^[0-9]+(,[0-9]+)*$'),
     -- Suspending before the last reminder has been sent would take the platform away from a business
     -- that has not yet been told it is late, and giving up before suspending would write off a debt
     -- the platform never stopped serving. The order is part of the policy, so the database holds it.
-    CONSTRAINT ck_dunning_order CHECK (uncollectible_after_days > suspend_after_days),
-    CONSTRAINT ck_dunning_suspend CHECK (suspend_after_days BETWEEN 1 AND 365),
-    CONSTRAINT ck_dunning_write_off CHECK (uncollectible_after_days BETWEEN 2 AND 730)
+    CONSTRAINT chk_dunning_order CHECK (uncollectible_after_days > suspend_after_days),
+    CONSTRAINT chk_dunning_suspend CHECK (suspend_after_days BETWEEN 1 AND 365),
+    CONSTRAINT chk_dunning_write_off CHECK (uncollectible_after_days BETWEEN 2 AND 730)
 );
 
 -- Deliberately not seeded. A seed row would need an updated_by, which is the id of the person who set
@@ -59,7 +59,7 @@ CREATE TABLE dunning_events (
     actor_id   UUID,
     created_at TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_dunning_step CHECK (step ~ '^[A-Z][A-Z0-9_]*$')
+    CONSTRAINT chk_dunning_step CHECK (step ~ '^[A-Z][A-Z0-9_]*$')
 );
 
 -- One step per invoice, ever. A reminder that has been sent is not sent again because the run ran

@@ -47,19 +47,19 @@ CREATE TABLE statutory_returns (
     effective_to   DATE,
 
     CONSTRAINT pk_statutory_returns PRIMARY KEY (code, scope_kind, scope, effective_from),
-    CONSTRAINT ck_statutory_scope_kind CHECK (scope_kind IN ('COUNTRY', 'REGIME')),
+    CONSTRAINT chk_statutory_scope_kind CHECK (scope_kind IN ('COUNTRY', 'REGIME')),
     -- DECADAL is a real frequency in French tax law and not a rounding of "monthly": a business on the
     -- ordinary monthly VAT regime reports three times a month. It cannot be expressed as a day count — the
     -- third period of a month runs from the 21st to the 1st, which is 11 days in March and 8 in February —
     -- so it is a frequency the calendar derives, exactly like a quarter.
-    CONSTRAINT ck_statutory_frequency CHECK (frequency IN ('DECADAL', 'MONTHLY', 'QUARTERLY', 'ANNUAL')),
+    CONSTRAINT chk_statutory_frequency CHECK (frequency IN ('DECADAL', 'MONTHLY', 'QUARTERLY', 'ANNUAL')),
     -- At least one component: a bare 'P' is not a period, and it would read as "due immediately".
-    CONSTRAINT ck_statutory_due_after CHECK (
+    CONSTRAINT chk_statutory_due_after CHECK (
         due_after ~ '^P([0-9]+M)?([0-9]+D)?$' AND due_after <> 'P'
     ),
-    CONSTRAINT ck_statutory_window CHECK (effective_to IS NULL OR effective_to >= effective_from),
+    CONSTRAINT chk_statutory_window CHECK (effective_to IS NULL OR effective_to >= effective_from),
     -- A route without a service, or the other way about, is half a link and would 404 quietly.
-    CONSTRAINT ck_statutory_export CHECK (
+    CONSTRAINT chk_statutory_export CHECK (
         (export_service IS NULL AND export_path IS NULL)
         OR (export_service IS NOT NULL AND export_path IS NOT NULL)
     )
@@ -149,11 +149,11 @@ CREATE TABLE statutory_filings (
     note           TEXT,
     created_at     TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_statutory_filing_period CHECK (period_end > period_start),
-    CONSTRAINT ck_statutory_filing_provider CHECK (provider IN ('HMRC_MTD', 'MANUAL', 'SIMULATED')),
+    CONSTRAINT chk_statutory_filing_period CHECK (period_end > period_start),
+    CONSTRAINT chk_statutory_filing_provider CHECK (provider IN ('HMRC_MTD', 'MANUAL', 'SIMULATED')),
     -- A filing cannot correct or be corrected by itself.
-    CONSTRAINT ck_statutory_filing_supersedes CHECK (supersedes IS NULL OR supersedes <> id),
-    CONSTRAINT ck_statutory_filing_superseded_by CHECK (superseded_by IS NULL OR superseded_by <> id)
+    CONSTRAINT chk_statutory_filing_supersedes CHECK (supersedes IS NULL OR supersedes <> id),
+    CONSTRAINT chk_statutory_filing_superseded_by CHECK (superseded_by IS NULL OR superseded_by <> id)
 );
 
 -- One filing per period per return per business that still stands.

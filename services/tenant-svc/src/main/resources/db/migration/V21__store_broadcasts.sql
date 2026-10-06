@@ -32,10 +32,10 @@ CREATE TABLE store_broadcasts (
     withdrawn_by   UUID,
     withdrawn_reason TEXT,
 
-    CONSTRAINT ck_broadcast_priority CHECK (priority IN ('INFO', 'IMPORTANT', 'URGENT')),
-    CONSTRAINT ck_broadcast_status CHECK (status IN ('PUBLISHED', 'WITHDRAWN')),
-    CONSTRAINT ck_broadcast_expiry CHECK (expires_at IS NULL OR expires_at > published_at),
-    CONSTRAINT ck_broadcast_withdrawn CHECK (
+    CONSTRAINT chk_broadcast_priority CHECK (priority IN ('INFO', 'IMPORTANT', 'URGENT')),
+    CONSTRAINT chk_broadcast_status CHECK (status IN ('PUBLISHED', 'WITHDRAWN')),
+    CONSTRAINT chk_broadcast_expiry CHECK (expires_at IS NULL OR expires_at > published_at),
+    CONSTRAINT chk_broadcast_withdrawn CHECK (
         (status <> 'WITHDRAWN')
         OR (withdrawn_at IS NOT NULL AND withdrawn_by IS NOT NULL AND withdrawn_reason IS NOT NULL)
     )

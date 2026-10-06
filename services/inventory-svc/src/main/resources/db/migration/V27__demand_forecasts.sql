@@ -61,11 +61,11 @@ CREATE TABLE demand_forecasts (
 
     CONSTRAINT pk_demand_forecasts   PRIMARY KEY (id),
     CONSTRAINT uq_demand_forecast    UNIQUE (tenant_id, store_id, variant_id),
-    CONSTRAINT ck_forecast_method    CHECK (method IN ('MEAN', 'SES', 'CROSTON_SBA')),
-    CONSTRAINT ck_forecast_horizon   CHECK (horizon_days BETWEEN 1 AND 365),
-    CONSTRAINT ck_forecast_history   CHECK (history_days >= 0 AND history_to >= history_from),
-    CONSTRAINT ck_forecast_uplift_source CHECK (uplift_source IS NULL OR uplift_source IN ('ITEM', 'STORE')),
-    CONSTRAINT ck_forecast_uplift    CHECK (uplift IS NULL OR uplift >= 1)
+    CONSTRAINT chk_forecast_method    CHECK (method IN ('MEAN', 'SES', 'CROSTON_SBA')),
+    CONSTRAINT chk_forecast_horizon   CHECK (horizon_days BETWEEN 1 AND 365),
+    CONSTRAINT chk_forecast_history   CHECK (history_days >= 0 AND history_to >= history_from),
+    CONSTRAINT chk_forecast_uplift_source CHECK (uplift_source IS NULL OR uplift_source IN ('ITEM', 'STORE')),
+    CONSTRAINT chk_forecast_uplift    CHECK (uplift IS NULL OR uplift >= 1)
 );
 
 CREATE INDEX idx_demand_forecasts_store ON demand_forecasts (tenant_id, store_id, variant_id);

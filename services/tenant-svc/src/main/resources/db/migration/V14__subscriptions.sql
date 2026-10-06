@@ -33,10 +33,10 @@ CREATE TABLE platform_billing_profile (
     updated_by      UUID         NOT NULL,
     updated_at      TIMESTAMPTZ  NOT NULL,
 
-    CONSTRAINT ck_billing_profile_singleton CHECK (id = 1),
-    CONSTRAINT ck_billing_profile_country CHECK (country ~ '^[A-Z]{2}$'),
-    CONSTRAINT ck_billing_profile_terms CHECK (payment_terms_days BETWEEN 0 AND 180),
-    CONSTRAINT ck_billing_profile_rate CHECK (tax_rate >= 0 AND tax_rate < 1)
+    CONSTRAINT chk_billing_profile_singleton CHECK (id = 1),
+    CONSTRAINT chk_billing_profile_country CHECK (country ~ '^[A-Z]{2}$'),
+    CONSTRAINT chk_billing_profile_terms CHECK (payment_terms_days BETWEEN 0 AND 180),
+    CONSTRAINT chk_billing_profile_rate CHECK (tax_rate >= 0 AND tax_rate < 1)
 );
 
 -- ── the rates the platform charges, by country ────────────────────────────────
@@ -52,8 +52,8 @@ CREATE TABLE platform_vat_rates (
     updated_at     TIMESTAMPTZ  NOT NULL,
 
     PRIMARY KEY (country, effective_from),
-    CONSTRAINT ck_platform_vat_country CHECK (country ~ '^[A-Z]{2}$'),
-    CONSTRAINT ck_platform_vat_rate CHECK (rate >= 0 AND rate < 1)
+    CONSTRAINT chk_platform_vat_country CHECK (country ~ '^[A-Z]{2}$'),
+    CONSTRAINT chk_platform_vat_rate CHECK (rate >= 0 AND rate < 1)
 );
 
 -- ── what a business is signed up to ───────────────────────────────────────────
@@ -105,15 +105,15 @@ CREATE TABLE subscriptions (
     created_at        TIMESTAMPTZ   NOT NULL,
     updated_at        TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_subscriptions_status CHECK (
+    CONSTRAINT chk_subscriptions_status CHECK (
         status IN ('TRIALING', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED')
     ),
-    CONSTRAINT ck_subscriptions_interval CHECK (billing_interval IN ('MONTH', 'YEAR')),
-    CONSTRAINT ck_subscriptions_currency CHECK (currency ~ '^[A-Z]{3}$'),
-    CONSTRAINT ck_subscriptions_buyer_country CHECK (buyer_country ~ '^[A-Z]{2}$'),
-    CONSTRAINT ck_subscriptions_amount CHECK (price_amount >= 0),
-    CONSTRAINT ck_subscriptions_period CHECK (period_end > period_start),
-    CONSTRAINT ck_subscriptions_cancelled CHECK ((status = 'CANCELLED') = (cancelled_at IS NOT NULL))
+    CONSTRAINT chk_subscriptions_interval CHECK (billing_interval IN ('MONTH', 'YEAR')),
+    CONSTRAINT chk_subscriptions_currency CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT chk_subscriptions_buyer_country CHECK (buyer_country ~ '^[A-Z]{2}$'),
+    CONSTRAINT chk_subscriptions_amount CHECK (price_amount >= 0),
+    CONSTRAINT chk_subscriptions_period CHECK (period_end > period_start),
+    CONSTRAINT chk_subscriptions_cancelled CHECK ((status = 'CANCELLED') = (cancelled_at IS NOT NULL))
 );
 
 -- A business has one subscription. Two would mean two answers to what it pays.
@@ -141,7 +141,7 @@ CREATE TABLE billing_invoice_numbers (
     year        INTEGER PRIMARY KEY,
     next_number BIGINT  NOT NULL,
 
-    CONSTRAINT ck_invoice_numbers_next CHECK (next_number > 0)
+    CONSTRAINT chk_invoice_numbers_next CHECK (next_number > 0)
 );
 
 -- ── the invoice ───────────────────────────────────────────────────────────────
@@ -188,18 +188,18 @@ CREATE TABLE billing_invoices (
     created_at      TIMESTAMPTZ   NOT NULL,
     updated_at      TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_invoices_status CHECK (status IN ('OPEN', 'PAID', 'VOID', 'UNCOLLECTIBLE')),
-    CONSTRAINT ck_invoices_kind CHECK (kind IN ('PERIOD', 'ADJUSTMENT')),
-    CONSTRAINT ck_invoices_treatment CHECK (
+    CONSTRAINT chk_invoices_status CHECK (status IN ('OPEN', 'PAID', 'VOID', 'UNCOLLECTIBLE')),
+    CONSTRAINT chk_invoices_kind CHECK (kind IN ('PERIOD', 'ADJUSTMENT')),
+    CONSTRAINT chk_invoices_treatment CHECK (
         tax_treatment IN ('DOMESTIC', 'REVERSE_CHARGE', 'DESTINATION', 'OUT_OF_SCOPE')
     ),
-    CONSTRAINT ck_invoices_currency CHECK (currency ~ '^[A-Z]{3}$'),
-    CONSTRAINT ck_invoices_adds_up CHECK (total_amount = net_amount + tax_amount),
-    CONSTRAINT ck_invoices_paid CHECK (amount_paid >= 0 AND amount_paid <= total_amount),
-    CONSTRAINT ck_invoices_due CHECK (due_date >= issue_date),
+    CONSTRAINT chk_invoices_currency CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT chk_invoices_adds_up CHECK (total_amount = net_amount + tax_amount),
+    CONSTRAINT chk_invoices_paid CHECK (amount_paid >= 0 AND amount_paid <= total_amount),
+    CONSTRAINT chk_invoices_due CHECK (due_date >= issue_date),
     -- Only the two taxed treatments carry tax. Saying so in the schema stops a rate being applied
     -- to a reverse charge by accident — which would be VAT charged that should not have been.
-    CONSTRAINT ck_invoices_tax_zero CHECK (
+    CONSTRAINT chk_invoices_tax_zero CHECK (
         tax_treatment IN ('DOMESTIC', 'DESTINATION') OR (tax_amount = 0 AND tax_rate = 0)
     )
 );
@@ -234,8 +234,8 @@ CREATE TABLE billing_invoice_lines (
     unit_amount NUMERIC(18,4) NOT NULL,
     amount      NUMERIC(18,4) NOT NULL,
 
-    CONSTRAINT ck_invoice_lines_kind CHECK (kind IN ('PLAN', 'PRORATION', 'CREDIT', 'USAGE')),
-    CONSTRAINT ck_invoice_lines_amount CHECK (amount = round(quantity * unit_amount, 4))
+    CONSTRAINT chk_invoice_lines_kind CHECK (kind IN ('PLAN', 'PRORATION', 'CREDIT', 'USAGE')),
+    CONSTRAINT chk_invoice_lines_amount CHECK (amount = round(quantity * unit_amount, 4))
 );
 CREATE UNIQUE INDEX uq_invoice_lines ON billing_invoice_lines (invoice_id, line_no);
 CREATE INDEX idx_invoice_lines_tenant ON billing_invoice_lines (tenant_id, invoice_id);
@@ -256,8 +256,8 @@ CREATE TABLE billing_payments (
     idempotency_key TEXT,
     created_at      TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_billing_payments_amount CHECK (amount > 0),
-    CONSTRAINT ck_billing_payments_method CHECK (method IN ('BANK_TRANSFER', 'CARD'))
+    CONSTRAINT chk_billing_payments_amount CHECK (amount > 0),
+    CONSTRAINT chk_billing_payments_method CHECK (method IN ('BANK_TRANSFER', 'CARD'))
 );
 CREATE INDEX idx_billing_payments_invoice ON billing_payments (invoice_id, received_on);
 -- A provider tells us about one payment more than once; it is still one payment.

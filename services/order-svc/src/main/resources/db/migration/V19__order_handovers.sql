@@ -18,10 +18,10 @@ CREATE TABLE order_handovers (
     handed_at     TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT pk_order_handovers PRIMARY KEY (id),
     CONSTRAINT uq_order_handovers_order UNIQUE (tenant_id, order_id),
-    CONSTRAINT ck_order_handovers_kind CHECK (kind IN ('DISPATCHED', 'COLLECTED')),
-    CONSTRAINT ck_order_handovers_shape CHECK (
+    CONSTRAINT chk_order_handovers_kind CHECK (kind IN ('DISPATCHED', 'COLLECTED')),
+    CONSTRAINT chk_order_handovers_shape CHECK (
         (kind = 'DISPATCHED' AND carrier IS NOT NULL AND collected_by IS NULL)
         OR (kind = 'COLLECTED' AND carrier IS NULL AND reference IS NULL AND parcels IS NULL)),
-    CONSTRAINT ck_order_handovers_parcels CHECK (parcels IS NULL OR parcels > 0)
+    CONSTRAINT chk_order_handovers_parcels CHECK (parcels IS NULL OR parcels > 0)
 );
 CREATE INDEX idx_order_handovers_store ON order_handovers (tenant_id, store_id, handed_at DESC);

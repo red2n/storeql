@@ -13,6 +13,6 @@ CREATE TABLE crossdock_expected (
     updated_at        TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT pk_crossdock_expected PRIMARY KEY (id),
     CONSTRAINT uq_crossdock_expected UNIQUE (tenant_id, purchase_order_id, store_id, variant_id),
-    CONSTRAINT ck_crossdock_expected_qty CHECK (qty > 0)
+    CONSTRAINT chk_crossdock_expected_qty CHECK (qty > 0)
 );
 CREATE INDEX idx_crossdock_expected_store ON crossdock_expected (tenant_id, store_id, variant_id);

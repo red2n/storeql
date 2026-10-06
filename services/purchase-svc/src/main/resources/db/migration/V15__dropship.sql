@@ -27,7 +27,7 @@ CREATE TABLE dropship_arrangements (
     CONSTRAINT chk_dropship_unit_cost CHECK (unit_cost >= 0)
 );
 -- One live arrangement per variant: which supplier ships it is never a toss-up.
-CREATE UNIQUE INDEX ux_dropship_arrangement_live
+CREATE UNIQUE INDEX uq_dropship_arrangement_live
     ON dropship_arrangements (tenant_id, variant_id) WHERE active;
-CREATE INDEX ix_dropship_arrangements_tenant
+CREATE INDEX idx_dropship_arrangements_tenant
     ON dropship_arrangements (tenant_id, created_at DESC, id);

@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS z_reports (
     time_zone         TEXT,
     zone_assumed      BOOLEAN       NOT NULL DEFAULT false,
     PRIMARY KEY (tenant_id, id),
-    CONSTRAINT z_reports_day_version_key UNIQUE (tenant_id, store_id, business_date, version)
+    CONSTRAINT uq_z_reports_day_version_key UNIQUE (tenant_id, store_id, business_date, version)
 );
 CREATE INDEX IF NOT EXISTS idx_z_reports_store
     ON z_reports (tenant_id, store_id, business_date DESC);

@@ -18,7 +18,7 @@ CREATE TABLE processed_events (
     event_id   UUID        NOT NULL,
     consumer   TEXT        NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
+    CONSTRAINT pk_processed_events PRIMARY KEY (event_id, consumer)
 );
 -- The hourly purge asks for processed_at first and falls back to created_at: the dedupe table keeps its
 -- timestamp in created_at. Ordered and batched by it, so the index keeps every batch off a full scan.

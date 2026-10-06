@@ -248,7 +248,7 @@ CREATE TABLE product_variants (
         CHECK (deposit_volume_ml IS NULL OR (deposit_volume_ml > 0 AND deposit_volume_ml <= 10000)),
     CONSTRAINT chk_variant_deposit_pair
         CHECK ((deposit_material IS NULL) = (deposit_volume_ml IS NULL)),
-    CONSTRAINT ck_variant_facing_width
+    CONSTRAINT chk_variant_facing_width
         CHECK (facing_width_mm IS NULL OR facing_width_mm BETWEEN 1 AND 5000)
 );
 
@@ -314,8 +314,8 @@ CREATE TABLE outbox (
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_error      TEXT,
     dead_at         TIMESTAMPTZ,
-    CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-    CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+    CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+    CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 
 -- The scheduled outbox purge (common-service OutboxPublisher -> BaseOutboxRepository.purgePublished)

@@ -58,17 +58,17 @@ CREATE TABLE IF NOT EXISTS payment_intents (
 
     PRIMARY KEY (tenant_id, id),
 
-    CONSTRAINT ck_payment_intents_status CHECK (
+    CONSTRAINT chk_payment_intents_status CHECK (
         status IN ('REQUIRES_ACTION', 'AUTHORIZED', 'CAPTURED', 'FAILED', 'CANCELLED')
     ),
     -- An intent can never have captured more than it authorised, and neither figure can go
     -- negative. A provider webhook reporting otherwise is a bug worth failing loudly on rather
     -- than silently recording.
-    CONSTRAINT ck_payment_intents_amounts CHECK (
+    CONSTRAINT chk_payment_intents_amounts CHECK (
         amount >= 0 AND captured_amount >= 0 AND captured_amount <= amount
     ),
     -- CAPTURED is the only status that may name a tender, and it must name one.
-    CONSTRAINT ck_payment_intents_captured_has_tender CHECK (
+    CONSTRAINT chk_payment_intents_captured_has_tender CHECK (
         (status = 'CAPTURED') = (payment_id IS NOT NULL)
     )
 );

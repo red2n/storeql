@@ -36,11 +36,11 @@ CREATE TABLE card_terminals (
     -- an upgrade. A retired terminal is never deleted: payments point at it.
     retired_reason TEXT,
 
-    CONSTRAINT ck_terminal_vendor CHECK (
+    CONSTRAINT chk_terminal_vendor CHECK (
         vendor IN ('SIMULATED', 'STRIPE_TERMINAL', 'ADYEN', 'VERIFONE')
     ),
-    CONSTRAINT ck_terminal_status CHECK (status IN ('ACTIVE', 'RETIRED')),
-    CONSTRAINT ck_terminal_retired_reason CHECK (
+    CONSTRAINT chk_terminal_status CHECK (status IN ('ACTIVE', 'RETIRED')),
+    CONSTRAINT chk_terminal_retired_reason CHECK (
         (status = 'RETIRED') OR retired_reason IS NULL
     )
 );
@@ -119,36 +119,36 @@ CREATE TABLE terminal_payments (
     reason          TEXT,
     due_id          UUID,
 
-    CONSTRAINT ck_terminal_payment_kind CHECK (kind IN ('SALE', 'REFUND')),
-    CONSTRAINT ck_terminal_payment_state CHECK (
+    CONSTRAINT chk_terminal_payment_kind CHECK (kind IN ('SALE', 'REFUND')),
+    CONSTRAINT chk_terminal_payment_state CHECK (
         state IN ('REQUESTED', 'APPROVED', 'DECLINED', 'CANCELLED', 'FAILED', 'TIMED_OUT')
     ),
-    CONSTRAINT ck_terminal_payment_amount CHECK (amount > 0),
-    CONSTRAINT ck_terminal_entry_mode CHECK (
+    CONSTRAINT chk_terminal_payment_amount CHECK (amount > 0),
+    CONSTRAINT chk_terminal_entry_mode CHECK (
         entry_mode IS NULL OR entry_mode IN ('CHIP', 'CONTACTLESS', 'SWIPE', 'MANUAL')
     ),
-    CONSTRAINT ck_terminal_verification CHECK (
+    CONSTRAINT chk_terminal_verification CHECK (
         verification IS NULL OR verification IN ('PIN', 'SIGNATURE', 'NONE', 'DEVICE')
     ),
-    CONSTRAINT ck_terminal_pan_last4 CHECK (pan_last4 IS NULL OR pan_last4 ~ '^[0-9]{4}$'),
+    CONSTRAINT chk_terminal_pan_last4 CHECK (pan_last4 IS NULL OR pan_last4 ~ '^[0-9]{4}$'),
     -- An approval has to say what was approved: a receipt with no scheme and no last four digits is
     -- not a valid card receipt in any market the platform trades in.
-    CONSTRAINT ck_terminal_approved_has_receipt CHECK (
+    CONSTRAINT chk_terminal_approved_has_receipt CHECK (
         state <> 'APPROVED'
         OR (scheme IS NOT NULL AND pan_last4 IS NOT NULL AND entry_mode IS NOT NULL)
     ),
     -- A refund names what it refunds; a sale does not.
-    CONSTRAINT ck_terminal_refund_of CHECK (
+    CONSTRAINT chk_terminal_refund_of CHECK (
         (kind = 'REFUND' AND refund_of IS NOT NULL) OR (kind = 'SALE' AND refund_of IS NULL)
     ),
-    CONSTRAINT ck_terminal_settled_at CHECK (
+    CONSTRAINT chk_terminal_settled_at CHECK (
         (state = 'REQUESTED') = (settled_at IS NULL)
     ),
-    CONSTRAINT ck_terminal_reason CHECK (reason IS NULL OR char_length(reason) <= 500),
+    CONSTRAINT chk_terminal_reason CHECK (reason IS NULL OR char_length(reason) <= 500),
     -- Every refund says why. That holds for every row, which is what lets a business's data be
     -- imported again (21.14): an import inserts each row, and this check runs on each one.
-    CONSTRAINT ck_terminal_refund_has_reason CHECK (kind <> 'REFUND' OR reason IS NOT NULL),
-    CONSTRAINT ck_terminal_requested_by CHECK (
+    CONSTRAINT chk_terminal_refund_has_reason CHECK (kind <> 'REFUND' OR reason IS NOT NULL),
+    CONSTRAINT chk_terminal_requested_by CHECK (
         requested_by IS NOT NULL OR (kind = 'REFUND' AND due_id IS NOT NULL)
     )
 );

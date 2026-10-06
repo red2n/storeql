@@ -155,8 +155,8 @@ CREATE TABLE outbox (
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_error      TEXT,
     dead_at         TIMESTAMPTZ,
-    CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-    CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+    CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+    CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 -- The claim (common-service BaseOutboxRepository.claim): rows that may publish now, in the order
 -- they were written. idx_outbox_claim serves its ordered scan (ORDER BY created_at, id LIMIT n):

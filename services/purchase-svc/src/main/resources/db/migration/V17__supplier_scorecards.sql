@@ -28,8 +28,8 @@ CREATE TABLE supplier_deliveries (
     CONSTRAINT pk_supplier_deliveries PRIMARY KEY (id),
     CONSTRAINT uq_supplier_delivery_receipt UNIQUE (gr_id),
     CONSTRAINT fk_supplier_delivery_receipt FOREIGN KEY (gr_id) REFERENCES goods_receipts (id),
-    CONSTRAINT ck_supplier_delivery_lead CHECK (lead_days >= 0),
-    CONSTRAINT ck_supplier_delivery_qty CHECK (received_qty >= 0)
+    CONSTRAINT chk_supplier_delivery_lead CHECK (lead_days >= 0),
+    CONSTRAINT chk_supplier_delivery_qty CHECK (received_qty >= 0)
 );
 CREATE INDEX idx_supplier_deliveries_supplier
     ON supplier_deliveries (tenant_id, supplier_id, received_at DESC);

@@ -22,8 +22,8 @@ CREATE TABLE accounting_connections (
     last_sync_at       TIMESTAMPTZ,
     last_error         TEXT,                        -- the first thing that went wrong on the last pass
     disabled_reason    TEXT,
-    CONSTRAINT ck_accounting_provider CHECK (provider IN ('XERO', 'QUICKBOOKS', 'SAGE', 'SIMULATED')),
-    CONSTRAINT ck_accounting_status CHECK (status IN ('ACTIVE', 'DISABLED'))
+    CONSTRAINT chk_accounting_provider CHECK (provider IN ('XERO', 'QUICKBOOKS', 'SAGE', 'SIMULATED')),
+    CONSTRAINT chk_accounting_status CHECK (status IN ('ACTIVE', 'DISABLED'))
 );
 CREATE UNIQUE INDEX uq_accounting_connections_tenant ON accounting_connections (tenant_id);
 
@@ -55,8 +55,8 @@ CREATE TABLE accounting_syncs (
     resolved_by     UUID,
     resolved_at     TIMESTAMPTZ,
     resolution_note TEXT,
-    CONSTRAINT ck_accounting_sync_status CHECK (status IN ('PENDING', 'DELIVERED', 'FAILED', 'UNCERTAIN', 'SKIPPED')),
-    CONSTRAINT ck_accounting_sync_resolution CHECK (resolution IS NULL OR resolution IN ('LANDED', 'NOT_LANDED')),
+    CONSTRAINT chk_accounting_sync_status CHECK (status IN ('PENDING', 'DELIVERED', 'FAILED', 'UNCERTAIN', 'SKIPPED')),
+    CONSTRAINT chk_accounting_sync_resolution CHECK (resolution IS NULL OR resolution IN ('LANDED', 'NOT_LANDED')),
     CONSTRAINT uq_accounting_sync UNIQUE (connection_id, journal_id)
 );
 CREATE INDEX idx_accounting_syncs_due ON accounting_syncs (next_attempt_at) WHERE status = 'PENDING';

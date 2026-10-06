@@ -24,7 +24,7 @@ CREATE TABLE order_proposal_runs (
     skipped        JSONB       NOT NULL,      -- [{"variantId", "reason"}]: what could not be judged, and why
 
     CONSTRAINT pk_order_proposal_runs PRIMARY KEY (id),
-    CONSTRAINT ck_proposal_cover CHECK (cover_days BETWEEN 1 AND 365)
+    CONSTRAINT chk_proposal_cover CHECK (cover_days BETWEEN 1 AND 365)
 );
 
 CREATE INDEX idx_order_proposal_runs_store ON order_proposal_runs (tenant_id, store_id, ran_at DESC);

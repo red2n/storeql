@@ -26,6 +26,6 @@ CREATE TABLE manual_grants (
     idempotency_key TEXT,
     created_at      TIMESTAMPTZ   NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX ux_manual_grants_key
+CREATE UNIQUE INDEX uq_manual_grants_key
     ON manual_grants (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX idx_manual_grants_customer ON manual_grants (tenant_id, customer_id, created_at DESC);

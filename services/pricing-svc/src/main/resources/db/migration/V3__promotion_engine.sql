@@ -29,7 +29,7 @@ CREATE TABLE promotion_redemptions (
 -- checkout, or an offline POS sale replaying its writes, must not burn a second use of a coupon.
 -- The same replay question applies to gift cards: ask what a replay would do, not only whether the
 -- code is correct.
-CREATE UNIQUE INDEX idx_promotion_redemptions_once
+CREATE UNIQUE INDEX uq_promotion_redemptions_once
     ON promotion_redemptions (tenant_id, promotion_id, order_id);
 
 -- Serves both caps: total usage (tenant + promotion) and per-customer usage.

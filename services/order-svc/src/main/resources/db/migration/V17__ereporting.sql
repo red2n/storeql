@@ -42,10 +42,10 @@ CREATE TABLE ereporting_submissions (
     supersedes        UUID          REFERENCES ereporting_submissions (id) DEFERRABLE INITIALLY DEFERRED,
     superseded_by     UUID          REFERENCES ereporting_submissions (id) DEFERRABLE INITIALLY DEFERRED,
 
-    CONSTRAINT ck_ereporting_status CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED')),
-    CONSTRAINT ck_ereporting_period CHECK (period_end > period_start),
-    CONSTRAINT ck_ereporting_counts CHECK (transaction_count >= 0),
-    CONSTRAINT ck_ereporting_self   CHECK (supersedes IS NULL OR supersedes <> id)
+    CONSTRAINT chk_ereporting_status CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED')),
+    CONSTRAINT chk_ereporting_period CHECK (period_end > period_start),
+    CONSTRAINT chk_ereporting_counts CHECK (transaction_count >= 0),
+    CONSTRAINT chk_ereporting_self   CHECK (supersedes IS NULL OR supersedes <> id)
 );
 
 -- One standing submission per period, stream and CURRENCY. A correction supersedes rather than

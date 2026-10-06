@@ -33,8 +33,8 @@ CREATE TABLE einvoice_inbox_settings (
     updated_at      TIMESTAMPTZ NOT NULL,
     updated_by      UUID,
 
-    CONSTRAINT ck_inbox_network  CHECK (network IN ('NONE', 'KSEF')),
-    CONSTRAINT ck_inbox_provider CHECK (provider IN ('NONE', 'SIMULATED', 'KSEF'))
+    CONSTRAINT chk_inbox_network  CHECK (network IN ('NONE', 'KSEF')),
+    CONSTRAINT chk_inbox_provider CHECK (provider IN ('NONE', 'SIMULATED', 'KSEF'))
 );
 
 COMMENT ON TABLE einvoice_inbox_settings IS

@@ -130,7 +130,7 @@ class PaymentSchemaGuardsIT {
     // a method left in the check that nothing writes any more fails here too.
     assertEquals(new TreeSet<>(METHODS), methodsTheCodeNames());
 
-    for (String check : new String[] {"ck_payment_tenders_method", "ck_refund_tenders_method"}) {
+    for (String check : new String[] {"chk_payment_tenders_method", "chk_refund_tenders_method"}) {
       String definition = constraintDefinition(check);
       assertNotNull(definition, check + " does not exist");
       assertEquals(new TreeSet<>(METHODS), literals(definition), check + ": " + definition);
@@ -154,10 +154,10 @@ class PaymentSchemaGuardsIT {
     for (String method : new String[] {"BITCOIN", "ORIGINAL", "cash", "", "CASH "}) {
       SQLException t = assertThrows(SQLException.class, () -> tender(method), "tender " + method);
       assertEquals("23514", t.getSQLState(), t.getMessage());
-      assertTrue(t.getMessage().contains("ck_payment_tenders_method"), t.getMessage());
+      assertTrue(t.getMessage().contains("chk_payment_tenders_method"), t.getMessage());
       SQLException r = assertThrows(SQLException.class, () -> refund(method), "refund " + method);
       assertEquals("23514", r.getSQLState(), r.getMessage());
-      assertTrue(r.getMessage().contains("ck_refund_tenders_method"), r.getMessage());
+      assertTrue(r.getMessage().contains("chk_refund_tenders_method"), r.getMessage());
     }
   }
 

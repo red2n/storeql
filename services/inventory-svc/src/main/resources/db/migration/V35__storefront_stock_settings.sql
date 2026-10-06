@@ -8,6 +8,6 @@ CREATE TABLE storefront_stock_settings (
     updated_by          UUID        NOT NULL,
     updated_at          TIMESTAMPTZ NOT NULL,
     CONSTRAINT pk_storefront_stock_settings PRIMARY KEY (tenant_id),
-    CONSTRAINT ck_storefront_stock_settings_threshold
+    CONSTRAINT chk_storefront_stock_settings_threshold
         CHECK (low_stock_threshold IS NULL OR low_stock_threshold BETWEEN 1 AND 1000)
 );

@@ -29,11 +29,11 @@ CREATE TABLE commission_schemes (
     created_at     TIMESTAMPTZ   NOT NULL,
     created_by     UUID          NOT NULL,
 
-    CONSTRAINT ck_commission_basis  CHECK (basis IN ('PERCENT_OF_NET', 'PER_UNIT')),
-    CONSTRAINT ck_commission_status CHECK (status IN ('ACTIVE', 'WITHDRAWN')),
+    CONSTRAINT chk_commission_basis  CHECK (basis IN ('PERCENT_OF_NET', 'PER_UNIT')),
+    CONSTRAINT chk_commission_status CHECK (status IN ('ACTIVE', 'WITHDRAWN')),
     -- A per-unit scheme without a currency is an amount of nothing; a percentage with one invites the
     -- reader to think it is an amount.
-    CONSTRAINT ck_commission_currency CHECK (
+    CONSTRAINT chk_commission_currency CHECK (
         (basis = 'PER_UNIT' AND currency IS NOT NULL) OR (basis = 'PERCENT_OF_NET' AND currency IS NULL)
     )
 );
@@ -58,8 +58,8 @@ CREATE TABLE commission_scheme_bands (
     -- A percentage (PERCENT_OF_NET, so 2.5 means 2.5%) or an amount per unit (PER_UNIT).
     rate           NUMERIC(12,4) NOT NULL,
 
-    CONSTRAINT ck_band_threshold CHECK (threshold_from >= 0),
-    CONSTRAINT ck_band_rate      CHECK (rate >= 0),
+    CONSTRAINT chk_band_threshold CHECK (threshold_from >= 0),
+    CONSTRAINT chk_band_rate      CHECK (rate >= 0),
     -- Two bands starting at the same figure is an undecidable rate.
     CONSTRAINT uq_band_threshold UNIQUE (scheme_id, threshold_from)
 );

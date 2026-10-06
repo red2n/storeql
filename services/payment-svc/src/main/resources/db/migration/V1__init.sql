@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS payment_tenders (
     order_id        UUID        NOT NULL,
     amount          NUMERIC(14,4) NOT NULL,
     -- How the money moved: CASH | CARD | UPI | WALLET | GIFT_CARD | VOUCHER | STORE_CREDIT |
-    -- EXCHANGE, exactly the set the service writes, held by ck_payment_tenders_method below.
+    -- EXCHANGE, exactly the set the service writes, held by chk_payment_tenders_method below.
     method          VARCHAR(30) NOT NULL,
     reference       VARCHAR(255),           -- card auth code, gift-card code, etc.
     idempotency_key VARCHAR(255),
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS payment_tenders (
     -- (database-per-service). Null where the payment named no store.
     store_id        UUID,
     PRIMARY KEY (tenant_id, id),
-    CONSTRAINT ck_payment_tenders_method CHECK (
+    CONSTRAINT chk_payment_tenders_method CHECK (
         method IN ('CASH', 'CARD', 'UPI', 'WALLET', 'GIFT_CARD', 'VOUCHER', 'STORE_CREDIT',
                    'EXCHANGE')
     )
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS refund_tenders (
     payment_id      UUID        NOT NULL,
     amount          NUMERIC(14,4) NOT NULL,
     -- How the value went back, from the set of payment_tenders.method (held by
-    -- ck_refund_tenders_method below). A refund a person records (POST /payments/by-order/{id}/
+    -- chk_refund_tenders_method below). A refund a person records (POST /payments/by-order/{id}/
     -- refunds) is under the method the request names. A refund of an order's tenders (a
     -- cancellation, a void, a return to the original tender, an exchange's cash-back) is under the
     -- method of the tender refunded, except that a return whose value goes to a liability writes
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS refund_tenders (
     -- payment named one.
     store_id        UUID,
     PRIMARY KEY (tenant_id, id),
-    CONSTRAINT ck_refund_tenders_method CHECK (
+    CONSTRAINT chk_refund_tenders_method CHECK (
         method IN ('CASH', 'CARD', 'UPI', 'WALLET', 'GIFT_CARD', 'VOUCHER', 'STORE_CREDIT',
                    'EXCHANGE')
     )
@@ -76,8 +76,8 @@ CREATE TABLE IF NOT EXISTS outbox (
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_error      TEXT,
     dead_at         TIMESTAMPTZ,
-    CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-    CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+    CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+    CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_idempotency

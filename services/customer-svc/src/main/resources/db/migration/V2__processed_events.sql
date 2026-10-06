@@ -9,7 +9,7 @@ CREATE TABLE processed_events (
     event_id     UUID NOT NULL,
     consumer     TEXT NOT NULL,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
+    CONSTRAINT pk_processed_events PRIMARY KEY (event_id, consumer)
 );
 
 -- The scheduled purge deletes rows older than storeql.processed-events.retention-days, in bounded

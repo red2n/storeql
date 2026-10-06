@@ -25,9 +25,9 @@ CREATE TABLE order_line_adjustments (
     idempotency_key       TEXT,
     adjusted_at           TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT pk_order_line_adjustments PRIMARY KEY (id),
-    CONSTRAINT ck_order_line_adjustments_kind CHECK (kind IN ('SHORT_CLOSED', 'SUBSTITUTED')),
-    CONSTRAINT ck_order_line_adjustments_qty CHECK (qty > 0),
-    CONSTRAINT ck_order_line_adjustments_shape CHECK (
+    CONSTRAINT chk_order_line_adjustments_kind CHECK (kind IN ('SHORT_CLOSED', 'SUBSTITUTED')),
+    CONSTRAINT chk_order_line_adjustments_qty CHECK (qty > 0),
+    CONSTRAINT chk_order_line_adjustments_shape CHECK (
         (kind = 'SHORT_CLOSED' AND substitute_item_id IS NULL AND substitute_variant_id IS NULL)
         OR (kind = 'SUBSTITUTED' AND substitute_item_id IS NOT NULL AND substitute_variant_id IS NOT NULL))
 );

@@ -126,7 +126,7 @@ class ImageStorageCapIT {
       assertThat(
           "a " + size + "-byte image",
           insertImage(product, FREE, size),
-          containsString("product_images_size_under_256kb"));
+          containsString("chk_product_images_size_under_256kb"));
       assertThat("nothing of it was kept", imageRows(product), is(0));
     }
   }

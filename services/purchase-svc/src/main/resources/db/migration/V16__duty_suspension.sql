@@ -26,4 +26,4 @@ CREATE TABLE duty_releases (
     CONSTRAINT chk_duty_release_qty CHECK (qty > 0),
     CONSTRAINT chk_duty_release_amount CHECK (duty_amount >= 0)
 );
-CREATE INDEX ix_duty_releases_period ON duty_releases (tenant_id, released_on DESC, id);
+CREATE INDEX idx_duty_releases_period ON duty_releases (tenant_id, released_on DESC, id);

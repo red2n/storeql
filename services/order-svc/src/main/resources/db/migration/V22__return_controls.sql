@@ -15,8 +15,8 @@ CREATE TABLE return_policies (
     no_receipt_ceiling NUMERIC(18,4),
     updated_by         UUID,
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT ck_return_policies_window CHECK (window_days BETWEEN 1 AND 3650),
-    CONSTRAINT ck_return_policies_cashier CHECK (cashier_ceiling IS NULL OR cashier_ceiling >= 0),
-    CONSTRAINT ck_return_policies_no_receipt
+    CONSTRAINT chk_return_policies_window CHECK (window_days BETWEEN 1 AND 3650),
+    CONSTRAINT chk_return_policies_cashier CHECK (cashier_ceiling IS NULL OR cashier_ceiling >= 0),
+    CONSTRAINT chk_return_policies_no_receipt
         CHECK (no_receipt_ceiling IS NULL OR no_receipt_ceiling >= 0)
 );

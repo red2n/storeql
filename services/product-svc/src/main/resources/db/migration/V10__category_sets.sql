@@ -39,7 +39,7 @@ CREATE TABLE variant_category_set_assignments (
     category_id     UUID        NOT NULL REFERENCES categories(id),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (tenant_id, variant_id, set_id)
+    CONSTRAINT uq_variant_category_set_assignments UNIQUE (tenant_id, variant_id, set_id)
 );
 CREATE INDEX idx_vcsa_tenant_variant ON variant_category_set_assignments (tenant_id, variant_id);
 CREATE INDEX idx_vcsa_tenant_set     ON variant_category_set_assignments (tenant_id, set_id);

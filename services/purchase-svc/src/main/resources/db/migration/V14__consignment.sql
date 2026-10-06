@@ -31,7 +31,7 @@ CREATE TABLE consignment_settlements (
     CONSTRAINT uq_consignment_settlement_reference UNIQUE (tenant_id, reference),
     CONSTRAINT chk_consignment_settlement_period CHECK (period_from <= period_to)
 );
-CREATE INDEX ix_consignment_settlements_tenant
+CREATE INDEX idx_consignment_settlements_tenant
     ON consignment_settlements (tenant_id, supplier_id, created_at DESC, id);
 
 CREATE TABLE consignment_sales (
@@ -56,6 +56,6 @@ CREATE TABLE consignment_sales (
     CONSTRAINT fk_consignment_sale_settlement
         FOREIGN KEY (settlement_id) REFERENCES consignment_settlements (id)
 );
-CREATE INDEX ix_consignment_sales_open
+CREATE INDEX idx_consignment_sales_open
     ON consignment_sales (tenant_id, supplier_id, sold_on) WHERE settlement_id IS NULL;
-CREATE INDEX ix_consignment_sales_tenant ON consignment_sales (tenant_id, recorded_at DESC, id);
+CREATE INDEX idx_consignment_sales_tenant ON consignment_sales (tenant_id, recorded_at DESC, id);

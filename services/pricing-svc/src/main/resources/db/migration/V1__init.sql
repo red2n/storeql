@@ -91,7 +91,7 @@ CREATE TABLE price_zones (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_price_zone_name UNIQUE (tenant_id, name)
 );
-CREATE INDEX ix_price_zones_tenant ON price_zones (tenant_id, created_at, id);
+CREATE INDEX idx_price_zones_tenant ON price_zones (tenant_id, created_at, id);
 
 -- Named price lists per tenant. The currency is the business's own and has no default.
 -- A list bound to a price zone (zone_id) is what the zone's stores charge instead of the
@@ -109,10 +109,10 @@ CREATE TABLE price_lists (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     zone_id        UUID,       -- NULL = the tenant-wide list every store falls back to
     CONSTRAINT uq_price_lists_tenant_name UNIQUE (tenant_id, name),
-    CONSTRAINT price_lists_zone_id_fkey FOREIGN KEY (zone_id) REFERENCES price_zones (id)
+    CONSTRAINT fk_price_lists_zone_id FOREIGN KEY (zone_id) REFERENCES price_zones (id)
 );
 CREATE INDEX idx_price_lists_tenant ON price_lists (tenant_id, active);
-CREATE INDEX ix_price_lists_zone ON price_lists (tenant_id, zone_id) WHERE zone_id IS NOT NULL;
+CREATE INDEX idx_price_lists_zone ON price_lists (tenant_id, zone_id) WHERE zone_id IS NOT NULL;
 
 -- Per-variant prices within a price list. Supports qty-break tiers via min_qty.
 -- The price is kept at the list's currency scale (see the header on money).
@@ -169,13 +169,13 @@ CREATE TABLE promotions (
     buy_qty          NUMERIC(18,3),
     get_qty          NUMERIC(18,3),
     get_discount_pct NUMERIC(5,2),
-    CONSTRAINT promotions_type_check CHECK (type IN (
+    CONSTRAINT chk_promotions_type CHECK (type IN (
         'PERCENT', 'FLAT', 'BASKET_PERCENT', 'BASKET_FLAT', 'SPEND_THRESHOLD', 'BOGO', 'MIX_MATCH'
     )),
     -- A BOGO needs its three quantities, a MIX_MATCH its bundle size, and nothing else may carry
     -- them: a half-configured BOGO is a promotion that silently discounts nothing. Enforced in the
     -- database so it holds however the row was written.
-    CONSTRAINT promotions_bogo_shape CHECK (
+    CONSTRAINT chk_promotions_bogo_shape CHECK (
         (type = 'BOGO' AND buy_qty > 0 AND get_qty > 0
                        AND get_discount_pct > 0 AND get_discount_pct <= 100)
         OR (type = 'MIX_MATCH' AND buy_qty >= 2 AND get_qty IS NULL AND get_discount_pct IS NULL)
@@ -183,18 +183,18 @@ CREATE TABLE promotions (
                        AND get_discount_pct IS NULL)
     ),
     -- A threshold promotion without a threshold is just a discount, and would apply to every basket.
-    CONSTRAINT promotions_threshold_shape CHECK (
+    CONSTRAINT chk_promotions_threshold_shape CHECK (
         type <> 'SPEND_THRESHOLD' OR min_order_amount IS NOT NULL
     ),
     -- A percentage that is not a percentage is a unit confusion waiting to happen.
-    CONSTRAINT promotions_percent_range CHECK (
+    CONSTRAINT chk_promotions_percent_range CHECK (
         type NOT IN ('PERCENT','BASKET_PERCENT') OR (value > 0 AND value <= 100)
     )
 );
 -- Coupon codes are matched case-insensitively — a customer typing SAVE10 must get the promotion
 -- created as save10 — so uniqueness is case-insensitive too, or two rows could both claim the same
 -- code and which one applied would be an accident of ordering.
-CREATE UNIQUE INDEX idx_promotions_coupon
+CREATE UNIQUE INDEX uq_promotions_coupon
     ON promotions (tenant_id, upper(coupon_code))
     WHERE coupon_code IS NOT NULL;
 -- The engine's candidate query filters on tenant, active, window and store, and orders by priority.
@@ -259,8 +259,8 @@ CREATE TABLE outbox (
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_error      TEXT,
     dead_at         TIMESTAMPTZ,
-    CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0),
-    CONSTRAINT ck_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
+    CONSTRAINT chk_outbox_attempts CHECK (attempts >= 0),
+    CONSTRAINT chk_outbox_dead_unpublished CHECK (dead_at IS NULL OR published_at IS NULL)
 );
 -- The scheduled purge (common-service OutboxPublisher) deletes, in batches of a thousand, the
 -- published rows older than a retention, oldest first. A published row is in neither of the claim's

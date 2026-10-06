@@ -25,10 +25,10 @@ CREATE TABLE plan_meters (
     hard      BOOLEAN NOT NULL,
 
     PRIMARY KEY (plan_id, meter),
-    CONSTRAINT ck_plan_meters_meter CHECK (meter IN ('ORDERS', 'SMS')),
-    CONSTRAINT ck_plan_meters_included CHECK (included IS NULL OR included >= 0),
+    CONSTRAINT chk_plan_meters_meter CHECK (meter IN ('ORDERS', 'SMS')),
+    CONSTRAINT chk_plan_meters_included CHECK (included IS NULL OR included >= 0),
     -- A hard ceiling on unlimited use means nothing.
-    CONSTRAINT ck_plan_meters_hard CHECK (NOT hard OR included IS NOT NULL)
+    CONSTRAINT chk_plan_meters_hard CHECK (NOT hard OR included IS NOT NULL)
 );
 
 -- What each unit beyond the included costs, per currency and from a date. Never edited: a new row
@@ -44,9 +44,9 @@ CREATE TABLE plan_meter_prices (
     created_by     UUID          NOT NULL,
     created_at     TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_plan_meter_prices_meter CHECK (meter IN ('ORDERS', 'SMS')),
-    CONSTRAINT ck_plan_meter_prices_currency CHECK (currency ~ '^[A-Z]{3}$'),
-    CONSTRAINT ck_plan_meter_prices_amount CHECK (unit_amount >= 0)
+    CONSTRAINT chk_plan_meter_prices_meter CHECK (meter IN ('ORDERS', 'SMS')),
+    CONSTRAINT chk_plan_meter_prices_currency CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT chk_plan_meter_prices_amount CHECK (unit_amount >= 0)
 );
 CREATE UNIQUE INDEX uq_plan_meter_prices_day
     ON plan_meter_prices (plan_id, meter, currency, effective_from);
@@ -65,8 +65,8 @@ CREATE TABLE usage_records (
     source_ref  TEXT        NOT NULL,
     recorded_at TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_usage_records_meter CHECK (meter IN ('ORDERS', 'SMS')),
-    CONSTRAINT ck_usage_records_quantity CHECK (quantity > 0)
+    CONSTRAINT chk_usage_records_meter CHECK (meter IN ('ORDERS', 'SMS')),
+    CONSTRAINT chk_usage_records_quantity CHECK (quantity > 0)
 );
 CREATE UNIQUE INDEX uq_usage_records_source ON usage_records (tenant_id, meter, source_ref);
 -- What a period's total and a quota check read: one business's meter over a span of time.
@@ -94,11 +94,11 @@ CREATE TABLE usage_periods (
     invoice_id      UUID          REFERENCES billing_invoices (id),
     created_at      TIMESTAMPTZ   NOT NULL,
 
-    CONSTRAINT ck_usage_periods_meter CHECK (meter IN ('ORDERS', 'SMS')),
-    CONSTRAINT ck_usage_periods_used CHECK (used >= 0 AND overage >= 0),
-    CONSTRAINT ck_usage_periods_span CHECK (period_end > period_start),
-    CONSTRAINT ck_usage_periods_amount CHECK (amount >= 0),
-    CONSTRAINT ck_usage_periods_not_charged CHECK (
+    CONSTRAINT chk_usage_periods_meter CHECK (meter IN ('ORDERS', 'SMS')),
+    CONSTRAINT chk_usage_periods_used CHECK (used >= 0 AND overage >= 0),
+    CONSTRAINT chk_usage_periods_span CHECK (period_end > period_start),
+    CONSTRAINT chk_usage_periods_amount CHECK (amount >= 0),
+    CONSTRAINT chk_usage_periods_not_charged CHECK (
         not_charged IS NULL OR not_charged IN ('TRIAL', 'NOT_PRICED')
     )
 );
@@ -119,8 +119,8 @@ CREATE TABLE usage_alerts (
     included     BIGINT      NOT NULL,
     raised_at    TIMESTAMPTZ NOT NULL,
 
-    CONSTRAINT ck_usage_alerts_meter CHECK (meter IN ('ORDERS', 'SMS')),
-    CONSTRAINT ck_usage_alerts_threshold CHECK (threshold IN (80, 100))
+    CONSTRAINT chk_usage_alerts_meter CHECK (meter IN ('ORDERS', 'SMS')),
+    CONSTRAINT chk_usage_alerts_threshold CHECK (threshold IN (80, 100))
 );
 CREATE UNIQUE INDEX uq_usage_alerts ON usage_alerts (tenant_id, meter, period_start, threshold);
 -- The platform's read across businesses: who reached a threshold lately, newest first.

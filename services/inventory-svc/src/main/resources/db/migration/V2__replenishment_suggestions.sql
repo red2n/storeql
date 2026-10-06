@@ -23,6 +23,6 @@ CREATE INDEX idx_suggestions_tenant_status
 
 -- Unique partial index: prevents duplicate OPEN suggestions for the same (store, variant).
 -- ON CONFLICT uses this index for idempotent inserts.
-CREATE UNIQUE INDEX idx_suggestions_open_unique
+CREATE UNIQUE INDEX uq_suggestions_open_unique
     ON replenishment_suggestions (tenant_id, store_id, variant_id)
     WHERE status = 'OPEN';

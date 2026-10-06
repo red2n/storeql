@@ -20,7 +20,7 @@ CREATE TABLE staff_pay_rates (
 
     -- A rate of zero is meaningful (an unpaid trial, a proprietor drawing no wage); a negative one is
     -- not.
-    CONSTRAINT ck_pay_rate_amount CHECK (hourly_rate >= 0),
+    CONSTRAINT chk_pay_rate_amount CHECK (hourly_rate >= 0),
     -- One rate per person per day: two rates effective the same morning is an undecidable cost.
     CONSTRAINT uq_pay_rate_day UNIQUE (tenant_id, user_id, effective_from)
 );

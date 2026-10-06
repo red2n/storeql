@@ -16,7 +16,7 @@ CREATE TABLE processed_events (
     consumer     VARCHAR(120) NOT NULL,
     processed_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
 
-    CONSTRAINT processed_events_pkey PRIMARY KEY (event_id, consumer)
+    CONSTRAINT pk_processed_events PRIMARY KEY (event_id, consumer)
 );
 
 -- The scheduled purge (common-service OutboxPublisher -> BaseOutboxRepository) deletes marks once

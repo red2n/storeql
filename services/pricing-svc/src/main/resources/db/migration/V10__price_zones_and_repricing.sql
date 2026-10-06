@@ -23,7 +23,7 @@ CREATE TABLE price_zone_stores (
     store_id  UUID NOT NULL,
     PRIMARY KEY (tenant_id, store_id)
 );
-CREATE INDEX ix_price_zone_stores_zone ON price_zone_stores (tenant_id, zone_id);
+CREATE INDEX idx_price_zone_stores_zone ON price_zone_stores (tenant_id, zone_id);
 
 -- What a rival charged, as seen: append-only, except tenant erasure, in the business's own
 -- currency (like for like).
@@ -42,7 +42,7 @@ CREATE TABLE competitor_prices (
     CONSTRAINT chk_competitor_price  CHECK (price > 0),
     CONSTRAINT chk_competitor_source CHECK (source IN ('MANUAL', 'IMPORT'))
 );
-CREATE INDEX ix_competitor_prices_variant
+CREATE INDEX idx_competitor_prices_variant
     ON competitor_prices (tenant_id, variant_id, observed_on DESC, recorded_at DESC);
 
 -- How a list answers its rivals. The floor is a share of the current price: pricing-svc has no
@@ -66,7 +66,7 @@ CREATE TABLE repricing_rules (
     CONSTRAINT chk_repricing_rounding CHECK (rounding IN ('NONE', 'ENDING_99')),
     CONSTRAINT chk_repricing_max_age  CHECK (max_age_days BETWEEN 1 AND 365)
 );
-CREATE INDEX ix_repricing_rules_tenant ON repricing_rules (tenant_id, created_at, id);
+CREATE INDEX idx_repricing_rules_tenant ON repricing_rules (tenant_id, created_at, id);
 
 -- What a run proposed, and what became of it. One open proposal per rule and variant: a later run
 -- refreshes it rather than piling up.
@@ -89,6 +89,6 @@ CREATE TABLE repricing_proposals (
     decided_by       UUID,
     CONSTRAINT chk_repricing_proposal_status CHECK (status IN ('PROPOSED', 'APPLIED', 'DISMISSED'))
 );
-CREATE INDEX ix_repricing_proposals_status ON repricing_proposals (tenant_id, status, proposed_at DESC, id);
-CREATE UNIQUE INDEX ux_repricing_proposals_open
+CREATE INDEX idx_repricing_proposals_status ON repricing_proposals (tenant_id, status, proposed_at DESC, id);
+CREATE UNIQUE INDEX uq_repricing_proposals_open
     ON repricing_proposals (tenant_id, rule_id, variant_id) WHERE status = 'PROPOSED';
