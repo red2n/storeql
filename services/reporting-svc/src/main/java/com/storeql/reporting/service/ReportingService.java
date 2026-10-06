@@ -136,6 +136,9 @@ public class ReportingService {
   /**
    * Opens an in-transit supply line per variant when a stock transfer ships.
    *
+   * <p>Today no line opens: StockEventDispatcher passes empty lists, though TransferOrderShipped
+   * carries the lines and the dispatcher does not read them yet.
+   *
    * <p>The lines are keyed by {@code eventId} so {@link #applyTransferReceived} can retire exactly
    * this shipment's lines when the goods land.
    *
@@ -143,7 +146,7 @@ public class ReportingService {
    * ReportingRepository#applyTransferShippedOnce}).
    *
    * @param tenantId owning tenant
-   * @param eventId the {@code TransferShipped} event id, retained as the retirement key
+   * @param eventId the {@code TransferOrderShipped} event id, retained as the retirement key
    * @param consumerName this consumer's dedupe name
    * @param fromStoreId store the stock left
    * @param toStoreId store the stock is bound for
@@ -168,7 +171,7 @@ public class ReportingService {
    *
    * <p>Idempotent by construction: a redelivered event deletes rows that are already gone.
    *
-   * @param eventId the {@code TransferShipped} event id the lines were opened under
+   * @param eventId the {@code TransferOrderShipped} event id the lines were opened under
    */
   public void applyTransferReceived(UUID eventId) {
     repo.deleteSupplyLinesByEvent(eventId);

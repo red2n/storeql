@@ -9,9 +9,9 @@
 
 -- ── redemptions: an append-only ledger, and the only source of a usage count ─────────────────
 --
--- Append-only (golden rule #8). A counter column on promotions would have been cheaper to read
--- and impossible to audit: "this coupon is exhausted" is a claim a tenant will dispute, and the
--- answer has to be a list of orders rather than a number.
+-- Append-only (golden rule #8), except tenant erasure (21.14). A counter column on promotions
+-- would have been cheaper to read and impossible to audit: "this coupon is exhausted" is a claim a
+-- tenant will dispute, and the answer has to be a list of orders rather than a number.
 CREATE TABLE promotion_redemptions (
     id            UUID          PRIMARY KEY,
     tenant_id     UUID          NOT NULL,

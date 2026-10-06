@@ -27,7 +27,8 @@ CREATE TABLE customers (
     first_name            TEXT,
     last_name             TEXT,
     dob                   DATE,
-    gender                TEXT,                          -- M | F | OTHER | PREFER_NOT
+    -- Free text, not checked by the schema.
+    gender                TEXT,
     status                TEXT        NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | SUSPENDED | ANONYMIZED
     -- A legacy one-bit mirror of marketing consent, kept beside marketing_preferences, which is the
     -- consent of record with its evidence. Set when the signup or profile form last gave marketing

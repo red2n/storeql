@@ -1,7 +1,7 @@
 -- product-svc schema: catalog (products, variants, categories tree, brands, media). README §9.3.
--- Every tenant table: tenant_id NOT NULL + composite index starting tenant_id. Two tables do not meet
--- the index half (category_reset_planograms in V26, range_review_lines in V27); their reads still
--- filter on tenant_id first. outbox is the relay's table, not a tenant table: its tenant_id is nullable.
+-- Every tenant table: tenant_id NOT NULL + an index starting with tenant_id. One table is the
+-- exception: outbox is the relay's table, not a tenant table. Its tenant_id is nullable, it has no
+-- tenant-led index, and the relay drains it across tenants (BaseOutboxRepository).
 
 -- ── brands ──────────────────────────────────────────────────────────────────────────────────────────
 

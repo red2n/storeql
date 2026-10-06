@@ -36,9 +36,9 @@ CREATE TABLE demand_forecasts (
     -- months: what sold in spring says little about what sells this week. The forecast carries what the
     -- batches say about the item's life: the median days from receipt to expiry, whether that makes it
     -- fresh (fourteen days or fewer), the waste rate (the share of sold-or-wasted stock that went out of
-    -- date unsold), and the longest cover an order should be given (the shelf life). No order proposal
-    -- reads fresh or max_cover_days yet, so nothing caps an order's cover or EOQ to what sells before the
-    -- item expires; the columns hold the figures such a cap would need.
+    -- date unsold), and the longest cover an order should be given (the shelf life). purchase-svc caps
+    -- an order's cover to max_cover_days (OrderProposal), so an order is never for longer than the item
+    -- lives.
     fresh           BOOLEAN        NOT NULL DEFAULT false,
     shelf_life_days INT,
     waste_rate      NUMERIC(6,4),                      -- wasted / (sold + wasted), a fraction; null when nothing sold or wasted

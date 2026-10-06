@@ -60,8 +60,14 @@ industry default and needs no decision.
 
 ### 2b. Legacy product images above 256 KB
 
-`V14__product_images.sql` (folded) adds the size constraint, enforced inline on every new write. Rows written
-under the old 512 KB cap were never re-checked, so any that exist are still serving. A database that applied the earlier `NOT VALID` form still needs the `VALIDATE` below.
+`V14__product_images.sql` (folded) creates the size constraint with the table, so it is validated from
+the first row: no row can predate it. The fold replaced the earlier V15 (a `NOT VALID` constraint) and
+V16 (a pre-check, then `VALIDATE`), and the pre-check went with them. A database built from the
+migrations before the fold cannot take the folded set, because V14's checksum has changed and V15 and
+V16 are no longer on the classpath; it needs a reset. A database that never applied the old V16 may
+still hold rows written under the old 512 KB cap, which were never re-checked, so any that exist are
+still serving. Flyway cannot take the folded set, so for that database either reset it or run the
+queries below by hand.
 
 ```sql
 -- Find rows still in breach:
@@ -74,7 +80,8 @@ SELECT tenant_id, product_id, octet_length(bytes) AS size_bytes
 ALTER TABLE product_images VALIDATE CONSTRAINT product_images_size_under_256kb;
 ```
 
-Until that runs, "no image over 256 KB in the system" is true going forward but not retroactively.
+For a database built from the folded set, "no image over 256 KB in the system" is true retroactively
+as well: the table was empty when the check was created.
 
 ---
 

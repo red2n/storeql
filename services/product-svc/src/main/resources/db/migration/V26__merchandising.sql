@@ -194,16 +194,14 @@ CREATE INDEX idx_resets_tenant ON category_resets (tenant_id, scheduled_for DESC
 
 -- Which shelves the reset moves. A planogram belongs to at most one reset: two resets claiming the
 -- same shelf on different days is the contradiction this prevents being recorded at all.
---
--- No index on this table leads with tenant_id: the primary key is (reset_id, planogram_id) and
--- uq_reset_planogram_once is on (planogram_id). Every read of it filters on tenant_id first, so only
--- the index is missing. Adding one is a schema change, so it belongs in a later migration.
 CREATE TABLE category_reset_planograms (
     reset_id     UUID NOT NULL REFERENCES category_resets (id) ON DELETE CASCADE,
     planogram_id UUID NOT NULL REFERENCES planograms (id),
     tenant_id    UUID NOT NULL,
     CONSTRAINT pk_reset_planograms PRIMARY KEY (reset_id, planogram_id)
 );
+CREATE INDEX idx_category_reset_planograms_tenant_reset
+    ON category_reset_planograms (tenant_id, reset_id);
 
 CREATE UNIQUE INDEX uq_reset_planogram_once ON category_reset_planograms (planogram_id);
 

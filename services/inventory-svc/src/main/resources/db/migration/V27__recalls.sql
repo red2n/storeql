@@ -18,7 +18,7 @@ CREATE TABLE recalls (
     kind             TEXT        NOT NULL,
     hazard           TEXT        NOT NULL,
     reason           TEXT        NOT NULL,
-    -- The point-of-sale notice a recall must display; a withdrawal has none.
+    -- The point-of-sale notice a recall must display; a withdrawal needs none, and one given is kept.
     customer_notice  TEXT,
     source           TEXT        NOT NULL,
     source_reference TEXT,

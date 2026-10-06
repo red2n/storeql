@@ -24,7 +24,8 @@ CREATE TABLE price_zone_stores (
 );
 CREATE INDEX ix_price_zone_stores_zone ON price_zone_stores (tenant_id, zone_id);
 
--- What a rival charged, as seen: append-only, in the business's own currency (like for like).
+-- What a rival charged, as seen: append-only, except tenant erasure (21.14), in the business's own
+-- currency (like for like).
 CREATE TABLE competitor_prices (
     id          UUID          PRIMARY KEY,
     tenant_id   UUID          NOT NULL,

@@ -72,8 +72,8 @@ COMMENT ON COLUMN suppliers.bank_details_version IS
 --
 -- Money. Unconstrained NUMERIC, not NUMERIC(14,2): the currency decides the precision, not the column
 -- (SJ-D25). Totals.of rounds at the currency's own minor units before the write, and that scale
--- survives the round trip. A fixed scale of 2 rounded the third decimal of a dinar and the whole
--- figure of a yen.
+-- survives the round trip. A fixed scale of 2 stored a yen figure at two decimal places (3702.00)
+-- and rounded the third decimal of a dinar.
 --
 -- Home-currency figure. The spend authority is decided against the order's figure in the business's
 -- home currency. The rate and the translated net are kept on the order, because a rate moves and the
@@ -139,8 +139,8 @@ CREATE TABLE purchase_orders (
     (status <> 'CANCELLED' AND cancelled_at IS NULL     AND cancelled_reason IS NULL)
   ),
   -- Scoped to the states an approval decision actually produces. SUBMITTED is reachable two ways --
-  -- approved, or under the raiser's own authority and never routed for approval -- so it is
-  -- deliberately absent from both branches.
+  -- approved, or under the raiser's own authority and never routed for approval -- so the first
+  -- branch leaves it out, and the second (no condition on the approval fields) takes it.
   CONSTRAINT po_approved_fields CHECK (
     (status IN ('DRAFT','PENDING_APPROVAL') AND approved_by IS NULL AND approved_at IS NULL)
     OR
@@ -368,6 +368,6 @@ CREATE INDEX idx_outbox_aggregate_pending
 --     FOR UPDATE SKIP LOCKED)
 --
 -- A published row is the one the drain index has let go of; a partial index on published_at holds
--- exactly those and costs the drain nothing.
+-- exactly those. The drain never reads it, and each row it publishes writes one entry into it.
 CREATE INDEX idx_outbox_published
     ON outbox (published_at) WHERE published_at IS NOT NULL;

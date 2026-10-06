@@ -1,6 +1,6 @@
 -- iam-svc schema. Identity for BOTH staff and customers.
 --
--- Tenant-scoping note (README §9.1): a business's staff belong to it (tenant_id set). A customer is
+-- Tenant-scoping note (README §18): a business's staff belong to it (tenant_id set). A customer is
 -- global (tenant_id NULL — a customer may shop any storefront), and so is a login that belongs to no
 -- business yet (a business sign-up not yet onboarded, the platform administrator). So
 -- users.tenant_id is intentionally NULLABLE, a deliberate exception to the usual NOT NULL rule.
@@ -21,7 +21,7 @@ CREATE TABLE users (
     email         TEXT,
     phone         TEXT,
     password_hash TEXT,                              -- Argon2; NULL if OTP-only
-    status        TEXT NOT NULL DEFAULT 'ACTIVE',    -- ACTIVE | DISABLED
+    status        TEXT NOT NULL DEFAULT 'ACTIVE',    -- ACTIVE | DELETED
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()  -- audit timestamp
 );

@@ -6,7 +6,9 @@ CREATE TABLE IF NOT EXISTS payment_tenders (
     tenant_id       UUID        NOT NULL,
     order_id        UUID        NOT NULL,
     amount          NUMERIC(14,4) NOT NULL,
-    method          VARCHAR(30) NOT NULL,   -- CASH | CARD | GIFT_CARD | VOUCHER
+    -- CASH | CARD | UPI | WALLET | GIFT_CARD | VOUCHER | STORE_CREDIT | EXCHANGE. No CHECK holds
+    -- it; the service writes only these.
+    method          VARCHAR(30) NOT NULL,
     reference       VARCHAR(255),           -- card auth code, gift-card code, etc.
     idempotency_key VARCHAR(255),
     status          VARCHAR(20) NOT NULL DEFAULT 'CAPTURED', -- CAPTURED | FAILED

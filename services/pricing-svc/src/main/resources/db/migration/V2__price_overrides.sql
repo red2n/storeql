@@ -1,5 +1,5 @@
 -- POS price overrides — append-only audit log of staff-approved ad-hoc price changes.
--- Append-only: no UPDATE or DELETE (golden rule #8).
+-- Append-only: no UPDATE or DELETE (golden rule #8), except tenant erasure (21.14).
 CREATE TABLE price_overrides (
     id              UUID          PRIMARY KEY,
     tenant_id       UUID          NOT NULL,

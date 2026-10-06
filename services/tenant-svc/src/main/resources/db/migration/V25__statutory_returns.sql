@@ -112,7 +112,7 @@ VALUES
      'CGI art. 290 A; décret n° 2022-1299 du 7 oct. 2022', '2026-09-01');
 
 COMMENT ON COLUMN statutory_returns.frequency IS
-    'DECADAL (three ten-day periods a month, French e-reporting), MONTHLY, QUARTERLY or ANNUAL. Derived, never stored.';
+    'DECADAL (three ten-day periods a month, French e-reporting), MONTHLY, QUARTERLY or ANNUAL. Stored; the due date is derived from it.';
 
 -- What a business filed. Append-only: a correction is a new filing that supersedes its predecessor,
 -- with both on the record, for the same reason an invoice is never edited.

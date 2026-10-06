@@ -158,7 +158,7 @@ CREATE UNIQUE INDEX uq_tenants_active_sandbox
 CREATE INDEX idx_tenants_sandbox_of ON tenants (sandbox_of) WHERE sandbox_of IS NOT NULL;
 
 COMMENT ON COLUMN tenants.deactivated_reason IS
-    'NON_PAYMENT (dunning, lifted by paying up) or ADMINISTRATOR (never lifted by a payment).';
+    'NON_PAYMENT (dunning, lifted by paying up), ADMINISTRATOR (never lifted by a payment) or SANDBOX_DELETED (its owner removed the sandbox it was).';
 COMMENT ON COLUMN tenants.mode IS
     'LIVE, or SANDBOX for a business''s test double (22.8): every service that reads the profile treats a sandbox as unreal — no message leaves it, no money moves.';
 COMMENT ON COLUMN tenants.sandbox_of IS

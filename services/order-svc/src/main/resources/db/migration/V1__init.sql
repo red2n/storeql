@@ -6,6 +6,8 @@
 -- rounds every amount half up to the currency's minor units (common-service Fx.minorUnits) before it
 -- writes it, so a yen business keeps whole yen and a dinar business keeps three places. A fixed scale
 -- would round a dinar to two places on every order, return, gift card and deposit without an error.
+-- The exceptions are a commission statement line's amount, threshold_from and rated_commission, which
+-- are written as computed, not rounded (V35).
 -- Left at a fixed scale, on purpose:
 --   * sales_invoices and ereporting_submissions: EN 16931 (BR-DEC) and the French e-reporting flux
 --     state amounts to at most two decimals; an invoice or report in those formats is in euros (or
@@ -116,8 +118,8 @@ CREATE TABLE orders (
     -- A sale to a tax-exempt buyer, and the reason it is exempt.
     tax_exempt            BOOLEAN NOT NULL DEFAULT false,
     exempt_reason         TEXT,
-    -- Contact phone for the customer/walk-in on PICKUP and INSTORE orders. Delivery orders use
-    -- delivery_recipient_phone instead.
+    -- The customer's or walk-in's own number, as typed, on any order that gives one. A delivery order
+    -- also has delivery_recipient_phone, the number of whoever receives it.
     contact_phone         TEXT,
     -- The contact number in international form, read at placement in the store's own country, then the
     -- business's home and its other stores' (intent/phone-at-the-till.md). What a recall text is sent
@@ -478,3 +480,4 @@ CREATE TABLE idempotency_keys (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (key, tenant_id)
 );
+CREATE INDEX idx_idempotency_keys_tenant ON idempotency_keys (tenant_id, created_at);

@@ -1,7 +1,9 @@
 -- The transactional outbox (golden rule 6). What this service announces: each purge of the
--- notification log (21.16) is announced to tenant-svc's register, and the announcement is written
--- in the purge's own transaction so a run is never recorded that did not happen, nor happens
--- unrecorded. Each text sent is announced too (SmsSent, 21.10), so tenant-svc can meter it.
+-- notification log (21.16) is announced to tenant-svc's register. The purge deletes in batches,
+-- each committed on its own, and the announcement is written last, in a transaction of its own:
+-- a run that dies half way has deleted its finished batches and announced nothing, and the next
+-- run finishes the rest. Each text sent is announced too (SmsSent, 21.10), so
+-- tenant-svc can meter it.
 --
 -- Retry and dead-letter state. A row that fails to publish is retried after a backoff
 -- (storeql.outbox.backoff-base-seconds, doubling, capped at storeql.outbox.backoff-cap-seconds),

@@ -49,6 +49,7 @@ CREATE INDEX idx_mvt_tenant_store ON movement_events (tenant_id, store_id, occur
 CREATE INDEX idx_mvt_variant      ON movement_events (tenant_id, variant_id, occurred_at DESC);
 
 -- Open supply in transit: INTRANSIT transfer orders shipped but not yet received (Gap #48).
+-- Empty today: TransferOrderShipped carries the lines, but StockEventDispatcher does not read them yet.
 CREATE TABLE open_supply_lines (
     id          UUID PRIMARY KEY,
     tenant_id   UUID NOT NULL,

@@ -43,4 +43,5 @@ CREATE TABLE transfer_order_lines (
     CONSTRAINT pk_transfer_order_lines PRIMARY KEY (id),
     CONSTRAINT fk_tol_order FOREIGN KEY (transfer_order_id) REFERENCES transfer_orders(id)
 );
+CREATE INDEX idx_transfer_order_lines_tenant_order ON transfer_order_lines (tenant_id, transfer_order_id);
 CREATE INDEX idx_tol_order ON transfer_order_lines (transfer_order_id);

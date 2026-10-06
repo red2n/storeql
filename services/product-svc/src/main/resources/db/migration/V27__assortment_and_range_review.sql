@@ -88,7 +88,7 @@ COMMENT ON TABLE range_reviews IS
 --
 -- product_stores stays exactly as it is: the range as it stands today, which is what the till and the
 -- storefront ask. This table is the decision log in front of it. A decision (the line, the action, its
--- date, the reason and who decided) is written once and never edited, so the question "who took this
+-- date, the reason and who decided) is written once and its facts are never edited, so the question "who took this
 -- line out of the Scottish shops, when, and why" can be answered months later. Only the sweep stamps
 -- an outcome on it: applied_at when the change is pushed, or refused_at when it is closed for good.
 --
@@ -164,12 +164,10 @@ CREATE INDEX idx_assortment_changes_pending
     ON assortment_changes (tenant_id, effective_from)
     WHERE applied_at IS NULL AND refused_at IS NULL;
 
--- The text below says "append-only", which the table does not enforce: the sweep stamps applied_at,
--- refused_at and the refusal columns on a row after it is written (AssortmentRepository). Nothing in
--- the schema stops an UPDATE. The text is left as it is because changing a COMMENT ON changes the
--- schema's catalogue.
+-- Not append-only: the sweep stamps applied_at, refused_at and the refusal columns on a row after it
+-- is written (AssortmentRepository), and no trigger, rule or grant stops an UPDATE.
 COMMENT ON TABLE assortment_changes IS
-    'The dated, reasoned decision log in front of product_stores. Append-only; applied_at marks the push.';
+    'The dated, reasoned decision log in front of product_stores. The sweep stamps applied_at and refused_at in place.';
 COMMENT ON COLUMN assortment_changes.held_to_stores IS
     'Decided by a manager held to stores: never applied so as to move the line to or from every store.';
 COMMENT ON COLUMN assortment_changes.refused_at IS
@@ -185,10 +183,6 @@ COMMENT ON COLUMN assortment_changes.refusal_detail IS
 -- margin belong to order-svc and reporting-svc, and product-svc does not read another service's tables.
 -- A snapshot is also the more useful record — the decision was taken on the numbers as they stood, and
 -- a report re-run next year would show different ones and make the decision look arbitrary.
---
--- No index on this table leads with tenant_id: the indexes are (review_id, variant_id) and
--- (review_id, rank_in_category). Every read and update of it filters on tenant_id first, so only the
--- index is missing. Adding one is a schema change, so it belongs in a later migration.
 CREATE TABLE range_review_lines (
     id            UUID    PRIMARY KEY,
     tenant_id     UUID    NOT NULL,
@@ -224,6 +218,7 @@ CREATE TABLE range_review_lines (
         (revenue IS NULL AND margin IS NULL) = (currency IS NULL)
     )
 );
+CREATE INDEX idx_range_review_lines_tenant_review ON range_review_lines (tenant_id, review_id);
 
 -- A variant appears once in a review: two rows for one line would be two rankings of the same thing.
 CREATE UNIQUE INDEX uq_review_line ON range_review_lines (review_id, variant_id);

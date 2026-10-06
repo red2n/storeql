@@ -125,7 +125,7 @@ public class ReportingRepository extends BaseJdbcRepository {
    * false if this consumer already processed the event.
    *
    * @param tenantId owning tenant
-   * @param eventId the {@code TransferShipped} event id, retained as the retirement key
+   * @param eventId the {@code TransferOrderShipped} event id, retained as the retirement key
    * @param consumerName this consumer's dedupe name
    * @param fromStoreId the shipping store
    * @param toStoreId the receiving store
@@ -169,7 +169,7 @@ public class ReportingRepository extends BaseJdbcRepository {
    * <p>Not tenant-scoped, unusually for this codebase: {@code event_id} is a globally unique UUIDv7
    * that already pins the rows to the tenant that emitted the shipment.
    *
-   * @param eventId the {@code TransferShipped} event id the lines were opened under
+   * @param eventId the {@code TransferOrderShipped} event id the lines were opened under
    */
   public void deleteSupplyLinesByEvent(UUID eventId) {
     exec(

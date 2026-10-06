@@ -19,7 +19,7 @@ public record User(
     String email,
     String phone,
     String passwordHash,
-    String status, // ACTIVE | DISABLED
+    String status, // ACTIVE | DELETED
     Instant createdAt,
     Instant updatedAt) {
   public static final String TYPE_STAFF = "STAFF";

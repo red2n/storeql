@@ -32,4 +32,5 @@ CREATE TABLE move_order_lines (
     CONSTRAINT pk_move_order_lines PRIMARY KEY (id),
     CONSTRAINT fk_mol_order FOREIGN KEY (move_order_id) REFERENCES move_orders(id)
 );
+CREATE INDEX idx_move_order_lines_tenant_order ON move_order_lines (tenant_id, move_order_id);
 CREATE INDEX idx_mol_order ON move_order_lines (move_order_id);

@@ -60,4 +60,5 @@ CREATE TABLE webhook_attempts (
     response_snippet TEXT,                      -- the first kilobytes of what came back
     duration_ms      INT NOT NULL
 );
+CREATE INDEX idx_webhook_attempts_tenant ON webhook_attempts (tenant_id, id);
 CREATE INDEX idx_webhook_attempts_delivery ON webhook_attempts (delivery_id, attempt);

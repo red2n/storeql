@@ -39,10 +39,11 @@ CREATE TABLE dunning_policy (
 );
 
 -- Deliberately not seeded. A seed row would need an updated_by, and the platform's rule is UUIDv7
--- minted with Ids.newId() — never a literal in SQL, which the integration-test audit also refuses. So
--- the defaults live in code (Dunning.DEFAULT_POLICY) and an absent row means "the defaults", the same
--- way Entitlements treats a business on no plan as unrestricted. updated_by is then only ever written
--- when a person actually set the policy, which is the only time the question "who?" has an answer.
+-- minted with Ids.newId() by the code that writes the row, never a column DEFAULT (the integration-test
+-- audit refuses those). So the defaults live in code (Dunning.DEFAULT_POLICY) and an absent row means
+-- "the defaults", the same way Entitlements treats a business on no plan as unrestricted. updated_by is
+-- then only ever written when a person actually set the policy, which is the only time the question
+-- "who?" has an answer.
 
 -- What has been done about one overdue invoice, append-only. The unique index is the idempotency:
 -- a run that runs twice, or two replicas running at the same instant, chase once.
@@ -61,7 +62,7 @@ CREATE TABLE dunning_events (
 );
 
 -- One step per invoice, ever. A reminder that has been sent is not sent again because the run ran
--- again; an extension is the exception and carries the day it was extended to in its step.
+-- again; an extension is the exception, and its detail carries the day it was extended to.
 CREATE UNIQUE INDEX uq_dunning_step ON dunning_events (invoice_id, step)
     WHERE step <> 'DUE_DATE_EXTENDED';
 CREATE INDEX idx_dunning_tenant ON dunning_events (tenant_id, created_at DESC);

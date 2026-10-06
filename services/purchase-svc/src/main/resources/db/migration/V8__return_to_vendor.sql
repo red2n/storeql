@@ -14,7 +14,7 @@
 -- offset, which is how accounts payable expects it.
 
 -- One counter per tenant: a debit note number is quoted on the supplier's credit note and in the
--- ledger, so it is short, sequential and never reused. Same shape as the receipt series — a row
+-- ledger, so it is short, sequential and never reused. Same shape as rfq_series (V27) — a row
 -- moved under its lock, not a SEQUENCE that gaps on rollback.
 CREATE TABLE debit_note_series (
     tenant_id   UUID   PRIMARY KEY,

@@ -10,9 +10,10 @@
 -- Three groups declare a scale. promotions.value is NUMERIC(18,4): a percentage for PERCENT and
 -- BASKET_PERCENT, otherwise an amount in the business's currency. competitor_prices.price and the
 -- repricing amounts are NUMERIC(19,4), and the VAT return's boxes are NUMERIC(18,2), in pounds.
--- Nothing refuses a promotion's value or a competitor price typed finer than its currency: the
--- promotion engine rounds an amount half up to the currency's minor units when it applies it, and
--- a competitor price is kept at four places as typed.
+-- Known gap, not the rule above: nothing refuses a promotion's value, a repricing rule's value or a
+-- competitor price typed finer than its currency. The promotion engine rounds a value half up to the currency's minor
+-- units when it applies it, and a competitor price is stored at the column's four places, which
+-- rounds one typed finer. Refusing both is a follow-up (a service-layer change).
 -- Percentages and VAT rates are not money and keep their scales: NUMERIC(5,2) and NUMERIC(5,4)
 -- (a VAT rate 0.2000 = 20%).
 -- Times: TIMESTAMPTZ UTC. Every row of a business's data carries tenant_id, NOT NULL. Two tables
@@ -206,11 +207,12 @@ CREATE TABLE promotion_items (
     scope_id       UUID,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_promotion_items_tenant_scope ON promotion_items (tenant_id, scope_type);
 CREATE INDEX idx_promotion_items_promo ON promotion_items (promotion_id);
 
 -- POSLog-compatible tax capture per order line.
 -- tax_point_date = time of supply per s.6 VATA 1994. Feeds HMRC MTD boxes 1 and 6.
--- Append-only: no UPDATE or DELETE on this table.
+-- Append-only: no UPDATE or DELETE on this table, except tenant erasure (21.14).
 CREATE TABLE tax_transactions (
     id             UUID         PRIMARY KEY,
     tenant_id      UUID         NOT NULL,

@@ -106,8 +106,8 @@ public class SalesEventHandler {
 
   /**
    * {@code NoReceiptReturnRecorded}: a return with no sale behind it, refunded to store credit or a
-   * gift card. Its posting is the only credit to that liability (a card it loads is {@code paidBy:
-   * RETURN}, counted in the pool but never posted).
+   * gift card. Its posting is the only credit this event makes to that liability (a card it loads
+   * is {@code paidBy: RETURN}, counted in the pool but never posted).
    */
   public void noReceiptReturn(String json) {
     try {

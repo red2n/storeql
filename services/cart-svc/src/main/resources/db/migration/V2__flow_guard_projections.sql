@@ -15,3 +15,7 @@ CREATE TABLE store_status (
     status            TEXT        NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | SUSPENDED | CLOSED
     status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- CLAUDE.md asks for a composite index starting with tenant_id on each tenant table. This table
+-- has one below; its primary key is store_id alone.
+CREATE INDEX idx_store_status_tenant_store ON store_status (tenant_id, store_id);

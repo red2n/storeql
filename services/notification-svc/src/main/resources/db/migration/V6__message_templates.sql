@@ -1,8 +1,9 @@
 -- Message templates (13.x): a business puts its messages in its own words, per message, per form
 -- (email, text, push, store alert) and per language. A template is never edited: saving writes the
 -- next version and retires the one before, so what was sent can always be traced to the words it
--- was sent in. Retiring the live version returns that message, form and language to the platform's
--- own words.
+-- was sent in. Once the live version is retired, that message, form and language go out in the
+-- platform's own words, unless the business's default language has a live version: that one goes
+-- out instead (Messages.compose).
 
 CREATE TABLE message_templates (
     id           UUID        PRIMARY KEY,

@@ -50,10 +50,11 @@ CREATE TABLE marketing_consent_log (
     actor_id    UUID,
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_consent_log_channel CHECK (channel IN ('EMAIL', 'SMS', 'PHONE', 'POST')),
-    -- PURPOSE_WITHDRAWN is the switch-off of each channel when the MARKETING purpose is withdrawn,
-    -- written on the same transaction as that withdrawal. It is its own source, so the evidence says
-    -- why the channel went off (the purpose) — never disguised as a preference-centre click, an
-    -- unsubscribe link or a member of staff.
+    -- PURPOSE_WITHDRAWN is the switch-off of each channel when the MARKETING purpose is withdrawn.
+    -- A live withdrawal writes it on the same transaction as that withdrawal; the start-up
+    -- reconciler writes it later, in its own transaction, for a channel still granted. It is its
+    -- own source, so the evidence says why the channel went off (the purpose) — never disguised
+    -- as a preference-centre click, an unsubscribe link or a member of staff.
     CONSTRAINT chk_consent_log_source CHECK (source IN (
         'SIGNUP', 'CHECKOUT', 'PREFERENCE_CENTRE', 'STAFF', 'UNSUBSCRIBE_LINK', 'IMPORT',
         'PURPOSE_WITHDRAWN'))

@@ -2,6 +2,8 @@
 --
 -- A loyalty adjustment (up or down), a manual award of points and an issue of store credit by hand
 -- are management's decisions (OWNER/MANAGER), so each keeps the person who made it and the reason.
+-- A redemption of points at the till (LOYALTY_REDEEM) is recorded here too. Any staff member may
+-- redeem, so its actor is whoever spent the points, not a manager's decision.
 -- The ledgers stay exactly as they were (append-only); this table is written on the same transaction
 -- as the ledger entry it explains, and is itself append-only: only ever inserted.
 --
@@ -12,7 +14,8 @@ CREATE TABLE manual_grants (
     id              UUID          PRIMARY KEY,
     tenant_id       UUID          NOT NULL,
     customer_id     UUID          NOT NULL,
-    kind            TEXT          NOT NULL,             -- LOYALTY_EARN | LOYALTY_ADJUST | STORE_CREDIT_ISSUE
+    -- LOYALTY_EARN | LOYALTY_ADJUST | STORE_CREDIT_ISSUE | LOYALTY_REDEEM
+    kind            TEXT          NOT NULL,
     -- Points, or money in currency (store credit), signed for an adjustment. It takes the money scale
     -- of four places because it holds either; points written here are still held to two places by
     -- the requests that make them.

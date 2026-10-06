@@ -82,7 +82,7 @@ public final class Domain {
     /** The provider declined, or the customer failed SCA. Terminal. */
     public static final String STATUS_FAILED = "FAILED";
 
-    /** Abandoned before capture, by the customer or by the provider. Terminal. */
+    /** Abandoned before capture: the provider cancelled it (its cancel event). Terminal. */
     public static final String STATUS_CANCELLED = "CANCELLED";
 
     /**

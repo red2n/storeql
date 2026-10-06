@@ -24,8 +24,9 @@ CREATE TABLE IF NOT EXISTS payment_intents (
     -- be confirmed; MANUAL is the no-provider mode for local dev and for tenants who only ever take
     -- cash at the till.
     provider         VARCHAR(30)   NOT NULL,
-    -- The provider's own id for this intent (Stripe `pi_…`, Razorpay `order_…`). Null only in the
-    -- window between inserting the row and the provider call returning — see the unique index.
+    -- The provider's own id for this intent (Stripe `pi_…`, Razorpay `order_…`). Null until the
+    -- provider call returns one; an intent whose call fails keeps it null, as markTerminal never
+    -- writes it. See the unique index.
     provider_ref     VARCHAR(255),
 
     -- Money is NUMERIC and the currency is stored explicitly (golden rule #13). amount is what was

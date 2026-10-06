@@ -167,7 +167,10 @@ public class MessageTemplateService {
     return get(tenantId, type, form, language);
   }
 
-  /** Retires the live version: the platform's words again. */
+  /**
+   * Retires the live version. Messages then go out in the default language's version if there is
+   * one, else in the platform's words.
+   */
   public void retire(UUID tenantId, UUID by, String type, String form, String language) {
     Catalogue.MessageType t = type(type);
     Catalogue.FormSpec spec = form(t, form);

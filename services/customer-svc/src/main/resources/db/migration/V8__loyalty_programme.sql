@@ -54,4 +54,6 @@ CREATE INDEX idx_loyalty_lots_open ON loyalty_point_lots (tenant_id, customer_id
 -- across every business are read as one range, and the business's own rows are filtered from them.
 -- A (tenant_id, expires_at) index would serve each business's sweep on its own. The choice is open:
 -- changing the index is a schema change, for the owner to decide.
+-- The table's tenant-led index is idx_loyalty_lots_open, which is (tenant_id, customer_id, ...), so
+-- the sweep cannot seek into it by expires_at.
 CREATE INDEX idx_loyalty_lots_due ON loyalty_point_lots (expires_at) WHERE remaining > 0 AND expires_at IS NOT NULL;

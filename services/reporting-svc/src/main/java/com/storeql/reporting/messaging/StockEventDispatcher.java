@@ -73,7 +73,8 @@ class StockEventDispatcher extends JsonEventDispatcher {
     UUID toStoreId = Ids.parse(obj.getString("toStoreId"));
     // The dedupe mark and the supply lines commit together (see applyTransferShippedOnce), so a
     // redelivery adds nothing twice and a failed write is retried rather than swallowed. The event
-    // carries no line details yet, so the lists are empty placeholders.
+    // carries the lines, but this dispatcher does not read them yet, so the lists are empty and no
+    // supply line opens.
     service.applyTransferShippedOnce(
         tenantId, eventId, CONSUMER, fromStoreId, toStoreId, List.of(), List.of());
   }

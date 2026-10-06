@@ -1,4 +1,4 @@
--- inventory-svc schema: the stock source of truth. README §9.4.
+-- inventory-svc schema: the stock source of truth. README §7.
 -- References store_id/variant_id from other services but NEVER joins their tables (database-per-service).
 -- Quantities are NUMERIC (exact). stock_movements is APPEND-ONLY: no UPDATE path, and its one DELETE
 -- relocates old rows to stock_movements_archive (MovementArchiveRepository), which keeps every row.
@@ -17,7 +17,7 @@ CREATE TABLE inventory_batches (
     cost_price                 NUMERIC(18,4),
     expiry_date                DATE,
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Lifecycle status: ACTIVE | DEPLETED | EXPIRED.
+    -- Lifecycle status. Only ACTIVE is written today; no code sets DEPLETED or EXPIRED.
     status                     TEXT NOT NULL DEFAULT 'ACTIVE',
     -- Physical condition, orthogonal to the lifecycle status:
     -- AVAILABLE | QUARANTINE | INSPECTION | DAMAGED | RECALLED.
@@ -52,10 +52,11 @@ CREATE TABLE inventory_batches (
 );
 -- FIFO scan order: soonest expiry first, then oldest. Index supports the deduction query.
 CREATE INDEX idx_batches_fifo ON inventory_batches (tenant_id, store_id, variant_id, expiry_date NULLS LAST, created_at);
--- Only active batches participate in FIFO deduction and level queries.
+-- ACTIVE batches (every batch, today). listExpiringBatches reads them; the draw and level queries
+-- filter on material_status, not on status.
 CREATE INDEX idx_batches_active ON inventory_batches (tenant_id, store_id, variant_id)
     WHERE status = 'ACTIVE';
--- Availability: only AVAILABLE + ACTIVE batches contribute to stock levels.
+-- Availability: stock levels count only AVAILABLE batches (the levels query filters on material_status).
 CREATE INDEX idx_batches_available_material
     ON inventory_batches (tenant_id, store_id, variant_id, expiry_date NULLS LAST, created_at)
     WHERE material_status = 'AVAILABLE' AND status = 'ACTIVE';
@@ -70,7 +71,8 @@ CREATE INDEX idx_batches_live
 CREATE INDEX idx_batches_zone ON inventory_batches (tenant_id, store_id, zone_id) WHERE zone_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_batches_idem ON inventory_batches (tenant_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
--- The consignment holding per supplier: what a settlement statement is checked against.
+-- Consignment stock by supplier and variant. No query reads it by supplier yet: the valuation
+-- reports all consignment stock together.
 CREATE INDEX idx_batches_consignment
     ON inventory_batches (tenant_id, owner_supplier_id, variant_id)
     WHERE ownership = 'CONSIGNMENT';
@@ -113,7 +115,8 @@ CREATE INDEX idx_movements_actor ON stock_movements (tenant_id, actor_id, create
 CREATE INDEX idx_stock_movements_voids
     ON stock_movements (tenant_id, ref_id, variant_id)
     WHERE ref_type = 'VOID';
--- The sales a recall looks for are found by variant and type; the FIFO index leads with the store.
+-- The live half of a recall's sales search (stock_movements) is served by variant and type
+-- (idx_movements_variant_sales); the archive half is not.
 CREATE INDEX idx_movements_variant_sales ON stock_movements (tenant_id, variant_id, created_at)
     WHERE type = 'SALE' AND ref_type = 'ORDER';
 

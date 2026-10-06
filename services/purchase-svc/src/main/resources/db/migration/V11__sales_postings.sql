@@ -13,8 +13,9 @@
 --                          covers, Dr 1105 for the rest (all of it when the sale was never
 --                          confirmed)                          Cr the refunded tender's control account
 --
--- Every posting carries the order as its source, so the clearing account nets to zero per order
--- once a sale is paid and confirmed; anything left open is listed by GET /nominal-ledger/sales-clearing.
+-- The sale, tender and refund postings carry the order as their source, so the receipts clearing
+-- account nets to zero per order once a sale is paid and confirmed; anything left open is listed by
+-- GET /nominal-ledger/sales-clearing.
 
 -- Consumer-level dedupe, as every consuming service keeps it (golden rule #7). The key is
 -- (event_id, consumer), not event_id alone: one consumer's mark must not stop another consumer from

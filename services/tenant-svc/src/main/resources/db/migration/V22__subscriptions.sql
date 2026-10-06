@@ -127,7 +127,7 @@ CREATE TABLE subscription_events (
     id              UUID        PRIMARY KEY,
     tenant_id       UUID        NOT NULL,
     subscription_id UUID        NOT NULL,
-    kind            TEXT        NOT NULL,   -- STARTED, TRIAL_ENDED, RENEWED, UPGRADED, DOWNGRADE_SCHEDULED, DOWNGRADED, CANCELLED, REACTIVATED, PAST_DUE, SUSPENDED
+    kind            TEXT        NOT NULL,   -- STARTED, TRIAL_ENDED, RENEWED, UPGRADED, DOWNGRADE_SCHEDULED, DOWNGRADED, CANCEL_SCHEDULED, ENDED, PAID_UP, DETAILS_CHANGED, VAT_CHECKED
     detail          TEXT,
     actor_id        UUID,                   -- null when the billing run did it
     created_at      TIMESTAMPTZ NOT NULL
@@ -210,7 +210,7 @@ CREATE UNIQUE INDEX uq_invoices_number ON billing_invoices (number);
 -- it keeps its number but it is no longer the period's invoice.
 CREATE UNIQUE INDEX uq_invoices_period ON billing_invoices (subscription_id, period_start)
     WHERE status <> 'VOID' AND kind = 'PERIOD';
--- What an adjustment is read by: the period it adjusts, newest first.
+-- Adjustments by subscription and period. No query reads them this way yet.
 CREATE INDEX idx_invoices_adjustments ON billing_invoices (subscription_id, period_start)
     WHERE kind = 'ADJUSTMENT';
 CREATE INDEX idx_invoices_tenant ON billing_invoices (tenant_id, issue_date DESC, id);
