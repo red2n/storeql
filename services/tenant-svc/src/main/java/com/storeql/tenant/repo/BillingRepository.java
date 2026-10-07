@@ -202,7 +202,7 @@ public class BillingRepository extends BaseJdbcRepository {
    * Moves a subscription's status, keeping {@code cancelled_at} true to it in the same statement:
    * set on the move to CANCELLED, cleared on any other move.
    *
-   * <p>{@code ck_subscriptions_cancelled} holds the two together, and this statement used to set
+   * <p>{@code chk_subscriptions_cancelled} holds the two together, and this statement used to set
    * the status alone. So every move to CANCELLED broke the constraint — a subscription cancelled at
    * its period end was passed over by every billing run and never ended, and a debt given up on
    * never ended the subscription it was owed on (SJ-D69). Found by the first test that let a period

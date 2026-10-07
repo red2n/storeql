@@ -64,6 +64,9 @@ public class VendorReturnResource {
   @APIResponse(
       responseCode = "422",
       description = "A variant not on the order, more than was received, or not on hand")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @POST
   public Response raise(
       @HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
@@ -84,11 +87,16 @@ public class VendorReturnResource {
       description = "Optionally ?poId=. Newest first. Any staff role.")
   @APIResponse(responseCode = "200", description = "The returns")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the order named is another store's than the caller's")
   @GET
   public Response list(@QueryParam("poId") UUID poId) {
+    var returns = svc.listVendorReturns(ctx, poId);
+    var lines = svc.vendorReturnLinesOf(ctx, returns);
     List<Object> out =
-        svc.listVendorReturns(ctx, poId).stream()
-            .map(r -> (Object) Mappers.toDto(r, svc.vendorReturnLines(ctx, r.id())))
+        returns.stream()
+            .map(r -> (Object) Mappers.toDto(r, lines.getOrDefault(r.id(), List.of())))
             .toList();
     return Response.ok(ApiResponse.ok(out)).build();
   }
@@ -102,6 +110,9 @@ public class VendorReturnResource {
       description = "Another tenant's is 404. Any staff role.")
   @APIResponse(responseCode = "200", description = "The return")
   @APIResponse(responseCode = "404", description = "Not this business's")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the return is from another store than the caller's")
   @GET
   @Path("/{id}")
   public Response get(@PathParam("id") UUID id) {
@@ -123,9 +134,18 @@ public class VendorReturnResource {
               + " amount (the debit note's gross when omitted). Once only — a second credit note is"
               + " refused with the first one named. Management-only.")
   @APIResponse(responseCode = "200", description = "The return, credited")
-  @APIResponse(responseCode = "400", description = "A date that is not a date")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "A date that is not a date, or PURCHASE_AMOUNT_TOO_PRECISE: an amount finer than the"
+              + " return's currency (refused, never rounded)")
   @APIResponse(responseCode = "404", description = "Not this business's")
   @APIResponse(responseCode = "409", description = "Already credited")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not a management role, or STORE_ACCESS_DENIED: the return is from another store than"
+              + " the caller's")
   @POST
   @Path("/{id}/credit")
   public Response credit(@PathParam("id") UUID id, RecordCreditNoteRequest req) {

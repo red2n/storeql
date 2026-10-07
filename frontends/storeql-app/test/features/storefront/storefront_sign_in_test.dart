@@ -141,4 +141,12 @@ void main() {
     expect(capturedFrom, 'storefront');
     expect(find.text('FORGOT PASSWORD PAGE'), findsOneWidget);
   });
+
+  test('the storefront asks for the shopper account, never the business one on the same address', () {
+    expect(StorefrontAuthNotifier.signInBody('ana@example.com', 'a phrase long enough'), {
+      'email': 'ana@example.com',
+      'password': 'a phrase long enough',
+      'accountType': 'CUSTOMER',
+    });
+  });
 }

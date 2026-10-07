@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/auth/auth_notifier.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
@@ -13,6 +14,7 @@ import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_picker.dart';
 
 // ---------------------------------------------------------------------------
@@ -418,6 +420,27 @@ class _NewYieldTemplateDialogState extends ConsumerState<NewYieldTemplateDialog>
   bool _busy = false;
   String? _refusal;
 
+  // A cut's figures are read the way the app's language writes a number
+  // ([AmountMarks]), within what inventory-svc keeps — a share NUMERIC(7,3), a
+  // cost share NUMERIC(9,3), a shelf life in whole days — and sent as the
+  // figures typed. One that cannot be read is refused under its field and
+  // nothing is saved: parsed with a point, Romanian's 35,5 % went as a share
+  // of nothing, and a cost share or shelf life the dialog could not read was
+  // saved as none (by weight; the primal's date).
+  final _marks = AmountMarks.ofApp();
+  static const _pctShape = AmountShape(4, 3);
+  static const _shareShape = AmountShape(6, 3);
+  static const _lifeShape = AmountShape(5, 0);
+
+  /// Every figure field of every cut, each with the shape it is read in.
+  Iterable<(TextEditingController, AmountShape)> get _figures => [
+        for (final r in _rows) ...[
+          (r.pct, _pctShape),
+          (r.share, _shareShape),
+          (r.life, _lifeShape),
+        ],
+      ];
+
   @override
   void dispose() {
     _name.dispose();
@@ -428,10 +451,17 @@ class _NewYieldTemplateDialogState extends ConsumerState<NewYieldTemplateDialog>
     super.dispose();
   }
 
+  /// What the shares that can be read leave of the primal.
   double get _expectedLoss =>
-      100 - _rows.fold<double>(0, (s, r) => s + (double.tryParse(r.pct.text.trim()) ?? 0));
+      100 -
+      _rows.fold<double>(
+          0, (s, r) => s + double.parse(figureOf(r.pct, _pctShape, _marks) ?? '0'));
 
   Future<void> _save() async {
+    if (figureRefused(_marks, _figures)) {
+      setState(() => _refusal = figureRefusedMessage);
+      return;
+    }
     if (_name.text.trim().isEmpty || _variantId == null) {
       setState(() => _refusal = 'Name the template and pick the primal it breaks down.');
       return;
@@ -439,11 +469,18 @@ class _NewYieldTemplateDialogState extends ConsumerState<NewYieldTemplateDialog>
     final outputs = <Map<String, dynamic>>[];
     for (final r in _rows) {
       if (r.variantId == null) continue;
+      final pct = figureOf(r.pct, _pctShape, _marks);
+      if (pct == null || pct == '0') {
+        setState(() => _refusal = 'Say what share of the primal each cut is expected to be, more than 0.');
+        return;
+      }
       outputs.add({
         'variantId': r.variantId,
-        'expectedPct': double.tryParse(r.pct.text.trim()) ?? 0,
-        if (r.share.text.trim().isNotEmpty) 'costShare': double.tryParse(r.share.text.trim()),
-        if (r.life.text.trim().isNotEmpty) 'shelfLifeDays': int.tryParse(r.life.text.trim()),
+        // The plain decimals typed: JSON-B reads them exactly. A blank cost
+        // share or shelf life is left out, for the template's own default.
+        'expectedPct': pct,
+        'costShare': ?figureOf(r.share, _shareShape, _marks),
+        'shelfLifeDays': ?wholeOf(r.life, _marks, shape: _lifeShape),
       });
     }
     if (outputs.isEmpty) {
@@ -528,32 +565,39 @@ class _NewYieldTemplateDialogState extends ConsumerState<NewYieldTemplateDialog>
                 Row(
                   children: [
                     Expanded(
-                      child: TextField(
-                        key: Key('yield-pct-$i'),
+                      child: FigureField(
+                        fieldKey: Key('yield-pct-$i'),
                         controller: _rows[i].pct,
-                        decoration: const InputDecoration(labelText: 'Expected %'),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        shape: _pctShape,
+                        marks: _marks,
+                        label: 'Expected %',
+                        hint: '0',
                         onChanged: (_) => setState(() {}),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: TextField(
-                        key: Key('yield-share-$i'),
+                      child: FigureField(
+                        fieldKey: Key('yield-share-$i'),
                         controller: _rows[i].share,
-                        decoration: const InputDecoration(
-                            labelText: 'Cost share', helperText: 'Blank: by weight'),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        shape: _shareShape,
+                        marks: _marks,
+                        label: 'Cost share',
+                        helper: 'Blank: by weight',
+                        hint: '0',
+                        onChanged: (_) => setState(() {}),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: TextField(
-                        key: Key('yield-life-$i'),
+                      child: FigureField(
+                        fieldKey: Key('yield-life-$i'),
                         controller: _rows[i].life,
-                        decoration: const InputDecoration(
-                            labelText: 'Shelf life (days)', helperText: 'Blank: primal\'s date'),
-                        keyboardType: TextInputType.number,
+                        shape: _lifeShape,
+                        marks: _marks,
+                        label: 'Shelf life (days)',
+                        helper: 'Blank: primal\'s date',
+                        onChanged: (_) => setState(() {}),
                       ),
                     ),
                     if (_rows.length > 1)
@@ -618,6 +662,20 @@ class _RecordYieldDialogState extends ConsumerState<RecordYieldDialog> {
   bool _busy = false;
   String? _refusal;
 
+  // What went in and what came out are quantities, to three places, read the
+  // way the app's language writes a number ([AmountMarks]) and sent as the
+  // decimals typed. One that cannot be read is refused under its field and
+  // nothing is recorded: parsed with a point, Romanian's 34,5 kg of sirloin
+  // was recorded as none, all of it loss, and 1.250 kg as a kilo and a quarter.
+  final _marks = AmountMarks.ofApp();
+
+  /// The cuts' fields of the chosen template, with what went in.
+  Iterable<(TextEditingController, AmountShape)> get _figures => [
+        (_input, AmountShape.quantity),
+        for (final o in _template?.outputs ?? const <YieldOutputSpec>[])
+          if (_out[o.variantId] case final c?) (c, AmountShape.quantity),
+      ];
+
   @override
   void dispose() {
     _input.dispose();
@@ -628,19 +686,27 @@ class _RecordYieldDialogState extends ConsumerState<RecordYieldDialog> {
     super.dispose();
   }
 
+  /// Fills each cut in at what the template expects of what went in, written
+  /// the way the app's language writes a number so it reads back unchanged.
   void _prefill() {
-    final input = double.tryParse(_input.text.trim());
+    final typed = figureOf(_input, AmountShape.quantity, _marks);
     final t = _template;
-    if (t == null || input == null) return;
+    if (t == null || typed == null) return;
+    final input = double.parse(typed);
     for (final o in t.outputs) {
       _out.putIfAbsent(o.variantId, TextEditingController.new).text =
-          qtyText(input * o.expectedPct / 100);
+          _marks.write(qtyText(input * o.expectedPct / 100));
     }
   }
 
   Future<void> _save() async {
     final t = _template;
-    if (_storeId == null || t == null || double.tryParse(_input.text.trim()) == null) {
+    if (figureRefused(_marks, _figures)) {
+      setState(() => _refusal = figureRefusedMessage);
+      return;
+    }
+    final input = figureOf(_input, AmountShape.quantity, _marks);
+    if (_storeId == null || t == null || input == null || input == '0') {
       setState(() => _refusal = 'Pick the store and the template, and say how much went in.');
       return;
     }
@@ -654,10 +720,18 @@ class _RecordYieldDialogState extends ConsumerState<RecordYieldDialog> {
         data: {
           'storeId': _storeId,
           'templateId': t.id,
-          'inputQty': double.parse(_input.text.trim()),
+          // The plain decimals typed: JSON-B reads them exactly. A cut left
+          // blank came to nothing.
+          'inputQty': input,
           'outputs': [
             for (final o in t.outputs)
-              {'variantId': o.variantId, 'qty': double.tryParse(_out[o.variantId]?.text.trim() ?? '') ?? 0},
+              {
+                'variantId': o.variantId,
+                'qty': switch (_out[o.variantId]) {
+                  final c? => figureOf(c, AmountShape.quantity, _marks) ?? '0',
+                  null => '0',
+                },
+              },
           ],
           if (_reference.text.trim().isNotEmpty) 'reference': _reference.text.trim(),
         },
@@ -723,27 +797,28 @@ class _RecordYieldDialogState extends ConsumerState<RecordYieldDialog> {
                 }),
               ),
               const SizedBox(height: 8),
-              TextField(
-                key: const Key('yield-input'),
+              FigureField(
+                fieldKey: const Key('yield-input'),
                 controller: _input,
-                decoration: InputDecoration(
-                  labelText: 'Went in *${t?.unit == null ? '' : ' (${t!.unit})'}',
-                  helperText: 'The cuts below are filled in at what the template expects',
-                ),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                shape: AmountShape.quantity,
+                marks: _marks,
+                label: 'Went in *${t?.unit == null ? '' : ' (${t!.unit})'}',
+                helper: 'The cuts below are filled in at what the template expects',
+                hint: '0',
                 onChanged: (_) => setState(_prefill),
               ),
               if (t != null) ...[
                 const SizedBox(height: 8),
                 for (final o in t.outputs) ...[
-                  TextField(
-                    key: Key('yield-out-${o.variantId}'),
+                  FigureField(
+                    fieldKey: Key('yield-out-${o.variantId}'),
                     controller: _out.putIfAbsent(o.variantId, TextEditingController.new),
-                    decoration: InputDecoration(
-                      labelText: '${variantDisplayName(o.variantId, names)} came out',
-                      helperText: 'Expected ${qtyText(o.expectedPct)} %',
-                    ),
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    shape: AmountShape.quantity,
+                    marks: _marks,
+                    label: '${variantDisplayName(o.variantId, names)} came out',
+                    helper: 'Expected ${qtyText(o.expectedPct)} %',
+                    hint: '0',
+                    onChanged: (_) => setState(() {}),
                   ),
                   const SizedBox(height: 4),
                 ],

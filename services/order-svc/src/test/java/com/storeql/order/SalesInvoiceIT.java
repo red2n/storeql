@@ -1,6 +1,7 @@
 package com.storeql.order;
 
 import static com.storeql.order.support.InvoicingStubs.V_GST;
+import static com.storeql.order.support.InvoicingStubs.V_NAMELESS;
 import static com.storeql.order.support.InvoicingStubs.V_NOHSN;
 import static com.storeql.order.support.InvoicingStubs.V_ODD;
 import static com.storeql.order.support.InvoicingStubs.V_RED;
@@ -65,6 +66,8 @@ class SalesInvoiceIT {
   private static final String T_BARE = Ids.newId().toString();
   private static final String T_SEQ = Ids.newId().toString();
   private static final String T_OTHER = Ids.newId().toString();
+  private static final String T_NONAME = Ids.newId().toString();
+  private static final String S_NONAME = Ids.newId().toString();
   private static final String S_GB = Ids.newId().toString();
   private static final String S_IN = Ids.newId().toString();
   private static final String S_BARE = Ids.newId().toString();
@@ -103,6 +106,9 @@ class SalesInvoiceIT {
             .withIdentity(T_SEQ, "GB987654321", null, null)
             .withLegalName(T_SEQ, "Sequence Stores Ltd")
             .withStore(T_SEQ, S_SEQ, "GB", "9 Number Row", "York", "YO1 7HH")
+            .with(T_NONAME, "GBP", "GB")
+            .withIdentity(T_NONAME, "GB246813579", null, null)
+            .withStore(T_NONAME, S_NONAME, "GB", "5 Silent Row", "Ely", "CB7 4AA")
             .with(T_OTHER, "GBP", "GB")
             .withIdentity(T_OTHER, "GB111111111", null, null)
             .withLegalName(T_OTHER, "Someone Else Ltd")
@@ -388,7 +394,7 @@ class SalesInvoiceIT {
             "{\"reason\":\"one bag split\",\"refundMethod\":\"ORIGINAL\","
                 + "\"items\":[{\"variantId\":\""
                 + V_STD
-                + "\",\"qty\":1}]}",
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
             T_GB);
     JsonObject ret = data(returned);
     assertThat(ret.toString(), returned.getStatus(), is(201));
@@ -424,7 +430,9 @@ class SalesInvoiceIT {
     Response returned =
         post(
             "/orders/" + order + "/returns",
-            "{\"reason\":\"changed mind\",\"items\":[{\"variantId\":\"" + V_STD + "\",\"qty\":1}]}",
+            "{\"reason\":\"changed mind\",\"items\":[{\"variantId\":\""
+                + V_STD
+                + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
             T_GB);
     String returnId = data(returned).getString("id");
     Response credit = post("/admin/returns/" + returnId + "/credit-note", "{}", T_GB);
@@ -433,6 +441,7 @@ class SalesInvoiceIT {
     assertThat(documentsOf(order, T_GB), hasSize(0));
     Response unknown = post("/admin/returns/" + Ids.newId() + "/credit-note", "{}", T_GB);
     assertThat(unknown.getStatus(), is(404));
+    assertThat(code(unknown), is("ORDER_RETURN_NOT_FOUND"));
   }
 
   // ── India ──────────────────────────────────────────────────────────────────
@@ -509,13 +518,38 @@ class SalesInvoiceIT {
     assertThat(code(unavailable), is("ORDER_INVOICE_DEPENDENCY_UNAVAILABLE"));
 
     assertThat(post("/admin/orders/" + Ids.newId() + "/invoice", "{}", T_GB).getStatus(), is(404));
-    assertThat(get("/admin/sales-invoices/" + Ids.newId(), T_GB).getStatus(), is(404));
-    assertThat(
-        get("/admin/sales-invoices/" + Ids.newId() + "/document", T_GB).getStatus(), is(404));
+    Response noInvoice = get("/admin/sales-invoices/" + Ids.newId(), T_GB);
+    assertThat(noInvoice.getStatus(), is(404));
+    assertThat(code(noInvoice), is("ORDER_INVOICE_NOT_FOUND"));
+    Response noDocument = get("/admin/sales-invoices/" + Ids.newId() + "/document", T_GB);
+    assertThat(noDocument.getStatus(), is(404));
+    assertThat(code(noDocument), is("ORDER_INVOICE_NOT_FOUND"));
     for (String order : List.of(pending, anonymous, privateSale, nowhere, down)) {
       assertThat(documentsOf(order, T_GB), hasSize(0));
     }
     assertThat(documentsOf(bare, T_BARE), hasSize(0));
+  }
+
+  @Test
+  @DisplayName("A line with no item name would break the standard, so it is not invoiced")
+  void aLineWithNoItemNameIsNotInvoiced() {
+    String order = sell(basket(S_GB, C_BIZ, "GBP", V_NAMELESS, "1"), T_GB);
+    Response r = post("/admin/orders/" + order + "/invoice", "{}", T_GB);
+    String text = r.readEntity(String.class);
+    assertThat(text, r.getStatus(), is(409));
+    assertThat(text, containsString("ORDER_INVOICE_NOT_COMPLIANT"));
+    assertThat(text, containsString("EN 16931"));
+    assertThat(documentsOf(order, T_GB), hasSize(0));
+  }
+
+  @Test
+  @DisplayName("An invoice needs the seller's legal name as well as its VAT number")
+  void anInvoiceNeedsTheSellersLegalName() {
+    String order = sell(basket(S_NONAME, C_BIZ, "GBP", V_STD, "1"), T_NONAME);
+    Response r = post("/admin/orders/" + order + "/invoice", "{}", T_NONAME);
+    assertThat(r.getStatus(), is(409));
+    assertThat(code(r), is("ORDER_INVOICE_SELLER_NAME_MISSING"));
+    assertThat(documentsOf(order, T_NONAME), hasSize(0));
   }
 
   @Test
@@ -544,8 +578,12 @@ class SalesInvoiceIT {
     String order = sell(basket(S_GB, C_BIZ, "GBP", V_STD, "1"), T_GB);
     JsonObject inv = only(documentsOf(order, T_GB, 1), "INVOICE");
     String id = inv.getString("id");
-    assertThat(get("/admin/sales-invoices/" + id, T_OTHER).getStatus(), is(404));
-    assertThat(get("/admin/sales-invoices/" + id + "/document", T_OTHER).getStatus(), is(404));
+    Response theirs = get("/admin/sales-invoices/" + id, T_OTHER);
+    assertThat(theirs.getStatus(), is(404));
+    assertThat(code(theirs), is("ORDER_INVOICE_NOT_FOUND"));
+    Response theirsDocument = get("/admin/sales-invoices/" + id + "/document", T_OTHER);
+    assertThat(theirsDocument.getStatus(), is(404));
+    assertThat(code(theirsDocument), is("ORDER_INVOICE_NOT_FOUND"));
     assertThat(post("/admin/orders/" + order + "/invoice", "{}", T_OTHER).getStatus(), is(404));
     assertThat(get("/admin/orders/" + order + "/invoices", T_OTHER).getStatus(), is(200));
     assertThat(documentsOf(order, T_OTHER), hasSize(0));

@@ -3,6 +3,7 @@ package com.storeql.tenant.repo;
 import com.storeql.events.EventPayload;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
+import com.storeql.tenant.domain.Audit;
 import com.storeql.tenant.domain.Domain.DeliveryArea;
 import com.storeql.tenant.domain.Domain.StaffAssignment;
 import com.storeql.tenant.domain.Domain.Store;
@@ -36,7 +37,7 @@ public class TenantRepository extends BaseOutboxRepository {
 
   private static final String TENANT_SELECT =
       "SELECT id, name, legal_name, status, plan_id, owner_user_id, country, currency,"
-          + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of FROM tenants";
+          + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of, deactivated_note, deactivated_by, deactivated_at FROM tenants";
 
   // ─────────────────────────────────────────────── create (atomic with outbox)
 
@@ -71,6 +72,16 @@ public class TenantRepository extends BaseOutboxRepository {
    */
   public StoreWithZone createStoreWithDefaultZone(
       Store store, Zone defaultZone, List<OutboxRow> events) {
+    return createStoreWithDefaultZone(store, defaultZone, events, null);
+  }
+
+  /**
+   * The same, with the entry the admin change log keeps of it, written on the same transaction.
+   *
+   * @param audit the change-log entry, or null for none
+   */
+  public StoreWithZone createStoreWithDefaultZone(
+      Store store, Zone defaultZone, List<OutboxRow> events, Audit.Entry audit) {
     return inTx(
         c -> {
           assertTenantActive(c, store.tenantId());
@@ -79,6 +90,7 @@ public class TenantRepository extends BaseOutboxRepository {
           for (OutboxRow event : events) {
             insertOutbox(c, event);
           }
+          AuditRepository.insert(c, audit);
           return new StoreWithZone(store, defaultZone);
         },
         "create store");
@@ -110,10 +122,20 @@ public class TenantRepository extends BaseOutboxRepository {
    * @param event the outbox row to commit alongside the insert
    */
   public void createStaffWithOutbox(StaffAssignment s, OutboxRow event) {
+    createStaffWithOutbox(s, event, null);
+  }
+
+  /**
+   * The same, with the change-log entry written on the same transaction.
+   *
+   * @param audit the change-log entry, or null for none
+   */
+  public void createStaffWithOutbox(StaffAssignment s, OutboxRow event, Audit.Entry audit) {
     inTx(
         c -> {
           insertStaff(c, s);
           insertOutbox(c, event);
+          AuditRepository.insert(c, audit);
           return null;
         },
         "assign staff");
@@ -159,7 +181,7 @@ public class TenantRepository extends BaseOutboxRepository {
   public Optional<Tenant> findTenant(UUID tenantId) {
     return one(
         "SELECT id, name, legal_name, status, plan_id, owner_user_id, country, currency,"
-            + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of FROM tenants WHERE id = ?",
+            + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of, deactivated_note, deactivated_by, deactivated_at FROM tenants WHERE id = ?",
         tenantId,
         TenantRepository::mapTenant);
   }
@@ -250,6 +272,22 @@ public class TenantRepository extends BaseOutboxRepository {
    */
   public Tenant updateTenantStatusWithOutbox(
       UUID tenantId, String status, String reason, UUID actorId, List<OutboxRow> events) {
+    return updateTenantStatusWithOutbox(tenantId, status, reason, null, actorId, events);
+  }
+
+  /**
+   * The same, keeping what the administrator said when switching it off, with who and when (the
+   * note, like the reason, is cleared when the business is switched back on).
+   *
+   * @param note the administrator's own words, or null
+   */
+  public Tenant updateTenantStatusWithOutbox(
+      UUID tenantId,
+      String status,
+      String reason,
+      String note,
+      UUID actorId,
+      List<OutboxRow> events) {
     Instant now = Instant.now();
     boolean off = !"ACTIVE".equals(status);
     inTx(
@@ -257,13 +295,15 @@ public class TenantRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE tenants SET status = ?, updated_at = ?, deactivated_reason = ?,"
-                      + " deactivated_by = ?, deactivated_at = ? WHERE id = ?")) {
+                      + " deactivated_by = ?, deactivated_at = ?, deactivated_note = ?"
+                      + " WHERE id = ?")) {
             ps.setString(1, status);
             ps.setObject(2, now.atOffset(ZoneOffset.UTC));
             ps.setString(3, off ? reason : null);
             ps.setObject(4, off ? actorId : null);
             ps.setObject(5, off ? now.atOffset(ZoneOffset.UTC) : null);
-            ps.setObject(6, tenantId);
+            ps.setString(6, off ? note : null);
+            ps.setObject(7, tenantId);
             if (ps.executeUpdate() == 0) {
               throw ApiException.notFound("TENANT_NOT_FOUND", "Tenant not found");
             }
@@ -443,6 +483,7 @@ public class TenantRepository extends BaseOutboxRepository {
    * @param showPrices whether the storefront shows prices or runs as a catalogue
    * @param enabledPaymentMethods the canonicalised comma-separated tender list
    * @param tillPhone what the till asks for the customer's phone: REQUIRED, OPTIONAL or OFF
+   * @param actorId the login making the change, kept in the change log when the till setting moves
    * @return the store as stored
    */
   public Store updateStore(
@@ -461,31 +502,51 @@ public class TenantRepository extends BaseOutboxRepository {
       String businessHours,
       boolean showPrices,
       String enabledPaymentMethods,
-      String tillPhone) {
+      String tillPhone,
+      UUID actorId) {
     Instant now = Instant.now();
-    exec(
-        "UPDATE stores SET name=?, line1=?, line2=?, city=?, state=?, country=?, pincode=?,"
-            + " geo_lat=?, geo_lng=?, timezone=?, business_hours=?, show_prices=?,"
-            + " enabled_payment_methods=?, till_phone=?, updated_at=?"
-            + " WHERE tenant_id=? AND id=?",
-        ps -> {
-          ps.setString(1, name);
-          ps.setString(2, line1);
-          ps.setString(3, line2);
-          ps.setString(4, city);
-          ps.setString(5, state);
-          ps.setString(6, country);
-          ps.setString(7, pincode);
-          ps.setBigDecimal(8, geoLat);
-          ps.setBigDecimal(9, geoLng);
-          ps.setString(10, timezone);
-          ps.setString(11, businessHours);
-          ps.setBoolean(12, showPrices);
-          ps.setString(13, enabledPaymentMethods);
-          ps.setString(14, tillPhone);
-          ps.setObject(15, now.atOffset(ZoneOffset.UTC));
-          ps.setObject(16, tenantId);
-          ps.setObject(17, storeId);
+    inTx(
+        c -> {
+          String before = lockedStoreColumn(c, tenantId, storeId, "till_phone");
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE stores SET name=?, line1=?, line2=?, city=?, state=?, country=?,"
+                      + " pincode=?, geo_lat=?, geo_lng=?, timezone=?, business_hours=?,"
+                      + " show_prices=?, enabled_payment_methods=?, till_phone=?, updated_at=?"
+                      + " WHERE tenant_id=? AND id=?")) {
+            ps.setString(1, name);
+            ps.setString(2, line1);
+            ps.setString(3, line2);
+            ps.setString(4, city);
+            ps.setString(5, state);
+            ps.setString(6, country);
+            ps.setString(7, pincode);
+            ps.setBigDecimal(8, geoLat);
+            ps.setBigDecimal(9, geoLng);
+            ps.setString(10, timezone);
+            ps.setString(11, businessHours);
+            ps.setBoolean(12, showPrices);
+            ps.setString(13, enabledPaymentMethods);
+            ps.setString(14, tillPhone);
+            ps.setObject(15, now.atOffset(ZoneOffset.UTC));
+            ps.setObject(16, tenantId);
+            ps.setObject(17, storeId);
+            ps.executeUpdate();
+          }
+          if (!java.util.Objects.equals(before, tillPhone)) {
+            AuditRepository.insert(
+                c,
+                Audit.Entry.of(
+                    tenantId,
+                    Audit.STORE_TILL_PHONE_CHANGED,
+                    actorId,
+                    storeId,
+                    null,
+                    null,
+                    before,
+                    tillPhone));
+          }
+          return null;
         },
         "update store");
     return findStore(tenantId, storeId)
@@ -524,9 +585,21 @@ public class TenantRepository extends BaseOutboxRepository {
    */
   public Store updateStoreStatusWithOutbox(
       UUID tenantId, UUID storeId, String status, OutboxRow event) {
+    return updateStoreStatusWithOutbox(tenantId, storeId, status, event, null);
+  }
+
+  /**
+   * The same, keeping who changed it and from what: the status it had is read under the row's lock
+   * on the transaction that changes it, so the entry names the change that really happened.
+   *
+   * @param actorId the login that made the change, or null when nobody did
+   */
+  public Store updateStoreStatusWithOutbox(
+      UUID tenantId, UUID storeId, String status, OutboxRow event, UUID actorId) {
     Instant now = Instant.now();
     inTx(
         c -> {
+          String before = lockedStoreColumn(c, tenantId, storeId, "status");
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE stores SET status = ?, updated_at = ? WHERE tenant_id = ? AND id = ?")) {
@@ -534,16 +607,42 @@ public class TenantRepository extends BaseOutboxRepository {
             ps.setObject(2, now.atOffset(ZoneOffset.UTC));
             ps.setObject(3, tenantId);
             ps.setObject(4, storeId);
-            if (ps.executeUpdate() == 0) {
-              throw ApiException.notFound("STORE_NOT_FOUND", "Store not found");
-            }
+            ps.executeUpdate();
           }
           insertOutbox(c, event);
+          AuditRepository.insert(
+              c,
+              Audit.Entry.of(
+                  tenantId,
+                  Audit.STORE_STATUS_CHANGED,
+                  actorId,
+                  storeId,
+                  null,
+                  null,
+                  before,
+                  status));
           return null;
         },
         "update store status");
     return findStore(tenantId, storeId)
         .orElseThrow(() -> ApiException.notFound("STORE_NOT_FOUND", "Store not found"));
+  }
+
+  /** One column of a store, read with the row locked; 404 when the tenant has no such store. */
+  private static String lockedStoreColumn(Connection c, UUID tenantId, UUID storeId, String column)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT " + column + " FROM stores WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, storeId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw ApiException.notFound("STORE_NOT_FOUND", "Store not found");
+        }
+        return rs.getString(1);
+      }
+    }
   }
 
   /**
@@ -650,26 +749,34 @@ public class TenantRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Sets a zone's status.
+   * Sets a zone's status only if it is still {@code from}, with its event and change-log entry on
+   * the same transaction.
    *
    * @param tenantId owning tenant; the first condition of the query
-   * @param zoneId the zone to update
-   * @param status the status to set
-   * @return the zone with its new status
+   * @param from the status the caller read; the write is refused if it moved since
+   * @return false when the zone was not at {@code from} any more (nothing written, nothing sent)
    */
-  public Zone updateZoneStatus(UUID tenantId, UUID zoneId, String status) {
+  public boolean updateZoneStatusWithOutbox(
+      UUID tenantId, UUID zoneId, String from, String to, OutboxRow event, Audit.Entry audit) {
     Instant now = Instant.now();
-    exec(
-        "UPDATE zones SET status = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
-        ps -> {
-          ps.setString(1, status);
-          ps.setObject(2, now.atOffset(ZoneOffset.UTC));
-          ps.setObject(3, tenantId);
-          ps.setObject(4, zoneId);
+    return inTx(
+        c -> {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "UPDATE zones SET status = ?, updated_at = ?"
+                      + " WHERE tenant_id = ? AND id = ? AND status = ?")) {
+            ps.setString(1, to);
+            ps.setObject(2, now.atOffset(ZoneOffset.UTC));
+            ps.setObject(3, tenantId);
+            ps.setObject(4, zoneId);
+            ps.setString(5, from);
+            if (ps.executeUpdate() != 1) return false;
+          }
+          insertOutbox(c, event);
+          AuditRepository.insert(c, audit);
+          return true;
         },
         "update zone status");
-    return findZone(tenantId, zoneId)
-        .orElseThrow(() -> ApiException.notFound("ZONE_NOT_FOUND", "Zone not found"));
   }
 
   // ──────────────────────────────────────────────────────── staff reads/writes
@@ -740,18 +847,46 @@ public class TenantRepository extends BaseOutboxRepository {
       UUID userId,
       UUID storeId,
       java.util.function.Function<String, OutboxRow> event) {
+    return removeStaffWithOutbox(tenantId, userId, storeId, event, null);
+  }
+
+  /**
+   * The same, leaving a change-log entry for each assignment taken away, on the same transaction.
+   *
+   * @param actorId the login that removed them, or null when nobody did
+   */
+  public int removeStaffWithOutbox(
+      UUID tenantId,
+      UUID userId,
+      UUID storeId,
+      java.util.function.Function<String, OutboxRow> event,
+      UUID actorId) {
     return inTx(
         c -> {
           java.util.List<String> tiers = new java.util.ArrayList<>();
           try (PreparedStatement ps =
               c.prepareStatement(
                   "DELETE FROM staff_assignments WHERE tenant_id = ? AND user_id = ?"
-                      + " AND store_id = ? RETURNING base_tier")) {
+                      + (storeId == null ? " AND store_id IS NULL" : " AND store_id = ?")
+                      + " RETURNING base_tier, role")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, userId);
-            ps.setObject(3, storeId);
+            if (storeId != null) ps.setObject(3, storeId);
             try (ResultSet rs = ps.executeQuery()) {
-              while (rs.next()) tiers.add(rs.getString(1));
+              while (rs.next()) {
+                tiers.add(rs.getString(1));
+                AuditRepository.insert(
+                    c,
+                    Audit.Entry.of(
+                        tenantId,
+                        Audit.STAFF_UNASSIGNED,
+                        actorId,
+                        storeId,
+                        userId,
+                        rs.getString(2),
+                        rs.getString(2) + (storeId == null ? Audit.BUSINESS_WIDE : ""),
+                        null));
+              }
             }
           }
           for (String tier : new java.util.LinkedHashSet<>(tiers)) {
@@ -775,7 +910,8 @@ public class TenantRepository extends BaseOutboxRepository {
    * @param event {@code RoleDefined}
    * @throws ApiException 409 {@code ROLE_ALREADY_EXISTS} when the tenant already has the code
    */
-  public void createRole(com.storeql.tenant.domain.Domain.TenantRole r, OutboxRow event) {
+  public void createRole(
+      com.storeql.tenant.domain.Domain.TenantRole r, OutboxRow event, UUID actorId) {
     inTx(
         c -> {
           try (PreparedStatement ps =
@@ -803,6 +939,17 @@ public class TenantRepository extends BaseOutboxRepository {
             throw e;
           }
           insertOutbox(c, event);
+          AuditRepository.insert(
+              c,
+              Audit.Entry.of(
+                  r.tenantId(),
+                  Audit.ROLE_DEFINED,
+                  actorId,
+                  null,
+                  null,
+                  r.code(),
+                  null,
+                  roleLabel(r.name(), r.baseTier(), String.join(",", r.permissions()))));
           return null;
         },
         "define role");
@@ -814,10 +961,23 @@ public class TenantRepository extends BaseOutboxRepository {
    *
    * @return {@code true} when the role existed in this tenant
    */
-  public boolean updateRole(com.storeql.tenant.domain.Domain.TenantRole r, OutboxRow event) {
+  public boolean updateRole(
+      com.storeql.tenant.domain.Domain.TenantRole r, OutboxRow event, UUID actorId) {
     return inTx(
         c -> {
           int n;
+          String before;
+          try (PreparedStatement sel =
+              c.prepareStatement(
+                  "SELECT name, base_tier, permissions FROM tenant_roles WHERE tenant_id = ? AND code = ?"
+                      + " FOR UPDATE")) {
+            sel.setObject(1, r.tenantId());
+            sel.setString(2, r.code());
+            try (ResultSet rs = sel.executeQuery()) {
+              if (!rs.next()) return false;
+              before = roleLabel(rs.getString(1), rs.getString(2), rs.getString(3));
+            }
+          }
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE tenant_roles SET name = ?, permissions = ?, description = ?,"
@@ -831,6 +991,17 @@ public class TenantRepository extends BaseOutboxRepository {
           }
           if (n == 0) return false;
           insertOutbox(c, event);
+          AuditRepository.insert(
+              c,
+              Audit.Entry.of(
+                  r.tenantId(),
+                  Audit.ROLE_CHANGED,
+                  actorId,
+                  null,
+                  null,
+                  r.code(),
+                  before,
+                  roleLabel(r.name(), r.baseTier(), String.join(",", r.permissions()))));
           return true;
         },
         "redefine role");
@@ -843,16 +1014,19 @@ public class TenantRepository extends BaseOutboxRepository {
    * @throws ApiException 409 {@code ROLE_IN_USE} while an assignment still names it, decided under
    *     the role's row lock so an assignment made at the same moment cannot slip past
    */
-  public boolean deleteRole(UUID tenantId, String code) {
+  public boolean deleteRole(UUID tenantId, String code, UUID actorId) {
     return inTx(
         c -> {
+          String before;
           try (PreparedStatement ps =
               c.prepareStatement(
-                  "SELECT id FROM tenant_roles WHERE tenant_id = ? AND code = ? FOR UPDATE")) {
+                  "SELECT name, base_tier, permissions FROM tenant_roles WHERE tenant_id = ? AND code = ?"
+                      + " FOR UPDATE")) {
             ps.setObject(1, tenantId);
             ps.setString(2, code);
             try (ResultSet rs = ps.executeQuery()) {
               if (!rs.next()) return false;
+              before = roleLabel(rs.getString(1), rs.getString(2), rs.getString(3));
             }
           }
           try (PreparedStatement ps =
@@ -878,9 +1052,22 @@ public class TenantRepository extends BaseOutboxRepository {
             ps.setString(2, code);
             ps.executeUpdate();
           }
+          AuditRepository.insert(
+              c,
+              Audit.Entry.of(
+                  tenantId, Audit.ROLE_DELETED, actorId, null, null, code, before, null));
           return true;
         },
         "delete role");
+  }
+
+  /** A role as the change log words it: name, tier, then the permissions it holds, sorted. */
+  private static String roleLabel(String name, String tier, String permissionsCsv) {
+    var sorted = new java.util.TreeSet<String>();
+    if (permissionsCsv != null && !permissionsCsv.isBlank()) {
+      sorted.addAll(List.of(permissionsCsv.split(",")));
+    }
+    return name + " (" + tier + "): " + String.join(",", sorted);
   }
 
   /**
@@ -1070,6 +1257,11 @@ public class TenantRepository extends BaseOutboxRepository {
 
   // ──────────────────────────────────────────────────────────────── row mappers
 
+  private static Instant instantOf(ResultSet rs, String column) throws SQLException {
+    OffsetDateTime at = rs.getObject(column, OffsetDateTime.class);
+    return at == null ? null : at.toInstant();
+  }
+
   private static Tenant mapTenant(ResultSet rs) throws SQLException {
     return new Tenant(
         rs.getObject("id", UUID.class),
@@ -1087,7 +1279,10 @@ public class TenantRepository extends BaseOutboxRepository {
         rs.getString("einvoice_id"),
         rs.getString("deactivated_reason"),
         rs.getString("mode"),
-        rs.getObject("sandbox_of", UUID.class));
+        rs.getObject("sandbox_of", UUID.class),
+        rs.getString("deactivated_note"),
+        rs.getObject("deactivated_by", UUID.class),
+        instantOf(rs, "deactivated_at"));
   }
 
   private static Store mapStore(ResultSet rs) throws SQLException {
@@ -1244,7 +1439,7 @@ public class TenantRepository extends BaseOutboxRepository {
     StringBuilder sql =
         new StringBuilder(
             "SELECT id, name, legal_name, status, plan_id, owner_user_id, country, currency,"
-                + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of FROM tenants");
+                + " created_at, updated_at, vat_number, einvoice_scheme, einvoice_id, deactivated_reason, mode, sandbox_of, deactivated_note, deactivated_by, deactivated_at FROM tenants");
     if (afterCreatedAt != null && afterId != null) sql.append(" WHERE (created_at, id) > (?, ?)");
     sql.append(" ORDER BY created_at, id LIMIT ?");
     return query(
@@ -1370,6 +1565,22 @@ public class TenantRepository extends BaseOutboxRepository {
   public DeliveryArea insertDeliveryArea(DeliveryArea a) {
     inTx(
         c -> {
+          // Codes differing only in case are the same code (lookup ignores case), so the store
+          // covers it once. The unique index catches the exact-case race; this the rest.
+          try (PreparedStatement dup =
+              c.prepareStatement(
+                  "SELECT 1 FROM delivery_areas WHERE tenant_id=? AND store_id=?"
+                      + " AND lower(pincode)=lower(?) LIMIT 1")) {
+            dup.setObject(1, a.tenantId());
+            dup.setObject(2, a.storeId());
+            dup.setString(3, a.pincode());
+            try (ResultSet rs = dup.executeQuery()) {
+              if (rs.next()) {
+                throw ApiException.conflict(
+                    "DELIVERY_AREA_EXISTS", "This store already covers pincode " + a.pincode());
+              }
+            }
+          }
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO delivery_areas (id, tenant_id, store_id, pincode, priority,"
@@ -1381,6 +1592,16 @@ public class TenantRepository extends BaseOutboxRepository {
             ps.setInt(5, a.priority());
             ps.setObject(6, a.createdAt().atOffset(ZoneOffset.UTC));
             ps.executeUpdate();
+          } catch (SQLException e) {
+            if (UNIQUE_VIOLATION.equals(e.getSQLState())) {
+              throw new ApiException(
+                  409,
+                  "DELIVERY_AREA_EXISTS",
+                  "This store already covers pincode " + a.pincode(),
+                  List.of(),
+                  e);
+            }
+            throw e;
           }
           return null;
         },
@@ -1438,7 +1659,7 @@ public class TenantRepository extends BaseOutboxRepository {
     List<DeliveryArea> rows =
         query(
             "SELECT id, tenant_id, store_id, pincode, priority, created_at FROM delivery_areas"
-                + " WHERE tenant_id=? AND lower(pincode)=lower(?) ORDER BY priority ASC LIMIT 1",
+                + " WHERE tenant_id=? AND lower(pincode)=lower(?) ORDER BY priority ASC, created_at ASC, id ASC LIMIT 1",
             ps -> {
               ps.setObject(1, tenantId);
               ps.setString(2, pincode.trim());

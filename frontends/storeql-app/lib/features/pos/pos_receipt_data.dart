@@ -6,6 +6,8 @@
 /// lives behind the conditional export in `pos_receipt.dart`.
 library;
 
+import 'package:qr/qr.dart';
+
 import '../../core/format.dart';
 import 'pos_fiscal_receipt.dart';
 import 'pos_providers.dart';
@@ -42,6 +44,10 @@ class PosReceiptData {
   /// the totals, as the regime requires. Null under NONE or before issue.
   final FiscalStamp? fiscalStamp;
 
+  /// The gift cards this sale issued, with their codes as the server said them:
+  /// printed once, under the totals. Empty for a sale that sold none.
+  final List<SoldGiftCard> soldCards;
+
   const PosReceiptData({
     required this.orderId,
     required this.storeName,
@@ -60,7 +66,30 @@ class PosReceiptData {
     this.fiscalNumber,
     this.fiscalNumberNote,
     this.fiscalStamp,
+    this.soldCards = const [],
   });
+
+  /// The same receipt, now carrying the codes of the cards it sold.
+  PosReceiptData withSoldCards(List<SoldGiftCard> cards) => PosReceiptData(
+    orderId: orderId,
+    storeName: storeName,
+    storeAddress: storeAddress,
+    dateTime: dateTime,
+    cashierEmail: cashierEmail,
+    items: items,
+    subtotal: subtotal,
+    discount: discount,
+    deposit: deposit,
+    total: total,
+    currency: currency,
+    tenders: tenders,
+    change: change,
+    customerName: customerName,
+    fiscalNumber: fiscalNumber,
+    fiscalNumberNote: fiscalNumberNote,
+    fiscalStamp: fiscalStamp,
+    soldCards: cards,
+  );
 
   /// The same receipt, now carrying the number that was not issued in time.
   PosReceiptData withFiscalNumber(String number) => withFiscalStamp(
@@ -85,9 +114,42 @@ class PosReceiptData {
     customerName: customerName,
     fiscalNumber: stamp.fullNumber,
     fiscalStamp: stamp,
+    soldCards: soldCards,
   );
 
   String get shortId => shortRef(orderId).toUpperCase();
+
+  /// What the receipt's scannable code carries: the legal receipt number, else
+  /// the short order reference printed on it. The Returns screen finds the sale
+  /// from either. Null for a sale held offline, whose reference is the till's
+  /// own and means nothing to the server until it has synced.
+  String? get receiptCode {
+    final n = fiscalNumber;
+    if (n != null && n.isNotEmpty) return n;
+    return orderId.length > 8 ? shortId : null;
+  }
+
+  /// The receipt code as a QR code in SVG, black on white, drawn from the
+  /// encoder's modules with a quiet zone of four modules on every side.
+  static String qrSvg(String data, {int cell = 3}) {
+    final image = QrImage(QrCode(payload: QrPayload.fromString(data)));
+    final n = image.moduleCount;
+    const quiet = 4;
+    final side = (n + 2 * quiet) * cell;
+    final rects = StringBuffer();
+    for (var y = 0; y < n; y++) {
+      for (var x = 0; x < n; x++) {
+        if (image.isDark(y, x)) {
+          rects.write('<rect x="${(x + quiet) * cell}" y="${(y + quiet) * cell}" '
+              'width="$cell" height="$cell"/>');
+        }
+      }
+    }
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="$side" height="$side" '
+        'viewBox="0 0 $side $side" shape-rendering="crispEdges">'
+        '<rect width="$side" height="$side" fill="#fff"/>'
+        '<g fill="#000">$rects</g></svg>';
+  }
 
   /// Money as the shopper reads it, `£12.00`. (The thermal encoder keeps
   /// currency codes: a printer's code page cannot print every symbol.)
@@ -210,6 +272,27 @@ class PosReceiptData {
   </div>''';
     }
 
+    // The cards this sale issued: the code is the customer's to keep.
+    final cardBlock = StringBuffer();
+    for (final c in soldCards) {
+      cardBlock.write(
+          '<div class="info-row" data-gift-card="1"><span>${c.topUp ? 'Gift card top-up' : 'Gift card'} ${_esc(_fmt(c.amount))}:</span>'
+          '<span class="mono">${_esc(c.code ?? 'code not available')}</span></div>');
+    }
+    final giftCardBlock =
+        soldCards.isEmpty ? '' : '<hr class="divider">\n  $cardBlock';
+
+    // A scannable code of the receipt number, so the Returns screen's scan
+    // finds this sale.
+    final code = receiptCode;
+    final codeBlock = code == null
+        ? ''
+        : '''
+  <div class="receipt-code center" data-receipt-code="${_esc(code)}">
+    ${qrSvg(code)}
+    <div class="fiscal-note">${_esc(code)}</div>
+  </div>''';
+
     return '''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -299,6 +382,8 @@ class PosReceiptData {
     $changeRow
   </table>
   $fiscalBlock
+  $giftCardBlock
+  $codeBlock
 
   <hr class="divider-solid">
 

@@ -15,6 +15,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -74,12 +75,17 @@ public class ConsignmentRepository extends BaseJdbcRepository {
         "record consignment sale");
   }
 
+  /**
+   * @param stores the stores the sales were made at, or null for every store (a sale that names no
+   *     store is read only then)
+   */
   public List<ConsignmentSale> findSales(
-      UUID tenantId, UUID supplierId, Boolean settled, int limit) {
+      UUID tenantId, UUID supplierId, Boolean settled, Set<UUID> stores, int limit) {
     StringBuilder sql = new StringBuilder(SALE_COLUMNS);
     if (supplierId != null) sql.append(" AND supplier_id = ?");
     if (settled != null)
       sql.append(settled ? " AND settlement_id IS NOT NULL" : " AND settlement_id IS NULL");
+    if (stores != null) sql.append(" AND store_id = ANY(?)");
     sql.append(" ORDER BY sold_on DESC, recorded_at DESC, id DESC LIMIT ?");
     return query(
         sql.toString(),
@@ -87,6 +93,9 @@ public class ConsignmentRepository extends BaseJdbcRepository {
           int i = 1;
           ps.setObject(i++, tenantId);
           if (supplierId != null) ps.setObject(i++, supplierId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         ConsignmentRepository::mapSale,
@@ -185,9 +194,21 @@ public class ConsignmentRepository extends BaseJdbcRepository {
         "settle consignment sales");
   }
 
-  public List<ConsignmentSettlement> findSettlements(UUID tenantId, UUID supplierId, int limit) {
+  /**
+   * @param stores the stores a statement's sales must all have been made at, or null for every
+   *     statement: a statement that took a sale at another store, or a sale that named no store, is
+   *     read only by a caller held to no store
+   */
+  public List<ConsignmentSettlement> findSettlements(
+      UUID tenantId, UUID supplierId, Set<UUID> stores, int limit) {
     StringBuilder sql = new StringBuilder(SETTLEMENT_COLUMNS);
     if (supplierId != null) sql.append(" AND supplier_id = ?");
+    if (stores != null) {
+      sql.append(
+          " AND NOT EXISTS (SELECT 1 FROM consignment_sales cs WHERE cs.tenant_id = ?"
+              + " AND cs.settlement_id = consignment_settlements.id"
+              + " AND (cs.store_id IS NULL OR NOT (cs.store_id = ANY(?))))");
+    }
     sql.append(" ORDER BY created_at DESC, id DESC LIMIT ?");
     return query(
         sql.toString(),
@@ -195,6 +216,10 @@ public class ConsignmentRepository extends BaseJdbcRepository {
           int i = 1;
           ps.setObject(i++, tenantId);
           if (supplierId != null) ps.setObject(i++, supplierId);
+          if (stores != null) {
+            ps.setObject(i++, tenantId);
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         ConsignmentRepository::mapSettlement,

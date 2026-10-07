@@ -4,6 +4,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
 
 import com.storeql.ids.Ids;
+import com.storeql.notification.domain.Domain.ShortageAlert;
 import com.storeql.notification.messaging.SupplierRemittanceHandler;
 import com.storeql.notification.repo.NotificationRepository;
 import com.storeql.notification.service.NotificationErasure;
@@ -11,8 +12,15 @@ import com.storeql.notification.service.Notifier;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
+import jakarta.json.JsonArray;
+import jakarta.json.JsonObject;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.Response;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -93,7 +101,7 @@ class NotificationIT {
         null,
         event,
         "PASSWORD_RESET",
-        "EMAIL",
+        "SMTP",
         "forgetful@example.com",
         "Reset your password",
         "Shopper account: [link removed]",
@@ -107,6 +115,38 @@ class NotificationIT {
         String body = getAs("/admin/notifications", tenant, role).readEntity(String.class);
         assertThat(tenant + "/" + role, body.contains("forgetful@example.com"), is(false));
         assertThat(tenant + "/" + role, body.contains("PASSWORD_RESET"), is(false));
+      }
+    }
+  }
+
+  /**
+   * The "your password was changed" row belongs to no business either, so no tenant-scoped read of
+   * the log — any role, either business — finds it, even by the address it went to.
+   */
+  @org.junit.jupiter.api.Test
+  @org.junit.jupiter.api.DisplayName(
+      "Another business's staff of every role — and this one's — never read the changed row")
+  void thePasswordChangedRowIsInvisibleToEveryRoleOfEveryBusiness() {
+    UUID event = Ids.newId();
+    notifications.recordNotification(
+        null,
+        Ids.newId(),
+        event,
+        "PASSWORD_CHANGED",
+        "SMTP",
+        "changed-pw@example.com",
+        "Your password was changed",
+        "The password for your login at this email address was changed.",
+        "SENT",
+        "en",
+        null);
+    assertThat(notifications.alreadyNotified(event, "PASSWORD_CHANGED"), is(true));
+
+    for (String tenant : new String[] {T, OTHER}) {
+      for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+        String body = getAs("/admin/notifications", tenant, role).readEntity(String.class);
+        assertThat(tenant + "/" + role, body.contains("changed-pw@example.com"), is(false));
+        assertThat(tenant + "/" + role, body.contains("PASSWORD_CHANGED"), is(false));
       }
     }
   }
@@ -240,7 +280,7 @@ class NotificationIT {
         user,
         reset,
         "PASSWORD_RESET",
-        "EMAIL",
+        "SMTP",
         "leaving@example.com",
         "Reset your password",
         "Shopper account: [link removed]",
@@ -426,5 +466,264 @@ class NotificationIT {
   void tenantDataIsExportable() {
     com.storeql.test.TenantDataChecks.assertExportable(
         target, "01a090ae-611e-702c-a97b-d1b8025478e1");
+  }
+
+  // ── flow: notifications to the shopper — whose log it is ───────────────────
+
+  private Response feedOf(String tenant, String role, String recipient) {
+    return target
+        .path("/admin/notifications")
+        .queryParam("recipient", recipient)
+        .request()
+        .header("X-Tenant-Id", tenant)
+        .header("X-Roles", role)
+        .get();
+  }
+
+  /**
+   * What a business told its shoppers about their orders is in its own log and in nobody else's:
+   * another business's management reads none of it, even naming the address it went to, and nobody
+   * below management, nor a shopper, of either business, reads any. Nothing is copied or moved.
+   */
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A shopper's order messages are in their business's log alone, whoever asks")
+  void aShoppersOrderMessagesAreInTheirBusinessesLogAndNoOthers() {
+    String address = "shopper-" + Ids.newId() + "@example.com";
+    UUID customer = Ids.newId();
+    String[] types = {
+      "ORDER_CONFIRMATION",
+      "ORDER_READY_FOR_COLLECTION",
+      "ORDER_DISPATCHED",
+      "ORDER_LINE_SHORT",
+      "ORDER_LINE_SUBSTITUTED"
+    };
+    for (String type : types) {
+      notifier.notifyOnce(
+          Ids.newId(), type, Ids.parse(T), customer, address, "Your order", "Order for " + address);
+    }
+
+    // Their own management reads all five.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response r = feedOf(T, role, address);
+      String ours = r.readEntity(String.class);
+      assertThat(role + ": " + ours, r.getStatus(), is(200));
+      for (String type : types) {
+        assertThat(role + " reads " + type, ours.contains("\"type\":\"" + type + "\""), is(true));
+      }
+    }
+    // Another business's management finds none of them, even naming the address.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response r = feedOf(OTHER, role, address);
+      String theirs = r.readEntity(String.class);
+      assertThat(role + ": " + theirs, r.getStatus(), is(200));
+      assertThat(role, theirs.contains(address), is(false));
+      assertThat(role, theirs.contains("\"data\":[]"), is(true));
+    }
+    // The rest of the staff, and a shopper, are refused by either business.
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      for (String business : new String[] {T, OTHER}) {
+        Response r = feedOf(business, role, address);
+        String body = r.readEntity(String.class);
+        assertThat(role + " of " + business + ": " + body, r.getStatus(), is(403));
+        assertThat(role + " of " + business, body.contains(address), is(false));
+      }
+    }
+    // Five rows, all ours; none under the other business.
+    String mine = "recipient = '" + address + "' AND tenant_id = '";
+    assertThat(
+        com.storeql.test.Envelopes.scalar(
+            PG, "SELECT count(*) FROM notification.notification_log WHERE " + mine + T + "'"),
+        is("5"));
+    assertThat(
+        com.storeql.test.Envelopes.scalar(
+            PG, "SELECT count(*) FROM notification.notification_log WHERE " + mine + OTHER + "'"),
+        is("0"));
+  }
+
+  // ── the feed read by channel ───────────────────────────────────────────────
+
+  private List<String> recipientsByChannel(String tenant, String role, String channel) {
+    Response r =
+        target
+            .path("/admin/notifications")
+            .queryParam("channel", channel)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-Roles", role)
+            .get();
+    return com.storeql.test.Envelopes.okArray(r).getValuesAs(JsonObject.class).stream()
+        .map(o -> o.getString("recipient"))
+        .toList();
+  }
+
+  /**
+   * On a deployment that only keeps the in-app feed, EMAIL — the name of its default channel — is
+   * the in-app feed, which is the carrier the log names APP: a message sent by EMAIL there is found
+   * by it. Another business's rows are never returned.
+   */
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "On an in-app deployment EMAIL finds the in-app rows; another business's, never")
+  void emailIsTheInAppFeedWhereThatIsTheDefaultChannel() {
+    UUID mine = Ids.newId();
+    UUID theirs = Ids.newId();
+    String inApp = "inapp-" + Ids.newId() + "@example.com";
+    String text = "+4915112345678";
+    String theirInApp = "inapp-" + Ids.newId() + "@example.com";
+    notifications.recordNotification(
+        mine, null, Ids.newId(), "WELCOME", "APP", inApp, "Welcome", "hi", "SENT");
+    notifications.recordNotification(
+        mine, null, Ids.newId(), "ORDER_READY", "SMS", text, "Ready", "collect", "SENT");
+    notifications.recordNotification(
+        theirs, null, Ids.newId(), "WELCOME", "APP", theirInApp, "Welcome", "hi", "SENT");
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(role, recipientsByChannel(mine.toString(), role, "EMAIL"), is(List.of(inApp)));
+      assertThat(role, recipientsByChannel(mine.toString(), role, "APP"), is(List.of(inApp)));
+      assertThat(role, recipientsByChannel(mine.toString(), role, "SMS"), is(List.of(text)));
+      assertThat(
+          role, recipientsByChannel(theirs.toString(), role, "EMAIL"), is(List.of(theirInApp)));
+      // A business that has sent nothing finds none of ours, by the same channel names.
+      assertThat(role, recipientsByChannel(Ids.newId().toString(), role, "EMAIL"), is(List.of()));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      for (UUID business : new UUID[] {mine, theirs}) {
+        Response r =
+            target
+                .path("/admin/notifications")
+                .queryParam("channel", "EMAIL")
+                .request()
+                .header("X-Tenant-Id", business)
+                .header("X-Roles", role)
+                .get();
+        String body = r.readEntity(String.class);
+        assertThat(role + ": " + body, r.getStatus(), is(403));
+        assertThat(role, body.contains(inApp), is(false));
+      }
+    }
+  }
+
+  // ── the shortage-alert feed is held to the caller's stores ─────────────────
+
+  private Response alertsAs(String tenant, String role, String stores, String... query) {
+    WebTarget t = target.path("/admin/notifications/shortage-alerts");
+    for (int i = 0; i + 1 < query.length; i += 2) {
+      t = t.queryParam(query[i], query[i + 1]);
+    }
+    var b = t.request().header("X-Tenant-Id", tenant).header("X-Roles", role);
+    if (stores != null) {
+      b = b.header("X-Store-Ids", stores);
+    }
+    return b.get();
+  }
+
+  private static JsonArray alertList(Response r) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(200));
+    return com.storeql.test.Envelopes.parse(body).getJsonArray("data");
+  }
+
+  private static Set<String> storesOf(JsonArray alerts) {
+    Set<String> stores = new HashSet<>();
+    for (JsonObject alert : alerts.getValuesAs(JsonObject.class)) {
+      stores.add(alert.getString("storeId"));
+    }
+    return stores;
+  }
+
+  private static void assertRefused(String what, Response r, int status, String code) {
+    String body = r.readEntity(String.class);
+    assertThat(what + ": " + body, r.getStatus(), is(status));
+    JsonObject problem = com.storeql.test.Envelopes.parse(body);
+    String actual =
+        problem.containsKey("code")
+            ? problem.getString("code")
+            : problem.getJsonObject("error").getString("code");
+    assertThat(what + ": " + body, actual, is(code));
+  }
+
+  private void shortAt(UUID store, UUID variant) {
+    notifications.insertAlertOnce(
+        "shortage-feed-test",
+        new ShortageAlert(
+            Ids.newId(),
+            Ids.parse(T),
+            store,
+            variant,
+            new BigDecimal("2"),
+            new BigDecimal("5"),
+            Ids.newId(),
+            Instant.now()));
+  }
+
+  /**
+   * A manager held to stores reads those stores' shortage alerts and no others — by store, by
+   * variant and with no filter at all — and naming another store is refused by name. Another
+   * business reads none of it, whatever it names; a till, a warehouse and a shopper are refused.
+   */
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A manager held to stores reads only those stores' shortage alerts; naming another is refused")
+  void theShortageFeedIsHeldToTheCallersStores() {
+    UUID storeA = Ids.newId();
+    UUID storeB = Ids.newId();
+    UUID shortEverywhere = Ids.newId();
+    UUID shortAtAOnly = Ids.newId();
+    shortAt(storeA, shortEverywhere);
+    shortAt(storeA, shortAtAOnly);
+    shortAt(storeB, shortEverywhere);
+    String a = storeA.toString();
+    String b = storeB.toString();
+
+    // A caller held to no store reads every store's.
+    assertThat(
+        alertList(alertsAs(T, "OWNER", null, "variantId", shortEverywhere.toString())).size(),
+        is(2));
+    assertThat(alertList(alertsAs(T, "MANAGER", null, "storeId", b)).size(), is(1));
+
+    // A manager held to store A reads A's alone, however they ask.
+    JsonArray everything = alertList(alertsAs(T, "MANAGER", a));
+    assertThat(everything.size(), is(2));
+    assertThat(storesOf(everything), is(Set.of(a)));
+    JsonArray byVariant =
+        alertList(alertsAs(T, "MANAGER", a, "variantId", shortEverywhere.toString()));
+    assertThat(byVariant.size(), is(1));
+    assertThat(storesOf(byVariant), is(Set.of(a)));
+    assertThat(alertList(alertsAs(T, "MANAGER", a, "storeId", a)).size(), is(2));
+    // Another store is refused by name, and nothing is listed.
+    assertRefused(
+        "a store that is not theirs",
+        alertsAs(T, "MANAGER", a, "storeId", b),
+        403,
+        "STORE_ACCESS_DENIED");
+    // Held to both, they read both.
+    assertThat(alertList(alertsAs(T, "MANAGER", a + "," + b)).size(), is(3));
+
+    // Another business reads none of it, whatever it names, held to the store or not.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(alertList(alertsAs(OTHER, role, null, "storeId", a)).size(), is(0));
+      assertThat(
+          alertList(alertsAs(OTHER, role, null, "variantId", shortEverywhere.toString())).size(),
+          is(0));
+      assertThat(alertList(alertsAs(OTHER, role, a)).size(), is(0));
+    }
+    // A till, a warehouse and a shopper are refused, of either business.
+    for (String tenant : new String[] {T, OTHER}) {
+      for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+        assertRefused(role + " of " + tenant, alertsAs(tenant, role, null), 403, "FORBIDDEN");
+      }
+    }
+    // What is not an id is refused as one.
+    assertRefused(
+        "a store that is no id",
+        alertsAs(T, "OWNER", null, "storeId", "not-a-uuid"),
+        400,
+        "INVALID_UUID");
+    assertRefused(
+        "a variant that is no id",
+        alertsAs(T, "OWNER", null, "variantId", "not-a-uuid"),
+        400,
+        "INVALID_UUID");
   }
 }

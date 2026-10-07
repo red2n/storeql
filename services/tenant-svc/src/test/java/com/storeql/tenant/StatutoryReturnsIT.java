@@ -20,8 +20,18 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -175,6 +185,41 @@ class StatutoryReturnsIT {
         "and a return the platform cannot produce says so rather than offering an empty export",
         statement.get("exportService"),
         is(nullValue()));
+  }
+
+  @Test
+  @DisplayName("Every seeded export names a route its own service serves, spelled as it serves it")
+  void everySeededExportIsARealRoute() throws SQLException {
+    // The link is service + path, and the path is the one the owning service itself serves, not a
+    // gateway path and not a guess: a route that is not there 404s quietly. Each is read off the
+    // resource that serves it:
+    //   order-svc   FiscalReceiptResource  @Path("/admin") + GET /fiscal-receipts/export?format=
+    //                                       dsfinvk | saft-pt
+    //   order-svc   EReportingResource      @Path("/admin/ereporting") + GET and POST /submissions
+    //   pricing-svc VatReturnResource       @Path("/vat-return"), GET, and not under /admin/
+    Map<String, String> expected = new LinkedHashMap<>();
+    expected.put("DSFINVK_DE", "order-svc /admin/fiscal-receipts/export?format=dsfinvk");
+    expected.put("EC_SALES_LIST", "none");
+    expected.put("EREPORTING_PAY_FR", "order-svc /admin/ereporting/submissions");
+    expected.put("EREPORTING_TX_FR", "order-svc /admin/ereporting/submissions");
+    expected.put("SAFT_PT", "order-svc /admin/fiscal-receipts/export?format=saft-pt");
+    expected.put("VAT_RETURN_UK", "pricing-svc /vat-return");
+
+    Map<String, String> seeded = new LinkedHashMap<>();
+    try (Connection c = PG.dataSource().getConnection();
+        Statement st = c.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT code, export_service, export_path FROM tenant.statutory_returns"
+                    + " ORDER BY code")) {
+      while (rs.next()) {
+        String service = rs.getString("export_service");
+        seeded.put(
+            rs.getString("code"),
+            service == null ? "none" : service + " " + rs.getString("export_path"));
+      }
+    }
+    assertThat(seeded, is(expected));
   }
 
   @Test
@@ -367,6 +412,72 @@ class StatutoryReturnsIT {
             tenantId);
     assertThat(twice.status(), is(409));
     assertThat(twice.code(), is("STATUTORY_FILING_NOT_STANDING"));
+  }
+
+  @Test
+  @DisplayName("Ten corrections of one standing filing at once: one stands, the rest are refused")
+  void twoCorrectionsAtOnceStandOnce() throws Exception {
+    String tenantId = business("PT", "EUR");
+    LocalDate last = monthsBack(1);
+    Answer first =
+        owner(
+            "POST",
+            SR + "/SAFT_PT/filings",
+            "{\"periodStart\":\"" + last + "\",\"provider\":\"MANUAL\",\"reference\":\"AT-1\"}",
+            tenantId);
+    assertThat(first.text(), first.status(), is(200));
+    String standing = first.data().getJsonObject("filing").getString("id");
+
+    int n = 10;
+    var pool = Executors.newFixedThreadPool(n);
+    var go = new CountDownLatch(1);
+    List<Future<Answer>> results = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      String reference = "AT-C" + i;
+      results.add(
+          pool.submit(
+              () -> {
+                go.await();
+                return owner(
+                    "POST",
+                    SR + "/SAFT_PT/filings",
+                    "{\"periodStart\":\""
+                        + last
+                        + "\",\"provider\":\"MANUAL\",\"reference\":\""
+                        + reference
+                        + "\",\"supersedes\":\""
+                        + standing
+                        + "\"}",
+                    tenantId);
+              }));
+    }
+    go.countDown();
+    int accepted = 0;
+    for (Future<Answer> f : results) {
+      Answer a = f.get();
+      if (a.status() == 200) {
+        accepted++;
+      } else {
+        assertThat(a.text(), a.status(), is(409));
+        assertThat(
+            a.text(),
+            a.code(),
+            org.hamcrest.Matchers.either(is("STATUTORY_FILING_ALREADY_CORRECTED"))
+                .or(is("STATUTORY_FILING_NOT_STANDING")));
+      }
+    }
+    pool.shutdown();
+    assertThat("one correction wins", accepted, is(1));
+
+    List<JsonObject> history =
+        owner("GET", SR + "/filings", null, tenantId).list().stream()
+            .filter(f -> last.toString().equals(f.getString("periodStart")))
+            .toList();
+    assertThat("the first and the one correction are on the record", history, hasSize(2));
+    assertThat(
+        "and exactly one of them stands",
+        history.stream().filter(f -> f.getBoolean("stands")).count(),
+        is(1L));
   }
 
   // ── what filing refuses ────────────────────────────────────────────────────

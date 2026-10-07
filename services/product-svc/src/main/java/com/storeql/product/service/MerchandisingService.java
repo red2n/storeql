@@ -9,7 +9,9 @@ import com.storeql.product.domain.Merchandising.Reset;
 import com.storeql.product.domain.Merchandising.SpacePlan;
 import com.storeql.product.repo.MerchandisingRepository;
 import com.storeql.service.OutboxRow;
+import com.storeql.service.TenantProfiles;
 import com.storeql.web.ApiException;
+import com.storeql.web.TenantContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.math.BigDecimal;
@@ -46,8 +48,21 @@ import java.util.UUID;
 public class MerchandisingService {
 
   @Inject MerchandisingRepository repo;
+  @Inject TenantProfiles profiles;
 
   // ── fixtures ────────────────────────────────────────────────────────────────
+
+  /**
+   * The store a fixture or a space plan names is the business's ({@code 404 MERCH_STORE_NOT_FOUND};
+   * {@code 503 TENANT_STORES_UNAVAILABLE} while tenant-svc cannot say) and then the caller's
+   * ({@code 403 STORE_ACCESS_DENIED}): another business's store, or one nobody has, is not found
+   * whoever names it — an owner included, who is held to no store and so was never asked.
+   */
+  public void requireStore(TenantContext ctx, UUID storeId) {
+    CatalogueStores.requireOwn(
+        profiles, ctx.requireTenantId(), List.of(storeId), CatalogueStores.MERCH_NOT_FOUND);
+    ctx.requireStoreAccess(storeId);
+  }
 
   /**
    * Records a piece of shelving.
@@ -427,17 +442,19 @@ public class MerchandisingService {
   }
 
   /**
-   * @throws ApiException 409 {@code RESET_NOT_OPEN}
+   * @throws ApiException 404 {@code RESET_NOT_FOUND}; 409 {@code RESET_NOT_OPEN}
    */
   public Reset complete(UUID tenantId, UUID id) {
     if (!repo.moveReset(tenantId, id, Merchandising.PLANNED, Merchandising.COMPLETED, null)) {
+      requireReset(tenantId, id); // not this business's, or no such reset: 404, not "not open"
       throw ApiException.conflict("RESET_NOT_OPEN", "That reset is not open");
     }
     return requireReset(tenantId, id);
   }
 
   /**
-   * @throws ApiException 400 {@code RESET_REASON_REQUIRED}; 409 {@code RESET_NOT_OPEN}
+   * @throws ApiException 400 {@code RESET_REASON_REQUIRED}; 404 {@code RESET_NOT_FOUND}; 409 {@code
+   *     RESET_NOT_OPEN}
    */
   public Reset cancel(UUID tenantId, UUID id, String reason) {
     String why = blankToNull(reason);
@@ -448,6 +465,7 @@ public class MerchandisingService {
               + "is the thing somebody asks about in six months");
     }
     if (!repo.moveReset(tenantId, id, Merchandising.PLANNED, Merchandising.CANCELLED, why)) {
+      requireReset(tenantId, id);
       throw ApiException.conflict("RESET_NOT_OPEN", "That reset is not open");
     }
     return requireReset(tenantId, id);
@@ -466,6 +484,74 @@ public class MerchandisingService {
     if (!repo.setOwnBrand(tenantId, brandId, own)) {
       throw ApiException.notFound("BRAND_NOT_FOUND", "No such brand");
     }
+  }
+
+  // ── store scope (3 Oct 2026) ────────────────────────────────────────────────
+
+  /**
+   * A fixture belongs to a store, so a caller held to stores acts on it only if they hold that
+   * store. The fixture is the business's first (404, tenant first), then the caller's store (403
+   * {@code STORE_ACCESS_DENIED}); asked before anything is written. A caller held to no store is
+   * never refused.
+   *
+   * @throws ApiException 404 {@code FIXTURE_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}
+   */
+  public Fixture requireFixtureHeld(TenantContext ctx, UUID fixtureId) {
+    Fixture f = requireFixture(ctx.requireTenantId(), fixtureId);
+    ctx.requireStoreAccess(f.storeId());
+    return f;
+  }
+
+  /**
+   * As {@link #requireFixtureHeld}, for a layout, which is drawn for one fixture and so belongs to
+   * its store.
+   *
+   * @throws ApiException 404 {@code PLANOGRAM_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}
+   */
+  public Planogram requirePlanogramHeld(TenantContext ctx, UUID planogramId) {
+    UUID tenantId = ctx.requireTenantId();
+    Planogram p = requirePlanogram(tenantId, planogramId);
+    ctx.requireStoreAccess(requireFixture(tenantId, p.fixtureId()).storeId());
+    return p;
+  }
+
+  /**
+   * A reset is a category's, across stores, and touches the stores of the layouts attached to it: a
+   * caller held to stores acts on it only if they hold every one of them. A reset with no layout
+   * attached touches no store, and is anyone's with the right role (what they then attach is judged
+   * by that layout's store).
+   *
+   * @throws ApiException 404 {@code RESET_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}
+   */
+  public Reset requireResetHeld(TenantContext ctx, UUID resetId) {
+    UUID tenantId = ctx.requireTenantId();
+    Reset r = requireReset(tenantId, resetId);
+    if (!ctx.storeIds().isEmpty()) {
+      for (UUID storeId : repo.resetStores(tenantId).getOrDefault(r.id(), java.util.Set.of())) {
+        ctx.requireStoreAccess(storeId);
+      }
+    }
+    return r;
+  }
+
+  /**
+   * The resets a caller may see: every one for a caller held to no store; for one held to stores,
+   * those that touch at least one of theirs, and those that touch none yet.
+   */
+  public List<Reset> resetsFor(TenantContext ctx) {
+    UUID tenantId = ctx.requireTenantId();
+    List<Reset> all = repo.resetsOf(tenantId);
+    if (ctx.storeIds().isEmpty()) {
+      return all;
+    }
+    Map<UUID, java.util.Set<UUID>> stores = repo.resetStores(tenantId);
+    return all.stream()
+        .filter(
+            r -> {
+              var touched = stores.getOrDefault(r.id(), java.util.Set.of());
+              return touched.isEmpty() || touched.stream().anyMatch(ctx.storeIds()::contains);
+            })
+        .toList();
   }
 
   // ── guards ──────────────────────────────────────────────────────────────────

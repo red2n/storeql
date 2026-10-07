@@ -62,15 +62,15 @@ export default function ({ tenant, rival }) {
   expect(otherVariant, '[+] alerts for a well-stocked variant', 200);
   truthy('[+] ...are empty', (data(otherVariant) || []).length === 0, data(otherVariant));
   expect(call('GET', `${ALERTS}?limit=500`, { token: t }), '[+] an oversized limit is capped, not refused', 200);
-  expect(call('GET', `${ALERTS}?storeId=not-a-uuid`, { token: t }), '[-] store filter must be a UUID', 400);
+  expect(call('GET', `${ALERTS}?storeId=not-a-uuid`, { token: t }), '[-] store filter must be a UUID', 400, 'INVALID_UUID');
   truthy("[-] a rival tenant sees none of our alerts", !(data(call('GET', ALERTS, { token: rival.owner.token })) || []).some((a) => a.variantId === variantId));
-  expect(call('GET', ALERTS, { token: register('notify-shopper').token }), '[-] a customer cannot read alerts', 403);
-  expect(call('GET', ALERTS), '[-] no token', 401);
+  expect(call('GET', ALERTS, { token: register('notify-shopper').token }), '[-] a customer cannot read alerts', 403, 'FORBIDDEN');
+  expect(call('GET', ALERTS), '[-] no token', 401, 'UNAUTHORIZED');
 
   // ── send, with dedupe on (eventId, type) ───────────────────────────────────
   const recipient = `notify-${uniq()}@k6.storeql.test`;
   const message = { recipient, subject: 'Your order is ready', body: 'Collect it from the front desk.', type: 'ORDER_READY', eventId: newId() };
-  expect(call('POST', '/api/notification-svc/notifications/send', { token: t, body: { ...message, subject: '' } }), '[-] send: subject required', 400);
+  expect(call('POST', '/api/notification-svc/notifications/send', { token: t, body: { ...message, subject: '' } }), '[-] send: subject required', 400, 'VALIDATION_FAILED');
   expect(
     call('POST', '/api/notification-svc/notifications/send', { token: t, body: { ...message, customerId: 'not-a-uuid' } }),
     '[-] send: customerId must be a UUID',
@@ -82,7 +82,7 @@ export default function ({ tenant, rival }) {
     400,
     'INVALID_UUID'
   );
-  expect(call('POST', '/api/notification-svc/notifications/send', { token: register('notify-shopper2').token, body: message }), '[-] a customer cannot send', 403);
+  expect(call('POST', '/api/notification-svc/notifications/send', { token: register('notify-shopper2').token, body: message }), '[-] a customer cannot send', 403, 'FORBIDDEN');
   expect(call('POST', '/api/notification-svc/notifications/send', { token: t, body: message }), '[+] send a notification', 202);
   expect(call('POST', '/api/notification-svc/notifications/send', { token: t, body: message }), '[+] the same event sent twice is accepted', 202);
 

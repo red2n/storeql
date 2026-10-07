@@ -10,6 +10,7 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 import com.storeql.ids.Ids;
+import com.storeql.notification.repo.WebhookRepository;
 import com.storeql.notification.service.WebhookDeliverer;
 import com.storeql.notification.service.WebhookFanout;
 import com.storeql.notification.service.WebhookSigner;
@@ -37,6 +38,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -57,6 +61,9 @@ import org.junit.jupiter.api.Test;
 class WebhookIT {
 
   private static final PostgresSupport PG;
+  private static final CountDownLatch SLOW_ARRIVED = new CountDownLatch(2);
+  private static final AtomicInteger SLOW_MET = new AtomicInteger();
+
   private static final HttpServer RECEIVER;
   private static final String BASE;
   private static final List<Received> RECEIVED = new CopyOnWriteArrayList<>();
@@ -79,6 +86,8 @@ class WebhookIT {
     System.setProperty("storeql.webhooks.disable-after-failures", "3");
     try {
       RECEIVER = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+      // The JDK server answers on one thread by default, which would serialise any receiver.
+      RECEIVER.setExecutor(Executors.newCachedThreadPool());
     } catch (IOException e) {
       throw new IllegalStateException(e);
     }
@@ -88,7 +97,9 @@ class WebhookIT {
           byte[] body = exchange.getRequestBody().readAllBytes();
           RECEIVED.add(
               new Received(
-                  exchange.getRequestURI().getPath(),
+                  // Raw, as it crossed the wire: a decoded path would hide a query sent escaped.
+                  exchange.getRequestURI().getRawPath(),
+                  exchange.getRequestURI().getRawQuery(),
                   exchange.getRequestHeaders().entrySet().stream()
                       .collect(
                           java.util.stream.Collectors.toMap(
@@ -102,16 +113,31 @@ class WebhookIT {
           exchange.getResponseBody().write(answer);
           exchange.close();
         });
+    RECEIVER.createContext(
+        "/slow",
+        exchange -> {
+          exchange.getRequestBody().readAllBytes();
+          SLOW_ARRIVED.countDown();
+          try {
+            // Each waits for the other: only receivers sent to together can both get past.
+            if (SLOW_ARRIVED.await(10, TimeUnit.SECONDS)) SLOW_MET.incrementAndGet();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          exchange.sendResponseHeaders(200, -1);
+          exchange.close();
+        });
     RECEIVER.start();
     BASE = "http://localhost:" + RECEIVER.getAddress().getPort();
   }
 
   /** What the receiver saw. */
-  private record Received(String path, Map<String, String> headers, String body) {}
+  private record Received(String path, String query, Map<String, String> headers, String body) {}
 
   @Inject WebTarget target;
   @Inject WebhookFanout fanout;
   @Inject WebhookDeliverer deliverer;
+  @Inject WebhookRepository webhooks;
 
   @AfterAll
   static void stop() {
@@ -380,6 +406,60 @@ class WebhookIT {
   // ── delivering ─────────────────────────────────────────────────────────────
 
   @Test
+  void anEndpointWithoutADescriptionOrWithAnEssayIsRefused() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    String url = BASE + "/hook";
+
+    for (String description : new String[] {null, "", "   ", "d".repeat(121)}) {
+      Answer refused =
+          call(
+              "POST",
+              "/admin/webhooks/endpoints",
+              own,
+              endpointJson(url, description, "OrderPlaced"));
+      assertThat(refused.body().toString(), refused.status(), is(400));
+      assertThat(refused.code(), is("WEBHOOK_DESCRIPTION_INVALID"));
+    }
+    assertThat(
+        "nothing was stored",
+        call("GET", "/admin/webhooks/endpoints", own, null).items(),
+        hasSize(0));
+
+    Answer made = register(own, url, "OrderPlaced");
+    assertThat(made.body().toString(), made.status(), is(201));
+    String id = made.data().getString("id");
+    for (String description : new String[] {"  ", "", "d".repeat(121)}) {
+      Answer refused =
+          call(
+              "PUT",
+              "/admin/webhooks/endpoints/" + id,
+              own,
+              "{\"description\":\"" + description + "\"}");
+      assertThat(refused.body().toString(), refused.status(), is(400));
+      assertThat(refused.code(), is("WEBHOOK_DESCRIPTION_INVALID"));
+    }
+    Answer unchanged = call("GET", "/admin/webhooks/endpoints/" + id, own, null);
+    assertThat(unchanged.data().getString("description"), is("ERP"));
+  }
+
+  @Test
+  void slowReceiversAreSentToTogetherNotOneAfterTheOther() {
+    UUID tenantA = Ids.newId();
+    UUID tenantB = Ids.newId();
+    assertThat(register(owner(tenantA), BASE + "/slow", "OrderPlaced").status(), is(201));
+    assertThat(register(owner(tenantB), BASE + "/slow", "OrderPlaced").status(), is(201));
+    fanout.accept(orderPlaced(tenantA, Ids.newId()));
+    fanout.accept(orderPlaced(tenantB, Ids.newId()));
+
+    int sent = deliverer.tick();
+
+    assertThat(sent, is(2));
+    // Both receivers were in flight at once: each saw the other arrive before it answered.
+    assertThat("receivers that overlapped", SLOW_MET.get(), is(2));
+  }
+
+  @Test
   void anEventOfASubscribedTypeIsDeliveredSignedOnceAndOnlyToItsBusiness() {
     UUID tenant = Ids.newId();
     Caller own = owner(tenant);
@@ -443,6 +523,11 @@ class WebhookIT {
         call("GET", "/admin/webhooks/deliveries/" + d.getString("id"), owner(Ids.newId()), null)
             .status(),
         is(404));
+    // The tries are read by the business first, so another business naming our delivery's id to
+    // the repository itself is shown none of them.
+    UUID delivery = Ids.parse(d.getString("id"));
+    assertThat(webhooks.attempts(tenant, delivery), hasSize(1));
+    assertThat(webhooks.attempts(Ids.newId(), delivery), hasSize(0));
 
     // Switched off: a matching event is not even queued.
     assertThat(
@@ -572,9 +657,9 @@ class WebhookIT {
     assertThat(rest.data().getJsonArray("items"), hasSize(1));
     assertThat(rest.data().getJsonArray("items").getJsonObject(0).getString("id"), is(id));
     assertThat(absent(rest.data(), "nextCursor"), is(true));
-    assertThat(
-        call("GET", "/admin/webhooks/deliveries?status=LOST", own, null).status(),
-        anyOf(is(400), is(200)));
+    Answer lost = call("GET", "/admin/webhooks/deliveries?status=LOST", own, null);
+    assertThat(lost.body().toString(), lost.status(), is(400));
+    assertThat(lost.code(), is("WEBHOOK_STATUS_INVALID"));
   }
 
   @Test
@@ -624,5 +709,215 @@ class WebhookIT {
     assertThat(
         call("POST", "/admin/webhooks/endpoints/" + Ids.newId() + "/ping", own, null).status(),
         is(404));
+  }
+
+  /**
+   * A receiver's URL often carries its own query (a token, a channel). The query arrives as a
+   * query, never escaped into the path, each value escaped once, not twice. Its parameters may come
+   * in another order (the client writes the query from its parameters), which no receiver may rely
+   * on.
+   */
+  @Test
+  void aReceiverUrlWithAQueryIsCalledWithThatQuery() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook?token=abc%2Fdef&channel=ops", "OrderPlaced");
+    assertThat(made.body().toString(), made.status(), is(201));
+
+    Answer ping =
+        call(
+            "POST",
+            "/admin/webhooks/endpoints/" + made.data().getString("id") + "/ping",
+            own,
+            null);
+    assertThat(ping.body().toString(), ping.status(), is(202));
+    assertThat(deliverer.tick(), is(1));
+    assertThat(RECEIVED, hasSize(1));
+    assertThat(RECEIVED.get(0).path(), is("/hook"));
+    assertThat(
+        java.util.Set.of(RECEIVED.get(0).query().split("&")),
+        is(java.util.Set.of("token=abc%2Fdef", "channel=ops")));
+    assertSigned(RECEIVED.get(0), made.data().getString("secret"), "Ping");
+  }
+
+  /**
+   * Flow catalogue, mkt-notification-delivery gap 1: order-svc's OrderPlaced, payment-svc's
+   * PaymentCaptured and pricing-svc's PriceChanged carry no {@code eventId}, and the fan-out used
+   * to drop all three with a warning — subscribers never heard of them. The first two are queued
+   * under an id derived from the order or payment; the third has nothing to derive one from.
+   */
+  @Test
+  void anEventWithNoEventIdIsQueuedFromItsKeyOnceAndOneWithNoKeyIsNotQueued() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook", "OrderPlaced", "PaymentCaptured", "PriceChanged");
+    assertThat(made.status(), is(201));
+    String endpoint = made.data().getString("id");
+
+    UUID order = Ids.newId();
+    UUID payment = Ids.newId();
+    String placed =
+        "{\"eventType\":\"OrderPlaced\",\"tenantId\":\""
+            + tenant
+            + "\",\"orderId\":\""
+            + order
+            + "\",\"channel\":\"ONLINE\"}";
+    String captured =
+        "{\"eventType\":\"PaymentCaptured\",\"tenantId\":\""
+            + tenant
+            + "\",\"paymentId\":\""
+            + payment
+            + "\",\"orderId\":\""
+            + order
+            + "\",\"amount\":9.99}";
+    String priced =
+        "{\"eventType\":\"PriceChanged\",\"tenantId\":\""
+            + tenant
+            + "\",\"priceListId\":\""
+            + Ids.newId()
+            + "\"}";
+
+    assertThat(fanout.accept(placed), is(1));
+    assertThat("redelivered by Kafka: still one", fanout.accept(placed), is(0));
+    assertThat(fanout.accept(captured), is(1));
+    assertThat(fanout.accept(captured), is(0));
+    assertThat("no eventId and no key to derive one from", fanout.accept(priced), is(0));
+
+    JsonArray queued = deliveries(own, "?endpointId=" + endpoint);
+    assertThat(queued.toString(), queued, hasSize(2));
+    java.util.Set<String> ids = new java.util.HashSet<>();
+    java.util.Set<String> types = new java.util.HashSet<>();
+    for (JsonObject d : queued.getValuesAs(JsonObject.class)) {
+      ids.add(d.getString("eventId"));
+      types.add(d.getString("eventType"));
+    }
+    assertThat(types, is(java.util.Set.of("OrderPlaced", "PaymentCaptured")));
+    assertThat(
+        ids,
+        is(
+            java.util.Set.of(
+                Ids.derived(order, "webhook:OrderPlaced").toString(),
+                Ids.derived(payment, "webhook:PaymentCaptured").toString())));
+
+    // Another business's endpoint never receives this business's order, id-less or not.
+    Caller other = owner(Ids.newId());
+    String otherEndpoint = register(other, BASE + "/hook", "OrderPlaced").data().getString("id");
+    assertThat(fanout.accept(placed.replace(tenant.toString(), other.tenant().toString())), is(1));
+    assertThat(deliveries(own, "?endpointId=" + endpoint), hasSize(2));
+    assertThat(deliveries(other, "?endpointId=" + endpoint), hasSize(0));
+    assertThat(deliveries(other, "?endpointId=" + otherEndpoint), hasSize(1));
+
+    // Nothing this test queued may be left for another test's tick to send: removing an endpoint
+    // removes its deliveries with it.
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + endpoint, own, null).status(), is(200));
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + otherEndpoint, other, null).status(),
+        is(200));
+  }
+
+  /**
+   * Flow catalogue MKT-43 and MKT-44: deleting an endpoint removes its delivery log, and another
+   * business — an owner, a manager, even naming our ids — can read, ping, rotate, change, redeliver
+   * or delete nothing of ours.
+   */
+  @Test
+  void deletingAnEndpointRemovesItsDeliveriesAndAnotherBusinessCanTouchNoneOfIt() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook", "OrderPlaced");
+    String endpoint = made.data().getString("id");
+    fanout.accept(orderPlaced(tenant, Ids.newId()));
+    JsonArray queued = deliveries(own, "?endpointId=" + endpoint);
+    assertThat(queued, hasSize(1));
+    String deliveryId = queued.getJsonObject(0).getString("id");
+
+    for (Caller stranger : new Caller[] {owner(Ids.newId()), new Caller(Ids.newId(), "MANAGER")}) {
+      String who = stranger.roles();
+      assertThat(
+          who,
+          call("GET", "/admin/webhooks/endpoints/" + endpoint, stranger, null).status(),
+          is(404));
+      assertThat(
+          who,
+          call("POST", "/admin/webhooks/endpoints/" + endpoint + "/ping", stranger, null).status(),
+          is(404));
+      assertThat(
+          who,
+          call("GET", "/admin/webhooks/deliveries/" + deliveryId, stranger, null).status(),
+          is(404));
+      assertThat(
+          who,
+          call("POST", "/admin/webhooks/deliveries/" + deliveryId + "/redeliver", stranger, null)
+              .status(),
+          is(404));
+      assertThat(deliveries(stranger, "?endpointId=" + endpoint), hasSize(0));
+    }
+    Caller rival = owner(Ids.newId());
+    assertThat(
+        call("POST", "/admin/webhooks/endpoints/" + endpoint + "/secret", rival, null).status(),
+        is(404));
+    assertThat(
+        call("PUT", "/admin/webhooks/endpoints/" + endpoint, rival, "{\"enabled\":false}").status(),
+        is(404));
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + endpoint, rival, null).status(), is(404));
+
+    // Nothing of ours moved: still enabled, still there, delivery still queued.
+    Answer ours = call("GET", "/admin/webhooks/endpoints/" + endpoint, own, null);
+    assertThat(ours.data().getBoolean("enabled"), is(true));
+    assertThat(deliveries(own, "?endpointId=" + endpoint), hasSize(1));
+
+    assertThat(
+        call("DELETE", "/admin/webhooks/endpoints/" + endpoint, own, null).status(), is(200));
+    assertThat(
+        call("GET", "/admin/webhooks/deliveries/" + deliveryId, own, null).status(), is(404));
+    assertThat(deliveries(own, null), hasSize(0));
+  }
+
+  @Test
+  void aTypeNobodyCanSubscribeToIsIgnoredWhateverItCarries() {
+    UUID tenant = Ids.newId();
+    assertThat(
+        fanout.accept("{\"eventType\":\"PaymentFailed\",\"tenantId\":\"" + tenant + "\"}"), is(0));
+    assertThat(fanout.accept("{\"eventType\":\"SomethingNew\"}"), is(0));
+  }
+
+  /**
+   * The request's body is validated at the door like every other: no body, a body that is not JSON
+   * and a body of the wrong shape are refused 400 by name for registering and for changing, never
+   * read as a request with every field left out (a 500 on the old path) and never stored.
+   */
+  @Test
+  void aMissingOrMalformedBodyIsRefusedByNameAndNothingIsStoredOrChanged() {
+    UUID tenant = Ids.newId();
+    Caller own = owner(tenant);
+    Answer made = register(own, BASE + "/hook", "OrderPlaced");
+    assertThat(made.body().toString(), made.status(), is(201));
+    String id = made.data().getString("id");
+    String change = "/admin/webhooks/endpoints/" + id;
+
+    for (String bad : new String[] {"{not json", "[]", "\"https://example.com/hook\""}) {
+      Answer registering = call("POST", "/admin/webhooks/endpoints", own, bad);
+      assertThat("POST " + bad, registering.status(), is(400));
+      assertThat("POST " + bad, registering.code(), is("REQUEST_BODY_INVALID"));
+      Answer changing = call("PUT", change, own, bad);
+      assertThat("PUT " + bad, changing.status(), is(400));
+      assertThat("PUT " + bad, changing.code(), is("REQUEST_BODY_INVALID"));
+    }
+    // A literal null reaches the resource as no body at all.
+    Answer registering = call("POST", "/admin/webhooks/endpoints", own, "null");
+    assertThat(registering.body().toString(), registering.status(), is(400));
+    assertThat(registering.code(), anyOf(is("BODY_REQUIRED"), is("REQUEST_BODY_INVALID")));
+    Answer changing = call("PUT", change, own, "null");
+    assertThat(changing.body().toString(), changing.status(), is(400));
+    assertThat(changing.code(), anyOf(is("BODY_REQUIRED"), is("REQUEST_BODY_INVALID")));
+
+    // Nothing was stored, and the endpoint is as it was made.
+    assertThat(call("GET", "/admin/webhooks/endpoints", own, null).items(), hasSize(1));
+    JsonObject ep = call("GET", change, own, null).data();
+    assertThat(ep.getString("description"), is("ERP"));
+    assertThat(ep.getBoolean("enabled"), is(true));
+    assertThat(ep.getJsonArray("events"), hasSize(1));
   }
 }

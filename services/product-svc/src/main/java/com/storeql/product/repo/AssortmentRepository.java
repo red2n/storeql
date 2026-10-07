@@ -134,7 +134,8 @@ public class AssortmentRepository extends BaseOutboxRepository {
   /** One statement for both writers: a single decision, and the batch a closing review produces. */
   private static final String INSERT_CHANGE =
       "INSERT INTO assortment_changes (id, tenant_id, product_id, store_id, cluster_id, action,"
-          + " effective_from, reason, decided_by, created_at, review_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)";
+          + " effective_from, reason, decided_by, created_at, review_id, held_to_stores)"
+          + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)";
 
   private static void bindChange(PreparedStatement ps, Change ch) throws SQLException {
     ps.setObject(1, ch.id());
@@ -148,11 +149,19 @@ public class AssortmentRepository extends BaseOutboxRepository {
     ps.setObject(9, ch.decidedBy());
     ps.setObject(10, ch.createdAt().atOffset(ZoneOffset.UTC));
     ps.setObject(11, ch.reviewId());
+    ps.setBoolean(12, ch.heldToStores());
   }
 
   private static final String CHANGE_COLUMNS =
       "SELECT id, tenant_id, product_id, store_id, cluster_id, action, effective_from, reason,"
-          + " decided_by, created_at, applied_at, review_id FROM assortment_changes";
+          + " decided_by, created_at, applied_at, review_id, held_to_stores, refused_at,"
+          + " refusal_code, refusal_detail FROM assortment_changes";
+
+  /**
+   * A change still open: neither applied nor closed as refused. The same predicate as the partial
+   * index idx_assortment_changes_pending in V16__assortment_and_range_review.sql.
+   */
+  private static final String UNSETTLED = " applied_at IS NULL AND refused_at IS NULL";
 
   public Change record(Change ch) {
     return inTx(
@@ -180,12 +189,15 @@ public class AssortmentRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Everything dated on or before a day and not yet applied, oldest first so order is respected.
+   * Everything dated on or before a day and still open (neither applied nor closed as refused),
+   * oldest first so order is respected.
    */
   public List<Change> due(UUID tenantId, LocalDate asOf) {
     return query(
         CHANGE_COLUMNS
-            + " WHERE tenant_id = ? AND applied_at IS NULL AND effective_from <= ?"
+            + " WHERE tenant_id = ? AND"
+            + UNSETTLED
+            + " AND effective_from <= ?"
             + " ORDER BY effective_from, created_at",
         ps -> {
           ps.setObject(1, tenantId);
@@ -193,6 +205,30 @@ public class AssortmentRepository extends BaseOutboxRepository {
         },
         AssortmentRepository::readChange,
         "assortment changes due");
+  }
+
+  /**
+   * Every open change of the lines named, whatever its day, in the sweep's order: the plan a new
+   * change joins when it is recorded.
+   *
+   * @param productIds the lines
+   * @return their changes neither applied nor closed, oldest first
+   */
+  public List<Change> pending(UUID tenantId, java.util.Collection<UUID> productIds) {
+    if (productIds.isEmpty()) return List.of();
+    return query(
+        CHANGE_COLUMNS
+            + " WHERE tenant_id = ? AND product_id = ANY(?) AND"
+            + UNSETTLED
+            + " ORDER BY effective_from, created_at",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setArray(
+              2,
+              ps.getConnection().createArrayOf("uuid", java.util.Set.copyOf(productIds).toArray()));
+        },
+        AssortmentRepository::readChange,
+        "the open assortment changes of products");
   }
 
   /**
@@ -204,32 +240,76 @@ public class AssortmentRepository extends BaseOutboxRepository {
    */
   public List<UUID> tenantsWithDue(LocalDate asOf) {
     return query(
-        "SELECT DISTINCT tenant_id FROM assortment_changes"
-            + " WHERE applied_at IS NULL AND effective_from <= ? ORDER BY tenant_id",
+        "SELECT DISTINCT tenant_id FROM assortment_changes WHERE"
+            + UNSETTLED
+            + " AND effective_from <= ? ORDER BY tenant_id",
         ps -> ps.setObject(1, asOf),
         rs -> rs.getObject("tenant_id", UUID.class),
         "businesses with a range change due");
   }
 
   /**
-   * Applies one change to {@code product_stores} and marks it applied — one transaction.
+   * What applying one change came to.
    *
-   * <p>Both halves together on purpose: a change applied without being marked would be applied
-   * again on the next run, and a change marked without being applied would silently never happen.
-   * Neither is recoverable by looking at the data afterwards, because both leave the log and the
-   * state disagreeing with no way to tell which is right.
+   * @param applied true when this call put it into the range and marked it applied
+   * @param refusal why it was not applied, when it was judged and refused; with {@link
+   *     Assortment.Refusal#staysDue} false the change is now closed as refused. Both unset: it was
+   *     already applied or closed when the product row was locked, and nothing was written
+   */
+  public record ApplyResult(boolean applied, Assortment.Refusal refusal) {
+
+    public static final ApplyResult APPLIED = new ApplyResult(true, null);
+
+    /** Already applied or closed by another sweep: nothing to do. */
+    public static final ApplyResult SETTLED = new ApplyResult(false, null);
+
+    public static ApplyResult refused(Assortment.Refusal refusal) {
+      return new ApplyResult(false, refusal);
+    }
+  }
+
+  /**
+   * Applies one change to {@code product_stores} and marks it applied — one transaction — or, when
+   * it is judged not to apply, leaves it due or closes it as refused.
    *
-   * <p>{@code ON CONFLICT DO NOTHING} on the way in and a plain delete on the way out, so applying
-   * the same change twice is harmless if it ever does happen.
+   * <p>Applied and marked together on purpose: a change applied without being marked would be
+   * applied again on the next run, and a change marked without being applied would silently never
+   * happen. Neither is recoverable by looking at the data afterwards, because both leave the log
+   * and the state disagreeing with no way to tell which is right.
+   *
+   * <p>Decided on the range as it stands inside the same transaction, with the product row locked
+   * as {@code ProductRepository.setStoresForProduct} locks it: a range read before it could be one
+   * a PUT of the product's stores, or another change, had already replaced, and the change would be
+   * judged on a range that is gone. Every write to a change's state (applied, closed) is made under
+   * that lock, so the change is read again once it is held: one that another sweep settled
+   * meanwhile is left alone rather than written twice.
+   *
+   * <p>A refusal that stays due writes nothing. One that does not ({@link
+   * Assortment.Refusal#staysDue} false) closes the change as refused, with its code and sentence,
+   * in the same transaction that judged it, so it is never due again.
    *
    * @param stores the stores the change resolves to — one, or a cluster's members, expanded by the
    *     caller because a cluster's membership is a fact about today and not about the day it was
    *     decided
-   * @return true when this call applied it; false when something else already had
+   * @param judge sees the stores the product is sold at now (empty for every store) and says why
+   *     the change is not applied, or nothing when it may be
+   * @return what was done
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND} when the product is not the tenant's
    */
-  public boolean apply(UUID tenantId, Change ch, List<UUID> stores) {
+  public ApplyResult apply(
+      UUID tenantId,
+      Change ch,
+      List<UUID> stores,
+      java.util.function.Function<List<UUID>, Optional<Assortment.Refusal>> judge) {
     return inTx(
         c -> {
+          List<UUID> current = lockedRangeTx(c, tenantId, ch.productId());
+          if (!stillOpenTx(c, tenantId, ch.id())) return ApplyResult.SETTLED;
+          Optional<Assortment.Refusal> refusal = judge.apply(current);
+          if (refusal.isPresent()) {
+            if (!refusal.get().staysDue()) closeTx(c, tenantId, ch.id(), refusal.get());
+            return ApplyResult.refused(refusal.get());
+          }
           if (Assortment.LIST.equals(ch.action())) {
             try (PreparedStatement ps =
                 c.prepareStatement(
@@ -259,29 +339,119 @@ public class AssortmentRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE assortment_changes SET applied_at = ?"
-                      + " WHERE tenant_id = ? AND id = ? AND applied_at IS NULL")) {
+                      + " WHERE tenant_id = ? AND id = ? AND"
+                      + UNSETTLED)) {
             ps.setObject(1, Instant.now().atOffset(ZoneOffset.UTC));
             ps.setObject(2, tenantId);
             ps.setObject(3, ch.id());
-            return ps.executeUpdate() == 1;
+            return ps.executeUpdate() == 1 ? ApplyResult.APPLIED : ApplyResult.SETTLED;
           }
         },
         "apply an assortment change");
   }
 
-  /** How many rows a product has in {@code product_stores} — zero meaning "sold everywhere". */
-  public int rangedStoreCount(UUID tenantId, UUID productId) {
-    return query(
-            "SELECT COUNT(*) AS n FROM product_stores WHERE tenant_id = ? AND product_id = ?",
+  /** Whether a change is still open, read under the product lock its every settlement takes. */
+  private static boolean stillOpenTx(java.sql.Connection c, UUID tenantId, UUID changeId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT 1 FROM assortment_changes WHERE tenant_id = ? AND id = ? AND" + UNSETTLED)) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, changeId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
+  }
+
+  /** Closes a change as refused for good, with the refusal it was judged to have. */
+  private static void closeTx(
+      java.sql.Connection c, UUID tenantId, UUID changeId, Assortment.Refusal refusal)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE assortment_changes SET refused_at = ?, refusal_code = ?, refusal_detail = ?"
+                + " WHERE tenant_id = ? AND id = ? AND"
+                + UNSETTLED)) {
+      ps.setObject(1, Instant.now().atOffset(ZoneOffset.UTC));
+      ps.setString(2, refusal.code());
+      ps.setString(3, refusal.detail());
+      ps.setObject(4, tenantId);
+      ps.setObject(5, changeId);
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Locks the product row and reads the stores it is sold at, through the transaction's own
+   * connection.
+   *
+   * @return the stores; empty for every store
+   * @throws ApiException 404 {@code PRODUCT_NOT_FOUND}
+   */
+  private static List<UUID> lockedRangeTx(java.sql.Connection c, UUID tenantId, UUID productId)
+      throws SQLException {
+    // The same lock ProductRepository's range changes take (FOR NO KEY UPDATE): range changes to
+    // one product are serialised, and a variant insert's foreign-key check is not blocked.
+    try (PreparedStatement lock =
+        c.prepareStatement(
+            "SELECT id FROM products WHERE tenant_id = ? AND id = ? FOR NO KEY UPDATE")) {
+      lock.setObject(1, tenantId);
+      lock.setObject(2, productId);
+      try (ResultSet rs = lock.executeQuery()) {
+        if (!rs.next()) {
+          throw ApiException.notFound("PRODUCT_NOT_FOUND", "No such product");
+        }
+      }
+    }
+    var stores = new java.util.ArrayList<UUID>();
+    try (PreparedStatement read =
+        c.prepareStatement(
+            "SELECT store_id FROM product_stores WHERE tenant_id = ? AND product_id = ?"
+                + " ORDER BY id")) {
+      read.setObject(1, tenantId);
+      read.setObject(2, productId);
+      try (ResultSet rs = read.executeQuery()) {
+        while (rs.next()) stores.add(rs.getObject("store_id", UUID.class));
+      }
+    }
+    return stores;
+  }
+
+  /**
+   * Where each of the business's products named is sold now, for judging a change when it is
+   * recorded (it is judged again, on the range as it stands, when it is applied: {@link #apply}).
+   *
+   * @param productIds the products
+   * @return each product of this tenant's, with the stores it is sold at (empty for every store); a
+   *     product that is not the tenant's is absent
+   */
+  public Map<UUID, List<UUID>> rangesOf(UUID tenantId, java.util.Collection<UUID> productIds) {
+    Map<UUID, List<UUID>> ranges = new java.util.LinkedHashMap<>();
+    if (productIds.isEmpty()) return ranges;
+    record Row(UUID productId, UUID storeId) {}
+    for (Row r :
+        query(
+            "SELECT p.id AS product_id, ps.store_id FROM products p"
+                + " LEFT JOIN product_stores ps"
+                + " ON ps.tenant_id = p.tenant_id AND ps.product_id = p.id"
+                + " WHERE p.tenant_id = ? AND p.id = ANY(?) ORDER BY p.id, ps.id",
             ps -> {
               ps.setObject(1, tenantId);
-              ps.setObject(2, productId);
+              ps.setArray(
+                  2,
+                  ps.getConnection()
+                      .createArrayOf("uuid", java.util.Set.copyOf(productIds).toArray()));
             },
-            rs -> rs.getInt("n"),
-            "a product's ranged store count")
-        .stream()
-        .findFirst()
-        .orElse(0);
+            rs ->
+                new Row(
+                    rs.getObject("product_id", UUID.class), rs.getObject("store_id", UUID.class)),
+            "the ranges of products")) {
+      List<UUID> stores = ranges.computeIfAbsent(r.productId(), k -> new java.util.ArrayList<>());
+      if (r.storeId() != null) stores.add(r.storeId());
+    }
+    ranges.replaceAll((k, v) -> List.copyOf(v));
+    return ranges;
   }
 
   // ── reviews ─────────────────────────────────────────────────────────────────
@@ -537,7 +707,11 @@ public class AssortmentRepository extends BaseOutboxRepository {
         rs.getObject("decided_by", UUID.class),
         instant(rs, "created_at"),
         instant(rs, "applied_at"),
-        rs.getObject("review_id", UUID.class));
+        rs.getObject("review_id", UUID.class),
+        rs.getBoolean("held_to_stores"),
+        instant(rs, "refused_at"),
+        rs.getString("refusal_code"),
+        rs.getString("refusal_detail"));
   }
 
   private static Review readReview(ResultSet rs) throws SQLException {

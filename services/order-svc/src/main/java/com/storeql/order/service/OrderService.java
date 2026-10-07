@@ -11,6 +11,7 @@ import com.storeql.order.domain.Domain.GiftCardTransaction;
 import com.storeql.order.domain.Domain.Layaway;
 import com.storeql.order.domain.Domain.LayawayDeposit;
 import com.storeql.order.domain.Domain.LayawayItem;
+import com.storeql.order.domain.Domain.OfflineSaleFlag;
 import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderDeposit;
 import com.storeql.order.domain.Domain.OrderDiscount;
@@ -25,16 +26,25 @@ import com.storeql.order.domain.Domain.SalesByHourRow;
 import com.storeql.order.domain.Domain.SalesByStaffRow;
 import com.storeql.order.domain.Domain.SpecialOrder;
 import com.storeql.order.domain.Domain.SpecialOrderItem;
+import com.storeql.order.domain.GiftCardLoads;
 import com.storeql.order.domain.Handover;
 import com.storeql.order.domain.OrderSplit;
+import com.storeql.order.domain.ReturnValue;
 import com.storeql.order.domain.Routing;
+import com.storeql.order.domain.SpecialOrderReplay;
+import com.storeql.order.domain.StopSale;
 import com.storeql.order.domain.SubstitutePrice;
 import com.storeql.order.dto.Dtos.AddDepositRequest;
 import com.storeql.order.dto.Dtos.CreateLayawayRequest;
 import com.storeql.order.dto.Dtos.CreateReturnRequest;
 import com.storeql.order.dto.Dtos.CreateSpecialOrderRequest;
+import com.storeql.order.dto.Dtos.ExchangeNewItemRequest;
+import com.storeql.order.dto.Dtos.ExchangeRequest;
 import com.storeql.order.dto.Dtos.GenerateReceiptRequest;
+import com.storeql.order.dto.Dtos.GiftCardLoadRequest;
 import com.storeql.order.dto.Dtos.IssueGiftCardRequest;
+import com.storeql.order.dto.Dtos.NoReceiptReturnRequest;
+import com.storeql.order.dto.Dtos.OrderItemRequest;
 import com.storeql.order.dto.Dtos.PlaceOrderRequest;
 import com.storeql.order.dto.Dtos.RecordAgeCheckRequest;
 import com.storeql.order.dto.Dtos.RedeemGiftCardRequest;
@@ -42,6 +52,7 @@ import com.storeql.order.dto.Dtos.ReloadGiftCardRequest;
 import com.storeql.order.dto.Dtos.VoidRequest;
 import com.storeql.order.repo.OrderRepository;
 import com.storeql.order.repo.RecallNoticeRepository;
+import com.storeql.service.Fx;
 import com.storeql.service.StoreStatusRepository;
 import com.storeql.service.TenantStatusRepository;
 import com.storeql.web.ApiException;
@@ -57,10 +68,12 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /** Business logic for order-svc. Thin resource → this service → repository. */
@@ -89,6 +102,18 @@ public class OrderService {
   @Inject com.storeql.order.repo.DepositRepository depositRepo;
   @Inject OrderRouter router;
   @Inject FulfilmentWindowService windows;
+  @Inject SaleChecks saleChecks;
+  @Inject ReturnPolicyService returnPolicies;
+  @Inject OrderSettingsService orderSettings;
+  @Inject GiftCardCeiling giftCardCeiling;
+
+  @Inject
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.order.pending-sweeper.ttl-hours",
+      defaultValue = "24")
+  int pendingDefaultHours;
+
+  @Inject com.storeql.service.FxRates fx;
 
   // ── Orders ────────────────────────────────────────────────────────────────
 
@@ -261,8 +286,145 @@ public class OrderService {
   }
 
   public Order placeOrder(PlaceOrderRequest req, TenantContext ctx, String idempotencyKey) {
-    if (req.items() == null || req.items().isEmpty())
+    return placeOrder(req, ctx, idempotencyKey, null);
+  }
+
+  /**
+   * The request with each line's quantity as it is counted ({@link
+   * com.storeql.order.domain.Quantities}): three decimal places, as every quantity column keeps it.
+   * Finer is refused, never rounded — a column would round it silently and the line would be
+   * charged on one quantity and held, kept and deducted on another — except on a till sale, whose
+   * sale, or the offline replay of it, must not be refused over what the till sends without anyone
+   * typing it: weighings it added in floating point ({@code 0.1 + 0.2} kg posts as {@code
+   * 0.30000000000000004}) and a label's net weight read to five places (GS1 AI 3105, 0.37512 kg).
+   * Those are the reading they stand for, counted at the gram below ({@link
+   * com.storeql.order.domain.Quantities#fromTill}), before anything is priced, held or written, so
+   * the line is charged, held, kept and printed at one figure.
+   *
+   * @throws ApiException 400 {@code VALIDATION_FAILED} naming {@code items[i].qty}
+   */
+  static PlaceOrderRequest countedQuantities(PlaceOrderRequest req) {
+    if (req.items() == null || req.items().isEmpty()) return req;
+    boolean till = "POS".equalsIgnoreCase(req.channel());
+    List<OrderItemRequest> counted = new ArrayList<>(req.items().size());
+    boolean changed = false;
+    for (int i = 0; i < req.items().size(); i++) {
+      OrderItemRequest line = req.items().get(i);
+      if (line == null) {
+        counted.add(null);
+        continue;
+      }
+      String field = "items[" + i + "].qty";
+      BigDecimal qty =
+          till
+              ? com.storeql.order.domain.Quantities.fromTill(line.qty(), field)
+              : com.storeql.order.domain.Quantities.typed(line.qty(), field);
+      if (java.util.Objects.equals(qty, line.qty())) {
+        counted.add(line);
+        continue;
+      }
+      changed = true;
+      counted.add(
+          new OrderItemRequest(
+              line.variantId(),
+              qty,
+              line.unitPrice(),
+              line.notes(),
+              line.weighingInstrumentId(),
+              line.markdownId(),
+              line.batchNo(),
+              line.expiry()));
+    }
+    return changed ? req.toBuilder().items(counted).build() : req;
+  }
+
+  /**
+   * An exchange's new items as the lines of the till sale it places. The till builds them with its
+   * scanner, as it builds a sale's (a pack's label weight, 0.37512 kg, as read; weighings added in
+   * floating point), and the new sale is a till sale, so each quantity is counted as a till's line
+   * is ({@link com.storeql.order.domain.Quantities#fromTill}: the reading at the gram below) — the
+   * same pack is never taken on a sale and refused on an exchange. What the pack said of itself
+   * goes with it exactly as on a sale's line — the lot and expiry a GS1 2D code carried, the
+   * sticker's markdown, the scale it was weighed on — so the new sale's recall, markdown and scale
+   * checks judge it as they judge a sale ({@link SaleChecks}, the quote): a recalled lot is never
+   * handed over by way of an exchange. The price is never the exchange's: the new sale is priced by
+   * the server.
+   *
+   * <p>Each item's ids and expiry are judged here, by the exchange's own names for them, so a
+   * malformed new basket is refused before the sale is looked for or the caller's store judged.
+   *
+   * @param items the exchange's new items, each present (validated at the door)
+   * @return one line per item, its quantity as counted
+   * @throws ApiException 400 {@code VALIDATION_FAILED} naming {@code newItems[i].qty}, {@code
+   *     INVALID_UUID} naming {@code newItems[i].variantId}, {@code .markdownId} or {@code
+   *     .weighingInstrumentId}, {@code ORDER_LINE_EXPIRY_INVALID} naming {@code newItems[i].expiry}
+   */
+  static List<OrderItemRequest> exchangeSaleLines(List<ExchangeNewItemRequest> items) {
+    List<OrderItemRequest> lines = new ArrayList<>(items.size());
+    for (int i = 0; i < items.size(); i++) {
+      ExchangeNewItemRequest n = items.get(i);
+      String at = "newItems[" + i + "].";
+      BigDecimal qty = com.storeql.order.domain.Quantities.fromTill(n.qty(), at + "qty");
+      Parsing.uuid(n.variantId(), at + "variantId");
+      Parsing.optionalUuid(n.markdownId(), at + "markdownId");
+      Parsing.optionalUuid(n.weighingInstrumentId(), at + "weighingInstrumentId");
+      expiryOf(n.expiry(), at + "expiry");
+      lines.add(
+          new OrderItemRequest(
+              n.variantId(),
+              qty,
+              null,
+              null,
+              n.weighingInstrumentId(),
+              n.markdownId(),
+              n.batchNo(),
+              n.expiry()));
+    }
+    return lines;
+  }
+
+  /**
+   * The sale a retried placement's key already made, when the caller may see it: an order at a
+   * store the caller keeps. Null with no key, no such sale, or a sale at another store — so a
+   * refusal is never a way to read a sale the caller could not.
+   */
+  private Order standingSale(TenantContext ctx, String idempotencyKey) {
+    if (idempotencyKey == null) return null;
+    return repo.findOrderByIdempotencyKey(ctx.requireTenantId(), idempotencyKey)
+        .filter(o -> ctx.hasStoreAccess(o.storeId()))
+        .orElse(null);
+  }
+
+  /**
+   * As {@link #placeOrder(PlaceOrderRequest, TenantContext, String)}, with a step that commits with
+   * the order or not at all: the return a direct exchange writes beside the sale it pays for. Only
+   * a till sale is placed this way, so the split-checkout path never carries a step.
+   *
+   * @param afterPlaced the step, or null for none; not run when the placement is a replay
+   */
+  private Order placeOrder(
+      PlaceOrderRequest asSent,
+      TenantContext ctx,
+      String idempotencyKey,
+      OrderRepository.PlacedStep afterPlaced) {
+    List<GiftCardLoadRequest> cardLoads =
+        asSent.giftCardLoads() == null ? List.of() : asSent.giftCardLoads();
+    if ((asSent.items() == null || asSent.items().isEmpty()) && cardLoads.isEmpty())
       throw ApiException.badRequest("ORDER_NO_ITEMS", "order must have at least one item");
+    // Every line's quantity as it is counted, before anything is priced, held or written: three
+    // places, never rounded — a till's floating-point noise and a label's finer weight excepted
+    // (Quantities). A retried placement of a sale that already stands gets that sale back, as it
+    // does further down: a sale the till rang up before quantities were counted (the column rounded
+    // it then) is replayed from the offline queue under its key, and nothing is written from the
+    // figure refused here.
+    PlaceOrderRequest req;
+    try {
+      req = countedQuantities(asSent);
+    } catch (ApiException e) {
+      Order standing = standingSale(ctx, idempotencyKey);
+      if (standing != null) return standing;
+      throw e;
+    }
 
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = Parsing.uuid(req.storeId(), "storeId");
@@ -299,6 +461,23 @@ public class OrderService {
     String fulfilment =
         req.fulfilmentType() != null ? req.fulfilmentType() : Order.FULFILMENT_INSTORE;
     boolean delivery = Order.FULFILMENT_DELIVERY.equals(fulfilment);
+    BigDecimal cardValue =
+        GiftCardLoads.total(cardLoads.stream().map(GiftCardLoadRequest::amount).toList(), currency);
+    if (!cardLoads.isEmpty() && !Order.FULFILMENT_INSTORE.equals(fulfilment)) {
+      throw ApiException.badRequest(
+          "ORDER_GIFT_CARD_INSTORE_ONLY",
+          "a gift card is sold across the counter: fulfilmentType must be INSTORE");
+    }
+    for (var load : cardLoads) {
+      if (!isBlank(load.code())) {
+        GiftCard target = getGiftCard(tenantId, load.code().trim());
+        if (!GiftCard.STATUS_ACTIVE.equals(target.status()))
+          throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+        if (!target.currency().equalsIgnoreCase(currency))
+          throw ApiException.conflict(
+              "GIFT_CARD_CURRENCY_MISMATCH", "the card holds another currency than this sale");
+      }
+    }
     if (delivery) {
       if (isBlank(req.deliveryLine1())
           || isBlank(req.deliveryCity())
@@ -388,12 +567,53 @@ public class OrderService {
 
     List<UUID> variantIds =
         req.items().stream().map(ir -> Parsing.uuid(ir.variantId(), "variantId")).toList();
-    // Gap #63: when enforcement is on, the price comes from pricing-svc — the client-supplied
-    // unitPrice is ignored. When off (local dev / unseeded rigs), the client price is trusted.
-    // One batched call resolves every line instead of one cross-service HTTP call per line.
+    // Stop-sale and certified scales, checked here as well as at the till, which is one client of
+    // this endpoint and not the only one: a line an open recall covers, or one weighed on a scale
+    // the store may not weigh for trade on, is refused before anything is priced, held or placed.
+    // Both fail open when inventory-svc or tenant-svc cannot answer. A till sale replayed from the
+    // till's offline queue within the grace has already happened — the goods have gone, the money
+    // was taken — so it is never refused: what would have stopped it when it was rung up comes
+    // back as entries for the audit trail, written with the order below, naming who the till says
+    // rang it up when the business holds them at this store. A replay whose capture time is not
+    // honoured is judged as a sale made now. Online neither field is even read, so an online
+    // order is never refused over a capture time it had no business sending.
+    List<UUID> instrumentIds = instrumentsOf(req);
+    Instant capturedAt = tillSale ? capturedAtOf(req.capturedAt()) : null;
+    UUID rungUpBy = tillSale ? Parsing.optionalUuid(req.rungUpBy(), "rungUpBy") : null;
+    List<OfflineSaleFlag> offlineFlags;
+    try {
+      offlineFlags =
+          saleChecks.check(
+              new SaleChecks.Sale(
+                  tenantId,
+                  storeId,
+                  orderId,
+                  rungUpBy,
+                  ctx.userId(),
+                  staffOfThisBusiness(ctx),
+                  packsOf(req, variantIds),
+                  instrumentIds),
+              capturedAt);
+    } catch (ApiException e) {
+      // A retried placement of a sale that already stands gets that sale back, as it would further
+      // down: a recall opened, or a certificate lapsed, after the sale was made does not unmake it.
+      if (idempotencyKey != null) {
+        var earlier = repo.findOrderByIdempotencyKey(tenantId, idempotencyKey);
+        if (earlier.isPresent()) return earlier.get();
+      }
+      throw e;
+    }
+    // Gap #63: when enforcement is on, the price charged comes from pricing-svc — the
+    // client-supplied unitPrice never prices a line, the subtotal, the VAT or anything kept. On a
+    // till sale it is read for one thing only: with the quantities, the goods as the till rang
+    // them up (TillAmount.goodsAsRung), the most a full-basket staff discount is capped at the
+    // subtotal for rather than refused below — a bound on that cap, never a price, and never more
+    // authority than the role's ceiling, which is measured on the capped figure. When enforcement
+    // is off (local dev / unseeded rigs), the client price is trusted. One batched call resolves
+    // every line instead of one cross-service HTTP call per line.
     List<com.storeql.order.client.PricingClient.QuotedLine> resolvedLines = null;
     com.storeql.order.client.PricingClient.QuotedBasket quoted = null;
-    if (enforcePricing) {
+    if (enforcePricing && !variantIds.isEmpty()) {
       var lineRequests =
           new ArrayList<com.storeql.order.client.PricingClient.LineRequest>(variantIds.size());
       for (int i = 0; i < variantIds.size(); i++) {
@@ -454,14 +674,19 @@ public class OrderService {
         if (ir.unitPrice() == null)
           throw ApiException.badRequest(
               "ORDER_PRICE_REQUIRED", "unitPrice is required for variant " + ir.variantId());
-        unitPrice = ir.unitPrice();
+        // A trusted client price (enforcement off) is no finer than the currency, kept at its
+        // own minor units.
+        unitPrice = TypedMoney.require(ir.unitPrice(), currency, "unitPrice");
       }
-      BigDecimal line = quotedLineNet != null ? quotedLineNet : unitPrice.multiply(ir.qty());
+      // One rule for every line (LineMoney): quantity × unit price, rounded half up once at the
+      // currency's minor units, and the subtotal the sum of the rounded lines — the quote's lines
+      // are rounded by pricing-svc the same way, so holding them to it changes none.
+      BigDecimal line =
+          quotedLineNet != null
+              ? LineMoney.quoted(quotedLineNet, currency)
+              : LineMoney.of(unitPrice, ir.qty(), currency);
       subtotal = subtotal.add(line);
-      UUID instrumentId =
-          ir.weighingInstrumentId() == null || ir.weighingInstrumentId().isBlank()
-              ? null
-              : Parsing.uuid(ir.weighingInstrumentId(), "weighingInstrumentId");
+      UUID instrumentId = instrumentIds.get(i);
       items.add(
           new OrderItem(
               Ids.newId(),
@@ -496,8 +721,10 @@ public class OrderService {
       } else if (routed != null) {
         BigDecimal splitTax =
             enforcePricing
-                ? serverTax.setScale(2, java.math.RoundingMode.HALF_UP)
-                : req.taxAmount() != null ? req.taxAmount() : BigDecimal.ZERO;
+                ? serverTax.setScale(Fx.minorUnits(currency), java.math.RoundingMode.HALF_UP)
+                : req.taxAmount() != null
+                    ? TypedMoney.require(req.taxAmount(), currency, "taxAmount")
+                    : BigDecimal.ZERO;
         return placeSplit(
             new SplitCheckout(
                 req,
@@ -524,7 +751,7 @@ public class OrderService {
     // client Idempotency-Key, so a retried placement replays the original holds; if createOrder
     // fails below, the holds are released (best effort — the TTL sweeper is the backstop).
     List<UUID> heldReservations = List.of();
-    if (Order.CHANNEL_ONLINE.equals(req.channel()) && config.reserveEnforce()) {
+    if (Order.CHANNEL_ONLINE.equals(req.channel()) && config.reserveEnforce() && !items.isEmpty()) {
       var reserveLines =
           new ArrayList<com.storeql.order.client.InventoryClient.ReserveLine>(items.size());
       for (OrderItem it : items) {
@@ -544,15 +771,46 @@ public class OrderService {
     // Zeroing it here meant the till tendered subtotal - discount against an order stored at full
     // price, so paid_amount never covered the total, the order never confirmed, and the sweeper
     // cancelled a sale the customer had already paid for.
-    BigDecimal disc = req.discountAmount() != null ? req.discountAmount() : BigDecimal.ZERO;
+    // The staff discount and a trusted tax figure are money in the order's currency, kept at its
+    // own minor units. Typed, they are no finer than it. The till's discount is not typed: the
+    // till clamps it to the goods it added up in floating point (a whole basket of 0.70 and 0.10
+    // is 0.7999999999999999), so a till sale's is taken half up at the currency's units, as its
+    // gift-card tenders are and as payment-svc takes its other tenders, and the sale the cashier
+    // rang up, or its offline replay, is never refused over a double's noise.
+    int scale = Fx.minorUnits(currency);
+    BigDecimal disc =
+        req.discountAmount() == null
+            ? BigDecimal.ZERO
+            : tillSale
+                ? TillAmount.rounded(req.discountAmount(), currency)
+                : TypedMoney.require(req.discountAmount(), currency, "discountAmount");
     if (enforcePricing) {
-      tax = serverTax.setScale(2, java.math.RoundingMode.HALF_UP);
+      // The quote's VAT, to the currency's own minor unit: whole yen, three-decimal dinars.
+      tax = serverTax.setScale(scale, java.math.RoundingMode.HALF_UP);
     } else {
-      tax = req.taxAmount() != null ? req.taxAmount() : BigDecimal.ZERO;
+      tax =
+          req.taxAmount() != null
+              ? TypedMoney.require(req.taxAmount(), currency, "taxAmount")
+              : BigDecimal.ZERO;
     }
     if (disc.signum() < 0)
       throw ApiException.badRequest(
           "ORDER_DISCOUNT_NEGATIVE", "discountAmount cannot be negative — got " + disc);
+    // A till's discount is at most the goods, as the till itself caps it — but the till caps it
+    // at the goods as it rang them up, its lines added unrounded (2 × 0.333 kg at 1.99 is 1.32534,
+    // shown as 1.33), while this service rounds each line half up first (0.66 + 0.66 = 1.32), and
+    // the till's prices may be older than the quote's. A discount no more than the till's goods,
+    // half up 1.33, is the whole basket: 1.32. The role's ceiling below is measured on that capped
+    // figure, so the cap widens nobody's authority. More than the till's own goods is no rounding
+    // of the till's, and is refused below like a discount typed anywhere else.
+    if (tillSale
+        && disc.compareTo(subtotal) > 0
+        && disc.compareTo(
+                TillAmount.goodsAsRung(
+                    asSent.items(), items.stream().map(OrderItem::lineTotal).toList(), currency))
+            <= 0) {
+      disc = subtotal;
+    }
     if (disc.compareTo(subtotal) > 0)
       throw ApiException.badRequest(
           "ORDER_DISCOUNT_EXCEEDS_SUBTOTAL",
@@ -578,7 +836,10 @@ public class OrderService {
         containerDeposits.stream()
             .map(OrderDeposit::amount)
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-    BigDecimal total = subtotal.add(tax).subtract(disc).subtract(promoDiscount).add(depositAmount);
+    // Value sold on gift cards is what the customer pays and nothing else: no VAT (it falls due
+    // when the card is spent), no discount, no stock, no share of the subtotal.
+    BigDecimal total =
+        subtotal.add(tax).subtract(disc).subtract(promoDiscount).add(depositAmount).add(cardValue);
 
     boolean taxExempt = req.taxExempt() != null && req.taxExempt();
     // SJ-D41: a catalog-mode till order is placed without prices and waits for a manager; it is
@@ -652,7 +913,9 @@ public class OrderService {
                   order.slotTimeZone()),
               discountAudit,
               quoted == null ? List.of() : quoted.applied(),
-              containerDeposits);
+              containerDeposits,
+              offlineFlags,
+              withCardLoads(afterPlaced, orderId, tenantId, cardLoads, currency));
       // Spending the coupon is deliberately the last thing, and deliberately outside the order's
       // transaction. A basket is quoted on every change and must not burn a redemption by being
       // looked at; only a placed order spends one. If this call fails the order still stands — a
@@ -682,6 +945,36 @@ public class OrderService {
   }
 
   /**
+   * The step that writes an order's gift-card lines on the order's own transaction, after any step
+   * the caller already has.
+   */
+  private static OrderRepository.PlacedStep withCardLoads(
+      OrderRepository.PlacedStep before,
+      UUID orderId,
+      UUID tenantId,
+      List<GiftCardLoadRequest> loads,
+      String currency) {
+    if (loads.isEmpty()) return before;
+    List<Domain.GiftCardLoadLine> lines =
+        loads.stream()
+            .map(
+                l ->
+                    new Domain.GiftCardLoadLine(
+                        Ids.newId(),
+                        tenantId,
+                        orderId,
+                        // Already checked by GiftCardLoads.total; kept at the currency's scale.
+                        GiftCardLoads.amount(l.amount(), currency),
+                        isBlank(l.code()) ? null : l.code().trim(),
+                        null))
+            .toList();
+    return (c, placed) -> {
+      if (before != null) before.run(c, placed);
+      OrderRepository.insertGiftCardLoadLinesTx(c, lines);
+    };
+  }
+
+  /**
    * Whether the store is one of the tenant's dark stores. An unreadable answer is not a refusal:
    * the store is taken for a shop and the order placed as it always was, as routing does when the
    * stores cannot be read.
@@ -697,6 +990,88 @@ public class OrderService {
           e.code(),
           storeId);
       return false;
+    }
+  }
+
+  /** Each line's weighing instrument, null for a line sold by the each. */
+  private static List<UUID> instrumentsOf(PlaceOrderRequest req) {
+    List<UUID> out = new ArrayList<>(req.items().size());
+    for (var ir : req.items()) {
+      out.add(
+          isBlank(ir.weighingInstrumentId())
+              ? null
+              : Parsing.uuid(ir.weighingInstrumentId(), "weighingInstrumentId"));
+    }
+    return out;
+  }
+
+  /**
+   * Each line as its pack described itself: the lot and expiry a GS1 2D code carried, when the till
+   * read one. Used to check the line against open recalls, and not stored.
+   *
+   * @throws ApiException 400 {@code ORDER_LINE_EXPIRY_INVALID} for an expiry that is not a date
+   */
+  private static List<StopSale.Pack> packsOf(PlaceOrderRequest req, List<UUID> variantIds) {
+    List<StopSale.Pack> out = new ArrayList<>(variantIds.size());
+    for (int i = 0; i < variantIds.size(); i++) {
+      var ir = req.items().get(i);
+      out.add(new StopSale.Pack(i, variantIds.get(i), ir.batchNo(), expiryOf(ir.expiry(), i)));
+    }
+    return out;
+  }
+
+  /**
+   * When a replayed till sale says the cashier completed it; null when the request does not say.
+   *
+   * @throws ApiException 400 {@code ORDER_CAPTURED_AT_INVALID} for a time that is not an instant
+   */
+  private static Instant capturedAtOf(String text) {
+    if (isBlank(text)) return null;
+    try {
+      return java.time.OffsetDateTime.parse(text.strip()).toInstant();
+    } catch (DateTimeException e) {
+      throw new ApiException(
+          400,
+          "ORDER_CAPTURED_AT_INVALID",
+          "capturedAt must be an instant with its offset, e.g. 2026-09-29T10:15:30Z",
+          List.of(),
+          e);
+    }
+  }
+
+  /**
+   * Whether the caller's own sign-in is staff of this business. The store was checked already
+   * ({@link TenantContext#requireStoreAccess}), so a till naming the caller as who rang the sale up
+   * needs no second question; the platform's own administrator is no member of any business.
+   */
+  private static boolean staffOfThisBusiness(TenantContext ctx) {
+    return ctx.hasRole("OWNER")
+        || ctx.hasRole("MANAGER")
+        || ctx.hasRole("STOREKEEPER")
+        || ctx.hasRole("CASHIER");
+  }
+
+  private static java.time.LocalDate expiryOf(String text, int line) {
+    return expiryOf(text, "items[" + line + "].expiry");
+  }
+
+  /**
+   * The expiry a pack declared, or null when it declared none.
+   *
+   * @param field the request's own name for it, for the refusal
+   * @throws ApiException 400 {@code ORDER_LINE_EXPIRY_INVALID} for a text that is not a date
+   */
+  private static java.time.LocalDate expiryOf(String text, String field) {
+    if (isBlank(text)) return null;
+    try {
+      return java.time.LocalDate.parse(text.strip());
+    } catch (DateTimeException e) {
+      throw new ApiException(
+          400,
+          "ORDER_LINE_EXPIRY_INVALID",
+          field + " must be a date as the pack printed it, e.g. 2026-10-01",
+          List.of(),
+          e);
     }
   }
 
@@ -1259,9 +1634,10 @@ public class OrderService {
             plan.byStore(),
             co.tax(),
             BigDecimal.ZERO,
-            BigDecimal.ZERO);
+            BigDecimal.ZERO,
+            Fx.minorUnits(co.currency()));
     List<List<com.storeql.order.client.PricingClient.AppliedPromotion>> promotions =
-        promotionsByPart(co.applied(), parts);
+        promotionsByPart(co.applied(), parts, Fx.minorUnits(co.currency()));
     UUID groupId = Ids.newId();
     UUID idemBase = idempotencyKey != null ? Ids.parse(idempotencyKey) : groupId;
     PlaceOrderRequest req = co.req();
@@ -1372,7 +1748,9 @@ public class OrderService {
                     child.slotTimeZone()),
                 null,
                 promotions.get(k),
-                deposits));
+                deposits,
+                // A split checkout is online, and only a till sale is replayed from a queue.
+                List.of()));
       }
       repo.createOrderGroup(
           new com.storeql.order.domain.OrderGroup(
@@ -1420,7 +1798,8 @@ public class OrderService {
   private static List<List<com.storeql.order.client.PricingClient.AppliedPromotion>>
       promotionsByPart(
           List<com.storeql.order.client.PricingClient.AppliedPromotion> applied,
-          List<OrderSplit.Part> parts) {
+          List<OrderSplit.Part> parts,
+          int scale) {
     List<List<com.storeql.order.client.PricingClient.AppliedPromotion>> out = new ArrayList<>();
     parts.forEach(p -> out.add(new ArrayList<>()));
     for (var a : applied) {
@@ -1437,7 +1816,7 @@ public class OrderService {
         out.get(0).add(a);
         continue;
       }
-      List<BigDecimal> shares = OrderSplit.share(a.amount(), qtys);
+      List<BigDecimal> shares = OrderSplit.share(a.amount(), qtys, scale);
       for (int k = 0; k < parts.size(); k++) {
         if (qtys.get(k).signum() > 0) {
           out.get(k)
@@ -1693,8 +2072,12 @@ public class OrderService {
     if (customerId == null && loginId == null) {
       return List.of();
     }
-    return repo.listOrdersForSubject(tenantId, customerId, loginId, EXPORT_MAX_ORDERS).stream()
-        .map(o -> new OrderWithItems(o, repo.findOrderItems(tenantId, o.id())))
+    List<Order> orders =
+        repo.listOrdersForSubject(tenantId, customerId, loginId, EXPORT_MAX_ORDERS);
+    // One read for every order's lines, not one per order.
+    var items = repo.findOrderItems(tenantId, orders.stream().map(Order::id).toList());
+    return orders.stream()
+        .map(o -> new OrderWithItems(o, items.getOrDefault(o.id(), List.of())))
         .toList();
   }
 
@@ -1858,14 +2241,17 @@ public class OrderService {
    * @param tenantId owning tenant
    * @param orderId the order to confirm
    * @param userId the staff member or system actor confirming it
+   * @param ctx the caller, who must be staff allowed to act at the order's store
    * @return the confirmed order
-   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; a conflict when
-   *     the order is not awaiting confirmation
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists in this business;
+   *     {@code STORE_ACCESS_DENIED} (403) for staff held to other stores; {@code
+   *     ORDER_NOT_FOUND_OR_WRONG_STATUS} (404) when the order is not awaiting confirmation
    */
-  public Order confirmOrder(UUID tenantId, UUID orderId, UUID userId) {
+  public Order confirmOrder(UUID tenantId, UUID orderId, UUID userId, TenantContext ctx) {
     // Load the order so OrderConfirmed can carry the buyer + settled amount (loyalty accrual)
     // and its lines (sales by category).
     Order order = getOrder(tenantId, orderId);
+    ctx.requireStoreAccess(order.storeId());
     var confirmEvent =
         Events.orderConfirmed(
             tenantId,
@@ -2018,20 +2404,25 @@ public class OrderService {
       UUID tenantId, UUID orderId, TenantContext ctx, int waitSeconds) {
     requireReadAccess(getOrder(tenantId, orderId), ctx);
     long deadline = System.nanoTime() + Math.min(Math.max(waitSeconds, 0), 20) * 1_000_000_000L;
+    // Polls back off (250 ms, 500 ms, then every second) so a long wait is a handful of reads.
+    long pauseMillis = 250;
     do {
       var found = receiptRepo.findByOrder(tenantId, orderId);
       if (found.isPresent()) {
         return found.get();
       }
-    } while (System.nanoTime() < deadline && pauseBriefly());
+      long leftMillis = (deadline - System.nanoTime()) / 1_000_000L;
+      if (leftMillis <= 0 || !pauseBriefly(Math.min(pauseMillis, leftMillis))) break;
+      pauseMillis = Math.min(pauseMillis * 2, 1000);
+    } while (System.nanoTime() < deadline);
     throw ApiException.notFound(
         "ORDER_RECEIPT_NOT_ISSUED", "No fiscal receipt has been issued for this sale");
   }
 
   /** One poll interval; false when the thread was interrupted, which ends the wait. */
-  private static boolean pauseBriefly() {
+  private static boolean pauseBriefly(long millis) {
     try {
-      Thread.sleep(250);
+      Thread.sleep(millis);
       return true;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
@@ -2148,8 +2539,8 @@ public class OrderService {
   public Object exportRegister(
       UUID tenantId, UUID storeId, String series, String period, String format) {
     String s = seriesOrDefault(series);
-    var docs = receiptRepo.listSeries(tenantId, storeId, s, period, 1_000_000);
     if ("json".equalsIgnoreCase(format)) {
+      var docs = receiptRepo.listSeries(tenantId, storeId, s, period, 1_000_000);
       var lines = new java.util.HashMap<Long, List<Map<String, Object>>>();
       for (var l : receiptRepo.linesInSeries(tenantId, storeId, s, period)) {
         var line = new LinkedHashMap<String, Object>();
@@ -2191,31 +2582,42 @@ public class OrderService {
         new StringBuilder(
             "number,fullNumber,issuedAt,orderId,currency,grossTotal,taxTotal,voidedAt,voidReason,"
                 + "prevHash,hash\n");
-    for (var d : docs) {
-      csv.append(d.number())
-          .append(',')
-          .append(csvCell(d.fullNumber()))
-          .append(',')
-          .append(d.issuedAt())
-          .append(',')
-          .append(d.orderId())
-          .append(',')
-          .append(d.currency())
-          .append(',')
-          .append(d.grossTotal().toPlainString())
-          .append(',')
-          .append(d.taxTotal().toPlainString())
-          .append(',')
-          .append(d.voidedAt() == null ? "" : d.voidedAt().toString())
-          .append(',')
-          .append(csvCell(d.voidReason()))
-          .append(',')
-          .append(csvCell(d.prevHash()))
-          .append(',')
-          .append(csvCell(d.hash()))
-          .append('\n');
-    }
+    receiptRepo.forEachInSeries(
+        tenantId,
+        storeId,
+        s,
+        period,
+        com.storeql.order.repo.FiscalReceiptRepository.pageSize(),
+        d -> {
+          appendCsvRow(csv, d);
+          return true;
+        });
     return csv.toString();
+  }
+
+  private static void appendCsvRow(StringBuilder csv, Domain.FiscalReceipt d) {
+    csv.append(d.number())
+        .append(',')
+        .append(csvCell(d.fullNumber()))
+        .append(',')
+        .append(d.issuedAt())
+        .append(',')
+        .append(d.orderId())
+        .append(',')
+        .append(d.currency())
+        .append(',')
+        .append(d.grossTotal().toPlainString())
+        .append(',')
+        .append(d.taxTotal().toPlainString())
+        .append(',')
+        .append(d.voidedAt() == null ? "" : d.voidedAt().toString())
+        .append(',')
+        .append(csvCell(d.voidReason()))
+        .append(',')
+        .append(csvCell(d.prevHash()))
+        .append(',')
+        .append(csvCell(d.hash()))
+        .append('\n');
   }
 
   private static String csvCell(String v) {
@@ -2243,14 +2645,28 @@ public class OrderService {
    * @param orderId the order to cancel
    * @param reason free-text reason recorded on the status transition
    * @param userId the staff member cancelling it
+   * @param ctx the caller: staff are held to the order's store like the void and the return beside
+   *     it; a shopper may cancel only their own unpaid, PENDING online order ({@link
+   *     #cancelOwnOrder})
    * @return the cancelled order
-   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
-   *     ORDER_CANNOT_CANCEL} (409) when it is not PENDING or CONFIRMED
+   * @throws ApiException {@code ORDER_GIFT_CARD_SPENT} (409) when a gift card the sale loaded has
+   *     been spent (nothing moves); {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
+   *     STORE_ACCESS_DENIED} (403) for staff held to other stores; {@code PERMISSION_DENIED} (403)
+   *     when money was taken and the caller may not void; {@code ORDER_CANNOT_CANCEL} (409) when it
+   *     is not PENDING or CONFIRMED
    */
-  public Order cancelOrder(UUID tenantId, UUID orderId, String reason, UUID userId) {
+  public Order cancelOrder(
+      UUID tenantId, UUID orderId, String reason, UUID userId, TenantContext ctx) {
     // PENDING covers pay-later online orders awaiting confirmation; both states must be
     // cancellable so their stock holds get released (inventory-svc reacts to OrderCancelled).
     Order order = getOrder(tenantId, orderId);
+    if (!isStaff(ctx)) return cancelOwnOrder(order, reason, ctx);
+    ctx.requireStoreAccess(order.storeId());
+    // Once a tender was captured, payment-svc refunds it on OrderCancelled: that is a void, and
+    // asks what a void asks. An order nobody paid for is still any staff's at its store to cancel.
+    if (repo.paidAmount(tenantId, orderId).signum() > 0) {
+      ctx.requirePermission(com.storeql.web.Permissions.SALES_VOID);
+    }
     if (Order.STATUS_PARTIALLY_FULFILLED.equals(order.status()))
       throw ApiException.conflict(
           "ORDER_PARTLY_FULFILLED",
@@ -2268,7 +2684,43 @@ public class OrderService {
         Order.STATUS_CANCELLED,
         reason,
         userId,
-        Events.orderCancelled(tenantId, orderId, reason, order.channel(), order.fulfilmentType()));
+        Events.orderCancelled(tenantId, orderId, reason, order.channel(), order.fulfilmentType()),
+        r -> Events.giftCardLoadReversed(r.card(), r.tx()));
+  }
+
+  /**
+   * A shopper cancelling their own order, and only that: an online order they placed, still
+   * PENDING, with nothing paid towards it. Anything else, once money has moved or the shop has
+   * begun to fill it, is the shop's to cancel or refund, so the shopper is told to ask. An order
+   * that is not theirs is a 404, the same as reading it, so no one can probe for ids.
+   *
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404) unless the order was placed with the
+   *     caller's own login; {@code ORDER_CANNOT_CANCEL} (409) unless it is PENDING and not one part
+   *     of a split checkout; {@code ORDER_CANCEL_PAID_NEEDS_STAFF} (409) when any part of it is
+   *     paid
+   */
+  private Order cancelOwnOrder(Order order, String reason, TenantContext ctx) {
+    requireReadAccess(order, ctx);
+    if (!Order.CHANNEL_ONLINE.equals(order.channel())
+        || !Order.STATUS_PENDING.equals(order.status())
+        || repo.groupIdOf(order.tenantId(), order.id()).isPresent())
+      throw ApiException.conflict(
+          "ORDER_CANNOT_CANCEL",
+          "only an online order still waiting for payment can be cancelled by its shopper; ask the"
+              + " shop about this one");
+    if (repo.paidAmount(order.tenantId(), order.id()).signum() > 0)
+      throw ApiException.conflict(
+          "ORDER_CANCEL_PAID_NEEDS_STAFF",
+          "some of this order is paid, so the shop has to cancel it and refund what was taken");
+    return repo.transitionOrderStatus(
+        order.tenantId(),
+        order.id(),
+        Order.STATUS_PENDING,
+        Order.STATUS_CANCELLED,
+        reason,
+        ctx.userId(),
+        Events.orderCancelled(
+            order.tenantId(), order.id(), reason, order.channel(), order.fulfilmentType()));
   }
 
   /**
@@ -2306,15 +2758,25 @@ public class OrderService {
     ctx.requireStoreAccess(order.storeId());
     Map<UUID, BigDecimal> prices = new LinkedHashMap<>();
     for (var line : req.lines()) {
-      if (line.unitPrice() == null || line.unitPrice().signum() < 0) {
-        throw ApiException.badRequest("ORDER_PRICE_INVALID", "a unit price cannot be negative");
+      // A null element passes Bean Validation (a cascade skips nulls), so it is refused here.
+      if (line == null || line.unitPrice() == null || line.unitPrice().signum() < 0) {
+        throw ApiException.badRequest(
+            "ORDER_PRICE_INVALID", "each line needs a unit price of zero or more");
       }
-      prices.put(Parsing.uuid(line.variantId(), "variantId"), line.unitPrice());
+      // No finer than the order's currency, kept at its own minor units.
+      prices.put(
+          Parsing.uuid(line.variantId(), "variantId"),
+          TypedMoney.require(
+              line.unitPrice(), order.currency(), "unitPrice", "ORDER_PRICE_INVALID"));
     }
     if (prices.isEmpty()) {
       throw ApiException.badRequest("ORDER_PRICE_LINE_MISSING", "no prices given");
     }
-    BigDecimal tax = req.taxAmount() == null ? BigDecimal.ZERO : req.taxAmount();
+    BigDecimal tax =
+        req.taxAmount() == null
+            ? BigDecimal.ZERO
+            : TypedMoney.require(
+                req.taxAmount(), order.currency(), "taxAmount", "ORDER_PRICE_INVALID");
     return repo.priceOrder(tenantId, orderId, prices, tax, userId);
   }
 
@@ -2434,38 +2896,77 @@ public class OrderService {
    * they were handed over. Returning a PENDING or CONFIRMED order would record a refund for goods,
    * and often money, that were never exchanged — cancel it instead.
    *
+   * <p>The business's return policy is checked before anything is written. A return outside it
+   * (past the window, over the cashier's ceiling) needs a caller holding {@code sales.refund}, who
+   * is then named on it; anyone else is refused with the reasons. A retry under the same {@code
+   * Idempotency-Key} answers with the first return and writes nothing.
+   *
    * @param tenantId owning tenant
    * @param orderId the order being returned against
-   * @param req the lines and quantities coming back, and the reason
+   * @param req the lines, their conditions and quantities, the reason and the refund method
+   * @param idempotencyKey the caller's key, already known to be present
    * @param ctx caller context, checked for access to the order's store
-   * @return the recorded return
+   * @return the recorded return, or the first one made under this key
    * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
-   *     ORDER_CANNOT_RETURN} (409) when it is not FULFILLED or PARTIALLY_REFUNDED
+   *     ORDER_CANNOT_RETURN} (409) when it is not FULFILLED or PARTIALLY_REFUNDED; {@code
+   *     ORDER_RETURN_NEEDS_MANAGER} (403) when the return is outside the policy and the caller
+   *     holds no {@code sales.refund}
    */
   public Return createReturn(
-      UUID tenantId, UUID orderId, CreateReturnRequest req, TenantContext ctx) {
+      UUID tenantId,
+      UUID orderId,
+      CreateReturnRequest req,
+      String idempotencyKey,
+      TenantContext ctx) {
     Order order =
         repo.findOrder(tenantId, orderId)
             .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
     ctx.requireStoreAccess(order.storeId());
 
+    // A retry answers with the first return, before anything is judged again: the policy and the
+    // order's status may have moved on, and the first answer is still the answer.
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findReturnByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedReturn(earlier.get(), orderId);
+
+    // What the request says is judged before what the order is: a bad request is the caller's to
+    // fix whatever state the order is in.
+    if (req.items() == null || req.items().isEmpty())
+      throw ApiException.badRequest("ORDER_RETURN_NO_ITEMS", "a return needs at least one item");
+    // A refund that settles a product-safety recall is the business's duty, not a favour its
+    // return policy grants: no window or limit stands in its way, and the goods go to RECALLED
+    // whatever state they are in, so a condition is not asked for (one that is sent is checked).
+    boolean settlesRecall = req.recallNoticeId() != null && !req.recallNoticeId().isBlank();
+    for (var ri : req.items()) {
+      if (!settlesRecall || !isBlank(ri.condition())) returnCondition(ri.condition());
+    }
+
     // Goods can only come back once they were handed over. An order still PENDING or CONFIRMED
     // never left the store — cancel it instead; returning it recorded a refund for goods, and
     // often money, that were never exchanged. A fully REFUNDED order has nothing left to refund.
-    if (!Order.STATUS_FULFILLED.equals(order.status())
-        && !Order.STATUS_PARTIALLY_FULFILLED.equals(order.status())
-        && !Order.STATUS_PARTIALLY_REFUNDED.equals(order.status()))
+    requireReturnable(order);
+
+    String method = returnMethod(req.refundMethod());
+    if (Return.METHOD_STORE_CREDIT.equals(method) && order.customerId() == null)
       throw ApiException.conflict(
-          "ORDER_CANNOT_RETURN",
-          "only a fulfilled order can be returned; this one is " + order.status());
+          "ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER",
+          "store credit goes to the sale's customer, and this sale names none");
+    String giftCode = req.giftCardCode() == null ? "" : req.giftCardCode().trim();
+    if (!giftCode.isEmpty() && !Return.METHOD_GIFT_CARD.equals(method))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_GIFT_CARD_CODE_UNEXPECTED",
+          "giftCardCode is only for a refund to a gift card");
 
     List<OrderItem> orderItems = repo.findOrderItems(tenantId, orderId);
+    ReturnWorths worths = new ReturnWorths(repo.returnedQtyByVariant(tenantId, orderId));
     UUID returnId = Ids.newId();
     BigDecimal totalRefund = BigDecimal.ZERO;
     List<ReturnItem> returnItems = new ArrayList<>();
-    String method = req.refundMethod() != null ? req.refundMethod() : Return.METHOD_ORIGINAL;
+    boolean everyLineFaulty = true;
 
     for (var ri : req.items()) {
+      String condition =
+          settlesRecall && isBlank(ri.condition()) ? null : returnCondition(ri.condition());
       UUID variantId = Parsing.uuid(ri.variantId(), "variantId");
       OrderItem matched =
           orderItems.stream()
@@ -2475,13 +2976,70 @@ public class OrderService {
                   () ->
                       ApiException.notFound(
                           "ITEM_NOT_IN_ORDER", "variant " + ri.variantId() + " not in order"));
-      BigDecimal refundAmt = matched.unitPrice().multiply(ri.qty());
-      totalRefund = totalRefund.add(refundAmt);
+      // The refund is what the customer paid for the quantity: its net price and VAT less its
+      // share of the order's discounts; the line keeps the net figure the fiscal and commission
+      // reports read, likewise less that share.
+      var worth = worthOfReturn(order, orderItems, worths, matched, ri.qty());
+      totalRefund = totalRefund.add(worth.value());
+      everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
       returnItems.add(
           new ReturnItem(
-              Ids.newId(), tenantId, returnId, variantId, ri.qty(), refundAmt, ri.condition()));
+              Ids.newId(), tenantId, returnId, variantId, ri.qty(), worth.net(), condition));
     }
 
+    // A refund to a gift card goes on a new card or a named one of this business. Read here, so a
+    // card that is not there or not usable is refused before the policy is judged or anything is
+    // written; the card itself is written on the return's own transaction below.
+    GiftCard freshCard = null;
+    String topUpCode = null;
+    UUID giftCardId = null;
+    if (Return.METHOD_GIFT_CARD.equals(method)) {
+      if (giftCode.isEmpty()) {
+        giftCardId = Ids.newId();
+        freshCard =
+            new GiftCard(
+                giftCardId,
+                tenantId,
+                order.storeId(),
+                generateGiftCardCode(),
+                totalRefund,
+                totalRefund,
+                GiftCard.STATUS_ACTIVE,
+                order.currency(),
+                Instant.now(),
+                null);
+      } else {
+        topUpCode = giftCode.toUpperCase(Locale.ROOT);
+        GiftCard card = getGiftCard(tenantId, topUpCode);
+        if (!GiftCard.STATUS_ACTIVE.equals(card.status()))
+          throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+        if (!card.currency().equalsIgnoreCase(order.currency()))
+          throw ApiException.conflict(
+              "GIFT_CARD_CURRENCY_MISMATCH",
+              "the card holds " + card.currency() + " and this sale is in " + order.currency());
+        giftCardId = card.id();
+      }
+    }
+
+    // The policy, before anything is written. Outside it the caller must hold sales.refund and is
+    // named as the approver; otherwise the refusal lists why, and no return, refund or restock
+    // exists afterwards.
+    List<String> outside =
+        settlesRecall
+            ? List.of()
+            : returnPolicies
+                .effective(tenantId)
+                .reasons(
+                    handedOverAt(order),
+                    Instant.now(),
+                    storeZone(tenantId, order.storeId()),
+                    inHomeCurrency(tenantId, totalRefund, order.currency()),
+                    everyLineFaulty);
+    UUID approvedBy = approverFor(outside, ctx);
+
+    // One clock for the row and the answer, at the precision Postgres keeps, so a replay under the
+    // same key answers with exactly the times the first did.
+    Instant returnedAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
     Return ret =
         new Return(
             returnId,
@@ -2492,10 +3050,14 @@ public class OrderService {
             totalRefund,
             method,
             Return.STATUS_COMPLETED,
-            Instant.now(),
-            Instant.now(),
+            returnedAt,
+            returnedAt,
             // The audit trail (20.11) names who took the goods back; a return never used to.
-            ctx.userId());
+            ctx.userId(),
+            key,
+            approvedBy,
+            outside,
+            giftCardId);
 
     // A refund that settles a recall notice (05.10) settles it in this transaction: the goods, the
     // money and the notice agree, or none of them is recorded.
@@ -2503,27 +3065,734 @@ public class OrderService {
         req.recallNoticeId() == null || req.recallNoticeId().isBlank()
             ? null
             : Parsing.uuid(req.recallNoticeId(), "recallNoticeId");
-    Return created =
-        repo.createReturn(
-            ret,
-            returnItems,
-            Events.orderReturned(
+    GiftCard cardToWrite = freshCard;
+    String codeToTopUp = topUpCode;
+    BigDecimal refund = totalRefund;
+    OrderRepository.ReturnStep step =
+        c -> {
+          if (Return.METHOD_GIFT_CARD.equals(method)) {
+            repo.giftCardForReturnTx(
+                c,
+                cardToWrite,
+                codeToTopUp,
                 tenantId,
+                refund,
                 orderId,
                 returnId,
-                order.storeId(),
-                returnItems,
-                totalRefund,
-                method,
-                order.currency()),
-            noticeId == null
-                ? null
-                : c ->
-                    RecallNoticeRepository.resolveByReturnTx(
-                        c, tenantId, noticeId, orderId, returnId, ctx.userId()));
+                (card, tx) -> Events.giftCardLoadedByReturn(card, tx, returnId));
+          }
+          if (noticeId != null) {
+            RecallNoticeRepository.resolveByReturnTx(
+                c, tenantId, noticeId, orderId, returnId, ctx.userId());
+          }
+        };
+    Return created;
+    try {
+      created =
+          repo.createReturn(
+              ret,
+              returnItems,
+              Events.orderReturned(
+                  tenantId,
+                  orderId,
+                  returnId,
+                  order.storeId(),
+                  returnItems,
+                  totalRefund,
+                  method,
+                  order.currency(),
+                  order.customerId(),
+                  Return.METHOD_GIFT_CARD.equals(method) ? giftCardId : null,
+                  noticeId != null,
+                  approvedBy),
+              step);
+    } catch (ApiException e) {
+      // Two attempts with one key raced and this one lost — on the key itself, or on the quantity
+      // the winner just took back. Either way the winner's return is the answer.
+      var first = repo.findReturnByKey(tenantId, key);
+      if (first.isPresent()) return replayedReturn(first.get(), orderId);
+      throw e;
+    }
     // A return against an invoiced sale is credited (18.9), in the background.
     salesInvoices.issueCreditNoteLater(tenantId, orderId, created.id(), ctx.userId());
     return created;
+  }
+
+  /**
+   * What has come back from each variant of a sale so far, kept while a request is worked through
+   * so two lines of one request for one variant are valued one after the other.
+   */
+  private static final class ReturnWorths {
+    private final Map<UUID, BigDecimal> returned;
+
+    ReturnWorths(Map<UUID, BigDecimal> alreadyReturned) {
+      this.returned = new HashMap<>(alreadyReturned);
+    }
+
+    BigDecimal take(UUID variantId, BigDecimal qty) {
+      BigDecimal before = returned.getOrDefault(variantId, BigDecimal.ZERO);
+      returned.put(variantId, before.add(qty));
+      return before;
+    }
+  }
+
+  /**
+   * What returning {@code qty} of a sold line is worth: what the customer paid for it, the order's
+   * discounts (the staff discount and the promotion engine's whole-basket reduction) taken off in
+   * proportion to the line's net value, in the currency's minor units, so the parts a line comes
+   * back in never add up to more than the line was paid for ({@link ReturnValue#worth}).
+   */
+  private ReturnValue.Worth worthOfReturn(
+      Order order, List<OrderItem> lines, ReturnWorths worths, OrderItem matched, BigDecimal qty) {
+    int scale = java.util.Currency.getInstance(order.currency()).getDefaultFractionDigits();
+    // A stable order, because the units a discount cannot divide evenly go to a line by its place.
+    List<OrderItem> stable = new ArrayList<>(lines);
+    stable.sort(java.util.Comparator.comparing(OrderItem::id));
+    BigDecimal discount =
+        (order.discountAmount() == null ? BigDecimal.ZERO : order.discountAmount())
+            .add(order.promotionDiscount() == null ? BigDecimal.ZERO : order.promotionDiscount());
+    List<BigDecimal> shares =
+        ReturnValue.discountShares(
+            discount,
+            stable.stream()
+                .map(l -> l.lineTotal() == null ? BigDecimal.ZERO : l.lineTotal())
+                .toList(),
+            scale);
+    BigDecimal share = shares.get(stable.indexOf(matched));
+    BigDecimal lineNet =
+        matched.lineTotal() != null
+            ? matched.lineTotal()
+            : matched.unitPrice().multiply(matched.qty());
+    BigDecimal before = worths.take(matched.variantId(), qty);
+    return ReturnValue.worth(
+        lineNet, matched.vatAmount(), matched.qty(), share, before, qty, scale);
+  }
+
+  /**
+   * Goods can only come back once they were handed over.
+   *
+   * @throws ApiException 409 {@code ORDER_CANNOT_RETURN} unless the order is FULFILLED,
+   *     PARTIALLY_FULFILLED or PARTIALLY_REFUNDED
+   */
+  private static void requireReturnable(Order order) {
+    if (!Order.STATUS_FULFILLED.equals(order.status())
+        && !Order.STATUS_PARTIALLY_FULFILLED.equals(order.status())
+        && !Order.STATUS_PARTIALLY_REFUNDED.equals(order.status()))
+      throw ApiException.conflict(
+          "ORDER_CANNOT_RETURN",
+          "only a fulfilled order can be returned; this one is " + order.status());
+  }
+
+  /**
+   * Who may allow a return that falls outside the policy: a holder of {@code sales.refund}, who is
+   * then named on it. A return inside the policy needs nobody.
+   *
+   * @param outside why the return is outside the policy; empty when it is not
+   * @return the approver, or null when none was needed
+   * @throws ApiException 403 {@code ORDER_RETURN_NEEDS_MANAGER}, naming the reasons
+   */
+  private static UUID approverFor(List<String> outside, TenantContext ctx) {
+    if (outside.isEmpty()) return null;
+    if (!ctx.hasPermission(com.storeql.web.Permissions.SALES_REFUND))
+      throw new ApiException(
+          403,
+          "ORDER_RETURN_NEEDS_MANAGER",
+          "this return is outside the business's return policy and needs a manager: "
+              + String.join(", ", outside),
+          outside);
+    return ctx.userId();
+  }
+
+  /** The first return made under a key, when the key is used again for the same order. */
+  private static Return replayedReturn(Return first, UUID orderId) {
+    if (!orderId.equals(first.orderId()))
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for a different order");
+    return first;
+  }
+
+  // ── Direct exchange (intent/return-controls.md) ──────────────────────────
+
+  /**
+   * A direct exchange as it is answered.
+   *
+   * @param ret the return of the old goods, method EXCHANGE
+   * @param items its lines
+   * @param order the new sale, PENDING until paid
+   * @param settlement how the two settle: what the returned value pays, what is still due, what
+   *     goes back
+   */
+  public record ExchangeResult(
+      Return ret, List<ReturnItem> items, Order order, ReturnValue.Settlement settlement) {}
+
+  /**
+   * Takes goods back and sells others in one act: the return of the old goods and the new till sale
+   * are written on one transaction, so the customer is never left with one and not the other.
+   *
+   * <p>The return is judged exactly as {@link #createReturn} judges one (status, quantities,
+   * conditions, the business's policy, a manager when outside it), and the new sale is placed by
+   * the ordinary till path, priced by the same rules. What the returned goods are worth is measured
+   * the way the new sale is charged, VAT included, so a like-for-like swap moves no money.
+   * payment-svc settles it from {@code OrderReturned}; the till then collects only what is due on
+   * the new sale.
+   *
+   * @param tenantId owning tenant
+   * @param orderId the sale the goods came from
+   * @param req the reason, the goods coming back with their conditions, and the goods bought
+   * @param idempotencyKey the caller's key, already known to be present: a retry answers with the
+   *     first exchange and writes nothing
+   * @param ctx caller context, checked for access to the sale's store
+   * @return the exchange
+   * @throws ApiException as for a return, plus 400 {@code ORDER_EXCHANGE_NO_NEW_ITEMS}, 409 {@code
+   *     ORDER_EXCHANGE_CURRENCY_MISMATCH}, and whatever placing a till sale can refuse
+   */
+  public ExchangeResult exchange(
+      UUID tenantId, UUID orderId, ExchangeRequest req, String idempotencyKey, TenantContext ctx) {
+    // The request is judged whole first — the platform's order is 400, then 404, then 403, then
+    // the key and the write (intent/accounting-periods.md): a body that is wrong is wrong whoever
+    // sends it and whatever sale it names, and judging it reads nothing about the sale or stores.
+    if (req.returnItems() == null || req.returnItems().isEmpty())
+      throw ApiException.badRequest("ORDER_RETURN_NO_ITEMS", "an exchange needs an item to return");
+    if (req.newItems() == null || req.newItems().isEmpty())
+      throw ApiException.badRequest(
+          "ORDER_EXCHANGE_NO_NEW_ITEMS", "an exchange needs an item to buy; otherwise return it");
+    // The new basket as the till scanned it, counted as a till sale's lines are and carrying what
+    // each pack said of itself — before anything is judged, priced or written, and refused by the
+    // exchange's own field names.
+    List<OrderItemRequest> newLines = exchangeSaleLines(req.newItems());
+    for (int i = 0; i < req.returnItems().size(); i++) {
+      var ri = req.returnItems().get(i);
+      returnCondition(ri.condition());
+      Parsing.uuid(ri.variantId(), "returnItems[" + i + "].variantId");
+    }
+    UUID namedCustomer = Parsing.optionalUuid(req.customerId(), "customerId");
+
+    Order order =
+        repo.findOrder(tenantId, orderId)
+            .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    ctx.requireStoreAccess(order.storeId());
+
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findReturnByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedExchange(earlier.get(), orderId);
+
+    requireReturnable(order);
+
+    List<OrderItem> orderItems = repo.findOrderItems(tenantId, orderId);
+    ReturnWorths worths = new ReturnWorths(repo.returnedQtyByVariant(tenantId, orderId));
+    UUID returnId = Ids.newId();
+    BigDecimal value = BigDecimal.ZERO;
+    List<ReturnItem> returnItems = new ArrayList<>();
+    boolean everyLineFaulty = true;
+    for (var ri : req.returnItems()) {
+      String condition = returnCondition(ri.condition());
+      UUID variantId = Parsing.uuid(ri.variantId(), "variantId");
+      OrderItem matched =
+          orderItems.stream()
+              .filter(oi -> oi.variantId().equals(variantId))
+              .findFirst()
+              .orElseThrow(
+                  () ->
+                      ApiException.notFound(
+                          "ITEM_NOT_IN_ORDER", "variant " + ri.variantId() + " not in order"));
+      // The line is worth what the customer paid for it, VAT included and the order's discounts
+      // taken off, because that is what the new sale asks of them; the line itself keeps the net
+      // figure every report reads.
+      var worth = worthOfReturn(order, orderItems, worths, matched, ri.qty());
+      value = value.add(worth.value());
+      everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
+      returnItems.add(
+          new ReturnItem(
+              Ids.newId(), tenantId, returnId, variantId, ri.qty(), worth.net(), condition));
+    }
+
+    List<String> outside =
+        returnPolicies
+            .effective(tenantId)
+            .reasons(
+                handedOverAt(order),
+                Instant.now(),
+                storeZone(tenantId, order.storeId()),
+                inHomeCurrency(tenantId, value, order.currency()),
+                everyLineFaulty);
+    UUID approvedBy = approverFor(outside, ctx);
+
+    UUID customerId = namedCustomer == null ? order.customerId() : namedCustomer;
+    // A till sale at the same store as the old one, placed by the ordinary path so it is priced,
+    // checked and announced as any other; only the return rides on its transaction.
+    var placeReq =
+        PlaceOrderRequest.builder()
+            .storeId(order.storeId().toString())
+            .customerId(customerId == null ? null : customerId.toString())
+            .channel(Order.CHANNEL_POS)
+            .fulfilmentType(Order.FULFILMENT_INSTORE)
+            .items(newLines)
+            .contactPhone(order.contactPhone())
+            .build();
+
+    Instant at = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+    BigDecimal returnedValue = value;
+    java.util.concurrent.atomic.AtomicReference<Return> written =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    java.util.concurrent.atomic.AtomicReference<ReturnValue.Settlement> settled =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    OrderRepository.PlacedStep step =
+        (c, placed) -> {
+          if (!placed.currency().equalsIgnoreCase(order.currency()))
+            throw ApiException.conflict(
+                "ORDER_EXCHANGE_CURRENCY_MISMATCH",
+                "the sale was in "
+                    + order.currency()
+                    + " and the business now trades in "
+                    + placed.currency());
+          var settlement = ReturnValue.settle(returnedValue, placed.total());
+          Return ret =
+              new Return(
+                  returnId,
+                  tenantId,
+                  orderId,
+                  order.storeId(),
+                  req.reason(),
+                  returnedValue,
+                  Return.METHOD_EXCHANGE,
+                  Return.STATUS_COMPLETED,
+                  at,
+                  at,
+                  ctx.userId(),
+                  key,
+                  approvedBy,
+                  outside,
+                  null,
+                  placed.id(),
+                  false,
+                  null,
+                  null);
+          repo.createReturnTx(
+              c,
+              ret,
+              returnItems,
+              Events.orderReturned(
+                  tenantId,
+                  orderId,
+                  returnId,
+                  order.storeId(),
+                  returnItems,
+                  returnedValue,
+                  Return.METHOD_EXCHANGE,
+                  order.currency(),
+                  order.customerId(),
+                  null,
+                  false,
+                  approvedBy,
+                  placed.id(),
+                  settlement.exchangeAmount()),
+              null);
+          repo.linkExchangeTx(c, tenantId, placed.id(), returnId);
+          written.set(ret);
+          settled.set(settlement);
+        };
+
+    Order placed;
+    try {
+      placed = placeOrder(placeReq, ctx, Ids.derived(key, "exchange-order").toString(), step);
+    } catch (ApiException e) {
+      // Two attempts with one key raced and this one lost, on the key or on the quantity the
+      // winner just took back: the winner's exchange is the answer.
+      var first = repo.findReturnByKey(tenantId, key);
+      if (first.isPresent()) return replayedExchange(first.get(), orderId);
+      throw e;
+    }
+    if (written.get() == null) {
+      // The sale under the derived key already stood, so the step never ran: a retry.
+      return replayedExchange(
+          repo.findReturnByKey(tenantId, key)
+              .orElseThrow(
+                  () ->
+                      ApiException.conflict(
+                          "ORDER_EXCHANGE_INCOMPLETE",
+                          "the sale for this exchange stands without its return")),
+          orderId);
+    }
+    salesInvoices.issueCreditNoteLater(tenantId, orderId, returnId, ctx.userId());
+    return new ExchangeResult(written.get(), returnItems, placed, settled.get());
+  }
+
+  /** The exchange already made under a key, when the key is used again for the same sale. */
+  private ExchangeResult replayedExchange(Return first, UUID orderId) {
+    if (!orderId.equals(first.orderId()) || first.exchangeOrderId() == null)
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
+    Order bought = getOrder(first.tenantId(), first.exchangeOrderId());
+    return new ExchangeResult(
+        first,
+        repo.findReturnItems(first.tenantId(), first.id()),
+        bought,
+        ReturnValue.settle(first.refundAmount(), bought.total()));
+  }
+
+  // ── Return with no receipt (intent/return-controls.md) ────────────────────
+
+  /**
+   * Takes goods back with no receipt, for store credit or a gift card, at what the store sells them
+   * for today.
+   *
+   * <p>There is no sale to refund against, so nothing here reaches payment-svc: the return is
+   * announced by {@code NoReceiptReturnRecorded}, and customer-svc, inventory-svc and purchase-svc
+   * act on that. A manager only ({@code sales.refund}), only where the business allows it at all,
+   * never for cash, and never over the business's ceiling. Each line is priced by pricing-svc; a
+   * price that cannot be had refuses the return, since a guessed price is money given away.
+   *
+   * @param tenantId owning tenant
+   * @param req the store, the reason, the method, the customer and how to reach them, the goods
+   * @param idempotencyKey the caller's key, already known to be present: a retry answers with the
+   *     first return and writes nothing
+   * @param ctx caller context, checked for access to the store
+   * @return the recorded return
+   * @throws ApiException 400 {@code ORDER_NO_RECEIPT_METHOD_INVALID}, {@code
+   *     ORDER_RETURN_NO_ITEMS}, the condition codes; 403 {@code ORDER_RETURN_NEEDS_MANAGER}
+   *     (details {@code NO_RECEIPT}); 409 {@code ORDER_NO_RECEIPT_RETURNS_OFF}, {@code
+   *     ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER}, gift card conflicts; 422 {@code
+   *     ORDER_NO_RECEIPT_OVER_CEILING}, {@code ORDER_PRICE_UNRESOLVED}; 503 when pricing cannot be
+   *     reached
+   */
+  public Return noReceiptReturn(
+      UUID tenantId, NoReceiptReturnRequest req, String idempotencyKey, TenantContext ctx) {
+    UUID storeId = Parsing.uuid(req.storeId(), "storeId");
+    ctx.requireStoreAccess(storeId);
+
+    // A retry answers with the first return before anything is judged again: the policy may have
+    // moved on, and the first answer is still the answer.
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findReturnByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedNoReceipt(earlier.get(), storeId);
+
+    if (req.items() == null || req.items().isEmpty())
+      throw ApiException.badRequest("ORDER_RETURN_NO_ITEMS", "a return needs at least one item");
+    String method =
+        req.refundMethod() == null ? "" : req.refundMethod().trim().toUpperCase(Locale.ROOT);
+    if (!Return.METHOD_STORE_CREDIT.equals(method) && !Return.METHOD_GIFT_CARD.equals(method))
+      throw ApiException.badRequest(
+          "ORDER_NO_RECEIPT_METHOD_INVALID",
+          "a return with no receipt is refunded to store credit or a gift card, never to how the"
+              + " sale was paid");
+    List<String> conditions = new ArrayList<>();
+    for (var ri : req.items()) conditions.add(returnCondition(ri.condition()));
+
+    var policy = returnPolicies.effective(tenantId);
+    if (!policy.noReceiptAllowed())
+      throw ApiException.conflict(
+          "ORDER_NO_RECEIPT_RETURNS_OFF", "this business does not take returns with no receipt");
+    if (!ctx.hasPermission(com.storeql.web.Permissions.SALES_REFUND))
+      throw new ApiException(
+          403,
+          "ORDER_RETURN_NEEDS_MANAGER",
+          "a return with no receipt needs a manager",
+          List.of(Return.NO_RECEIPT));
+
+    UUID customerId = Parsing.optionalUuid(req.customerId(), "customerId");
+    if (Return.METHOD_STORE_CREDIT.equals(method) && customerId == null)
+      throw ApiException.conflict(
+          "ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER",
+          "store credit goes to a customer, and this return names none");
+    String giftCode = req.giftCardCode() == null ? "" : req.giftCardCode().trim();
+    if (!giftCode.isEmpty() && !Return.METHOD_GIFT_CARD.equals(method))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_GIFT_CARD_CODE_UNEXPECTED",
+          "giftCardCode is only for a refund to a gift card");
+    String contact = req.customerContact() == null ? "" : req.customerContact().trim();
+    if (contact.isEmpty())
+      throw ApiException.badRequest(
+          "ORDER_NO_RECEIPT_CONTACT_REQUIRED",
+          "a return with no receipt records how to reach the customer");
+
+    // The store's own money: the business's currency, and each line at what the till would charge
+    // for it right now. Unreadable is a refusal, never a guess.
+    String currency = resolveCurrency(tenantId, null);
+    UUID returnId = Ids.newId();
+    BigDecimal total = BigDecimal.ZERO;
+    BigDecimal tax = BigDecimal.ZERO;
+    List<ReturnItem> returnItems = new ArrayList<>();
+    for (int i = 0; i < req.items().size(); i++) {
+      var ri = req.items().get(i);
+      UUID variantId = Parsing.uuid(ri.variantId(), "variantId");
+      com.storeql.order.client.PricingClient.ResolvedLine price;
+      try {
+        price = pricing.resolveLine(tenantId, variantId, storeId, Order.CHANNEL_POS, ri.qty());
+      } catch (org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException e) {
+        throw new ApiException(
+            503,
+            "ORDER_PRICING_UNAVAILABLE",
+            "pricing-svc circuit open — too many recent failures",
+            List.of(),
+            e);
+      }
+      var line =
+          ReturnValue.priceLine(
+              price.unitPrice(), price.vatAmount(), ri.qty(), Fx.minorUnits(currency));
+      total = total.add(line.value());
+      tax = tax.add(line.taxAmount());
+      returnItems.add(
+          new ReturnItem(
+              Ids.newId(),
+              tenantId,
+              returnId,
+              variantId,
+              ri.qty(),
+              line.value(),
+              conditions.get(i),
+              line.unitPrice(),
+              line.taxAmount()));
+    }
+    if (policy.noReceiptCeiling() != null && total.compareTo(policy.noReceiptCeiling()) > 0)
+      throw ApiException.unprocessable(
+          "ORDER_NO_RECEIPT_OVER_CEILING",
+          "this return is over the most the business gives without a receipt");
+
+    GiftCard freshCard = null;
+    String topUpCode = null;
+    UUID giftCardId = null;
+    if (Return.METHOD_GIFT_CARD.equals(method)) {
+      if (giftCode.isEmpty()) {
+        giftCardId = Ids.newId();
+        freshCard =
+            new GiftCard(
+                giftCardId,
+                tenantId,
+                storeId,
+                generateGiftCardCode(),
+                total,
+                total,
+                GiftCard.STATUS_ACTIVE,
+                currency,
+                Instant.now(),
+                null);
+      } else {
+        topUpCode = giftCode.toUpperCase(Locale.ROOT);
+        GiftCard card = getGiftCard(tenantId, topUpCode);
+        if (!GiftCard.STATUS_ACTIVE.equals(card.status()))
+          throw ApiException.conflict("GIFT_CARD_NOT_ACTIVE", "gift card is not active");
+        if (!card.currency().equalsIgnoreCase(currency))
+          throw ApiException.conflict(
+              "GIFT_CARD_CURRENCY_MISMATCH",
+              "the card holds " + card.currency() + " and this return is in " + currency);
+        giftCardId = card.id();
+      }
+    }
+
+    Instant at = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+    Return ret =
+        new Return(
+            returnId,
+            tenantId,
+            null,
+            storeId,
+            req.reason(),
+            total,
+            method,
+            Return.STATUS_COMPLETED,
+            at,
+            at,
+            ctx.userId(),
+            key,
+            // The manager who took it is the approver: a return with no receipt is always outside
+            // the policy, and the audit trail says so.
+            ctx.userId(),
+            List.of(Return.NO_RECEIPT),
+            giftCardId,
+            null,
+            true,
+            customerId,
+            contact);
+    GiftCard cardToWrite = freshCard;
+    String codeToTopUp = topUpCode;
+    BigDecimal refund = total;
+    OrderRepository.ReturnStep step =
+        c -> {
+          if (Return.METHOD_GIFT_CARD.equals(method)) {
+            repo.giftCardForReturnTx(
+                c,
+                cardToWrite,
+                codeToTopUp,
+                tenantId,
+                refund,
+                null,
+                returnId,
+                (card, tx) -> Events.giftCardLoadedByReturn(card, tx, returnId));
+          }
+        };
+    try {
+      return repo.createReturn(
+          ret,
+          returnItems,
+          Events.noReceiptReturnRecorded(ret, currency, tax, returnItems, giftCardId),
+          step);
+    } catch (ApiException e) {
+      var first = repo.findReturnByKey(tenantId, key);
+      if (first.isPresent()) return replayedNoReceipt(first.get(), storeId);
+      throw e;
+    }
+  }
+
+  /** The no-receipt return already made under a key, when the key is used again at the store. */
+  private static Return replayedNoReceipt(Return first, UUID storeId) {
+    if (!first.noReceipt() || !storeId.equals(first.storeId()))
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
+    return first;
+  }
+
+  private static String returnMethod(String requested) {
+    if (requested == null || requested.isBlank()) return Return.METHOD_ORIGINAL;
+    String m = requested.trim().toUpperCase(Locale.ROOT);
+    if (!Return.METHODS.contains(m))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_METHOD_INVALID",
+          "refundMethod must be ORIGINAL, STORE_CREDIT or GIFT_CARD");
+    return m;
+  }
+
+  private static String returnCondition(String requested) {
+    if (requested == null || requested.isBlank())
+      throw ApiException.badRequest(
+          "ORDER_RETURN_CONDITION_REQUIRED",
+          "each returned item needs its condition: SEALED, OPENED, DAMAGED or FAULTY");
+    String c = requested.trim().toUpperCase(Locale.ROOT);
+    if (!ReturnItem.CONDITIONS.contains(c))
+      throw ApiException.badRequest(
+          "ORDER_RETURN_CONDITION_INVALID", "condition must be SEALED, OPENED, DAMAGED or FAULTY");
+    return c;
+  }
+
+  /**
+   * When the goods left the store: the recorded handover of an online order, else the moment the
+   * sale first became fulfilled (a till sale's completion).
+   */
+  private Instant handedOverAt(Order order) {
+    var handover = repo.findHandover(order.tenantId(), order.id());
+    if (handover.isPresent()) return handover.get().handedAt();
+    return repo.findFirstFulfilledAt(order.tenantId(), order.id()).orElse(order.createdAt());
+  }
+
+  /** The store's own zone; UTC only when tenant-svc cannot say (the window is then by UTC day). */
+  private ZoneId storeZone(UUID tenantId, UUID storeId) {
+    try {
+      ZoneId zone = profiles.stores(tenantId, storeId).zoneOf(storeId);
+      return zone != null ? zone : ZoneOffset.UTC;
+    } catch (ApiException e) {
+      return ZoneOffset.UTC;
+    }
+  }
+
+  /**
+   * An amount in the business's home currency, for the cashier's ceiling; null when the sale is in
+   * another currency and the business keeps no rate for it, which the policy reads as over the
+   * ceiling (it fails closed, as spend authority does).
+   */
+  private BigDecimal inHomeCurrency(UUID tenantId, BigDecimal amount, String currency) {
+    String home =
+        tenantStatusRepo
+            .findCurrency(tenantId)
+            .orElseGet(
+                () ->
+                    profiles
+                        .find(tenantId)
+                        .map(com.storeql.service.TenantProfiles.Profile::currency)
+                        .orElse(null));
+    if (home != null && home.equalsIgnoreCase(currency)) return amount;
+    return fx.toHome(tenantId, amount, currency)
+        .map(com.storeql.service.Fx.Converted::amount)
+        .orElse(null);
+  }
+
+  /**
+   * The gift card a return's refund went on, for the answer to the return itself.
+   *
+   * @param ret the return
+   * @return the card, or empty when the refund was not to a gift card
+   */
+  public java.util.Optional<GiftCard> giftCardOf(Return ret) {
+    return ret.giftCardId() == null
+        ? java.util.Optional.empty()
+        : repo.findGiftCardById(ret.tenantId(), ret.giftCardId());
+  }
+
+  /**
+   * A sale found by its receipt, with what can still come back on each line.
+   *
+   * @param order the sale
+   * @param receiptNumber its printed fiscal number, or null when none is issued yet
+   * @param lines what was sold, what came back and what can still
+   */
+  public record ReceiptMatch(Order order, String receiptNumber, List<ReturnableLine> lines) {}
+
+  /**
+   * One variant of a sale: sold, already returned, and still returnable.
+   *
+   * @param variantId the variant
+   * @param soldQty what was handed over
+   * @param returnedQty what has come back on any return
+   * @param unitPrice the price paid for one
+   */
+  public record ReturnableLine(
+      UUID variantId, BigDecimal soldQty, BigDecimal returnedQty, BigDecimal unitPrice) {
+    /** Sold less returned, never below zero. */
+    public BigDecimal returnableQty() {
+      return soldQty.subtract(returnedQty).max(BigDecimal.ZERO);
+    }
+  }
+
+  /**
+   * Finds a sale by the number printed on its receipt: the fiscal number (case-insensitive) or the
+   * short order reference, the last eight characters of the order id. Only sales at stores the
+   * caller may act at are found; a short reference is not unique, so two sales sharing one are
+   * refused rather than guessed between.
+   *
+   * @param tenantId owning tenant
+   * @param number the text typed or scanned
+   * @param ctx caller context, whose stores bound the search
+   * @return the sale with its returnable lines
+   * @throws ApiException {@code ORDER_RECEIPT_NOT_FOUND} (404) when nothing at the caller's stores
+   *     matches; {@code ORDER_RECEIPT_AMBIGUOUS} (409) when more than one sale does
+   */
+  public ReceiptMatch findByReceipt(UUID tenantId, String number, TenantContext ctx) {
+    String n = number == null ? "" : number.trim();
+    if (n.isEmpty()) throw ApiException.badRequest("VALIDATION_FAILED", "number: is required");
+    String bare = n.startsWith("#") ? n.substring(1).trim() : n;
+    String shortRef = bare.matches("(?i)[0-9a-f]{8}") ? bare.toLowerCase(Locale.ROOT) : null;
+    List<Order> found = new ArrayList<>();
+    for (UUID id : repo.findOrderIdsByReceipt(tenantId, n, shortRef)) {
+      repo.findOrder(tenantId, id)
+          .filter(o -> ctx.hasStoreAccess(o.storeId()))
+          .ifPresent(found::add);
+    }
+    if (found.isEmpty())
+      throw ApiException.notFound("ORDER_RECEIPT_NOT_FOUND", "no sale found for that receipt");
+    if (found.size() > 1)
+      throw ApiException.conflict(
+          "ORDER_RECEIPT_AMBIGUOUS",
+          "more than one sale matches that number; use the full receipt number");
+    Order order = found.get(0);
+    var returned = repo.returnedQtyByVariant(tenantId, order.id());
+    Map<UUID, ReturnableLine> byVariant = new LinkedHashMap<>();
+    for (OrderItem item : repo.findOrderItems(tenantId, order.id())) {
+      BigDecimal sold = item.fulfilledQty() == null ? BigDecimal.ZERO : item.fulfilledQty();
+      byVariant.merge(
+          item.variantId(),
+          new ReturnableLine(
+              item.variantId(),
+              sold,
+              returned.getOrDefault(item.variantId(), BigDecimal.ZERO),
+              item.unitPrice()),
+          (a, b) ->
+              new ReturnableLine(
+                  a.variantId(), a.soldQty().add(b.soldQty()), a.returnedQty(), a.unitPrice()));
+    }
+    String receipt =
+        receiptRepo
+            .findByOrder(tenantId, order.id())
+            .map(Domain.FiscalReceipt::fullNumber)
+            .orElse(null);
+    return new ReceiptMatch(order, receipt, List.copyOf(byVariant.values()));
   }
 
   /**
@@ -2569,32 +3838,58 @@ public class OrderService {
    * @param tenantId owning tenant
    * @param orderId the sale to void
    * @param req the reason, recorded on both the void log and the receipt
+   * @param idempotencyKey the caller's key; a retry answers with the first void
    * @param ctx caller context, checked for access to the sale's store
    * @return the recorded void log entry
    * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists; {@code
    *     ORDER_VOID_ONLY_POS} (409) when the order is not a POS sale
    */
-  public PosVoidLog voidOrder(UUID tenantId, UUID orderId, VoidRequest req, TenantContext ctx) {
+  public PosVoidLog voidOrder(
+      UUID tenantId, UUID orderId, VoidRequest req, String idempotencyKey, TenantContext ctx) {
     Order order =
         repo.findOrder(tenantId, orderId)
             .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
     ctx.requireStoreAccess(order.storeId());
+    // A retry answers with the first void: the order is voided by now, and saying so again would
+    // turn a lost response into an error.
+    UUID key = Ids.parse(idempotencyKey);
+    var earlier = repo.findVoidByKey(tenantId, key);
+    if (earlier.isPresent()) return replayedVoid(earlier.get(), orderId);
     if (!Order.CHANNEL_POS.equals(order.channel()))
       throw ApiException.conflict("ORDER_VOID_ONLY_POS", "void is only allowed on POS orders");
-    PosVoidLog log =
-        repo.voidOrder(
-            tenantId,
-            orderId,
-            order.storeId(),
-            req.reason(),
-            ctx.userId(),
-            restock -> Events.orderVoided(tenantId, orderId, order.storeId(), restock));
+    PosVoidLog log;
+    try {
+      log =
+          repo.voidOrder(
+              tenantId,
+              orderId,
+              order.storeId(),
+              req.reason(),
+              ctx.userId(),
+              key,
+              restock ->
+                  Events.orderVoided(
+                      tenantId, orderId, order.storeId(), order.customerId(), restock),
+              r -> Events.giftCardLoadReversed(r.card(), r.tx()));
+    } catch (ApiException e) {
+      // A retry that raced the first: it lost on the key or found the order already voided.
+      var first = repo.findVoidByKey(tenantId, key);
+      if (first.isPresent()) return replayedVoid(first.get(), orderId);
+      throw e;
+    }
 
     // The receipt keeps its number and gains a reason. Removing it would close the hole in the
     // sequence, and closing the hole is the whole trick: ring the sale, take the cash, void the
     // receipt, and a till that balances hides a theft. Here the document stays, numbered.
     receiptRepo.markVoided(tenantId, orderId, req.reason());
     return log;
+  }
+
+  private static PosVoidLog replayedVoid(PosVoidLog first, UUID orderId) {
+    if (!first.orderId().equals(orderId))
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for a different order");
+    return first;
   }
 
   // ── Layaway ───────────────────────────────────────────────────────────────
@@ -2619,11 +3914,19 @@ public class OrderService {
     UUID customerId =
         req.customerId() != null ? Parsing.uuid(req.customerId(), "customerId") : null;
     UUID layawayId = Ids.newId();
+    // A layaway is in the business's currency; its typed prices and deposit are no finer than it,
+    // and every figure is kept at its own minor units.
+    String currency = resolveCurrency(tenantId, null);
+    int scale = Fx.minorUnits(currency);
 
-    BigDecimal total = BigDecimal.ZERO;
+    BigDecimal total = BigDecimal.ZERO.setScale(scale);
     List<LayawayItem> items = new ArrayList<>();
-    for (var li : req.items()) {
-      BigDecimal line = li.unitPrice().multiply(li.qty());
+    for (int i = 0; i < req.items().size(); i++) {
+      var li = req.items().get(i);
+      BigDecimal unitPrice = TypedMoney.require(li.unitPrice(), currency, "unitPrice");
+      // Typed at the back office: three places, never rounded (Quantities).
+      BigDecimal qty = com.storeql.order.domain.Quantities.typed(li.qty(), "items[" + i + "].qty");
+      BigDecimal line = LineMoney.of(unitPrice, qty, currency);
       total = total.add(line);
       items.add(
           new LayawayItem(
@@ -2631,12 +3934,14 @@ public class OrderService {
               tenantId,
               layawayId,
               Parsing.uuid(li.variantId(), "variantId"),
-              li.qty(),
-              li.unitPrice(),
+              qty,
+              unitPrice,
               line));
     }
 
-    BigDecimal balance = total.subtract(req.initialDeposit());
+    BigDecimal initialDeposit =
+        TypedMoney.require(req.initialDeposit(), currency, "initialDeposit");
+    BigDecimal balance = total.subtract(initialDeposit);
     if (balance.compareTo(BigDecimal.ZERO) < 0)
       throw ApiException.conflict(
           "DEPOSIT_EXCEEDS_TOTAL", "initial deposit cannot exceed total amount");
@@ -2649,7 +3954,7 @@ public class OrderService {
             storeId,
             customerId,
             total,
-            req.initialDeposit(),
+            initialDeposit,
             balance,
             Layaway.STATUS_ACTIVE,
             req.notes(),
@@ -2663,7 +3968,7 @@ public class OrderService {
             Ids.newId(),
             tenantId,
             layawayId,
-            req.initialDeposit(),
+            initialDeposit,
             req.paymentMethod(),
             null,
             Instant.now());
@@ -2718,12 +4023,16 @@ public class OrderService {
    */
   public Layaway addDeposit(
       UUID tenantId, UUID layawayId, AddDepositRequest req, TenantContext ctx) {
+    // The layaway is this business's first (404 otherwise); the payment is then no finer than its
+    // currency, and kept at its minor units as the balance is.
+    getLayaway(tenantId, layawayId);
+    BigDecimal amount = TypedMoney.require(req.amount(), resolveCurrency(tenantId, null), "amount");
     LayawayDeposit deposit =
         new LayawayDeposit(
             Ids.newId(),
             tenantId,
             layawayId,
-            req.amount(),
+            amount,
             req.paymentMethod(),
             req.reference(),
             Instant.now());
@@ -2773,11 +4082,13 @@ public class OrderService {
    * @param ctx caller context; supplies the tenant and is checked for store access
    * @return the issued card, including its code
    */
-  public GiftCard issueGiftCard(IssueGiftCardRequest req, TenantContext ctx) {
+  public GiftCard issueGiftCard(
+      IssueGiftCardRequest req, String idempotencyKey, TenantContext ctx) {
     // requireTenantId (not the nullable tenantId()) so issuing a gift card without a tenant in
     // context fails 401 rather than minting stored value against a null-tenant row.
     UUID tenantId = ctx.requireTenantId();
-    String paidBy = giftCardPaidBy(req.paidBy());
+    String source = handSource(req.reason());
+    requireHandPaidBy(req.paidBy());
     UUID storeId = Parsing.uuid(req.storeId(), "storeId");
     ctx.requireStoreAccess(storeId);
     UUID gcId = Ids.newId();
@@ -2785,6 +4096,9 @@ public class OrderService {
     String currency = resolveCurrency(tenantId, req.currency());
     Instant expiresAt =
         req.expiresAt() != null ? Parsing.instant(req.expiresAt(), "expiresAt") : null;
+    // Stored value no finer than the currency, kept at its own scale (GIFT_CARD_AMOUNT_INVALID).
+    BigDecimal amount = GiftCardLoads.amount(req.amount(), currency);
+    giftCardCeiling.requireWithin(tenantId, GiftCardCeiling.Action.ISSUE, amount, currency, ctx);
 
     GiftCard gc =
         new GiftCard(
@@ -2792,8 +4106,8 @@ public class OrderService {
             tenantId,
             storeId,
             code,
-            req.amount(),
-            req.amount(),
+            amount,
+            amount,
             GiftCard.STATUS_ACTIVE,
             currency,
             Instant.now(),
@@ -2805,14 +4119,54 @@ public class OrderService {
             tenantId,
             gcId,
             GiftCardTransaction.TX_ISSUE,
-            req.amount(),
-            BigDecimal.ZERO,
-            req.amount(),
+            amount,
+            BigDecimal.ZERO.setScale(amount.scale()),
+            amount,
             null,
             null,
             Instant.now());
 
-    return repo.issueGiftCard(gc, tx, Events.giftCardLoaded(gc, tx, paidBy));
+    return repo.issueGiftCard(
+        gc,
+        tx,
+        Events.giftCardLoadedByHand(gc, tx, source, req.note()),
+        new OrderRepository.HandLoad(
+            Ids.parse(idempotencyKey), source, req.note(), ctx.requireUserId()));
+  }
+
+  /** The reasons value may be handed out by hand, with no sale behind it. */
+  static final java.util.Set<String> HAND_SOURCES =
+      java.util.Set.of("GOODWILL", "PROMOTION", "COMPENSATION", "MIGRATION");
+
+  /**
+   * The reason a manager gave for handing out value, normalised.
+   *
+   * @throws ApiException 400 {@code GIFT_CARD_REASON_REQUIRED} when it is missing or not on the
+   *     list
+   */
+  static String handSource(String reason) {
+    String r = reason == null ? "" : reason.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!HAND_SOURCES.contains(r)) {
+      throw ApiException.badRequest(
+          "GIFT_CARD_REASON_REQUIRED",
+          "reason is required: GOODWILL, PROMOTION, COMPENSATION or MIGRATION");
+    }
+    return r;
+  }
+
+  /**
+   * Value handed out by hand is given away, so a tender named with it is a sale in disguise: money
+   * taken for a card is a GIFT_CARD_LOAD line on a sale, paid, and nothing else.
+   *
+   * @throws ApiException 409 {@code GIFT_CARD_NEEDS_SALE} for a paidBy that is a tender
+   */
+  static void requireHandPaidBy(String paidBy) {
+    if (paidBy == null || paidBy.isBlank()) return;
+    if (!"PROMOTIONAL".equals(paidBy.trim().toUpperCase(java.util.Locale.ROOT))) {
+      throw ApiException.conflict(
+          "GIFT_CARD_NEEDS_SALE",
+          "money taken for a gift card is a sale: sell the card as a line of the order");
+    }
   }
 
   /**
@@ -2834,56 +4188,84 @@ public class OrderService {
    * @param tenantId owning tenant
    * @param code the card's code
    * @param req the amount to add and a reference for the transaction log
+   * @param ctx the caller, held to the stores they keep
    * @return the card with its new balance
-   * @throws ApiException {@code GIFT_CARD_NOT_FOUND} (404) when no such card exists; a conflict
+   * @throws ApiException {@code GIFT_CARD_NOT_FOUND} (404) when no such card exists; {@code
+   *     STORE_ACCESS_DENIED} (403) when the caller keeps stores and none is the card's; a conflict
    *     when the card is not active
    */
-  public GiftCard reloadGiftCard(UUID tenantId, String code, ReloadGiftCardRequest req) {
-    String paidBy = giftCardPaidBy(req.paidBy());
+  public GiftCard reloadGiftCard(
+      UUID tenantId,
+      String code,
+      ReloadGiftCardRequest req,
+      String idempotencyKey,
+      TenantContext ctx) {
+    String source = handSource(req.reason());
+    requireHandPaidBy(req.paidBy());
+    // Adding value is issuing it again: a caller held to stores reloads only a card issued at one
+    // of them, and one held to none (the whole business) reloads any.
+    GiftCard existing = getGiftCard(tenantId, code);
+    ctx.requireStoreAccess(existing.storeId());
+    BigDecimal amount = GiftCardLoads.amount(req.amount(), existing.currency());
+    giftCardCeiling.requireWithin(
+        tenantId, GiftCardCeiling.Action.RELOAD, amount, existing.currency(), ctx);
     return repo.reloadGiftCard(
         tenantId,
         code,
-        req.amount(),
+        amount,
         req.reference(),
-        (card, tx) -> Events.giftCardLoaded(card, tx, paidBy));
-  }
-
-  /** What gift card value may be paid for with, and PROMOTIONAL for value given away (17.11). */
-  static final java.util.Set<String> GIFT_CARD_PAID_BY =
-      java.util.Set.of("CASH", "CARD", "UPI", "WALLET", "PROMOTIONAL");
-
-  /**
-   * How gift card value was paid for, normalised. Stored value bought with another gift card, a
-   * voucher or store credit would only move a liability from one account to another, so those are
-   * refused with everything else that is not a tender.
-   *
-   * @throws ApiException {@code GIFT_CARD_PAID_BY_INVALID} (400)
-   */
-  static String giftCardPaidBy(String paidBy) {
-    String p = paidBy == null ? "" : paidBy.trim().toUpperCase(java.util.Locale.ROOT);
-    if (!GIFT_CARD_PAID_BY.contains(p)) {
-      throw ApiException.badRequest(
-          "GIFT_CARD_PAID_BY_INVALID", "paidBy must be CASH, CARD, UPI, WALLET or PROMOTIONAL");
-    }
-    return p;
+        new OrderRepository.HandLoad(
+            Ids.parse(idempotencyKey), source, req.note(), ctx.requireUserId()),
+        (card, tx) -> Events.giftCardLoadedByHand(card, tx, source, req.note()));
   }
 
   /**
-   * Spends against a gift card, optionally attributing it to an order.
+   * Charges a gift card for an order, once per {@code Idempotency-Key}.
    *
-   * <p>The balance check happens in the repository, inside the transaction that writes the
-   * transaction row, so two tills cannot together overspend one card.
+   * <p>The card is debited, the ledger row written and {@code GiftCardRedeemed} put in the outbox
+   * on one transaction; payment-svc records the GIFT_CARD tender from that event, so a payment
+   * exists only for value the card really gave up. The order must be this business's, at a store
+   * the caller may act at, and in the card's currency. The balance check happens in the repository
+   * with the card row locked, so two tills cannot together overspend one card.
    *
    * @param tenantId owning tenant
    * @param code the card's code
-   * @param req the amount, the order being paid towards, and a reference
-   * @return the card with its new balance
-   * @throws ApiException {@code GIFT_CARD_NOT_FOUND} (404) when no such card exists; a conflict
-   *     when the balance is insufficient or the card is not active
+   * @param req the amount and the order being paid towards
+   * @param idempotencyKey the caller's key, already known to be present
+   * @param ctx caller context, checked for access to the order's store
+   * @return the redemption, made now or the first one made under this key
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404), {@code GIFT_CARD_NOT_FOUND} (404); 400
+   *     {@code GIFT_CARD_AMOUNT_INVALID} for a charge that is nothing at the order currency's
+   *     units; 409 {@code GIFT_CARD_NOT_ACTIVE}, {@code GIFT_CARD_EXPIRED}, {@code
+   *     GIFT_CARD_CURRENCY_MISMATCH}, {@code GIFT_CARD_INSUFFICIENT_BALANCE}
    */
-  public GiftCard redeemGiftCard(UUID tenantId, String code, RedeemGiftCardRequest req) {
-    UUID orderId = req.orderId() != null ? Parsing.uuid(req.orderId(), "orderId") : null;
-    return repo.redeemGiftCard(tenantId, code, req.amount(), orderId, req.reference());
+  public GiftCardTransaction redeemGiftCard(
+      UUID tenantId,
+      String code,
+      RedeemGiftCardRequest req,
+      String idempotencyKey,
+      TenantContext ctx) {
+    UUID orderId = Parsing.uuid(req.orderId(), "orderId");
+    Order order =
+        repo.findOrder(tenantId, orderId)
+            .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    ctx.requireStoreAccess(order.storeId());
+    // What the card gives up is money in the order's currency, at its own minor units. The till
+    // sends what it worked out in floating point (what is left to pay, or the balance), not a typed
+    // figure: taken half up, as payment-svc takes the same till's tenders, so 3.3000000000000003
+    // is 3.30 and an offline-queued sale replays to the same charge rather than a refusal.
+    BigDecimal amount = TillAmount.giftCardCharge(req.amount(), order.currency());
+    return repo.redeemGiftCard(
+            tenantId,
+            code,
+            amount,
+            orderId,
+            order.currency(),
+            req.reference(),
+            Ids.parse(idempotencyKey),
+            Instant.now(),
+            (card, tx) -> Events.giftCardRedeemed(card, tx, order))
+        .tx();
   }
 
   /**
@@ -2950,6 +4332,13 @@ public class OrderService {
         isTillSale(order.channel(), order.fulfilmentType())
             ? fulfilledWithRevenue(tenantId, order, items)
             : null;
+    // Value sold on gift cards is stored value, not a sale: the confirmation, and with it the
+    // loyalty and the ledger's revenue, carries only the rest. The cards are issued on this same
+    // transaction, by the capture that completes the payment, once.
+    BigDecimal cardValue =
+        java.util.Objects.requireNonNullElse(
+            repo.giftCardLoadTotal(tenantId, orderId), BigDecimal.ZERO);
+    String tender = method != null ? method : order.paymentMethod();
     boolean completed =
         repo.applyPaymentCaptured(
             tenantId,
@@ -2963,7 +4352,7 @@ public class OrderService {
                 order.storeId(),
                 order.channel(),
                 order.customerId(),
-                order.total(),
+                order.total().subtract(cardValue),
                 order.taxAmount(),
                 order.currency(),
                 items,
@@ -2974,7 +4363,18 @@ public class OrderService {
                 order.slotStartsAt(),
                 order.slotEndsAt(),
                 order.slotTimeZone()),
-            fulfilEvent);
+            fulfilEvent,
+            cardValue.signum() == 0
+                ? null
+                : c ->
+                    repo.issuePaidGiftCardLinesTx(
+                        c,
+                        tenantId,
+                        orderId,
+                        order.storeId(),
+                        order.currency(),
+                        this::generateGiftCardCode,
+                        (card, tx) -> Events.giftCardLoadedBySale(card, tx, tender)));
 
     // Till sales are confirmed here, not in confirmOrder, so this is where most receipts are
     // numbered. The first version of the sequence hooked only confirmOrder — which the till never
@@ -3295,17 +4695,128 @@ public class OrderService {
     return cancelled;
   }
 
+  /**
+   * The gift cards an order sold, for the till that sold them: pending with no code until the sale
+   * is paid, then each card's id and code. A code is bearer value, so this is for staff at the
+   * order's store only; the card ledger has no place to record a read, so none is recorded.
+   *
+   * @throws ApiException 404 {@code ORDER_NOT_FOUND} for another business's order; 403 {@code
+   *     STORE_ACCESS_DENIED} for staff held to other stores
+   */
+  public List<Domain.GiftCardLoadView> giftCardLoadsOf(
+      UUID tenantId, UUID orderId, TenantContext ctx) {
+    Order order = getOrder(tenantId, orderId);
+    ctx.requireStoreAccess(order.storeId());
+    return repo.findGiftCardLoadViews(tenantId, orderId);
+  }
+
+  /**
+   * When an order still waiting for payment lapses: its last change (placement, pricing or a part
+   * payment) plus its business's unpaid-order limit (or the platform's default while it has set
+   * none), as an ISO instant; null for an order that is not PENDING.
+   */
+  public String expiresAtOf(Order order) {
+    if (!Order.STATUS_PENDING.equals(order.status())) return null;
+    return expiresAt(order, orderSettings.get(order.tenantId()).pendingHours(pendingDefaultHours));
+  }
+
+  /**
+   * When each order of a page still waiting for payment lapses, by order id; the business's limit
+   * is read once for the page, and not at all for a page with nothing waiting.
+   *
+   * @param orders one business's orders
+   * @return the ISO instant for each PENDING order; no entry for any other
+   */
+  public Map<UUID, String> expiriesOf(UUID tenantId, List<Order> orders) {
+    Map<UUID, String> out = new HashMap<>();
+    Integer hours = null;
+    for (Order order : orders) {
+      if (!Order.STATUS_PENDING.equals(order.status())) continue;
+      if (hours == null) hours = orderSettings.get(tenantId).pendingHours(pendingDefaultHours);
+      out.put(order.id(), expiresAt(order, hours));
+    }
+    return out;
+  }
+
+  private static String expiresAt(Order order, int hours) {
+    // The database keeps microseconds; an answer built before the write must agree with one read
+    // after.
+    return order
+        .updatedAt()
+        .truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+        .plus(java.time.Duration.ofHours(hours))
+        .toString();
+  }
+
+  /** The reason an order waiting for a price is cancelled at its business's second limit. */
+  public static final String PRICE_WAIT_EXPIRED = "PRICE_WAIT_EXPIRED";
+
+  /**
+   * An order waiting for a price does not wait forever (unit-pricing slice 5). At its business's
+   * first limit the order is flagged once and {@code OrderPriceOverdue} is written (no consumer
+   * yet); at the second it is cancelled, {@code AWAITING_PRICE} to {@code CANCELLED}, through the
+   * same transition as any cancellation, so {@code OrderCancelled} releases whatever stock the
+   * order held. A business that has set no limit is never touched. Both steps are conditional
+   * updates, so a manager pricing at the same moment wins or loses cleanly. Driven by {@code
+   * AwaitingPriceSweeper}.
+   *
+   * @param batchLimit the most orders handled in one sweep
+   * @return how many orders were flagged or cancelled
+   */
+  public int sweepAwaitingPriceOrders(int batchLimit) {
+    int acted = 0;
+    for (var ref : repo.findAwaitingPriceDue(batchLimit)) {
+      try {
+        if (ref.cancelDue()) {
+          repo.transitionOrderStatus(
+              ref.tenantId(),
+              ref.orderId(),
+              Order.STATUS_AWAITING_PRICE,
+              Order.STATUS_CANCELLED,
+              PRICE_WAIT_EXPIRED,
+              null,
+              Events.orderCancelled(
+                  ref.tenantId(),
+                  ref.orderId(),
+                  PRICE_WAIT_EXPIRED,
+                  ref.channel(),
+                  ref.fulfilmentType()));
+          acted++;
+        } else if (repo.flagPriceOverdue(
+            ref.tenantId(),
+            ref.orderId(),
+            Events.orderPriceOverdue(
+                ref.tenantId(), ref.orderId(), ref.storeId(), ref.awaitingSince(), ref.total()))) {
+          acted++;
+        }
+      } catch (ApiException e) {
+        // Priced or cancelled by a person between the scan and the update: theirs stands.
+        LOG.log(
+            java.lang.System.Logger.Level.DEBUG,
+            "Skipped awaiting-price order {0}: {1}",
+            ref.orderId(),
+            e.getMessage());
+      }
+    }
+    return acted;
+  }
+
   // ── Gap #42: Special orders ───────────────────────────────────────────────
 
   /**
    * Opens a special order: goods a store does not stock, ordered in for a named customer.
    *
+   * <p>Retryable (golden rule 11): a retry under the same key answers the order the first attempt
+   * made and writes nothing, and the same key for a different request is refused. Who may ask is
+   * judged first, so a caller held to another store learns nothing of the first order.
+   *
    * @param tenantId owning tenant
    * @param req the store, customer, items and optional currency
    * @param idempotencyKey the caller's key, already checked to be a UUIDv7, or {@code null}
    * @param ctx caller context, checked for access to the store
-   * @return the opened special order
-   * @throws ApiException {@code SPECIAL_ORDER_NO_ITEMS} (400) when no items are supplied
+   * @return the opened special order, or the first one made under the key
+   * @throws ApiException {@code SPECIAL_ORDER_NO_ITEMS} (400) when no items are supplied; {@code
+   *     IDEMPOTENCY_KEY_REUSED} (409) when the key made a different special order
    */
   public SpecialOrder createSpecialOrder(
       UUID tenantId, CreateSpecialOrderRequest req, String idempotencyKey, TenantContext ctx) {
@@ -3319,11 +4830,18 @@ public class OrderService {
     UUID customerId =
         req.customerId() != null ? Parsing.uuid(req.customerId(), "customerId") : null;
     String currency = resolveCurrency(tenantId, req.currency());
+    // Typed prices no finer than the business's currency; totals kept at its own minor units:
+    // whole yen, three-decimal dinars.
+    int scale = Fx.minorUnits(currency);
 
-    java.math.BigDecimal subtotal = java.math.BigDecimal.ZERO;
+    java.math.BigDecimal subtotal = BigDecimal.ZERO.setScale(scale);
     List<SpecialOrderItem> items = new ArrayList<>();
-    for (var ir : req.items()) {
-      var line = ir.unitPrice().multiply(ir.qty());
+    for (int i = 0; i < req.items().size(); i++) {
+      var ir = req.items().get(i);
+      BigDecimal unitPrice = TypedMoney.require(ir.unitPrice(), currency, "unitPrice");
+      // Typed at the back office: three places, never rounded (Quantities).
+      BigDecimal qty = com.storeql.order.domain.Quantities.typed(ir.qty(), "items[" + i + "].qty");
+      var line = LineMoney.of(unitPrice, qty, currency);
       subtotal = subtotal.add(line);
       items.add(
           new SpecialOrderItem(
@@ -3331,8 +4849,8 @@ public class OrderService {
               tenantId,
               soId,
               Parsing.uuid(ir.variantId(), "variantId"),
-              ir.qty(),
-              ir.unitPrice(),
+              qty,
+              unitPrice,
               line,
               ir.notes()));
     }
@@ -3361,7 +4879,41 @@ public class OrderService {
             Instant.now(),
             Instant.now());
 
-    return repo.createSpecialOrder(so, items);
+    // A retry under the same key gets the first order back (golden rule 11), when it is the same
+    // request; the same key for another is a mistake to be refused, never answered with the wrong
+    // order.
+    if (idempotencyKey != null) {
+      var earlier = repo.findSpecialOrderByKey(tenantId, idempotencyKey);
+      if (earlier.isPresent()) return replayedSpecialOrder(earlier.get(), so, items);
+    }
+    try {
+      return repo.createSpecialOrder(so, items);
+    } catch (ApiException e) {
+      // Two attempts under one key raced and this one lost: the winner's order is the answer.
+      if ("SPECIAL_ORDER_DUPLICATE_KEY".equals(e.code()) && idempotencyKey != null) {
+        var winner = repo.findSpecialOrderByKey(tenantId, idempotencyKey);
+        if (winner.isPresent()) return replayedSpecialOrder(winner.get(), so, items);
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * The special order already made under a key, when the key is used again for the same request.
+   *
+   * @param first the order the key made
+   * @param wanted the order this request would make, built as it would be inserted
+   * @param wantedLines its lines
+   * @throws ApiException 409 {@code IDEMPOTENCY_KEY_REUSED} when this request is not the one the
+   *     key made the order from
+   */
+  private SpecialOrder replayedSpecialOrder(
+      SpecialOrder first, SpecialOrder wanted, List<SpecialOrderItem> wantedLines) {
+    var firstLines = repo.findSpecialOrderItems(first.tenantId(), first.id());
+    if (!SpecialOrderReplay.isSameRequest(first, firstLines, wanted, wantedLines))
+      throw ApiException.conflict(
+          "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for a different special order");
+    return first;
   }
 
   /** One page of special orders plus the opaque cursor for the next page (null when exhausted). */
@@ -3437,23 +4989,39 @@ public class OrderService {
   }
 
   /**
+   * A special order of this business that the caller may act on: found in the tenant first (another
+   * business's id is a 404), then held to the caller's stores, as an order's own confirm, cancel
+   * and void are (a manager held to other stores moves nothing here).
+   *
+   * @throws ApiException {@code SPECIAL_ORDER_NOT_FOUND} (404); {@code STORE_ACCESS_DENIED} (403)
+   *     for staff not assigned to the order's store
+   */
+  private SpecialOrder specialOrderAtTheCallersStore(UUID tenantId, UUID soId, TenantContext ctx) {
+    SpecialOrder so = getSpecialOrder(tenantId, soId);
+    ctx.requireStoreAccess(so.storeId());
+    return so;
+  }
+
+  /**
    * Confirms a special order once the goods are on their way.
    *
    * @param tenantId owning tenant
    * @param soId the special order to confirm
-   * @param userId the staff member confirming it
+   * @param ctx the staff member confirming it, who must be able to act at the order's store
    * @return the confirmed special order
-   * @throws ApiException {@code SPECIAL_ORDER_NOT_FOUND} (404) when it does not exist; a conflict
-   *     when its current status does not allow confirmation
+   * @throws ApiException {@code SPECIAL_ORDER_NOT_FOUND} (404) when it does not exist; {@code
+   *     STORE_ACCESS_DENIED} (403) at a store the caller is not assigned to; a conflict when its
+   *     current status does not allow confirmation
    */
-  public SpecialOrder confirmSpecialOrder(UUID tenantId, UUID soId, UUID userId) {
+  public SpecialOrder confirmSpecialOrder(UUID tenantId, UUID soId, TenantContext ctx) {
+    specialOrderAtTheCallersStore(tenantId, soId, ctx);
     return repo.transitionSpecialOrderStatus(
         tenantId,
         soId,
         SpecialOrder.STATUS_PENDING,
         SpecialOrder.STATUS_CONFIRMED,
         "confirmed",
-        userId);
+        ctx.userId());
   }
 
   /**
@@ -3461,19 +5029,21 @@ public class OrderService {
    *
    * @param tenantId owning tenant
    * @param soId the special order to fulfil
-   * @param userId the staff member handing it over
+   * @param ctx the staff member handing it over, who must be able to act at the order's store
    * @return the fulfilled special order
-   * @throws ApiException {@code SPECIAL_ORDER_NOT_FOUND} (404) when it does not exist; a conflict
-   *     when its current status does not allow fulfilment
+   * @throws ApiException {@code SPECIAL_ORDER_NOT_FOUND} (404) when it does not exist; {@code
+   *     STORE_ACCESS_DENIED} (403) at a store the caller is not assigned to; a conflict when its
+   *     current status does not allow fulfilment
    */
-  public SpecialOrder fulfilSpecialOrder(UUID tenantId, UUID soId, UUID userId) {
+  public SpecialOrder fulfilSpecialOrder(UUID tenantId, UUID soId, TenantContext ctx) {
+    specialOrderAtTheCallersStore(tenantId, soId, ctx);
     return repo.transitionSpecialOrderStatus(
         tenantId,
         soId,
         SpecialOrder.STATUS_CONFIRMED,
         SpecialOrder.STATUS_FULFILLED,
         "fulfilled",
-        userId);
+        ctx.userId());
   }
 
   /**
@@ -3481,18 +5051,19 @@ public class OrderService {
    *
    * @param tenantId owning tenant
    * @param soId the special order to cancel
-   * @param userId the staff member cancelling it
+   * @param ctx the staff member cancelling it, who must be able to act at the order's store
    * @return the cancelled special order
    * @throws ApiException {@code SPECIAL_ORDER_NOT_FOUND} (404) when it does not exist; {@code
+   *     STORE_ACCESS_DENIED} (403) at a store the caller is not assigned to; {@code
    *     SPECIAL_ORDER_FULFILLED} (409) when it has already been fulfilled
    */
-  public SpecialOrder cancelSpecialOrder(UUID tenantId, UUID soId, UUID userId) {
-    var so = getSpecialOrder(tenantId, soId);
+  public SpecialOrder cancelSpecialOrder(UUID tenantId, UUID soId, TenantContext ctx) {
+    var so = specialOrderAtTheCallersStore(tenantId, soId, ctx);
     if (SpecialOrder.STATUS_FULFILLED.equals(so.status()))
       throw ApiException.conflict(
           "SPECIAL_ORDER_FULFILLED", "cannot cancel a fulfilled special order");
     return repo.transitionSpecialOrderStatus(
-        tenantId, soId, so.status(), SpecialOrder.STATUS_CANCELLED, "cancelled", userId);
+        tenantId, soId, so.status(), SpecialOrder.STATUS_CANCELLED, "cancelled", ctx.userId());
   }
 
   // ── Gap #43: POSLog ───────────────────────────────────────────────────────
@@ -3553,23 +5124,23 @@ public class OrderService {
    * is accountable for is the last thing this report should hide.
    */
   public List<ExceptionRow> exceptionReport(
-      UUID tenantId, UUID storeId, Instant from, Instant to, ExceptionGrouping grouping) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, ExceptionGrouping grouping) {
     boolean byActor = grouping == ExceptionGrouping.ACTOR;
     Map<String, BigDecimal[]> money = new LinkedHashMap<>();
     Map<String, long[]> counts = new LinkedHashMap<>();
 
-    for (Object[] r : repo.aggregateDiscounts(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateDiscounts(tenantId, stores, from, to, byActor)) {
       String k = key(r[0]);
       counts.computeIfAbsent(k, x -> new long[4])[0] = (Long) r[1];
       money.computeIfAbsent(k, x -> newMoney())[0] = (BigDecimal) r[2];
     }
-    for (Object[] r : repo.aggregateVoids(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateVoids(tenantId, stores, from, to, byActor)) {
       counts.computeIfAbsent(key(r[0]), x -> new long[4])[1] = (Long) r[1];
     }
-    for (Object[] r : repo.aggregateNoSales(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateNoSales(tenantId, stores, from, to, byActor)) {
       counts.computeIfAbsent(key(r[0]), x -> new long[4])[2] = (Long) r[1];
     }
-    for (Object[] r : repo.aggregateJournalledSales(tenantId, storeId, from, to, byActor)) {
+    for (Object[] r : repo.aggregateJournalledSales(tenantId, stores, from, to, byActor)) {
       String k = key(r[0]);
       counts.computeIfAbsent(k, x -> new long[4])[3] = (Long) r[1];
       money.computeIfAbsent(k, x -> newMoney())[1] = (BigDecimal) r[2];
@@ -3610,25 +5181,31 @@ public class OrderService {
    * Postgres, which rejects it with an error that surfaces as a 500. {@link ZoneId#of} knows the
    * same tz database Postgres does, so validating with it turns that into the 400 it always was.
    *
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else these stores added together — never a store the caller has not
+   *     already been checked against
    * @param tz an IANA zone name such as {@code Europe/London}; defaults to UTC when absent
    */
   public List<SalesByHourRow> salesByHour(
-      UUID tenantId, UUID storeId, String channel, Instant from, Instant to, String tz) {
+      UUID tenantId, Set<UUID> stores, String channel, Instant from, Instant to, String tz) {
     requireOrderedPeriod(from, to);
     String normalisedChannel = normaliseChannel(channel);
+    ZoneId zone = zone(tz);
+    // The money in the business's own minor units: whole yen, three-decimal dinars.
+    int scale = Fx.minorUnits(resolveCurrency(tenantId, null));
     return salesAnalyticsRepo
-        .salesByHour(tenantId, storeId, normalisedChannel, from, to, zone(tz))
+        .salesByHour(tenantId, stores, normalisedChannel, from, to, zone)
         .stream()
         .map(
             r ->
                 new SalesByHourRow(
                     r.hourOfDay(),
                     r.orders(),
-                    r.grossAmount(),
-                    r.discountAmount(),
+                    r.grossAmount().setScale(scale, RoundingMode.HALF_UP),
+                    r.discountAmount().setScale(scale, RoundingMode.HALF_UP),
                     // An hour with no orders produces no row, so the divisor is never zero.
                     r.grossAmount()
-                        .divide(BigDecimal.valueOf(r.orders()), 2, RoundingMode.HALF_UP)))
+                        .divide(BigDecimal.valueOf(r.orders()), scale, RoundingMode.HALF_UP)))
         .toList();
   }
 
@@ -3637,12 +5214,17 @@ public class OrderService {
    *
    * <p>Online orders have no cashier and are therefore not here at all. That is a property of the
    * data rather than a filter — the journal only ever covers the till.
+   *
+   * @param stores the stores a report reads (SJ-D74's {@code reportStores}): {@code null} for every
+   *     store in the tenant, else these stores added together — never a store the caller has not
+   *     already been checked against
    */
   public List<SalesByStaffRow> salesByStaff(
-      UUID tenantId, UUID storeId, Instant from, Instant to, int limit) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, int limit) {
     requireOrderedPeriod(from, to);
-    return salesAnalyticsRepo.salesByStaff(tenantId, storeId, from, to, limit).stream()
-        .map(OrderService::withStaffRatios)
+    int scale = Fx.minorUnits(resolveCurrency(tenantId, null));
+    return salesAnalyticsRepo.salesByStaff(tenantId, stores, from, to, limit).stream()
+        .map(r -> withStaffRatios(r, scale))
         .toList();
   }
 
@@ -3652,12 +5234,23 @@ public class OrderService {
    * <p>The discount rate divides by what the sales would have been worth undiscounted, not by what
    * they fetched: discounting £50 off £100 is half the ticket given away, and dividing by the £50
    * that was actually taken would call it 100%.
+   *
+   * @param scale the business currency's minor units ({@code Fx.minorUnits}): the average basket is
+   *     money and is kept to them; the discount rate is a percentage and keeps one decimal
    */
-  private static SalesByStaffRow withStaffRatios(SalesByStaffRow r) {
+  static SalesByStaffRow withStaffRatios(SalesByStaffRow raw, int scale) {
+    SalesByStaffRow r =
+        new SalesByStaffRow(
+            raw.groupKey(),
+            raw.sales(),
+            raw.grossAmount().setScale(scale, RoundingMode.HALF_UP),
+            raw.discountAmount().setScale(scale, RoundingMode.HALF_UP),
+            null,
+            null);
     BigDecimal basket =
         r.sales() == 0
             ? null
-            : r.grossAmount().divide(BigDecimal.valueOf(r.sales()), 2, RoundingMode.HALF_UP);
+            : r.grossAmount().divide(BigDecimal.valueOf(r.sales()), scale, RoundingMode.HALF_UP);
     BigDecimal undiscounted = r.grossAmount().add(r.discountAmount());
     BigDecimal rate =
         undiscounted.signum() <= 0
@@ -3785,6 +5378,8 @@ public class OrderService {
     Order order =
         repo.findOrder(tenantId, orderId)
             .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    // A copy of a sale is made by staff at the sale's store, not by staff of another branch.
+    if (ctx != null) ctx.requireStoreAccess(order.storeId());
     if (OrderReceipt.TYPE_EMAIL.equals(req.receiptType())
         && (req.emailedTo() == null || req.emailedTo().isBlank()))
       throw ApiException.badRequest(
@@ -3798,16 +5393,28 @@ public class OrderService {
       UUID userId = ctx != null ? ctx.userId() : null;
       java.util.Set<String> roles =
           ctx != null && ctx.roles() != null ? ctx.roles() : java.util.Set.of("CASHIER");
-      notifications.send(
-          tenantId,
-          userId,
-          roles,
-          req.emailedTo().trim(),
-          subject,
-          body,
-          "POS_RECEIPT",
-          eventId,
-          order.customerId());
+      try {
+        notifications.send(
+            tenantId,
+            userId,
+            roles,
+            req.emailedTo().trim(),
+            subject,
+            body,
+            "POS_RECEIPT",
+            eventId,
+            order.customerId());
+      } catch (org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException e) {
+        // Thrown by the breaker's interceptor outside the client method, so the client's own catch
+        // never sees it; without this an open breaker answered 500 and not the 503 the receipt is
+        // owed when it cannot be sent.
+        throw new ApiException(
+            503,
+            "ORDER_NOTIFICATION_UNAVAILABLE",
+            "notification-svc circuit open — receipt was not emailed",
+            List.of(),
+            e);
+      }
     }
 
     int printCount = req.printCount() != null ? req.printCount() : 1;
@@ -3889,13 +5496,26 @@ public class OrderService {
    *
    * @param tenantId owning tenant
    * @param orderId the sale whose receipt events to read
+   * @param ctx the caller, held to the stores they keep
    * @return the receipt events, empty when none were produced
-   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists in this tenant
+   * @throws ApiException {@code ORDER_NOT_FOUND} (404) when no such order exists in this tenant;
+   *     {@code STORE_ACCESS_DENIED} (403) for staff not assigned to the sale's store
    */
-  public List<OrderReceipt> listReceipts(UUID tenantId, UUID orderId) {
-    repo.findOrder(tenantId, orderId)
-        .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+  public List<OrderReceipt> listReceipts(UUID tenantId, UUID orderId, TenantContext ctx) {
+    Order order =
+        repo.findOrder(tenantId, orderId)
+            .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
+    ctx.requireStoreAccess(order.storeId());
     return repo.findOrderReceipts(tenantId, orderId);
+  }
+
+  /**
+   * Whether the reader sees the address a receipt copy was emailed to whole: management (owner or
+   * manager) and only there. The caller has already been held to the sale's store by {@link
+   * #listReceipts} or {@link #generateReceipt}; everyone else reads it masked.
+   */
+  public boolean mayReadReceiptAddresses(TenantContext ctx) {
+    return ctx.hasRole("OWNER") || ctx.hasRole("MANAGER");
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -3958,16 +5578,13 @@ public class OrderService {
       var v = facts.get(item.variantId());
       if (v == null || v.depositMaterial() == null || v.depositVolumeMl() == null) continue;
       if (!s.covers(v.depositMaterial(), v.depositVolumeMl())) continue;
+      int scale = Fx.minorUnits(currency);
       BigDecimal amount =
-          s.depositEach().multiply(item.qty()).setScale(2, java.math.RoundingMode.HALF_UP);
+          com.storeql.order.domain.ContainerDeposits.amount(s.depositEach(), item.qty(), scale);
       // Where the scheme taxes the deposit it is taxed as the drink: the deposit is quoted gross,
       // so the VAT is the part inside it at the line's rate.
       BigDecimal vatRate = s.taxed() ? item.vatRate() : null;
-      BigDecimal vat =
-          vatRate == null
-              ? BigDecimal.ZERO.setScale(2)
-              : amount.subtract(
-                  amount.divide(BigDecimal.ONE.add(vatRate), 2, java.math.RoundingMode.HALF_UP));
+      BigDecimal vat = com.storeql.order.domain.ContainerDeposits.vatInside(amount, vatRate, scale);
       out.add(
           new OrderDeposit(
               Ids.newId(),
@@ -4030,7 +5647,8 @@ public class OrderService {
                         "no deposit return scheme is in force where this store trades"));
     List<com.storeql.order.domain.Domain.ContainerRefundLine> lines = new java.util.ArrayList<>();
     int containers = 0;
-    BigDecimal amount = BigDecimal.ZERO.setScale(2);
+    int scale = Fx.minorUnits(currency);
+    BigDecimal amount = com.storeql.order.domain.ContainerDeposits.zero(scale);
     for (var line : req.lines()) {
       String material = line.material().trim().toUpperCase(java.util.Locale.ROOT);
       if (line.count() > MAX_REFUND_OF_ONE_KIND) {
@@ -4050,10 +5668,8 @@ public class OrderService {
       }
       containers += line.count();
       BigDecimal lineAmount =
-          scheme
-              .depositEach()
-              .multiply(BigDecimal.valueOf(line.count()))
-              .setScale(2, java.math.RoundingMode.HALF_UP);
+          com.storeql.order.domain.ContainerDeposits.amount(
+              scheme.depositEach(), BigDecimal.valueOf(line.count()), scale);
       amount = amount.add(lineAmount);
       lines.add(
           new com.storeql.order.domain.Domain.ContainerRefundLine(
@@ -4097,7 +5713,12 @@ public class OrderService {
    * Deposits charged on sales that stand and paid back at the till over [from, to) (09.16), by
    * material; the difference is what the scheme holds unredeemed.
    *
-   * @throws ApiException {@code 400 ORDER_REPORT_PERIOD_INVALID} when from is not before to
+   * <p>A named store is checked against the caller's own (SJ-D74's {@code reportStores}); with none
+   * named, a caller held to no store reads the whole business as before, and a caller held to some
+   * reads exactly those, added together.
+   *
+   * @throws ApiException {@code 400 ORDER_REPORT_PERIOD_INVALID} when from is not before to; {@code
+   *     403 STORE_ACCESS_DENIED} for a named store the caller does not keep
    */
   public com.storeql.order.dto.Dtos.DepositReportResponse depositReport(
       TenantContext ctx, String storeIdRaw, String fromRaw, String toRaw) {
@@ -4109,13 +5730,15 @@ public class OrderService {
     }
     UUID storeId =
         storeIdRaw == null || storeIdRaw.isBlank() ? null : Parsing.uuid(storeIdRaw, "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
-    var rows = depositRepo.report(tenantId, storeId, from, to);
+    Set<UUID> stores = ctx.reportStores(storeId);
+    var rows = depositRepo.report(tenantId, stores, from, to);
+    String currency = resolveCurrency(tenantId, null);
+    int scale = Fx.minorUnits(currency);
     long chargedContainers = 0;
     long refundedContainers = 0;
-    BigDecimal chargedAmount = BigDecimal.ZERO.setScale(2);
-    BigDecimal chargedVat = BigDecimal.ZERO.setScale(2);
-    BigDecimal refundedAmount = BigDecimal.ZERO.setScale(2);
+    BigDecimal chargedAmount = com.storeql.order.domain.ContainerDeposits.zero(scale);
+    BigDecimal chargedVat = com.storeql.order.domain.ContainerDeposits.zero(scale);
+    BigDecimal refundedAmount = com.storeql.order.domain.ContainerDeposits.zero(scale);
     List<com.storeql.order.dto.Dtos.DepositReportRowResponse> byMaterial =
         new java.util.ArrayList<>();
     for (var r : rows) {
@@ -4137,7 +5760,7 @@ public class OrderService {
         from.toString(),
         to.toString(),
         storeId == null ? null : storeId.toString(),
-        resolveCurrency(tenantId, null),
+        currency,
         chargedContainers,
         chargedAmount,
         chargedVat,

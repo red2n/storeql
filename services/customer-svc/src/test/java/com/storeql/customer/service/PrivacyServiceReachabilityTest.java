@@ -116,4 +116,35 @@ class PrivacyServiceReachabilityTest {
     assertThat(channel.getValue(), is("EMAIL"));
     assertThat(recipient.getValue(), is("a@example.com"));
   }
+
+  @Test
+  void manyRecipientsAreAllToldAndNeverMoreThanTheConfiguredNumberAtOnce() {
+    service.intimationConcurrency = 3;
+    List<Reachable> people = new java.util.ArrayList<>();
+    for (int i = 0; i < 40; i++) {
+      people.add(new Reachable(Ids.newId(), "c" + i + "@example.com", null, null));
+    }
+    when(repo.reachable(eq(TENANT), any(), eq(PrivacyService.MAX_RECIPIENTS))).thenReturn(people);
+    java.util.concurrent.atomic.AtomicInteger inFlight =
+        new java.util.concurrent.atomic.AtomicInteger();
+    java.util.concurrent.atomic.AtomicInteger peak =
+        new java.util.concurrent.atomic.AtomicInteger();
+    java.util.concurrent.atomic.AtomicInteger sent =
+        new java.util.concurrent.atomic.AtomicInteger();
+    when(notifications.send(
+            any(), any(), anyString(), anyString(), any(), any(), any(), any(), any()))
+        .thenAnswer(
+            call -> {
+              peak.accumulateAndGet(inFlight.incrementAndGet(), Math::max);
+              Thread.sleep(5);
+              inFlight.decrementAndGet();
+              sent.incrementAndGet();
+              return true;
+            });
+
+    service.intimate(TENANT, null, "Your data", "What happened and what we did.", null, ACTOR);
+
+    assertThat(sent.get(), is(40));
+    assertThat("at most three at once, saw " + peak.get(), peak.get() <= 3, is(true));
+  }
 }

@@ -58,7 +58,8 @@ public class LoyaltyProgrammeResource {
    *
    * @param req the tiers, months and reason
    * @return the programme as saved
-   * @throws com.storeql.web.ApiException {@code 400 LOYALTY_TIERS_INVALID}, {@code 400
+   * @throws com.storeql.web.ApiException {@code 403 BUSINESS_WIDE_ONLY} for a caller held to
+   *     stores, the programme covering every store; {@code 400 LOYALTY_TIERS_INVALID}, {@code 400
    *     LOYALTY_EXPIRY_INVALID}
    */
   @Operation(
@@ -70,6 +71,9 @@ public class LoyaltyProgrammeResource {
               + " never sooner than thirty days from now. Management only.")
   @APIResponse(responseCode = "200", description = "Programme saved")
   @APIResponse(responseCode = "400", description = "A shape that cannot be honoured, by name")
+  @APIResponse(
+      responseCode = "403",
+      description = "BUSINESS_WIDE_ONLY: a caller held to stores cannot set the whole business's")
   @PUT
   @Path("/programme")
   public ApiResponse<?> set(SetLoyaltyProgrammeRequest req) {
@@ -80,18 +84,28 @@ public class LoyaltyProgrammeResource {
 
   /**
    * Runs the expiry and re-tiering sweep for this business now, rather than waiting for the hour.
+   * It touches every store's customers, so it is run by a caller held to no store.
    *
    * @return what it did
+   * @throws com.storeql.web.ApiException {@code 403 BUSINESS_WIDE_ONLY} for a caller held to
+   *     stores, checked before anything runs
    */
   @Operation(
       summary = "Run the loyalty sweep now",
       description =
           "Writes off every lot that has died (one EXPIRE entry per customer, announced as"
               + " LoyaltyExpired) and re-tiers every account from what qualifies today. The sweeper"
-              + " does this hourly; this is for the business that wants it now. Management only.")
+              + " does this hourly; this is for the business that wants it now. Management held to"
+              + " no store (an owner or a business-wide manager), since it expires points and"
+              + " re-tiers the customers of every store.")
   @APIResponse(
       responseCode = "200",
       description = "Customers and points expired, accounts re-tiered")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN below management; BUSINESS_WIDE_ONLY: a caller held to stores cannot run"
+              + " the whole business's sweep, and nothing is expired or re-tiered")
   @POST
   @Path("/expiry/run")
   public ApiResponse<?> runExpiry() {

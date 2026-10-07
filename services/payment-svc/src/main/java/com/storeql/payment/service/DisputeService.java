@@ -63,7 +63,8 @@ public class DisputeService {
    * @throws ApiException 404 {@code PAYMENT_NOT_FOUND}; 409 {@code DISPUTE_NOT_DISPUTABLE} for a
    *     tender no bank can take back or one a provider would tell us about itself, {@code
    *     DISPUTE_ALREADY_OPEN}; 400 for an amount over the tender, an unknown reason or a date that
-   *     has already passed
+   *     has already passed; 400 {@code DISPUTE_AMOUNT_INVALID} for an amount or fee finer than the
+   *     dispute's currency's minor unit
    */
   public Dispute record(
       UUID tenantId, UUID actorId, DisputeDtos.RecordDisputeRequest req, String idempotencyKey) {
@@ -81,6 +82,11 @@ public class DisputeService {
       throw ApiException.badRequest("DISPUTE_REASON_UNKNOWN", "Not a reason a card scheme gives");
     }
     BigDecimal amount = req.amount() == null ? tender.amount() : req.amount();
+    BigDecimal fee = req.feeAmount() == null ? BigDecimal.ZERO : req.feeAmount();
+    String currency = profiles.currencyOr(tenantId, req.currency());
+    // The acquirer's letter is money in its currency: no finer than its minor unit, never rounded.
+    Amounts.requireFits(amount, currency, "DISPUTE_AMOUNT_INVALID");
+    Amounts.requireFits(fee, currency, "DISPUTE_AMOUNT_INVALID");
     if (amount.compareTo(tender.amount()) > 0) {
       throw ApiException.badRequest(
           "DISPUTE_AMOUNT_EXCEEDS_PAYMENT", "A dispute cannot be for more than was paid");
@@ -100,8 +106,8 @@ public class DisputeService {
             MANUAL,
             req.caseReference().trim(),
             amount,
-            req.feeAmount() == null ? BigDecimal.ZERO : req.feeAmount(),
-            profiles.currencyOr(tenantId, req.currency()),
+            fee,
+            currency,
             reason,
             blankToNull(req.networkReasonCode()),
             Disputes.NEEDS_RESPONSE,
@@ -110,7 +116,9 @@ public class DisputeService {
             now,
             null,
             blankToNull(idempotencyKey),
-            actorId);
+            actorId,
+            // The acquirer's letter is in one currency, the fee with the amount.
+            currency);
     return open(d, actorId, "Recorded from the acquirer's notice, case " + d.providerDisputeRef());
   }
 
@@ -127,7 +135,9 @@ public class DisputeService {
                   + " "
                   + d.currency()
                   + " and a fee of "
-                  + d.feeAmount().toPlainString(),
+                  + d.feeAmount().toPlainString()
+                  + " "
+                  + d.feeCurrency(),
               actorId,
               d.openedAt()));
     }
@@ -172,7 +182,9 @@ public class DisputeService {
                   provider,
                   notice.disputeRef(),
                   notice.amount(),
-                  notice.fee() == null ? BigDecimal.ZERO : notice.fee(),
+                  notice.fee() == null || notice.feeCurrency() == null
+                      ? BigDecimal.ZERO
+                      : notice.fee(),
                   notice.currency(),
                   notice.reason(),
                   notice.networkReasonCode(),
@@ -182,7 +194,12 @@ public class DisputeService {
                   now,
                   null,
                   null,
-                  null),
+                  null,
+                  // The fee in the currency the provider charged it in; one it said nothing
+                  // readable about is none yet, which is zero in the charge's own currency.
+                  notice.fee() == null || notice.feeCurrency() == null
+                      ? notice.currency()
+                      : notice.feeCurrency()),
               null,
               "Opened by " + provider);
       if (!DisputeNotice.PHASE_CLOSED.equals(notice.phase())) return;
@@ -190,12 +207,17 @@ public class DisputeService {
     Instant now = Instant.now();
     switch (notice.phase()) {
       case DisputeNotice.PHASE_FUNDS_WITHDRAWN -> {
-        BigDecimal fee = notice.fee() == null ? known.feeAmount() : notice.fee();
-        Dispute after = withFunds(known, fee);
+        // The fee and its currency together, or what was known of both: never a figure in one
+        // currency and a code from another.
+        boolean said = notice.fee() != null && notice.feeCurrency() != null;
+        BigDecimal fee = said ? notice.fee() : known.feeAmount();
+        String feeCurrency = said ? notice.feeCurrency() : known.feeCurrency();
+        Dispute after = withFunds(known, fee, feeCurrency);
         repo.fundsWithdrawn(
             known.tenantId(),
             known.id(),
             fee,
+            feeCurrency,
             now,
             new DisputeEvent(
                 Ids.newId(), Disputes.EVENT_FUNDS_WITHDRAWN, "By " + provider, null, now),
@@ -399,7 +421,7 @@ public class DisputeService {
     }
   }
 
-  private static Dispute withFunds(Dispute d, BigDecimal fee) {
+  private static Dispute withFunds(Dispute d, BigDecimal fee, String feeCurrency) {
     return new Dispute(
         d.id(),
         d.tenantId(),
@@ -419,7 +441,8 @@ public class DisputeService {
         d.openedAt(),
         d.closedAt(),
         d.idempotencyKey(),
-        d.createdBy());
+        d.createdBy(),
+        feeCurrency);
   }
 
   private static PaymentProvider.DisputeAnswer answer(Evidence e) {

@@ -1,6 +1,7 @@
 package com.storeql.notification.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.notification.channel.Channels;
 import com.storeql.notification.domain.Domain.NotificationLog;
 import com.storeql.notification.domain.Domain.PushDevice;
 import com.storeql.notification.domain.Domain.ShortageAlert;
@@ -12,6 +13,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -24,6 +26,7 @@ import java.util.UUID;
 public class NotificationService {
 
   @Inject NotificationRepository repo;
+  @Inject Channels channels;
 
   /** Record a shortage alert, deduped on eventId atomically with the insert. */
   public boolean recordShortageAlertOnce(
@@ -48,29 +51,34 @@ public class NotificationService {
   }
 
   /**
-   * Lists recent stock-shortage alerts for a store, newest first.
+   * Lists recent stock-shortage alerts, newest first.
    *
    * @param tenantId owning tenant
-   * @param storeId the store whose alerts to list
+   * @param stores the stores whose alerts the caller may read, or {@code null} for every store of
+   *     the tenant ({@code TenantContext#reportStores})
    * @param limit maximum rows to return; capped at 100
    * @return the matching alerts, newest first
    */
-  public List<ShortageAlert> listAlerts(UUID tenantId, UUID storeId, int limit) {
+  public List<ShortageAlert> listAlerts(UUID tenantId, Set<UUID> stores, int limit) {
     int cap = Math.min(limit, 100);
-    return repo.listAlerts(tenantId, storeId, cap);
+    return repo.listAlerts(tenantId, stores, cap);
   }
 
   /**
-   * Lists recent stock-shortage alerts for one variant across every store, newest first.
+   * Lists recent stock-shortage alerts for one variant across the stores the caller may read,
+   * newest first.
    *
    * @param tenantId owning tenant
    * @param variantId the product variant whose alerts to list
+   * @param stores the stores whose alerts the caller may read, or {@code null} for every store of
+   *     the tenant
    * @param limit maximum rows to return; capped at 100
    * @return the matching alerts, newest first
    */
-  public List<ShortageAlert> listAlertsByVariant(UUID tenantId, UUID variantId, int limit) {
+  public List<ShortageAlert> listAlertsByVariant(
+      UUID tenantId, UUID variantId, Set<UUID> stores, int limit) {
     int cap = Math.min(limit, 100);
-    return repo.listAlertsByVariant(tenantId, variantId, cap);
+    return repo.listAlertsByVariant(tenantId, variantId, stores, cap);
   }
 
   /** In-app notifications feed for a tenant, newest first (optionally filtered by recipient). */
@@ -122,9 +130,17 @@ public class NotificationService {
     return listNotifications(tenantId, recipient, null, limit);
   }
 
+  /**
+   * The tenant's notification feed, newest first.
+   *
+   * @param channel a channel or carrier name to narrow the feed to, in any case, or {@code null} or
+   *     blank for every channel. The log holds the carrier that carried each message, so a channel
+   *     name is turned into its carrier first ({@link Channels#carrierOf}): EMAIL finds the rows of
+   *     the deployment's default channel, and a carrier's own name (SMTP, SMS…) finds itself.
+   */
   public List<NotificationLog> listNotifications(
       UUID tenantId, String recipient, String channel, int limit) {
     int cap = Math.min(limit, 100);
-    return repo.listRecent(tenantId, recipient, channel, cap);
+    return repo.listRecent(tenantId, recipient, channels.carrierOf(channel), cap);
   }
 }

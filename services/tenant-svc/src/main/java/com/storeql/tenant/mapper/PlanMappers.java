@@ -74,7 +74,10 @@ public final class PlanMappers {
   public static java.util.List<PlanDtos.GrantResponse> grantsOf(TenantPlan t) {
     return t.plan() == null
         ? java.util.List.of()
-        : t.plan().grants().stream().map(PlanMappers::toDto).toList();
+        : t.plan().grants().stream()
+            .filter(g -> Plans.isEnforced(g.key()))
+            .map(PlanMappers::toDto)
+            .toList();
   }
 
   private static PlanDtos.UsageResponse toDto(Usage u) {

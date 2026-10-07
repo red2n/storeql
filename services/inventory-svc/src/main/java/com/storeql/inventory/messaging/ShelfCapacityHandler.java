@@ -1,11 +1,11 @@
 package com.storeql.inventory.messaging;
 
 import com.storeql.ids.Ids;
+import com.storeql.inventory.config.Jsons;
 import com.storeql.inventory.repo.ShelfTargetRepository;
 import com.storeql.inventory.repo.ShelfTargetRepository.Target;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
 import java.lang.System.Logger;
@@ -47,7 +47,7 @@ public class ShelfCapacityHandler {
     UUID tenantId;
     UUID storeId;
     UUID fixtureId;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.createReader(new StringReader(json))) {
       obj = reader.readObject();
       eventType = obj.getString("eventType", "");
       tenantId = Ids.parse(obj.getString("tenantId"));

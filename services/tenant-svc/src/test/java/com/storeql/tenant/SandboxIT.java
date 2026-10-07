@@ -248,6 +248,58 @@ class SandboxIT {
         is("2"));
   }
 
+  @Test
+  @DisplayName(
+      "A deployment that has lost the SANDBOX plan refuses to make a sandbox, and makes nothing")
+  void aSandboxIsRefusedWhereThePlanIsLost() throws Exception {
+    Business live = business("Lost Plan Co");
+    String sandboxPlan = "019965a0-0000-7000-8000-000000000001";
+    String tenantsBefore = scalar(PG, "SELECT count(*) FROM tenant.tenants");
+
+    // The seeded plan can be taken away by nobody over HTTP; a damaged database is how a
+    // deployment loses it. Its code is changed rather than the row removed, so what holds the plan
+    // (its allowances) stays, and it is put back whatever the outcome.
+    changeSandboxPlanCode(sandboxPlan, "SANDBOX-LOST");
+    try {
+      assertError(owner(live, "POST", SANDBOX, null), 503, "SANDBOX_PLAN_MISSING");
+      assertThat(
+          "no sandbox was made for the business",
+          scalar(
+              PG, "SELECT count(*) FROM tenant.tenants WHERE sandbox_of = '" + live.tenant() + "'"),
+          is("0"));
+      assertThat(
+          "no tenant of any kind was written",
+          scalar(PG, "SELECT count(*) FROM tenant.tenants"),
+          is(tenantsBefore));
+      assertError(owner(live, "GET", SANDBOX, null), 404, "SANDBOX_NOT_FOUND");
+      assertThat(
+          "and no TenantCreated was announced for one",
+          scalar(
+              PG,
+              "SELECT count(*) FROM tenant.outbox WHERE event_type = 'TenantCreated'"
+                  + " AND payload LIKE '%\"sandboxOf\":\""
+                  + live.tenant()
+                  + "\"%'"),
+          is("0"));
+    } finally {
+      changeSandboxPlanCode(sandboxPlan, "SANDBOX");
+    }
+
+    // The plan back, the same request makes the sandbox: the refusal was the plan's, nothing
+    // else's.
+    JsonObject made = data(owner(live, "POST", SANDBOX, null), 201);
+    assertThat(made.getString("mode"), is("SANDBOX"));
+  }
+
+  private static void changeSandboxPlanCode(String planId, String code) throws Exception {
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps = c.prepareStatement("UPDATE tenant.plans SET code = ? WHERE id = ?::uuid")) {
+      ps.setString(1, code);
+      ps.setString(2, planId);
+      assertThat("the SANDBOX plan is seeded", ps.executeUpdate(), is(1));
+    }
+  }
+
   // ── helpers ────────────────────────────────────────────────────────────────
 
   /** A live business with an owner and a default store. */

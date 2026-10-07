@@ -11,7 +11,9 @@ import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * How this module's integration tests call the service: as somebody, the way the gateway would have
@@ -23,16 +25,26 @@ final class ItCalls {
 
   /**
    * Who is calling, as the gateway's identity headers say: the stores they are held to ride along
-   * as {@code X-Store-Ids}, none meaning the whole business.
+   * as {@code X-Store-Ids} (comma-separated when there is more than one), none meaning the whole
+   * business.
    */
-  record Caller(UUID tenantId, UUID userId, String roles, UUID store) {
+  record Caller(UUID tenantId, UUID userId, String roles, UUID store, List<UUID> stores) {
+
+    Caller(UUID tenantId, UUID userId, String roles, UUID store) {
+      this(tenantId, userId, roles, store, List.of());
+    }
 
     Caller(UUID tenantId, UUID userId, String roles) {
-      this(tenantId, userId, roles, null);
+      this(tenantId, userId, roles, null, List.of());
     }
 
     static Caller owner(UUID tenantId) {
       return new Caller(tenantId, Ids.newId(), "OWNER");
+    }
+
+    /** The same tenant and role, held to several stores added together. */
+    static Caller heldTo(UUID tenantId, String roles, UUID... storeIds) {
+      return new Caller(tenantId, Ids.newId(), roles, null, List.of(storeIds));
     }
 
     Caller as(String role) {
@@ -41,7 +53,15 @@ final class ItCalls {
 
     /** The same person, held to one store. */
     Caller at(UUID storeId) {
-      return new Caller(tenantId, userId, roles, storeId);
+      return new Caller(tenantId, userId, roles, storeId, List.of());
+    }
+
+    /** The {@code X-Store-Ids} header value the gateway would have stamped, or null for none. */
+    String storeIdsHeader() {
+      if (!stores.isEmpty()) {
+        return stores.stream().map(UUID::toString).collect(Collectors.joining(","));
+      }
+      return store == null ? null : store.toString();
     }
   }
 
@@ -77,14 +97,32 @@ final class ItCalls {
       Caller who,
       String json,
       String idempotencyKey) {
+    return call(target, method, pathAndQuery, who, json, idempotencyKey, null);
+  }
+
+  /**
+   * As {@link #call}, for a caller whose role names its permissions (20.10): {@code permissions} is
+   * the {@code X-Permissions} header the gateway stamps from the token, comma-separated ({@code -}
+   * for none); null sends none, so the tier's defaults apply.
+   */
+  static Answer call(
+      WebTarget target,
+      String method,
+      String pathAndQuery,
+      Caller who,
+      String json,
+      String idempotencyKey,
+      String permissions) {
     Invocation.Builder b =
         WebTargets.at(target, pathAndQuery)
             .request()
             .header("X-Tenant-Id", who.tenantId())
             .header("X-User-Id", who.userId())
             .header("X-Roles", who.roles());
-    if (who.store() != null) b = b.header("X-Store-Ids", who.store());
+    String storeIds = who.storeIdsHeader();
+    if (storeIds != null) b = b.header("X-Store-Ids", storeIds);
     if (idempotencyKey != null) b = b.header("Idempotency-Key", idempotencyKey);
+    if (permissions != null) b = b.header("X-Permissions", permissions);
     Response r =
         "GET".equals(method)
             ? b.get()

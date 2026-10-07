@@ -66,13 +66,14 @@ public class CostingRepository extends BaseOutboxRepository {
             ps.setString(5, method);
             ps.setBigDecimal(6, averageCost);
             ps.setBigDecimal(7, averageCost);
-            ResultSet rs = ps.executeQuery();
-            if (!rs.next())
-              throw ApiException.unprocessable(
-                  "COSTING_METHOD_ERROR", "upsert costing method returned nothing");
-            CostingMethod cm = mapCostingMethod(rs);
-            insertOutbox(c, event);
-            return cm;
+            try (ResultSet rs = ps.executeQuery()) {
+              if (!rs.next())
+                throw ApiException.unprocessable(
+                    "COSTING_METHOD_ERROR", "upsert costing method returned nothing");
+              CostingMethod cm = mapCostingMethod(rs);
+              insertOutbox(c, event);
+              return cm;
+            }
           }
         },
         "upsert costing method");
@@ -145,8 +146,7 @@ public class CostingRepository extends BaseOutboxRepository {
             ps.setObject(3, storeId);
             ps.setString(4, periodName);
             ps.setObject(5, Date.valueOf(periodDate));
-            try {
-              ResultSet rs = ps.executeQuery();
+            try (ResultSet rs = ps.executeQuery()) {
               if (!rs.next())
                 throw ApiException.unprocessable(
                     "PERIOD_OPEN_ERROR", "open period returned nothing");
@@ -189,12 +189,14 @@ public class CostingRepository extends BaseOutboxRepository {
           try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setObject(1, tenantId);
             ps.setObject(2, periodId);
-            ResultSet rs = ps.executeQuery();
-            if (!rs.next())
-              throw ApiException.conflict("PERIOD_NOT_OPEN", "period not found or already closed");
-            AccountingPeriod ap = mapPeriod(rs);
-            insertOutbox(c, event);
-            return ap;
+            try (ResultSet rs = ps.executeQuery()) {
+              if (!rs.next())
+                throw ApiException.conflict(
+                    "PERIOD_NOT_OPEN", "period not found or already closed");
+              AccountingPeriod ap = mapPeriod(rs);
+              insertOutbox(c, event);
+              return ap;
+            }
           }
         },
         "close accounting period");

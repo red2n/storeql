@@ -49,6 +49,9 @@ public class JwtAuthFilter implements ContainerRequestFilter {
   private static final Set<String> PUBLIC_PATHS =
       Set.of(
           "api/iam-svc/auth/register",
+          // Business sign-up ("Start a business"): like a shopper's sign-up, it is how a person
+          // first gets a token, so it cannot ask for one.
+          "api/iam-svc/auth/register/business",
           // The price list a prospect reads before signing up (21.13): plans on sale, no identity.
           "api/tenant-svc/plans",
           // The API's versions and their policy (22.8): what an integrator reads before holding
@@ -119,6 +122,13 @@ public class JwtAuthFilter implements ContainerRequestFilter {
 
   @Inject SigningKeySet signingKeys;
 
+  private static final java.util.regex.Pattern VERSION_PREFIX =
+      java.util.regex.Pattern.compile("^api/v\\d+/");
+  private static final java.util.regex.Pattern ONBOARDING_ROUTE =
+      java.util.regex.Pattern.compile("api/[a-z0-9-]+/onboarding(/.*)?");
+  private static final java.util.regex.Pattern PLATFORM_ROUTE =
+      java.util.regex.Pattern.compile("api/[a-z0-9-]+/platform(/.*)?");
+
   /** A verifier per signing key, built once the key is known. */
   private final java.util.Map<String, JWTVerifier> verifiers =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -151,8 +161,8 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     String kid = decoded.getKeyId();
     var key =
         signingKeys.key(kid).orElseThrow(() -> new JWTVerificationException("unknown signing key"));
-    return verifiers
-        .computeIfAbsent(
+    JWTVerifier verifier =
+        verifiers.computeIfAbsent(
             kid + ":" + key.getModulus().hashCode(),
             k ->
                 JWT.require(Algorithm.RSA256(key, null))
@@ -174,8 +184,15 @@ public class JwtAuthFilter implements ContainerRequestFilter {
                     // never be allowed to help.
                     .acceptIssuedAt(CLOCK_SKEW_SECONDS)
                     .acceptNotBefore(CLOCK_SKEW_SECONDS)
-                    .build())
-        .verify(token);
+                    .build());
+    // Once a rotation has retired a key, its verifier goes too: the cache holds the current set.
+    if (verifiers.size() > signingKeys.kids().size()) {
+      var current = new java.util.HashSet<String>();
+      signingKeys.snapshot().forEach((id, k) -> current.add(id + ":" + k.getModulus().hashCode()));
+      verifiers.keySet().retainAll(current);
+    }
+    // The token is already decoded: verify that, rather than parsing the compact form again.
+    return verifier.verify(decoded);
   }
 
   @Override
@@ -202,6 +219,7 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     ctx.getHeaders().remove(HttpHeaders.PERMISSIONS);
     ctx.getHeaders().remove(HttpHeaders.AUTH_SCOPE);
     ctx.getHeaders().remove(HttpHeaders.AUTH_METHODS);
+    ctx.getHeaders().remove(HttpHeaders.SESSION_ID);
 
     // Allow public auth paths without a token.
     if (isPublic(path)) {
@@ -370,6 +388,13 @@ public class JwtAuthFilter implements ContainerRequestFilter {
       ctx.getHeaders().putSingle(HttpHeaders.AUTH_METHODS, String.join(",", amr));
     }
 
+    // Which of the person's sessions this token belongs to (sign-in protection): iam-svc marks it
+    // as "this one" in the person's own list. A token minted before sessions had ids names none.
+    String sid = jwt.getClaim("sid").asString();
+    if (sid != null && !sid.isBlank()) {
+      ctx.getHeaders().putSingle(HttpHeaders.SESSION_ID, sid);
+    }
+
     // Restore preserved tenant ID for onboarding paths (flow guard: user provides tenant context)
     if (preservedTenantId != null && !preservedTenantId.isBlank() && tenantId == null) {
       ctx.getHeaders().putSingle(HttpHeaders.TENANT_ID, preservedTenantId.trim());
@@ -420,6 +445,11 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     // through /orders/mine and could not open any of them, because no tenant was derived for the
     // read by id — a gap the privacy-flow k6 suite hit the first time it drove the real door.
     if ("GET".equals(method) && isOrderSelfRead(path)) {
+      return true;
+    }
+    // The shopper cancelling one of their own orders before anything was paid: order-svc lets only
+    // the login the order belongs to do it, and only while it is an unpaid PENDING online order.
+    if ("POST".equals(method) && isOrderSelfCancel(path)) {
       return true;
     }
     // A split checkout (order orchestration): the shopper reading the parts of the delivery they
@@ -660,6 +690,21 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     return "history".equals(child) || "returns".equals(child) || "fiscal-receipt".equals(child);
   }
 
+  /**
+   * {@code POST api/order-svc/orders/{id}/cancel} with an id-shaped segment and nothing after it.
+   *
+   * @param path the normalized request path
+   * @return {@code true} for exactly that shape
+   */
+  private static boolean isOrderSelfCancel(String path) {
+    String prefix = "api/order-svc/orders/";
+    String suffix = "/cancel";
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) {
+      return false;
+    }
+    return looksLikeUuid(path.substring(prefix.length(), path.length() - suffix.length()));
+  }
+
   private static boolean isPaymentIntentRead(String path) {
     String prefix = "api/payment-svc/payments/intents/";
     if (!path.startsWith(prefix)) {
@@ -706,7 +751,7 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     while (p.endsWith("/")) p = p.substring(0, p.length() - 1);
     // Collapse an optional API version segment so /api/v1/... matches the same public/storefront/
     // onboarding whitelists as the unversioned /api/... alias (golden rule #2 stays exact-match).
-    p = p.replaceFirst("^api/v\\d+/", "api/");
+    p = VERSION_PREFIX.matcher(p).replaceFirst("api/");
     return p;
   }
 
@@ -759,8 +804,8 @@ public class JwtAuthFilter implements ContainerRequestFilter {
   /** The routes a key never reaches, whatever tier it holds: see {@link #authenticateApiKey}. */
   static boolean isNoRouteForAKey(String target) {
     return target.startsWith("api/iam-svc/")
-        || target.matches("api/[a-z0-9-]+/onboarding(/.*)?")
-        || target.matches("api/[a-z0-9-]+/platform(/.*)?");
+        || ONBOARDING_ROUTE.matcher(target).matches()
+        || PLATFORM_ROUTE.matcher(target).matches();
   }
 
   private static Response keyRouteForbidden() {

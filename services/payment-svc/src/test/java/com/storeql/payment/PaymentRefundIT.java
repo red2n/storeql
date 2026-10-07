@@ -138,4 +138,124 @@ class PaymentRefundIT {
 
     assertRefunded(tenant, order, "0");
   }
+
+  // ── return refund methods (return controls) ────────────────────────────────
+
+  private List<String> refundedEvents(UUID tenantId) throws Exception {
+    List<String> out = new java.util.ArrayList<>();
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "SELECT payload FROM payment.outbox WHERE tenant_id = ?"
+                    + " AND event_type = 'PaymentRefunded' ORDER BY created_at")) {
+      ps.setObject(1, tenantId);
+      try (var rs = ps.executeQuery()) {
+        while (rs.next()) out.add(rs.getString(1));
+      }
+    }
+    return out;
+  }
+
+  private void storeCreditOrGiftCardReturn(String method) throws Exception {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    UUID customer = Ids.newId();
+    UUID ret = Ids.newId();
+    captureTender(tenant, order, "40.00");
+    // The sale's currency rides on the event, so store credit is credited in what was paid.
+    var info =
+        new PaymentService.ReturnRefund(
+            method, ret, "STORE_CREDIT".equals(method) ? customer : null, "INR");
+
+    UUID event = Ids.newId();
+    service.refundReturnForOrderEvent(
+        event, CONSUMER, tenant, order, new BigDecimal("15.00"), "return", info);
+    service.refundReturnForOrderEvent(
+        event, CONSUMER, tenant, order, new BigDecimal("15.00"), "return", info);
+
+    List<RefundTender> refunds = repo.findRefundsByOrder(tenant, order);
+    assertThat(refunds.size(), is(1));
+    assertThat(refunds.get(0).method(), is(method));
+    assertRefunded(tenant, order, "15.00");
+
+    List<String> events = refundedEvents(tenant);
+    assertThat(events.size(), is(1));
+    String json = events.get(0);
+    assertThat(json.contains("\"refundMethod\":\"" + method + "\""), is(true));
+    assertThat(json.contains("\"returnId\":\"" + ret + "\""), is(true));
+    assertThat(json.contains("\"method\":\"" + method + "\",\"amount\":15.00"), is(true));
+    assertThat(
+        json.contains("\"customerId\":\"" + customer + "\""), is("STORE_CREDIT".equals(method)));
+    assertThat(json, json.contains("\"currency\":\"INR\""), is(true));
+  }
+
+  @Test
+  void storeCreditReturnRecordsOneStoreCreditRefundOnce() throws Exception {
+    storeCreditOrGiftCardReturn("STORE_CREDIT");
+  }
+
+  @Test
+  void giftCardReturnRecordsOneGiftCardRefundOnce() throws Exception {
+    storeCreditOrGiftCardReturn("GIFT_CARD");
+  }
+
+  @Test
+  void storeCreditReturnIsCappedAtWhatWasCapturedLessWhatWasRefunded() {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    captureTender(tenant, order, "30.00");
+    var info = new PaymentService.ReturnRefund("STORE_CREDIT", Ids.newId(), Ids.newId());
+
+    service.refundReturnForOrderEvent(
+        Ids.newId(), CONSUMER, tenant, order, new BigDecimal("20.00"), "return", info);
+    service.refundReturnForOrderEvent(
+        Ids.newId(), CONSUMER, tenant, order, new BigDecimal("999.00"), "return", info);
+
+    assertRefunded(tenant, order, "30.00");
+  }
+
+  @Test
+  void anotherBusinessesReturnEventTouchesNothing() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID other = Ids.newId();
+    UUID order = Ids.newId();
+    captureTender(tenant, order, "30.00");
+
+    service.refundReturnForOrderEvent(
+        Ids.newId(),
+        CONSUMER,
+        other,
+        order,
+        new BigDecimal("10.00"),
+        "return",
+        new PaymentService.ReturnRefund("GIFT_CARD", Ids.newId(), null));
+
+    assertRefunded(tenant, order, "0");
+    assertRefunded(other, order, "0");
+    assertThat(refundedEvents(other).size(), is(0));
+  }
+
+  @Test
+  void originalReturnStillRefundsTheOriginalTenderAndNamesTheMethod() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    UUID ret = Ids.newId();
+    captureTender(tenant, order, "40.00");
+
+    service.refundReturnForOrderEvent(
+        Ids.newId(),
+        CONSUMER,
+        tenant,
+        order,
+        new BigDecimal("12.00"),
+        "return",
+        new PaymentService.ReturnRefund("ORIGINAL", ret, null));
+
+    List<RefundTender> refunds = repo.findRefundsByOrder(tenant, order);
+    assertThat(refunds.size(), is(1));
+    assertThat(refunds.get(0).method(), is(PaymentTender.METHOD_CARD));
+    String json = refundedEvents(tenant).get(0);
+    assertThat(json.contains("\"refundMethod\":\"ORIGINAL\""), is(true));
+    assertThat(json.contains("\"customerId\""), is(false));
+  }
 }

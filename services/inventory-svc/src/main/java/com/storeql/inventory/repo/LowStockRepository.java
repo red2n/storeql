@@ -1,11 +1,14 @@
 package com.storeql.inventory.repo;
 
 import com.storeql.inventory.domain.Domain.LowStockRow;
+import com.storeql.inventory.domain.Expiry;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -32,16 +35,25 @@ import java.util.UUID;
 @ApplicationScoped
 public class LowStockRepository extends BaseJdbcRepository {
 
+  @Inject ExpiryDay expiryDay;
+
   /**
    * Availability, defined exactly as {@code InventoryRepository.LEVELS_CORE} defines it — on hand
    * minus held reservations, counting only AVAILABLE material. Reserved stock is spoken for, so
    * treating it as on hand would under-report shortages; and a report that disagreed with the
    * levels list about how much stock there is would be worse than no report.
    */
-  private static final String AVAILABLE =
+  private static String available(Expiry expiry) {
+    // Stock past its date is on hand but never available (Expiry), so it is no cover for a
+    // shortage.
+    return AVAILABLE_HEAD.replace("{SELLABLE}", expiry.sellableSql("b"));
+  }
+
+  private static final String AVAILABLE_HEAD =
       """
       SELECT b.store_id, b.variant_id,
-             COALESCE(SUM(b.remaining_qty),0) - COALESCE(MAX(res.reserved),0) AS available
+             COALESCE(SUM(b.remaining_qty) FILTER (WHERE {SELLABLE}),0)
+               - COALESCE(MAX(res.reserved),0) AS available
       FROM inventory_batches b
       LEFT JOIN (
           SELECT store_id, variant_id, SUM(qty) AS reserved
@@ -70,17 +82,17 @@ public class LowStockRepository extends BaseJdbcRepository {
 
   /**
    * @param tenantId the owning tenant; the first filter on every branch (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param limit maximum rows, already clamped by the caller
    * @return items below their reorder level, deepest shortfall first
    */
-  public List<LowStockRow> lowStock(UUID tenantId, UUID storeId, int limit) {
+  public List<LowStockRow> lowStock(UUID tenantId, Set<UUID> stores, int limit) {
     // LEFT JOIN from the signals, not from the batches: an item that has run out has no batch rows
     // at all, and an inner join would silently drop exactly the most urgent case -- zero on hand
     // against a configured level.
     String sql =
         "WITH avail AS ("
-            + AVAILABLE
+            + available(expiryDay.of(tenantId))
             + "), signals AS ("
             + SIGNALS
             + "), binding AS ("
@@ -100,7 +112,7 @@ public class LowStockRepository extends BaseJdbcRepository {
             // shortage however low it runs.
             + "  AND NOT EXISTS (SELECT 1 FROM catalog_lines_out o"
             + "                  WHERE o.tenant_id = ? AND o.variant_id = b.variant_id)"
-            + (storeId != null ? " AND b.store_id = ?" : "")
+            + (stores != null ? " AND b.store_id = ANY(?)" : "")
             + "  ORDER BY shortfall DESC, b.store_id, b.variant_id"
             + "  LIMIT ?";
 
@@ -117,7 +129,9 @@ public class LowStockRepository extends BaseJdbcRepository {
           ps.setObject(i++, tenantId);
           // lines out: the tenant again
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
         LowStockRepository::mapRow,

@@ -1,5 +1,6 @@
 package com.storeql.inventory.dto;
 
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -93,6 +94,7 @@ public final class FoodSafetyDtos {
           @NotNull
           @Min(1)
           @Max(744)
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer frequencyHours) {}
 
   @Schema(name = "UpdateFoodSafetyPointRequest")
@@ -101,7 +103,8 @@ public final class FoodSafetyDtos {
       @NotBlank @Size(max = 120) String name,
       BigDecimal minValue,
       BigDecimal maxValue,
-      @NotNull @Min(1) @Max(744) Integer frequencyHours) {}
+      @NotNull @Min(1) @Max(744) @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
+          Integer frequencyHours) {}
 
   @Schema(name = "FoodSafetyPointStatusRequest", description = "Why a point is switched on or off.")
   public record PointStatusRequest(@NotBlank @Size(max = 500) String reason) {}

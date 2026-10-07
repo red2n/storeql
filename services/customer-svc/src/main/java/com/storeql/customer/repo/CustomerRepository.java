@@ -11,6 +11,8 @@ import com.storeql.customer.domain.Domain.StoreCreditAccount;
 import com.storeql.customer.domain.Domain.StoreCreditLedgerEntry;
 import com.storeql.customer.domain.Domain.TierChange;
 import com.storeql.customer.domain.LoyaltyProgramme;
+import com.storeql.customer.domain.LoyaltyReversal;
+import com.storeql.customer.domain.ManualGrant;
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
@@ -32,6 +34,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Persistence for customers, addresses, loyalty, and store credit. Every query on tenant-owned data
@@ -756,9 +759,11 @@ public class CustomerRepository extends BaseOutboxRepository {
     String pattern = term == null ? null : CustomerSearch.pattern(term);
     String digits = term == null ? null : CustomerSearch.phonePattern(term);
     if (pattern != null) {
-      // concat_ws skips a null half, so a record with only a first or a last name still matches.
+      // A null half is read as empty, so a record with only a first or a last name still matches.
+      // The expression is IMMUTABLE and the same as the trigram index on it (V1__init.sql), which a
+      // concat_ws (only STABLE) could not be.
       sql.append(
-          " AND (concat_ws(' ', first_name, last_name) ILIKE ? ESCAPE '\\'"
+          " AND ((COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) ILIKE ? ESCAPE '\\'"
               + " OR email ILIKE ? ESCAPE '\\' OR phone ILIKE ? ESCAPE '\\'");
       // The stored phone as its ASCII digits, against the term's digits — both bound, so however
       // either was spaced or punctuated, the same number is found. Kept alongside the E.164 exact
@@ -937,30 +942,42 @@ public class CustomerRepository extends BaseOutboxRepository {
    * loyalty movement and no consent change since. Candidates for the retention purge, which erases
    * each as the customer could have asked.
    */
-  public List<UUID> inactiveSince(UUID tenantId, Instant cutoff) {
+  public List<UUID> inactiveSince(UUID tenantId, Instant cutoff, UUID after, int limit) {
     return query(
         "SELECT c.id FROM customers c WHERE c.tenant_id = ? AND c.status = 'ACTIVE'"
             + " AND c.updated_at < ?"
+            + (after == null ? "" : " AND c.id > ?")
             + " AND NOT EXISTS (SELECT 1 FROM loyalty_ledger l WHERE l.tenant_id = c.tenant_id"
             + "   AND l.customer_id = c.id AND l.created_at >= ?)"
             + " AND NOT EXISTS (SELECT 1 FROM marketing_consent_log m WHERE m.tenant_id = c.tenant_id"
             + "   AND m.customer_id = c.id AND m.recorded_at >= ?)"
-            + " ORDER BY c.id",
+            + " ORDER BY c.id LIMIT ?",
         ps -> {
           var at = cutoff.atOffset(java.time.ZoneOffset.UTC);
-          ps.setObject(1, tenantId);
-          ps.setObject(2, at);
-          ps.setObject(3, at);
-          ps.setObject(4, at);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          ps.setObject(i++, at);
+          if (after != null) ps.setObject(i++, after);
+          ps.setObject(i++, at);
+          ps.setObject(i++, at);
+          ps.setInt(i, limit);
         },
         rs -> rs.getObject("id", UUID.class),
         "inactive customers");
   }
 
-  /** Every business with a customer: the tenants a retention sweep visits. */
+  /**
+   * Every business with a customer: the tenants a retention sweep visits. A loose index scan (one
+   * probe of the tenant index per business) rather than a DISTINCT over every customer row.
+   */
   public List<UUID> tenantsWithCustomers() {
     return query(
-        "SELECT DISTINCT c.tenant_id FROM customers c ORDER BY c.tenant_id",
+        "WITH RECURSIVE t(tenant_id) AS ("
+            + " (SELECT c.tenant_id FROM customers c ORDER BY c.tenant_id LIMIT 1)"
+            + " UNION ALL"
+            + " SELECT (SELECT c.tenant_id FROM customers c WHERE c.tenant_id > t.tenant_id"
+            + "   ORDER BY c.tenant_id LIMIT 1) FROM t WHERE t.tenant_id IS NOT NULL)"
+            + " SELECT tenant_id FROM t WHERE tenant_id IS NOT NULL ORDER BY tenant_id",
         ps -> {},
         rs -> rs.getObject("tenant_id", UUID.class),
         "tenants with customers");
@@ -1207,10 +1224,16 @@ public class CustomerRepository extends BaseOutboxRepository {
       String reason,
       LoyaltyProgramme programme,
       OutboxRow event,
-      Function<TierChange, OutboxRow> tierEvent) {
+      Function<TierChange, OutboxRow> tierEvent,
+      ManualGrant grant) {
     return inTx(
         conn -> {
+          requireNotErasedTx(conn, tenantId, customerId, CustomerRepository::erasedForManualPoints);
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // a retry under the same key: the first answer, nothing written
+            return getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          }
           LoyaltyAccount updated =
               credit(
                   conn,
@@ -1237,6 +1260,7 @@ public class CustomerRepository extends BaseOutboxRepository {
       UUID tenantId,
       UUID customerId,
       UUID orderId,
+      BigDecimal orderTotal,
       BigDecimal basePoints,
       LoyaltyProgramme programme,
       Function<BigDecimal, OutboxRow> eventFor,
@@ -1268,6 +1292,7 @@ public class CustomerRepository extends BaseOutboxRepository {
                   points,
                   LoyaltyLedgerEntry.TYPE_EARN,
                   orderId,
+                  orderTotal,
                   reason,
                   programme,
                   tierEvent);
@@ -1275,6 +1300,92 @@ public class CustomerRepository extends BaseOutboxRepository {
           return updated;
         },
         "accrue loyalty from order");
+  }
+
+  /**
+   * The refusal of points awarded or corrected by hand to an erased customer: the code every write
+   * to an erased record answers with.
+   */
+  public static ApiException erasedForManualPoints() {
+    return erased("points can no longer be awarded or adjusted by hand");
+  }
+
+  /** The refusal of store credit issued by hand to an erased customer. */
+  public static ApiException erasedForStoreCredit() {
+    return erased("store credit can no longer be issued to it");
+  }
+
+  /**
+   * The refusal of a new spend of an erased customer's points or store credit: nobody can show any
+   * longer that they are the person whose balance it is.
+   */
+  public static ApiException erasedForSpending() {
+    return erased("its points and store credit can no longer be spent");
+  }
+
+  /** One state, one stable code, whatever was attempted: {@code 409 CUSTOMER_ANONYMIZED}. */
+  private static ApiException erased(String what) {
+    return ApiException.conflict("CUSTOMER_ANONYMIZED", "Customer has been erased; " + what);
+  }
+
+  /**
+   * Holds the customer's row for the rest of the transaction and refuses an erased one, so an
+   * erasure cannot land between the check and a manual grant (it waits for this transaction, or
+   * this one sees it).
+   *
+   * @param refusal what an erased customer is answered with
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED}
+   */
+  private static void requireNotErasedTx(
+      Connection c, UUID tenantId, UUID customerId, Supplier<ApiException> refusal)
+      throws SQLException {
+    if (erasedTx(c, tenantId, customerId)) {
+      throw refusal.get();
+    }
+  }
+
+  /**
+   * Whether the customer is erased, with their row held {@code FOR SHARE} for the rest of the
+   * transaction, so an erasure that has not committed yet waits for it rather than landing between
+   * this answer and the write it decides.
+   *
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND} when the business holds no such customer
+   */
+  private static boolean erasedTx(Connection c, UUID tenantId, UUID customerId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT status FROM customers WHERE tenant_id = ? AND id = ? FOR SHARE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, customerId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          throw ApiException.notFound("CUSTOMER_NOT_FOUND", "Customer not found");
+        }
+        return Customer.STATUS_ANONYMIZED.equals(rs.getString(1));
+      }
+    }
+  }
+
+  /**
+   * Whether this business has already acted under the key: for an erased customer, only a request
+   * already carried out may be answered again (as {@link #recordGrant} answers it), never a new
+   * one.
+   */
+  private static boolean keyUsedTx(Connection c, UUID tenantId, String idempotencyKey)
+      throws SQLException {
+    if (idempotencyKey == null) {
+      return false;
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT 1 FROM manual_grants WHERE tenant_id = ? AND idempotency_key = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setString(2, idempotencyKey);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
   }
 
   private static boolean customerExists(Connection c, UUID tenantId, UUID customerId)
@@ -1290,7 +1401,15 @@ public class CustomerRepository extends BaseOutboxRepository {
     }
   }
 
-  /** Spends points from the lot that dies first; refused when the balance is short. */
+  /**
+   * Spends points from the lot that dies first; refused when the balance is short. An erased
+   * customer spends nothing new: only a redemption already recorded under the grant's key (the
+   * order's, or the request's) answers again, as it stands, with nothing more taken.
+   *
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for a new
+   *     spend by an erased customer, nothing written; {@code 409 IDEMPOTENCY_KEY_REUSED}; {@code
+   *     422 LOYALTY_INSUFFICIENT_POINTS}
+   */
   public LoyaltyAccount redeemPoints(
       UUID tenantId,
       UUID customerId,
@@ -1298,10 +1417,19 @@ public class CustomerRepository extends BaseOutboxRepository {
       UUID orderId,
       String reason,
       LoyaltyProgramme programme,
-      OutboxRow event) {
+      OutboxRow event,
+      ManualGrant grant) {
     return inTx(
         conn -> {
+          if (erasedTx(conn, tenantId, customerId)
+              && !keyUsedTx(conn, tenantId, grant.idempotencyKey())) {
+            throw erasedForSpending();
+          }
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // the same order or key already took these points: nothing more
+            return getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          }
           if (account.pointsBalance().compareTo(points) < 0) {
             throw new ApiException(
                 422,
@@ -1343,7 +1471,14 @@ public class CustomerRepository extends BaseOutboxRepository {
 
   /**
    * A correction: an award is a lot like any earning and may move the tier; a deduction comes out
-   * of the lots that die first, and never below zero.
+   * of the lots that die first and never takes the balance below zero. What is written — the ledger
+   * entry and the event the deferred revenue is booked from — is the points that actually moved, so
+   * a deduction larger than the balance records the balance, not the figure that was asked for; one
+   * that finds nothing to take is refused, and the grant with it.
+   *
+   * @param eventFor the event for the signed points that actually moved
+   * @throws ApiException 422 {@code LOYALTY_INSUFFICIENT_POINTS} when a deduction finds no points
+   *     to take (the balance is zero or in debt); nothing is written
    */
   public LoyaltyAccount adjustPoints(
       UUID tenantId,
@@ -1351,13 +1486,21 @@ public class CustomerRepository extends BaseOutboxRepository {
       BigDecimal points,
       String reason,
       LoyaltyProgramme programme,
-      OutboxRow event,
-      Function<TierChange, OutboxRow> tierEvent) {
+      Function<BigDecimal, OutboxRow> eventFor,
+      Function<TierChange, OutboxRow> tierEvent,
+      ManualGrant grant) {
     return inTx(
         conn -> {
+          requireNotErasedTx(conn, tenantId, customerId, CustomerRepository::erasedForManualPoints);
           LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // a retry under the same key: the first answer, nothing written
+            return getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          }
           LoyaltyAccount updated;
+          BigDecimal moved;
           if (points.signum() > 0) {
+            moved = points;
             updated =
                 credit(
                     conn,
@@ -1370,7 +1513,16 @@ public class CustomerRepository extends BaseOutboxRepository {
                     tierEvent);
           } else {
             Instant now = Instant.now();
-            BigDecimal taken = points.negate().min(account.pointsBalance());
+            BigDecimal taken = points.negate().min(account.pointsBalance()).max(BigDecimal.ZERO);
+            if (taken.signum() == 0) {
+              // Nothing to take: a ledger entry and an event for no points would only mislead.
+              throw new ApiException(
+                  422,
+                  "LOYALTY_INSUFFICIENT_POINTS",
+                  "There are no loyalty points to take off",
+                  java.util.List.of());
+            }
+            moved = taken.negate();
             LoyaltyLots.consume(
                 conn, tenantId, LoyaltyLots.openLots(conn, account, programme, now), taken);
             BigDecimal newBalance = account.pointsBalance().subtract(taken);
@@ -1391,13 +1543,13 @@ public class CustomerRepository extends BaseOutboxRepository {
                     tenantId,
                     customerId,
                     LoyaltyLedgerEntry.TYPE_ADJUST,
-                    points,
+                    moved,
                     newBalance,
                     null,
                     reason,
                     now));
           }
-          insertOutbox(conn, event);
+          insertOutbox(conn, eventFor.apply(moved));
           return updated;
         },
         "adjust loyalty points");
@@ -1417,6 +1569,20 @@ public class CustomerRepository extends BaseOutboxRepository {
       LoyaltyProgramme programme,
       Function<TierChange, OutboxRow> tierEvent)
       throws SQLException {
+    return credit(conn, account, points, type, orderId, null, reason, programme, tierEvent);
+  }
+
+  private LoyaltyAccount credit(
+      Connection conn,
+      LoyaltyAccount account,
+      BigDecimal points,
+      String type,
+      UUID orderId,
+      BigDecimal orderTotal,
+      String reason,
+      LoyaltyProgramme programme,
+      Function<TierChange, OutboxRow> tierEvent)
+      throws SQLException {
     Instant now = Instant.now();
     UUID tenantId = account.tenantId();
     UUID customerId = account.customerId();
@@ -1430,9 +1596,20 @@ public class CustomerRepository extends BaseOutboxRepository {
     insertLedgerEntry(
         conn,
         new LoyaltyLedgerEntry(
-            entryId, tenantId, customerId, type, points, newBalance, orderId, reason, now));
+            entryId, tenantId, customerId, type, points, newBalance, orderId, reason, now),
+        orderTotal);
+    // Points already taken back below zero are made good first: only the rest can be spent.
+    BigDecimal debt =
+        account.pointsBalance().signum() < 0 ? account.pointsBalance().negate() : BigDecimal.ZERO;
     LoyaltyLots.insertLot(
-        conn, tenantId, customerId, entryId, points, now, programme.expiryFor(now));
+        conn,
+        tenantId,
+        customerId,
+        entryId,
+        points,
+        points.subtract(debt.min(points)),
+        now,
+        programme.expiryFor(now));
     LoyaltyAccount provisional =
         new LoyaltyAccount(
             account.id(),
@@ -1513,6 +1690,9 @@ public class CustomerRepository extends BaseOutboxRepository {
    * @param reason free-text reason recorded on the ledger entry
    * @param event the outbox row to commit alongside
    * @return the account with its new balance
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for an
+   *     erased customer, a retry under an earlier key included, nothing written (no account, grant,
+   *     ledger entry or event); {@code 409 IDEMPOTENCY_KEY_REUSED}
    */
   public StoreCreditAccount issueStoreCredit(
       UUID tenantId,
@@ -1521,11 +1701,17 @@ public class CustomerRepository extends BaseOutboxRepository {
       String currency,
       UUID orderId,
       String reason,
-      OutboxRow event) {
+      OutboxRow event,
+      ManualGrant grant) {
     return inTx(
         conn -> {
+          requireNotErasedTx(conn, tenantId, customerId, CustomerRepository::erasedForStoreCredit);
           StoreCreditAccount account =
               getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
+          if (!recordGrant(conn, tenantId, grant)) {
+            // a retry under the same key: the first answer, nothing written
+            return getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
+          }
           BigDecimal newBalance = account.balance().add(amount);
           StoreCreditAccount updated =
               updateStoreCreditAccount(conn, tenantId, customerId, currency, newBalance);
@@ -1548,11 +1734,177 @@ public class CustomerRepository extends BaseOutboxRepository {
         "issue store credit");
   }
 
+  /** What an order's earning and reversals stand at, for the one customer who earned it. */
+  private record OrderPoints(UUID customerId, BigDecimal earned, BigDecimal orderTotal) {}
+
+  /**
+   * Takes back the points an order earned, once per event (return controls). {@code refundAmount}
+   * is what a return refunded; null takes back everything still held (a void). The customer is the
+   * one the ledger says earned the order, whatever the event names, and the order is looked up
+   * under the event's business only, so another business's event finds nothing.
+   *
+   * <p>Lots are drawn oldest-dying first for what they still hold; the balance may fall below zero
+   * when the points were already spent, and redemption stays refused until it is earned back.
+   *
+   * @return the account after the reversal, or null when nothing was taken back
+   */
+  public LoyaltyAccount reversePointsForOrderOnce(
+      UUID eventId,
+      String consumerName,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal refundAmount,
+      BigDecimal pointsPerUnit,
+      String reason,
+      LoyaltyProgramme programme,
+      java.util.function.BiFunction<UUID, BigDecimal, OutboxRow> eventFor) {
+    return inTx(
+        conn -> {
+          if (!markProcessedIfNewTx(conn, eventId, consumerName)) {
+            return null; // already taken back for this event
+          }
+          OrderPoints earnedOn = orderEarning(conn, tenantId, orderId);
+          if (earnedOn == null) {
+            return null; // the order earned nothing here
+          }
+          UUID customerId = earnedOn.customerId();
+          LoyaltyAccount account = getOrCreateLoyaltyAccount(conn, tenantId, customerId);
+          BigDecimal reversed = orderReversed(conn, tenantId, orderId);
+          BigDecimal points =
+              refundAmount == null
+                  ? LoyaltyReversal.remaining(earnedOn.earned(), reversed)
+                  : LoyaltyReversal.forReturn(
+                      earnedOn.earned(),
+                      reversed,
+                      earnedOn.orderTotal(),
+                      refundAmount,
+                      pointsPerUnit);
+          if (points.signum() <= 0) {
+            return null;
+          }
+          Instant now = Instant.now();
+          LoyaltyLots.consume(
+              conn, tenantId, LoyaltyLots.openLots(conn, account, programme, now), points);
+          BigDecimal newBalance = account.pointsBalance().subtract(points);
+          LoyaltyAccount updated =
+              updateLoyaltyAccount(
+                  conn,
+                  tenantId,
+                  customerId,
+                  newBalance,
+                  account.lifetimePoints(),
+                  account.tier(),
+                  account.qualifyingPoints(),
+                  account.tierSince());
+          insertLedgerEntry(
+              conn,
+              new LoyaltyLedgerEntry(
+                  Ids.newId(),
+                  tenantId,
+                  customerId,
+                  LoyaltyLedgerEntry.TYPE_REVERSE,
+                  points.negate(),
+                  newBalance,
+                  orderId,
+                  reason,
+                  now));
+          insertOutbox(conn, eventFor.apply(customerId, points));
+          return updated;
+        },
+        "reverse loyalty points for order");
+  }
+
+  /** The customer who earned on the order, what they earned in all, and what it was based on. */
+  private static OrderPoints orderEarning(Connection c, UUID tenantId, UUID orderId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT customer_id, SUM(points) AS earned, MAX(order_total) AS order_total"
+                + " FROM loyalty_ledger"
+                + " WHERE tenant_id = ? AND order_id = ? AND type = 'EARN' AND points > 0"
+                + " GROUP BY customer_id ORDER BY MIN(created_at) LIMIT 1")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next()
+            ? new OrderPoints(
+                rs.getObject("customer_id", UUID.class),
+                rs.getBigDecimal("earned"),
+                rs.getBigDecimal("order_total"))
+            : null;
+      }
+    }
+  }
+
+  /** Points already taken back for the order, as a positive number. */
+  private static BigDecimal orderReversed(Connection c, UUID tenantId, UUID orderId)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT COALESCE(-SUM(points), 0) AS reversed FROM loyalty_ledger"
+                + " WHERE tenant_id = ? AND order_id = ? AND type = 'REVERSE'")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, orderId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getBigDecimal("reversed") : BigDecimal.ZERO;
+      }
+    }
+  }
+
+  /**
+   * Credits store credit from a refund, once per event: the account in the refund's currency, a
+   * ledger entry naming the order, and the event. Nothing when the customer is not this business's.
+   *
+   * @return the account, or null when the event was already applied or the customer is unknown
+   */
+  public StoreCreditAccount issueStoreCreditFromRefundOnce(
+      UUID eventId,
+      String consumerName,
+      UUID tenantId,
+      UUID customerId,
+      BigDecimal amount,
+      String currency,
+      UUID orderId,
+      String reason,
+      OutboxRow event) {
+    return inTx(
+        conn -> {
+          if (!markProcessedIfNewTx(conn, eventId, consumerName)) {
+            return null;
+          }
+          if (!customerExists(conn, tenantId, customerId)) {
+            return null; // not this business's customer — nothing to credit, no loop
+          }
+          StoreCreditAccount account =
+              getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
+          BigDecimal newBalance = account.balance().add(amount);
+          StoreCreditAccount updated =
+              updateStoreCreditAccount(conn, tenantId, customerId, currency, newBalance);
+          insertStoreCreditEntry(
+              conn,
+              new StoreCreditLedgerEntry(
+                  Ids.newId(),
+                  tenantId,
+                  customerId,
+                  StoreCreditLedgerEntry.TYPE_ISSUE,
+                  amount,
+                  newBalance,
+                  currency,
+                  orderId,
+                  reason,
+                  Instant.now()));
+          insertOutbox(conn, event);
+          return updated;
+        },
+        "issue store credit from refund");
+  }
+
   /**
    * Debits store credit, appends the ledger entry and writes the event — atomically.
    *
    * <p>The balance check happens inside the transaction, so concurrent redemptions cannot together
-   * overdraw the account.
+   * overdraw the account; and the order's earlier redemption is looked for only while the account
+   * is locked, so two for the same order fired at once take once.
    *
    * @param tenantId owning tenant
    * @param customerId the customer to debit
@@ -1562,6 +1914,9 @@ public class CustomerRepository extends BaseOutboxRepository {
    * @param reason free-text reason recorded on the ledger entry
    * @param event the outbox row to commit alongside
    * @return the account with its new balance
+   * @throws ApiException {@code 404 CUSTOMER_NOT_FOUND}; {@code 409 CUSTOMER_ANONYMIZED} for a new
+   *     spend by an erased customer (only a redemption already recorded for the order answers
+   *     again, as it stands), nothing written; {@code 422 STORE_CREDIT_INSUFFICIENT}
    */
   public StoreCreditAccount redeemStoreCredit(
       UUID tenantId,
@@ -1573,13 +1928,27 @@ public class CustomerRepository extends BaseOutboxRepository {
       OutboxRow event) {
     return inTx(
         conn -> {
+          // The order of these three steps is the idempotency. The customer's row first (FOR
+          // SHARE: an erasure waits for this spend, or this spend sees it), then the account's
+          // FOR UPDATE — the same order of locks as a manual issue — and only then the order's
+          // earlier REDEEM. A second spend for the same order (a retry after a timeout, a second
+          // press) waits on the account lock and, let in once the first commits, reads in a new
+          // snapshot and finds the first's REDEEM: a no-op, not a second deduction. Looked for
+          // before the lock, both would find nothing and both would take; no unique key on the
+          // ledger stands behind it.
+          boolean erased = erasedTx(conn, tenantId, customerId);
           StoreCreditAccount account =
               getOrCreateStoreCreditAccount(conn, tenantId, customerId, currency);
-          // Idempotent per order: a store-credit tender against an order may be retried by
-          // payment-svc; a REDEEM already recorded for this order is a no-op, not a second
-          // deduction.
-          if (orderId != null && storeCreditRedeemExistsTx(conn, tenantId, customerId, orderId)) {
+          boolean replay =
+              orderId != null && storeCreditRedeemExistsTx(conn, tenantId, customerId, orderId);
+          if (replay) {
+            // That answer stands after an erasure too: payment-svc records the tender from it.
             return account;
+          }
+          if (erased) {
+            // Anything new for an erased customer is refused; the throw rolls back the account
+            // row the lock may have created, so nothing is written.
+            throw erasedForSpending();
           }
           if (account.balance().compareTo(amount) < 0) {
             throw new ApiException(
@@ -1840,11 +2209,81 @@ public class CustomerRepository extends BaseOutboxRepository {
     }
   }
 
+  /**
+   * Writes the manual grant's record on the caller's transaction: who, why, and the key that makes
+   * a retry the same request. A grant with no key is always new.
+   *
+   * @return true when this is a new grant to carry out; false when the same key already carried it
+   *     out (a retry, nothing more to write)
+   * @throws ApiException 409 {@code IDEMPOTENCY_KEY_REUSED} when the key was used for a different
+   *     request
+   */
+  private static boolean recordGrant(Connection c, UUID tenantId, ManualGrant g)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO manual_grants (id, tenant_id, customer_id, kind, amount, currency, reason,"
+                + " actor_id, idempotency_key, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+                + " ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+                + " DO NOTHING")) {
+      ps.setObject(1, Ids.newId());
+      ps.setObject(2, tenantId);
+      ps.setObject(3, g.customerId());
+      ps.setString(4, g.kind());
+      ps.setBigDecimal(5, g.amount());
+      ps.setString(6, g.currency());
+      ps.setString(7, g.reason());
+      if (g.actorId() == null) {
+        ps.setNull(8, java.sql.Types.OTHER);
+      } else {
+        ps.setObject(8, g.actorId());
+      }
+      ps.setString(9, g.idempotencyKey());
+      ps.setObject(10, Instant.now().atOffset(ZoneOffset.UTC));
+      if (ps.executeUpdate() == 1) {
+        return true;
+      }
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT kind, customer_id, amount, currency FROM manual_grants"
+                + " WHERE tenant_id = ? AND idempotency_key = ?")) {
+      ps.setObject(1, tenantId);
+      ps.setString(2, g.idempotencyKey());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          ManualGrant first =
+              new ManualGrant(
+                  rs.getString(1),
+                  rs.getObject(2, UUID.class),
+                  rs.getBigDecimal(3),
+                  rs.getString(4),
+                  null,
+                  null,
+                  g.idempotencyKey());
+          if (!first.sameRequestAs(g)) {
+            throw new ApiException(
+                409,
+                "IDEMPOTENCY_KEY_REUSED",
+                "This Idempotency-Key was already used for a different request",
+                java.util.List.of());
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   private void insertLedgerEntry(Connection c, LoyaltyLedgerEntry e) throws SQLException {
+    insertLedgerEntry(c, e, null);
+  }
+
+  private void insertLedgerEntry(Connection c, LoyaltyLedgerEntry e, BigDecimal orderTotal)
+      throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO loyalty_ledger (id, tenant_id, customer_id, type, points, balance_after,"
-                + " order_id, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)")) {
+                + " order_id, reason, created_at, order_total) VALUES (?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, e.id());
       ps.setObject(2, e.tenantId());
       ps.setObject(3, e.customerId());
@@ -1854,6 +2293,7 @@ public class CustomerRepository extends BaseOutboxRepository {
       ps.setObject(7, e.orderId());
       ps.setString(8, e.reason());
       ps.setObject(9, e.createdAt().atOffset(ZoneOffset.UTC));
+      ps.setBigDecimal(10, orderTotal);
       ps.executeUpdate();
     }
   }

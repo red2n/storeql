@@ -1,11 +1,15 @@
 package com.storeql.inventory.dto;
 
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
@@ -23,9 +27,17 @@ public final class Dtos {
       @Schema(description = "UUID of the store receiving stock.") @NotBlank String storeId,
       @Schema(description = "UUID of the product variant being received.") @NotBlank
           String variantId,
-      @Schema(description = "Quantity received.") @NotNull @Positive BigDecimal qty,
+      // A quantity as a batch keeps it (NUMERIC(18,3)): sixteen whole digits overflowed it, a 500,
+      // and a fourth place was rounded away (0.0004 became a batch of nothing).
+      @Schema(description = "Quantity received, to three places.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal qty,
       String batchNo,
-      @Schema(description = "Unit cost of this batch.") BigDecimal costPrice,
+      @Schema(description = "Unit cost of this batch, to four places (NUMERIC(18,4)).")
+          @Fits(integer = 14, fraction = 4)
+          BigDecimal costPrice,
       @Schema(description = "ISO expiry date, if perishable.") String expiryDate,
       String grade,
       @Schema(description = "UUID of the zone the batch is placed in.") String zoneId,
@@ -47,7 +59,11 @@ public final class Dtos {
       @Schema(description = "UUID of the store receiving stock.") @NotBlank String storeId,
       @Schema(description = "UUID of the product variant being received.") @NotBlank
           String variantId,
-      @Schema(description = "Quantity received.") @NotNull @Positive BigDecimal qty) {}
+      @Schema(description = "Quantity received, to three places.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal qty) {}
 
   @Schema(name = "BatchReceiveRequest", description = "Bulk receive of multiple items in one call.")
   public record BatchReceiveRequest(@NotNull @Valid List<BatchReceiveItem> items) {}
@@ -62,8 +78,12 @@ public final class Dtos {
       @Schema(description = "UUID of the store being adjusted.") @NotBlank String storeId,
       @Schema(description = "UUID of the product variant being adjusted.") @NotBlank
           String variantId,
-      @Schema(description = "Signed adjustment quantity; positive adds, negative removes stock.")
+      @Schema(
+              description =
+                  "Signed adjustment quantity, to three places; positive adds, negative removes"
+                      + " stock.")
           @NotNull
+          @Fits(integer = 15, fraction = 3)
           BigDecimal delta,
       String reason,
       String reasonCode) {}
@@ -72,9 +92,21 @@ public final class Dtos {
   public record ReserveRequest(
       @Schema(description = "UUID of the store to reserve from.") @NotBlank String storeId,
       @Schema(description = "UUID of the product variant to reserve.") @NotBlank String variantId,
-      @Schema(description = "Quantity to hold.") @NotNull @Positive BigDecimal qty,
+      @Schema(description = "Quantity to hold, to three places.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal qty,
       @Schema(description = "UUID of the order this reservation is for.") String orderId,
-      @Schema(description = "Hold duration in seconds; defaults to the service's configured TTL.")
+      // A hold ends at now + ttl: Long.MAX_VALUE seconds is past any instant (a 500), and none or
+      // less is a hold that has already ended. A year is beyond any checkout.
+      @Schema(
+              description =
+                  "Hold duration in seconds, 1 to 31536000 (a year); defaults to the service's"
+                      + " configured TTL.")
+          @Positive
+          @Max(31_536_000)
+          @JsonbTypeDeserializer(WholeNumbers.ExactLong.class)
           Long ttlSeconds) {}
 
   @Schema(
@@ -83,15 +115,25 @@ public final class Dtos {
   public record ThresholdRequest(
       @Schema(description = "UUID of the store.") @NotBlank String storeId,
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
+      // Both are written to the suggestions they raise (NUMERIC(14,4): ten whole digits), and an
+      // absent cap is twice the threshold: nine whole digits leaves room for that.
       @Schema(description = "Available qty at or below which a suggestion is raised.")
           @NotNull
           @Positive
+          @Fits(integer = 9, fraction = 3)
           BigDecimal threshold,
-      @Schema(description = "Optional cap on suggested replenishment qty.") BigDecimal maxQty) {}
+      @Schema(description = "Optional cap on suggested replenishment qty.")
+          @Fits(integer = 9, fraction = 3)
+          BigDecimal maxQty) {}
 
   @Schema(name = "MaterialStatusRequest", description = "Hold/release-style batch material status.")
   public record MaterialStatusRequest(
-      @Schema(description = "e.g. AVAILABLE, QUARANTINE, HOLD, REJECTED.") @NotBlank
+      @Schema(
+              description =
+                  "The batch's physical condition: AVAILABLE, QUARANTINE, INSPECTION, DAMAGED or"
+                      + " RECALLED. Any other non-blank value is refused with 400"
+                      + " INVALID_MATERIAL_STATUS.")
+          @NotBlank
           String materialStatus,
       String reason) {}
 
@@ -103,10 +145,19 @@ public final class Dtos {
       @Schema(description = "UUID of the product variant.") String variantId,
       @Schema(description = "Total physical quantity in stock.") BigDecimal onHand,
       @Schema(description = "Quantity currently held by open reservations.") BigDecimal reserved,
-      @Schema(description = "onHand minus what is in bond minus reserved; the sellable quantity.")
+      @Schema(
+              description =
+                  "onHand minus what is in bond, minus what is past its date, minus reserved; the sellable"
+                      + " quantity.")
           BigDecimal available,
       @Schema(description = "How much of onHand sits in bond with its duty suspended.")
-          BigDecimal inBond) {}
+          BigDecimal inBond,
+      @Schema(
+              description =
+                  "How much of onHand is past its expiry date (the date is the last day it may be"
+                      + " sold, read in the store's own time zone): on hand and valued, never"
+                      + " available, never held or drawn by a sale.")
+          BigDecimal expired) {}
 
   @Schema(name = "LevelSummaryResponse", description = "Aggregate stock-level KPI counts.")
   public record LevelSummaryResponse(
@@ -124,8 +175,17 @@ public final class Dtos {
       @Schema(description = "Unit cost of this batch.") BigDecimal costPrice,
       @Schema(description = "ISO expiry date, if perishable.") String expiryDate,
       String createdAt,
-      @Schema(description = "e.g. ACTIVE, DEPLETED, CANCELLED.") String status,
-      @Schema(description = "e.g. AVAILABLE, QUARANTINE, HOLD, REJECTED.") String materialStatus,
+      @Schema(
+              description =
+                  "The batch's lifecycle status: ACTIVE, the only one. A batch that has run out says"
+                      + " so through remainingQty, and one past its date through the levels'"
+                      + " expired quantity; its physical condition is materialStatus.")
+          String status,
+      @Schema(
+              description =
+                  "The batch's physical condition: AVAILABLE, QUARANTINE, INSPECTION, DAMAGED or"
+                      + " RECALLED.")
+          String materialStatus,
       String materialStatusReason,
       String grade,
       @Schema(description = "UUID of the zone the batch is placed in.") String zoneId,
@@ -229,7 +289,7 @@ public final class Dtos {
   public record BondReleaseRequest(
       @NotBlank String storeId,
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @NotNull @Positive @Fits(integer = 15, fraction = 3) BigDecimal qty,
       @Schema(description = "The return or warrant this release belongs to.") String reference) {}
 
   @Schema(name = "BondReleaseResponse")
@@ -253,18 +313,26 @@ public final class Dtos {
   @Schema(name = "YieldOutputSpecRequest", description = "One cut a primal is expected to yield.")
   public record YieldOutputSpecRequest(
       @NotBlank String variantId,
+      // As the template keeps them: a share NUMERIC(7,3), a cost share NUMERIC(9,3) and never below
+      // nothing, a shelf life above nothing (the table's own checks, a 500 when they failed).
       @Schema(description = "The cut's expected share of the input quantity, in percent.")
           @NotNull
           @Positive
+          @Fits(integer = 4, fraction = 3)
           BigDecimal expectedPct,
       @Schema(
               description =
                   "The relative share of the primal's cost this cut carries; the expected share"
                       + " when unsaid, so cost follows weight.")
+          @DecimalMin("0")
+          @Fits(integer = 6, fraction = 3)
           BigDecimal costShare,
       @Schema(
               description =
                   "The cut's own shelf life from the day it is made; unsaid keeps the primal's date.")
+          @Positive
+          @Max(36_500)
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer shelfLifeDays) {}
 
   @Schema(name = "YieldTemplateRequest", description = "What a primal should break into.")
@@ -295,13 +363,17 @@ public final class Dtos {
 
   @Schema(name = "YieldRunOutputRequest", description = "What came out of one cut.")
   public record YieldRunOutputRequest(
-      @NotBlank String variantId, @NotNull @DecimalMin("0") BigDecimal qty) {}
+      @NotBlank String variantId,
+      @NotNull @DecimalMin("0") @Fits(integer = 15, fraction = 3) BigDecimal qty) {}
 
   @Schema(name = "YieldRunRequest", description = "A breakdown made at a store.")
   public record YieldRunRequest(
       @NotBlank String storeId,
       @NotBlank String templateId,
-      @Schema(description = "How much of the primal went in.") @NotNull @Positive
+      @Schema(description = "How much of the primal went in.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
           BigDecimal inputQty,
       @Schema(description = "What came out, per cut; a cut left out came to nothing.")
           @NotNull
@@ -461,7 +533,12 @@ public final class Dtos {
           String batchId,
       @Schema(
               description =
-                  "RECEIVE, SALE, ADJUST, TRANSFER_OUT or TRANSFER_IN (a manual adjustment is ADJUST with refType ADJUSTMENT).")
+                  "RECEIVE, SALE, ADJUST, TRANSFER, RTV, RESERVE, RELEASE, BOND_RELEASE, YIELD,"
+                      + " LOT_SPLIT or LOT_MERGE. A manual adjustment is ADJUST with refType"
+                      + " ADJUSTMENT; a return or a void is a RECEIVE with refType RETURN or VOID;"
+                      + " a lot split is a LOT_SPLIT out of the source batch and a LOT_SPLIT into"
+                      + " the new one, and a lot merge a LOT_MERGE out of the source and a"
+                      + " LOT_MERGE into the target, each pair netting to zero.")
           String type,
       @Schema(description = "Signed movement quantity.") BigDecimal qty,
       String refType,
@@ -473,7 +550,8 @@ public final class Dtos {
           String reasonCode,
       @Schema(
               description =
-                  "UUID of the user who made this adjustment. Null for system-caused movements --"
+                  "UUID of the user who made this movement by hand: an adjustment, a count, a lot"
+                      + " split, or a receipt entered manually. Null for system-caused movements --"
                       + " trace those through refType/refId to the record that names its actor.")
           String actorId,
       String createdAt) {}
@@ -514,6 +592,7 @@ public final class Dtos {
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
       @Schema(description = "Explicit serial codes to register.") List<String> serials,
       @Schema(description = "Number of serials to auto-generate (max 200) if serials is omitted.")
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer autoQty,
       @Schema(description = "Prefix used when auto-generating serial codes.") String prefix) {}
 
@@ -549,7 +628,10 @@ public final class Dtos {
   @Schema(name = "MoveOrderLineRequest", description = "One requested variant/qty on a move order.")
   public record MoveOrderLineRequest(
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
-      @Schema(description = "Quantity requested to move.") @NotNull @Positive
+      @Schema(description = "Quantity requested to move.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
           BigDecimal requestedQty) {}
 
   @Schema(
@@ -562,10 +644,22 @@ public final class Dtos {
                   "UUID of the destination store (same as fromStoreId for intra-store" + " moves).")
           @NotBlank
           String toStoreId,
-      String fromZone,
-      String toZone,
+      @Schema(description = "Free-text label; kept for old clients. Prefer fromZoneId.")
+          String fromZone,
+      @Schema(description = "Free-text label; kept for old clients. Prefer toZoneId.")
+          String toZone,
       String notes,
-      @NotNull @Valid List<MoveOrderLineRequest> lines) {}
+      @NotNull @Valid List<MoveOrderLineRequest> lines,
+      @Schema(
+              description =
+                  "UUID of the zone (tenant-svc's) to draw from; the pick takes only batches"
+                      + " sitting there. Omit to draw from anywhere in the store.")
+          String fromZoneId,
+      @Schema(
+              description =
+                  "UUID of the zone (tenant-svc's) the picked stock is put down in. Omit to put"
+                      + " nothing in a zone.")
+          String toZoneId) {}
 
   @Schema(name = "MoveOrderLineResponse", description = "One line of a move order.")
   public record MoveOrderLineResponse(
@@ -582,13 +676,23 @@ public final class Dtos {
       String id,
       @Schema(description = "UUID of the source store.") String fromStoreId,
       @Schema(description = "UUID of the destination store.") String toStoreId,
-      String fromZone,
-      String toZone,
+      @Schema(description = "Free-text label of an order made before zones were ids.")
+          String fromZone,
+      @Schema(description = "Free-text label of an order made before zones were ids.")
+          String toZone,
       String notes,
-      @Schema(description = "PENDING, PICKED, or CANCELLED.") String status,
+      @Schema(
+              description =
+                  "DRAFT (raised, not picked), OPEN, COMPLETED (picked; the stock has moved) or"
+                      + " CANCELLED.")
+          String status,
       String createdAt,
       String pickedAt,
-      List<MoveOrderLineResponse> lines) {}
+      List<MoveOrderLineResponse> lines,
+      @Schema(description = "UUID of the zone the stock is drawn from, when one was named.")
+          String fromZoneId,
+      @Schema(description = "UUID of the zone the stock is put down in, when one was named.")
+          String toZoneId) {}
 
   // ── Transfer Orders (Gap #6) ─────────────────────────────────────────────────
 
@@ -597,7 +701,10 @@ public final class Dtos {
       description = "One requested variant/qty on a transfer order.")
   public record TransferOrderLineRequest(
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
-      @Schema(description = "Quantity requested to transfer.") @NotNull @Positive
+      @Schema(description = "Quantity requested to transfer.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
           BigDecimal requestedQty) {}
 
   @Schema(name = "CreateTransferOrderRequest", description = "Inter-store stock transfer request.")
@@ -655,7 +762,11 @@ public final class Dtos {
   public record CreateLotLinkRequest(
       @Schema(description = "UUID of the parent (source) batch.") @NotBlank String parentBatchId,
       @Schema(description = "UUID of the child (resulting) batch.") @NotBlank String childBatchId,
-      @Schema(description = "Quantity attributed to this link.") @NotNull @Positive BigDecimal qty,
+      @Schema(description = "Quantity attributed to this link.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal qty,
       @Schema(description = "e.g. SPLIT, MERGE, REPACK.") String relationType,
       String notes) {}
 
@@ -685,12 +796,16 @@ public final class Dtos {
       @NotBlank String name,
       @Schema(description = "Comma-separated ABC classes included, e.g. \"A,B,C\".")
           String abcClasses,
-      @Schema(description = "Variance percentage within which a line auto-approves.")
+      @Schema(description = "Variance percentage within which a line auto-approves, to two places.")
+          @Fits(integer = 3, fraction = 2)
           BigDecimal tolerancePct) {}
 
   @Schema(name = "EnterCountRequest", description = "Record a counted quantity for a count line.")
   public record EnterCountRequest(
-      @Schema(description = "Physically counted quantity.") @NotNull BigDecimal countedQty) {}
+      @Schema(description = "Physically counted quantity.")
+          @NotNull
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal countedQty) {}
 
   @Schema(name = "CycleCountLineResponse", description = "One variant's line within a cycle count.")
   public record CycleCountLineResponse(
@@ -738,9 +853,15 @@ public final class Dtos {
       @Schema(description = "UUID of the store to scope the run to; null for all stores.")
           String storeId,
       @Schema(description = "VALUE or VELOCITY.") String criteria,
-      @Schema(description = "Cumulative percentage cutoff for class A (0-100).")
+      // Two places, as the run keeps them (NUMERIC(5,2)): a finer cutoff would be rounded on the
+      // way in, and 99.999 rounds to 100, which the table refuses.
+      @Schema(description = "Cumulative percentage cutoff for class A (0-100), to two places.")
+          @Fits(integer = 3, fraction = 2)
           BigDecimal thresholdA,
-      @Schema(description = "Cumulative percentage cutoff for class B (thresholdA-100).")
+      @Schema(
+              description =
+                  "Cumulative percentage cutoff for class B (thresholdA-100), to two places.")
+          @Fits(integer = 3, fraction = 2)
           BigDecimal thresholdAB) {}
 
   @Schema(name = "AbcCompileRunResponse", description = "A completed ABC classification run.")
@@ -771,11 +892,21 @@ public final class Dtos {
       @Schema(description = "UUID of the store.") @NotBlank String storeId,
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
       @Schema(description = "MAD or USER_DEFINED.") @NotBlank String method,
-      Integer leadTimeDays,
-      @Schema(description = "Target service level percentage, e.g. 95.") BigDecimal serviceLevelPct,
+      @Schema(description = "Replenishment lead time in days, at most 365; 7 when omitted.")
+          @Max(365)
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
+          Integer leadTimeDays,
+      // As the parameters keep them (NUMERIC(5,2)); a service level is above 0 and below 100, as
+      // the table requires (100 was a 500).
+      @Schema(description = "Target service level percentage, e.g. 95, above 0 and below 100.")
+          @DecimalMin(value = "0", inclusive = false)
+          @DecimalMax(value = "100", inclusive = false)
+          @Fits(integer = 3, fraction = 2)
+          BigDecimal serviceLevelPct,
       @Schema(
               description =
                   "Required when method is USER_DEFINED; a manual safety-stock" + " percentage.")
+          @Fits(integer = 3, fraction = 2)
           BigDecimal userDefinedPct) {}
 
   @Schema(
@@ -834,14 +965,29 @@ public final class Dtos {
   public record UpsertRopPlanRequest(
       @Schema(description = "UUID of the store.") @NotBlank String storeId,
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
-      @Schema(description = "Supplier lead time in days.") @NotNull @Positive Integer leadTimeDays,
-      @Schema(description = "Fixed cost per purchase order, used in the EOQ formula.")
+      // As the plan keeps them: ordering cost NUMERIC(18,2), holding cost NUMERIC(7,4), unit cost
+      // NUMERIC(18,6). Wider overflowed as a 500 (a holding cost of 1000), finer was rounded
+      // unasked (50.005 kept as 50.01). A lead time past a year only overflows the reorder point.
+      @Schema(description = "Supplier lead time in days, 1 to 365.")
           @NotNull
           @Positive
+          @Max(365)
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
+          Integer leadTimeDays,
+      @Schema(description = "Fixed cost per purchase order, used in the EOQ formula; two places.")
+          @NotNull
+          @Positive
+          @Fits(integer = 16, fraction = 2)
           BigDecimal orderingCost,
-      @Schema(description = "Annual holding cost as a percentage of unit cost.") @NotNull @Positive
+      @Schema(description = "Annual holding cost as a percentage of unit cost; four places.")
+          @NotNull
+          @Positive
+          @Fits(integer = 3, fraction = 4)
           BigDecimal holdingCostPct,
-      @Schema(description = "Unit cost used in the EOQ formula.") @NotNull @Positive
+      @Schema(description = "Unit cost used in the EOQ formula; six places.")
+          @NotNull
+          @Positive
+          @Fits(integer = 12, fraction = 6)
           BigDecimal unitCost) {}
 
   @Schema(name = "RopPlanResponse", description = "A computed reorder-point/EOQ plan.")
@@ -880,6 +1026,7 @@ public final class Dtos {
       @Schema(description = "Fixed quantity ordered each time the card triggers.")
           @NotNull
           @Positive
+          @Fits(integer = 15, fraction = 3)
           BigDecimal reorderQty,
       @Schema(description = "UUID of the store this card is replenished from, for TRANSFER cards.")
           String sourceStoreId,
@@ -889,7 +1036,7 @@ public final class Dtos {
   @Schema(
       name = "TriggerKanbanRequest",
       description = "Optional notes when triggering a kanban card.")
-  public record TriggerKanbanRequest(String notes) {}
+  public record TriggerKanbanRequest(@Size(max = 2000) String notes) {}
 
   @Schema(name = "KanbanCardResponse", description = "A kanban replenishment card.")
   public record KanbanCardResponse(
@@ -922,8 +1069,10 @@ public final class Dtos {
       @Schema(
               description =
                   "Standard unit cost used when method is AVERAGE. Omit to leave the stored value"
-                      + " unchanged. Ignored for FIFO, which values each batch at its own cost.")
+                      + " unchanged. Ignored for FIFO, which values each batch at its own cost. Six"
+                      + " places, as kept.")
           @PositiveOrZero
+          @Fits(integer = 12, fraction = 6)
           BigDecimal averageCost) {}
 
   @Schema(name = "CostingMethodResponse", description = "A variant's assigned costing method.")
@@ -988,9 +1137,16 @@ public final class Dtos {
   @Schema(name = "LotSplitRequest", description = "Split a batch into a new child batch.")
   public record LotSplitRequest(
       @Schema(description = "UUID of the batch to split.") @NotBlank String sourceBatchId,
-      @Schema(description = "Quantity to move into the new batch.") @NotNull @Positive
+      @Schema(description = "Quantity to move into the new batch.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
           BigDecimal qty,
-      String batchNo,
+      @Schema(
+              description =
+                  "The new batch's lot number. Left out or blank, the new batch keeps the"
+                      + " source's, so a recall of that lot reaches it.")
+          String batchNo,
       String notes) {}
 
   @Schema(
@@ -999,7 +1155,11 @@ public final class Dtos {
   public record LotMergeRequest(
       @Schema(description = "UUID of the batch to merge from.") @NotBlank String sourceBatchId,
       @Schema(description = "UUID of the batch to merge into.") @NotBlank String targetBatchId,
-      @Schema(description = "Quantity to move.") @NotNull @Positive BigDecimal qty,
+      @Schema(description = "Quantity to move.")
+          @NotNull
+          @Positive
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal qty,
       String notes) {}
 
   @Schema(name = "LotActionResponse", description = "A recorded split or merge action.")
@@ -1041,7 +1201,10 @@ public final class Dtos {
           String batchId,
       @NotBlank String fromUom,
       @NotBlank String toUom,
-      @Schema(description = "Multiplier: 1 fromUom = factor toUom.") @NotNull @Positive
+      @Schema(description = "Multiplier: 1 fromUom = factor toUom, to six places.")
+          @NotNull
+          @Positive
+          @Fits(integer = 12, fraction = 6)
           BigDecimal factor,
       String notes) {}
 
@@ -1066,6 +1229,7 @@ public final class Dtos {
       @Schema(description = "Target quantity to be topped up to on each review cycle.")
           @NotNull
           @Positive
+          @Fits(integer = 15, fraction = 3)
           BigDecimal parQty,
       String uom,
       @Schema(description = "e.g. DAILY, WEEKLY.") String reviewCycle) {}
@@ -1087,10 +1251,19 @@ public final class Dtos {
       name = "UpdateOrderModifiersRequest",
       description = "Order-quantity modifiers applied on top of a computed reorder quantity.")
   public record UpdateOrderModifiersRequest(
-      @Schema(description = "Floor applied to the computed order quantity.") BigDecimal minOrderQty,
+      // Each is a quantity as the plan or card keeps it (NUMERIC(18,3)): fifteen whole digits and
+      // three places, never negative, a lot never nothing. Wider would fail the write as a 500.
+      @Schema(description = "Floor applied to the computed order quantity.")
+          @DecimalMin("0")
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal minOrderQty,
       @Schema(description = "Ceiling applied to the computed order quantity.")
+          @DecimalMin("0")
+          @Fits(integer = 15, fraction = 3)
           BigDecimal maxOrderQty,
       @Schema(description = "Rounds the order qty up to a multiple of this lot size.")
+          @DecimalMin(value = "0", inclusive = false)
+          @Fits(integer = 15, fraction = 3)
           BigDecimal lotMultiplier) {}
 
   // ── Tier-1 Gap #29: Batch reservations ────────────────────────────────────
@@ -1108,14 +1281,21 @@ public final class Dtos {
 
   @Schema(
       name = "PurgeMovementsRequest",
-      description = "Delete movement history older than a given instant (data retention).")
+      description =
+          "Archive movement history older than a given instant (data retention). The movements"
+              + " are moved into the movement archive and leave the live ledger; none is deleted,"
+              + " so the movement ledger stays append-only.")
   public record PurgeMovementsRequest(
-      @Schema(description = "ISO-8601 instant; movements before this are permanently deleted.")
+      @Schema(
+              description =
+                  "ISO-8601 instant; movements recorded before this are moved into the archive."
+                      + " It must be at least 90 days ago (400 PURGE_TOO_RECENT).")
           @NotBlank
           String before) {}
 
   @Schema(name = "PurgeResult", description = "Outcome of a movement purge.")
-  public record PurgeResult(@Schema(description = "Number of movements deleted.") int purged) {}
+  public record PurgeResult(
+      @Schema(description = "Number of movements moved into the archive.") int purged) {}
 
   // ── Tier-1 Gap #31: Zone GL mappings ─────────────────────────────────────
 
@@ -1164,7 +1344,8 @@ public final class Dtos {
         name = "ZonePriorityEntry",
         description = "One zone's pick priority (lower picks first).")
     public record ZonePriorityEntry(
-        @Schema(description = "UUID of the zone.") @NotBlank String zoneId, int priority) {}
+        @Schema(description = "UUID of the zone.") @NotBlank String zoneId,
+        @JsonbTypeDeserializer(WholeNumbers.ExactInt.class) int priority) {}
   }
 
   @Schema(
@@ -1222,16 +1403,26 @@ public final class Dtos {
       @Schema(description = "UUID of the store being counted.") @NotBlank String storeId,
       String notes) {}
 
-  @Schema(name = "AddTagRequest", description = "Register a variant to be counted.")
+  /**
+   * A variant to count. There is no system quantity to send: the service records what the books
+   * hold at the store (and zone) when the tag is added, and the count is measured from that.
+   */
+  @Schema(
+      name = "AddTagRequest",
+      description =
+          "Register a variant to be counted. The tag's system quantity is what the books hold at"
+              + " the store (in the zone, when one is named) when it is added.")
   public record AddTagRequest(
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
-      @Schema(description = "UUID of the zone the variant is expected in.") String zoneId,
-      @Schema(description = "Quantity per system records at the time the tag is added.") @NotNull
-          BigDecimal systemQty) {}
+      @Schema(description = "UUID of the zone the variant is counted in.") String zoneId) {}
 
   @Schema(name = "CountTagRequest", description = "Record a counted quantity for a tag.")
   public record CountTagRequest(
-      @Schema(description = "Physically counted quantity.") @NotNull BigDecimal countedQty) {}
+      @Schema(description = "Physically counted quantity.")
+          @NotNull
+          @PositiveOrZero
+          @Fits(integer = 15, fraction = 3)
+          BigDecimal countedQty) {}
 
   @Schema(
       name = "PhysicalInventoryTagResponse",
@@ -1292,6 +1483,7 @@ public final class Dtos {
               + " switches the feature off.")
   public record StorefrontStockSettingsRequest(
       @Schema(description = "1..1000, or null to switch the feature off.")
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer lowStockThreshold) {}
 
   @Schema(
@@ -1342,7 +1534,9 @@ public final class Dtos {
       @NotBlank String storeId,
       @Schema(description = "One variant, or omitted for every variant with history at the store.")
           String variantId,
-      @Schema(description = "Days to forecast, 1 to 365; 28 when omitted.") Integer horizonDays) {}
+      @Schema(description = "Days to forecast, 1 to 365; 28 when omitted.")
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
+          Integer horizonDays) {}
 
   @Schema(name = "ForecastRunResponse")
   public record ForecastRunResponse(
@@ -1410,7 +1604,7 @@ public final class Dtos {
           Integer shelfLifeDays,
       @Schema(
               description =
-                  "Percent of what was received that went out of date unsold (past-date stock plus"
+                  "Percent of sold-or-wasted stock that went out of date unsold (past-date stock plus"
                       + " EXPIRY write-offs); null when nothing sold or wasted.")
           BigDecimal wasteRatePct,
       @Schema(

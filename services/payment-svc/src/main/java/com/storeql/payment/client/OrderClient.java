@@ -3,6 +3,7 @@ package com.storeql.payment.client;
 import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.payment.config.Jsons;
 import com.storeql.payment.config.ServiceConfig;
 import com.storeql.web.ApiException;
 import com.storeql.web.HttpHeaders;
@@ -12,7 +13,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -195,7 +195,7 @@ public class OrderClient {
   }
 
   static GroupInfo parseGroup(String body) {
-    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
       JsonObject data = reader.readObject().getJsonObject("data");
       List<GroupPart> parts = new java.util.ArrayList<>();
       for (JsonObject p : data.getJsonArray("parts").getValuesAs(JsonObject.class)) {
@@ -238,7 +238,7 @@ public class OrderClient {
    * @return the parsed fields; {@code customerId} null for a guest order
    */
   static OrderInfo parseOrder(String body) {
-    try (JsonReader reader = Json.createReader(new StringReader(body))) {
+    try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
       JsonObject data = reader.readObject().getJsonObject("data");
       return new OrderInfo(
           optionalString(data, "customerId"),

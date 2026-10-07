@@ -22,17 +22,29 @@ void main() {
     test('read as words, the same in the list, the filter and the dialog', () {
       expect(materialStatusLabel('AVAILABLE'), 'Available');
       expect(materialStatusLabel('QUARANTINE'), 'In quarantine');
-      expect(materialStatusLabel('HOLD'), 'On hold');
-      expect(materialStatusLabel('rejected'), 'Rejected');
+      expect(materialStatusLabel('INSPECTION'), 'Under inspection');
+      expect(materialStatusLabel('damaged'), 'Damaged');
+      expect(materialStatusLabel('RECALLED'), 'Recalled');
       expect(materialStatusLabel('SOMETHING_NEW'), 'Something new');
-      expect(batchMaterialStatuses, ['AVAILABLE', 'QUARANTINE', 'HOLD', 'REJECTED']);
     });
 
-    test('green to sell, amber while held back, red once rejected', () {
+    test('the choices are the five the API accepts, and no code it would refuse', () {
+      expect(batchMaterialStatuses,
+          ['AVAILABLE', 'QUARANTINE', 'INSPECTION', 'DAMAGED', 'RECALLED']);
+      expect(batchMaterialStatuses.contains('HOLD'), isFalse);
+      expect(batchMaterialStatuses.contains('REJECTED'), isFalse);
+      for (final status in batchMaterialStatuses) {
+        expect(materialStatusLabel(status), isNot(status), reason: status);
+        expect(materialStatusLabel(status), isNot(status.toLowerCase()), reason: status);
+      }
+    });
+
+    test('green to sell, amber while held back, blue to check, red once damaged or recalled', () {
       expect(materialStatusTone('AVAILABLE'), StatusTone.success);
       expect(materialStatusTone('QUARANTINE'), StatusTone.warning);
-      expect(materialStatusTone('HOLD'), StatusTone.warning);
-      expect(materialStatusTone('REJECTED'), StatusTone.error);
+      expect(materialStatusTone('INSPECTION'), StatusTone.info);
+      expect(materialStatusTone('DAMAGED'), StatusTone.error);
+      expect(materialStatusTone('RECALLED'), StatusTone.error);
       expect(materialStatusTone('SOMETHING_NEW'), StatusTone.neutral);
     });
   });

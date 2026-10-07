@@ -217,6 +217,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         child: Text(
                             _isRegister ? l.toggleHaveAccount : l.toggleNewHere),
                       ),
+                      // Setting a business up is a sign-up of its own: the
+                      // toggle above makes a shopper's account, which never
+                      // reaches the setup wizard.
+                      TextButton.icon(
+                        key: const Key('start-business'),
+                        onPressed: isLoading ? null : () => context.go('/start-business'),
+                        icon: const Icon(Icons.add_business_outlined),
+                        label: Text(l.startBusiness),
+                      ),
                     ],
                   ),
                 ),

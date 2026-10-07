@@ -58,7 +58,7 @@ public class GatewayConfig {
 
   /** Bodies larger than this are scanned only up to this many bytes; card numbers are short. */
   @Inject
-  @ConfigProperty(name = "storeql.gateway.card-data-guard.max-scan-bytes", defaultValue = "8388608")
+  @ConfigProperty(name = "storeql.gateway.card-data-guard.max-scan-bytes", defaultValue = "1048576")
   int cardDataGuardMaxScanBytes;
 
   /** The largest request body a route takes unless it is a named upload route. */
@@ -167,6 +167,13 @@ public class GatewayConfig {
   @Inject
   @ConfigProperty(name = "storeql.redis.password", defaultValue = "redis_dev_change_me")
   String redisPassword;
+
+  /**
+   * Commands that may wait on the Redis connection at once; past it they are refused, not queued.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.redis.request-queue-size", defaultValue = "10000")
+  int redisRequestQueueSize;
 
   /**
    * {@code /.well-known/security.txt} (RFC 9116). Published only when a contact and an expiry are
@@ -295,6 +302,10 @@ public class GatewayConfig {
 
   public String redisPassword() {
     return redisPassword;
+  }
+
+  public int redisRequestQueueSize() {
+    return redisRequestQueueSize;
   }
 
   public boolean cardDataGuardEnabled() {

@@ -49,6 +49,7 @@ class SalesPostingTest {
     assertThat(SalesPosting.controlFor("GIFT_CARD"), is(SalesPosting.GIFT_CARD_LIABILITY));
     assertThat(SalesPosting.controlFor("VOUCHER"), is(SalesPosting.GIFT_CARD_LIABILITY));
     assertThat(SalesPosting.controlFor("STORE_CREDIT"), is(SalesPosting.STORE_CREDIT_LIABILITY));
+    assertThat(SalesPosting.controlFor("EXCHANGE"), is(SalesPosting.EXCHANGE_CLEARING));
     assertThat(SalesPosting.controlFor(null), is(SalesPosting.UNALLOCATED_RECEIPTS));
     assertThat(SalesPosting.controlFor("BARTER"), is(SalesPosting.UNALLOCATED_RECEIPTS));
   }
@@ -93,6 +94,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CARD", d("6.00"))),
             d("12.00"),
             d("2.00"),
+            "GBP",
             true,
             DAY);
     var taken = SalesPosting.chargebackWithdrawn(TENANT, ORDER, STORE, d("12.00"), d("15"), DAY);
@@ -130,7 +132,8 @@ class SalesPostingTest {
     var tooMuchVat = SalesPosting.sale(TENANT, ORDER, STORE, d("10.00"), d("15"), DAY);
     same(balance(tooMuchVat, Domain.CODE_VAT_OUTPUT), "-10.00");
     assertThat(
-        SalesPosting.refund(TENANT, ORDER, STORE, List.of(), d("10"), d("0"), true, DAY).isEmpty(),
+        SalesPosting.refund(TENANT, ORDER, STORE, List.of(), d("10"), d("0"), "GBP", true, DAY)
+            .isEmpty(),
         is(true));
   }
 
@@ -145,6 +148,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CARD", d("30.00"))),
             d("120.00"),
             d("20.00"),
+            "GBP",
             true,
             DAY);
     same(balance(lines, Domain.CODE_SALES), "25.00");
@@ -160,10 +164,49 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("CASH", d("10.00"))),
             d("30.00"),
             d("5.00"),
+            "GBP",
             true,
             DAY);
     same(balance(rounded, Domain.CODE_VAT_OUTPUT), "1.67");
     same(balance(rounded, Domain.CODE_SALES), "8.33");
+  }
+
+  @Test
+  @DisplayName(
+      "A refund's VAT share is rounded to the sale's own currency: whole yen, thousandths of a dinar")
+  void aRefundsVatShareIsRoundedInTheSalesOwnCurrency() {
+    // ¥1,000 back of a ¥1,100 sale carrying ¥100 VAT: 90.909… is ¥91, never 90.91 — a ledger
+    // counted in whole yen (and the package it is pushed to) cannot carry a fraction of one.
+    var yen =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CARD", d("1000"))),
+            d("1100"),
+            d("100"),
+            "JPY",
+            true,
+            DAY);
+    assertThat(balance(yen, Domain.CODE_VAT_OUTPUT).toPlainString(), is("91"));
+    assertThat(balance(yen, Domain.CODE_SALES).toPlainString(), is("909"));
+    same(balance(yen, Domain.CODE_CARD_CLEARING), "-1000");
+
+    // BHD 1.000 back of a BHD 1.100 sale carrying BHD 0.100 VAT: the third decimal is kept.
+    var dinar =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CASH", d("1.000"))),
+            d("1.100"),
+            d("0.100"),
+            "BHD",
+            true,
+            DAY);
+    assertThat(balance(dinar, Domain.CODE_VAT_OUTPUT).toPlainString(), is("0.091"));
+    assertThat(balance(dinar, Domain.CODE_SALES).toPlainString(), is("0.909"));
+    same(balance(dinar, Domain.CODE_CASH_IN_TILLS), "-1.000");
   }
 
   @Test
@@ -181,6 +224,7 @@ class SalesPostingTest {
                 new SalesPosting.Allocation("STORE_CREDIT", d("0"))),
             d("100.00"),
             d("0"),
+            "GBP",
             true,
             DAY);
     same(balance(split, Domain.CODE_CASH_IN_TILLS), "-6.00");
@@ -195,6 +239,7 @@ class SalesPostingTest {
             List.of(new SalesPosting.Allocation("GIFT_CARD", d("12.00"))),
             null,
             null,
+            "GBP",
             false,
             DAY);
     same(balance(unseen, Domain.CODE_SALES_CLEARING), "12.00");
@@ -331,5 +376,87 @@ class SalesPostingTest {
         SalesPosting.cardSettlement(TENANT, ORDER, STORE, "WP-5", null, null, null, null, DAY)
             .isEmpty(),
         is(true));
+  }
+
+  @Test
+  @DisplayName("An exchange's refund and its new-sale tender net to zero on exchange clearing")
+  void anExchangeNetsToZeroOnExchangeClearing() {
+    UUID newOrder = Ids.parse("0198a000-0000-7000-8000-00000000000a");
+    List<NominalLedgerEntry> lines = new ArrayList<>();
+    lines.addAll(
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("EXCHANGE", d("30.00"))),
+            d("120.00"),
+            d("20.00"),
+            "GBP",
+            true,
+            DAY));
+    lines.addAll(SalesPosting.tender(TENANT, newOrder, STORE, "EXCHANGE", d("30.00"), DAY));
+    same(balance(lines, "1260"), "0");
+    same(balance(lines, "1250"), "0");
+    same(balance(lines, "2310"), "0");
+    same(balance(lines, "4010"), "25.00");
+  }
+
+  @Test
+  @DisplayName("A no-receipt return debits sales and VAT and credits the liability it refunded to")
+  void aNoReceiptReturnCreditsTheLiability() {
+    var credit =
+        SalesPosting.noReceiptReturn(
+            TENANT, ORDER, STORE, "STORE_CREDIT", d("12.00"), d("2.00"), DAY);
+    same(balance(credit, "4010"), "10.00");
+    same(balance(credit, "2200"), "2.00");
+    same(balance(credit, "2320"), "-12.00");
+    var card =
+        SalesPosting.noReceiptReturn(TENANT, ORDER, STORE, "GIFT_CARD", d("12.00"), null, DAY);
+    same(balance(card, "2310"), "-12.00");
+    same(balance(card, "4010"), "12.00");
+    assertThat(
+        SalesPosting.noReceiptReturn(TENANT, ORDER, STORE, "GIFT_CARD", d("0"), null, DAY).size(),
+        is(0));
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> SalesPosting.noReceiptReturn(TENANT, ORDER, STORE, "CASH", d("1.00"), null, DAY));
+  }
+
+  @Test
+  @DisplayName("A refund beyond what the sale holds (its card's value) debits clearing, not sales")
+  void aRefundBeyondTheSaleGoesToClearing() {
+    // Goods 60.00 with 10.00 VAT confirmed; the void refunds 100.00 (a 40.00 card was in it).
+    var lines =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CASH", d("100.00"))),
+            d("60.00"),
+            d("10.00"),
+            "GBP",
+            true,
+            DAY);
+    same(balance(lines, "4010"), "50.00");
+    same(balance(lines, "2200"), "10.00");
+    same(balance(lines, "1105"), "40.00");
+    same(balance(lines, "1210"), "-100.00");
+
+    // Part of the goods already went back: only what is left of the sale is revenue.
+    var rest =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CASH", d("80.00"))),
+            d("60.00"),
+            d("10.00"),
+            "GBP",
+            true,
+            DAY,
+            d("20.00"));
+    same(balance(rest, "4010"), "33.33");
+    same(balance(rest, "2200"), "6.67");
+    same(balance(rest, "1105"), "40.00");
   }
 }

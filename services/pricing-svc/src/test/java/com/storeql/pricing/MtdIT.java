@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
+import com.storeql.ids.Ids;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -33,8 +34,28 @@ class MtdIT {
 
   private static final PostgresSupport PG;
 
+  /**
+   * The two businesses that file are UK businesses, as tenant-svc would describe them (home country
+   * GB, pounds): the VAT return is HMRC's, so only a business that uses UK law may register for it.
+   * The others are not: a yen business, a dinar one, one in Ireland, a pound business outside the
+   * UK and a UK one that trades in euros. A tax line is kept to its business currency's minor
+   * units, so the currency is read (the currency minor-units sweep).
+   */
+  @SuppressWarnings("unused")
+  private static final com.storeql.test.TenantSvcStub TENANTS;
+
   static {
     PG = PostgresSupport.start();
+    TENANTS =
+        com.storeql.test.TenantSvcStub.start()
+            .with(MtdIT.T, "GBP", "GB")
+            .with(MtdIT.OTHER_T, "GBP", "GB")
+            .with(MtdIT.YEN_T, "JPY", "JP")
+            .with(MtdIT.DINAR_T, "KWD", "KW")
+            .with(MtdIT.IRISH_T, "EUR", "IE")
+            .with(MtdIT.POUNDS_ABROAD_T, "GBP", "DE")
+            .with(MtdIT.EUROS_IN_UK_T, "EUR", "GB");
+    // MtdIT.UNREAD_T is never registered with the stub: tenant-svc cannot say who it is.
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -46,6 +67,12 @@ class MtdIT {
 
   private static final String T = "01a090ae-611e-702c-a97b-d1b8025478e1";
   private static final String OTHER_T = "01a090ae-611e-701d-9d60-a9d7516ed03b";
+  private static final String YEN_T = "01a090ae-611e-70f0-8a00-0000000000b1";
+  private static final String DINAR_T = "01a090ae-611e-70f0-8a00-0000000000b2";
+  private static final String IRISH_T = "01a090ae-611e-70f0-8a00-0000000000b3";
+  private static final String POUNDS_ABROAD_T = "01a090ae-611e-70f0-8a00-0000000000b4";
+  private static final String EUROS_IN_UK_T = "01a090ae-611e-70f0-8a00-0000000000b5";
+  private static final String UNREAD_T = "01a090ae-611e-70f0-8a00-0000000000b6";
   private static final String V = "01a090ae-611e-7037-a4b7-c854f0266ace";
   private static final String S = "01a090ae-611e-703c-a378-a4972ea461c8";
 
@@ -63,6 +90,46 @@ class MtdIT {
       st.execute(
           "TRUNCATE TABLE pricing.vat_return_submissions, pricing.vat_registrations,"
               + " pricing.tax_transactions, pricing.input_tax_transactions CASCADE");
+    }
+  }
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return json(body).getString("code");
+  }
+
+  /** A business that files through HMRC itself, with no grant yet. */
+  private static void registerWithHmrc(String tenant) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute(
+          "INSERT INTO pricing.vat_registrations (tenant_id, vrn, provider) VALUES ('"
+              + tenant
+              + "', '123456782', 'HMRC')");
+    }
+  }
+
+  /** A registration already on file, as one made before the UK gate (or by hand) would be. */
+  private static void registerOnFile(String tenant) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement()) {
+      st.execute(
+          "INSERT INTO pricing.vat_registrations (tenant_id, vrn, provider) VALUES ('"
+              + tenant
+              + "', '123456782', 'SIMULATED')");
+    }
+  }
+
+  private static int rows(String table, String tenant) throws Exception {
+    try (var conn = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = conn.createStatement();
+        var rs =
+            st.executeQuery(
+                "SELECT count(*) FROM pricing." + table + " WHERE tenant_id = '" + tenant + "'")) {
+      rs.next();
+      return rs.getInt(1);
     }
   }
 
@@ -263,8 +330,8 @@ class MtdIT {
     assertThat(r.getStatus(), is(400));
     assertThat(r.readEntity(String.class), containsString("PRICING_INVALID_PERIOD"));
     assertThat(
-        get("/vat-return/mtd/obligations", T, "OWNER", "from", "2024-01-01T00:00:00Z").getStatus(),
-        is(400));
+        codeOf(get("/vat-return/mtd/obligations", T, "OWNER", "from", "2024-01-01T00:00:00Z"), 400),
+        is("PRICING_MISSING_TO"));
   }
 
   @Test
@@ -338,7 +405,12 @@ class MtdIT {
             .getJsonArray("data");
     assertThat(list.size(), is(1));
     assertThat(get("/vat-return/mtd/submissions/" + id, T, "OWNER").getStatus(), is(200));
-    assertThat(get("/vat-return/mtd/submissions/" + id, OTHER_T, "OWNER").getStatus(), is(404));
+    Response foreign = get("/vat-return/mtd/submissions/" + id, OTHER_T, "OWNER");
+    assertThat(codeOf(foreign, 404), is("MTD_SUBMISSION_NOT_FOUND"));
+    assertThat(
+        "an id nobody issued",
+        codeOf(get("/vat-return/mtd/submissions/" + Ids.newId(), T, "OWNER"), 404),
+        is("MTD_SUBMISSION_NOT_FOUND"));
     assertThat(
         json(get("/vat-return/mtd/submissions", OTHER_T, "OWNER").readEntity(String.class))
             .getJsonArray("data")
@@ -354,6 +426,108 @@ class MtdIT {
             .bigDecimalValue()
             .toPlainString(),
         is("199.80"));
+  }
+
+  /** Every business that is not a UK one by its own profile: home country GB and pounds, both. */
+  private static final String[][] NOT_UK = {
+    {YEN_T, "JPY", "JP"},
+    {DINAR_T, "KWD", "KW"},
+    {IRISH_T, "EUR", "IE"},
+    {POUNDS_ABROAD_T, "GBP", "DE"},
+    {EUROS_IN_UK_T, "EUR", "GB"},
+  };
+
+  @Test
+  @DisplayName(
+      "The UK VAT return is for a business that uses UK law: any other is refused, and keeps nothing")
+  void aBusinessOutsideTheUkCannotRegister() throws Exception {
+    for (String[] biz : NOT_UK) {
+      for (String role : new String[] {"OWNER", "MANAGER"}) {
+        for (String provider : new String[] {"SIMULATED", "HMRC"}) {
+          Response r =
+              call(
+                  "PUT",
+                  "/vat-return/mtd/registration",
+                  "{\"vrn\":\"123456782\",\"provider\":\"" + provider + "\"}",
+                  biz[0],
+                  role);
+          assertThat(
+              biz[1] + "/" + biz[2] + " " + role + " " + provider,
+              codeOf(r, 409),
+              is("VAT_RETURN_NOT_AVAILABLE"));
+        }
+      }
+      assertThat(
+          biz[1] + "/" + biz[2] + ": nothing registered", rows("vat_registrations", biz[0]), is(0));
+      JsonObject offer =
+          json(get("/vat-return/mtd/registration", biz[0], "OWNER").readEntity(String.class))
+              .getJsonObject("data");
+      assertThat(offer.getBoolean("registered"), is(false));
+    }
+    // Below management nobody reaches the question, in any business.
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(
+          role,
+          call(
+                  "PUT",
+                  "/vat-return/mtd/registration",
+                  "{\"vrn\":\"123456782\",\"provider\":\"SIMULATED\"}",
+                  YEN_T,
+                  role)
+              .getStatus(),
+          is(403));
+    }
+    // A UK business is unaffected, and what a refusal elsewhere did not touch is still its own.
+    register(T);
+    assertThat(rows("vat_registrations", T), is(1));
+    assertThat(rows("vat_registrations", YEN_T), is(0));
+  }
+
+  @Test
+  @DisplayName("A business whose profile cannot be read cannot register: filing fails closed")
+  void aBusinessWhoseProfileCannotBeReadCannotRegister() throws Exception {
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Response r =
+          call(
+              "PUT",
+              "/vat-return/mtd/registration",
+              "{\"vrn\":\"123456782\",\"provider\":\"SIMULATED\"}",
+              UNREAD_T,
+              role);
+      assertThat(role, codeOf(r, 503), is("TENANT_PROFILE_UNAVAILABLE"));
+    }
+    assertThat(rows("vat_registrations", UNREAD_T), is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "A return is not filed for a business outside the UK even with a registration on file, nor"
+          + " when its profile cannot be read; nothing is sent or recorded")
+  void aBusinessOutsideTheUkCannotFile() throws Exception {
+    for (String[] biz : NOT_UK) {
+      registerOnFile(biz[0]);
+      for (String role : new String[] {"OWNER", "MANAGER"}) {
+        Response r =
+            call("POST", "/vat-return/mtd/submissions", filing("24A2", "true"), biz[0], role);
+        assertThat(
+            biz[1] + "/" + biz[2] + " " + role, codeOf(r, 409), is("VAT_RETURN_NOT_AVAILABLE"));
+      }
+      assertThat(rows("vat_return_submissions", biz[0]), is(0));
+    }
+    // A UK business without a registration of its own is not helped by another's: nothing to file.
+    assertThat(
+        codeOf(
+            call("POST", "/vat-return/mtd/submissions", filing("24A2", "true"), OTHER_T, "OWNER"),
+            404),
+        is("MTD_NOT_REGISTERED"));
+    registerOnFile(UNREAD_T);
+    assertThat(
+        codeOf(
+            call("POST", "/vat-return/mtd/submissions", filing("24A2", "true"), UNREAD_T, "OWNER"),
+            503),
+        is("TENANT_PROFILE_UNAVAILABLE"));
+    assertThat(rows("vat_return_submissions", UNREAD_T), is(0));
+    assertThat(rows("vat_return_submissions", OTHER_T), is(0));
   }
 
   @Test
@@ -398,5 +572,71 @@ class MtdIT {
             .getJsonObject("data")
             .getBoolean("registered"),
         is(false));
+  }
+
+  @Test
+  @DisplayName("A grant code of only spaces is refused, and nothing is stored")
+  void aGrantCodeOfOnlySpacesIsRefused() throws Exception {
+    registerWithHmrc(T);
+    Response r =
+        call(
+            "POST",
+            "/vat-return/mtd/hmrc/connect",
+            "{\"code\":\"\\u2003\",\"redirectUri\":\"https://shop.example/cb\"}",
+            T,
+            "OWNER");
+    assertThat(codeOf(r, 400), is("MTD_CODE_REQUIRED"));
+    JsonObject after =
+        json(get("/vat-return/mtd/registration", T, "OWNER").readEntity(String.class))
+            .getJsonObject("data");
+    assertThat("no grant was stored", after.getBoolean("connected"), is(false));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(
+          role,
+          call(
+                  "POST",
+                  "/vat-return/mtd/hmrc/connect",
+                  "{\"code\":\"abc\",\"redirectUri\":\"https://shop.example/cb\"}",
+                  T,
+                  role)
+              .getStatus(),
+          is(403));
+    }
+    Response unregistered =
+        call(
+            "POST",
+            "/vat-return/mtd/hmrc/connect",
+            "{\"code\":\"abc\",\"redirectUri\":\"https://shop.example/cb\"}",
+            OTHER_T,
+            "OWNER");
+    assertThat(codeOf(unregistered, 404), is("MTD_NOT_REGISTERED"));
+  }
+
+  @Test
+  @DisplayName("An authorise redirect that is not an http(s) address, or is missing, is refused")
+  void anAuthoriseRedirectThatIsNotHttpIsRefused() throws Exception {
+    registerWithHmrc(T);
+    assertThat(
+        codeOf(
+            get(
+                "/vat-return/mtd/hmrc/authorize-url",
+                T,
+                "OWNER",
+                "redirectUri",
+                "javascript:alert(1)"),
+            400),
+        is("MTD_REDIRECT_INVALID"));
+    assertThat(
+        codeOf(get("/vat-return/mtd/hmrc/authorize-url", T, "OWNER"), 400),
+        is("MTD_REDIRECT_INVALID"));
+    assertThat(
+        get(
+                "/vat-return/mtd/hmrc/authorize-url",
+                T,
+                "CASHIER",
+                "redirectUri",
+                "https://shop.example/cb")
+            .getStatus(),
+        is(403));
   }
 }

@@ -7,6 +7,7 @@ import '../../core/format.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../shared/widgets/adaptive_nav_shell.dart';
+import '../auth/sign_out_everywhere.dart';
 import 'storefront_providers.dart';
 import 'survey_widgets.dart';
 import '../../core/theme.dart';
@@ -249,6 +250,21 @@ class CurrencyPicker extends ConsumerWidget {
   }
 }
 
+/// Ends every session of the shopper's login after a confirmation; a refusal
+/// is said in words and leaves them signed in.
+Future<void> _signOutEverywhere(BuildContext context, WidgetRef ref) async {
+  if (!await confirmSignOutEverywhere(context) || !context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await ref.read(storefrontAuthProvider.notifier).signOutEverywhere();
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+        content: Text(friendlyError(e,
+            fallback:
+                'Could not sign out everywhere. You are still signed in.'))));
+  }
+}
+
 class _AccountAction extends ConsumerWidget {
   const _AccountAction();
 
@@ -294,6 +310,8 @@ class _AccountAction extends ConsumerWidget {
           showFeedbackSheet(context);
         } else if (v == 'logout') {
           ref.read(storefrontAuthProvider.notifier).logout();
+        } else if (v == 'logout_all') {
+          _signOutEverywhere(context, ref);
         } else if (v == 'delete_account') {
           showDialog(context: context, builder: (_) => const _DeleteAccountDialog());
         }
@@ -313,6 +331,8 @@ class _AccountAction extends ConsumerWidget {
             value: 'accessibility', child: Text('Accessibility')),
         const PopupMenuItem(value: 'feedback', child: Text('Send feedback')),
         const PopupMenuItem(value: 'logout', child: Text('Sign out')),
+        const PopupMenuItem(
+            value: 'logout_all', child: Text('Sign out everywhere')),
         const PopupMenuDivider(),
         const PopupMenuItem(
             value: 'delete_account', child: Text('Delete my account')),

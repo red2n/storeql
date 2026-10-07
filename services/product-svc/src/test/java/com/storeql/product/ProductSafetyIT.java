@@ -357,4 +357,80 @@ class ProductSafetyIT {
     assertThat(
         "online " + online + " with " + missing + " missing", online && missing > 0, is(false));
   }
+
+  // ── refusals the negative-coverage audit found untested (1 Oct 2026) ─────────
+
+  @Test
+  @DisplayName("The shopper's safety sheet needs a shop, and shows nothing of another business's")
+  void theShoppersSheetIsRefusedWithNoShopOrForAnotherBusinesssProduct() {
+    String candle = created(DE, "Candle", true, EU_MAKER);
+    String path = "/catalog/products/" + candle + "/safety-information";
+
+    // No storefront named: refused, not guessed.
+    Response noShop = target.path(path).request().get();
+    assertThat(noShop.getStatus(), is(400));
+    assertThat(noShop.readEntity(String.class), containsString("NO_STOREFRONT"));
+
+    // Our product named from another business's storefront: not found, and nothing of ours shown.
+    Response other = as(path, GB, null).get();
+    assertThat(other.getStatus(), is(404));
+    String shown = other.readEntity(String.class);
+    assertThat(shown, containsString("PRODUCT_NOT_FOUND"));
+    assertThat(shown, not(containsString("Atelier Lumière SAS")));
+
+    // An id nobody holds.
+    Response unknown =
+        as("/catalog/products/" + Ids.newId() + "/safety-information", DE, null).get();
+    assertThat(unknown.getStatus(), is(404));
+    assertThat(unknown.readEntity(String.class), containsString("PRODUCT_NOT_FOUND"));
+
+    // Our own storefront still reads it, so the refusals above are about who asks.
+    assertThat(as(path, DE, null).get().getStatus(), is(200));
+  }
+
+  // ── an edit to a product does not hold up a variant being added (2 Oct 2026) ─────
+
+  @Test
+  @DisplayName("An update and a safety statement go through while a variant is being added")
+  void anEditDoesNotWaitForAVariantBeingAdded() throws Exception {
+    String lantern = created(GB, "Lantern", false, null);
+    try (java.sql.Connection other =
+        java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
+      other.setAutoCommit(false);
+      // A variant being added, not yet committed: its foreign-key check holds a key share of the
+      // product row until it ends. Under FOR UPDATE the edits below waited for it; the row lock
+      // they take now (FOR NO KEY UPDATE) leaves a key share free, in either order.
+      try (java.sql.PreparedStatement add =
+          other.prepareStatement(
+              "INSERT INTO product.product_variants (id, tenant_id, product_id, sku)"
+                  + " VALUES (?::uuid, ?::uuid, ?::uuid, ?)")) {
+        add.setString(1, Ids.newId().toString());
+        add.setString(2, GB);
+        add.setString(3, lantern);
+        add.setString(4, "LN-" + Ids.newId());
+        add.executeUpdate();
+      }
+      var pool = Executors.newSingleThreadExecutor();
+      try {
+        Future<Integer> renamed = pool.submit(() -> update(GB, lantern, false).getStatus());
+        assertThat(
+            "the update did not wait for the variant",
+            renamed.get(10, java.util.concurrent.TimeUnit.SECONDS),
+            is(200));
+        Future<Integer> stated =
+            pool.submit(() -> state(GB, lantern, EU_MAKER, "OWNER").getStatus());
+        assertThat(
+            "nor did the safety statement",
+            stated.get(10, java.util.concurrent.TimeUnit.SECONDS),
+            is(200));
+      } finally {
+        other.rollback();
+        pool.shutdownNow();
+      }
+    }
+    assertThat(
+        "the edit stands",
+        data(as("/admin/products/" + lantern, GB, "OWNER").get()).getString("name"),
+        is("Renamed " + lantern));
+  }
 }

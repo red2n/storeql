@@ -40,6 +40,25 @@ Per the golden rule in CLAUDE.md: `tenant_id` from the JWT, first predicate, eve
 
 ---
 
+### 1.4 Migration files
+Flyway's standard name: `V<n>__<description>.sql`, lowercase snake_case words that say what the file creates (`V5__input_vat.sql`). Each service numbers its files `1..n` with no gaps; a new table is the next number. While the product is in DEV a migration only creates (see [ARCHITECTURE §7](ARCHITECTURE.md#7-anatomy-of-one-service)): a change to a table goes into the `CREATE TABLE` in the file that creates it, and existing files are not renumbered afterwards. `validateMigrationNaming` is on, so a misspelled file name fails startup instead of being skipped.
+
+### 1.5 Table and column names
+Tables: plural lowercase snake_case (`order_items`; a log, a projection or a ledger may be singular: `audit_log`). Columns: singular lowercase snake_case; a timestamp ends `_at`, a date `_on`, an id `_id`.
+
+### 1.6 Constraint and index names
+Name every constraint and index you write, with the prefix of its type:
+
+| Object | Prefix | Example |
+|---|---|---|
+| Primary key | `pk_` | `pk_processed_events` |
+| Foreign key | `fk_` | `fk_orders_group_id` |
+| Unique constraint or unique index | `uq_` | `uq_users_business_email` |
+| Check | `chk_` | `chk_zone_status` |
+| Other index | `idx_` | `idx_orders_tenant_created` |
+
+A name is `<prefix><what it protects or serves>`, at most 63 characters. Names Postgres picks for an unnamed constraint (`orders_pkey`, `x_y_fkey`, `x_y_check`) are left alone, and so are the `v7_` checks common-service's callback adds. `PostgresSupport.stop()` fails an integration test class whose schema has a name outside the rule (`badObjectNames()`), so a violation is a failing build.
+
 ## 2. SOLID principles
 
 ### 2.1 Single Responsibility (SRP)

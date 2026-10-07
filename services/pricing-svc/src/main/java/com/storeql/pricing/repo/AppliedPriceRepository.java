@@ -170,6 +170,26 @@ public class AppliedPriceRepository extends BaseJdbcRepository {
         "claim price evaluations");
   }
 
+  /**
+   * Pushes a claimed evaluation's due time on again, so a long whole-tenant run is not taken a
+   * second time by another worker while it is still being worked.
+   *
+   * @param tenantId the evaluation's tenant; the first condition of the query
+   * @param id the evaluation being worked
+   * @param lease how far from now it stays ours
+   */
+  public void renewLease(UUID tenantId, UUID id, Duration lease) {
+    exec(
+        "UPDATE price_evaluations SET due_at = clock_timestamp() + (? * interval '1 second')"
+            + " WHERE tenant_id = ? AND id = ?",
+        ps -> {
+          ps.setLong(1, lease.toSeconds());
+          ps.setObject(2, tenantId);
+          ps.setObject(3, id);
+        },
+        "renew price evaluation lease");
+  }
+
   /** An evaluation done. */
   public void complete(UUID id) {
     exec(

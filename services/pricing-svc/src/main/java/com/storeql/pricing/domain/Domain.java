@@ -167,6 +167,19 @@ public final class Domain {
      */
     public static final String TYPE_MIX_MATCH = "MIX_MATCH";
 
+    /**
+     * Whether a promotion of this type keeps {@code value} as money in the business's currency: the
+     * four amount types (FLAT, BASKET_FLAT, SPEND_THRESHOLD, and MIX_MATCH's bundle price). The
+     * percentage types keep a percentage and BOGO is described by its quantities, so none of them
+     * has a currency's minor units to be held to.
+     */
+    public static boolean isAmountValued(String type) {
+      return TYPE_FLAT.equals(type)
+          || TYPE_BASKET_FLAT.equals(type)
+          || TYPE_SPEND_THRESHOLD.equals(type)
+          || TYPE_MIX_MATCH.equals(type);
+    }
+
     /** True when this promotion must be presented rather than applying on its own. */
     public boolean requiresCoupon() {
       return couponCode != null && !couponCode.isBlank();

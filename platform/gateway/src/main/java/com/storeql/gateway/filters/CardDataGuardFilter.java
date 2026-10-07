@@ -16,6 +16,7 @@ import jakarta.ws.rs.ext.Provider;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
@@ -35,8 +36,8 @@ import java.util.Locale;
  *
  * <p>The scan is bounded: a body past {@code storeql.gateway.card-data-guard.max-scan-bytes} is
  * scanned up to that point, which is more than any text body the API takes and covers the start of
- * an image upload, where a card number could not be anyway. The proxy already buffers the whole
- * body, so this adds one pass over bytes already in memory.
+ * an image upload, where a card number could not be anyway. Only that window is read here, and a
+ * binary body (an image, a PDF, an octet stream) is not scanned at all.
  */
 @Provider
 @ApplicationScoped
@@ -51,6 +52,7 @@ public class CardDataGuardFilter implements ContainerRequestFilter {
   @Inject GatewayConfig config;
 
   @Override
+  @SuppressWarnings("PMD.CloseResource") // the stream is handed on to the proxy, not dropped
   public void filter(ContainerRequestContext requestContext) throws IOException {
     if (!config.cardDataGuardEnabled()) {
       return;
@@ -63,13 +65,18 @@ public class CardDataGuardFilter implements ContainerRequestFilter {
     if (!hasBody(requestContext.getMethod()) || !requestContext.hasEntity()) {
       return;
     }
-    byte[] body;
-    try (InputStream in = requestContext.getEntityStream()) {
-      body = in.readAllBytes();
+    if (isBinary(requestContext.getMediaType())) {
+      // A document or an image is not text a card number is typed into; it is not decoded to a
+      // String to look for one.
+      return;
     }
-    requestContext.setEntityStream(new ByteArrayInputStream(body));
-    int scan = Math.min(body.length, Math.max(config.cardDataGuardMaxScanBytes(), 0));
-    String text = new String(body, 0, scan, StandardCharsets.UTF_8);
+    InputStream in = requestContext.getEntityStream();
+    int scan = Math.max(config.cardDataGuardMaxScanBytes(), 0);
+    // Only the scanned window is read here; the rest of the stream is handed on unread, so a large
+    // body is never copied a second time just to be looked at.
+    byte[] head = in.readNBytes(scan);
+    requestContext.setEntityStream(new SequenceInputStream(new ByteArrayInputStream(head), in));
+    String text = new String(head, StandardCharsets.UTF_8);
     if (isFormEncoded(requestContext.getMediaType())) {
       // Percent-encoded spaces and pluses between the digit groups are still a card number.
       text = URLDecoder.decode(text, StandardCharsets.UTF_8);
@@ -82,6 +89,18 @@ public class CardDataGuardFilter implements ContainerRequestFilter {
   private static boolean hasBody(String method) {
     String m = method == null ? "" : method.toUpperCase(Locale.ROOT);
     return "POST".equals(m) || "PUT".equals(m) || "PATCH".equals(m);
+  }
+
+  /** Media types that carry bytes, not text: scanning them as a String only costs heap. */
+  static boolean isBinary(MediaType type) {
+    if (type == null) return false;
+    String main = type.getType().toLowerCase(Locale.ROOT);
+    String sub = type.getSubtype().toLowerCase(Locale.ROOT);
+    return "image".equals(main)
+        || "audio".equals(main)
+        || "video".equals(main)
+        || ("application".equals(main)
+            && ("pdf".equals(sub) || "octet-stream".equals(sub) || "zip".equals(sub)));
   }
 
   private static boolean isFormEncoded(MediaType type) {

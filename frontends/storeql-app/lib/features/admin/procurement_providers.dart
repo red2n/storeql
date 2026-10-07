@@ -364,6 +364,35 @@ final purchaseOrderLinesProvider = FutureProvider.autoDispose
           .toList();
     });
 
+/// The plain warnings on one purchase order (`SUPPLIER_GRADE_D`), which the
+/// server fills only on the single read and on submit. Never blocking: a read
+/// that fails or carries none is simply no warning.
+final purchaseOrderWarningsProvider =
+    FutureProvider.autoDispose.family<List<String>, String>((ref, poId) async {
+  try {
+    final resp = await ref
+        .read(apiClientProvider)
+        .dio
+        .get('/${ApiConstants.purchase}/purchase-orders/$poId');
+    return purchaseWarningsOf(resp.data is Map ? (resp.data as Map)['data'] : null);
+  } catch (_) {
+    return const [];
+  }
+});
+
+/// The `warnings` of a purchase order's JSON, as codes.
+List<String> purchaseWarningsOf(Object? order) {
+  if (order is! Map) return const [];
+  final w = order['warnings'];
+  return w is List ? [for (final e in w) e.toString()] : const [];
+}
+
+/// A warning in words; a code nobody here knows yet is shown humanised.
+String purchaseWarningWords(String code) => switch (code) {
+      'SUPPLIER_GRADE_D' => "This supplier's recent deliveries grade D",
+      _ => humanizeCode(code),
+    };
+
 // ── Supplier invoices: the three-way match ───────────────────────────────────
 //
 // Ordered against received against invoiced. The screen exists because a status

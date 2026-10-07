@@ -47,6 +47,7 @@ public class InventoryConfigResource {
   @APIResponse(responseCode = "200", description = "The merged configuration")
   @PUT
   public Response upsert(UpsertInventoryConfigRequest req) {
+    BusinessWide.require(ctx);
     // Body is optional (PUT with no body = upsert defaults); validate only when one is supplied.
     if (req != null) {
       Validations.validate(req);

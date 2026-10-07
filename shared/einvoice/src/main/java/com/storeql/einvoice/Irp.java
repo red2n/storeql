@@ -26,6 +26,8 @@ import java.util.regex.Pattern;
  * (BT-79) for the place of supply; the PIN is the postcode.
  */
 public final class Irp {
+  private static final java.util.regex.Pattern NON_DIGITS =
+      java.util.regex.Pattern.compile("[^0-9]");
 
   /** The INV-01 schema version the payload declares. */
   public static final String SCHEMA_VERSION = "1.1";
@@ -452,7 +454,7 @@ public final class Irp {
     if (a.postcode() != null) m.put("Pin", Long.parseLong(a.postcode().strip()));
     Invoice.Contact c = p.contact();
     if (c != null && c.phone() != null) {
-      String digits = c.phone().replaceAll("[^0-9]", "");
+      String digits = NON_DIGITS.matcher(c.phone()).replaceAll("");
       if (digits.length() >= 6 && digits.length() <= 12) m.put("Ph", digits);
     }
     if (c != null && between(c.email(), 6, 100) && c.email().contains("@")) m.put("Em", c.email());

@@ -9,6 +9,7 @@ import com.storeql.inventory.dto.Dtos.DutyRateRequest;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.BondService;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
@@ -25,13 +26,14 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
 /**
  * Bonded and duty-suspended stock: approvals and duty rates are management's; a release to home use
- * is warehouse work, at a store the caller may act at.
+ * is warehouse work (stock.adjust), at a store the caller may act at.
  */
 @RequestScoped
 @Path("/admin/inventory/bond")
@@ -63,12 +65,15 @@ public class BondResource {
 
   @Operation(summary = "End a store's approval", description = "It takes no more suspended stock.")
   @APIResponse(responseCode = "200", description = "Ended")
+  @APIResponse(responseCode = "403", description = "STORE_ACCESS_DENIED")
   @APIResponse(responseCode = "404", description = "INVENTORY_BOND_APPROVAL_NOT_FOUND")
   @POST
   @Path("/approvals/{storeId}/end")
   public Response end(@PathParam("storeId") String storeId) {
     ctx.requireAnyRole(MANAGEMENT);
-    svc.end(ctx, Ids.parse(storeId));
+    UUID store = Ids.parse(storeId);
+    ctx.requireStoreAccess(store);
+    svc.end(ctx, store);
     return Response.ok(ApiResponse.ok("ended")).build();
   }
 
@@ -108,10 +113,11 @@ public class BondResource {
   @Operation(
       summary = "Release duty-suspended stock to home use",
       description =
-          "Draws the bonded batches FIFO into duty-paid batches of their own (a BOND_RELEASE"
+          "Needs stock.adjust and access to the store. Draws the bonded batches FIFO into duty-paid batches of their own (a BOND_RELEASE"
               + " movement), computes the duty at the variant's rate and announces DutyReleased,"
               + " which purchase-svc owes to the revenue. At a store the caller may act at.")
   @APIResponse(responseCode = "201", description = "Released")
+  @APIResponse(responseCode = "403", description = "PERMISSION_DENIED, STORE_ACCESS_DENIED")
   @APIResponse(
       responseCode = "409",
       description = "INVENTORY_STORE_NOT_BONDED, INVENTORY_DUTY_RATE_MISSING")
@@ -119,6 +125,9 @@ public class BondResource {
   @POST
   @Path("/releases")
   public Response release(BondReleaseRequest req) {
+    // A release crystallises a duty debt: stock work, so stock.adjust, never the till's. The store
+    // check follows in BondService.release.
+    ctx.requirePermission(Permissions.STOCK_ADJUST);
     Validations.validate(req);
     return Response.status(201)
         .entity(ApiResponse.ok(Mappers.toDto(svc.release(ctx, req))))

@@ -107,7 +107,27 @@ public final class AccountingDtos {
       BigDecimal total,
       @Schema(description = "The journal's lines; on the detail only.")
           List<Dtos.NominalLedgerEntryResponse> lines,
-      @Schema(description = "Every try; on the detail only.") List<AttemptResponse> attemptLog) {}
+      @Schema(description = "Every try; on the detail only.") List<AttemptResponse> attemptLog,
+      @Schema(
+              description =
+                  "A person's word on a push that was UNCERTAIN, on the detail only; null when"
+                      + " nobody was asked.")
+          ResolutionResponse resolution) {}
+
+  @Schema(name = "AccountingSyncResolution")
+  public record ResolutionResponse(
+      @Schema(description = "LANDED (it is in the package) or NOT_LANDED (it never arrived).")
+          String outcome,
+      String resolvedBy,
+      Instant resolvedAt,
+      String note) {}
+
+  @Schema(name = "ResolveAccountingSyncRequest")
+  public record ResolveRequest(
+      @Schema(description = "LANDED or NOT_LANDED.") String outcome,
+      @Schema(description = "The package's own reference for the journal; required for LANDED.")
+          String externalId,
+      @Schema(description = "Optional note, kept on the row.") String note) {}
 
   @Schema(name = "AccountingSyncPage")
   public record SyncPage(List<SyncResponse> items, String nextCursor) {}

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -9,6 +10,7 @@ import '../../shared/util/status_labels.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import '../../shared/util/short_ref.dart';
 
 // ── Transfers ────────────────────────────────────────────────────────────────
@@ -235,6 +237,12 @@ class _CreateTransferDialogState extends ConsumerState<_CreateTransferDialog> {
   bool _loading = false;
   String? _error;
 
+  /// What is to move: a quantity, read the way the app's language writes a
+  /// number ([AmountMarks]) to three places and sent as the decimal typed.
+  /// One that cannot be read is refused under its field and no transfer is
+  /// raised: parsed with a point, Romanian's 1.250 moved a kilo and a quarter.
+  final _marks = AmountMarks.ofApp();
+
   @override
   void dispose() {
     _variantCtrl.dispose();
@@ -252,9 +260,13 @@ class _CreateTransferDialogState extends ConsumerState<_CreateTransferDialog> {
       setState(() => _error = 'From and to stores must differ.');
       return;
     }
+    if (figureRefused(_marks, [(_qtyCtrl, AmountShape.quantity)])) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
     final variantId = _variantCtrl.text.trim();
-    final qty = double.tryParse(_qtyCtrl.text.trim());
-    if (variantId.isEmpty || qty == null || qty <= 0) {
+    final qty = figureOf(_qtyCtrl, AmountShape.quantity, _marks);
+    if (variantId.isEmpty || qty == null || qty == '0') {
       setState(() => _error = 'Variant ID and positive qty are required.');
       return;
     }
@@ -271,6 +283,7 @@ class _CreateTransferDialogState extends ConsumerState<_CreateTransferDialog> {
           'transferType': 'STANDARD',
           if (_notesCtrl.text.trim().isNotEmpty) 'notes': _notesCtrl.text.trim(),
           'lines': [
+            // The plain decimal typed: JSON-B reads it exactly.
             {'variantId': variantId, 'requestedQty': qty},
           ],
         },
@@ -330,11 +343,14 @@ class _CreateTransferDialogState extends ConsumerState<_CreateTransferDialog> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                FigureField(
+                  fieldKey: const Key('transfer-qty'),
                   controller: _qtyCtrl,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(labelText: 'Quantity'),
+                  shape: AmountShape.quantity,
+                  marks: _marks,
+                  label: 'Quantity',
+                  hint: '0',
+                  onChanged: (_) => setState(() {}),
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -489,16 +505,23 @@ String transferStatusLabel(String status) => switch (status.toUpperCase()) {
       _ => humanizeCode(status),
     };
 
-/// A stock movement's kind in words.
+/// A stock movement's kind in words: one for each type inventory-svc writes
+/// to its ledger (`stock_movements.type`). The quantity beside it says which
+/// way the stock went (`+` in, `-` out), so a transfer is one word, not two.
+/// A customer's return or a voided sale comes back as a `RECEIVE`, so it reads
+/// as a receipt; the ledger has no types of its own for them.
 String movementTypeLabel(String type) => switch (type.toUpperCase()) {
+      'RECEIVE' => 'Receipt',
       'SALE' => 'Sale',
-      'RECEIPT' => 'Receipt',
       'ADJUST' => 'Adjustment',
-      'TRANSFER_OUT' => 'Transfer out',
-      'TRANSFER_IN' => 'Transfer in',
-      'RETURN' => 'Return',
-      'YIELD' => 'Breakdown',
+      'TRANSFER' => 'Transfer',
+      'RTV' => 'Return to supplier',
+      'RESERVE' => 'Hold placed',
+      'RELEASE' => 'Hold released',
       'BOND_RELEASE' => 'Released from bond',
+      'YIELD' => 'Breakdown',
+      'LOT_SPLIT' => 'Lot split',
+      'LOT_MERGE' => 'Lot merge',
       _ => humanizeCode(type),
     };
 

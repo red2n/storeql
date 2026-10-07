@@ -89,6 +89,17 @@ for secret in STOREQL_JWT_SECRET STOREQL_CONFIG_TOKEN; do
   fi
 done
 
+# The keys the webhook signing secrets (notification-svc) and the accounting packages' tokens
+# (purchase-svc) are sealed under: an AES key, so 32 bytes, not the 48 above. Left blank, compose
+# falls back to one development key that every checkout shares. Generated once on first sight and
+# never rotated here: a new key strands every secret sealed under the old one.
+for secret in STOREQL_WEBHOOKS_SECRETS_KEY STOREQL_ACCOUNTING_SECRETS_KEY; do
+  if [ -z "$(env_get "$secret")" ]; then
+    env_set "$secret" "$(openssl rand -base64 32)"
+    cyan "Generated $secret (saved to .env)."
+  fi
+done
+
 # The MQTT broker's publisher password (20.15): hex, because it is written into the CSV the
 # broker bootstraps its one password user from.
 if [ -z "$(env_get MQTT_PUBLISHER_PASSWORD)" ]; then

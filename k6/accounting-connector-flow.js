@@ -12,6 +12,7 @@
 import { Counter } from 'k6/metrics';
 import {
   ALL_CHECKS_PASS,
+  businessWideManager,
   call,
   data,
   expect,
@@ -44,7 +45,10 @@ export function setup() {
     tenant,
     rival,
     store,
-    manager: staffUser(tenant, 'MANAGER', [store.id]),
+    // The connection, its mapping and every push are the whole business's books: the manager who
+    // maps and pushes is held to no store; one held to a store is refused BUSINESS_WIDE_ONLY.
+    manager: businessWideManager(tenant),
+    branchManager: staffUser(tenant, 'MANAGER', [store.id]),
     cashier: staffUser(tenant, 'CASHIER', [store.id]),
     variantId: sellableVariant(tenant, `Booked ${uniq()}`).variantId,
   };
@@ -53,7 +57,7 @@ export function setup() {
 const today = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 
-export default function ({ tenant, rival, store, manager, cashier, variantId }) {
+export default function ({ tenant, rival, store, manager, branchManager, cashier, variantId }) {
   const owner = tenant.owner.token;
   const journal = (description, debitCode, creditCode) =>
     must(
@@ -72,6 +76,7 @@ export default function ({ tenant, rival, store, manager, cashier, variantId }) 
   const providers = data(call('GET', `${ACC}/providers`, { token: manager.token })) || [];
   truthy('[+] a manager reads the packages that can be connected: Xero, QuickBooks Online, Sage, and the stand-in', ['XERO', 'QUICKBOOKS', 'SAGE', 'SIMULATED'].every((c) => providers.some((p) => p.code === c && p.name && p.tokens)), providers.map((p) => p.code));
   truthy('[+] ...each with the settings it needs', (providers.find((p) => p.code === 'XERO') || {}).settings[0] === 'tenantId' && (providers.find((p) => p.code === 'QUICKBOOKS') || {}).settings[0] === 'realmId', providers);
+  truthy('[+] ...as does a manager held to one store: the catalogue is nobody\'s in particular', (data(call('GET', `${ACC}/providers`, { token: branchManager.token })) || []).length === providers.length, 'branch read');
   expect(call('GET', `${ACC}/providers`, { token: cashier.token }), '[-] a cashier does not', 403);
   expect(call('GET', CONNECTION, { token: owner }), '[-] nothing is connected to start with', 404, 'ACCOUNTING_NOT_CONNECTED');
 
@@ -87,6 +92,8 @@ export default function ({ tenant, rival, store, manager, cashier, variantId }) 
   truthy('[+] connected and pushing, nothing pushed yet, no token kept', c.provider === 'SIMULATED' && c.status === 'ACTIVE' && c.counts && c.counts.delivered === 0 && !('credentials' in c) && c.hasRefreshToken === false, c);
   truthy('[+] a manager reads the connection', (data(call('GET', CONNECTION, { token: manager.token })) || {}).id === c.id, 'manager read');
   expect(call('GET', CONNECTION, { token: rival.owner.token }), '[-] another business sees nothing', 404, 'ACCOUNTING_NOT_CONNECTED');
+  expect(call('GET', CONNECTION, { token: branchManager.token }), '[-] a manager held to one store does not read the whole business\'s books', 403, 'BUSINESS_WIDE_ONLY');
+  expect(call('PUT', `${CONNECTION}/mappings`, { token: branchManager.token, body: { mappings: [{ nominalCode: '1001', externalAccount: 'SIM-1001' }] } }), '[-] ...nor maps them', 403, 'BUSINESS_WIDE_ONLY');
 
   // ── the chart and the mapping ─────────────────────────────────────────────────────────────────
   const chart = data(call('GET', `${CONNECTION}/accounts`, { token: manager.token })) || [];
@@ -111,6 +118,8 @@ export default function ({ tenant, rival, store, manager, cashier, variantId }) 
   truthy('[+] filtered by status', syncs('?status=DELIVERED').length === 1 && syncs('?status=PENDING').length === 1, 'filters');
   expect(call('GET', `${ACC}/syncs/${landed.id}`, { token: rival.owner.token }), '[-] another business cannot read a push', 404, 'ACCOUNTING_SYNC_NOT_FOUND');
   expect(call('GET', `${ACC}/syncs`, { token: cashier.token }), '[-] nor can a cashier', 403);
+  expect(call('GET', `${ACC}/syncs`, { token: branchManager.token }), '[-] nor a manager held to one store', 403, 'BUSINESS_WIDE_ONLY');
+  expect(sync(branchManager.token), '[-] ...who cannot push either', 403, 'BUSINESS_WIDE_ONLY');
   const again = must(sync(), 200, 'second pass');
   truthy('[+] a second pass pushes nothing twice and does not retry before its time', again.queued === 0 && again.delivered === 0 && again.failed === 0 && syncs().length === 2 && byJournal(rent).attempts === 1, { again, count: syncs().length });
   truthy('[+] the connection counts what happened', (data(call('GET', CONNECTION, { token: owner })) || {}).counts.delivered === 1 && (data(call('GET', CONNECTION, { token: owner })) || {}).lastSyncAt, 'counts');

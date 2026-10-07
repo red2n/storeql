@@ -39,14 +39,18 @@ public class CompetitorPriceResource {
       summary = "Record a competitor's price",
       description =
           "One rival's price for one variant on one day, in the business's own currency, optionally"
-              + " in one price zone. Append-only: a later sighting is a new row, and the freshest"
-              + " per rival is what a repricing rule answers.")
+              + " in one price zone. It is an observation, kept as seen to four decimals (fuel to"
+              + " a tenth of a penny is kept, not rounded to the pence). Append-only: a later"
+              + " sighting is a new row, and the freshest per rival is what a repricing rule"
+              + " answers.")
   @APIResponse(responseCode = "201", description = "Observation recorded")
   @APIResponse(
       responseCode = "400",
       description =
           "PRICING_COMPETITOR_CURRENCY_MISMATCH, PRICING_COMPETITOR_DATE_INVALID,"
-              + " PRICING_ZONE_UNKNOWN")
+              + " PRICING_ZONE_UNKNOWN; VALIDATION_FAILED for a price with more than four decimals"
+              + " (what a rival was seen to charge is kept as seen, even finer than the business's"
+              + " currency, and a price the column would round is refused, never rounded)")
   @POST
   public Response record(RecordCompetitorPriceRequest req) {
     Validations.validate(req);

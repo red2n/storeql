@@ -1,7 +1,9 @@
 package com.storeql.cart.service;
 
+import com.storeql.cart.domain.CartAccess;
 import com.storeql.cart.domain.Domain.Cart;
 import com.storeql.cart.domain.Domain.CartItem;
+import com.storeql.cart.domain.Domain.StaffAction;
 import com.storeql.cart.dto.Dtos.AddItemRequest;
 import com.storeql.cart.dto.Dtos.CartItemResponse;
 import com.storeql.cart.dto.Dtos.CartResponse;
@@ -149,7 +151,10 @@ public class CartService {
             req.qty(),
             req.unitPrice(),
             Instant.now());
-    return toItemResponse(repo.upsertItem(item));
+    StaffAction trace =
+        assistedAction(
+            cart, ctx, req.sessionId(), StaffAction.ADD_ITEM, null, item.variantId(), req.qty());
+    return toItemResponse(trace == null ? repo.upsertItem(item) : repo.upsertItem(item, trace));
   }
 
   /**
@@ -161,7 +166,8 @@ public class CartService {
    * @return the item with its updated quantity
    * @throws ApiException {@code CART_NOT_FOUND} (404) when the cart does not exist or the caller
    *     does not own it; {@code CART_ITEM_NOT_FOUND} (404) when the item does not exist or belongs
-   *     to a different cart
+   *     to a different cart; {@code CART_NOT_ACTIVE}, {@code TENANT_NOT_OPERATIONAL} and {@code
+   *     STORE_NOT_OPERATIONAL} (409) exactly as for add-item
    */
   public CartItemResponse updateItemQty(TenantContext ctx, UUID itemId, UpdateItemQtyRequest req) {
     UUID tenantId = ctx.requireTenantId();
@@ -171,6 +177,9 @@ public class CartService {
         repo.findById(tenantId, cartId)
             .orElseThrow(() -> ApiException.notFound("CART_NOT_FOUND", "cart not found"));
     requireOwnership(cart, ctx, req.sessionId());
+    if (!Cart.STATUS_ACTIVE.equals(cart.status()))
+      throw ApiException.conflict("CART_NOT_ACTIVE", "cart is not active");
+    guardTenantAndStore(tenantId, cart.storeId());
 
     CartItem item =
         repo.findItemById(tenantId, itemId)
@@ -178,7 +187,14 @@ public class CartService {
     if (!item.cartId().equals(cartId))
       throw ApiException.notFound("CART_ITEM_NOT_FOUND", "item not found in this cart");
 
-    repo.updateItemQty(tenantId, cartId, itemId, req.qty());
+    StaffAction trace =
+        assistedAction(
+            cart, ctx, req.sessionId(), StaffAction.SET_QTY, itemId, item.variantId(), req.qty());
+    if (trace == null) {
+      repo.updateItemQty(tenantId, cartId, itemId, req.qty());
+    } else {
+      repo.updateItemQty(tenantId, cartId, itemId, req.qty(), trace);
+    }
     return toItemResponse(repo.findItemById(tenantId, itemId).orElseThrow());
   }
 
@@ -191,7 +207,8 @@ public class CartService {
    * @param sessionId guest session token, or {@code null} for an authenticated caller
    * @throws ApiException {@code CART_NOT_FOUND} (404) when the cart does not exist or the caller
    *     does not own it; {@code CART_ITEM_NOT_FOUND} (404) when the item does not exist or belongs
-   *     to a different cart
+   *     to a different cart; {@code CART_NOT_ACTIVE}, {@code TENANT_NOT_OPERATIONAL} and {@code
+   *     STORE_NOT_OPERATIONAL} (409) exactly as for add-item
    */
   public void removeItem(TenantContext ctx, UUID itemId, String cartIdStr, String sessionId) {
     UUID tenantId = ctx.requireTenantId();
@@ -201,11 +218,22 @@ public class CartService {
         repo.findById(tenantId, cartId)
             .orElseThrow(() -> ApiException.notFound("CART_NOT_FOUND", "cart not found"));
     requireOwnership(cart, ctx, sessionId);
+    if (!Cart.STATUS_ACTIVE.equals(cart.status()))
+      throw ApiException.conflict("CART_NOT_ACTIVE", "cart is not active");
+    guardTenantAndStore(tenantId, cart.storeId());
 
-    repo.findItemById(tenantId, itemId)
-        .filter(i -> i.cartId().equals(cartId))
-        .orElseThrow(() -> ApiException.notFound("CART_ITEM_NOT_FOUND", "item not found"));
-    repo.deleteItem(tenantId, cartId, itemId);
+    CartItem item =
+        repo.findItemById(tenantId, itemId)
+            .filter(i -> i.cartId().equals(cartId))
+            .orElseThrow(() -> ApiException.notFound("CART_ITEM_NOT_FOUND", "item not found"));
+    StaffAction trace =
+        assistedAction(
+            cart, ctx, sessionId, StaffAction.REMOVE_ITEM, itemId, item.variantId(), item.qty());
+    if (trace == null) {
+      repo.deleteItem(tenantId, cartId, itemId);
+    } else {
+      repo.deleteItem(tenantId, cartId, itemId, trace);
+    }
   }
 
   // ── Merge guest cart ──────────────────────────────────────────────────────
@@ -250,33 +278,44 @@ public class CartService {
 
   // ── Called by OrderPlacedHandler ─────────────────────────────────────────
 
+  /** The key an {@code OrderPlaced} is recorded under in {@code processed_events}. */
+  public static final String ORDER_PLACED_CONSUMER = "cart-svc/order-placed";
+
   /**
-   * Marks the customer's active cart at a store as checked out once their order is placed.
+   * Marks the customer's active cart at a store as checked out once their order is placed, once per
+   * event: the event is recorded on the transaction that closes the cart, so a redelivered {@code
+   * OrderPlaced} changes nothing and leaves a newer {@code ACTIVE} cart the customer opened since
+   * untouched (golden rule 7). Guest orders and till sales naming no customer carry no customer id
+   * and are ignored: they have no server-side cart to retire.
    *
-   * <p>Idempotent, as the {@code OrderPlaced} consumer may redeliver: a cart already moved out of
-   * {@code ACTIVE} is left untouched. Guest and POS orders carry no customer id and are ignored —
-   * they have no server-side cart to retire.
-   *
+   * @param eventId the event's id, or an id derived from its order when it carries none
    * @param tenantId owning tenant
-   * @param customerId the ordering customer, or {@code null} for a guest/POS order
+   * @param customerId the ordering customer, or {@code null} for a guest order or a till sale that
+   *     names none
    * @param storeId the store the order was placed against
+   * @return {@code true} when the event was new and is now recorded; {@code false} for a
+   *     redelivery, which changed nothing, and for an order naming no customer
    */
-  public void onOrderPlaced(UUID tenantId, UUID customerId, UUID storeId) {
-    if (customerId == null) return; // guest or POS order — no cart to mark
-    repo.markCheckedOutByCustomerAndStore(tenantId, customerId, storeId);
+  public boolean onOrderPlaced(UUID eventId, UUID tenantId, UUID customerId, UUID storeId) {
+    if (customerId == null) return false; // guest order, or a till sale naming no customer
+    return repo.markCheckedOutOnce(eventId, ORDER_PLACED_CONSUMER, tenantId, customerId, storeId);
   }
 
   /**
    * Marks the shopper's active cart checked out once their online order is placed, whichever store
    * the order went to: a delivery resolves to the store serving the postcode and may be split
    * across several (order orchestration), none of which need be the store the cart was filled at.
-   * Idempotent: every part of a split announces itself, and the first closes the cart.
+   * Once per event, as {@link #onOrderPlaced}: each part of a split announces itself, and so closes
+   * the shopper's ACTIVE cart, but a part's redelivery closes nothing.
    *
+   * @param eventId the event's id, or an id derived from its order when it carries none
    * @param loginId the shopper's login, which is what holds a cart
+   * @return {@code true} when the event was new and is now recorded; {@code false} for a
+   *     redelivery, which changed nothing, and for an order naming no login
    */
-  public void onOnlineOrderPlaced(UUID tenantId, UUID loginId) {
-    if (loginId == null) return; // a guest checkout has no server-side cart
-    repo.markCheckedOutByCustomer(tenantId, loginId);
+  public boolean onOnlineOrderPlaced(UUID eventId, UUID tenantId, UUID loginId) {
+    if (loginId == null) return false; // a guest checkout has no server-side cart
+    return repo.markCheckedOutOnce(eventId, ORDER_PLACED_CONSUMER, tenantId, loginId, null);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -284,8 +323,7 @@ public class CartService {
   private void guardTenantAndStore(UUID tenantId, UUID storeId) {
     if (!tenantStatusRepo.isActive(tenantId))
       throw ApiException.conflict(
-          "TENANT_NOT_OPERATIONAL",
-          "Tenant is suspended or blocked — cart operations are unavailable");
+          "TENANT_NOT_OPERATIONAL", "Business is switched off — cart operations are unavailable");
     if (!storeStatusRepo.isActive(tenantId, storeId))
       throw ApiException.conflict(
           "STORE_NOT_OPERATIONAL",
@@ -318,21 +356,33 @@ public class CartService {
    * was created with (the cartId is returned to any caller who can view it, the sessionId is not).
    */
   private void requireOwnership(Cart cart, TenantContext ctx, String suppliedSessionId) {
-    if (isStaff(ctx)) return;
-    if (cart.customerId() != null) {
-      if (!cart.customerId().equals(ctx.userId()))
-        throw ApiException.notFound("CART_NOT_FOUND", "cart not found");
-      return;
-    }
-    if (cart.sessionId() == null || !cart.sessionId().equals(suppliedSessionId))
+    if (CartAccess.isStaff(staffRoles(ctx))) return;
+    if (!CartAccess.owns(cart, ctx.userId(), suppliedSessionId))
       throw ApiException.notFound("CART_NOT_FOUND", "cart not found");
   }
 
-  private boolean isStaff(TenantContext ctx) {
-    return ctx.hasRole("CASHIER")
-        || ctx.hasRole("STOREKEEPER")
-        || ctx.hasRole("MANAGER")
-        || ctx.hasRole("OWNER");
+  /**
+   * The trace of a change staff make to a cart that is not theirs (assisted shopping): who, in what
+   * role, and what. Null for a shopper on their own cart, or staff on a cart they hold as its
+   * owner.
+   */
+  private static java.util.Set<String> staffRoles(TenantContext ctx) {
+    return CartAccess.STAFF_ROLES.stream()
+        .filter(ctx::hasRole)
+        .collect(java.util.stream.Collectors.toSet());
+  }
+
+  private StaffAction assistedAction(
+      Cart cart,
+      TenantContext ctx,
+      String suppliedSession,
+      String action,
+      UUID itemId,
+      UUID variantId,
+      java.math.BigDecimal qty) {
+    if (!CartAccess.isAssisted(cart, staffRoles(ctx), ctx.userId(), suppliedSession)) return null;
+    return new StaffAction(
+        action, ctx.userId(), CartAccess.staffRole(staffRoles(ctx)), itemId, variantId, qty);
   }
 
   private UUID parseUuid(String val, String field) {

@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:storeql_app/core/auth/auth_notifier.dart';
+import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/accounting_section.dart';
 import 'package:storeql_app/shared/widgets/status_badge.dart';
@@ -137,12 +139,32 @@ class _Server implements HttpClientAdapter {
   }
 }
 
+/// A signed-in manager: the stores the token names (none is head office) and
+/// the permissions it carries (null is the tier's defaults).
+class _Manager extends AuthNotifier {
+  final List<String> storeIds;
+  final List<String>? permissions;
+  _Manager({this.storeIds = const [], this.permissions});
+
+  @override
+  Future<AuthState> build() async => AuthAuthenticated(
+        accessToken: 'a',
+        refreshToken: 'r',
+        userId: 'u',
+        tenantId: 't',
+        roles: const ['MANAGER'],
+        storeIds: storeIds,
+        permissions: permissions,
+      );
+}
+
 Future<_Server> _pump(WidgetTester tester,
     {required bool owner,
     bool connected = true,
     String provider = 'SIMULATED',
     bool active = true,
-    List<Map<String, dynamic>>? syncs}) async {
+    List<Map<String, dynamic>>? syncs,
+    _Manager? manager}) async {
   tester.view.physicalSize = const Size(1400, 2400);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -150,7 +172,13 @@ Future<_Server> _pump(WidgetTester tester,
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
   await tester.pumpWidget(
     ProviderScope(
-      overrides: [apiClientProvider.overrideWithValue(FakeApiClient(dio))],
+      key: UniqueKey(),
+      overrides: [
+        apiClientProvider.overrideWithValue(FakeApiClient(dio)),
+        // A head-office manager unless the test names one: the section asks
+        // nothing until the sign-in is known.
+        authNotifierProvider.overrideWith(() => manager ?? _Manager()),
+      ],
       child: MaterialApp(
         home: Scaffold(
           body: SingleChildScrollView(
@@ -259,6 +287,67 @@ void main() {
     expect(body['provider'], 'SIMULATED');
     expect(body.containsKey('credentials'), isFalse);
     expect(body['settings'], isEmpty);
+  });
+
+  // The connection, its mapping and every push are the whole business's books: purchase-svc
+  // answers a manager held to stores 403 BUSINESS_WIDE_ONLY on every one of them, reads included.
+  // So nothing is asked and the section says who keeps them; a head-office manager reads and pushes.
+  const booksNote = 'Only an owner or a head-office manager reads or changes the accounting connection.';
+
+  testWidgets('a manager held to stores is told who keeps the books, and nothing is asked', (tester) async {
+    final server = await _pump(tester,
+        owner: false, manager: _Manager(storeIds: const ['019987b0-0f1e-7c3b-8a4d-3e2f1a0b9d40']));
+    expect(find.text('Accounting'), findsOneWidget);
+    expect(find.text(booksNote), findsOneWidget);
+    expect(find.byKey(const Key('accounting-card')), findsNothing);
+    expect(find.byKey(const Key('accounting-sync')), findsNothing);
+    expect(find.byKey(const Key('accounting-map')), findsNothing);
+    expect(find.byKey(const Key('sync-retry-$_failed')), findsNothing);
+    expect(server.requests.where((r) => r.path.contains('/accounting/')), isEmpty);
+  });
+
+  testWidgets('a head-office manager reads the connection and is offered the push, and no note', (tester) async {
+    final server = await _pump(tester, owner: false, manager: _Manager());
+    expect(find.text(booksNote), findsNothing);
+    expect(find.byKey(const Key('accounting-card')), findsOneWidget);
+    expect(find.byKey(const Key('accounting-sync')), findsOneWidget);
+    expect(find.byKey(const Key('accounting-map')), findsOneWidget);
+    expect(find.byKey(const Key('sync-retry-$_failed')), findsOneWidget);
+    expect(server.of('GET', '/accounting/connection'), isNotEmpty);
+  });
+
+  // Mapping accounts, pushing and putting a push right are finance's (finance.journal): a
+  // manager whose role was narrowed out of it reads the connection and its pushes, and is
+  // offered none of the controls that would only be refused.
+  testWidgets('a manager without finance.journal reads the books but is offered no push, mapping or retry',
+      (tester) async {
+    await _pump(tester, owner: false, manager: _Manager(permissions: const ['purchasing.approve']));
+    expect(find.byKey(const Key('accounting-card')), findsOneWidget);
+    expect(find.text('Suspense'), findsOneWidget);
+    expect(find.byKey(const Key('accounting-check')), findsOneWidget);
+    expect(find.byKey(const Key('accounting-sync')), findsNothing);
+    expect(find.byKey(const Key('accounting-map')), findsNothing);
+    expect(find.byKey(const Key('sync-retry-$_failed')), findsNothing);
+    expect(find.byKey(const Key('sync-skip-$_failed')), findsNothing);
+  });
+
+  // With nothing pushed yet, the line under the list says what the reader can do: a finance
+  // holder posts a journal or presses Push now; a manager without finance.journal, offered
+  // neither, is told the list fills itself.
+  testWidgets('nothing pushed yet: a finance holder is told to post a journal or push now', (tester) async {
+    await _pump(tester, owner: false, syncs: const []);
+    expect(find.text('Nothing pushed yet. Post a journal, or press Push now.'), findsOneWidget);
+  });
+
+  testWidgets('nothing pushed yet: a manager without finance.journal is not sent for what they cannot do',
+      (tester) async {
+    await _pump(tester,
+        owner: false, syncs: const [], manager: _Manager(permissions: const ['purchasing.approve']));
+    final none = tester.widget<Text>(
+        find.descendant(of: find.byKey(const Key('accounting-syncs-none')), matching: find.byType(Text)));
+    expect(none.data, 'Nothing pushed yet. Each journal the ledger posts is listed here as it is pushed.');
+    expect(find.textContaining('Push now'), findsNothing);
+    expect(find.textContaining('Post a journal'), findsNothing);
   });
 
   testWidgets('connected: the card says what is where, Push now pushes, and the pushes are listed with what needs a person', (tester) async {

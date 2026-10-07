@@ -44,7 +44,8 @@ public class CrossDockService {
   /**
    * Replaces a line's allocations. An empty list clears them.
    *
-   * @throws ApiException 404 {@code PURCHASE_LINE_NOT_FOUND}; 409 {@code
+   * @throws ApiException 403 {@code STORE_ACCESS_DENIED} for a caller held to another store than
+   *     the order's; 404 {@code PURCHASE_LINE_NOT_FOUND}; 409 {@code
    *     PURCHASE_ALLOCATION_ORDER_NOT_DRAFT}, {@code PURCHASE_ALLOCATION_STOCK_NOT_OWNED}; 400
    *     {@code PURCHASE_ALLOCATION_NOT_A_WAREHOUSE}, {@code PURCHASE_ALLOCATION_NOT_SERVED}, {@code
    *     PURCHASE_ALLOCATION_EXCEEDS_LINE}, {@code PURCHASE_ALLOCATION_QTY_INVALID}; 503 {@code
@@ -54,6 +55,8 @@ public class CrossDockService {
       TenantContext ctx, UUID poId, UUID lineId, List<Allocation> requested) {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
+    // The order's own store (getPurchaseOrder): a buyer held to another one changes none of its
+    // lines.
     PurchaseOrder po = purchases.getPurchaseOrder(ctx, poId);
     PurchaseOrderLine line = lineOf(tenantId, po, lineId);
     requireAllocatable(tenantId, po);
@@ -119,6 +122,8 @@ public class CrossDockService {
   public List<LineAllocation> fillFromNeeds(TenantContext ctx, UUID poId, UUID lineId) {
     ctx.requireAnyRole(BUYING);
     UUID tenantId = ctx.requireTenantId();
+    // The order's own store (getPurchaseOrder): a buyer held to another one changes none of its
+    // lines.
     PurchaseOrder po = purchases.getPurchaseOrder(ctx, poId);
     PurchaseOrderLine line = lineOf(tenantId, po, lineId);
     requireAllocatable(tenantId, po);

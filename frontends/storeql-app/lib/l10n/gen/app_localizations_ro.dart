@@ -207,4 +207,21 @@ class AppLocalizationsRo extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'Cere un link nou';
+
+  @override
+  String get startBusiness => 'Pornește o afacere';
+
+  @override
+  String get startBusinessTitle => 'Pornește-ți afacerea';
+
+  @override
+  String get startBusinessIntro =>
+      'Creează contul cu care îți vei conduce afacerea. Apoi configurezi afacerea și primul ei magazin.';
+
+  @override
+  String get fieldPasswordConfirm => 'Confirmă parola';
+
+  @override
+  String get fieldPasswordMismatch =>
+      'Nu se potrivește cu parola introdusă mai sus.';
 }

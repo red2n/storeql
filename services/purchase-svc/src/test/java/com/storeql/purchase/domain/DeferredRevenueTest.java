@@ -33,7 +33,7 @@ class DeferredRevenueTest {
   private static final UUID TENANT = Ids.newId();
   private static final UUID STORE = Ids.newId();
   private static final Settings SETTINGS =
-      new Settings(new BigDecimal("0.05"), new BigDecimal("20"), new BigDecimal("10"));
+      new Settings(new BigDecimal("0.05"), new BigDecimal("20"), new BigDecimal("10"), "GBP");
   private static final Source SRC =
       new Source(TENANT, Ids.newId(), STORE, LocalDate.of(2026, 9, 15));
 
@@ -128,6 +128,50 @@ class DeferredRevenueTest {
     PointsOutcome out = DeferredRevenue.adjusted(SRC, SETTINGS, pool, new BigDecimal("-30"));
     assertThat(out.posting(), is(empty()));
     assertPool(out.pool(), "170", "7.41", "0");
+  }
+
+  @Test
+  @DisplayName("Points taken back with a returned sale put their deferral back into sales")
+  void pointsTakenBackWithAReturnPutTheirDeferralBackIntoSales() {
+    PointsPool pool = saleOf200Points(PointsPool.EMPTY).pool();
+
+    // Half the sale comes back: 100 of 200 points, 7.41 × 100 / 200 = 3.705 → 3.71 back to sales.
+    PointsOutcome half = DeferredRevenue.reversed(SRC, SETTINGS, pool, new BigDecimal("100"));
+    assertThat(net(half.posting(), Domain.CODE_SALES), comparesEqualTo(new BigDecimal("-3.71")));
+    assertThat(
+        net(half.posting(), Domain.CODE_DEFERRED_LOYALTY), comparesEqualTo(new BigDecimal("3.71")));
+    assertThat(half.posting().get(0).sourceType(), is(Domain.SOURCE_LOYALTY_DEFERRAL));
+    assertBalanced(half.posting());
+    assertPool(half.pool(), "100", "3.70", "0");
+
+    // The rest comes back: nothing left deferred, nothing outstanding, and no breakage invented.
+    PointsOutcome rest =
+        DeferredRevenue.reversed(SRC, SETTINGS, half.pool(), new BigDecimal("100"));
+    assertThat(net(rest.posting(), Domain.CODE_SALES), comparesEqualTo(new BigDecimal("-3.70")));
+    assertThat(net(rest.posting(), Domain.CODE_LOYALTY_BREAKAGE), comparesEqualTo(BigDecimal.ZERO));
+    assertPool(rest.pool(), "0", "0", "0");
+  }
+
+  @Test
+  @DisplayName("Points already spent release nothing when their sale comes back: they are a debt")
+  void pointsAlreadySpentReleaseNothingWhenTheirSaleComesBack() {
+    PointsPool pool = saleOf200Points(PointsPool.EMPTY).pool();
+    PointsPool spent = DeferredRevenue.redeemed(SRC, SETTINGS, pool, new BigDecimal("200")).pool();
+    PointsOutcome out = DeferredRevenue.reversed(SRC, SETTINGS, spent, new BigDecimal("200"));
+    assertThat(out.posting(), is(empty()));
+    assertThat(out.pool(), is(spent));
+  }
+
+  @Test
+  @DisplayName("A gift card loaded by a refund posts nothing: the refund already owes it")
+  void aGiftCardLoadedByARefundPostsNothing() {
+    assertThat(
+        DeferredRevenue.giftCardLoaded(
+            SRC, "ISSUE", DeferredRevenue.PAID_BY_RETURN, new BigDecimal("15.00")),
+        is(empty()));
+    assertThat(
+        DeferredRevenue.giftCardLoaded(SRC, "ISSUE", "CASH", new BigDecimal("15.00")),
+        is(not(empty())));
   }
 
   @Test
@@ -251,7 +295,7 @@ class DeferredRevenueTest {
   @DisplayName("A release never exceeds what is deferred, however high the breakage estimate")
   void aReleaseIsCappedAtTheDeferredIncome() {
     Settings mostlyUnspent =
-        new Settings(new BigDecimal("0.05"), new BigDecimal("95"), BigDecimal.ZERO);
+        new Settings(new BigDecimal("0.05"), new BigDecimal("95"), BigDecimal.ZERO, "GBP");
     PointsPool pool = new PointsPool(new BigDecimal("10"), new BigDecimal("1.00"), BigDecimal.ZERO);
     PointsOutcome out = DeferredRevenue.redeemed(SRC, mostlyUnspent, pool, new BigDecimal("5"));
     assertThat(
@@ -290,6 +334,31 @@ class DeferredRevenueTest {
     assertThat(
         DeferredRevenue.refusal(new BigDecimal("0.0001"), BigDecimal.ZERO, new BigDecimal("12.50")),
         is(nullValue()));
+  }
+
+  @Test
+  @DisplayName(
+      "A card sold in a sale debits clearing on the order; by hand it is the goodwill cost")
+  void aCardSoldInASaleIsPostedAgainstClearing() {
+    UUID order = com.storeql.ids.Ids.newId();
+    BigDecimal amount = new BigDecimal("40.00");
+    for (String tender : new String[] {"CASH", "CARD", ""}) {
+      List<NominalLedgerEntry> sold =
+          DeferredRevenue.giftCardLoaded(SRC, "ISSUE", tender, amount, "SALE", order, null);
+      assertThat(net(sold, Domain.CODE_SALES_CLEARING), comparesEqualTo(amount));
+      assertThat(net(sold, Domain.CODE_CASH_IN_TILLS), comparesEqualTo(BigDecimal.ZERO));
+      assertThat(net(sold, Domain.CODE_CARD_CLEARING), comparesEqualTo(BigDecimal.ZERO));
+      assertThat(net(sold, Domain.CODE_GIFT_CARD_LIABILITY), comparesEqualTo(amount.negate()));
+      assertThat(sold.get(0).sourceRef(), is(order));
+    }
+    List<NominalLedgerEntry> hand =
+        DeferredRevenue.giftCardLoaded(
+            SRC, "ISSUE", "PROMOTIONAL", amount, "GOODWILL", null, "late order");
+    assertThat(net(hand, Domain.CODE_GIFT_CARDS_GIVEN), comparesEqualTo(amount));
+    assertThat(hand.get(0).description(), containsString("(GOODWILL): late order"));
+    assertThat(
+        DeferredRevenue.giftCardLoaded(SRC, "ISSUE", "RETURN", amount, "RETURN", order, null),
+        is(empty()));
   }
 
   @Test
@@ -380,5 +449,80 @@ class DeferredRevenueTest {
     assertThat(
         DeferredRevenue.giftCardRedeemed(SRC, SETTINGS, pool, BigDecimal.ZERO).posting(),
         is(empty()));
+  }
+
+  @Test
+  @DisplayName("A load reversed is the opposite of the sale-loaded posting, on the order")
+  void aLoadReversedIsTheOppositeOfTheSaleLoad() {
+    UUID order = Ids.newId();
+    BigDecimal amount = new BigDecimal("40.00");
+    List<NominalLedgerEntry> sold =
+        DeferredRevenue.giftCardLoaded(SRC, "ISSUE", "CASH", amount, "SALE", order, null);
+    List<NominalLedgerEntry> reversed = DeferredRevenue.giftCardLoadReversed(SRC, order, amount);
+    assertThat(net(reversed, Domain.CODE_GIFT_CARD_LIABILITY), comparesEqualTo(amount));
+    assertThat(net(reversed, Domain.CODE_SALES_CLEARING), comparesEqualTo(amount.negate()));
+    for (String code : new String[] {Domain.CODE_GIFT_CARD_LIABILITY, Domain.CODE_SALES_CLEARING}) {
+      assertThat(net(sold, code).add(net(reversed, code)), comparesEqualTo(BigDecimal.ZERO));
+    }
+    assertThat(reversed.get(0).sourceRef(), is(order));
+    assertThat(reversed.get(0).entryDate(), is(SRC.date()));
+    assertThat(DeferredRevenue.giftCardLoadReversed(SRC, order, BigDecimal.ZERO), is(empty()));
+  }
+
+  @Test
+  @DisplayName("The pool takes a reversed load off what was loaded, and never goes below nothing")
+  void thePoolTakesAReversedLoadOff() {
+    GiftCardPool pool = DeferredRevenue.loaded(GiftCardPool.EMPTY, new BigDecimal("100.00"));
+    assertThat(
+        DeferredRevenue.loadReversed(pool, new BigDecimal("40.00")).loaded(),
+        comparesEqualTo(new BigDecimal("60.00")));
+    assertThat(
+        DeferredRevenue.loadReversed(pool, new BigDecimal("140.00")).loaded(),
+        comparesEqualTo(BigDecimal.ZERO));
+  }
+
+  // ── the business's own currency ─────────────────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "What is deferred and recognised is in the business's currency's own minor units: whole yen,"
+          + " three decimals of a dinar")
+  void amountsAreInTheBusinesssOwnMinorUnits() {
+    // A point worth 1 yen, a fifth never spent: 200 points stand alone at 160; 10000 net.
+    Settings yen = new Settings(BigDecimal.ONE, new BigDecimal("20"), new BigDecimal("10"), "JPY");
+    PointsOutcome earnedInYen =
+        DeferredRevenue.earned(
+            SRC,
+            yen,
+            PointsPool.EMPTY,
+            new BigDecimal("200"),
+            new BigDecimal("12000"),
+            new BigDecimal("2000"));
+    // 10000 × 160 / 10160 = 157.48… → 157 yen, never 157.48.
+    assertThat(net(earnedInYen.posting(), Domain.CODE_SALES).toPlainString(), is("157"));
+    assertBalanced(earnedInYen.posting());
+
+    // A point worth 0.005 dinar: 200 points stand alone at 0.800; 10.000 net.
+    Settings dinar =
+        new Settings(new BigDecimal("0.005"), new BigDecimal("20"), new BigDecimal("10"), "KWD");
+    PointsOutcome earnedInDinar =
+        DeferredRevenue.earned(
+            SRC,
+            dinar,
+            PointsPool.EMPTY,
+            new BigDecimal("200"),
+            new BigDecimal("12.000"),
+            new BigDecimal("2.000"));
+    // 10 × 0.8 / 10.8 = 0.7407… → 0.741 dinar, never 0.74.
+    assertThat(net(earnedInDinar.posting(), Domain.CODE_SALES).toPlainString(), is("0.741"));
+    assertBalanced(earnedInDinar.posting());
+
+    // A tenth of gift card value expected never to be claimed: 1000 yen spent of 10000 loaded
+    // recognises 1000 × 0.1 / 0.9 = 111.1… → 111 yen of breakage.
+    GiftCardPool cards = DeferredRevenue.loaded(GiftCardPool.EMPTY, new BigDecimal("10000"));
+    GiftCardOutcome spent =
+        DeferredRevenue.giftCardRedeemed(SRC, yen, cards, new BigDecimal("1000"));
+    assertThat(
+        net(spent.posting(), Domain.CODE_GIFT_CARD_BREAKAGE).negate().toPlainString(), is("111"));
   }
 }

@@ -26,8 +26,9 @@ public final class Domain {
 
   /** One delivered outbound notification (N1). */
   /**
-   * The channels a message can go out on (13.7). EMAIL is whatever the deployment's default channel
-   * is.
+   * The channels a message can be asked to go out on (13.7). EMAIL is whatever the deployment's
+   * default channel is. These are names to ask for: {@code notification_log.channel} records the
+   * channel that actually carried the message (APP, PUSH, MQTT, SMS or SMTP), never EMAIL.
    */
   public static final class Channel {
     public static final String EMAIL = "EMAIL";

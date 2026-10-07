@@ -30,9 +30,9 @@ public class VatReturnResource {
   /**
    * Computes HMRC MTD VAT return boxes 1-9 for a period.
    *
-   * <p>Box 4 (input VAT on purchases) and boxes 7-9 are still zero: they need purchase-side figures
-   * this service does not yet consume, so a return filed from this is incomplete for a business
-   * that reclaims input VAT.
+   * <p>Box 4 (input VAT on purchases) and box 7 (net purchases) come from the supplier invoices
+   * purchase-svc captured, by invoice date (SJ-D39). Boxes 8 and 9, goods traded with the EU, are
+   * zero: nothing records that trade.
    *
    * @param from inclusive ISO-8601 lower bound on the tax point
    * @param to exclusive ISO-8601 upper bound
@@ -43,8 +43,9 @@ public class VatReturnResource {
   @Operation(
       summary = "Compute the MTD VAT return for a period",
       description =
-          "Computes HMRC Making Tax Digital VAT return boxes 1-9 for the given date range. Box 4"
-              + " (input VAT) and boxes 7-9 remain zero until purchase-svc's data feeds them.")
+          "Computes HMRC Making Tax Digital VAT return boxes 1-9 for the given date range. Boxes 4"
+              + " (input VAT) and 7 (net purchases) come from the supplier invoices captured in"
+              + " purchasing, by invoice date; boxes 8 and 9 (goods traded with the EU) are zero.")
   @APIResponse(responseCode = "200", description = "Computed VAT return boxes 1-9")
   @APIResponse(
       responseCode = "400",

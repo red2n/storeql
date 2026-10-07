@@ -55,7 +55,7 @@ export default function ({ tenant, store, manager, platform }) {
 
   // ── made by the owner, one at a time ─────────────────────────────────────────────────────────
   expect(call('GET', SANDBOX, { token: owner }), '[-] a business starts with no sandbox', 404, 'SANDBOX_NOT_FOUND');
-  expect(call('POST', SANDBOX, { token: manager.token }), '[-] a manager cannot make one', 403);
+  expect(call('POST', SANDBOX, { token: manager.token }), '[-] a manager cannot make one', 403, 'FORBIDDEN');
   const made = call('POST', SANDBOX, { token: owner });
   expect(made, '[+] the owner makes the sandbox', 201);
   const sandbox = data(made);
@@ -80,7 +80,7 @@ export default function ({ tenant, store, manager, platform }) {
   const inside = data(entered).accessToken;
   const c = claims(inside || 'x.x.x') || {};
   truthy('[+] an owner there, marked sandbox, no refresh token', c.tenant === sandbox.id && (c.roles || []).includes('OWNER') && (c.amr || []).includes('sandbox') && !data(entered).refreshToken && data(entered).tenantId === sandbox.id, { claims: c, answer: data(entered) });
-  expect(call('POST', TOKEN, { token: manager.token }), '[-] a manager is not let in', 403);
+  expect(call('POST', TOKEN, { token: manager.token }), '[-] a manager is not let in', 403, 'FORBIDDEN');
   expect(call('POST', TOKEN, { token: inside }), '[-] there is no sandbox of a sandbox', 409, 'SANDBOX_NESTED');
   const insideProfile = data(call('GET', '/api/tenant-svc/admin/tenant', { token: inside })) || {};
   truthy('[+] inside, the profile is the sandbox', insideProfile.id === sandbox.id && insideProfile.mode === 'SANDBOX', insideProfile);
@@ -106,9 +106,9 @@ export default function ({ tenant, store, manager, platform }) {
   expect(product, '[+] the key creates a product in the sandbox', 201);
   const productId = data(product).id;
   expect(call('GET', `/api/product-svc/admin/products/${productId}`, { token: inside }), '[+] ...which the sandbox sees', 200);
-  expect(call('GET', `/api/product-svc/admin/products/${productId}`, { token: owner }), '[-] ...and the live business does not', 404);
+  expect(call('GET', `/api/product-svc/admin/products/${productId}`, { token: owner }), '[-] ...and the live business does not', 404, 'PRODUCT_NOT_FOUND');
   const platformTry = call('GET', '/api/tenant-svc/platform/tenants', { token: key });
-  truthy('[-] the key is no more the platform than any key', platformTry.status === 403, platformTry.status);
+  expect(platformTry, '[-] the key is no more the platform than any key', 403, 'API_KEY_ROUTE_FORBIDDEN');
 
   // ── integrations rehearse in the sandbox ─────────────────────────────────────────────────────
   const hook = call('POST', '/api/notification-svc/admin/webhooks/endpoints', { token: inside, body: { url: `${SINK}/hooks/sandbox-${uniq()}`, description: 'Rehearsal ERP', events: ['ProductCreated', 'OrderPlaced'] } });
@@ -125,7 +125,7 @@ export default function ({ tenant, store, manager, platform }) {
   truthy('[-] the live business sees no such message', ((data(call('GET', `/api/notification-svc/admin/notifications?recipient=${encodeURIComponent(recipient)}`, { token: owner })) || []).length) === 0, 'live log');
 
   // ── removed ──────────────────────────────────────────────────────────────────────────────────
-  expect(call('DELETE', SANDBOX, { token: manager.token }), '[-] a manager cannot remove it', 403);
+  expect(call('DELETE', SANDBOX, { token: manager.token }), '[-] a manager cannot remove it', 403, 'FORBIDDEN');
   expect(call('DELETE', SANDBOX, { token: inside }), '[-] nor is it removed from inside', 409, 'SANDBOX_NESTED');
   const gone = call('DELETE', SANDBOX, { token: owner });
   expect(gone, '[+] the owner removes it', 200);
@@ -151,7 +151,7 @@ export default function ({ tenant, store, manager, platform }) {
   let reentered = null;
   poll(60, () => { reentered = call('POST', TOKEN, { token: owner }); return reentered.status === 200 && data(reentered).tenantId === data(again).id; });
   truthy('[+] ...and it is the one entered now', reentered && reentered.status === 200 && data(reentered).tenantId === data(again).id, reentered && data(reentered));
-  expect(call('GET', `/api/product-svc/admin/products/${productId}`, { token: data(reentered).accessToken }), '[-] the old sandbox\'s product is not in the new one', 404);
+  expect(call('GET', `/api/product-svc/admin/products/${productId}`, { token: data(reentered).accessToken }), '[-] the old sandbox\'s product is not in the new one', 404, 'PRODUCT_NOT_FOUND');
 
   completed.add(1);
 }

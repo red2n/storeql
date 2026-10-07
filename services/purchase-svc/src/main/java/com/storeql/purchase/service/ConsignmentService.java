@@ -29,7 +29,7 @@ import java.util.UUID;
 /**
  * Consignment stock, the buyer's side: what inventory-svc sold of a supplier's stock is owed to
  * that supplier at the order's price the moment it sells, and a settlement gathers a period's
- * unsettled sales into one statement. Nothing is owed at the door; see {@code V23__consignment}.
+ * unsettled sales into one statement. Nothing is owed at the door; see {@code V14__consignment}.
  */
 @ApplicationScoped
 public class ConsignmentService {
@@ -112,21 +112,64 @@ public class ConsignmentService {
         .build();
   }
 
+  /**
+   * The consignment sales the caller may read: a caller held to stores reads the sales made at
+   * those stores, held to none the whole business's.
+   */
   public List<ConsignmentSale> listSales(
       TenantContext ctx, String supplierId, Boolean settled, int limit) {
     return repo.findSales(
-        ctx.requireTenantId(), Parsing.optionalUuid(supplierId, "supplierId"), settled, limit);
+        ctx.requireTenantId(),
+        Parsing.optionalUuid(supplierId, "supplierId"),
+        settled,
+        ctx.reportStores(null),
+        limit);
+  }
+
+  /**
+   * A statement gathers a supplier's sales at every store into the one document the supplier
+   * invoices against: only a caller held to no store makes one.
+   *
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY} for a caller held to stores
+   */
+  private static void requireBusinessWide(TenantContext ctx) {
+    BusinessWide.require(
+        ctx,
+        "a consignment statement covers every store's sales of the supplier; it needs a caller"
+            + " held to no store");
+  }
+
+  /**
+   * A statement is read by whoever may read every sale in it: a caller held to stores, only one
+   * whose sales were all made at their stores — never one that took another store's sale, or a sale
+   * that named no store.
+   *
+   * @throws ApiException 403 {@code STORE_ACCESS_DENIED} for a caller held to stores when a sale of
+   *     the statement was made elsewhere
+   */
+  private static void requireEverySaleTheirs(TenantContext ctx, List<ConsignmentSale> sales) {
+    if (ctx.storeIds().isEmpty()) return;
+    for (ConsignmentSale sale : sales) {
+      if (sale.storeId() == null || !ctx.hasStoreAccess(sale.storeId())) {
+        throw ApiException.forbidden(
+            "STORE_ACCESS_DENIED",
+            "the statement gathered sales at a store you are not assigned to; it is read by a"
+                + " caller held to every store it covers, or to none");
+      }
+    }
   }
 
   /**
    * Gathers a supplier's unsettled sales of a period into one statement, once.
    *
-   * @throws ApiException 404 {@code PURCHASE_SUPPLIER_NOT_FOUND}; 400 {@code
-   *     PURCHASE_CONSIGNMENT_PERIOD_INVALID} when the period ends before it starts; 409 {@code
-   *     PURCHASE_CONSIGNMENT_NOTHING_TO_SETTLE} when nothing is left to settle
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY} for a caller held to stores; 404 {@code
+   *     PURCHASE_SUPPLIER_NOT_FOUND}; 400 {@code PURCHASE_CONSIGNMENT_PERIOD_INVALID} when the
+   *     period ends before it starts; 409 {@code PURCHASE_CONSIGNMENT_NOTHING_TO_SETTLE} when
+   *     nothing is left to settle
    */
   public ConsignmentSettlement settle(TenantContext ctx, CreateConsignmentSettlementRequest req) {
     UUID tenantId = ctx.requireTenantId();
+    requireBusinessWide(ctx);
     Supplier supplier =
         purchases
             .findSupplier(tenantId, req.supplierId())
@@ -157,21 +200,46 @@ public class ConsignmentService {
             Instant.now()));
   }
 
+  /**
+   * The statements the caller may read, newest first: held to no store, every one; held to stores,
+   * those whose sales were all made at their stores.
+   */
   public List<ConsignmentSettlement> listSettlements(
       TenantContext ctx, String supplierId, int limit) {
     return repo.findSettlements(
-        ctx.requireTenantId(), Parsing.optionalUuid(supplierId, "supplierId"), limit);
+        ctx.requireTenantId(),
+        Parsing.optionalUuid(supplierId, "supplierId"),
+        ctx.reportStores(null),
+        limit);
   }
 
+  /**
+   * @throws ApiException 404 {@code PURCHASE_CONSIGNMENT_SETTLEMENT_NOT_FOUND}; 403 {@code
+   *     STORE_ACCESS_DENIED} for a caller held to stores when a sale of the statement was made
+   *     elsewhere
+   */
   public ConsignmentSettlement getSettlement(TenantContext ctx, UUID id) {
-    return repo.findSettlement(ctx.requireTenantId(), id)
-        .orElseThrow(
-            () ->
-                ApiException.notFound(
-                    "PURCHASE_CONSIGNMENT_SETTLEMENT_NOT_FOUND", "Settlement not found: " + id));
+    UUID tenantId = ctx.requireTenantId();
+    ConsignmentSettlement settlement =
+        repo.findSettlement(tenantId, id)
+            .orElseThrow(
+                () ->
+                    ApiException.notFound(
+                        "PURCHASE_CONSIGNMENT_SETTLEMENT_NOT_FOUND",
+                        "Settlement not found: " + id));
+    if (!ctx.storeIds().isEmpty()) {
+      requireEverySaleTheirs(ctx, repo.findSalesOfSettlement(tenantId, id));
+    }
+    return settlement;
   }
 
+  /**
+   * @throws ApiException 403 {@code STORE_ACCESS_DENIED} for a caller held to stores when a sale of
+   *     the statement was made elsewhere
+   */
   public List<ConsignmentSale> settlementSales(TenantContext ctx, UUID settlementId) {
-    return repo.findSalesOfSettlement(ctx.requireTenantId(), settlementId);
+    List<ConsignmentSale> sales = repo.findSalesOfSettlement(ctx.requireTenantId(), settlementId);
+    requireEverySaleTheirs(ctx, sales);
+    return sales;
   }
 }

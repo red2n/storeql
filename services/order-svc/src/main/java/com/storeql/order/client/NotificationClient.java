@@ -3,7 +3,9 @@ package com.storeql.order.client;
 import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
+import com.storeql.order.config.Json;
 import com.storeql.order.config.ServiceConfig;
+import com.storeql.service.ServiceReader;
 import com.storeql.web.ApiException;
 import com.storeql.web.HttpHeaders;
 import io.helidon.http.HeaderNames;
@@ -12,7 +14,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
 import java.time.Duration;
@@ -27,6 +28,10 @@ import org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenExce
  * Sync client for notification-svc's staff send API (golden rule #1/#4). Used to email POS receipts
  * when a cashier records an EMAIL receipt. Forwards the caller's identity so the staff-role gate on
  * {@code POST /notifications/send} accepts the request.
+ *
+ * <p>Reached at {@code storeql.clients.notification-svc.url} when that is set, else through Consul.
+ * An open circuit is raised by the interceptor outside {@link #send}, so the caller answers it (see
+ * {@code OrderService#generateReceipt}); every failure raised inside is already a 503.
  */
 @ApplicationScoped
 public class NotificationClient {
@@ -68,9 +73,11 @@ public class NotificationClient {
       String type,
       UUID eventId,
       UUID customerId) {
-    ServiceInstance instance =
-        registry
-            .resolve(NOTIFICATION_SERVICE)
+    // A configured address first — a deployment without discovery, or a test standing a stub where
+    // notification-svc would be — else the instance from Consul.
+    String base =
+        ServiceReader.configuredUrl(NOTIFICATION_SERVICE)
+            .or(() -> registry.resolve(NOTIFICATION_SERVICE).map(ServiceInstance::baseUri))
             .orElseThrow(
                 () ->
                     unavailable(
@@ -96,7 +103,7 @@ public class NotificationClient {
 
     try (HttpClientResponse res =
         webClient
-            .post(instance.baseUri() + "/notifications/send")
+            .post(base + "/notifications/send")
             .header(HeaderNames.create(HttpHeaders.TENANT_ID), tenantId.toString())
             .header(
                 HeaderNames.create(HttpHeaders.USER_ID), userId != null ? userId.toString() : "")

@@ -36,7 +36,57 @@ public final class Domain {
       /** LIVE, or SANDBOX for a business's test double (22.8). */
       String mode,
       /** For a sandbox, the live business it stands in for; null for a live business. */
-      UUID sandboxOf) {
+      UUID sandboxOf,
+      /**
+       * What the administrator said when switching it off (flow catalogue: suspension carries a
+       * reason); null for a business that is on, and for one dunning switched off.
+       */
+      String deactivatedNote,
+      /** The login that switched it off; null when it is on or the dunning run did. */
+      UUID deactivatedBy,
+      /** When it was switched off; null while it is on. */
+      Instant deactivatedAt) {
+
+    /** A business as it stands with no suspension on record. */
+    public Tenant(
+        UUID id,
+        String name,
+        String legalName,
+        String status,
+        UUID planId,
+        UUID ownerUserId,
+        String country,
+        String currency,
+        Instant createdAt,
+        Instant updatedAt,
+        String vatNumber,
+        String einvoiceScheme,
+        String einvoiceId,
+        String deactivatedReason,
+        String mode,
+        UUID sandboxOf) {
+      this(
+          id,
+          name,
+          legalName,
+          status,
+          planId,
+          ownerUserId,
+          country,
+          currency,
+          createdAt,
+          updatedAt,
+          vatNumber,
+          einvoiceScheme,
+          einvoiceId,
+          deactivatedReason,
+          mode,
+          sandboxOf,
+          null,
+          null,
+          null);
+    }
+
     public static final String STATUS_PENDING = "PENDING";
     public static final String STATUS_ACTIVE = "ACTIVE";
     public static final String STATUS_INACTIVE = "INACTIVE";
@@ -132,6 +182,18 @@ public final class Domain {
       Instant createdAt,
       Instant updatedAt) {
     public static final String TYPE_DEFAULT = "DEFAULT";
+
+    /** Takes stock and is walked. Every zone starts here. */
+    public static final String STATUS_ACTIVE = "ACTIVE";
+
+    /** Steers stock away for now: not put away into, not walked by a wave. */
+    public static final String STATUS_OUT_OF_SERVICE = "OUT_OF_SERVICE";
+
+    /** Closed for good; stock still in it is listed for a person to move. */
+    public static final String STATUS_RETIRED = "RETIRED";
+
+    public static final java.util.List<String> STATUSES =
+        java.util.List.of(STATUS_ACTIVE, STATUS_OUT_OF_SERVICE, STATUS_RETIRED);
   }
 
   /**
@@ -277,7 +339,7 @@ public final class Domain {
 
   /**
    * A legal obligation as it reaches one country: the obligation's own window, narrowed to the
-   * country's membership of the regime it comes through (V9). A British business is not bound by EU
+   * country's membership of the regime it comes through (V6). A British business is not bound by EU
    * law made after 31 January 2020.
    */
   public record LegalObligation(
@@ -287,7 +349,10 @@ public final class Domain {
       java.time.LocalDate effectiveFrom,
       java.time.LocalDate effectiveTo,
       String citation,
-      String summary) {
+      String summary,
+      java.math.BigDecimal limitValue,
+      String limitUnit,
+      String qualifier) {
     public static final String IN_FORCE = "IN_FORCE";
     public static final String UPCOMING = "UPCOMING";
 
@@ -397,7 +462,7 @@ public final class Domain {
       String reference,
       String note) {}
 
-  /** A statutory reporting stage for a kind of incident, as reference data (V11). */
+  /** A statutory reporting stage for a kind of incident, as reference data (V7). */
   public record ReportingStage(
       String incidentKind,
       String stage,

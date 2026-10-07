@@ -267,16 +267,19 @@ public class ContainerTypeRepository extends BaseJdbcRepository {
    * Deletes a variant container link.
    *
    * @param tenantId owning tenant; the first condition of the query
+   * @param variantId the variant it must belong to; another variant's is not found
    * @param id the variant container link to act on
    * @return {@code true} when a row was removed, {@code false} when nothing matched
    */
-  public boolean deleteVariantContainerLink(UUID tenantId, UUID id) {
+  public boolean deleteVariantContainerLink(UUID tenantId, UUID variantId, UUID id) {
     Instant[] found = {null};
     query(
-        "DELETE FROM variant_container_links WHERE tenant_id=? AND id=? RETURNING id",
+        "DELETE FROM variant_container_links WHERE tenant_id=? AND variant_id=? AND id=?"
+            + " RETURNING id",
         ps -> {
           ps.setObject(1, tenantId);
-          ps.setObject(2, id);
+          ps.setObject(2, variantId);
+          ps.setObject(3, id);
         },
         rs -> {
           found[0] = Instant.now();

@@ -42,6 +42,7 @@ public class WeighingInstrumentResource {
 
   @Inject WeighingInstrumentService service;
   @Inject TenantContext ctx;
+  @Inject com.storeql.tenant.service.TenantService tenants;
 
   /**
    * The store's register.
@@ -88,6 +89,7 @@ public class WeighingInstrumentResource {
   public Response create(@PathParam("storeId") UUID storeId, CreateWeighingInstrumentRequest req) {
     requireManagement();
     Validations.validate(req);
+    requireStoreHeld(storeId);
     var w = service.create(ctx.requireTenantId(), storeId, req);
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toInstrument(w), ApiResponse.Meta.of(ctx.requestId())))
@@ -132,6 +134,7 @@ public class WeighingInstrumentResource {
       UpdateWeighingInstrumentRequest req) {
     requireManagement();
     Validations.validate(req);
+    requireStoreHeld(storeId);
     return ApiResponse.ok(
         Mappers.toInstrument(service.update(ctx.requireTenantId(), storeId, id, req)),
         ApiResponse.Meta.of(ctx.requestId()));
@@ -155,6 +158,7 @@ public class WeighingInstrumentResource {
       @PathParam("storeId") UUID storeId, @PathParam("id") UUID id, PatchStatusRequest req) {
     requireManagement();
     Validations.validate(req);
+    requireStoreHeld(storeId);
     return ApiResponse.ok(
         Mappers.toInstrument(service.setStatus(ctx.requireTenantId(), storeId, id, req.status())),
         ApiResponse.Meta.of(ctx.requestId()));
@@ -201,6 +205,7 @@ public class WeighingInstrumentResource {
       @PathParam("storeId") UUID storeId, @PathParam("id") UUID id, RecordVerificationRequest req) {
     requireManagement();
     Validations.validate(req);
+    requireStoreHeld(storeId);
     var v = service.recordVerification(ctx.requireTenantId(), storeId, id, req, ctx.userId());
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toVerification(v), ApiResponse.Meta.of(ctx.requestId())))
@@ -209,5 +214,10 @@ public class WeighingInstrumentResource {
 
   private void requireManagement() {
     ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+  }
+
+  private void requireStoreHeld(UUID storeId) {
+    tenants.getStore(ctx.requireTenantId(), storeId);
+    ctx.requireStoreAccess(storeId);
   }
 }

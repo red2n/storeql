@@ -55,10 +55,13 @@
         <!-- GHSA-c4c3-7fpv-j4q5 (critical), GHSA-3qp7-7mw8-wx86, GHSA-c653-97m9-rcg9,
              GHSA-x4gw-5cx5-pgmh, GHSA-558v-64gr-wgg4, GHSA-mj4r-2hfc-f8p6 — via lettuce, hivemq -->
         <version.lib.netty>4.1.137.Final</version.lib.netty>
-        <!-- GHSA-r7wm-3cxj-wff9, GHSA-j3rv-43j4-c7qm, GHSA-rmj7-2vxq-3g9f (high; fixed 2.21.4) and
-             GHSA-5gvw-p9qm-jgwh, GHSA-5jmj-h7xm-6q6v, GHSA-mhm7-754m-9p8w (medium; fixed 2.21.5)
-             — via java-jwt, kafka -->
-        <version.lib.jackson>2.21.5</version.lib.jackson>
+        <!-- GHSA-r7wm-3cxj-wff9, GHSA-j3rv-43j4-c7qm, GHSA-rmj7-2vxq-3g9f (high; fixed 2.21.4),
+             GHSA-5gvw-p9qm-jgwh, GHSA-5jmj-h7xm-6q6v, GHSA-mhm7-754m-9p8w (medium; fixed 2.21.5) and
+             GHSA-q4xh-88c3-wmh7 (high), GHSA-gx83-3vf8-gh7j, GHSA-wjgm-6hv5-3cvf (medium; fixed
+             2.21.6), and GHSA-p6pp-m3f8-5c89, GHSA-7hhh-6rmp-j9qf (jackson-core),
+             GHSA-cxp5-3px4-pw24, GHSA-wv8q-qhhj-9h54 (jackson-databind) (high; fixed 2.21.7) — via
+             java-jwt, kafka -->
+        <version.lib.jackson>2.21.7</version.lib.jackson>
         <!-- GHSA-g3pr-3p32-fp23, GHSA-w737-wx49-qj23 — via Helidon metrics -->
         <version.lib.micrometer>1.15.12</version.lib.micrometer>
         <version.lib.micrometer-prometheus>1.15.12</version.lib.micrometer-prometheus>
@@ -249,6 +252,15 @@
                     <configuration>
                         <!-- Helidon/CDI play nicer with classloader isolation off for tests -->
                         <useModulePath>false</useModulePath>
+                        <systemPropertyVariables>
+                            <!-- Integration tests stub peer services that answer 500 on purpose
+                                 (a tenant they do not know, a peer that is down). The shared
+                                 ServiceReader breaker opens after a few such failures for the
+                                 whole peer, which would make later tests in the same run depend
+                                 on test order. The breaker is proved by its own unit test
+                                 (ReadBreakerAndCacheTest), so it is kept closed for tests here. -->
+                            <storeql.clients.breaker.failures>1000000</storeql.clients.breaker.failures>
+                        </systemPropertyVariables>
                         <includes>
                             <include>**/*Test.java</include>
                             <include>**/*Tests.java</include>

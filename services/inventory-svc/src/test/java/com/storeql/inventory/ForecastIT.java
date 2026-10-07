@@ -42,6 +42,12 @@ class ForecastIT {
 
   private static final PostgresSupport PG = PostgresSupport.start().wire("inventory");
 
+  static {
+    // One variant a page: every run in this class reads and forecasts item by item, and still
+    // pools the store's promotion facts across pages (variants=2 and the store uplift below).
+    System.setProperty("storeql.inventory.forecast.page-variants", "1");
+  }
+
   private static final String NO_WINDOWS = "{\"data\":[]}";
 
   /** pricing-svc, standing in: no promotion windows unless a test says otherwise. */
@@ -64,6 +70,7 @@ class ForecastIT {
 
   @AfterAll
   static void stopDb() {
+    System.clearProperty("storeql.inventory.forecast.page-variants");
     PRICING.close();
     PG.stop();
   }

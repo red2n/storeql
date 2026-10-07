@@ -4,8 +4,9 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.in;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.isIn;
+import static org.hamcrest.Matchers.not;
 
 import com.storeql.ids.Ids;
 import com.storeql.notification.service.Messages;
@@ -191,6 +192,204 @@ class MessageTemplatesIT {
     assertThat("history continues after a retirement", v3.data().getInt("version"), is(3));
   }
 
+  @Test
+  @DisplayName(
+      "A language with no live version shows the words a message in it would go out in: the"
+          + " house language's, else the platform's")
+  void theEditorShowsWhatWouldBeSentForARetiredLanguage() {
+    UUID tenant = Ids.newId();
+    UUID other = Ids.newId();
+    String orderDe = "/templates/ORDER_CONFIRMED/EMAIL/de";
+    String orderFr = "/templates/ORDER_CONFIRMED/EMAIL/fr";
+    String pushDe = "/templates/ORDER_CONFIRMED/PUSH/de";
+    call("PUT", "/template-settings", tenant, "OWNER", "{\"defaultLanguage\":\"pl\"}");
+    call("PUT", ORDER_PL, tenant, "OWNER", words("Zamówienie {{order}}", "Razem: {{total}}"));
+    call("PUT", orderDe, tenant, "OWNER", words("Bestellung {{order}}", "Gesamt: {{total}}"));
+    Values values = Values.of().text("order", "A-77").money("total", new BigDecimal("12.5"), "EUR");
+    Messages.Message german =
+        new Messages.Message("ORDER_CONFIRMED", Catalogue.Form.EMAIL, "de", values);
+
+    Answer own = call("GET", orderDe, tenant, "OWNER", null);
+    assertThat(
+        "while it is live the editor shows its own",
+        own.data().getString("source"),
+        is("BUSINESS"));
+    assertThat(own.data().getString("subject"), is("Bestellung {{order}}"));
+    assertThat(own.data().getString("wordsLanguage"), is("de"));
+    assertThat("its words parse", own.data().getBoolean("storedWordsUnusable"), is(false));
+    assertThat(messages.compose(tenant, german).language(), is("de"));
+
+    assertThat(call("DELETE", orderDe, tenant, "OWNER", null).status(), is(200));
+
+    // Retired: a German reader's message now goes out in the Polish house words, and the editor
+    // says so — those words, that version, that language — and keeps German's own history.
+    Answer retired = call("GET", orderDe, tenant, "OWNER", null);
+    assertThat(
+        retired.body().toString(), retired.data().getString("source"), is("DEFAULT_LANGUAGE"));
+    assertThat(retired.data().getString("language"), is("de"));
+    assertThat(retired.data().getString("wordsLanguage"), is("pl"));
+    assertThat(retired.data().getInt("version"), is(1));
+    assertThat(retired.data().getString("subject"), is("Zamówienie {{order}}"));
+    assertThat(retired.data().getString("body"), is("Razem: {{total}}"));
+    assertThat(retired.data().getJsonArray("history").size(), is(1));
+    assertThat(
+        "retired is not unusable: German has no live version",
+        retired.data().getBoolean("storedWordsUnusable"),
+        is(false));
+    Messages.Composed sent = messages.compose(tenant, german);
+    assertThat("what is sent is what is shown", sent.language(), is("pl"));
+    assertThat(sent.template(), is("v1"));
+    assertThat(sent.subject(), is("Zamówienie A-77"));
+
+    // A language the business never wrote goes the same way; the house language itself is its own.
+    Answer neverWritten = call("GET", orderFr, tenant, "MANAGER", null);
+    assertThat(neverWritten.data().getString("source"), is("DEFAULT_LANGUAGE"));
+    assertThat(neverWritten.data().getBoolean("storedWordsUnusable"), is(false));
+    assertThat(neverWritten.data().getString("body"), is("Razem: {{total}}"));
+    Answer house = call("GET", ORDER_PL, tenant, "MANAGER", null);
+    assertThat(house.data().getString("source"), is("BUSINESS"));
+    assertThat(house.data().getString("wordsLanguage"), is("pl"));
+    // Another form is its own: nothing was written in Polish for the push, so the platform's words.
+    Answer push = call("GET", pushDe, tenant, "OWNER", null);
+    assertThat(push.data().getString("source"), is("DEFAULT"));
+    assertThat(push.data().getString("wordsLanguage"), is("en"));
+
+    // Nothing here is another business's: its owner and manager read the platform's words, and
+    // staff below management read nothing, of a retired language or any other.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer theirs = call("GET", orderDe, other, role, null);
+      assertThat(role, theirs.data().getString("source"), is("DEFAULT"));
+      assertThat(role, theirs.body().toString(), not(containsString("Razem")));
+      assertThat(role, theirs.body().toString(), not(containsString("Zamówienie")));
+    }
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, call("GET", orderDe, tenant, role, null).status(), is(403));
+      assertThat(role, call("GET", orderDe, other, role, null).status(), is(403));
+    }
+    assertThat(
+        "there is nothing of its own to retire in German",
+        call("DELETE", orderDe, tenant, "OWNER", null).code(),
+        is("TEMPLATE_NOT_WRITTEN"));
+
+    // Retire the house words too: both go back to the platform's, and the editor agrees.
+    assertThat(call("DELETE", ORDER_PL, tenant, "OWNER", null).status(), is(200));
+    Answer platform = call("GET", orderDe, tenant, "OWNER", null);
+    assertThat(platform.data().getString("source"), is("DEFAULT"));
+    assertThat(platform.data().getString("wordsLanguage"), is("en"));
+    assertThat(platform.data().getString("body"), containsString("{{total}}"));
+    Messages.Composed platformSent = messages.compose(tenant, german);
+    assertThat(platformSent.template(), is("default"));
+    assertThat(platformSent.language(), is("en"));
+    assertThat(
+        call("GET", ORDER_PL, tenant, "OWNER", null).data().getString("source"), is("DEFAULT"));
+  }
+
+  /** Leaves the live version's body one that does not parse: written behind a save's back. */
+  private static void breakStoredBody(UUID tenant, String language) throws Exception {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
+      c.setSchema("notification");
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "UPDATE message_templates SET body = body || ' {{never closed'"
+                  + " WHERE tenant_id = ? AND language = ? AND retired_at IS NULL")) {
+        ps.setObject(1, tenant);
+        ps.setString(2, language);
+        assertThat(language, ps.executeUpdate(), is(1));
+      }
+    }
+  }
+
+  @Test
+  @DisplayName(
+      "A stored template that no longer parses is passed over by the editor and the send alike,"
+          + " which go on to the next words; the editor says so and still lists the version")
+  void theEditorAndTheSendAgreeWhenAStoredTemplateNoLongerParses() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID other = Ids.newId();
+    String orderDe = "/templates/ORDER_CONFIRMED/EMAIL/de";
+    call("PUT", "/template-settings", tenant, "OWNER", "{\"defaultLanguage\":\"pl\"}");
+    call("PUT", ORDER_PL, tenant, "OWNER", words("Zamówienie {{order}}", "Razem: {{total}}"));
+    call("PUT", orderDe, tenant, "OWNER", words("Bestellung {{order}}", "Gesamt: {{total}}"));
+    Values values = Values.of().text("order", "A-77").money("total", new BigDecimal("12.5"), "EUR");
+    Messages.Message german =
+        new Messages.Message("ORDER_CONFIRMED", Catalogue.Form.EMAIL, "de", values);
+    assertThat(
+        call("GET", orderDe, tenant, "OWNER", null).data().getString("source"), is("BUSINESS"));
+
+    breakStoredBody(tenant, "de");
+
+    // German's own words cannot be written: the Polish house words are shown, and are sent.
+    Answer shown = call("GET", orderDe, tenant, "OWNER", null);
+    assertThat(shown.body().toString(), shown.data().getString("source"), is("DEFAULT_LANGUAGE"));
+    assertThat(shown.data().getString("wordsLanguage"), is("pl"));
+    assertThat(shown.data().getString("subject"), is("Zamówienie {{order}}"));
+    assertThat(
+        "German is not told it has none: its own version is there, and cannot be written",
+        shown.data().getBoolean("storedWordsUnusable"),
+        is(true));
+    assertThat(
+        "its own history is still there to read",
+        shown.data().getJsonArray("history").size(),
+        is(1));
+    assertThat(
+        "and the broken version is still listed as the live one",
+        shown.data().getJsonArray("history").getJsonObject(0).containsKey("retiredAt"),
+        is(false));
+    Messages.Composed sent = messages.compose(tenant, german);
+    assertThat(sent.language(), is("pl"));
+    assertThat(sent.template(), is("v1"));
+    assertThat(sent.subject(), is("Zamówienie A-77"));
+    // The house language itself still reads as the business's own, and is not unusable.
+    Answer house = call("GET", ORDER_PL, tenant, "MANAGER", null);
+    assertThat(house.data().getString("source"), is("BUSINESS"));
+    assertThat(house.data().getBoolean("storedWordsUnusable"), is(false));
+
+    breakStoredBody(tenant, "pl");
+
+    // Neither parses now: the platform's words, shown and sent alike, in both languages.
+    Answer platform = call("GET", orderDe, tenant, "OWNER", null);
+    assertThat(platform.data().getString("source"), is("DEFAULT"));
+    assertThat(platform.data().getString("wordsLanguage"), is("en"));
+    assertThat(platform.data().getString("body"), containsString("{{total}}"));
+    assertThat(platform.data().getBoolean("storedWordsUnusable"), is(true));
+    Messages.Composed fallback = messages.compose(tenant, german);
+    assertThat(fallback.template(), is("default"));
+    assertThat(fallback.language(), is("en"));
+    Answer brokenHouse = call("GET", ORDER_PL, tenant, "OWNER", null);
+    assertThat(brokenHouse.data().getString("source"), is("DEFAULT"));
+    assertThat(brokenHouse.data().getBoolean("storedWordsUnusable"), is(true));
+    assertThat(
+        "French has no version of its own, so it is not told one is unusable",
+        call("GET", "/templates/ORDER_CONFIRMED/EMAIL/fr", tenant, "OWNER", null)
+            .data()
+            .getBoolean("storedWordsUnusable"),
+        is(false));
+
+    // Saving German again retires the broken version, and the editor reads the new one as its own.
+    Answer saved =
+        call("PUT", orderDe, tenant, "OWNER", words("Bestellung {{order}}", "Gesamt: {{total}}"));
+    assertThat(saved.body().toString(), saved.status(), is(200));
+    assertThat(saved.data().getString("source"), is("BUSINESS"));
+    assertThat(saved.data().getInt("version"), is(2));
+    assertThat(saved.data().getBoolean("storedWordsUnusable"), is(false));
+    assertThat(saved.data().getJsonArray("history").size(), is(2));
+    assertThat(messages.compose(tenant, german).language(), is("de"));
+
+    // Another business never had any of it: its owner and manager read the platform's words, and
+    // staff below management read nothing, of either business.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer theirs = call("GET", orderDe, other, role, null);
+      assertThat(role, theirs.data().getString("source"), is("DEFAULT"));
+      assertThat(role, theirs.data().getBoolean("storedWordsUnusable"), is(false));
+      assertThat(role, theirs.body().toString(), not(containsString("Gesamt")));
+      assertThat(role, theirs.body().toString(), not(containsString("never closed")));
+    }
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, call("GET", orderDe, tenant, role, null).status(), is(403));
+      assertThat(role, call("GET", orderDe, other, role, null).status(), is(403));
+    }
+  }
+
   // ── what is refused ────────────────────────────────────────────────────────────────────────────
 
   @Test
@@ -268,6 +467,64 @@ class MessageTemplatesIT {
         call("PUT", ORDER_PL, tenant, "CUSTOMER", words("a", "{{order}}")).status(), is(403));
   }
 
+  /** Flow catalogue MKT-23: a cashier or storekeeper reads, writes, retires or previews nothing. */
+  @Test
+  @DisplayName("Cashiers and storekeepers can neither read nor write templates or their settings")
+  void staffBelowManagerTouchNoTemplate() {
+    UUID tenant = Ids.newId();
+    assertThat(
+        call("PUT", ORDER_PL, tenant, "OWNER", words("Zamówienie {{order}}", "Razem {{total}}"))
+            .status(),
+        is(200));
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, call("GET", "/templates", tenant, role, null).status(), is(403));
+      assertThat(role, call("GET", ORDER_PL, tenant, role, null).status(), is(403));
+      assertThat(
+          role, call("PUT", ORDER_PL, tenant, role, words("x", "{{order}}")).status(), is(403));
+      assertThat(role, call("DELETE", ORDER_PL, tenant, role, null).status(), is(403));
+      assertThat(
+          role,
+          call("POST", ORDER_PL + "/preview", tenant, role, words("x", "{{order}}")).status(),
+          is(403));
+      assertThat(role, call("GET", "/template-settings", tenant, role, null).status(), is(403));
+    }
+    // Nothing moved: the owner's wording is still version 1.
+    assertThat(call("GET", ORDER_PL, tenant, "OWNER", null).data().getInt("version"), is(1));
+  }
+
+  /**
+   * Flow catalogue MKT-24: one business's wording is never another's, read, retired or replaced.
+   */
+  @Test
+  @DisplayName("Another business, owner or manager, sees only the platform's words, never ours")
+  void aBusinessesTemplatesAreItsOwn() {
+    UUID ours = Ids.newId();
+    UUID theirs = Ids.newId();
+    assertThat(
+        call("PUT", ORDER_PL, ours, "OWNER", words("Nasze {{order}}", "Nasze {{total}}")).status(),
+        is(200));
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      Answer read = call("GET", ORDER_PL, theirs, role, null);
+      assertThat(role, read.data().getString("source"), is("DEFAULT"));
+      assertThat(role, read.body().toString(), not(containsString("Nasze")));
+      assertThat(
+          role,
+          call("GET", "/templates", theirs, role, null).body().toString(),
+          not(containsString("\"language\":\"pl\",\"version\":1")));
+      Answer retire = call("DELETE", ORDER_PL, theirs, role, null);
+      assertThat(role, retire.status(), is(404));
+      assertThat(role, retire.code(), is("TEMPLATE_NOT_WRITTEN"));
+    }
+    // Their own write lands beside ours as their version 1, and ours is untouched.
+    Answer theirWords =
+        call("PUT", ORDER_PL, theirs, "OWNER", words("Ich {{order}}", "Ich {{total}}"));
+    assertThat(theirWords.data().getInt("version"), is(1));
+    Answer ourRead = call("GET", ORDER_PL, ours, "OWNER", null);
+    assertThat(ourRead.data().getInt("version"), is(1));
+    assertThat(ourRead.body().toString(), containsString("Nasze"));
+    assertThat(ourRead.body().toString(), not(containsString("Ich")));
+  }
+
   @Test
   @DisplayName("Five saves at once: one live version, every version numbered once")
   void savesRacingEachOther() throws Exception {
@@ -284,7 +541,7 @@ class MessageTemplatesIT {
     List<Integer> statuses = new ArrayList<>();
     for (Future<Integer> f : pool.invokeAll(saves)) statuses.add(f.get());
     pool.shutdown();
-    assertThat(statuses, everyItem(isIn(List.of(200, 409))));
+    assertThat(statuses, everyItem(is(in(List.of(200, 409)))));
     assertThat(statuses, hasItem(200));
     try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password())) {
       c.setSchema("notification");

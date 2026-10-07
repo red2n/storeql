@@ -1,10 +1,10 @@
 package com.storeql.purchase.client.accounting;
 
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Accounting;
 import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.NominalLedgerEntry;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
@@ -64,23 +64,27 @@ public class XeroPackage implements AccountingPackage {
       Accounting.Credentials creds,
       Domain.Journal j,
       Function<String, String> account) {
-    JsonArrayBuilder lines = Json.createArrayBuilder();
+    JsonArrayBuilder lines = Jsons.PROVIDER.createArrayBuilder();
     for (NominalLedgerEntry line : j.lines()) {
       BigDecimal amount = line.debit().subtract(line.credit());
       lines.add(
-          Json.createObjectBuilder()
+          Jsons.PROVIDER
+              .createObjectBuilder()
               .add("LineAmount", amount)
               .add("AccountCode", account.apply(line.nominalCode()))
               .add("Description", line.nominalName())
               .add("TaxType", "NONE"));
     }
     JsonObject body =
-        Json.createObjectBuilder()
+        Jsons.PROVIDER
+            .createObjectBuilder()
             .add(
                 "ManualJournals",
-                Json.createArrayBuilder()
+                Jsons.PROVIDER
+                    .createArrayBuilder()
                     .add(
-                        Json.createObjectBuilder()
+                        Jsons.PROVIDER
+                            .createObjectBuilder()
                             .add("Narration", j.description())
                             .add("Date", j.entryDate().toString())
                             .add("Status", "POSTED")

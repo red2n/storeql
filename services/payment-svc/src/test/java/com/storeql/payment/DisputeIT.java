@@ -15,6 +15,7 @@ import com.storeql.payment.provider.PaymentProvider.DisputeNotice;
 import com.storeql.payment.repo.PaymentRepository;
 import com.storeql.payment.service.DisputeService;
 import com.storeql.service.OutboxRow;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
@@ -371,7 +372,9 @@ class DisputeIT {
     UUID tenant = Ids.newId();
     UUID order = Ids.newId();
     Caller me = owner(tenant);
-    UUID payment = tender(tenant, order, null, "STRIPE", "80.00");
+    // A provider's capture is written as CARD (PaymentIntentService.writeCapture), never under the
+    // provider's name: chk_payment_tenders_method holds the set.
+    UUID payment = tender(tenant, order, null, "CARD", "80.00");
     PaymentIntent intent =
         new PaymentIntent(
             Ids.newId(),
@@ -473,5 +476,113 @@ class DisputeIT {
             null,
             due));
     assertThat(get("/admin/disputes", me).body().getJsonArray("data").size(), is(1));
+  }
+
+  @Test
+  @DisplayName(
+      "A provider's dispute fee keeps the currency it was charged in: a yen charge disputed on an"
+          + " account paid out in pounds costs a fee in pounds, said so on the register and the"
+          + " event")
+  void aDisputeFeeKeepsItsOwnCurrency() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    Caller me = owner(tenant);
+    UUID payment = tender(tenant, order, null, "CARD", "5000");
+    PaymentIntent intent =
+        new PaymentIntent(
+            Ids.newId(),
+            tenant,
+            order,
+            null,
+            "STRIPE",
+            "pi_it_fx",
+            new BigDecimal("5000"),
+            new BigDecimal("5000"),
+            "JPY",
+            PaymentIntent.STATUS_CAPTURED,
+            null,
+            null,
+            null,
+            payment,
+            null,
+            Instant.now(),
+            Instant.now());
+    Instant due = Instant.now().plusSeconds(600_000);
+    // Opened before any fee was charged: none yet, in the charge's own currency.
+    disputes.fromProvider(
+        "STRIPE",
+        intent,
+        new DisputeNotice(
+            "dp_it_fx",
+            DisputeNotice.PHASE_OPENED,
+            null,
+            new BigDecimal("5000"),
+            BigDecimal.ZERO,
+            "JPY",
+            "FRAUDULENT",
+            null,
+            due,
+            "JPY"));
+    JsonObject opened = get("/admin/disputes", me).body().getJsonArray("data").getJsonObject(0);
+    UUID id = Ids.parse(opened.getString("id"));
+    assertThat(opened.getString("feeCurrency"), is("JPY"));
+
+    // Stripe takes the money and its fee, in pounds.
+    DisputeNotice withdrawn =
+        new DisputeNotice(
+            "dp_it_fx",
+            DisputeNotice.PHASE_FUNDS_WITHDRAWN,
+            null,
+            new BigDecimal("5000"),
+            new BigDecimal("15.00"),
+            "JPY",
+            "FRAUDULENT",
+            null,
+            due,
+            "GBP");
+    disputes.fromProvider("STRIPE", intent, withdrawn);
+    disputes.fromProvider("STRIPE", intent, withdrawn);
+    JsonObject after = get("/admin/disputes/" + id, me).data().getJsonObject("dispute");
+    assertThat(after.getString("currency"), is("JPY"));
+    assertThat(
+        after.getJsonNumber("amount").bigDecimalValue().compareTo(new BigDecimal("5000")), is(0));
+    assertThat(
+        after.getJsonNumber("feeAmount").bigDecimalValue().compareTo(new BigDecimal("15")), is(0));
+    assertThat(after.getString("feeCurrency"), is("GBP"));
+    assertThat(outboxCount(id, "PaymentDisputeFundsWithdrawn"), is(1));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT payload FROM payment.outbox WHERE tenant_id = '"
+                + tenant
+                + "' AND event_type = 'PaymentDisputeFundsWithdrawn'"),
+        containsString("\"feeAmount\":15.00"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT payload FROM payment.outbox WHERE tenant_id = '"
+                + tenant
+                + "' AND event_type = 'PaymentDisputeFundsWithdrawn'"),
+        containsString("\"feeCurrency\":\"GBP\""));
+
+    // A later notice whose fee could not be read keeps what was known, in its own currency.
+    disputes.fromProvider(
+        "STRIPE",
+        intent,
+        new DisputeNotice(
+            "dp_it_fx",
+            DisputeNotice.PHASE_UPDATED,
+            null,
+            new BigDecimal("5000"),
+            null,
+            "JPY",
+            "FRAUDULENT",
+            null,
+            due,
+            null));
+    JsonObject kept = get("/admin/disputes/" + id, me).data().getJsonObject("dispute");
+    assertThat(kept.getString("feeCurrency"), is("GBP"));
+    // Another business finds none of it.
+    assertThat(get("/admin/disputes/" + id, owner(Ids.newId())).status(), is(404));
   }
 }

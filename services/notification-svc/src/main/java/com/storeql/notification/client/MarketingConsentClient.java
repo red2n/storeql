@@ -5,6 +5,7 @@ import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
 import com.storeql.notification.config.ServiceConfig;
 import com.storeql.notification.dto.Dtos.MarketingAllowance;
+import com.storeql.notification.json.Jsons;
 import com.storeql.web.HttpHeaders;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
@@ -12,7 +13,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -85,7 +85,7 @@ public class MarketingConsentClient {
         return new MarketingAllowance(
             false, "NONE", "customer-svc answered " + res.status().code(), null);
       }
-      try (JsonReader reader = Json.createReader(new StringReader(res.as(String.class)))) {
+      try (JsonReader reader = Jsons.reader(new StringReader(res.as(String.class)))) {
         JsonObject data = reader.readObject().getJsonObject("data");
         if (data == null) {
           return new MarketingAllowance(false, "NONE", "customer-svc returned no decision", null);

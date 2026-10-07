@@ -6,6 +6,7 @@ import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.LoggerProvider;
 import io.opentelemetry.api.logs.Severity;
 import io.opentelemetry.context.Context;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.Initialized;
 import jakarta.enterprise.event.Observes;
@@ -43,10 +44,29 @@ public class OtelLoggingBridge {
       LOG.log(Level.DEBUG, "No OpenTelemetry bean available; OTLP log export disabled");
       return;
     }
+    if (installed != null) return;
     Handler handler = new OtelHandler(openTelemetry.get());
     // Scrubbed like the console handler: a card number must not reach Loki either.
     LogScrubber.install(handler);
     LogManager.getLogManager().getLogger("").addHandler(handler);
+    installed = handler;
+  }
+
+  /** The root handler this bean added, so shutdown can take it off again. */
+  private volatile Handler installed;
+
+  /** Removes the root handler on shutdown (a redeploy must not stack handlers on the JVM root). */
+  @PreDestroy
+  void onStop() {
+    Handler handler = installed;
+    if (handler == null) return;
+    LogManager.getLogManager().getLogger("").removeHandler(handler);
+    installed = null;
+  }
+
+  /** For tests: the handler this bean installed, or null. */
+  Handler installedHandler() {
+    return installed;
   }
 
   private static final class OtelHandler extends Handler {

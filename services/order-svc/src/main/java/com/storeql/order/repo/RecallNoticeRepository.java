@@ -171,16 +171,29 @@ public class RecallNoticeRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Keyset page of a recall's notices, newest first, optionally by status.
+   * Keyset page of notices, newest first, of one recall and/or one order, optionally by status.
    *
+   * @param recallId the recall, or {@code null} for the notices of every recall
+   * @param orderId the order, or {@code null} for every order
+   * @param storeScope the stores the caller is held to, or {@code null} for all; a notice at any
+   *     other store is not returned
    * @param limitPlusOne page size plus one, so the caller can detect a next page
    */
   public List<Detail> list(
-      UUID tenantId, UUID recallId, Status status, Cursor.CreatedAtId after, int limitPlusOne) {
+      UUID tenantId,
+      UUID recallId,
+      UUID orderId,
+      java.util.Set<UUID> storeScope,
+      Status status,
+      Cursor.CreatedAtId after,
+      int limitPlusOne) {
     StringBuilder sql =
         new StringBuilder("SELECT ")
             .append(COLUMNS)
-            .append(" FROM recall_notices n WHERE n.tenant_id = ? AND n.recall_id = ?");
+            .append(" FROM recall_notices n WHERE n.tenant_id = ?");
+    if (recallId != null) sql.append(" AND n.recall_id = ?");
+    if (orderId != null) sql.append(" AND n.order_id = ?");
+    if (storeScope != null) sql.append(" AND n.store_id = ANY (?)");
     if (status != null) sql.append(" AND n.status = ?");
     if (after != null) sql.append(" AND (n.issued_at, n.id) < (?, ?)");
     sql.append(" ORDER BY n.issued_at DESC, n.id DESC LIMIT ?");
@@ -190,7 +203,11 @@ public class RecallNoticeRepository extends BaseOutboxRepository {
             ps -> {
               int i = 1;
               ps.setObject(i++, tenantId);
-              ps.setObject(i++, recallId);
+              if (recallId != null) ps.setObject(i++, recallId);
+              if (orderId != null) ps.setObject(i++, orderId);
+              if (storeScope != null) {
+                ps.setArray(i++, ps.getConnection().createArrayOf("uuid", storeScope.toArray()));
+              }
               if (status != null) ps.setString(i++, status.name());
               if (after != null) {
                 ps.setObject(i++, utc(after.createdAt()));
@@ -318,12 +335,22 @@ public class RecallNoticeRepository extends BaseOutboxRepository {
    * Settles a notice: the buyer was refunded, given a replacement, had the product repaired, or
    * wanted nothing. A remedy nobody had chosen is recorded as the one the settlement implies.
    *
-   * @throws ApiException 404 {@code RECALL_NOTICE_NOT_FOUND}; 409 {@code RECALL_NOTICE_RESOLVED}
+   * @param guard run on the locked notice before anything is written; it throws when the caller may
+   *     not act at the notice's store
+   * @throws ApiException 404 {@code RECALL_NOTICE_NOT_FOUND}; whatever {@code guard} throws; 409
+   *     {@code RECALL_NOTICE_RESOLVED}
    */
-  public Detail resolve(UUID tenantId, UUID id, Resolution resolution, String notes, UUID actor) {
+  public Detail resolve(
+      UUID tenantId,
+      UUID id,
+      Resolution resolution,
+      String notes,
+      UUID actor,
+      java.util.function.Consumer<Notice> guard) {
     inTx(
         c -> {
           Notice n = lock(c, tenantId, id);
+          guard.accept(n);
           n.requireOpen();
           settle(c, tenantId, id, resolution, null, notes, actor);
           return null;

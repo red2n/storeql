@@ -1,6 +1,7 @@
 package com.storeql.product.repo;
 
 import com.storeql.ids.Ids;
+import com.storeql.product.domain.CategoryTree;
 import com.storeql.product.domain.Domain.Category;
 import com.storeql.service.BaseJdbcRepository;
 import com.storeql.web.ApiException;
@@ -110,6 +111,27 @@ public class CategoryRepository extends BaseJdbcRepository {
   }
 
   /**
+   * Every category of the tenant, of any status, as id to parent id (a root maps to {@code null}):
+   * one query for a caller that walks many paths, instead of one per level per path.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @return the parent of each category
+   */
+  public java.util.Map<UUID, UUID> parentIds(UUID tenantId) {
+    java.util.Map<UUID, UUID> parents = new java.util.HashMap<>();
+    for (Category c :
+        query(
+            "SELECT id, tenant_id, parent_id, name, status, created_at, updated_at"
+                + " FROM categories WHERE tenant_id = ?",
+            ps -> ps.setObject(1, tenantId),
+            CategoryRepository::mapCategory,
+            "category parents")) {
+      parents.put(c.id(), c.parentId());
+    }
+    return parents;
+  }
+
+  /**
    * Writes a category back with its new values.
    *
    * @param tenantId owning tenant; the first condition of the query
@@ -120,15 +142,42 @@ public class CategoryRepository extends BaseJdbcRepository {
    */
   public Category updateCategory(UUID tenantId, UUID id, String name, UUID parentId) {
     Instant now = Instant.now();
-    exec(
-        "UPDATE categories SET name = ?, parent_id = ?, updated_at = ?"
-            + " WHERE tenant_id = ? AND id = ? AND status = 'ACTIVE'",
-        ps -> {
-          ps.setString(1, name);
-          ps.setObject(2, parentId);
-          ps.setObject(3, now.atOffset(ZoneOffset.UTC));
-          ps.setObject(4, tenantId);
-          ps.setObject(5, id);
+    inTx(
+        c -> {
+          // Every category of the tenant is locked before the tree is read, so two re-parents
+          // that would each be fine alone (A under B, B under A) are taken one after the other
+          // and the second sees the first's result. In id order, so two of them cannot deadlock.
+          java.util.Map<UUID, UUID> parentOf = new java.util.HashMap<>();
+          try (var ps =
+              c.prepareStatement(
+                  "SELECT id, parent_id FROM categories WHERE tenant_id = ? ORDER BY id FOR UPDATE")) {
+            ps.setObject(1, tenantId);
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                parentOf.put(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class));
+              }
+            }
+          }
+          if (parentId != null && !parentOf.containsKey(parentId)) {
+            throw ApiException.badRequest("PARENT_NOT_FOUND", "parentId not found in this tenant");
+          }
+          if (CategoryTree.createsCycle(parentOf, id, parentId)) {
+            throw ApiException.conflict(
+                "PRODUCT_CATEGORY_CYCLE",
+                "A category cannot be placed under itself or one of its own descendants");
+          }
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE categories SET name = ?, parent_id = ?, updated_at = ?"
+                      + " WHERE tenant_id = ? AND id = ? AND status = 'ACTIVE'")) {
+            ps.setString(1, name);
+            ps.setObject(2, parentId);
+            ps.setObject(3, now.atOffset(ZoneOffset.UTC));
+            ps.setObject(4, tenantId);
+            ps.setObject(5, id);
+            ps.executeUpdate();
+          }
+          return null;
         },
         "update category");
     return findCategory(tenantId, id)

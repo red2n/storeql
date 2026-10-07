@@ -4,6 +4,7 @@ import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.order.config.ServiceConfig;
 import com.storeql.web.ApiException;
 import com.storeql.web.HttpHeaders;
@@ -13,7 +14,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -24,6 +24,10 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.eclipse.microprofile.faulttolerance.CircuitBreaker;
 import org.eclipse.microprofile.faulttolerance.Retry;
 import org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException;
@@ -82,20 +86,68 @@ public class InventoryClient {
       List<ReserveLine> lines,
       long ttlSeconds,
       UUID idemBase) {
+    if (lines.size() < 2) {
+      List<UUID> held = new ArrayList<>(lines.size());
+      for (int i = 0; i < lines.size(); i++) {
+        try {
+          held.add(
+              reserveLine(
+                  tenantId,
+                  orderId,
+                  storeId,
+                  lines.get(i),
+                  ttlSeconds,
+                  lineKey(idemBase, i, lines)));
+        } catch (RuntimeException e) {
+          releaseQuietly(tenantId, held);
+          throw asReported(e);
+        }
+      }
+      return held;
+    }
+    // One call per line, all at once on virtual threads: a basket of N lines costs the slowest
+    // call, not the sum. Every call is awaited (each is bounded by the client's timeouts), the
+    // holds that were made are released when any line fails, and the first failure in line order
+    // is the one reported, as it was when the lines were held one after another.
     List<UUID> held = new ArrayList<>(lines.size());
-    for (int i = 0; i < lines.size(); i++) {
-      ReserveLine line = lines.get(i);
-      // Line index in the key so two order lines for the same variant hold stock separately
-      // instead of the second replaying the first line's hold.
-      String lineKey = Ids.derived(idemBase, "reserve:" + i + ":" + line.variantId()).toString();
-      try {
-        held.add(reserveLine(tenantId, orderId, storeId, line, ttlSeconds, lineKey));
-      } catch (RuntimeException e) {
-        releaseQuietly(tenantId, held);
-        throw e;
+    RuntimeException failure = null;
+    try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+      List<Future<UUID>> pending = new ArrayList<>(lines.size());
+      for (int i = 0; i < lines.size(); i++) {
+        ReserveLine line = lines.get(i);
+        String key = lineKey(idemBase, i, lines);
+        pending.add(
+            pool.submit(() -> reserveLine(tenantId, orderId, storeId, line, ttlSeconds, key)));
+      }
+      for (Future<UUID> f : pending) {
+        try {
+          held.add(f.get());
+        } catch (ExecutionException e) {
+          if (failure == null) {
+            failure =
+                e.getCause() instanceof RuntimeException re
+                    ? asReported(re)
+                    : unavailable("inventory-svc reservation failed", e.getCause());
+          }
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          if (failure == null) failure = unavailable("interrupted while holding stock", e);
+        }
       }
     }
+    if (failure != null) {
+      releaseQuietly(tenantId, held);
+      throw failure;
+    }
     return held;
+  }
+
+  /**
+   * The line index goes into the key so two order lines for the same variant hold stock separately
+   * instead of the second replaying the first line's hold.
+   */
+  private static String lineKey(UUID idemBase, int i, List<ReserveLine> lines) {
+    return Ids.derived(idemBase, "reserve:" + i + ":" + lines.get(i).variantId()).toString();
   }
 
   @Retry(
@@ -213,5 +265,16 @@ public class InventoryClient {
 
   private static ApiException unavailable(String message, Throwable cause) {
     return new ApiException(503, "ORDER_INVENTORY_UNAVAILABLE", message, List.of(), cause);
+  }
+
+  /**
+   * A failure as the checkout reports it. An open circuit is raised by the breaker's interceptor
+   * outside {@link #reserveLine}, so that method's own catch never sees it; left alone it would
+   * leave as an unmapped 500 and not the 503 this client promises when inventory cannot answer.
+   */
+  private static RuntimeException asReported(RuntimeException e) {
+    return e instanceof CircuitBreakerOpenException
+        ? unavailable("inventory-svc circuit open — too many recent failures", e)
+        : e;
   }
 }

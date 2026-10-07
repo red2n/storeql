@@ -106,6 +106,25 @@ public class JwtService {
       Set<UUID> storeIds,
       Set<String> permissions,
       List<String> amr) {
+    return issueAccessToken(
+        userId, tenantId, userType, email, roles, storeIds, permissions, amr, null);
+  }
+
+  /**
+   * Issue an access token that names the sign-in it belongs to.
+   *
+   * @param sessionId the session (the {@code sid} claim), or null to omit it
+   */
+  public String issueAccessToken(
+      UUID userId,
+      UUID tenantId,
+      String userType,
+      String email,
+      Set<String> roles,
+      Set<UUID> storeIds,
+      Set<String> permissions,
+      List<String> amr,
+      UUID sessionId) {
     Instant now = Instant.now();
     var builder =
         JWT.create()
@@ -138,6 +157,9 @@ public class JwtService {
       builder.withClaim("perms", List.copyOf(new java.util.TreeSet<>(permissions)));
     }
     builder.withClaim("amr", List.copyOf(amr));
+    if (sessionId != null) {
+      builder.withClaim("sid", sessionId.toString());
+    }
     SigningKeys.Signer signer = keys.signer();
     return builder.withKeyId(signer.kid()).sign(Algorithm.RSA256(null, signer.privateKey()));
   }

@@ -8,6 +8,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
+import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
@@ -40,7 +41,11 @@ class PricingIT {
             .with(PricingIT.T, "GBP", "GB")
             .with(PricingIT.YEN, "JPY", "JP")
             .with(PricingIT.YEN_BUSY, "JPY", "JP")
-            .with(PricingIT.RUPEE, "INR", "IN");
+            .with(PricingIT.RUPEE, "INR", "IN")
+            .with(PricingIT.DINAR, "KWD", "KW")
+            // The other business the isolation checks act as: a real business has a profile,
+            // and its tax summary is counted in its own currency.
+            .with("01a090ae-611e-701d-9d60-a9d7516ed03b", "EUR", "DE");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -55,6 +60,7 @@ class PricingIT {
   private static final String YEN_BUSY = "01a090ae-611e-70f0-8a00-0000000000a2";
   private static final String NOBODY = "01a090ae-611e-70f0-8a00-0000000000a3";
   private static final String RUPEE = "01a090ae-611e-70f0-8a00-0000000000a4";
+  private static final String DINAR = "01a090ae-611e-70f0-8a00-0000000000a5";
   private static final String V = "01a090ae-611e-7037-a4b7-c854f0266ace";
   private static final String S = "01a090ae-611e-703c-a378-a4972ea461c8";
   private static final String ORDER_ID = "01a090ae-611e-7056-8f30-ecdbb48160eb";
@@ -107,6 +113,14 @@ class PricingIT {
 
   /** A GET carrying roles — the financial reports are gated, so callers must state who they are. */
   private Response getAs(String pathAndQuery, String tenant, String roles) {
+    return getAs(pathAndQuery, tenant, roles, null);
+  }
+
+  /**
+   * A GET carrying roles and, optionally, the caller's store assignment — {@code X-Store-Ids} is
+   * how the gateway tells a service which stores a manager is held to (comma-separated).
+   */
+  private Response getAs(String pathAndQuery, String tenant, String roles, String storeIds) {
     int q = pathAndQuery.indexOf('?');
     WebTarget t = target.path(q < 0 ? pathAndQuery : pathAndQuery.substring(0, q));
     if (q >= 0) {
@@ -115,7 +129,9 @@ class PricingIT {
         t = t.queryParam(param.substring(0, eq), param.substring(eq + 1));
       }
     }
-    return t.request().header("X-Tenant-Id", tenant).header("X-Roles", roles).get();
+    var req = t.request().header("X-Tenant-Id", tenant).header("X-Roles", roles);
+    if (storeIds != null) req = req.header("X-Store-Ids", storeIds);
+    return req.get();
   }
 
   private Response put(String path, String json, String tenant) {
@@ -188,7 +204,7 @@ class PricingIT {
 
     // Tenant isolation — other tenant cannot see T1
     Response rIso = getAs("/vat-rates/T1", "01a090ae-611e-701d-9d60-a9d7516ed03b", "OWNER");
-    assertThat(rIso.getStatus(), is(404));
+    assertThat(codeOf(rIso, 404), is("PRICING_VAT_CODE_NOT_FOUND"));
 
     // Duplicate code is 409
     Response rDup =
@@ -197,7 +213,32 @@ class PricingIT {
             "{\"code\":\"T1\",\"name\":\"Dup\",\"rate\":0.10,"
                 + "\"exempt\":false,\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
             T);
-    assertThat(rDup.getStatus(), is(409));
+    assertThat(codeOf(rDup, 409), is("PRICING_VAT_CODE_EXISTS"));
+    // Codes are matched without regard to case, so a lower-case twin is the same code.
+    Response rLower =
+        post(
+            "/vat-rates",
+            "{\"code\":\"t1\",\"name\":\"Lower\",\"rate\":0.10,"
+                + "\"exempt\":false,\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}",
+            T);
+    assertThat(codeOf(rLower, 409), is("PRICING_VAT_CODE_EXISTS"));
+    assertThat(
+        "the refused twins were not kept",
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM pricing.vat_rates WHERE tenant_id = '" + T + "'"),
+        is("2"));
+  }
+
+  /** The stable code of a refused answer, after checking its status. */
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return Envelopes.parse(body).getString("code");
+  }
+
+  private static String count(String table, String tenant) {
+    return Envelopes.scalar(
+        PG, "SELECT count(*) FROM pricing." + table + " WHERE tenant_id = '" + tenant + "'");
   }
 
   /** Past the column's size or the rate CHECK the insert failed in Postgres: 500, not 400. */
@@ -459,11 +500,72 @@ class PricingIT {
 
     // Unknown groupBy is the caller's mistake, and storeId must be a UUID.
     assertThat(
-        getAs("/admin/reports/tax-summary?" + period + "&groupBy=SUPPLIER", T, "OWNER").getStatus(),
-        is(400));
+        codeOf(
+            getAs("/admin/reports/tax-summary?" + period + "&groupBy=SUPPLIER", T, "OWNER"), 400),
+        is("PRICING_INVALID_GROUPING"));
     assertThat(
         getAs("/admin/reports/tax-summary?" + period + "&storeId=nope", T, "OWNER").getStatus(),
         is(400));
+  }
+
+  /**
+   * The decided rule: a store named is refused unless the caller may act there; no store named
+   * means the whole business for a caller held to none, or exactly the caller's own stores added
+   * together, never any other; and another tenant's data never shows regardless of what {@code
+   * X-Store-Ids} claims.
+   */
+  @Test
+  void taxSummaryIsScopedToTheCallersStores() {
+    String storeA = com.storeql.ids.Ids.newId().toString();
+    String storeB = com.storeql.ids.Ids.newId().toString();
+    String storeC = com.storeql.ids.Ids.newId().toString();
+    recordTax(
+        ORDER_ID, storeA, "T1", "0.20", "100.00", "20.00", "120.00", false, "2023-02-01T10:00:00Z");
+    recordTax(
+        ORDER_ID, storeB, "T1", "0.20", "200.00", "40.00", "240.00", false, "2023-02-02T10:00:00Z");
+    recordTax(
+        ORDER_ID, storeC, "T1", "0.20", "400.00", "80.00", "480.00", false, "2023-02-03T10:00:00Z");
+    // A month no other test writes to, so the whole business is exactly these three.
+    String period = "from=2023-02-01T00:00:00Z&to=2023-03-01T00:00:00Z";
+    String path = "/admin/reports/tax-summary?" + period;
+
+    // OWNER is held to no store: naming none is the whole business, A+B+C.
+    Response owner = getAs(path, T, "OWNER");
+    assertThat(owner.getStatus(), is(200));
+    assertThat(owner.readEntity(String.class), containsString("\"outputVat\":140.00"));
+
+    // MANAGER held to A alone: naming none is A only, not A+B+C.
+    Response managerAtA = getAs(path, T, "MANAGER", storeA);
+    assertThat(managerAtA.getStatus(), is(200));
+    assertThat(managerAtA.readEntity(String.class), containsString("\"outputVat\":20.00"));
+
+    // Naming a store the caller is not held to is refused outright, whatever it would have shown.
+    Response managerNamesB = getAs(path + "&storeId=" + storeB, T, "MANAGER", storeA);
+    assertThat(managerNamesB.getStatus(), is(403));
+    assertThat(managerNamesB.readEntity(String.class), containsString("STORE_ACCESS_DENIED"));
+
+    // Naming the store the caller is held to still works.
+    Response managerNamesA = getAs(path + "&storeId=" + storeA, T, "MANAGER", storeA);
+    assertThat(managerNamesA.getStatus(), is(200));
+    assertThat(managerNamesA.readEntity(String.class), containsString("\"outputVat\":20.00"));
+
+    // MANAGER held to A and B: naming none is A+B, never C.
+    Response managerAtAB = getAs(path, T, "MANAGER", storeA + "," + storeB);
+    assertThat(managerAtAB.getStatus(), is(200));
+    assertThat(managerAtAB.readEntity(String.class), containsString("\"outputVat\":60.00"));
+
+    // Another tenant's staff, even naming our own store id, sees nothing of ours: OWNER/MANAGER
+    // clear the tier gate but the tenant filter leaves them an empty (zero) report; STOREKEEPER
+    // and CASHIER never clear the tier gate at all under /admin/.
+    String other = "01a090ae-611e-701d-9d60-a9d7516ed03b";
+    Response otherOwner = getAs(path + "&storeId=" + storeA, other, "OWNER", storeA);
+    assertThat(otherOwner.getStatus(), is(200));
+    assertThat(otherOwner.readEntity(String.class), containsString("\"outputVat\":0.00"));
+    Response otherManager = getAs(path, other, "MANAGER", storeA);
+    assertThat(otherManager.getStatus(), is(200));
+    assertThat(otherManager.readEntity(String.class), containsString("\"outputVat\":0.00"));
+    assertThat(getAs(path, other, "STOREKEEPER", storeA).getStatus(), is(403));
+    assertThat(getAs(path, other, "CASHIER", storeA).getStatus(), is(403));
   }
 
   /**
@@ -934,7 +1036,24 @@ class PricingIT {
                 + "\"startsAt\":\"2020-01-01T00:00:00Z\"}");
 
     // A switch with no stated reason is a discount that vanished with nobody accountable.
-    assertThat(post("/admin/promotions/" + id + "/deactivate", "{}", T).getStatus(), is(400));
+    assertThat(
+        codeOf(post("/admin/promotions/" + id + "/deactivate", "{}", T), 400),
+        is("PRICING_REASON_REQUIRED"));
+    assertThat(
+        codeOf(post("/admin/promotions/" + id + "/deactivate", "{\"reason\":\"  \"}", T), 400),
+        is("PRICING_REASON_REQUIRED"));
+    String listId = createPriceList(T, "Reasoned", "GBP");
+    assertThat(
+        codeOf(post("/admin/price-lists/" + listId + "/deactivate", "{}", T), 400),
+        is("PRICING_REASON_REQUIRED"));
+    assertThat(
+        "a refused switch left the price list on",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.price_lists WHERE id = '" + listId + "'"),
+        is("true"));
+    assertThat(
+        "a refused switch left the promotion on",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.promotions WHERE id = '" + id + "'"),
+        is("true"));
 
     post("/admin/promotions/" + id + "/deactivate", "{\"reason\":\"stopped\"}", T);
     post("/admin/promotions/" + id + "/activate", "{\"reason\":\"restarted\"}", T);
@@ -946,6 +1065,65 @@ class PricingIT {
     // Append-only: restarting does not erase the record of it having been stopped.
     assertThat(hist, containsString("\"active\":false"));
     assertThat(hist, containsString("\"active\":true"));
+  }
+
+  /**
+   * The four switch endpoints (stop and restart, for a promotion and for a price list) take a
+   * request whose reason is required. The service refuses a body without one by name, and that is
+   * where it is checked (no Validations.validate in front of it, which would answer
+   * VALIDATION_FAILED and lose the named code the screens and this module's tests know): here the
+   * restart, in both subjects and in every shape of nothing, is refused and the subject stays off,
+   * the trail does not grow, and a stated reason then restarts it.
+   */
+  @Test
+  void aRestartWithNoReasonIsRefusedAndTheTrailDoesNotGrow() {
+    String promoId =
+        createPromotion(
+            "{\"name\":\"Paused\",\"type\":\"BASKET_FLAT\",\"value\":5,"
+                + "\"startsAt\":\"2020-01-01T00:00:00Z\"}");
+    String listId = createPriceList(T, "Paused prices", "GBP");
+    assertThat(
+        post("/admin/promotions/" + promoId + "/deactivate", "{\"reason\":\"paused\"}", T)
+            .getStatus(),
+        is(200));
+    assertThat(
+        post("/admin/price-lists/" + listId + "/deactivate", "{\"reason\":\"paused\"}", T)
+            .getStatus(),
+        is(200));
+    String trailBefore = count("promotion_status_changes", T);
+    assertThat("one stop each", trailBefore, is("2"));
+
+    for (String nothing :
+        new String[] {"{}", "{\"reason\":null}", "{\"reason\":\"\"}", "{\"reason\":\"   \"}"}) {
+      assertThat(
+          "a promotion restarted with " + nothing,
+          codeOf(post("/admin/promotions/" + promoId + "/activate", nothing, T), 400),
+          is("PRICING_REASON_REQUIRED"));
+      assertThat(
+          "a price list restarted with " + nothing,
+          codeOf(post("/admin/price-lists/" + listId + "/activate", nothing, T), 400),
+          is("PRICING_REASON_REQUIRED"));
+    }
+    assertThat(
+        "the promotion is still off",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.promotions WHERE id = '" + promoId + "'"),
+        is("false"));
+    assertThat(
+        "the price list is still off",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.price_lists WHERE id = '" + listId + "'"),
+        is("false"));
+    assertThat("the trail did not grow", count("promotion_status_changes", T), is(trailBefore));
+
+    // A stated reason does restart each, once, and is recorded.
+    assertThat(
+        post("/admin/promotions/" + promoId + "/activate", "{\"reason\":\"back on\"}", T)
+            .getStatus(),
+        is(200));
+    assertThat(
+        post("/admin/price-lists/" + listId + "/activate", "{\"reason\":\"back on\"}", T)
+            .getStatus(),
+        is(200));
+    assertThat("one row for each restart", count("promotion_status_changes", T), is("4"));
   }
 
   /** Stopping something already stopped is a conflict, not a silent success. */
@@ -1119,12 +1297,18 @@ class PricingIT {
 
     // And one tenant cannot reach into another's switch, even knowing the id.
     assertThat(
-        post(
+        codeOf(
+            post(
                 "/admin/price-lists/" + lists.get(jp) + "/activate",
                 "{\"reason\":\"not mine to restart\"}",
-                "01a090ae-611e-700f-b645-a14095230b77")
-            .getStatus(),
-        is(404));
+                "01a090ae-611e-700f-b645-a14095230b77"),
+            404),
+        is("PRICING_SUBJECT_NOT_FOUND"));
+    assertThat(
+        "the other business's switch did not move",
+        Envelopes.scalar(
+            PG, "SELECT active FROM pricing.price_lists WHERE id = '" + lists.get(jp) + "'"),
+        is("false"));
   }
 
   /** SJ-D37: proved against the running stack — a CASHIER token created a price list, 201. */
@@ -1253,7 +1437,15 @@ class PricingIT {
             "{\"name\":\"Second\",\"type\":\"BASKET_FLAT\",\"value\":9,"
                 + "\"couponCode\":\"dupe\",\"startsAt\":\"2020-01-01T00:00:00Z\"}",
             T);
-    assertThat(second.getStatus(), is(409));
+    assertThat(codeOf(second, 409), is("PRICING_COUPON_CODE_TAKEN"));
+    assertThat(
+        "only the first promotion with that code was kept",
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM pricing.promotions WHERE tenant_id = '"
+                + T
+                + "' AND lower(coupon_code) = 'dupe'"),
+        is("1"));
   }
 
   /**
@@ -1630,6 +1822,125 @@ class PricingIT {
     assertThat(result, containsString(badVariant));
   }
 
+  /** A batch body of {@code n} one-pound rows, each for a variant of its own. */
+  private static String batchOf(int n) {
+    StringBuilder body = new StringBuilder("{\"items\":[");
+    for (int i = 0; i < n; i++) {
+      if (i > 0) {
+        body.append(',');
+      }
+      body.append("{\"variantId\":\"")
+          .append(Ids.newId())
+          .append("\",\"price\":1.00,\"minQty\":1}");
+    }
+    return body.append("]}").toString();
+  }
+
+  /** The field-level details of a refused answer, as the problem body carries them. */
+  private static java.util.List<String> detailsOf(String body) {
+    var parsed = Envelopes.parse(body);
+    if (!parsed.containsKey("details") || parsed.isNull("details")) {
+      return java.util.List.of();
+    }
+    return parsed.getJsonArray("details").getValuesAs(jakarta.json.JsonString.class).stream()
+        .map(jakarta.json.JsonString::getString)
+        .toList();
+  }
+
+  /**
+   * The documented cap of 500 rows a call is enforced (it was documented on the DTO and never
+   * checked): 501 is refused as a whole with the shared VALIDATION_FAILED, naming the field, and
+   * not one row is written, not one PriceChanged announced.
+   */
+  @Test
+  void aBatchOfMoreThanFiveHundredPricesIsRefusedAndWritesNothing() {
+    String plId = createPriceList(T, "Too many rows", "GBP");
+    String itemsBefore = count("price_list_items", T);
+    String eventsBefore = count("outbox", T);
+
+    Response r = post("/admin/price-lists/" + plId + "/items/batch", batchOf(501), T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(400));
+    assertThat(Envelopes.parse(body).getString("code"), is("VALIDATION_FAILED"));
+    assertThat(
+        "the refusal names the field and the limit",
+        detailsOf(body).stream().anyMatch(d -> d.startsWith("items: ") && d.contains("500")),
+        is(true));
+
+    assertThat("no price was written", count("price_list_items", T), is(itemsBefore));
+    assertThat("no PriceChanged was announced", count("outbox", T), is(eventsBefore));
+  }
+
+  /** The cap is a ceiling, not a rounding down: exactly 500 rows are all kept. */
+  @Test
+  void aBatchOfExactlyFiveHundredPricesIsKept() {
+    String plId = createPriceList(T, "Full batch", "GBP");
+
+    Response r = post("/admin/price-lists/" + plId + "/items/batch", batchOf(500), T);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(200));
+    assertThat(body, containsString("\"upserted\":500"));
+    assertThat(
+        "every row of the batch was written",
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM pricing.price_list_items WHERE tenant_id = '"
+                + T
+                + "' AND price_list_id = '"
+                + plId
+                + "'"),
+        is("500"));
+  }
+
+  /**
+   * A batch with no rows, with the rows missing or null, or from another business, is refused by
+   * name and writes nothing: the empty ones are 400, the other business's is 404 and our list is
+   * untouched. A row that breaks its own constraint still costs only itself (the test above).
+   */
+  @Test
+  void aBatchWithNoRowsOrFromAnotherBusinessIsRefusedAndWritesNothing() {
+    String plId = createPriceList(T, "Nothing to write", "GBP");
+    String path = "/admin/price-lists/" + plId + "/items/batch";
+    String itemsBefore = count("price_list_items", T);
+    String eventsBefore = count("outbox", T);
+
+    for (String empty : new String[] {"{\"items\":[]}", "{\"items\":null}", "{}"}) {
+      assertThat(empty, codeOf(post(path, empty, T), 400), is("VALIDATION_FAILED"));
+    }
+    String emptyList = post(path, "{\"items\":[]}", T).readEntity(String.class);
+    assertThat(
+        "the empty list is named by its field",
+        detailsOf(emptyList).stream().anyMatch(d -> d.startsWith("items: ")),
+        is(true));
+
+    // A row that is not there at all (a JSON null) is not a bad row to be reported against its
+    // variant: the body is not a list of rows, and is refused whole, the good row beside it
+    // included (nothing is written, which the counts below prove).
+    String goodRow = "{\"variantId\":\"" + Ids.newId() + "\",\"price\":1.00,\"minQty\":1}";
+    for (String nulled :
+        new String[] {"{\"items\":[null]}", "{\"items\":[" + goodRow + ",null]}"}) {
+      assertThat(nulled, codeOf(post(path, nulled, T), 400), is("VALIDATION_FAILED"));
+    }
+
+    // Another business's management, naming our price list: not found, and nothing written there.
+    for (String roles : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          roles + " of another business cannot batch into our list",
+          codeOf(postAs(path, batchOf(1), YEN, roles), 404),
+          is("PRICING_LIST_NOT_FOUND"));
+    }
+    // Every other role, ours or theirs, is turned away before the body is read.
+    for (String roles : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertThat(roles + " of ours", postAs(path, batchOf(1), T, roles).getStatus(), is(403));
+      assertThat(roles + " of theirs", postAs(path, batchOf(1), YEN, roles).getStatus(), is(403));
+    }
+
+    assertThat("no price was written", count("price_list_items", T), is(itemsBefore));
+    assertThat("no price was written elsewhere", count("price_list_items", YEN), is("0"));
+    assertThat("no PriceChanged was announced", count("outbox", T), is(eventsBefore));
+    assertThat("none for the other business", count("outbox", YEN), is("0"));
+  }
+
   @Test
   void customerVatStatusReadRequiresAStaffRole() {
     String customerId = "01a090ae-611e-7070-9b99-4c0448c39abf";
@@ -1991,5 +2302,282 @@ class PricingIT {
       }
     }
     assertThat(TENANTS.requests(), is(before));
+  }
+
+  // ── refusals that keep nothing ─────────────────────────────────────────────
+
+  @Test
+  @org.junit.jupiter.api.DisplayName("A promotion type nobody knows is refused and none is stored")
+  void aPromotionTypeNobodyKnowsIsRefused() {
+    Response r =
+        post(
+            "/admin/promotions",
+            "{\"name\":\"Magic\",\"type\":\"MAGIC\",\"value\":5,"
+                + "\"startsAt\":\"2020-01-01T00:00:00Z\"}",
+            T);
+    assertThat(codeOf(r, 400), is("PRICING_INVALID_PROMOTION_TYPE"));
+    assertThat(count("promotions", T), is("0"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A percentage above a hundred is refused for both percent types")
+  void aPercentageAboveAHundredIsRefused() {
+    for (String type : new String[] {"PERCENT", "BASKET_PERCENT"}) {
+      Response r =
+          post(
+              "/admin/promotions",
+              "{\"name\":\"Too generous\",\"type\":\""
+                  + type
+                  + "\",\"value\":150,\"startsAt\":\"2020-01-01T00:00:00Z\"}",
+              T);
+      assertThat(type, codeOf(r, 400), is("PRICING_INVALID_PERCENT"));
+    }
+    assertThat(count("promotions", T), is("0"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A quote line of no quantity, or a negative weight, is refused")
+  void aQuoteLineOfNothingIsRefused() {
+    seedPricedVariant(V, "10.00");
+    for (String qty : new String[] {"0", "-1", "-0.250"}) {
+      Response r =
+          postAs(
+              "/prices/quote",
+              "{\"lines\":[{\"variantId\":\"" + V + "\",\"qty\":" + qty + "}]}",
+              T,
+              "CASHIER");
+      assertThat(qty, codeOf(r, 400), is("PRICING_INVALID_QTY"));
+    }
+    assertThat("a quote prices only, it stores nothing", count("tax_transactions", T), is("0"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A price list name is taken once per business; another business may use it")
+  void aPriceListNameIsTakenOncePerBusiness() {
+    String body =
+        "{\"name\":\"Standard GBP\",\"channel\":\"ALL\",\"currency\":\"GBP\","
+            + "\"effectiveFrom\":\"2024-01-01T00:00:00Z\"}";
+    assertThat(post("/admin/price-lists", body, T).getStatus(), is(201));
+    assertThat(codeOf(post("/admin/price-lists", body, T), 409), is("PRICING_LIST_NAME_EXISTS"));
+    assertThat("the twin was not stored", count("price_lists", T), is("1"));
+    String inYen = body.replace("\"currency\":\"GBP\",", "");
+    assertThat(post("/admin/price-lists", inYen, YEN_BUSY).getStatus(), is(201));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A report or return with no start, or no end, is refused by name")
+  void aPeriodWithNoStartIsRefused() {
+    String instant = "2024-07-01T00:00:00Z";
+    String[] paths = {"/vat-return", "/admin/reports/tax-summary", "/vat-return/mtd/obligations"};
+    for (String path : paths) {
+      assertThat(
+          path,
+          codeOf(getAs(path + "?to=" + instant, T, "OWNER"), 400),
+          is("PRICING_MISSING_FROM"));
+    }
+    for (String path : new String[] {"/vat-return", "/admin/reports/tax-summary"}) {
+      assertThat(
+          path,
+          codeOf(getAs(path + "?from=" + instant, T, "OWNER"), 400),
+          is("PRICING_MISSING_TO"));
+    }
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName("Tax lines asked for with no order are refused")
+  void taxLinesForNoOrderAreRefused() {
+    assertThat(
+        codeOf(getAs("/tax-transactions", T, "CASHIER"), 400), is("PRICING_MISSING_ORDER_ID"));
+    assertThat(getAs("/tax-transactions", T, "CUSTOMER").getStatus(), is(403));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A customer with no VAT status, or another business's customer, is not found")
+  void aCustomerWithNoVatStatusIsNotFound() {
+    String customerId = Ids.newId().toString();
+    assertThat(
+        codeOf(getAs("/customer-vat-status/" + customerId, T, "CASHIER"), 404),
+        is("PRICING_CUSTOMER_VAT_NOT_FOUND"));
+    String ours = Ids.newId().toString();
+    Response created =
+        post(
+            "/customer-vat-status",
+            "{\"customerId\":\""
+                + ours
+                + "\",\"vatNumber\":\"GB123456789\",\"vatRegistered\":true,"
+                + "\"reverseChargeEligible\":false,\"countryCode\":\"GB\"}",
+            T);
+    assertThat(created.getStatus(), is(200));
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          codeOf(getAs("/customer-vat-status/" + ours, YEN_BUSY, role), 404),
+          is("PRICING_CUSTOMER_VAT_NOT_FOUND"));
+    }
+    assertThat(getAs("/customer-vat-status/" + ours, YEN_BUSY, "CUSTOMER").getStatus(), is(403));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "The currencies list needs a business, and shows only that business's own")
+  void theCurrenciesListNeedsABusinessAndShowsOnlyItsOwn() {
+    Response none = target.path("/prices/currencies").request().get();
+    assertThat(codeOf(none, 401), is("NO_TENANT"));
+    String yen = getAs("/prices/currencies", YEN, "CASHIER").readEntity(String.class);
+    assertThat(yen, containsString("\"home\":\"JPY\""));
+    assertThat(yen, not(containsString("GBP")));
+  }
+
+  // ── a promotion's typed amount is no finer than the business's currency ────
+
+  private static String promotionJson(String type, String value) {
+    String shape =
+        switch (type) {
+          case "SPEND_THRESHOLD" -> ",\"minOrderAmount\":100";
+          case "MIX_MATCH" -> ",\"buyQty\":3";
+          default -> "";
+        };
+    return "{\"name\":\"p-"
+        + type
+        + "-"
+        + value
+        + "\",\"type\":\""
+        + type
+        + "\",\"value\":"
+        + value
+        + shape
+        + ",\"startsAt\":\"2020-01-01T00:00:00Z\"}";
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A promotion's amount finer than the business's currency is refused by name, never rounded;"
+          + " a percentage is no money")
+  void aPromotionsAmountIsNoFinerThanTheBusinessCurrency() {
+    String[] amountTypes = {"FLAT", "BASKET_FLAT", "SPEND_THRESHOLD", "MIX_MATCH"};
+    // tenant, a value one place too fine, a value at the currency's own places, and as it is kept
+    String[][] markets = {
+      {DINAR, "1.2345", "1.235", "1.235"}, // three places: the fils
+      {YEN, "100.5", "100", "100"}, // none: whole yen
+      {T, "1.999", "1.99", "1.99"}, // two: pence
+    };
+    for (String[] m : markets) {
+      int kept = 0;
+      for (String type : amountTypes) {
+        Response refused = post("/admin/promotions", promotionJson(type, m[1]), m[0]);
+        String body = refused.readEntity(String.class);
+        assertThat(type + " " + m[1] + ": " + body, refused.getStatus(), is(400));
+        assertThat(body, containsString("VALIDATION_FAILED"));
+        assertThat("names the field: " + body, body, containsString("value:"));
+        assertThat("a refusal keeps nothing", count("promotions", m[0]), is("" + kept));
+
+        Response made = post("/admin/promotions", promotionJson(type, m[2]), m[0]);
+        String madeBody = made.readEntity(String.class);
+        assertThat(type + " " + m[2] + ": " + madeBody, made.getStatus(), is(201));
+        assertThat(
+            type + " is kept as the business's currency counts it",
+            Envelopes.parse(madeBody)
+                .getJsonObject("data")
+                .getJsonNumber("value")
+                .bigDecimalValue(),
+            comparesEqualTo(new BigDecimal(m[3])));
+        kept++;
+        assertThat(count("promotions", m[0]), is("" + kept));
+      }
+    }
+    // A figure the column cannot hold is refused at the door too, not left to overflow (a 500).
+    Response huge = post("/admin/promotions", promotionJson("FLAT", "100000000000000"), YEN);
+    assertThat(huge.readEntity(String.class), huge.getStatus(), is(400));
+    assertThat(count("promotions", YEN), is("4"));
+    // A percentage is not money: a yen business may give 12.5% and a dinar business 12.3456%.
+    for (String type : new String[] {"PERCENT", "BASKET_PERCENT"}) {
+      assertThat(
+          type, post("/admin/promotions", promotionJson(type, "12.5"), YEN).getStatus(), is(201));
+      assertThat(
+          type,
+          post("/admin/promotions", promotionJson(type, "12.3456"), DINAR).getStatus(),
+          is(201));
+    }
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A promotion amount's refusal is management's to see, and another business cannot stop the"
+          + " promotion it let through")
+  void aPromotionAmountRefusalLeavesNothingAndNoOneElseTouchesWhatPassed() {
+    String tooFine = promotionJson("FLAT", "1.2345");
+    String fine = promotionJson("FLAT", "1.235");
+    // A cashier, a storekeeper or a shopper never reaches the amount: the door is management's.
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(role, postAs("/admin/promotions", tooFine, DINAR, role).getStatus(), is(403));
+      assertThat(role, postAs("/admin/promotions", fine, DINAR, role).getStatus(), is(403));
+    }
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(role, postAs("/admin/promotions", tooFine, DINAR, role).getStatus(), is(400));
+    }
+    assertThat(count("promotions", DINAR), is("0"));
+    String id =
+        extractId(postAs("/admin/promotions", fine, DINAR, "MANAGER").readEntity(String.class));
+    assertThat(count("promotions", DINAR), is("1"));
+    // Another business's staff, naming its id, find nothing to stop.
+    for (String other : new String[] {T, YEN}) {
+      for (String role : new String[] {"OWNER", "MANAGER"}) {
+        assertThat(
+            role,
+            codeOf(
+                postAs(
+                    "/admin/promotions/" + id + "/deactivate",
+                    "{\"reason\":\"not mine\"}",
+                    other,
+                    role),
+                404),
+            is("PRICING_SUBJECT_NOT_FOUND"));
+      }
+      assertThat(count("promotions", other), is("0"));
+    }
+    assertThat(
+        "the promotion is still on",
+        Envelopes.scalar(PG, "SELECT active FROM pricing.promotions WHERE id = '" + id + "'"),
+        is("true"));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "A promotion is scoped only by its own business: another's staff, naming its id, find"
+          + " nothing and write nothing")
+  void aPromotionIsScopedOnlyByItsOwnBusiness() {
+    String id =
+        extractId(
+            post("/admin/promotions", promotionJson("BASKET_PERCENT", "10"), DINAR)
+                .readEntity(String.class));
+    String scope = "{\"scopeType\":\"ALL\"}";
+    assertThat(post("/admin/promotions/" + id + "/items", scope, DINAR).getStatus(), is(201));
+    assertThat(count("promotion_items", DINAR), is("1"));
+
+    for (String other : new String[] {T, YEN}) {
+      for (String role : new String[] {"OWNER", "MANAGER"}) {
+        assertThat(
+            role,
+            codeOf(postAs("/admin/promotions/" + id + "/items", scope, other, role), 404),
+            is("PRICING_SUBJECT_NOT_FOUND"));
+      }
+      for (String role : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+        assertThat(
+            role,
+            postAs("/admin/promotions/" + id + "/items", scope, other, role).getStatus(),
+            is(403));
+      }
+      assertThat("nothing was written for them", count("promotion_items", other), is("0"));
+    }
+    // A promotion nobody has is as absent to its own business's staff.
+    assertThat(
+        codeOf(postAs("/admin/promotions/" + Ids.newId() + "/items", scope, DINAR, "OWNER"), 404),
+        is("PRICING_SUBJECT_NOT_FOUND"));
+    assertThat("and nothing was written for it either", count("promotion_items", DINAR), is("1"));
   }
 }

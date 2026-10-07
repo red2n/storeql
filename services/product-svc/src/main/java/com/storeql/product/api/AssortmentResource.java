@@ -93,7 +93,22 @@ public class AssortmentResource {
       description =
           "Stores already in it are left alone rather than refused, so the same list can be sent twice"
               + " without a buyer having to work out which half is new.")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN), or a store of this business the caller is not held"
+              + " to (STORE_ACCESS_DENIED): none of the list is added")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "No such cluster (CLUSTER_NOT_FOUND), or a store that is not one of this business's"
+              + " (ASSORTMENT_STORE_NOT_FOUND), whoever names it: none of the list is added")
   @APIResponse(responseCode = "409", description = "The cluster is retired")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "tenant-svc cannot say which stores are the business's (TENANT_STORES_UNAVAILABLE): a"
+              + " store that cannot be checked is refused, not accepted")
   @POST
   @Path("/clusters/{id}/stores")
   public ApiResponse<AssortmentDtos.ClusterResponse> addStores(
@@ -101,9 +116,7 @@ public class AssortmentResource {
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
     List<UUID> stores = req.storeIds().stream().map(s -> uuid(s, "storeId")).toList();
-    stores.forEach(ctx::requireStoreAccess);
-    return ApiResponse.ok(
-        AssortmentMappers.toDto(svc.addMembers(ctx.requireTenantId(), id, stores)));
+    return ApiResponse.ok(AssortmentMappers.toDto(svc.addMembers(ctx, id, stores)));
   }
 
   // ── changes ─────────────────────────────────────────────────────────────────
@@ -116,26 +129,59 @@ public class AssortmentResource {
               + " the morning it happens. The reason is required — a de-list with none is exactly what"
               + " this log exists to stop.")
   @APIResponse(responseCode = "201", description = "Decision recorded")
-  @APIResponse(responseCode = "400", description = "Unknown action, or neither/both targets given")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "No product, action or reason, or a reason past 500 characters (VALIDATION_FAILED);"
+              + " unknown action (ASSORTMENT_ACTION_UNKNOWN), neither or both targets given"
+              + " (ASSORTMENT_TARGET_REQUIRED), an id that is not one (ASSORTMENT_ID_INVALID) or a"
+              + " day that is not one (ASSORTMENT_DATE_INVALID)")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); a store of this business the caller is not held to"
+              + " (STORE_ACCESS_DENIED); or, by a manager held to stores, a change aimed at a"
+              + " cluster or to a line sold at every store (BUSINESS_WIDE_ONLY, which names who"
+              + " can: an owner or a manager of the whole business). Nothing is recorded.")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "A de-list that would leave the line at no store, by anyone (ASSORTMENT_LAST_STORE): a"
+              + " line with no store range is sold at every store, so the sweep could never apply"
+              + " it. Judged on the line's whole plan — the range now, with every open change of"
+              + " the line, whatever its day, walked as the sweep walks them — so a de-list is"
+              + " also refused when it would leave one already recorded (for a later day, or"
+              + " waiting) taking the line out of its last store; the refusal names that one's"
+              + " day. A listing is never refused for it. Discontinue the line to stop selling it,"
+              + " or list it at another store first; a manager held to stores, who may not"
+              + " discontinue it, is pointed at an owner or a manager of the whole business to do"
+              + " so, and at another of their own stores or at that owner or manager to list it at"
+              + " one they do not keep. Nothing is recorded.")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "A line that is not this business's (PRODUCT_NOT_FOUND), no such cluster"
+              + " (CLUSTER_NOT_FOUND), or a store that is not one of this business's"
+              + " (ASSORTMENT_STORE_NOT_FOUND), whoever names it")
+  @APIResponse(
+      responseCode = "503",
+      description = "tenant-svc cannot say which stores are the business's")
   @POST
   @Path("/changes")
   public Response record(AssortmentDtos.RecordChangeRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
-    UUID storeId = optionalUuid(req.storeId(), "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
     var ch =
         svc.record(
-            ctx.requireTenantId(),
+            ctx,
             uuid(req.productId(), "productId"),
-            storeId,
+            optionalUuid(req.storeId(), "storeId"),
             optionalUuid(req.clusterId(), "clusterId"),
             req.action(),
             req.effectiveFrom() == null || req.effectiveFrom().isBlank()
                 ? null
                 : day(req.effectiveFrom(), "effectiveFrom"),
-            req.reason(),
-            ctx.requireUserId());
+            req.reason());
     return Response.status(201).entity(ApiResponse.ok(AssortmentMappers.toDto(ch))).build();
   }
 
@@ -168,8 +214,16 @@ public class AssortmentResource {
       summary = "Apply what is due",
       description =
           "Oldest first, because order carries meaning: a line listed in March and de-listed in June,"
-              + " applied the other way round, is on the shelf. A change that cannot be applied is"
-              + " reported and stays due — nothing has to be re-entered once the cause is fixed.")
+              + " applied the other way round, is on the shelf. Each change is judged on the range"
+              + " it finds. A de-list of a line sold everywhere (ASSORTMENT_RANGED_EVERYWHERE), a"
+              + " list decided by a manager held to stores of a line now sold everywhere"
+              + " (BUSINESS_WIDE_ONLY) and a change aimed at an empty cluster (CLUSTER_EMPTY) are"
+              + " reported with stillDue true and stay due — nothing has to be re-entered once the"
+              + " cause is fixed. A de-list of the last stores a line is sold at"
+              + " (ASSORTMENT_LAST_STORE: no stores means every store, so no range can make it"
+              + " apply) is closed as refused with its reason, reported once with stillDue false,"
+              + " kept on the line's history (refusedAt, refusalCode, refusal) and never due"
+              + " again.")
   @APIResponse(responseCode = "200", description = "What was applied, and what was not")
   @POST
   @Path("/changes/apply")
@@ -230,7 +284,14 @@ public class AssortmentResource {
               + " tables. A snapshot is also the better record — a report re-run next year shows"
               + " different numbers and makes an old decision look arbitrary. Sending a line twice"
               + " refreshes its figures.")
-  @APIResponse(responseCode = "400", description = "Money without a currency, or negative figures")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "Money without a currency, a currency without money, or a code ISO 4217 does not know"
+              + " (REVIEW_LINE_CURRENCY); negative units or revenue, revenue or margin with more"
+              + " decimal places than its currency has (two for GBP, none for JPY, three for KWD),"
+              + " units sold with more than three decimal places, or a figure too large to keep"
+              + " (REVIEW_LINE_FIGURES)")
   @APIResponse(responseCode = "409", description = "The review is already closed")
   @POST
   @Path("/reviews/{id}/lines")
@@ -295,23 +356,52 @@ public class AssortmentResource {
               + " review's effective date, usually the next reset, and reach the shelf when the sweep"
               + " runs. A product is de-listed only when every one of its variants was reviewed and"
               + " every one was dropped — the rest are reported as left alone, with the reason.")
-  @APIResponse(responseCode = "409", description = "Lines still undecided, or the review is closed")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "Lines still undecided (REVIEW_LINES_UNDECIDED), no lines (REVIEW_EMPTY), the review is"
+              + " closed (REVIEW_NOT_OPEN), or, whoever closes it, a de-list it would produce"
+              + " would leave a line at no store, which reads as every store"
+              + " (ASSORTMENT_LAST_STORE, naming the line: decide KEEP and discontinue it, or list"
+              + " it elsewhere first). The review stays open and nothing is recorded.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "Neither or both targets given (ASSORTMENT_TARGET_REQUIRED). Judged first: then the"
+              + " review and the store or cluster it names, each this business's (404) before the"
+              + " caller's (403), and only then the review's own state (409).")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Not an owner or manager (FORBIDDEN); a store of this business the caller is not held to"
+              + " (STORE_ACCESS_DENIED); or, by a manager held to stores, a cluster, or a change"
+              + " the review produces that they could not record one by one — to a line sold at"
+              + " every store (BUSINESS_WIDE_ONLY). The review stays open and nothing is"
+              + " recorded.")
+  @APIResponse(
+      responseCode = "404",
+      description =
+          "No such review or cluster, or a store that is not one of this business's"
+              + " (ASSORTMENT_STORE_NOT_FOUND), whoever names it")
+  @APIResponse(
+      responseCode = "503",
+      description = "tenant-svc cannot say which stores are the business's")
   @POST
   @Path("/reviews/{id}/close")
   public ApiResponse<AssortmentDtos.ReviewResultResponse> close(
       @PathParam("id") UUID id, AssortmentDtos.CloseReviewRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
-    UUID storeId = req == null ? null : optionalUuid(req.storeId(), "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
+    if (req != null) { // the body is optional: a bare close applies to the whole business
+      Validations.validate(req);
+    }
     return ApiResponse.ok(
         AssortmentMappers.toDto(
             svc.close(
-                ctx.requireTenantId(),
+                ctx,
                 id,
-                storeId,
+                req == null ? null : optionalUuid(req.storeId(), "storeId"),
                 req == null ? null : optionalUuid(req.clusterId(), "clusterId"),
-                req == null ? null : optionalDay(req.effectiveFrom(), "effectiveFrom"),
-                ctx.requireUserId())));
+                req == null ? null : optionalDay(req.effectiveFrom(), "effectiveFrom"))));
   }
 
   @Operation(

@@ -17,7 +17,9 @@ import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/page_header.dart';
 import '../../shared/widgets/scrollable_table.dart';
 import '../../shared/widgets/status_badge.dart';
+import '../../core/amount_entry.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import 'providers/products_pagination.dart';
 import 'variant_compliance_dialog.dart';
 
@@ -1328,90 +1330,15 @@ class _VariantsDialogState extends ConsumerState<_VariantsDialog> {
     );
   }
 
-  Future<void> _setPrice(VariantInfo v, double? current) async {
-    final ctrl =
-        TextEditingController(text: current != null ? current.toStringAsFixed(2) : '');
-    String? error;
-    bool saving = false;
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => AlertDialog(
-          title: Text('Set price — ${v.sku}'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (error != null) ...[
-                Text(error!,
-                    style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
-                const SizedBox(height: 8),
-              ],
-              TextField(
-                controller: ctrl,
-                autofocus: true,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: 'Selling price',
-                  helperText: 'Used on the online store and POS',
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: saving ? null : () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: saving
-                  ? null
-                  : () async {
-                      final price = double.tryParse(ctrl.text.trim());
-                      if (price == null || price <= 0) {
-                        setLocal(() => error = 'Enter a price greater than 0');
-                        return;
-                      }
-                      setLocal(() {
-                        saving = true;
-                        error = null;
-                      });
-                      try {
-                        final listId =
-                            await ref.read(defaultPriceListProvider.future);
-                        await ref.read(apiClientProvider).dio.post(
-                          '/${ApiConstants.pricing}/admin/price-lists/$listId/items',
-                          data: {
-                            'variantId': v.id,
-                            'price': price,
-                            'minQty': 1,
-                          },
-                        );
-                        ref.invalidate(variantPricesProvider);
-                        if (ctx.mounted) Navigator.pop(ctx);
-                      } catch (e) {
-                        setLocal(() {
-                          saving = false;
-                          error = friendlyError(e,
-                              fallback: 'Could not save price.');
-                        });
-                      }
-                    },
-              child: saving
-                  ?  SizedBox(
-                      height: 16,
-                      width: 16,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
-                  : const Text('Save'),
-            ),
-          ],
+  Future<void> _setPrice(VariantInfo v, double? current) => showDialog<void>(
+        context: context,
+        builder: (_) => SetPriceDialog(
+          variantId: v.id,
+          sku: v.sku,
+          current: current,
+          currency: ref.read(tenantInfoProvider).value?.currency,
         ),
-      ),
-    );
-    ctrl.dispose();
-  }
+      );
 
   Future<void> _saveVariant() async {
     if (_skuCtrl.text.trim().isEmpty) {
@@ -1607,6 +1534,127 @@ class _AssortmentDialogState extends ConsumerState<_AssortmentDialog> {
               ?  SizedBox(
                   height: 18,
                   width: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
+              : const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Sets a variant's selling price on the default price list: used online and
+/// at every till.
+class SetPriceDialog extends ConsumerStatefulWidget {
+  const SetPriceDialog({
+    super.key,
+    required this.variantId,
+    required this.sku,
+    this.current,
+    this.currency,
+  });
+
+  final String variantId;
+  final String sku;
+
+  /// The price it has now, if any.
+  final double? current;
+
+  /// The business's currency: the price is money in it.
+  final String? currency;
+
+  @override
+  ConsumerState<SetPriceDialog> createState() => _SetPriceDialogState();
+}
+
+class _SetPriceDialogState extends ConsumerState<SetPriceDialog> {
+  // The price is money in the business's currency, to its own places (none
+  // for the yen, three for the dinar), read the way the app's language writes
+  // a number ([AmountMarks]) and sent as the decimal typed. One that cannot
+  // be read is refused under the field and nothing is set: read with a point,
+  // Romanian's 1.250 lei went to every till as 1,25.
+  final _marks = AmountMarks.ofApp();
+  late final _shape = AmountShape.money(widget.currency);
+
+  /// Starts at the price it has, written at its places the way the app's
+  /// language writes a number, so Save sends it back unchanged.
+  late final _ctrl = TextEditingController(
+      text: widget.current == null ? '' : _marks.writeAt(widget.current!, _shape.decimals));
+  String? _error;
+  bool _saving = false;
+
+  bool get _refused => figureRefused(_marks, [(_ctrl, _shape)]);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (_refused) return;
+    final price = figureOf(_ctrl, _shape, _marks);
+    if (price == null || price == '0') {
+      setState(() => _error = 'Enter a price greater than 0');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final listId = await ref.read(defaultPriceListProvider.future);
+      await ref.read(apiClientProvider).dio.post(
+        '/${ApiConstants.pricing}/admin/price-lists/$listId/items',
+        // The plain decimal typed: JSON-B reads it exactly.
+        data: {'variantId': widget.variantId, 'price': price, 'minQty': 1},
+      );
+      ref.invalidate(variantPricesProvider);
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      setState(() {
+        _saving = false;
+        _error = friendlyError(e, fallback: 'Could not save price.');
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Set price — ${widget.sku}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_error != null) ...[
+            Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            const SizedBox(height: 8),
+          ],
+          FigureField(
+            fieldKey: const Key('set-price-amount'),
+            controller: _ctrl,
+            shape: _shape,
+            marks: _marks,
+            autofocus: true,
+            label: 'Selling price',
+            helper: 'Used on the online store and POS',
+            onChanged: (_) => setState(() {}),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('set-price-save'),
+          onPressed: _saving || _refused ? null : _save,
+          child: _saving
+              ? SizedBox(
+                  height: 16,
+                  width: 16,
                   child: CircularProgressIndicator(
                       strokeWidth: 2, color: Theme.of(context).colorScheme.onPrimary))
               : const Text('Save'),

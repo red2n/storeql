@@ -102,8 +102,54 @@ class RedisCacheTest {
     assertEquals(1, resolutions.get());
   }
 
+  /**
+   * What CDI does for a normal-scoped producer: {@code Instance.get()} returns a client proxy and
+   * does not run the producer; the producer runs when a method is first invoked through the proxy,
+   * and runs again on every later invocation that finds no connection. {@code producerRuns} counts
+   * the producer runs; the producer always fails, as Redis does while it is down.
+   */
+  @SuppressWarnings("unchecked")
+  private static Instance<RedisCommands<String, String>> cdiStyleInstance(
+      AtomicInteger producerRuns) {
+    RedisCommands<String, String> clientProxy =
+        (RedisCommands<String, String>)
+            Proxy.newProxyInstance(
+                RedisCommands.class.getClassLoader(),
+                new Class<?>[] {RedisCommands.class},
+                (proxy, method, args) -> {
+                  producerRuns.incrementAndGet();
+                  throw new RedisConnectionException("cannot connect");
+                });
+    return (Instance<RedisCommands<String, String>>)
+        Proxy.newProxyInstance(
+            Instance.class.getClassLoader(),
+            new Class<?>[] {Instance.class},
+            (proxy, method, args) -> {
+              if ("get".equals(method.getName())) return clientProxy;
+              throw new UnsupportedOperationException(method.getName());
+            });
+  }
+
+  /**
+   * Under CDI the connect failure surfaces on the first command, not at resolution. The backoff
+   * must hold across those commands too, or every cache call pays a fresh connect attempt while
+   * Redis is away, which is slower than having no cache.
+   */
   @Test
-  void aResolvedConnectionIsReusedRatherThanResolvedPerCall() {
+  void aFailedConnectSurfacingOnTheFirstCommandIsBackedOffToo() {
+    AtomicInteger producerRuns = new AtomicInteger();
+    RedisCache cache = new RedisCache();
+    cache.commandsSource = cdiStyleInstance(producerRuns);
+
+    for (int i = 0; i < 25; i++) {
+      assertNull(cache.get("product:t:" + i));
+    }
+
+    assertEquals(1, producerRuns.get(), "one connect attempt, then the backoff holds");
+  }
+
+  @Test
+  void aFailedCommandStopsResolutionUntilTheBackoffEnds() {
     AtomicInteger resolutions = new AtomicInteger();
     RedisCache cache = cacheBackedBy(RedisCacheTest::failingCommands, resolutions);
 
@@ -111,7 +157,7 @@ class RedisCacheTest {
       cache.get("product:t:" + i);
     }
 
-    // Lettuce reconnects underneath a live handle, so it is obtained once and kept.
+    // The first command fails and starts the backoff: the later calls do not resolve the handle.
     assertEquals(1, resolutions.get());
   }
 }

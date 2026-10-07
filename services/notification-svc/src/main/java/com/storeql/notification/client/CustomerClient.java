@@ -4,6 +4,7 @@ import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
 import com.storeql.notification.config.ServiceConfig;
+import com.storeql.notification.json.Jsons;
 import com.storeql.web.HttpHeaders;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
@@ -11,7 +12,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
@@ -125,12 +125,52 @@ public class CustomerClient {
     return Optional.empty();
   }
 
-  /** One string field of the customer record, empty when absent, null or blank. */
+  /**
+   * How to reach a customer and in what language, from a single read of the record: the language
+   * they read in, their email, and their phone (international form when held, else as typed). Each
+   * is null when the record has none.
+   */
+  public record Contact(String language, String email, String phone) {
+    /** Nothing known: customer-svc unreachable, or no such record. */
+    public static final Contact NONE = new Contact(null, null, null);
+  }
+
+  /**
+   * The contact details of a customer in one read of customer-svc (instead of one per field), with
+   * the same retry and breaker as the single-field reads. {@link Contact#NONE} when unreachable.
+   */
+  @Retry(maxRetries = 2, delay = 200)
+  @CircuitBreaker(requestVolumeThreshold = 5, failureRatio = 0.6, delay = 5000)
+  @Fallback(fallbackMethod = "contactUnavailable")
+  public Contact contactOf(UUID tenantId, UUID customerId) {
+    return readRecord(
+        tenantId,
+        customerId,
+        data ->
+            new Contact(
+                firstOf(data, "preferredLanguage").orElse(null),
+                firstOf(data, "email").orElse(null),
+                firstOf(data, "phoneE164", "phone").orElse(null)),
+        Contact.NONE);
+  }
+
+  @SuppressWarnings({"PMD.UnusedFormalParameter", "PMD.UnusedPrivateMethod"})
+  private Contact contactUnavailable(UUID tenantId, UUID customerId) {
+    LOG.log(Level.WARNING, "customer-svc unreachable — no contact for customer {0}", customerId);
+    return Contact.NONE;
+  }
+
   /** The first of {@code fields} the customer record holds, from one read of it. */
   private Optional<String> read(UUID tenantId, UUID customerId, String... fields) {
+    return readRecord(
+        tenantId, customerId, data -> firstOf(data, fields), Optional.<String>empty());
+  }
+
+  private <T> T readRecord(
+      UUID tenantId, UUID customerId, java.util.function.Function<JsonObject, T> from, T none) {
     ServiceInstance instance = registry.resolve(CUSTOMER_SERVICE).orElse(null);
     if (instance == null) {
-      return Optional.empty();
+      return none;
     }
     try (HttpClientResponse res =
         webClient
@@ -143,11 +183,11 @@ public class CustomerClient {
             .header(HeaderNames.create(HttpHeaders.ROLES), INTERNAL_ROLE)
             .request()) {
       if (res.status().code() != 200) {
-        return Optional.empty();
+        return none;
       }
-      try (JsonReader reader = Json.createReader(new StringReader(res.as(String.class)))) {
+      try (JsonReader reader = Jsons.reader(new StringReader(res.as(String.class)))) {
         JsonObject data = reader.readObject().getJsonObject("data");
-        return data == null ? Optional.empty() : firstOf(data, fields);
+        return data == null ? none : from.apply(data);
       }
     }
   }

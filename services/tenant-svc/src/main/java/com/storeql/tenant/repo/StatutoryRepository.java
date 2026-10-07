@@ -20,7 +20,7 @@ import java.util.UUID;
  *
  * <p><b>Nothing here returns a due date or a state.</b> Both are worked out from the return's own
  * frequency and offset against the period, in the domain, on every read — a stored deadline is a
- * deadline that goes stale, which is why the incident register (V11) derives its clocks too.
+ * deadline that goes stale, which is why the incident register (V7) derives its clocks too.
  *
  * <p>The returns are reference data and carry no tenant: the law is the same for every business in
  * a country. The filings are that business's own.

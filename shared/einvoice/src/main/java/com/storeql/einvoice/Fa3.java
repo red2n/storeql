@@ -22,6 +22,8 @@ import java.util.Map;
  * KOR whose lines are the differences: negative.
  */
 public final class Fa3 {
+  private static final java.util.regex.Pattern SPACE_DASH =
+      java.util.regex.Pattern.compile("[\\s-]");
 
   public static final String NAMESPACE = "http://crd.gov.pl/wzor/2025/06/25/13775/";
   public static final String SYSTEM_CODE = "FA (3)";
@@ -58,19 +60,23 @@ public final class Fa3 {
   /** The Polish tax number in a VAT identifier, or null when the party is not Polish. */
   public static String nipOf(String vatId) {
     if (vatId == null) return null;
-    String v = vatId.replaceAll("[\\s-]", "").toUpperCase(Locale.ROOT);
+    String v = SPACE_DASH.matcher(vatId).replaceAll("").toUpperCase(Locale.ROOT);
     if (!v.startsWith("PL")) return null;
     String digits = v.substring(2);
     return digits.matches("\\d{10}") ? digits : null;
   }
 
-  /** Whether ten digits are a NIP: weights 6 7 8 9 2 3 4 5 6 7, the sum mod 11 the last digit. */
+  /**
+   * Whether ten digits are a NIP: the first nine weighted 6 5 7 2 3 4 5 6 7, the sum mod 11 the
+   * tenth digit. A remainder of 10 has no digit to match, so such a number is never valid.
+   */
   public static boolean validNip(String nip) {
     if (nip == null || !nip.matches("\\d{10}")) return false;
-    int[] w = {6, 7, 8, 9, 2, 3, 4, 5, 6, 7};
+    int[] w = {6, 5, 7, 2, 3, 4, 5, 6, 7};
     int sum = 0;
     for (int i = 0; i < 9; i++) sum += (nip.charAt(i) - '0') * w[i];
-    return sum % 11 == nip.charAt(9) - '0';
+    int check = sum % 11;
+    return check != 10 && check == nip.charAt(9) - '0';
   }
 
   /** What KSeF would refuse, as rules: FA3-*. Fatal ones stop the document being written. */

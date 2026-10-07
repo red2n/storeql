@@ -14,6 +14,7 @@ import '../../shared/widgets/barcode_scanner_sheet.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
+import '../admin/providers/staff_names.dart';
 import 'pos_age_check.dart';
 import 'pos_providers.dart';
 import 'pos_recall_check.dart';
@@ -402,10 +403,48 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
     _barcodeFocus.requestFocus();
   }
 
+  /// Adds a gift card to the sale as a line of its own: an amount, and the
+  /// code of a card to top up when it is not a new one. The card is issued only
+  /// once the sale is paid.
+  Future<void> _sellGiftCard() async {
+    final storeId = ref.read(posStoreProvider);
+    if (storeId == null) {
+      _snack('Select a store before selling a gift card.', error: true);
+      return;
+    }
+    final cart = ref.read(posCartProvider);
+    var currency = cart.isNotEmpty ? cart.first.currency : '';
+    if (currency.isEmpty) {
+      try {
+        currency = (await ref.read(tenantInfoProvider.future)).currency;
+      } catch (_) {
+        // The card is then sold in the currency the till's other lines carry.
+      }
+    }
+    if (!mounted) return;
+    final sold = await showDialog<({double amount, String? code})>(
+      context: context,
+      builder: (_) => _SellGiftCardDialog(currency: currency),
+    );
+    if (sold == null) return;
+    ref
+        .read(posCartProvider.notifier)
+        .addOrIncrement(PosLine.giftCardSale(
+            amount: sold.amount, currency: currency, code: sold.code));
+    _barcodeFocus.requestFocus();
+  }
+
   Future<void> _park() async {
     final items = ref.read(posCartProvider);
     final storeId = ref.read(posStoreProvider);
     if (items.isEmpty || storeId == null) return;
+    if (items.any((l) => l.giftCard)) {
+      _snack(
+        'A gift card is sold at once and cannot be held. Take it off the sale, or finish the sale first.',
+        error: true,
+      );
+      return;
+    }
     try {
       await ref
           .read(apiClientProvider)
@@ -437,12 +476,50 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
     }
   }
 
+  /// Throws a held sale away. Discarding is not resuming: the server records
+  /// who threw it away, and the sale never reaches this till's basket.
+  Future<void> _discardHeld(BuildContext dialogContext, WidgetRef ref, ParkedSale s) async {
+    final ok = await showDialog<bool>(
+      context: dialogContext,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Discard held sale?'),
+        content: const Text('It is thrown away and cannot be resumed.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep it')),
+          FilledButton(
+            key: const Key('held-discard-confirm'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref
+          .read(apiClientProvider)
+          .dio
+          .delete('/${ApiConstants.order}/pos/parked-sales/${s.id}');
+    } catch (e) {
+      _snack(friendlyError(e, fallback: 'Could not discard the held sale.'), error: true);
+    }
+    if (mounted) ref.invalidate(parkedSalesProvider);
+  }
+
   Future<void> _resume() async {
     final selected = await showDialog<ParkedSale>(
       context: context,
       builder: (ctx) => Consumer(
         builder: (ctx, ref, _) {
           final async = ref.watch(parkedSalesProvider);
+          // Who held each sale, by name; the end of the id while it is unknown
+          // (a login the lookup is not open to, or not yet answered).
+          final holders = ref
+                  .watch(staffLoginsProvider(staffIdsKey([
+                    for (final s in async.value ?? const <ParkedSale>[]) ?s.parkedBy,
+                  ])))
+                  .value ??
+              const <String, String>{};
           return AlertDialog(
             title: const Text('Resume held sale'),
             content: SizedBox(
@@ -462,11 +539,19 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
                         children: [
                           for (final s in sales)
                             ListTile(
+                              key: Key('held-${s.id}'),
                               title: Text(s.customerName ?? 'Held sale'),
                               // A held sale carries no currency: the amount alone.
                               subtitle: Text(
                                 '${s.lines.length} item${s.lines.length == 1 ? '' : 's'}'
-                                ' · ${AppFormat.money(s.subtotal)}',
+                                ' · ${AppFormat.money(s.subtotal)}'
+                                '${s.parkedBy == null ? '' : ' · held by ${staffDisplayName(s.parkedBy!, holders)}'}',
+                              ),
+                              trailing: IconButton(
+                                key: Key('held-discard-${s.id}'),
+                                tooltip: 'Discard',
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: () => _discardHeld(ctx, ref, s),
                               ),
                               onTap: () => Navigator.pop(ctx, s),
                             ),
@@ -512,15 +597,24 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
       if (discard != true) return;
     }
 
-    ref.read(posCartProvider.notifier).loadLines(selected.lines);
+    // The server takes the sale off the open list and records who picked it up;
+    // it refuses one already resumed or discarded (another till was first), and
+    // then nothing is loaded here.
     try {
-      await ref
+      final resp = await ref
           .read(apiClientProvider)
           .dio
-          .delete('/${ApiConstants.order}/pos/parked-sales/${selected.id}');
-      ref.invalidate(parkedSalesProvider);
-    } catch (_) {
-      // Resumed locally even if the delete failed; it will expire server-side.
+          .post('/${ApiConstants.order}/pos/parked-sales/${selected.id}/resume');
+      if (!mounted) return;
+      final data = resp.data is Map ? (resp.data as Map)['data'] : null;
+      final basket = data is Map<String, dynamic> && (data['items'] is List)
+          ? ParkedSale.fromJson(data).lines
+          : selected.lines;
+      ref.read(posCartProvider.notifier).loadLines(basket.isEmpty ? selected.lines : basket);
+    } catch (e) {
+      _snack(friendlyError(e, fallback: 'Could not resume the held sale.'), error: true);
+    } finally {
+      if (mounted) ref.invalidate(parkedSalesProvider);
     }
   }
 
@@ -707,6 +801,15 @@ class _PosCartScreenState extends ConsumerState<PosCartScreen> {
                     icon: const Icon(Icons.play_circle_outline, size: 18),
                     label: const Text('Resume'),
                   ),
+                  // A card is sold for money, so a store that shows no prices
+                  // (and takes no payment) does not offer it.
+                  if (ref.watch(posShowPricesProvider))
+                    IconButton(
+                      key: const Key('pos-sell-gift-card'),
+                      tooltip: 'Sell a gift card',
+                      onPressed: _sellGiftCard,
+                      icon: const Icon(Icons.card_giftcard, size: 20),
+                    ),
                 ],
               ),
             ),
@@ -855,7 +958,13 @@ class _SaleLine extends ConsumerWidget {
       fontWeight: FontWeight.bold,
     );
 
-    final details = line.reduced
+    final details = line.giftCard
+        ? Text(
+            showPrices
+                ? '${money(line.unitPrice)} · ${line.giftCardCode ?? 'new card, issued when paid'}'
+                : line.sku,
+          )
+        : line.reduced
         ? Wrap(
             crossAxisAlignment: WrapCrossAlignment.center,
             spacing: 6,
@@ -892,7 +1001,10 @@ class _SaleLine extends ConsumerWidget {
           );
 
     final quantity = <Widget>[
-      if (line.measured)
+      // A card is one line for its amount: change it by taking it off.
+      if (line.giftCard)
+        const SizedBox.shrink()
+      else if (line.measured)
         TextButton(
           onPressed: () => _remeasure(context, ref, line),
           child: Text(
@@ -1575,10 +1687,12 @@ class _TotalsBarState extends ConsumerState<_TotalsBar> {
     final items = ref.watch(posCartProvider);
     final showPrices = ref.watch(posShowPricesProvider);
     final subtotal = ref.watch(posCartProvider.notifier).total;
+    // A discount comes off the goods; a gift card being sold is never discounted.
+    final goods = ref.watch(posCartProvider.notifier).goodsTotal;
     final currency = items.isNotEmpty ? items.first.currency : '';
     final discount = ref
         .watch(posDiscountProvider)
-        .clamp(0, subtotal)
+        .clamp(0, goods)
         .toDouble();
     final deposits = ref.watch(posCartProvider.notifier).deposits;
     final net = subtotal - discount + deposits;
@@ -1673,9 +1787,9 @@ class _TotalsBarState extends ConsumerState<_TotalsBar> {
                   child: Align(
                     alignment: AlignmentDirectional.centerStart,
                     child: TextButton.icon(
-                      onPressed: items.isEmpty
+                      onPressed: items.isEmpty || goods <= 0
                           ? null
-                          : () => _editDiscount(currency, subtotal),
+                          : () => _editDiscount(currency, goods),
                       icon: const Icon(Icons.percent, size: 16),
                       label: Text(discount > 0 ? 'Discount' : 'Add discount'),
                       style: TextButton.styleFrom(
@@ -1772,6 +1886,79 @@ class _TotalsBarState extends ConsumerState<_TotalsBar> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The amount of a gift card to sell and, to top one up, its code.
+class _SellGiftCardDialog extends StatefulWidget {
+  final String currency;
+  const _SellGiftCardDialog({required this.currency});
+
+  @override
+  State<_SellGiftCardDialog> createState() => _SellGiftCardDialogState();
+}
+
+class _SellGiftCardDialogState extends State<_SellGiftCardDialog> {
+  final _amount = TextEditingController();
+  final _code = TextEditingController();
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    _code.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final symbol = AppFormat.currencySymbol(widget.currency);
+    final v = double.tryParse(_amount.text.trim());
+    return AlertDialog(
+      title: const Text('Sell a gift card'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            key: const Key('gift-card-sale-amount'),
+            controller: _amount,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(
+              labelText: 'Amount on the card',
+              prefixText: symbol.isEmpty ? null : '$symbol ',
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          TextField(
+            key: const Key('gift-card-sale-code'),
+            controller: _code,
+            decoration: const InputDecoration(
+              labelText: 'Top up this card (optional)',
+              helperText: 'Leave empty for a new card.',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: v != null && v > 0
+              ? () {
+                  final code = _code.text.trim();
+                  Navigator.pop(context, (
+                    amount: v,
+                    code: code.isEmpty ? null : code,
+                  ));
+                }
+              : null,
+          child: const Text('Add to sale'),
+        ),
+      ],
     );
   }
 }

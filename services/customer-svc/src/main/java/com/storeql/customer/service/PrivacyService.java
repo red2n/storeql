@@ -70,6 +70,13 @@ public class PrivacyService {
   @Inject TenantProfiles profiles;
   @Inject NotificationClient notifications;
 
+  /** How many breach-intimation sends are in flight at once. */
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.customer.privacy.intimation-concurrency",
+      defaultValue = "8")
+  @Inject
+  int intimationConcurrency;
+
   Clock clock = Clock.systemUTC();
 
   /** A change to the business's settings; null keeps what is set. */
@@ -538,31 +545,51 @@ public class PrivacyService {
           "PRIVACY_NOBODY_TO_TELL", "no customer named can be reached by email or phone");
     }
     UUID id = Ids.newId();
-    int failures = 0;
-    for (Reachable p : people) {
-      boolean email = p.email() != null && !p.email().isBlank();
-      // The SMS channel only accepts E.164: the normalised form when there is one, the
-      // number as typed only when it never normalised.
-      String phone = p.phoneE164() != null ? p.phoneE164() : p.phone();
-      boolean sent =
-          notifications.send(
-              tenantId,
-              actor,
-              email ? "EMAIL" : "SMS",
-              email ? p.email() : phone,
-              s,
-              b,
-              INTIMATION_TYPE,
-              Ids.derived(id, p.id().toString()),
-              p.id());
-      if (!sent) failures++;
+    // Sent a few at a time on virtual threads (each is a call to notification-svc), so a business
+    // with thousands of customers is not a thousand round trips one after another.
+    java.util.concurrent.atomic.AtomicInteger failed =
+        new java.util.concurrent.atomic.AtomicInteger();
+    java.util.concurrent.Semaphore slots =
+        new java.util.concurrent.Semaphore(Math.max(1, intimationConcurrency));
+    try (var workers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+      for (Reachable p : people) {
+        slots.acquireUninterruptibly();
+        workers.submit(
+            () -> {
+              try {
+                if (!tell(tenantId, actor, id, p, s, b)) failed.incrementAndGet();
+              } catch (RuntimeException e) {
+                failed.incrementAndGet();
+              } finally {
+                slots.release();
+              }
+            });
+      }
     }
+    int failures = failed.get();
     if (failures > 0) {
       LOG.log(
           Level.WARNING, "breach intimation {0}: {1} of {2} not sent", id, failures, people.size());
     }
     return repo.recordIntimation(
         new Intimation(id, tenantId, noticeId, s, b, now(), actor, people.size(), failures));
+  }
+
+  private boolean tell(UUID tenantId, UUID actor, UUID id, Reachable p, String s, String b) {
+    boolean email = p.email() != null && !p.email().isBlank();
+    // The SMS channel only accepts E.164: the normalised form when there is one, the
+    // number as typed only when it never normalised.
+    String phone = p.phoneE164() != null ? p.phoneE164() : p.phone();
+    return notifications.send(
+        tenantId,
+        actor,
+        email ? "EMAIL" : "SMS",
+        email ? p.email() : phone,
+        s,
+        b,
+        INTIMATION_TYPE,
+        Ids.derived(id, p.id().toString()),
+        p.id());
   }
 
   public List<Intimation> intimations(UUID tenantId) {

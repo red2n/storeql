@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
@@ -185,4 +186,35 @@ void main() {
 
     expect(find.byKey(const Key('storefront-stock-signal')), findsNothing);
   });
+
+  // The threshold is the whole number of units typed, or it is refused under
+  // the field and nothing is saved. Read as a number literal, 0x10 was saved
+  // as 16 and +0x1F as 31: a figure nobody typed, shown to every shopper.
+  for (final (locale, typed) in const [
+    ('en_GB', '0x10'),
+    ('ro', '+0x1F'),
+    ('pl', '0X10'),
+    ('ar', '0x1e'),
+    ('en', '16.'),
+  ]) {
+    testWidgets('in $locale, "$typed" units is refused under the field, never saved as another figure',
+        (tester) async {
+      Intl.defaultLocale = locale;
+      addTearDown(() => Intl.defaultLocale = null);
+      final server = await _pump(tester, auth: () => RoleAuth('OWNER'));
+      await tester.tap(find.byKey(const Key('storefront-stock-signal')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('stock-signal-on')));
+      await tester.pumpAndSettle();
+      final field = find.byKey(const Key('stock-signal-threshold'));
+      for (var i = 1; i <= typed.length; i++) {
+        await tester.enterText(field, typed.substring(0, i));
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(const Key('stock-signal-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.any((r) => r.method == 'PUT'), isFalse);
+      expect(tester.widget<TextField>(field).decoration?.errorText, isNotNull);
+    });
+  }
 }

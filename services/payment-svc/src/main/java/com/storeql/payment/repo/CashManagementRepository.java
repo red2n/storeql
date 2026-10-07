@@ -138,68 +138,116 @@ public class CashManagementRepository extends BaseOutboxRepository {
         .orElse(BigDecimal.ZERO);
   }
 
-  /** Sum of CAPTURED tenders grouped by method, for a set of order_ids in this session's store. */
+  /**
+   * Sum of CAPTURED tenders grouped by method, at one store in a window: tenant first, then the
+   * store, so a second store trading at the same time is never in this drawer.
+   */
   public List<Object[]> sumTendersByMethod(
       UUID tenantId, UUID storeId, java.time.Instant from, java.time.Instant to) {
     return query(
         "SELECT method, COALESCE(SUM(amount),0) AS total"
             + " FROM payment_tenders"
-            + " WHERE tenant_id = ? AND status = 'CAPTURED'"
+            + " WHERE tenant_id = ? AND store_id = ? AND status = 'CAPTURED'"
             + " AND created_at >= ? AND created_at < ?"
             + " GROUP BY method",
         ps -> {
           ps.setObject(1, tenantId);
-          ps.setObject(2, java.time.OffsetDateTime.ofInstant(from, java.time.ZoneOffset.UTC));
-          ps.setObject(3, java.time.OffsetDateTime.ofInstant(to, java.time.ZoneOffset.UTC));
+          ps.setObject(2, storeId);
+          ps.setObject(3, java.time.OffsetDateTime.ofInstant(from, java.time.ZoneOffset.UTC));
+          ps.setObject(4, java.time.OffsetDateTime.ofInstant(to, java.time.ZoneOffset.UTC));
         },
         rs -> new Object[] {rs.getString("method"), rs.getBigDecimal("total")},
         "sum tenders by method");
   }
 
-  /** Sum of refunds grouped by method, matching same time window. */
+  /**
+   * Sum of refunds grouped by method at one store in a window. A refund belongs to the store it was
+   * made at ({@code refund_tenders.store_id}, written on every path): its payment's store, or an
+   * exchange's own. One with no store belongs to no drawer.
+   */
   public List<Object[]> sumRefundsByMethod(
-      UUID tenantId, java.time.Instant from, java.time.Instant to) {
+      UUID tenantId, UUID storeId, java.time.Instant from, java.time.Instant to) {
     return query(
         "SELECT method, COALESCE(SUM(amount),0) AS total"
             + " FROM refund_tenders"
-            + " WHERE tenant_id = ? AND created_at >= ? AND created_at < ?"
+            + " WHERE tenant_id = ? AND store_id = ? AND created_at >= ? AND created_at < ?"
             + " GROUP BY method",
         ps -> {
           ps.setObject(1, tenantId);
-          ps.setObject(2, java.time.OffsetDateTime.ofInstant(from, java.time.ZoneOffset.UTC));
-          ps.setObject(3, java.time.OffsetDateTime.ofInstant(to, java.time.ZoneOffset.UTC));
+          ps.setObject(2, storeId);
+          ps.setObject(3, java.time.OffsetDateTime.ofInstant(from, java.time.ZoneOffset.UTC));
+          ps.setObject(4, java.time.OffsetDateTime.ofInstant(to, java.time.ZoneOffset.UTC));
         },
         rs -> new Object[] {rs.getString("method"), rs.getBigDecimal("total")},
         "sum refunds by method");
   }
 
   /**
-   * Closes a till session, recording what was counted and how far it differed from expectation.
+   * Total of one direction of pay-in / pay-out recorded against one session.
+   *
+   * @param direction {@code PAY_IN} or {@code PAY_OUT}
+   */
+  public BigDecimal sumMovements(UUID tenantId, UUID tillSessionId, String direction) {
+    return query(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM cash_movements"
+                + " WHERE tenant_id = ? AND till_session_id = ? AND direction = ?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, tillSessionId);
+              ps.setString(3, direction);
+            },
+            rs -> rs.getBigDecimal("total"),
+            "sum cash movements")
+        .stream()
+        .findFirst()
+        .orElse(BigDecimal.ZERO);
+  }
+
+  /**
+   * Closes a till session, recording what was counted, how far it differed from expectation, who
+   * closed it and their note, and writes {@code TillSessionClosed} on the same transaction. The
+   * close happens once: a second attempt finds the session no longer open and writes nothing.
    *
    * @param tenantId owning tenant; the first condition of the query
    * @param sessionId the session to close
    * @param countedCash the cash actually counted in the drawer
    * @param overShort counted less expected — positive over, negative short
+   * @param closedAt the instant the close happened; also the end of the report's window
+   * @param closedBy the person closing
+   * @param note the closer's note on a difference, or null
+   * @param event the {@code TillSessionClosed} row to write with it
    * @return the closed session as stored
    */
   public TillSession closeTill(
-      UUID tenantId, UUID sessionId, BigDecimal countedCash, BigDecimal overShort) {
+      UUID tenantId,
+      UUID sessionId,
+      BigDecimal countedCash,
+      BigDecimal overShort,
+      java.time.Instant closedAt,
+      UUID closedBy,
+      String note,
+      com.storeql.service.OutboxRow event) {
     return inTx(
         c -> {
           int rows;
           try (PreparedStatement ps =
               c.prepareStatement(
                   "UPDATE till_sessions SET status = 'CLOSED', counted_cash = ?, over_short = ?,"
-                      + " closed_at = now() WHERE tenant_id = ? AND id = ? AND status = 'OPEN'")) {
+                      + " closed_at = ?, closed_by = ?, note = ?"
+                      + " WHERE tenant_id = ? AND id = ? AND status = 'OPEN'")) {
             ps.setBigDecimal(1, countedCash);
             ps.setBigDecimal(2, overShort);
-            ps.setObject(3, tenantId);
-            ps.setObject(4, sessionId);
+            ps.setObject(3, java.time.OffsetDateTime.ofInstant(closedAt, java.time.ZoneOffset.UTC));
+            ps.setObject(4, closedBy);
+            ps.setString(5, note);
+            ps.setObject(6, tenantId);
+            ps.setObject(7, sessionId);
             rows = ps.executeUpdate();
           }
           if (rows == 0) {
             throw ApiException.conflict("TILL_ALREADY_CLOSED", "Till session is already closed");
           }
+          insertOutbox(c, event);
           try (PreparedStatement ps =
               c.prepareStatement(
                   "SELECT id, tenant_id, store_id, opened_by, float_amount, status,"

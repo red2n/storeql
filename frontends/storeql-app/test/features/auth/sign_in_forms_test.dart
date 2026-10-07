@@ -159,6 +159,9 @@ void main() {
     await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
     expect(server.asked('$_iam/login'), isTrue, reason: 'a sign-in is not held to the sign-up rule');
+    final sent = server.requests.lastWhere((r) => r.path == '$_iam/login');
+    expect((sent.data as Map)['accountType'], 'STAFF',
+        reason: "this card runs a business: the business account, where the address also holds a shopper's");
     expect(find.text('Invalid email or password.'), findsOneWidget);
     expect(find.textContaining('Minimum'), findsNothing);
     expect(find.textContaining('at least'), findsNothing);

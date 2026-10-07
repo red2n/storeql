@@ -2,12 +2,34 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import '../../core/constants.dart';
+import '../../core/ids.dart';
 import '../../core/network/api_client.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import '../../shared/util/short_ref.dart';
 import '../storefront/storefront_providers.dart' show DepositScheme;
 import 'markdown_label.dart';
+
+/// Whether two scans are the same pack for merging into one line: the same
+/// variant, lot, expiry, sticker and scale. A pack of another lot is its own
+/// line, so a recalled lot is never hidden inside a line of a good one.
+bool samePackLine(PosLine a, PosLine b) =>
+    a.variantId == b.variantId &&
+    a.batchNo == b.batchNo &&
+    a.expiry == b.expiry &&
+    a.markdownId == b.markdownId &&
+    a.weighingInstrumentId == b.weighingInstrumentId;
+
+/// What a scanned pack declares of itself, as a till sale's line sends it
+/// (`batchNo`, `expiry` as a date, `markdownId`, `weighingInstrumentId`): one
+/// builder for every request that carries a basket the server checks like a sale.
+Map<String, dynamic> packFieldsOf(PosLine l) => {
+      if (l.weighingInstrumentId != null)
+        'weighingInstrumentId': l.weighingInstrumentId,
+      if (l.markdownId != null) 'markdownId': l.markdownId,
+      if (l.batchNo != null) 'batchNo': l.batchNo,
+      if (l.expiry != null) 'expiry': l.expiry!.toIso8601String().substring(0, 10),
+    };
 
 /// A single scanned line on the POS sale.
 class PosLine {
@@ -43,9 +65,9 @@ class PosLine {
   final double? originalPrice;
 
   /// The lot the pack itself declared, from a GS1 2D code (07.15). Null for a
-  /// linear barcode, which carries no lot. Sent with the order so a later recall
-  /// can find the sale, and used at the till so a lot-scoped recall stops the
-  /// recalled pack and nothing else.
+  /// linear barcode, which carries no lot. Used at the till so a lot-scoped
+  /// recall stops the recalled pack and nothing else, and sent with the order so
+  /// order-svc stops it too (it reads it for that check and does not keep it).
   final String? batchNo;
 
   /// The expiry the pack declared (AI 17). Null for a linear barcode.
@@ -64,6 +86,13 @@ class PosLine {
   /// back. Never part of the item's price.
   final double depositEach;
 
+  /// A gift card sold on this sale rather than a product: [unitPrice] is what
+  /// the card is loaded with, [giftCardCode] the existing card it tops up (null
+  /// for a new card). It goes to the server as `giftCardLoads`, never `items`;
+  /// the card is issued when the sale is paid.
+  final bool giftCard;
+  final String? giftCardCode;
+
   const PosLine({
     required this.variantId,
     required this.sku,
@@ -81,7 +110,26 @@ class PosLine {
     this.depositMaterial,
     this.depositVolumeMl,
     this.depositEach = 0,
+    this.giftCard = false,
+    this.giftCardCode,
   });
+
+  /// A gift card to sell: [amount] in [currency], topping up [code] when it
+  /// names a card of this business, else a new one. Every card is its own line.
+  factory PosLine.giftCardSale({
+    required double amount,
+    required String currency,
+    String? code,
+  }) => PosLine(
+    variantId: 'gift-card:${newId()}',
+    sku: code ?? 'New card',
+    name: code == null ? 'Gift card' : 'Gift card top-up',
+    qty: 1,
+    unitPrice: amount,
+    currency: currency,
+    giftCard: true,
+    giftCardCode: code,
+  );
 
   bool get measured => soldBy != 'EACH';
 
@@ -126,6 +174,8 @@ class PosLine {
     depositMaterial: depositMaterial,
     depositVolumeMl: depositVolumeMl,
     depositEach: depositEach,
+    giftCard: giftCard,
+    giftCardCode: giftCardCode,
   );
 }
 
@@ -147,6 +197,19 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
   /// shown to be born before it, so born before any later one too. Null until a
   /// check with a cut-off passes, and cleared with the cart like the age.
   DateTime? verifiedBornBefore;
+
+  /// Which sale this basket is, apart from what is in it: a new id each time
+  /// the till starts on a new basket — cleared, emptied or replaced — and the
+  /// same while the cashier works on this one.
+  ///
+  /// A card payment held at the machine is carried on only by its own sale
+  /// (held_card_payment.dart). Its content is not enough: the next customer
+  /// buying the same coffee sends the same order, and carried on under the
+  /// held keys would be recorded as paid by the earlier customer's card. Only
+  /// the basket that was never let go, or the held sale put back
+  /// ([restoreSale]), keeps the id.
+  String get saleId => _saleId;
+  String _saleId = newId();
 
   PosCartNotifier() : super(const []);
 
@@ -191,6 +254,8 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
         l.variantId == variantId && l.markdownId == markdownId;
     if (qty <= 0) {
       state = state.where((l) => !same(l)).toList();
+      // Emptied: whatever is rung up next is another sale.
+      if (state.isEmpty) _saleId = newId();
       return;
     }
     state = [
@@ -202,6 +267,7 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
   void clear() {
     ageVerifiedUpTo = 0;
     verifiedBornBefore = null;
+    _saleId = newId();
     state = const [];
   }
 
@@ -212,10 +278,27 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
   void loadLines(List<PosLine> lines) {
     ageVerifiedUpTo = 0;
     verifiedBornBefore = null;
+    _saleId = newId();
+    state = lines;
+  }
+
+  /// Puts back [lines] as the sale [saleId] they were: a sale held with its
+  /// card at the machine, so the next press carries on that same sale.
+  void restoreSale(List<PosLine> lines, String saleId) {
+    ageVerifiedUpTo = 0;
+    verifiedBornBefore = null;
+    _saleId = saleId;
     state = lines;
   }
 
   double get total => state.fold(0.0, (s, l) => s + l.lineTotal);
+
+  /// What the goods come to: the total less the gift cards being sold. A
+  /// discount is taken off this, never off a card's value.
+  double get goodsTotal =>
+      state.fold(0.0, (s, l) => l.giftCard ? s : s + l.lineTotal);
+
+  bool get hasGiftCard => state.any((l) => l.giftCard);
 
   /// The return-scheme deposits on the sale's containers (09.16): shown as
   /// their own line, added to what is due, never discounted.
@@ -225,6 +308,72 @@ class PosCartNotifier extends StateNotifier<List<PosLine>> {
 final posCartProvider = StateNotifierProvider<PosCartNotifier, List<PosLine>>(
   (ref) => PosCartNotifier(),
 );
+
+/// The products of a sale, for the order's `items`: the gift cards on it are
+/// not products.
+List<PosLine> productLines(List<PosLine> lines) =>
+    [for (final l in lines) if (!l.giftCard) l];
+
+/// The gift cards of a sale, for the order's `giftCardLoads`.
+List<Map<String, dynamic>> giftCardLoadsOf(List<PosLine> lines) => [
+  for (final l in lines)
+    if (l.giftCard)
+      {'amount': l.unitPrice, if (l.giftCardCode != null) 'code': l.giftCardCode},
+];
+
+/// A card sold on a paid sale, as the server says it was issued.
+class SoldGiftCard {
+  final double amount;
+
+  /// The card's code; null while the card is not yet issued (the sale's payment
+  /// has not completed) or when the server has not said it.
+  final String? code;
+
+  /// True when an existing card was topped up rather than a new one issued.
+  final bool topUp;
+  const SoldGiftCard({required this.amount, this.code, this.topUp = false});
+}
+
+/// The cards a paid sale issued or topped up, with their codes (order-svc
+/// `GET /orders/{id}/gift-card-loads`: PENDING lines have no code until the
+/// payment that completes the sale lands, LOADED ones do). A pending line is
+/// asked for again a few times, briefly. Empty when the answer cannot be
+/// read: the till never blocks a paid sale on this.
+Future<List<SoldGiftCard>> fetchSoldGiftCards(
+  Dio dio,
+  String orderId, {
+  int attempts = 4,
+  Duration interval = const Duration(milliseconds: 750),
+}) async {
+  var last = const <SoldGiftCard>[];
+  for (var i = 0; i < attempts; i++) {
+    try {
+      final resp =
+          await dio.get('/${ApiConstants.order}/orders/$orderId/gift-card-loads');
+      final raw = resp.data['data'];
+      var pending = false;
+      last = [
+        for (final e in raw is List ? raw : const [])
+          if (e is Map)
+            () {
+              final loaded = (e['status'] as String?)?.toUpperCase() == 'LOADED';
+              if (!loaded) pending = true;
+              final code = e['code'] as String?;
+              return SoldGiftCard(
+                amount: (e['amount'] as num?)?.toDouble() ?? 0,
+                code: loaded && code != null && code.isNotEmpty ? code : null,
+                topUp: (e['kind'] as String?)?.toUpperCase() == 'TOP_UP',
+              );
+            }(),
+      ];
+      if (!pending) return last;
+    } catch (_) {
+      return last;
+    }
+    if (i < attempts - 1) await Future<void>.delayed(interval);
+  }
+  return last;
+}
 
 /// What a reduced-price sticker means (05.4): the markdown behind a code in
 /// the shop's own range, priced at the sticker. Null when the code is not a
@@ -470,6 +619,28 @@ final posDiscountProvider = StateProvider<double>((ref) => 0);
 /// records it against the cashier who granted it, so the till must collect it up front.
 final posDiscountReasonProvider = StateProvider<String>((ref) => '');
 
+/// An exchange whose new order already exists (the server made it with the
+/// exchange) and only needs the difference paid. The tender screen settles it
+/// instead of placing an order from the cart: [due] is what the customer owes
+/// on [orderId], and [lines] are the new items, for the receipt. Cleared once
+/// the tenders have landed.
+class PosExchangeSettlement {
+  final String orderId;
+  final double due;
+  final String currency;
+  final List<PosLine> lines;
+
+  const PosExchangeSettlement({
+    required this.orderId,
+    required this.due,
+    required this.currency,
+    required this.lines,
+  });
+}
+
+final posExchangeSettlementProvider =
+    StateProvider<PosExchangeSettlement?>((ref) => null);
+
 /// A single tender (part-payment) staged against the sale before completion.
 /// POS supports splitting one sale across several tenders of different methods.
 class PosTender {
@@ -706,12 +877,16 @@ class ParkedSale {
   final List<PosLine> lines;
   final String? parkedAt;
 
+  /// The login that held it (a user id; name it through the staff lookup).
+  final String? parkedBy;
+
   const ParkedSale({
     required this.id,
     this.customerName,
     required this.subtotal,
     required this.lines,
     this.parkedAt,
+    this.parkedBy,
   });
 
   factory ParkedSale.fromJson(Map<String, dynamic> j) => ParkedSale(
@@ -719,6 +894,7 @@ class ParkedSale {
     customerName: j['customerName'] as String?,
     subtotal: (j['subtotal'] as num?)?.toDouble() ?? 0,
     parkedAt: j['parkedAt'] as String?,
+    parkedBy: j['parkedBy'] as String?,
     lines: ((j['items'] as List?) ?? []).map((e) {
       final m = e as Map<String, dynamic>;
       final vid = m['variantId'] as String? ?? '';

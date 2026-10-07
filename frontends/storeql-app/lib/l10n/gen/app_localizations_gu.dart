@@ -205,4 +205,20 @@ class AppLocalizationsGu extends AppLocalizations {
 
   @override
   String get resetPasswordRequestNew => 'નવી લિંક માટે વિનંતી કરો';
+
+  @override
+  String get startBusiness => 'વ્યવસાય શરૂ કરો';
+
+  @override
+  String get startBusinessTitle => 'તમારો વ્યવસાય શરૂ કરો';
+
+  @override
+  String get startBusinessIntro =>
+      'જે લોગિનથી તમે તમારો વ્યવસાય ચલાવશો તે બનાવો. પછી તમે વ્યવસાય અને તેની પહેલી દુકાન ગોઠવશો.';
+
+  @override
+  String get fieldPasswordConfirm => 'પાસવર્ડની પુષ્ટિ કરો';
+
+  @override
+  String get fieldPasswordMismatch => 'આ ઉપર આપેલા પાસવર્ડ સાથે મેળ ખાતું નથી.';
 }

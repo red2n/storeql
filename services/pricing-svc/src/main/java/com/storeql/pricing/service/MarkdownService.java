@@ -127,7 +127,13 @@ public class MarkdownService {
               .orElse(null);
       MarkdownStep step = ladder.stepFor(Math.max(0, b.daysUntilExpiry()));
       BigDecimal suggested =
-          current == null || step == null ? null : reducedPrice(current, step.percentOff());
+          current == null || step == null
+              ? null
+              : reducedPrice(
+                  current,
+                  step.percentOff(),
+                  com.storeql.service.Fx.minorUnits(
+                      currency != null ? currency : profiles.requireCurrency(tenantId)));
       out.add(
           new MarkdownSuggestion(
               b.batchId(),
@@ -145,10 +151,14 @@ public class MarkdownService {
     return new Plan(ladder, true, out);
   }
 
-  static BigDecimal reducedPrice(BigDecimal price, BigDecimal percentOff) {
+  /**
+   * A price less a percentage, rounded half up to the currency's minor units ({@code scale}): whole
+   * yen, pence, three-decimal dinars.
+   */
+  static BigDecimal reducedPrice(BigDecimal price, BigDecimal percentOff, int scale) {
     return price
         .multiply(BigDecimal.valueOf(100).subtract(percentOff))
-        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+        .divide(BigDecimal.valueOf(100), scale, RoundingMode.HALF_UP);
   }
 
   // ── stickering (05.4) ──────────────────────────────────────────────────────
@@ -203,14 +213,17 @@ public class MarkdownService {
         repo.findPriceList(tenantId, base.priceListId())
             .map(PriceList::currency)
             .orElseGet(() -> profiles.requireCurrency(tenantId));
-    BigDecimal original = base.price().setScale(2, RoundingMode.HALF_UP);
+    // Money in the list currency's own minor units; the percentage keeps its two decimals.
+    int scale = com.storeql.service.Fx.minorUnits(currency);
+    BigDecimal original = base.price().setScale(scale, RoundingMode.HALF_UP);
     BigDecimal reduced;
     BigDecimal percent;
     if (req.percentOff() != null) {
       percent = req.percentOff().setScale(2, RoundingMode.HALF_UP);
-      reduced = reducedPrice(original, percent);
+      reduced = reducedPrice(original, percent, scale);
     } else {
-      reduced = req.markdownPrice().setScale(2, RoundingMode.HALF_UP);
+      // A typed sticker price is no finer than the currency, kept at its minor units.
+      reduced = PricingService.amountIn(req.markdownPrice(), currency, "markdownPrice");
       percent =
           original.signum() == 0
               ? BigDecimal.ZERO
@@ -224,11 +237,13 @@ public class MarkdownService {
           "PRICING_MARKDOWN_NOT_A_REDUCTION",
           reduced + " is not below the current price " + original);
     }
-    if (reduced.compareTo(MarkdownLabel.MAX_PRICE) > 0) {
+    if (reduced.compareTo(MarkdownLabel.maxPrice(scale)) > 0) {
       throw ApiException.badRequest(
           "PRICING_MARKDOWN_LABEL_RANGE",
           "a sticker carries a price up to "
-              + MarkdownLabel.MAX_PRICE
+              + MarkdownLabel.maxPrice(scale).toPlainString()
+              + " "
+              + currency
               + "; "
               + reduced
               + " does not fit");

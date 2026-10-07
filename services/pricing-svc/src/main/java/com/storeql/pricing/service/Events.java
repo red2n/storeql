@@ -1,5 +1,6 @@
 package com.storeql.pricing.service;
 
+import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
 import java.util.UUID;
 
@@ -15,8 +16,12 @@ final class Events {
         tenantId,
         priceListId,
         String.format(
-            "{\"eventType\":\"PriceChanged\",\"tenantId\":\"%s\",\"priceListId\":\"%s\"}",
-            tenantId, priceListId));
+            // The eventId is what a consumer with no key of its own (the webhook fan-out) tells one
+            // change from the next by: a price list changes many times and has nothing else to go
+            // on.
+            "{\"eventType\":\"PriceChanged\",\"tenantId\":\"%s\",\"priceListId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, priceListId, Ids.newId()));
   }
 
   static OutboxRow promotionActivated(UUID tenantId, UUID promotionId) {
@@ -26,7 +31,8 @@ final class Events {
         tenantId,
         promotionId,
         String.format(
-            "{\"eventType\":\"PromotionActivated\",\"tenantId\":\"%s\",\"promotionId\":\"%s\"}",
-            tenantId, promotionId));
+            "{\"eventType\":\"PromotionActivated\",\"tenantId\":\"%s\",\"promotionId\":\"%s\","
+                + "\"eventId\":\"%s\"}",
+            tenantId, promotionId, Ids.newId()));
   }
 }

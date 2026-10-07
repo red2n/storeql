@@ -1,7 +1,6 @@
 package com.storeql.customer.messaging;
 
 import com.storeql.customer.service.PhoneBackfillService;
-import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.Initialized;
 import jakarta.enterprise.event.Observes;
@@ -15,7 +14,7 @@ import java.lang.System.Logger.Level;
  * tenant whose regions cannot be read this run is simply left for the next one.
  *
  * <p>{@code onStart} forces CDI to instantiate this eagerly (Helidon MP gotcha #9); the work runs
- * from {@link PostConstruct} so a failure here logs and lets the service start regardless.
+ * in the background so a failure here logs and lets the service start regardless.
  */
 @ApplicationScoped
 public class PhoneBackfillRunner {
@@ -24,11 +23,14 @@ public class PhoneBackfillRunner {
 
   @Inject PhoneBackfillService backfill;
 
+  /**
+   * Starts the work on a background virtual thread once the application is up: it can take a while
+   * with many tenants (and calls tenant-svc), and the service must be started, not wait.
+   */
   void onStart(@Observes @Initialized(ApplicationScoped.class) Object event) {
-    /* eager CDI startup */
+    Thread.ofVirtual().name("phone-backfill").start(this::run);
   }
 
-  @PostConstruct
   void run() {
     try {
       int fixed = backfill.run();

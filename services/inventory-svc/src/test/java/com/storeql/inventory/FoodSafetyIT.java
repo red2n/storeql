@@ -22,6 +22,7 @@ import jakarta.ws.rs.core.Response;
 import java.io.StringReader;
 import java.sql.DriverManager;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -298,30 +299,35 @@ class FoodSafetyIT {
     String recordId =
         created(record(pointId, "\"value\":4", null, "STOREKEEPER", null)).getString("id");
 
-    assertThat(
+    Response readIt =
         send(
-                "GET",
-                "/admin/inventory/food-safety/records/" + recordId,
-                null,
-                OTHER,
-                "OWNER",
-                MANAGER,
-                null,
-                null)
-            .getStatus(),
-        is(404));
-    assertThat(
+            "GET",
+            "/admin/inventory/food-safety/records/" + recordId,
+            null,
+            OTHER,
+            "OWNER",
+            MANAGER,
+            null,
+            null);
+    assertThat(readIt.getStatus(), is(404));
+    assertThat(readIt.readEntity(String.class), containsString("FOOD_SAFETY_RECORD_NOT_FOUND"));
+    Response useIt =
         send(
-                "POST",
-                "/admin/inventory/food-safety/records",
-                "{\"pointId\":\"" + pointId + "\",\"value\":4}",
-                OTHER,
-                "OWNER",
-                MANAGER,
-                null,
-                null)
-            .getStatus(),
-        is(404));
+            "POST",
+            "/admin/inventory/food-safety/records",
+            "{\"pointId\":\"" + pointId + "\",\"value\":4}",
+            OTHER,
+            "OWNER",
+            MANAGER,
+            null,
+            null);
+    assertThat(useIt.getStatus(), is(404));
+    assertThat(useIt.readEntity(String.class), containsString("FOOD_SAFETY_POINT_NOT_FOUND"));
+    // Nothing was recorded for the stranger: the point still has the one record of ours.
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_check_records WHERE point_id = '" + pointId + "'"),
+        is("1"));
     assertThat(
         dataArray(
                 send(
@@ -354,18 +360,18 @@ class FoodSafetyIT {
                 null,
                 null));
     assertThat(off.getBoolean("active"), is(false));
-    assertThat(
+    Response twice =
         send(
-                "POST",
-                "/admin/food-safety/points/" + pointId + "/deactivate",
-                reason,
-                T,
-                "OWNER",
-                MANAGER,
-                null,
-                null)
-            .getStatus(),
-        is(409));
+            "POST",
+            "/admin/food-safety/points/" + pointId + "/deactivate",
+            reason,
+            T,
+            "OWNER",
+            MANAGER,
+            null,
+            null);
+    assertThat(twice.getStatus(), is(409));
+    assertThat(twice.readEntity(String.class), containsString("FOOD_SAFETY_ALREADY_IN_STATE"));
 
     Response onOff = record(pointId, "\"value\":4", null, "STOREKEEPER", null);
     assertThat(onOff.getStatus(), is(409));
@@ -481,6 +487,307 @@ class FoodSafetyIT {
                     null))
             .getJsonObject(0);
     assertThat(listed.getString("dueStatus"), is("OVERDUE"));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  private static String scalar(String sql) {
+    try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = c.createStatement();
+        var rs = st.executeQuery(sql)) {
+      rs.next();
+      return rs.getString(1);
+    } catch (java.sql.SQLException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /** An upper-case code unique to this call, built from the tail of a fresh id. */
+  private static String freshCode(String prefix) {
+    String id = Ids.newId().toString();
+    return prefix + id.substring(id.length() - 12).toUpperCase(java.util.Locale.ROOT);
+  }
+
+  private Response asOwner(String method, String path, String json) {
+    return send(method, path, json, T, "OWNER", MANAGER, null, null);
+  }
+
+  private static String codeOf(Response r, int status) {
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(status));
+    return parse(body).getString("code");
+  }
+
+  @Test
+  @DisplayName("A temperature type with no limit, or in Fahrenheit, is refused and none is made")
+  void aTemperatureTypeThatIsWrongIsRefused() {
+    String noLimit = freshCode("HOT");
+    assertThat(
+        codeOf(
+            asOwner(
+                "POST",
+                "/admin/food-safety/check-types",
+                "{\"code\":\"" + noLimit + "\",\"name\":\"Hot hold\",\"kind\":\"TEMPERATURE\"}"),
+            400),
+        is("FOOD_SAFETY_LIMIT_REQUIRED"));
+    String fahrenheit = freshCode("HOT");
+    assertThat(
+        codeOf(
+            asOwner(
+                "POST",
+                "/admin/food-safety/check-types",
+                "{\"code\":\""
+                    + fahrenheit
+                    + "\",\"name\":\"Hot hold\",\"kind\":\"TEMPERATURE\",\"minValue\":63,"
+                    + "\"unit\":\"F\"}"),
+            400),
+        is("FOOD_SAFETY_UNIT_UNSUPPORTED"));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_check_types WHERE tenant_id = '"
+                + T
+                + "' AND code IN ('"
+                + noLimit
+                + "', '"
+                + fahrenheit
+                + "')"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A check type code is taken once per business; another business may use it")
+  void aCheckTypeCodeIsTakenOnce() {
+    String code = freshCode("SLICER");
+    String body = "{\"code\":\"" + code + "\",\"name\":\"Slicer cleaned\",\"kind\":\"PASS_FAIL\"}";
+    assertThat(asOwner("POST", "/admin/food-safety/check-types", body).getStatus(), is(201));
+    assertThat(
+        codeOf(asOwner("POST", "/admin/food-safety/check-types", body), 409),
+        is("FOOD_SAFETY_TYPE_CODE_TAKEN"));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_check_types WHERE tenant_id = '"
+                + T
+                + "' AND code = '"
+                + code
+                + "'"),
+        is("1"));
+    assertThat(
+        send("POST", "/admin/food-safety/check-types", body, OTHER, "OWNER", MANAGER, null, null)
+            .getStatus(),
+        is(201));
+  }
+
+  @Test
+  @DisplayName("A switched-off check type takes no new points")
+  void aSwitchedOffCheckTypeTakesNoNewPoints() {
+    String store = Ids.newId().toString();
+    JsonObject type =
+        created(
+            asOwner(
+                "POST",
+                "/admin/food-safety/check-types",
+                "{\"code\":\""
+                    + freshCode("OFF")
+                    + "\",\"name\":\"Slicer cleaned\",\"kind\":\"PASS_FAIL\"}"));
+    String typeId = type.getString("id");
+    assertThat(
+        asOwner(
+                "PUT",
+                "/admin/food-safety/check-types/" + typeId,
+                "{\"name\":\"Slicer cleaned\",\"active\":false}")
+            .getStatus(),
+        is(200));
+
+    assertThat(
+        codeOf(createPoint(store, "Slicer", typeId, "", 24), 409), is("FOOD_SAFETY_TYPE_INACTIVE"));
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_monitoring_points WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + store
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A point on a check type that is not there, or another business's own, is not found")
+  void aPointOnACheckTypeThatIsNotThereIsNotFound() {
+    String store = Ids.newId().toString();
+    JsonObject theirs =
+        created(
+            send(
+                "POST",
+                "/admin/food-safety/check-types",
+                "{\"code\":\""
+                    + freshCode("THEIRS")
+                    + "\",\"name\":\"Theirs\",\"kind\":\"PASS_FAIL\"}",
+                OTHER,
+                "OWNER",
+                MANAGER,
+                null,
+                null));
+    for (String typeId : new String[] {Ids.newId().toString(), theirs.getString("id")}) {
+      assertThat(
+          codeOf(createPoint(store, "X", typeId, "", 4), 404), is("FOOD_SAFETY_TYPE_NOT_FOUND"));
+    }
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_monitoring_points WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + store
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A reference needs both its type and its id, and nothing is recorded without them")
+  void aReferenceNeedsBothItsTypeAndItsId() {
+    String store = Ids.newId().toString();
+    String pointId =
+        created(createPoint(store, "Goods-in chiller", CHILLED, "", 4)).getString("id");
+    for (String fields :
+        new String[] {
+          "\"value\":4,\"refType\":\"GRN\"", "\"value\":4,\"refId\":\"" + Ids.newId() + "\""
+        }) {
+      assertThat(
+          codeOf(record(pointId, fields, null, "STOREKEEPER", null), 400),
+          is("FOOD_SAFETY_REFERENCE_INCOMPLETE"));
+    }
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_check_records WHERE point_id = '" + pointId + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A diary filtered by a result nobody defined, or a period backwards, is refused")
+  void aDiaryOrReviewThatIsWrongIsRefused() {
+    String store = Ids.newId().toString();
+    assertThat(
+        codeOf(
+            asOwner(
+                "GET",
+                "/admin/inventory/food-safety/records?storeId=" + store + "&result=MAYBE",
+                null),
+            400),
+        is("FOOD_SAFETY_RESULT_INVALID"));
+    assertThat(
+        codeOf(
+            asOwner(
+                "GET",
+                "/admin/inventory/food-safety/records?storeId="
+                    + store
+                    + "&from=2026-02-01T00:00:00Z&to=2026-01-01T00:00:00Z",
+                null),
+            400),
+        is("FOOD_SAFETY_PERIOD_INVERTED"));
+    for (String window :
+        new String[] {
+          "\"from\":\"2026-02-01T00:00:00Z\",\"to\":\"2026-02-01T00:00:00Z\"",
+          "\"from\":\"2026-02-01T00:00:00Z\",\"to\":\"2026-01-01T00:00:00Z\""
+        }) {
+      assertThat(
+          codeOf(
+              asOwner(
+                  "POST",
+                  "/admin/food-safety/reviews",
+                  "{\"storeId\":\"" + store + "\"," + window + "}"),
+              400),
+          is("FOOD_SAFETY_PERIOD_INVERTED"));
+    }
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_reviews WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + store
+                + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("A point switched with no reason, a blank one or an overlong one is not switched")
+  void aPointSwitchedWithoutAGoodReasonIsRefused() {
+    String store = Ids.newId().toString();
+    String pointId =
+        created(createPoint(store, "Reasonless freezer", CHILLED, "", 4)).getString("id");
+    String switchOff = "/admin/food-safety/points/" + pointId + "/deactivate";
+    String switchOn = "/admin/food-safety/points/" + pointId + "/activate";
+    String[] bad = {
+      "{}", "{\"reason\":\"\"}", "{\"reason\":\"   \"}", "{\"reason\":\"" + "x".repeat(501) + "\"}"
+    };
+
+    // Switched on: no body that breaks a constraint switches it off, and none leaves a trail.
+    for (String body : bad) {
+      assertThat(
+          "deactivate " + body.length(),
+          codeOf(asOwner("POST", switchOff, body), 400),
+          is("VALIDATION_FAILED"));
+    }
+    assertThat(pointActive(pointId), is("true"));
+    assertThat(statusChanges(pointId), is("0"));
+
+    // Switched off for a good reason, the same bodies do not switch it back on.
+    assertThat(asOwner("POST", switchOff, "{\"reason\":\"decommissioned\"}").getStatus(), is(200));
+    for (String body : bad) {
+      assertThat(
+          "activate " + body.length(),
+          codeOf(asOwner("POST", switchOn, body), 400),
+          is("VALIDATION_FAILED"));
+    }
+    assertThat(pointActive(pointId), is("false"));
+    assertThat(statusChanges(pointId), is("1"));
+  }
+
+  private static String pointActive(String pointId) {
+    return scalar(
+        "SELECT active::text FROM inventory.fs_monitoring_points WHERE tenant_id = '"
+            + T
+            + "' AND id = '"
+            + pointId
+            + "'");
+  }
+
+  private static String statusChanges(String pointId) {
+    return scalar(
+        "SELECT count(*) FROM inventory.fs_point_status_changes WHERE tenant_id = '"
+            + T
+            + "' AND point_id = '"
+            + pointId
+            + "'");
+  }
+
+  @Test
+  @DisplayName("Checks sent at once with one Idempotency-Key are recorded once")
+  void twoChecksSentAtOnceWithOneKeyAreRecordedOnce() throws Exception {
+    String store = Ids.newId().toString();
+    String pointId = created(createPoint(store, "Prep chiller", CHILLED, "", 4)).getString("id");
+    String key = Ids.newId().toString();
+
+    java.util.List<String> answers =
+        com.storeql.test.Concurrency.inParallel(
+            6,
+            () -> {
+              Response r = record(pointId, "\"value\":3", key, "STOREKEEPER", null);
+              return r.getStatus() + ":" + r.readEntity(String.class);
+            });
+
+    assertThat(answers.stream().filter(a -> a.startsWith("201:")).count(), is(1L));
+    for (String answer : answers) {
+      // The others are told it is a replay or that the key is taken; none records a second check.
+      assertThat(
+          answer,
+          answer.startsWith("201:")
+              || answer.startsWith("200:")
+              || (answer.startsWith("409:") && answer.contains("FOOD_SAFETY_DUPLICATE_KEY")),
+          is(true));
+    }
+    assertThat(
+        scalar(
+            "SELECT count(*) FROM inventory.fs_check_records WHERE point_id = '" + pointId + "'"),
+        is("1"));
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

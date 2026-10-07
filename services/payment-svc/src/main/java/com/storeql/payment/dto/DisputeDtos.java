@@ -22,11 +22,17 @@ public final class DisputeDtos {
   @Schema(name = "RecordDisputeRequest")
   public record RecordDisputeRequest(
       @Schema(description = "The card tender disputed.") @NotNull java.util.UUID paymentId,
-      @Schema(description = "What is disputed; the whole tender when absent.")
-          @DecimalMin(value = "0.01")
+      @Schema(
+              description =
+                  "What is disputed; the whole tender when absent. No finer than the currency's"
+                      + " minor unit (DISPUTE_AMOUNT_INVALID otherwise).")
+          @jakarta.validation.constraints.Positive
           @Digits(integer = 14, fraction = 4)
           BigDecimal amount,
-      @Schema(description = "What the acquirer charges for the dispute itself.")
+      @Schema(
+              description =
+                  "What the acquirer charges for the dispute itself, no finer than the currency's"
+                      + " minor unit.")
           @DecimalMin(value = "0")
           @Digits(integer = 14, fraction = 4)
           BigDecimal feeAmount,
@@ -90,7 +96,12 @@ public final class DisputeDtos {
       @Schema(description = "Whether the answer is still owed and its date has passed.")
           boolean overdue,
       String openedAt,
-      String closedAt) {}
+      String closedAt,
+      @Schema(
+              description =
+                  "The currency feeAmount is in: the acquirer's settlement currency, which need"
+                      + " not be the disputed charge's (currency).")
+          String feeCurrency) {}
 
   @Schema(name = "DisputeEvent")
   public record EventResponse(String kind, String detail, String actorId, String at) {}

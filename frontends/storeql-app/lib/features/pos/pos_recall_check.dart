@@ -19,6 +19,16 @@ import '../../core/network/api_client.dart';
 //
 // The list is kept rather than asked for per scan: a scan should not wait on a
 // network call, and a till that has lost its network is still a till.
+//
+// The till is not the only check. order-svc checks every order against the
+// same list when it is placed, at the till and online, and refuses a line this
+// check would stop outright (409 ORDER_LINE_RECALLED), so another client cannot
+// sell it either. It uses this rule, lot for lot, but it lets the sale through
+// when inventory-svc cannot answer — so this check still comes first. A sale
+// this till completed offline has already happened: when the queue replays it
+// within order-svc's grace it is recorded whatever the list says, and a line a
+// recall covered at the moment it was rung up is flagged for a manager on the
+// audit trail instead of refused.
 // ---------------------------------------------------------------------------
 
 /// How long a list may go without a successful refresh before the till says so.
@@ -115,7 +125,7 @@ class RecallCheckPack extends RecallCheckResult {
 /// recalled stock, and refusing it would take saleable food off sale.
 bool _coversPack(ActiveRecallItem i, String? batchNo, DateTime? expiry) {
   if (i.batchNo != null) {
-    if (batchNo == null || i.batchNo != batchNo) return false;
+    if (batchNo == null || !_sameLot(i.batchNo!, batchNo)) return false;
   }
   if (i.expiryFrom != null || i.expiryTo != null) {
     if (expiry == null) return false;
@@ -124,6 +134,11 @@ bool _coversPack(ActiveRecallItem i, String? batchNo, DateTime? expiry) {
   }
   return true;
 }
+
+/// The same lot, printed either way: trimmed and case aside, as inventory-svc
+/// and order-svc compare it, so the till and the server agree about a pack.
+bool _sameLot(String a, String b) =>
+    a.trim().toLowerCase() == b.trim().toLowerCase();
 
 /// Checks an item against the open recalls.
 ///

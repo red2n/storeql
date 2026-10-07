@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
 import '../../core/auth/passkeys.dart';
 import '../../core/format.dart';
 import '../../core/network/api_error.dart';
@@ -8,8 +10,11 @@ import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
+import '../../core/network/api_client.dart';
 import 'mfa_api.dart';
+import 'my_sessions.dart';
 import 'mfa_widgets.dart';
+import 'sign_out_everywhere.dart';
 
 /// A login's own second factors (20.12): an authenticator app, passkeys, and the
 /// recovery codes that go with them. Taking one away asks for the password, and
@@ -119,6 +124,26 @@ class _Factors extends ConsumerWidget {
             ),
           ),
         ),
+      // Each place this login is signed in, with a way out of any but this one.
+      MySessionsCard(
+        dio: ref.watch(apiClientProvider).dio,
+        accessToken: switch (ref.watch(authNotifierProvider).value) {
+          AuthAuthenticated(:final accessToken) => accessToken,
+          _ => null,
+        },
+      ),
+      Card(
+        child: ListTile(
+          leading: const Icon(Icons.devices_outlined),
+          title: const Text('Sign out everywhere'),
+          subtitle: const Text('Ends every session of this login, on every device. Use it if a device is lost.'),
+          trailing: OutlinedButton(
+            key: const Key('sign-out-everywhere'),
+            onPressed: () => _signOutEverywhere(context, ref),
+            child: const Text('Sign out'),
+          ),
+        ),
+      ),
     ];
 
     return ListView(
@@ -164,6 +189,19 @@ class _Factors extends ConsumerWidget {
         ],
       ],
     );
+  }
+
+  Future<void> _signOutEverywhere(BuildContext context, WidgetRef ref) async {
+    if (!await confirmSignOutEverywhere(context) || !context.mounted) return;
+    try {
+      // On success this device is signed out too and the router returns to
+      // sign-in; a refusal leaves the session as it was.
+      await ref.read(authNotifierProvider.notifier).signOutEverywhere();
+    } catch (e) {
+      if (context.mounted) {
+        _say(context, friendlyError(e, fallback: 'Could not sign out everywhere. You are still signed in.'));
+      }
+    }
   }
 
   Future<void> _setUpTotp(BuildContext context, MfaApi api, VoidCallback refresh) async {

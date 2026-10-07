@@ -125,7 +125,21 @@ public class AdminPromotionResource {
               + " only: this is money leaving the business, and it used to be reachable by any"
               + " staff role including a cashier.")
   @APIResponse(responseCode = "201", description = "Promotion created")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "PRICING_INVALID_PROMOTION_TYPE, PRICING_INCOMPLETE_BOGO, PRICING_INVALID_PROMOTION_SHAPE,"
+              + " PRICING_MISSING_THRESHOLD, PRICING_INVALID_PERCENT, PRICING_INVALID_LIMIT;"
+              + " VALIDATION_FAILED for a bad body, or an amount with more decimals than the"
+              + " business's currency has: the value of a FLAT, BASKET_FLAT, SPEND_THRESHOLD or"
+              + " MIX_MATCH promotion, or a minOrderAmount (a percentage is no money)")
   @APIResponse(responseCode = "403", description = "Caller is not management")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: an amount (the value of an amount-typed promotion, or a"
+              + " minOrderAmount) is kept to the business currency's minor units, and the currency"
+              + " could not be read")
   @POST
   public Response create(CreatePromotionRequest req) {
     Validations.validate(req);
@@ -137,19 +151,21 @@ public class AdminPromotionResource {
   /**
    * Scopes a promotion to a variant, or to everything.
    *
-   * <p>{@code CATEGORY} is rejected: pricing-svc has no variant→category mapping, so such a
-   * promotion would be stored and never fire.
+   * <p>A {@code CATEGORY} scope resolves to the variants of the products in that category, through
+   * the catalogue product-svc announces.
    *
    * @param id the promotion to scope
-   * @param req the scope type ({@code VARIANT} or {@code ALL}) and, for VARIANT, the variant id
+   * @param req the scope type ({@code VARIANT}, {@code CATEGORY} or {@code ALL}) and, for VARIANT
+   *     and CATEGORY, the variant or category id
    * @return the stored scope row
-   * @throws com.storeql.web.ApiException {@code 400} when the scope is a category, unknown, or a
-   *     VARIANT scope with no variant named
+   * @throws com.storeql.web.ApiException {@code 400} when the scope is unknown, or a VARIANT or
+   *     CATEGORY scope names no id; {@code 404} when the promotion is not this tenant's
    */
   @Operation(
       summary = "Add a scope item to a promotion",
       description = "Attaches the promotion to a scope (ALL, VARIANT or CATEGORY).")
   @APIResponse(responseCode = "201", description = "Promotion item added")
+  @APIResponse(responseCode = "404", description = "No such promotion for this tenant")
   @POST
   @Path("/{id}/items")
   public Response addItem(@PathParam("id") UUID id, AddPromotionItemRequest req) {
@@ -184,6 +200,9 @@ public class AdminPromotionResource {
   @POST
   @Path("/{id}/deactivate")
   public Response deactivate(@PathParam("id") UUID id, SetActiveRequest req) {
+    // The reason is checked in the service, which names the refusal (PRICING_REASON_REQUIRED, 400)
+    // before anything is read or written: Validations.validate here would answer VALIDATION_FAILED
+    // and lose the code the screens know.
     return Response.ok(
             ApiResponse.ok(
                 Mappers.toDto(svc.setActive(ctx, Domain.StatusChange.PROMOTION, id, false, req))))
@@ -208,6 +227,7 @@ public class AdminPromotionResource {
   @POST
   @Path("/{id}/activate")
   public Response activate(@PathParam("id") UUID id, SetActiveRequest req) {
+    // As for deactivate: the service checks the reason and names the refusal.
     return Response.ok(
             ApiResponse.ok(
                 Mappers.toDto(svc.setActive(ctx, Domain.StatusChange.PROMOTION, id, true, req))))

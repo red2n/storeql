@@ -92,10 +92,15 @@ class StorefrontAuthNotifier extends StateNotifier<StorefrontAuthState> {
         if (phone != null && phone.isNotEmpty) 'phone': phone,
       }, email);
 
-  Future<void> login(String email, String password) => _auth(
-      '/${ApiConstants.iam}/auth/login',
-      {'email': email, 'password': password},
-      email);
+  Future<void> login(String email, String password) =>
+      _auth('/${ApiConstants.iam}/auth/login', signInBody(email, password), email);
+
+  /// What the storefront's sign-in sends. One address may hold a shopper's
+  /// account and a business account, separate identities (iam-svc, 29 Sep
+  /// 2026): `accountType: CUSTOMER` asks for the shopper's, where the admin
+  /// console and the till ask for the business's.
+  static Map<String, dynamic> signInBody(String email, String password) =>
+      {'email': email, 'password': password, 'accountType': 'CUSTOMER'};
 
   Future<void> _auth(String path, Map<String, dynamic> body, String email) async {
     // Use a clean Dio (no stale Authorization header) for the auth call.
@@ -143,6 +148,22 @@ class StorefrontAuthNotifier extends StateNotifier<StorefrontAuthState> {
     await _storage.delete(key: _kRefresh);
     await _storage.delete(key: _kEmail);
     state = const StorefrontAuthState();
+  }
+
+  /// Ends every session of the shopper's login on every device
+  /// (`POST /auth/sessions/revoke-all`), then signs this device out. A refusal
+  /// throws and leaves them signed in.
+  Future<void> signOutEverywhere() async {
+    final token = state.accessToken;
+    if (token == null || token.isEmpty) {
+      throw Exception('Not signed in.');
+    }
+    final dio = Dio(BaseOptions(
+      baseUrl: ApiConstants.baseUrl,
+      headers: {'Authorization': 'Bearer $token'},
+    ));
+    await dio.post('/${ApiConstants.iam}/auth/sessions/revoke-all');
+    await logout();
   }
 
   /// SJ-D43: the account holder deletes their own login. The password is asked
@@ -1197,6 +1218,10 @@ class ServerOrderSummary {
   /// for an order with none.
   final OrderSlot? slot;
 
+  /// When an order still waiting for payment lapses (order-svc `expiresAt`: its
+  /// creation plus the business's unpaid-order limit); null when the answer names none.
+  final DateTime? expiresAt;
+
   const ServerOrderSummary({
     required this.id,
     required this.storeId,
@@ -1210,6 +1235,7 @@ class ServerOrderSummary {
     this.handoverCarrier,
     this.handoverReference,
     this.slot,
+    this.expiresAt,
   });
 
   /// Where the order is, in the shopper's words: a picked pickup is *Ready to collect*, a picked
@@ -1244,8 +1270,24 @@ class ServerOrderSummary {
         handoverCarrier: (j['handover'] as Map<String, dynamic>?)?['carrier'] as String?,
         handoverReference: (j['handover'] as Map<String, dynamic>?)?['reference'] as String?,
         slot: OrderSlot.maybe(j['slot']),
+        expiresAt: DateTime.tryParse(j['expiresAt'] as String? ?? '')?.toLocal(),
       );
 }
+
+/// When the shopper's unpaid order lapses. The history list does not carry it
+/// (order-svc answers `expiresAt` on the order itself), so a PENDING order's
+/// tile asks for its own; null when it cannot be read or the order names none.
+final orderExpiryProvider =
+    FutureProvider.autoDispose.family<DateTime?, String>((ref, orderId) async {
+  try {
+    final resp =
+        await ref.watch(storefrontDioProvider).get('/${ApiConstants.order}/orders/$orderId');
+    final at = (resp.data['data'] as Map?)?['expiresAt'] as String?;
+    return DateTime.tryParse(at ?? '')?.toLocal();
+  } catch (_) {
+    return null;
+  }
+});
 
 /// One part of a delivery split across shops (order orchestration), as the answer to placing it
 /// names it: its own order at its own shop, with its total and how many items it carries.

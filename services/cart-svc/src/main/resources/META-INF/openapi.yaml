@@ -6,8 +6,8 @@ info:
     Server-side shopping cart for the online storefront channel: session-scoped guest carts and
     authenticated customer carts, with merge-on-login. Every call requires a verified token. Reacts
     to OrderPlaced (closes the cart) and TenantStatusChanged/StoreStatusChanged (flow-guard: rejects
-    cart mutations early if the tenant/store is suspended). Reached through the API gateway at
-    /api/cart-svc.
+    cart mutations early if the business is switched off or the store is suspended or closed).
+    Reached through the API gateway at /api/cart-svc.
 tags:
   - name: Cart
     description: Cart creation/lookup, item add/update/remove, and guest-to-customer cart merge.

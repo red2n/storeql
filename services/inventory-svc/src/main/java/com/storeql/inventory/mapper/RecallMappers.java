@@ -102,10 +102,14 @@ public final class RecallMappers {
         i.kind().name(),
         i.hazard().name(),
         i.customerNotice(),
+        str(i.openedAt()),
         s.variantId().toString(),
         s.batchNo(),
         str(s.expiryFrom()),
-        str(s.expiryTo()));
+        str(s.expiryTo()),
+        str(i.endedAt()),
+        // Only an ended recall says how it ended, so the till's list of open ones reads as before.
+        i.endedAt() == null ? null : i.status().name());
   }
 
   /**

@@ -6,11 +6,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/format.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
 import 'package:storeql_app/features/admin/sales_screen.dart';
 import 'package:storeql_app/shared/widgets/status_badge.dart';
+
+import '../../support/fake_api.dart';
 
 // ---------------------------------------------------------------------------
 // A gift card looked up in Sales tools, as the person at the desk reads it:
@@ -81,6 +84,7 @@ Future<void> _pump(WidgetTester tester, Size size, {String? tab}) async {
     overrides: <Override>[
       apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
       storesProvider.overrideWith((ref) async => const <StoreInfo>[]),
+      authNotifierProvider.overrideWith(() => RoleAuth('MANAGER')),
     ],
     child: MaterialApp(home: Scaffold(body: SalesScreen(initialTab: tab))),
   ));

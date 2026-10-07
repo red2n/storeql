@@ -354,8 +354,13 @@ void main() {
           find.byKey(const Key('customer-vat-legal-name')), 'Cafe Leeds Ltd');
       await tester.enterText(
           find.byKey(const Key('customer-vat-number')), 'GB555555555');
-      await tester.enterText(
-          find.byKey(const Key('customer-vat-country')), 'gb');
+      // The country is chosen from the list of every country.
+      await tester.tap(find.byKey(const Key('customer-vat-country')));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.text('United Kingdom (GB)'), 400,
+          scrollable: find.byType(Scrollable).last);
+      await tester.tap(find.text('United Kingdom (GB)').last);
+      await tester.pumpAndSettle();
       await tester.enterText(
           find.byKey(const Key('customer-einvoice-scheme')), '9932');
       await tester.enterText(

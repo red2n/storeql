@@ -312,6 +312,32 @@ class ConsignmentIT {
         is("PURCHASE_SUPPLIER_NOT_FOUND"));
     assertThat(
         call("POST", "/admin/consignment/settlements", "{}", T, "CASHIER").getStatus(), is(403));
+    // Settling is management's: a storekeeper is refused too, and another business's staff find
+    // neither this supplier nor this settlement.
+    String settleBody =
+        "{\"supplierId\":\""
+            + supplierId
+            + "\",\"from\":\"2026-01-01\",\"to\":\""
+            + LocalDate.now()
+            + "\"}";
+    assertThat(
+        call("POST", "/admin/consignment/settlements", settleBody, T, "STOREKEEPER").getStatus(),
+        is(403));
+    assertThat(
+        call("POST", "/admin/consignment/settlements", settleBody, T2, "OWNER").getStatus(),
+        is(404));
+    assertThat(
+        code(
+            call(
+                "GET",
+                "/admin/consignment/settlements/" + settlement.getString("id"),
+                null,
+                T2,
+                "OWNER"),
+            404),
+        is("PURCHASE_CONSIGNMENT_SETTLEMENT_NOT_FOUND"));
+    assertThat(
+        call("GET", "/admin/consignment/settlements", null, T, "STOREKEEPER").getStatus(), is(403));
     assertThat(
         Envelopes.okArray(call("GET", "/admin/consignment/sales", null, T2, "OWNER")).size(),
         is(0));

@@ -25,8 +25,8 @@ public class DeferredRevenueHandler {
   @Inject DeferredRevenueService deferred;
 
   /**
-   * {@code LoyaltyEarned}, {@code LoyaltyRedeemed}, {@code LoyaltyAdjusted} or {@code
-   * LoyaltyExpired}.
+   * {@code LoyaltyEarned}, {@code LoyaltyRedeemed}, {@code LoyaltyAdjusted}, {@code LoyaltyExpired}
+   * or {@code LoyaltyReversed}.
    */
   public void loyalty(String json) {
     LoyaltyEvent event;
@@ -38,6 +38,7 @@ public class DeferredRevenueHandler {
             case "LoyaltyRedeemed" -> LoyaltyEvent.REDEEMED;
             case "LoyaltyAdjusted" -> LoyaltyEvent.ADJUSTED;
             case "LoyaltyExpired" -> LoyaltyEvent.EXPIRED;
+            case "LoyaltyReversed" -> LoyaltyEvent.REVERSED;
             default -> null;
           };
       if (kind == null) return;
@@ -73,11 +74,36 @@ public class DeferredRevenueHandler {
               o.getString("kind"),
               o.getString("paidBy"),
               o.getJsonNumber("amount").bigDecimalValue(),
-              o.getString("currency"));
+              o.getString("currency"),
+              EventJson.optUuid(o, "orderId"),
+              optString(o, "source"),
+              optString(o, "note"));
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "GiftCardLoaded not posted, malformed: " + e.getMessage());
       return;
     }
     deferred.giftCardLoaded(load);
+  }
+
+  /** {@code GiftCardLoadReversed}: the value a voided or cancelled sale loaded came back off. */
+  public void giftCardLoadReversed(String json) {
+    com.storeql.events.contract.GiftCardLoadReversed.Read r;
+    try {
+      r = com.storeql.events.contract.GiftCardLoadReversed.read(json);
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "GiftCardLoadReversed not posted, malformed: " + e.getMessage());
+      return;
+    }
+    deferred.giftCardLoadReversed(
+        r.envelope().eventId(),
+        r.envelope().requireTenant(),
+        r.orderId(),
+        r.storeId().orElse(null),
+        r.amount(),
+        r.reversedAt());
+  }
+
+  private static String optString(JsonObject o, String name) {
+    return o.containsKey(name) && !o.isNull(name) ? o.getString(name) : null;
   }
 }

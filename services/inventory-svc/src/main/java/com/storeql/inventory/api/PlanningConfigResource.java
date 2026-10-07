@@ -99,8 +99,12 @@ public class PlanningConfigResource {
   @PUT
   @Path("/par-levels")
   public ApiResponse<ParLevelResponse> upsertParLevel(UpsertParLevelRequest req) {
+    // A par level is the target the store replenishes to: management's, at a store the caller
+    // keeps.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(uuid(req.storeId(), "storeId"));
     var p =
         service.upsertParLevel(
             tenantId,

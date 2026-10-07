@@ -126,13 +126,42 @@ class RetentionTest {
     Retention down = Retention.forTest(t -> Optional.empty(), Clock.systemUTC());
     ApiException e = assertThrows(ApiException.class, () -> down.sheet(TENANT));
     assertEquals(503, e.status());
+    assertEquals("RETENTION_UNAVAILABLE", e.code());
     Retention garbled =
         Retention.forTest(t -> Optional.of("{\"data\":{\"classes\":[{}"), Clock.systemUTC());
-    assertEquals(503, assertThrows(ApiException.class, () -> garbled.sheet(TENANT)).status());
+    ApiException g = assertThrows(ApiException.class, () -> garbled.sheet(TENANT));
+    assertEquals(503, g.status());
+    assertEquals("RETENTION_UNAVAILABLE", g.code());
     Retention thin =
         Retention.forTest(
             t -> Optional.of("{\"data\":{\"classes\":[{\"code\":\"X\",\"periodDays\":1}]}}"),
             Clock.systemUTC());
-    assertEquals(503, assertThrows(ApiException.class, () -> thin.sheet(TENANT)).status());
+    ApiException n = assertThrows(ApiException.class, () -> thin.sheet(TENANT));
+    assertEquals(503, n.status());
+    assertEquals("RETENTION_UNAVAILABLE", n.code());
+  }
+
+  @Test
+  void aPurgeWithNoScheduleToObeyDeletesNothingAndAnnouncesNothing() {
+    // The refusal is the purge's own, before the purging service is asked to touch a row: a
+    // schedule that cannot be read whole must never be read as "nothing is held".
+    AtomicInteger deleted = new AtomicInteger();
+    Retention.Purge purger =
+        (cutoff, classHeld, sheet, payload) -> {
+          deleted.incrementAndGet();
+          return new Retention.Counts(1, 0);
+        };
+    String[] unreadable = {null, "{\"data\":{\"classes\":[{}", "{\"data\":null}", "{}", "not json"};
+    for (String body : unreadable) {
+      Retention r = Retention.forTest(t -> Optional.ofNullable(body), Clock.systemUTC());
+      ApiException e =
+          assertThrows(
+              ApiException.class,
+              () -> r.purge(TENANT, "test-svc", Retention.NOTIFICATION_LOG, purger),
+              String.valueOf(body));
+      assertEquals(503, e.status(), String.valueOf(body));
+      assertEquals("RETENTION_UNAVAILABLE", e.code(), String.valueOf(body));
+    }
+    assertEquals(0, deleted.get(), "no purge ran on a schedule that could not be read");
   }
 }

@@ -99,6 +99,28 @@ public final class FacturX {
 
   private FacturX() {}
 
+  /** The embedded font's bytes, read from the jar once (742 KB) rather than for every PDF. */
+  private static final class FontHolder {
+    static final byte[] BYTES = load();
+
+    private static byte[] load() {
+      try (InputStream in = FacturX.class.getResourceAsStream("fonts/DejaVuSans.ttf")) {
+        if (in == null) {
+          throw new IllegalStateException("fonts/DejaVuSans.ttf is not on the classpath");
+        }
+        return in.readAllBytes();
+      } catch (IOException e) {
+        throw new UncheckedIOException("the embedded font could not be read", e);
+      }
+    }
+  }
+
+  /** The cached font bytes; the same array every call, never to be modified. */
+  @SuppressWarnings("PMD.MethodReturnsInternalArray") // read-only by contract, copying defeats it
+  static byte[] fontBytes() {
+    return FontHolder.BYTES;
+  }
+
   /** A Factur-X PDF/A-3b of the invoice, at the EN 16931 conformance level. */
   public static byte[] create(Invoice invoice) {
     return create(
@@ -116,12 +138,7 @@ public final class FacturX {
             : invoice.seller().name();
     try (PDDocument doc = new PDDocument()) {
       doc.setVersion(1.7f);
-      PDType0Font font;
-      try (InputStream in = FacturX.class.getResourceAsStream("fonts/DejaVuSans.ttf")) {
-        if (in == null)
-          throw new IllegalStateException("fonts/DejaVuSans.ttf is not on the classpath");
-        font = PDType0Font.load(doc, in, true);
-      }
+      PDType0Font font = PDType0Font.load(doc, new ByteArrayInputStream(fontBytes()), true);
       new Layout(doc, font).render(invoice);
       PDDocumentInformation info = doc.getDocumentInformation();
       info.setTitle(title);

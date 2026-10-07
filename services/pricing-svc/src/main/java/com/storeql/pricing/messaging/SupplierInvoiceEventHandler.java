@@ -50,7 +50,9 @@ public class SupplierInvoiceEventHandler {
     Instant taxPoint;
     boolean rejected;
     try {
-      obj = Json.createReader(new StringReader(json)).readObject();
+      try (var reader = Json.createReader(new StringReader(json))) {
+        obj = reader.readObject();
+      }
       String type = obj.getString("eventType", "");
       // A rejection carries the same figures as the capture it undoes. It is projected as a
       // second, negative row rather than a delete: the table is append-only, and box 4 is a sum.
@@ -74,6 +76,15 @@ public class SupplierInvoiceEventHandler {
       net = net.negate();
       vat = vat.negate();
       gross = gross.negate();
+    }
+    // In the invoice currency's own minor units (half up); an event that does not name its
+    // currency is kept as it came.
+    String currency = obj.getString("currency", null);
+    if (currency != null && !currency.isBlank()) {
+      int units = com.storeql.service.Fx.minorUnits(currency);
+      net = net.setScale(units, java.math.RoundingMode.HALF_UP);
+      vat = vat.setScale(units, java.math.RoundingMode.HALF_UP);
+      gross = gross.setScale(units, java.math.RoundingMode.HALF_UP);
     }
     var row =
         new InputTaxTransaction(

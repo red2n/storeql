@@ -42,12 +42,12 @@ export default function ({ tenant, store, variantId, storekeeper, cashier }) {
   // ── 1. the programme: the default, then the business's own, refused by name when wrong ──
   const dflt = data(call('GET', PROGRAMME, { token: owner }));
   truthy('[+] a new business is on the platform default: four tiers, no expiry, lifetime qualification', dflt && dflt.isDefault === true && (dflt.tiers || []).length === 4 && dflt.expiryMonths == null, dflt);
-  expect(call('GET', PROGRAMME, { token: cashier.token }), '[-] a cashier cannot read the programme', 403);
-  expect(programme({ tiers: LADDER, expiryMonths: 12, qualifyingMonths: 12, reason: 'k6' }, storekeeper.token), '[-] a storekeeper cannot set it', 403);
+  expect(call('GET', PROGRAMME, { token: cashier.token }), '[-] a cashier cannot read the programme', 403, 'FORBIDDEN');
+  expect(programme({ tiers: LADDER, expiryMonths: 12, qualifyingMonths: 12, reason: 'k6' }, storekeeper.token), '[-] a storekeeper cannot set it', 403, 'FORBIDDEN');
   expect(programme({ tiers: [LADDER[0], LADDER[2], LADDER[1]], expiryMonths: 12, reason: 'k6' }), '[-] thresholds out of order are refused by name', 400, 'LOYALTY_TIERS_INVALID');
   expect(programme({ tiers: LADDER, expiryMonths: 0, reason: 'k6' }), '[-] a point that lives no months is refused by name', 400, 'LOYALTY_EXPIRY_INVALID');
   expect(programme({ tiers: LADDER, qualifyingMonths: 37, reason: 'k6' }), '[-] a qualifying window past three years is refused', 400, 'LOYALTY_EXPIRY_INVALID');
-  expect(programme({ tiers: LADDER, expiryMonths: 12 }), '[-] a programme without a reason is refused', 400);
+  expect(programme({ tiers: LADDER, expiryMonths: 12 }), '[-] a programme without a reason is refused', 400, 'VALIDATION_FAILED');
   expect(programme({ tiers: [{ name: 'bronze!', threshold: 0 }], reason: 'k6' }), '[-] a tier name is capitals, digits and underscores', 400, 'LOYALTY_TIERS_INVALID');
   const set = must(programme({ tiers: LADDER, expiryMonths: 12, qualifyingMonths: 12, reason: 'the autumn scheme' }), 200, 'programme set');
   truthy('[+] the programme is the business\'s own: three tiers, points living twelve months, a twelve-month window, the reason kept', set.isDefault === false && set.tiers.length === 3 && set.expiryMonths === 12 && set.qualifyingMonths === 12 && set.reason === 'the autumn scheme', set);
@@ -57,7 +57,7 @@ export default function ({ tenant, store, variantId, storekeeper, cashier }) {
   const customer = must(call('POST', `${CUST}/customers`, { token: owner, body: { email: `loyal-${uniq()}@k6.storeql.test`, firstName: 'Loyal', lastName: 'Shopper' } }), 201, 'customer');
   const fresh = loyalty(customer.id);
   truthy('[+] a new customer is BRONZE with nothing, SILVER ten points away, and points that will live twelve months', fresh.tier === 'BRONZE' && num(fresh.pointsBalance) === 0 && fresh.nextTier && fresh.nextTier.name === 'SILVER' && num(fresh.nextTier.pointsToGo) === 10 && fresh.expiryMonths === 12, fresh);
-  const earned = must(call('POST', `${CUST}/customers/${customer.id}/loyalty/earn`, { token: owner, body: { points: 12, reason: 'welcome' } }), 200, 'twelve points');
+  const earned = must(call('POST', `${CUST}/customers/${customer.id}/loyalty/earn`, { token: owner, idem: true, body: { points: 12, reason: 'welcome' } }), 200, 'twelve points');
   truthy('[+] twelve points reach SILVER', earned.tier === 'SILVER', earned);
   const silver = loyalty(customer.id);
   truthy('[+] ...the account says so: SILVER since now, twelve qualifying, ×1.5, GOLD thirty-eight away, nothing expiring soon', silver.tier === 'SILVER' && !!silver.tierSince && num(silver.qualifyingPoints) === 12 && num(silver.multiplier) === 1.5 && silver.nextTier.name === 'GOLD' && num(silver.nextTier.pointsToGo) === 38 && !silver.expiringSoon, silver);
@@ -82,10 +82,10 @@ export default function ({ tenant, store, variantId, storekeeper, cashier }) {
   truthy('[+] spending leaves the tier and the qualifying points where they were', spent.tier === 'SILVER' && num(spent.qualifyingPoints) === num(silver.qualifyingPoints) + expected && Math.abs(num(spent.pointsBalance) - (7 + expected)) < 0.011, spent);
   const run = data(call('POST', `${CUST}/admin/loyalty/expiry/run`, { token: owner }));
   truthy('[+] the sweep run now finds nothing due: every point is under a year old and every tier holds', run && run.customers === 0 && num(run.points) === 0 && run.retiered === 0, run);
-  expect(call('POST', `${CUST}/admin/loyalty/expiry/run`, { token: cashier.token }), '[-] a cashier cannot run the sweep', 403);
+  expect(call('POST', `${CUST}/admin/loyalty/expiry/run`, { token: cashier.token }), '[-] a cashier cannot run the sweep', 403, 'FORBIDDEN');
 
   // ── 5. lifting the expiry rule ──────────────────────────────────────────────
   const lifted = must(programme({ tiers: LADDER, qualifyingMonths: 12, reason: 'points live for ever again' }), 200, 'rule lifted');
   truthy('[+] with the expiry rule lifted, points live for ever and the account says so', lifted.expiryMonths == null && loyalty(customer.id).expiryMonths == null, lifted);
-  expect(call('GET', PROGRAMME), '[-] no token', 401);
+  expect(call('GET', PROGRAMME), '[-] no token', 401, 'UNAUTHORIZED');
 }

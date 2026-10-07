@@ -53,6 +53,31 @@ class PermissionsIT {
     gate().assertGated("GET", "/admin/cash/movements?tillSessionId=" + ID, null, "till.manage");
   }
 
+  @Test
+  @DisplayName(
+      "Recording, answering, accepting and resolving a chargeback need sales.refund, like a"
+          + " refund; reading the register stays with management's tier")
+  void disputeDecisionsAreGated() {
+    String base = "/admin/disputes";
+    gate()
+        .assertGated(
+            "POST",
+            base,
+            "{\"paymentId\":\""
+                + ID
+                + "\",\"reason\":\"FRAUDULENT\",\"caseReference\":\"C-1\","
+                + "\"evidenceDueBy\":\"2999-01-01T00:00:00Z\"}",
+            "sales.refund");
+    gate().assertGated("POST", base + "/" + ID + "/evidence", "{\"notes\":\"x\"}", "sales.refund");
+    gate().assertGated("POST", base + "/" + ID + "/accept", "{}", "sales.refund");
+    gate()
+        .assertGated("POST", base + "/" + ID + "/resolve", "{\"outcome\":\"WON\"}", "sales.refund");
+    // The register is read, not decided: a manager narrowed out of refunds still sees it.
+    try (var r = gate().send("GET", base, null, "MANAGER", "-")) {
+      org.hamcrest.MatcherAssert.assertThat(r.getStatus(), org.hamcrest.Matchers.is(200));
+    }
+  }
+
   @org.junit.jupiter.api.Test
   @org.junit.jupiter.api.DisplayName(
       "The owner's tenant data manifest is complete: every table is exported or left out by name")

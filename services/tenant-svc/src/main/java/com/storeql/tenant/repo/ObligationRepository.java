@@ -9,7 +9,7 @@ import java.time.LocalDate;
 import java.util.List;
 
 /**
- * The jurisdiction reference data (V9): which obligations reach a country, directly or through a
+ * The jurisdiction reference data (V6): which obligations reach a country, directly or through a
  * regime it belongs to. Platform-wide, so nothing here filters by tenant — no row belongs to one.
  */
 @ApplicationScoped
@@ -89,7 +89,8 @@ public class ObligationRepository extends BaseJdbcRepository {
 
   public List<LegalObligation> forCountry(String country) {
     return query(
-        "SELECT o.code, o.scope_kind, o.scope, o.citation, o.summary,"
+        "SELECT o.code, o.scope_kind, o.scope, o.citation, o.summary, o.limit_value, o.limit_unit,"
+            + " o.qualifier,"
             + " GREATEST(o.effective_from, COALESCE(m.member_from, o.effective_from)) AS eff_from,"
             + " CASE WHEN m.member_to IS NULL THEN o.effective_to"
             + "      WHEN o.effective_to IS NULL THEN m.member_to"
@@ -112,7 +113,10 @@ public class ObligationRepository extends BaseJdbcRepository {
                 rs.getObject("eff_from", LocalDate.class),
                 rs.getObject("eff_to", LocalDate.class),
                 rs.getString("citation"),
-                rs.getString("summary")),
+                rs.getString("summary"),
+                rs.getBigDecimal("limit_value"),
+                rs.getString("limit_unit"),
+                rs.getString("qualifier")),
         "legal obligations for a country");
   }
 

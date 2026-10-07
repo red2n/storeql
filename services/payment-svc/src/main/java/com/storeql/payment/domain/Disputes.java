@@ -51,8 +51,10 @@ public final class Disputes {
    * @param provider who told us: a payment provider, or MANUAL when staff recorded the acquirer's
    *     letter
    * @param providerDisputeRef the provider's id for it, or the acquirer's case number
-   * @param feeAmount what the acquirer charges for the dispute itself
+   * @param feeAmount what the acquirer charges for the dispute itself, in {@code feeCurrency}
    * @param fundsWithdrawn whether the acquirer has taken the disputed amount
+   * @param feeCurrency the currency the fee was charged in: the acquirer's settlement currency,
+   *     which need not be {@code currency}, the disputed charge's
    */
   public record Dispute(
       UUID id,
@@ -73,7 +75,8 @@ public final class Disputes {
       Instant openedAt,
       Instant closedAt,
       String idempotencyKey,
-      UUID createdBy) {
+      UUID createdBy,
+      String feeCurrency) {
 
     public boolean open() {
       return OPEN.contains(status);

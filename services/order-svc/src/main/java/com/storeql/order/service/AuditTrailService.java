@@ -14,9 +14,10 @@ import java.util.Locale;
 import java.util.UUID;
 
 /**
- * The business audit trail (20.11): who discounted, voided, opened the drawer, cancelled or took
- * goods back, read as one stream. Validates what the caller asked for and turns the repository's
- * rows into a cursor page; the rows themselves are the append-only logs, untouched.
+ * The business audit trail (20.11): who discounted, voided, opened the drawer, cancelled, took
+ * goods back, or sold offline what a recall or an unfit scale would have stopped, read as one
+ * stream. Validates what the caller asked for and turns the repository's rows into a cursor page;
+ * the rows themselves are the append-only logs, untouched.
  */
 @ApplicationScoped
 public class AuditTrailService {

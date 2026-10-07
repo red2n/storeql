@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
@@ -10,6 +11,7 @@ import '../../shared/widgets/page_header.dart';
 import '../../shared/util/short_ref.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'customer_providers.dart';
+import 'widgets/figure_field.dart';
 
 // ---------------------------------------------------------------------------
 // The business's side of its customers' privacy under India's DPDP Act (13.12):
@@ -264,6 +266,11 @@ class _SettingsCardState extends ConsumerState<_SettingsCard> {
   bool _filled = false;
   bool _busy = false;
 
+  /// The days to answer are a whole number, read with the shared reader.
+  /// Blank keeps what is set; text that cannot be read is refused under the
+  /// field, never saved as blank.
+  final _marks = AmountMarks.ofApp();
+
   @override
   void dispose() {
     for (final c in [_name, _email, _phone, _address, _days]) {
@@ -283,6 +290,10 @@ class _SettingsCardState extends ConsumerState<_SettingsCard> {
   }
 
   Future<void> _save() async {
+    if (figureRefused(_marks, [(_days, wholeNumber)])) {
+      _say(figureRefusedMessage);
+      return;
+    }
     setState(() => _busy = true);
     try {
       await ref.read(apiClientProvider).dio.put(_privacy('/settings'), data: {
@@ -290,7 +301,7 @@ class _SettingsCardState extends ConsumerState<_SettingsCard> {
         'grievanceEmail': _email.text.trim(),
         'grievancePhone': _phone.text.trim(),
         'grievanceAddress': _address.text.trim(),
-        'responseDays': int.tryParse(_days.text.trim()),
+        'responseDays': wholeOf(_days, _marks),
       });
       ref.invalidate(privacySettingsProvider);
       _say('Saved.');
@@ -356,12 +367,14 @@ class _SettingsCardState extends ConsumerState<_SettingsCard> {
                     controller: _address,
                     decoration: const InputDecoration(labelText: 'Address')),
                 const SizedBox(height: AppSpacing.md),
-                TextField(
-                  key: const Key('privacy-response-days'),
+                FigureField(
+                  fieldKey: const Key('privacy-response-days'),
                   controller: _days,
-                  keyboardType: TextInputType.number,
-                  decoration:
-                      const InputDecoration(labelText: 'Days to answer a request'),
+                  shape: wholeNumber,
+                  marks: _marks,
+                  label: 'Days to answer a request',
+                  hint: '',
+                  onChanged: (_) => setState(() {}),
                 ),
                 const SizedBox(height: AppSpacing.md),
                 Align(

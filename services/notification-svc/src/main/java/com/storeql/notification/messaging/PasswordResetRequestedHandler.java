@@ -2,10 +2,10 @@ package com.storeql.notification.messaging;
 
 import com.storeql.ids.Ids;
 import com.storeql.notification.channel.AccountEmailSender;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.repo.NotificationRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
@@ -26,7 +26,9 @@ import java.util.regex.Pattern;
  * <p>Sent by SMTP alone, through a dedicated {@link AccountEmailSender} — never in-app, MQTT or
  * SMS, so the link cannot reach a feed a business's own console can read. With no email transport
  * configured, or a failed send, nothing is retried (a retry could send the same links twice): the
- * row is written NOT_SENT and the consumer moves on, exactly once per event either way.
+ * row is written NOT_SENT and the consumer moves on, exactly once per event either way. Either way
+ * the row names the channel the sender carries it on ({@link AccountEmailSender#channel}, {@code
+ * SMTP}), as every email in the log does.
  *
  * <p>{@code subject_id} is the shopper login's own id when the address holds one, else the first
  * login's — so a person who deletes their account finds this row erased with their others by the
@@ -67,7 +69,7 @@ class PasswordResetRequestedHandler {
     String language;
     Instant expiresAt;
     List<PasswordResetWords.Entry> entries;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
       eventId = Ids.parse(obj.getString("eventId"));
       email = obj.getString("email", null);
@@ -102,7 +104,7 @@ class PasswordResetRequestedHandler {
         subjectOf(entries), // the shopper login's id, or the first login's — see the class doc
         eventId,
         TYPE,
-        "EMAIL",
+        sender.channel(),
         email,
         words.subject(),
         redact(words.body(), entries),

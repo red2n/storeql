@@ -85,7 +85,14 @@ public final class EInvoiceDtos {
       @Schema(description = "True when these exact bytes had been received before.")
           boolean alreadyReceived,
       List<RuleViolationResponse> violations,
-      List<SupplierEInvoiceLineResponse> lines) {}
+      List<SupplierEInvoiceLineResponse> lines,
+      @Schema(
+              description =
+                  "On a match asked to remember: what was not kept, and why, in words — a caller"
+                      + " held to stores does not set a supplier's electronic address, the"
+                      + " supplier's record being the whole business's. Null when everything asked"
+                      + " was kept, and on every other answer.")
+          String notRemembered) {}
 
   @Schema(name = "RuleViolationResponse", description = "One rule the document broke.")
   public record RuleViolationResponse(
@@ -126,8 +133,10 @@ public final class EInvoiceDtos {
       @Size(max = 500) List<@Valid LineChoiceRequest> lines,
       @Schema(
               description =
-                  "True to remember the choices for this supplier: its electronic address, and what"
-                      + " its item codes are, so its next invoice matches on its own.")
+                  "True to remember the choices for this supplier: what its item codes are, and —"
+                      + " for a caller held to no store — its electronic address, so its next"
+                      + " invoice matches on its own. A caller held to stores is told the address"
+                      + " was not kept (notRemembered); the match itself goes ahead.")
           boolean remember) {}
 
   @Schema(name = "LineChoiceRequest", description = "An invoice line, and the order line it is.")

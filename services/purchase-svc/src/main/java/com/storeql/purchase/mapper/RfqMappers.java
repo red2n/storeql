@@ -40,7 +40,11 @@ public final class RfqMappers {
     Map<UUID, UUID> variantByLine = new HashMap<>();
     for (Rfq.Line l : d.lines()) variantByLine.put(l.id(), l.variantId());
     Map<UUID, String> nameBySupplier = new HashMap<>();
-    for (Rfq.Bid b : d.bids()) nameBySupplier.put(b.supplierId(), b.supplierName());
+    Map<UUID, Boolean> lateBySupplier = new HashMap<>();
+    for (Rfq.Bid b : d.bids()) {
+      nameBySupplier.put(b.supplierId(), b.supplierName());
+      lateBySupplier.put(b.supplierId(), b.receivedLate());
+    }
 
     List<RfqDtos.RfqBidResponse> bids = new ArrayList<>(d.bids().size());
     for (Rfq.Bid b : d.bids()) {
@@ -61,7 +65,8 @@ public final class RfqMappers {
               b.notes(),
               b.quotedAt(),
               grades.get(b.supplierId()),
-              prices));
+              prices,
+              b.receivedLate()));
     }
 
     Rfq.Comparison c = d.comparison();
@@ -96,7 +101,8 @@ public final class RfqMappers {
                         b.total(),
                         b.currency(),
                         b.homeTotal(),
-                        b.rank()))
+                        b.rank(),
+                        lateBySupplier.getOrDefault(b.supplierId(), false)))
             .toList();
 
     Set<UUID> poIds = new LinkedHashSet<>();
@@ -109,7 +115,8 @@ public final class RfqMappers {
               a.supplierId(),
               a.poId(),
               a.unitPrice(),
-              a.currency()));
+              a.currency(),
+              a.reason()));
     }
     return new RfqDtos.RfqResponse(
         h.id(),

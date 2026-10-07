@@ -60,10 +60,13 @@ public class ProductSafetyRepository extends BaseJdbcRepository {
   public ProductSafety save(ProductSafety s, Consumer<Boolean> whenListed) {
     return inTx(
         c -> {
+          // FOR NO KEY UPDATE, as a product update locks the row: the two still go one after the
+          // other, but a variant being added (whose foreign-key check takes FOR KEY SHARE) is not
+          // held up behind a statement being saved.
           try (PreparedStatement ps =
               c.prepareStatement(
                   "SELECT status, sellable_online FROM products"
-                      + " WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
+                      + " WHERE tenant_id = ? AND id = ? FOR NO KEY UPDATE")) {
             ps.setObject(1, s.tenantId());
             ps.setObject(2, s.productId());
             try (ResultSet rs = ps.executeQuery()) {

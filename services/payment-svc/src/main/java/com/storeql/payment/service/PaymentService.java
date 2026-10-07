@@ -2,6 +2,7 @@ package com.storeql.payment.service;
 
 import com.storeql.ids.Ids;
 import com.storeql.payment.client.OrderClient;
+import com.storeql.payment.domain.CardSettlement;
 import com.storeql.payment.domain.Domain.PaymentTender;
 import com.storeql.payment.domain.Domain.RefundTender;
 import com.storeql.payment.dto.Dtos.RecordRefundRequest;
@@ -64,9 +65,16 @@ public class PaymentService {
   @Inject OrderPaymentGuard guard;
   @Inject com.storeql.payment.client.TenantStoreClient storeClient;
   @Inject com.storeql.payment.client.CustomerClient customerClient;
+  @Inject TerminalService terminals;
 
   /**
    * Staff-recorded tender (POS/back-office) — the caller's role is the trust boundary.
+   *
+   * <p>The amount is taken at the currency's own minor units, rounded half up ({@link
+   * Amounts#tendered}): the till works a sale out in binary floating point, so three items at 1.10
+   * paid with a 5.00 note arrive as 3.3000000000000003 and are recorded, announced and redeemed
+   * (store credit) as 3.30. The online paths are not rounded: theirs must equal the order's total
+   * as order-svc states it.
    *
    * @param req the order, amount, method and optional reference/notes
    * @param ctx caller context; supplies the tenant and is checked for store access
@@ -74,16 +82,55 @@ public class PaymentService {
    *     payment twice
    * @return the captured tender
    * @throws ApiException {@code PAYMENT_INVALID_METHOD} (400) for an unknown method; {@code
+   *     PAYMENT_AMOUNT_INVALID} (400) for an amount that comes to nothing at the currency's minor
+   *     unit; {@code CURRENCY_INVALID} (400) for a named currency ISO 4217 does not know; {@code
    *     PAYMENT_METHOD_DISABLED} (422) when the store owner has switched that method off
    */
   public PaymentTender recordTender(
       RecordTenderRequest req, TenantContext ctx, String idempotencyKey) {
     UUID tenantId = ctx.requireTenantId();
     UUID storeId = req.storeId() == null ? null : Ids.parse(req.storeId());
+    if (storeId == null && req.terminalPaymentId() != null && !req.terminalPaymentId().isBlank()) {
+      // A card machine's payment is the store's where the machine stands: a tender that names one
+      // and no store is that store's, and the caller must be able to act there.
+      storeId =
+          terminals
+              .attempt(tenantId, terminalPaymentOf(req, PaymentTender.METHOD_CARD))
+              .map(com.storeql.payment.domain.Terminals.Attempt::storeId)
+              .orElseThrow(
+                  () ->
+                      ApiException.notFound(
+                          "TERMINAL_ATTEMPT_NOT_FOUND", "No such payment on a terminal"));
+    }
     if (storeId != null) {
       ctx.requireStoreAccess(storeId);
     }
-    return capture(req, tenantId, Ids.parse(req.orderId()), storeId, idempotencyKey);
+    String currency = Amounts.currencyOrNull(profiles, tenantId, req.currency());
+    BigDecimal amount = Amounts.tendered(req.amount(), currency);
+    if (amount.signum() <= 0) {
+      throw ApiException.badRequest(
+          "PAYMENT_AMOUNT_INVALID",
+          "A tender comes to nothing at "
+              + (currency == null ? "four decimal places" : currency + "'s minor unit"));
+    }
+    return capture(
+        withAmount(req, amount), tenantId, Ids.parse(req.orderId()), storeId, idempotencyKey);
+  }
+
+  /** The same tender at another amount: the one the till meant, at the currency's units. */
+  private static RecordTenderRequest withAmount(RecordTenderRequest req, BigDecimal amount) {
+    return new RecordTenderRequest(
+        req.orderId(),
+        amount,
+        req.method(),
+        req.reference(),
+        req.idempotencyKey(),
+        req.notes(),
+        req.storeId(),
+        req.customerId(),
+        req.currency(),
+        req.groupId(),
+        req.terminalPaymentId());
   }
 
   /**
@@ -173,6 +220,13 @@ public class PaymentService {
           "PAYMENT_INVALID_METHOD",
           "method must be one of CASH, CARD, UPI, WALLET, GIFT_CARD, VOUCHER, STORE_CREDIT — got: "
               + req.method());
+    // The card is charged first, by order-svc's redeem; the tender then follows from its
+    // GiftCardRedeemed event (recordGiftCardRedemption). A client can never record one itself.
+    if (PaymentTender.METHOD_GIFT_CARD.equals(method)) {
+      throw ApiException.badRequest(
+          "PAYMENT_GIFT_CARD_VIA_REDEEM",
+          "charge the card through order-svc's redeem; the tender follows");
+    }
     requireMethodEnabledForStore(tenantId, storeId, method);
     if (PaymentTender.METHOD_CASH.equals(method)) {
       requireUnderCashLimit(tenantId, orderId, storeId, req);
@@ -182,6 +236,7 @@ public class PaymentService {
       return captureStoreCredit(req, tenantId, orderId, storeId);
     }
 
+    UUID attemptId = terminalPaymentOf(req, method);
     UUID tenderId = Ids.newId();
     PaymentTender tender =
         new PaymentTender(
@@ -196,9 +251,33 @@ public class PaymentService {
             req.notes(),
             Instant.now(),
             storeId);
+    var captured =
+        Events.paymentCaptured(tenantId, tenderId, orderId, req.amount(), method, storeId);
 
-    return repo.createTender(
-        tender, Events.paymentCaptured(tenantId, tenderId, orderId, req.amount(), method, storeId));
+    // A card machine's approval named by the till is recorded as exactly this tender, or refused;
+    // that is what settles the machine for its next sale.
+    if (attemptId != null) return repo.createTerminalTender(tender, captured, attemptId);
+    return repo.createTender(tender, captured);
+  }
+
+  /**
+   * The card machine's payment a tender names, or null when it names none.
+   *
+   * @throws ApiException 400 {@code TERMINAL_ID_INVALID} for one that is not an id; 400 {@code
+   *     PAYMENT_INVALID_METHOD} when the tender is not CARD — a card machine takes cards
+   */
+  private static UUID terminalPaymentOf(RecordTenderRequest req, String method) {
+    if (req.terminalPaymentId() == null || req.terminalPaymentId().isBlank()) return null;
+    if (!PaymentTender.METHOD_CARD.equals(method)) {
+      throw ApiException.badRequest(
+          "PAYMENT_INVALID_METHOD", "a card machine's payment is recorded as a CARD tender");
+    }
+    try {
+      return Ids.parse(req.terminalPaymentId());
+    } catch (IllegalArgumentException e) {
+      throw new ApiException(
+          400, "TERMINAL_ID_INVALID", "terminalPaymentId is not an id", List.of(), e);
+    }
   }
 
   /**
@@ -277,8 +356,9 @@ public class PaymentService {
             .reduce(BigDecimal.ZERO, BigDecimal::add);
     BigDecimal cash = cashSoFar.add(req.amount());
     if (limit.get().refuses(cash)) {
-      cash = cash.setScale(2, java.math.RoundingMode.HALF_UP);
-      cashSoFar = cashSoFar.setScale(2, java.math.RoundingMode.HALF_UP);
+      // Said at the currency's own minor units (whole yen, a dinar's three places), never two.
+      cash = Amounts.shown(cash, currency);
+      cashSoFar = Amounts.shown(cashSoFar, currency);
       throw ApiException.conflict(
           "PAYMENT_CASH_LIMIT_EXCEEDED",
           "cash for this sale would come to "
@@ -293,7 +373,7 @@ public class PaymentService {
               + " refuses cash of "
               + currency
               + " "
-              + limit.get().fromAmount().toPlainString()
+              + Amounts.shown(limit.get().fromAmount(), currency).toPlainString()
               + " or more; take the balance another way");
     }
   }
@@ -392,26 +472,40 @@ public class PaymentService {
   /**
    * Records a refund against a previously captured tender.
    *
-   * <p>Existence, order-match and the cumulative refund cap are enforced inside one transaction
-   * with the payment row locked, so two concurrent refunds cannot together exceed the original
-   * payment.
+   * <p>Existence, who may act at the tender's store, order-match and the cumulative refund cap are
+   * enforced inside one transaction with the payment row locked, so two concurrent refunds cannot
+   * together exceed the original payment.
    *
-   * @param tenantId owning tenant
+   * <p>A refund is the store's where its tender was taken: it lowers that store's expected cash and
+   * its X and day reports, and moves that store's order. So a caller held to stores refunds only a
+   * tender taken at one of them ({@link #requireMayRefundAt}), as they write only at their stores
+   * everywhere else; another business's tender is not found first.
+   *
+   * @param ctx the caller: their business, and the stores they are held to
    * @param orderId the order being refunded
    * @param req the payment being refunded against, the amount, method and reason
    * @param idempotencyKey the caller's {@code Idempotency-Key}, so a retry does not refund twice
    * @return the recorded refund
-   * @throws ApiException {@code PAYMENT_INVALID_METHOD} (400) for an unknown method; a conflict
-   *     when the refund would exceed what was captured
+   * @throws ApiException {@code PAYMENT_INVALID_METHOD} (400) for an unknown method; {@code
+   *     PAYMENT_AMOUNT_INVALID} (400) for an amount finer than the business's currency's minor
+   *     unit; {@code PAYMENT_NOT_FOUND} (404) for a tender the business does not have; {@code
+   *     STORE_ACCESS_DENIED} (403) for a tender taken at a store the caller is not held to; {@code
+   *     IDEMPOTENCY_KEY_REUSED} (409) for a key that already made another refund; a conflict when
+   *     the refund would exceed what was captured
    */
   public RefundTender recordRefund(
-      UUID tenantId, UUID orderId, RecordRefundRequest req, String idempotencyKey) {
+      TenantContext ctx, UUID orderId, RecordRefundRequest req, String idempotencyKey) {
+    UUID tenantId = ctx.requireTenantId();
     String method = req.method().toUpperCase(Locale.ROOT);
     if (!VALID_METHODS.contains(method))
       throw ApiException.badRequest(
           "PAYMENT_INVALID_METHOD",
           "method must be one of CASH, CARD, UPI, WALLET, GIFT_CARD, VOUCHER — got: "
               + req.method());
+    // Tenders carry no currency of their own: they are in the business's (one business, one
+    // currency), so that is the currency a refund of one is counted in.
+    Amounts.requireFits(
+        req.amount(), Amounts.currencyOrNull(profiles, tenantId, null), "PAYMENT_AMOUNT_INVALID");
 
     UUID refundId = Ids.newId();
     RefundTender refund =
@@ -427,9 +521,10 @@ public class PaymentService {
             req.reason(),
             Instant.now());
 
-    // Existence, order-match, and the cumulative refund cap are all enforced inside ONE
-    // transaction with the payment row locked — checking them here first would be a TOCTOU race
-    // letting two concurrent refunds together exceed the original payment.
+    // Existence, the caller's store, order-match, and the cumulative refund cap are all enforced
+    // inside ONE transaction with the payment row locked — checking them here first would be a
+    // TOCTOU race letting two concurrent refunds together exceed the original payment.
+    Set<UUID> heldTo = Set.copyOf(ctx.storeIds());
     return repo.createRefundGuarded(
         refund,
         Events.paymentRefunded(
@@ -439,7 +534,27 @@ public class PaymentService {
             req.amount(),
             List.of(
                 new com.storeql.payment.domain.Domain.RefundAllocation(
-                    Ids.parse(req.paymentId()), method, req.amount(), null))));
+                    Ids.parse(req.paymentId()), method, req.amount(), null))),
+        storeId -> requireMayRefundAt(heldTo, storeId));
+  }
+
+  /**
+   * Refuses a caller held to stores who would refund a tender taken at none of them.
+   *
+   * <p>Held to no store (an owner, a manager of the whole business), any tender of the business. A
+   * tender taken at no store belongs to the whole business, so only such a caller refunds it — the
+   * rule store-held reads already follow, where a row with no store is counted only when every
+   * store is read.
+   *
+   * @param heldTo the stores the caller is held to; empty for none
+   * @param storeId the store the tender was taken at, or null
+   * @throws ApiException 403 {@code STORE_ACCESS_DENIED}
+   */
+  static void requireMayRefundAt(Set<UUID> heldTo, UUID storeId) {
+    if (heldTo.isEmpty()) return;
+    if (storeId == null || !heldTo.contains(storeId)) {
+      throw ApiException.forbidden("STORE_ACCESS_DENIED", "Caller is not assigned to this store");
+    }
   }
 
   /**
@@ -520,7 +635,263 @@ public class PaymentService {
         orderId,
         requestedAmount,
         reason,
+        null,
+        new CardSettlement.OwedBack(eventId, kind, null, null, null),
         (amt, shares) ->
             Events.paymentRefunded(tenantId, refundBatchId, orderId, amt, shares, kind));
+    putBackOnCards(tenantId, orderId);
+  }
+
+  /** The event kind payment-svc began acting on late, whose history it leaves alone (V11). */
+  static final String ORDER_VOIDED = "OrderVoided";
+
+  /** When payment-svc began giving back what a voided sale took; read once, it never changes. */
+  private volatile Instant voidsSinceRead;
+
+  /**
+   * When payment-svc began giving back what a voided sale took ({@code events_handled_since}, V11).
+   * Read once and kept: a migration writes it and nothing changes it.
+   *
+   * @throws ApiException 500 {@code PAYMENT_VOIDS_SINCE_UNKNOWN} when no migration recorded it, so
+   *     the void is delivered again rather than acted on or dropped
+   */
+  public Instant voidsHandledSince() {
+    Instant since = voidsSinceRead;
+    if (since == null) {
+      since =
+          repo.handledSince(ORDER_VOIDED)
+              .orElseThrow(
+                  () ->
+                      new ApiException(
+                          500,
+                          "PAYMENT_VOIDS_SINCE_UNKNOWN",
+                          "When voids began to be refunded is not recorded (migration V11)",
+                          List.of()));
+      voidsSinceRead = since;
+    }
+    return since;
+  }
+
+  /**
+   * Gives back what a voided till sale took, as a cancelled order does ({@link
+   * #refundForOrderEvent}) — unless the void was announced before payment-svc began acting on voids
+   * ({@link com.storeql.payment.domain.EventCutoff#predates}). Those are history: payment-svc's
+   * consumer group meets them on its first read of the voids topic, they were settled by hand when
+   * they happened, and refunding them now would pay them back a second time, dated today. One is
+   * logged with its order and not acted on.
+   *
+   * @return whether the void was acted on (false for history)
+   */
+  public boolean refundVoidForOrderEvent(
+      UUID eventId, String consumer, UUID tenantId, UUID orderId) {
+    Instant since = voidsHandledSince();
+    if (com.storeql.payment.domain.EventCutoff.predates(eventId, since)) {
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "OrderVoided {0} for order {1} of tenant {2} was announced before payment-svc began"
+              + " refunding voids ({3}): history, settled by hand then, so nothing is refunded for"
+              + " it now",
+          eventId,
+          orderId,
+          tenantId,
+          since);
+      return false;
+    }
+    refundForOrderEvent(eventId, consumer, tenantId, orderId, null, "Sale voided", null);
+    return true;
+  }
+
+  /**
+   * Puts back on their cards what the order owes back to cards a terminal took: through the
+   * terminal, linked to the sale it reverses, as a provider refund would be. Asked on every
+   * delivery of the event, its own redeliveries included, so money owed is asked for even when the
+   * first delivery died between writing it and asking; each due is asked under a key of its own,
+   * which never reaches the machine twice.
+   */
+  private void putBackOnCards(UUID tenantId, UUID orderId) {
+    terminals.putBackOwed(tenantId, orderId);
+  }
+
+  /**
+   * What an {@code OrderReturned} says about where the money goes; {@code customerId} may be null,
+   * and {@code currency} is the sale's, so store credit is credited in it rather than guessed.
+   */
+  public record ReturnRefund(String method, UUID returnId, UUID customerId, String currency) {
+    public ReturnRefund(String method, UUID returnId, UUID customerId) {
+      this(method, returnId, customerId, null);
+    }
+
+    /** The value goes to a liability (store credit, gift card), not back to the card or cash. */
+    public boolean toLiability() {
+      return "STORE_CREDIT".equals(method) || "GIFT_CARD".equals(method);
+    }
+  }
+
+  /**
+   * Refund a return in whatever method the shopper chose. ORIGINAL reverses the captured tenders as
+   * before; STORE_CREDIT and GIFT_CARD record the refund under that method (no provider call, the
+   * value goes to a liability). All three are capped at what was captured less what was refunded,
+   * once per event, and announce {@code PaymentRefunded} with the method, return and customer.
+   */
+  public void refundReturnForOrderEvent(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      ReturnRefund ret) {
+    UUID refundBatchId = Ids.newId();
+    repo.refundOrderOnce(
+        eventId,
+        consumer,
+        tenantId,
+        orderId,
+        requestedAmount,
+        reason,
+        ret.toLiability() ? ret.method() : null,
+        new CardSettlement.OwedBack(eventId, null, ret.method(), ret.returnId(), ret.customerId()),
+        (amt, shares) ->
+            Events.paymentRefunded(
+                tenantId,
+                refundBatchId,
+                orderId,
+                amt,
+                shares,
+                null,
+                ret.method(),
+                ret.returnId(),
+                ret.customerId(),
+                ret.currency()));
+    putBackOnCards(tenantId, orderId);
+  }
+
+  /** The tender an exchange leaves on the new order: what the returned goods pay towards it. */
+  public static final String METHOD_EXCHANGE = "EXCHANGE";
+
+  private static final System.Logger LOG = System.getLogger(PaymentService.class.getName());
+
+  /**
+   * A gift card was charged by order-svc ({@code GiftCardRedeemed}): record a captured GIFT_CARD
+   * tender for the order and announce {@code PaymentCaptured} as a till tender does. Once per
+   * redemption: the tender's key is derived from {@code redemptionId}, and the event id is marked
+   * processed on the same transaction.
+   *
+   * @return true when a tender was recorded, false on a replay
+   */
+  public boolean recordGiftCardRedemption(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID redemptionId,
+      UUID orderId,
+      UUID storeId,
+      BigDecimal amount) {
+    UUID tenderId = Ids.newId();
+    PaymentTender tender =
+        new PaymentTender(
+            tenderId,
+            tenantId,
+            orderId,
+            amount,
+            PaymentTender.METHOD_GIFT_CARD,
+            redemptionId.toString(),
+            Ids.derived(redemptionId, "gift-card-tender").toString(),
+            PaymentTender.STATUS_CAPTURED,
+            null,
+            Instant.now(),
+            storeId);
+    return repo.captureGiftCardOnce(
+        eventId,
+        consumer,
+        tender,
+        Events.paymentCaptured(
+            tenantId, tenderId, orderId, amount, PaymentTender.METHOD_GIFT_CARD, storeId));
+  }
+
+  /** What an exchange {@code OrderReturned} says: the new order and how the value splits. */
+  public record ExchangeReturn(
+      UUID exchangeOrderId,
+      UUID storeId,
+      BigDecimal exchangeAmount,
+      BigDecimal refundAmount,
+      UUID returnId,
+      UUID customerId,
+      String currency) {}
+
+  /**
+   * An exchange, once per event, on one transaction: the returned value (capped at what the
+   * original order still has captured) is refunded to the original order under method EXCHANGE and
+   * captured as an EXCHANGE tender on the new order; any part of the refund beyond it goes back to
+   * the original tenders. Only what was actually moved is captured; a shortfall is logged.
+   */
+  public void exchangeForOrderEvent(
+      UUID eventId, String consumer, UUID tenantId, UUID orderId, ExchangeReturn ex) {
+    BigDecimal extra = ex.refundAmount().subtract(ex.exchangeAmount());
+    UUID exchangeRefundId = Ids.newId();
+    UUID originalRefundId = Ids.newId();
+    UUID tenderId = Ids.newId();
+    var moved =
+        repo.exchangeOnce(
+            eventId,
+            consumer,
+            tenantId,
+            orderId,
+            ex.exchangeAmount(),
+            extra,
+            "Exchange",
+            ex.storeId(),
+            (amt, shares) ->
+                Events.paymentRefunded(
+                    tenantId,
+                    exchangeRefundId,
+                    orderId,
+                    amt,
+                    shares,
+                    null,
+                    METHOD_EXCHANGE,
+                    ex.returnId(),
+                    ex.customerId(),
+                    ex.currency()),
+            (amt, shares) ->
+                Events.paymentRefunded(
+                    tenantId,
+                    originalRefundId,
+                    orderId,
+                    amt,
+                    shares,
+                    null,
+                    "ORIGINAL",
+                    ex.returnId(),
+                    ex.customerId(),
+                    ex.currency()),
+            amt ->
+                Events.paymentCaptured(
+                    tenantId, tenderId, ex.exchangeOrderId(), amt, METHOD_EXCHANGE, ex.storeId()),
+            amt ->
+                new PaymentTender(
+                    tenderId,
+                    tenantId,
+                    ex.exchangeOrderId(),
+                    amt,
+                    METHOD_EXCHANGE,
+                    ex.returnId() == null ? null : ex.returnId().toString(),
+                    Ids.derived(eventId, "exchange-tender").toString(),
+                    PaymentTender.STATUS_CAPTURED,
+                    null,
+                    Instant.now(),
+                    ex.storeId()),
+            new CardSettlement.OwedBack(eventId, null, "ORIGINAL", ex.returnId(), ex.customerId()));
+    putBackOnCards(tenantId, orderId);
+    if (moved != null && moved.exchanged().compareTo(ex.exchangeAmount()) < 0) {
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "Exchange {0}: order {1} had only {2} captured of the {3} being exchanged; captured "
+              + "only that on the new order",
+          eventId,
+          orderId,
+          moved.exchanged().toPlainString(),
+          ex.exchangeAmount().toPlainString());
+    }
   }
 }

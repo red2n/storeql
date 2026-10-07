@@ -55,9 +55,12 @@ public final class Problems {
     return Response.status(status).type(MEDIA_TYPE).entity(of(status, error, instance, requestId));
   }
 
+  private static final java.util.regex.Pattern WORD_BREAK =
+      java.util.regex.Pattern.compile("[_\\s]+");
+
   /** The code in words: {@code PAYMENT_CASH_LIMIT_EXCEEDED} reads "Payment cash limit exceeded". */
   public static String titleOf(String code) {
-    String[] words = code.trim().split("[_\\s]+");
+    String[] words = WORD_BREAK.split(code.trim());
     StringBuilder b = new StringBuilder();
     for (String w : words) {
       if (w.isEmpty()) continue;

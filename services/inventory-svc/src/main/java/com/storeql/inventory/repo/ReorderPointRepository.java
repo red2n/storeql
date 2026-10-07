@@ -150,6 +150,29 @@ public class ReorderPointRepository extends BaseOutboxRepository {
   }
 
   /**
+   * The plan with this id in this tenant, for the store check before its modifiers change.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param id the plan id
+   * @return the plan, or empty when it is not in this tenant
+   */
+  public Optional<ReorderPointPlan> findRopPlanById(UUID tenantId, UUID id) {
+    return query(
+            "SELECT id, tenant_id, store_id, variant_id, lead_time_days, ordering_cost,"
+                + " holding_cost_pct, unit_cost, avg_daily_demand, rop, eoq, min_order_qty,"
+                + " max_order_qty, lot_multiplier, computed_at, created_at"
+                + " FROM reorder_point_plans WHERE tenant_id=? AND id=?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, id);
+            },
+            ReorderPointRepository::mapRopPlan,
+            "find rop plan by id")
+        .stream()
+        .findFirst();
+  }
+
+  /**
    * Lists the tenant's rop plans.
    *
    * @param tenantId owning tenant; the first condition of the query

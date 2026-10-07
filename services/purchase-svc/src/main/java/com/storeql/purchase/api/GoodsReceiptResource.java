@@ -60,6 +60,10 @@ public class GoodsReceiptResource {
       responseCode = "400",
       description = "Purchase order is not SUBMITTED, or the receipt has no lines")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "STORE_ACCESS_DENIED: the order, or the store received into, is not the caller's")
   @POST
   public Response receive(
       @HeaderParam(com.storeql.web.HttpHeaders.IDEMPOTENCY_KEY) String idempotencyKey,
@@ -82,6 +86,9 @@ public class GoodsReceiptResource {
       description = "Requires ?poId=<purchase order id>.")
   @APIResponse(responseCode = "400", description = "poId query param required")
   @APIResponse(responseCode = "404", description = "Purchase order not found")
+  @APIResponse(
+      responseCode = "403",
+      description = "STORE_ACCESS_DENIED: the caller is held to stores that are not the order's")
   @GET
   public Response listByPo(@QueryParam("poId") UUID poId) {
     if (poId == null)

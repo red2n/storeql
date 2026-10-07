@@ -26,8 +26,8 @@ import java.util.UUID;
 import java.util.function.BiFunction;
 
 /**
- * The security incident register (V11). Incidents and their timelines are platform data; notices
- * are the one table here that belongs to a business, and every read of them filters by its tenant
+ * The security incident register (V7). Incidents and their timelines are platform data; notices are
+ * the one table here that belongs to a business, and every read of them filters by its tenant
  * first.
  */
 @ApplicationScoped
@@ -201,6 +201,7 @@ public class SecurityIncidentRepository extends BaseJdbcRepository {
           IncidentEvent told = decide.apply(incident, events(c, incidentId));
           List<UUID> targets = incident.affectsAllTenants() ? allTenants(c) : incident.tenantIds();
           int issued = 0;
+          int queued = 0;
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO security_notices"
@@ -215,8 +216,13 @@ public class SecurityIncidentRepository extends BaseJdbcRepository {
               ps.setString(5, body);
               ps.setObject(6, utc(at));
               ps.setObject(7, actor);
-              issued += ps.executeUpdate();
+              ps.addBatch();
+              if (++queued == NOTICE_BATCH) {
+                issued += inserted(ps.executeBatch());
+                queued = 0;
+              }
             }
+            if (queued > 0) issued += inserted(ps.executeBatch());
           }
           if (told != null) {
             insertEvent(c, told);
@@ -225,6 +231,15 @@ public class SecurityIncidentRepository extends BaseJdbcRepository {
           return new NoticeIssue(issued, counts[0], counts[1]);
         },
         "issue security notices");
+  }
+
+  private static final int NOTICE_BATCH = 500;
+
+  /** Rows a batch really inserted: a conflict that did nothing counts zero. */
+  private static int inserted(int... counts) {
+    int n = 0;
+    for (int count : counts) n += Math.max(0, count);
+    return n;
   }
 
   /** The duties a regime puts on a business told of a breach, in order (13.12). */

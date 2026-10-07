@@ -228,6 +228,26 @@ public class TenantContext {
   }
 
   /**
+   * The stores a report reads. A store that is named is checked against the caller's; with none
+   * named, a caller held to no store reads the whole business and a caller held to some reads
+   * exactly those, added together — a manager of two branches sees both, and never a third.
+   *
+   * <p>Unlike {@link #scopeStore}, several stores never have to be narrowed to one: a report sums,
+   * so the caller's stores together is an answer, where a stock list of several has no single one.
+   *
+   * @param requested the store named on the request, or null
+   * @return null for every store in the business, else the stores to read (never empty)
+   * @throws ApiException 403 STORE_ACCESS_DENIED for a store the caller does not keep
+   */
+  public Set<UUID> reportStores(UUID requested) {
+    if (requested != null) {
+      requireStoreAccess(requested);
+      return Set.of(requested);
+    }
+    return storeIds.isEmpty() ? null : Set.copyOf(storeIds);
+  }
+
+  /**
    * Populates this request-scoped context from identity headers. Called once per request by {@link
    * TenantContextFilter}; not for use outside the filter chain.
    *

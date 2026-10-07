@@ -23,15 +23,28 @@ import java.util.stream.Collectors;
  * goes out in now, a new version saved, a version retired, a draft previewed, and how the
  * business's messages are signed and in what language they go when the reader's is not known.
  *
- * <p>A template is judged before it is kept, never when a message is due: it must parse, use only
- * the values its message has, keep every part the message may not leave out, and — filled with the
- * message's sample values — fit the form it goes out in. A preview runs the same checks and says
- * what they found instead of refusing, so a draft can be seen half-written.
+ * <p>A template is judged before it is kept: it must parse, use only the values its message has,
+ * keep every part the message may not leave out, and — filled with the message's sample values —
+ * fit the form it goes out in. A preview runs the same checks and says what they found instead of
+ * refusing, so a draft can be seen half-written. A message that is due parses the stored words
+ * again and passes over a version that fails ({@link Messages#compose}).
  */
 @ApplicationScoped
 public class MessageTemplateService {
 
   private static final int HISTORY = 20;
+
+  /** The business's own words in the language asked for. */
+  static final String SOURCE_BUSINESS = "BUSINESS";
+
+  /**
+   * The business's words in its default language, in place of this language's: it has no live
+   * version in this one, or its live version cannot be used.
+   */
+  static final String SOURCE_DEFAULT_LANGUAGE = "DEFAULT_LANGUAGE";
+
+  /** No words of the business's to go out in: the platform's. */
+  static final String SOURCE_DEFAULT = "DEFAULT";
 
   /**
    * The platform's own neutral stand-in for a preview or a check when the business's currency
@@ -96,17 +109,20 @@ public class MessageTemplateService {
   }
 
   /**
-   * The words one message, form and language goes out in now: the business's live version, or the
-   * platform's words when it has none — the draft an editor starts from.
+   * The words one message, form and language goes out in now — the draft an editor starts from.
+   * They are the ones {@link Messages#compose} would send, chosen by the same rule ({@link
+   * Messages#ownWords}): the business's live version in the language, else its live version in its
+   * default language (a retired, never-written or unusable language goes out in those), else the
+   * platform's words. {@code storedWordsUnusable} says when this language's own live version is
+   * there but cannot be used. {@code history} is this language's own.
    */
   public TemplateDtos.TemplateView get(UUID tenantId, String type, String form, String language) {
     Catalogue.MessageType t = type(type);
     Catalogue.FormSpec spec = form(t, form);
     String lang = language(language);
-    var history = repo.history(tenantId, t.key(), spec.form(), lang, HISTORY);
-    var live = history.stream().filter(s -> s.retiredAt() == null).findFirst();
+    boolean unusable = messages.ownWordsUnusable(tenantId, t.key(), spec.form(), lang);
     var versions =
-        history.stream()
+        repo.history(tenantId, t.key(), spec.form(), lang, HISTORY).stream()
             .map(
                 s ->
                     new TemplateDtos.Version(
@@ -116,13 +132,17 @@ public class MessageTemplateService {
                         s.createdAt().toString(),
                         s.retiredAt() == null ? null : s.retiredAt().toString()))
             .toList();
-    return live.map(
+    return messages
+        .ownWords(tenantId, t.key(), spec.form(), lang)
+        .map(
             s ->
                 new TemplateDtos.TemplateView(
                     t.key(),
                     spec.form().name(),
                     lang,
-                    "BUSINESS",
+                    s.language(),
+                    s.language().equals(lang) ? SOURCE_BUSINESS : SOURCE_DEFAULT_LANGUAGE,
+                    unusable,
                     s.version(),
                     s.subject(),
                     s.body(),
@@ -133,7 +153,9 @@ public class MessageTemplateService {
                     t.key(),
                     spec.form().name(),
                     lang,
-                    "DEFAULT",
+                    Messages.PLATFORM_LANGUAGE,
+                    SOURCE_DEFAULT,
+                    unusable,
                     null,
                     spec.form().hasSubject() ? spec.subject() : "",
                     spec.body(),
@@ -167,7 +189,10 @@ public class MessageTemplateService {
     return get(tenantId, type, form, language);
   }
 
-  /** Retires the live version: the platform's words again. */
+  /**
+   * Retires the live version. Messages then go out in the default language's version if there is
+   * one, else in the platform's words.
+   */
   public void retire(UUID tenantId, UUID by, String type, String form, String language) {
     Catalogue.MessageType t = type(type);
     Catalogue.FormSpec spec = form(t, form);

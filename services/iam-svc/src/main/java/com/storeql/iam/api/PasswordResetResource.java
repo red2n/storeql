@@ -113,7 +113,7 @@ public class PasswordResetResource {
   @Path("/password/reset")
   public ApiResponse<ResetPasswordResponse> reset(ResetPasswordRequest req) {
     Validations.validate(req);
-    resetService.reset(req.token(), req.newPassword());
+    resetService.reset(req.token(), req.newPassword(), req.language());
     return ApiResponse.ok(new ResetPasswordResponse(true));
   }
 }

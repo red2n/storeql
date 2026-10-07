@@ -90,6 +90,38 @@ public final class PostgresSupport implements AutoCloseable {
           + " ORDER BY 1";
 
   /**
+   * A constraint a migration names carries the prefix of its type: pk_, fk_, uq_, chk_ (ex_ for an
+   * exclusion). Two kinds of name are not the migration's: the ones Postgres chooses for an unnamed
+   * constraint ({@code <table>_..._pkey}, {@code _fkey}, {@code _key}, {@code _check}, {@code
+   * _excl}) and the {@code v7_} checks common-service's afterMigrate callback generates.
+   */
+  private static final String BAD_CONSTRAINT_NAMES =
+      "SELECT n.nspname || '.' || c.relname || ' constraint ' || k.conname FROM pg_constraint k"
+          + " JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
+          + " WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')"
+          + " AND c.relname <> 'flyway_schema_history' AND k.contype IN ('p', 'f', 'u', 'c', 'x')"
+          + " AND NOT (k.conname LIKE CASE k.contype WHEN 'p' THEN 'pk\\_%' WHEN 'f' THEN 'fk\\_%'"
+          + "  WHEN 'u' THEN 'uq\\_%' WHEN 'c' THEN 'chk\\_%' ELSE 'ex\\_%' END)"
+          + " AND k.conname NOT LIKE 'v7\\_%'"
+          + " AND k.conname !~ ('^' || c.relname || '_.*(pkey|fkey|key|check|excl)[0-9]*$')"
+          + " ORDER BY 1";
+
+  /**
+   * An index a migration names is idx_ (or uq_ when unique). An index that backs a constraint takes
+   * the constraint's name and is judged by {@link #BAD_CONSTRAINT_NAMES}.
+   */
+  private static final String BAD_INDEX_NAMES =
+      "SELECT n.nspname || '.' || t.relname || ' index ' || ic.relname"
+          + " || CASE WHEN x.indisunique THEN ' (unique)' ELSE '' END FROM pg_index x"
+          + " JOIN pg_class ic ON ic.oid = x.indexrelid JOIN pg_class t ON t.oid = x.indrelid"
+          + " JOIN pg_namespace n ON n.oid = t.relnamespace"
+          + " WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')"
+          + " AND t.relname <> 'flyway_schema_history'"
+          + " AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = x.indexrelid)"
+          + " AND NOT (CASE WHEN x.indisunique THEN ic.relname LIKE 'uq\\_%'"
+          + "  ELSE ic.relname LIKE 'idx\\_%' END) ORDER BY 1";
+
+  /**
    * SJ-D54: a column holding a currency, country, time zone or locale must not default to a
    * literal. SJ-D53 took those literals out of the code and left 'GBP', 'USD' and 'GB' in thirteen
    * column defaults, where an insert that forgot the column was filled in with the wrong one
@@ -128,13 +160,6 @@ public final class PostgresSupport implements AutoCloseable {
   }
 
   /**
-   * Run Flyway migrations from the given location (e.g. {@code "classpath:db/migration"}).
-   *
-   * @param location the Flyway migration location to apply
-   * @return this, for chaining after {@link #start()}
-   * @throws org.flywaydb.core.api.FlywayException if a migration fails to apply
-   */
-  /**
    * Points a service's Helidon test at this database and switches discovery and Kafka off: the
    * static block every integration test opens with.
    *
@@ -152,10 +177,21 @@ public final class PostgresSupport implements AutoCloseable {
     return this;
   }
 
+  /**
+   * Run Flyway migrations from the given location (e.g. {@code "classpath:db/migration"}). A file
+   * whose name Flyway cannot read ({@code V2_b.sql}, {@code v3__c.sql}) fails the call instead of
+   * being left out of it.
+   *
+   * @param location the Flyway migration location to apply
+   * @return this, for chaining after {@link #start()}
+   * @throws org.flywaydb.core.api.FlywayException if a migration fails to apply or a file name is
+   *     not one Flyway recognises
+   */
   public PostgresSupport migrate(String location) {
     Flyway.configure()
         .dataSource(container.getJdbcUrl(), container.getUsername(), container.getPassword())
         .locations(location)
+        .validateMigrationNaming(true)
         .load()
         .migrate();
     return this;
@@ -246,6 +282,13 @@ public final class PostgresSupport implements AutoCloseable {
                 + " cannot be restored (the backup drill found this). Define guards with BEGIN"
                 + " ATOMIC so their references bind at creation.");
       }
+      List<String> badNames = badObjectNames();
+      if (!badNames.isEmpty()) {
+        throw new AssertionError(
+            "constraints and indexes whose names do not follow docs/coding-standards.md §1.6: "
+                + badNames
+                + ". Name them pk_, fk_, uq_, chk_ (constraints) or idx_, uq_ (indexes).");
+      }
     } finally {
       container.stop();
     }
@@ -253,8 +296,8 @@ public final class PostgresSupport implements AutoCloseable {
 
   /**
    * @return every column, in any schema, whose default calls a uuid generator — the same check as
-   *     common-service's afterMigrate.sql, made here because a service that fails to migrate only
-   *     logs a warning and keeps running
+   *     common-service's afterMigrate.sql, made here because FlywayRunner logs a failed
+   *     afterMigrate check as a warning and keeps the service running
    */
   public List<String> idGeneratingDefaults() {
     return columnsMatching(ID_GENERATING_DEFAULTS);
@@ -313,6 +356,16 @@ public final class PostgresSupport implements AutoCloseable {
       "SELECT n.nspname || '.' || p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
           + " WHERE p.proname LIKE 'uuid\\_%\\_v7' AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'sql')"
           + " AND p.prosqlbody IS NULL AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1";
+
+  /**
+   * @return every constraint or index, in any schema, that a migration named without the prefix of
+   *     its type (see docs/coding-standards.md §1.6); empty when every name follows the rule
+   */
+  public List<String> badObjectNames() {
+    List<String> out = new ArrayList<>(columnsMatching(BAD_CONSTRAINT_NAMES));
+    out.addAll(columnsMatching(BAD_INDEX_NAMES));
+    return out;
+  }
 
   /**
    * @return every uuid or uuid[] column, in any table, holding values that are not RFC 9562 v7,

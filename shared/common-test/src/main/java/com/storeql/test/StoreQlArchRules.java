@@ -126,4 +126,62 @@ public final class StoreQlArchRules {
           .because(
               "StoreQL ids are RFC 9562 UUIDv7: Ids.newId() / Ids.derived() to make one,"
                   + " Ids.parse() to read one");
+
+  // ── Drivers (docs/DRIVERS.md): an external party is reached only from client/ ─────────────
+
+  private static final String[] HTTP_CLIENT_PACKAGES = {
+    "java.net.http..",
+    "jakarta.ws.rs.client..",
+    "javax.ws.rs.client..",
+    "org.apache.http..",
+    "org.apache.hc..",
+    "okhttp3..",
+    "org.glassfish.jersey.client..",
+    "io.helidon.webclient.."
+  };
+
+  /**
+   * No class outside a {@code ..client..} package uses an HTTP client type ({@code java.net.http},
+   * the JAX-RS client, Apache, OkHttp, Helidon's web client) or {@code java.net.HttpURLConnection}.
+   * Whatever speaks to an external party lives in {@code client/}, behind an interface. Add it next
+   * to the others in a service's ArchitectureTest, which already leaves tests out.
+   */
+  public static final ArchRule DRIVERS_STAY_BEHIND_THE_INTERFACE =
+      noClasses()
+          .that()
+          .resideOutsideOfPackage("..client..")
+          .should()
+          .dependOnClassesThat(
+              resideInAnyPackage(HTTP_CLIENT_PACKAGES)
+                  .or(
+                      com.tngtech.archunit.core.domain.JavaClass.Predicates.equivalentTo(
+                          java.net.HttpURLConnection.class)))
+          .because(
+              "a driver is the only code that knows an external party's URL, headers or JSON:"
+                  + " it lives in client/ behind an interface. See docs/DRIVERS.md.");
+
+  /**
+   * {@code service/} depends on a driver package only through its interfaces (and the value types
+   * and exceptions that travel with them), never on a concrete driver.
+   *
+   * @param driverPackage the driver package, for example {@code "..client.payment.."}
+   */
+  public static ArchRule serviceUsesOnlyTheDriverInterface(String driverPackage) {
+    return noClasses()
+        .that()
+        .resideInAPackage("..service..")
+        .should()
+        .dependOnClassesThat(
+            resideInAPackage(driverPackage)
+                .and(not(com.tngtech.archunit.core.domain.JavaClass.Predicates.INTERFACES))
+                .and(not(com.tngtech.archunit.core.domain.JavaClass.Predicates.ENUMS))
+                .and(not(com.tngtech.archunit.core.domain.JavaClass.Predicates.RECORDS))
+                .and(
+                    not(
+                        com.tngtech.archunit.core.domain.JavaClass.Predicates.assignableTo(
+                            Throwable.class))))
+        .because(
+            "service/ knows the driver interface only, so a driver can be swapped for SIMULATED."
+                + " See docs/DRIVERS.md.");
+  }
 }

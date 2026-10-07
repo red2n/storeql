@@ -54,6 +54,7 @@ public class ReferenceDataResource {
   @POST
   @Path("/reason-codes")
   public ApiResponse<ReasonCodeResponse> createReasonCode(CreateReasonCodeRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
@@ -81,6 +82,7 @@ public class ReferenceDataResource {
   @POST
   @Path("/reason-codes/{id}/activate")
   public ApiResponse<ReasonCodeResponse> activateReasonCode(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(Mappers.toReasonCode(service.setReasonCodeActive(tenantId, id, true)));
   }
@@ -95,6 +97,7 @@ public class ReferenceDataResource {
   @POST
   @Path("/reason-codes/{id}/deactivate")
   public ApiResponse<ReasonCodeResponse> deactivateReasonCode(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(Mappers.toReasonCode(service.setReasonCodeActive(tenantId, id, false)));
   }
@@ -109,6 +112,7 @@ public class ReferenceDataResource {
   @POST
   @Path("/source-types")
   public ApiResponse<SourceTypeResponse> createSourceType(CreateSourceTypeRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(
@@ -136,6 +140,7 @@ public class ReferenceDataResource {
   @POST
   @Path("/source-types/{id}/activate")
   public ApiResponse<SourceTypeResponse> activateSourceType(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(Mappers.toSourceType(service.setSourceTypeActive(tenantId, id, true)));
   }
@@ -150,6 +155,7 @@ public class ReferenceDataResource {
   @POST
   @Path("/source-types/{id}/deactivate")
   public ApiResponse<SourceTypeResponse> deactivateSourceType(@PathParam("id") UUID id) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     UUID tenantId = ctx.requireTenantId();
     return ApiResponse.ok(Mappers.toSourceType(service.setSourceTypeActive(tenantId, id, false)));
   }
@@ -170,8 +176,10 @@ public class ReferenceDataResource {
   @PUT
   @Path("/zone-gl-mappings")
   public ApiResponse<ZoneGlMappingResponse> upsertZoneGlMapping(UpsertZoneGlMappingRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    ctx.requireStoreAccess(uuid(req.storeId(), "storeId"));
     UUID zoneId = req.zoneId() == null || req.zoneId().isBlank() ? null : Ids.parse(req.zoneId());
     var m =
         service.upsertZoneGlMapping(

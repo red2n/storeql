@@ -164,7 +164,7 @@ export default function ({ gb, cafe, shopper, nowhere, india, noHsn, bengaluru }
   truthy('[+] a till discount off the total is stated net: 24.00 less 3.00 is 17.50 net, 3.50 VAT, 21.00 to pay', netted && netted.payableAmount === 21 && netted.netAmount === 17.5 && netted.vatAmount === 3.5, netted);
 
   // ── the credit note ──────────────────────────────────────────────────────────────────────────────
-  const returned = must(call('POST', `${O}/orders/${sale.id}/returns`, { token: t, body: { reason: 'one bag split', items: [{ variantId: gb.variantId, qty: 1 }] } }), 201, 'return');
+  const returned = must(call('POST', `${O}/orders/${sale.id}/returns`, { token: t, idem: true, body: { reason: 'one bag split', items: [{ variantId: gb.variantId, qty: 1, condition: 'DAMAGED' }] } }), 201, 'return');
   const credit = documentOf(sale.id, 'CREDIT_NOTE');
   truthy('[+] a return against the invoiced sale is credited without anyone asking', credit, documentsOf(sale.id));
   truthy('[+] ...one at 10.00 and 20%, in the credit note series, naming the invoice it credits', credit && /^CRN\/\d{4}\/\d{6}$/.test(credit.fullNumber) && credit.precedingInvoiceId === invoice.id && credit.returnId === returned.id && credit.payableAmount === 12, credit);
@@ -183,11 +183,11 @@ export default function ({ gb, cafe, shopper, nowhere, india, noHsn, bengaluru }
   expect(issue(privately.id), '[-] a customer not recorded as a registered business gets a receipt, not an invoice', 409, 'ORDER_INVOICE_BUYER_NOT_REGISTERED');
   const homeless = sell(gb, { customerId: nowhere });
   expect(issue(homeless.id), '[-] a registered business with no address cannot be invoiced yet', 409, 'ORDER_INVOICE_BUYER_ADDRESS_MISSING');
-  expect(issue('01990000-0000-7000-8000-000000000000'), '[-] an unknown sale is not found', 404);
-  expect(inv('/sales-invoices/01990000-0000-7000-8000-000000000000'), '[-] nor an unknown document', 404);
-  expect(inv('/sales-invoices?after=not-a-cursor'), '[-] a cursor that is not a document is refused', 400);
-  expect(call('POST', `${O}/admin/returns/01990000-0000-7000-8000-000000000000/credit-note`, { token: t, body: {} }), '[-] an unknown return cannot be credited', 404);
-  const uninvoicedReturn = must(call('POST', `${O}/orders/${privately.id}/returns`, { token: t, body: { reason: 'changed mind', items: [{ variantId: gb.variantId, qty: 1 }] } }), 201, 'return on a receipted sale');
+  expect(issue('01990000-0000-7000-8000-000000000000'), '[-] an unknown sale is not found', 404, 'ORDER_NOT_FOUND');
+  expect(inv('/sales-invoices/01990000-0000-7000-8000-000000000000'), '[-] nor an unknown document', 404, 'ORDER_INVOICE_NOT_FOUND');
+  expect(inv('/sales-invoices?after=not-a-cursor'), '[-] a cursor that is not a document is refused', 400, 'INVALID_UUID');
+  expect(call('POST', `${O}/admin/returns/01990000-0000-7000-8000-000000000000/credit-note`, { token: t, body: {} }), '[-] an unknown return cannot be credited', 404, 'ORDER_RETURN_NOT_FOUND');
+  const uninvoicedReturn = must(call('POST', `${O}/orders/${privately.id}/returns`, { token: t, idem: true, body: { reason: 'changed mind', items: [{ variantId: gb.variantId, qty: 1, condition: 'SEALED' }] } }), 201, 'return on a receipted sale');
   expect(call('POST', `${O}/admin/returns/${uninvoicedReturn.id}/credit-note`, { token: t, body: {} }), '[-] a return on a sale that was never invoiced has nothing to credit', 409, 'ORDER_CREDIT_NOTE_NO_INVOICE');
   truthy('[-] ...and none of those took a document', [unpaid, anonymous, privately, homeless].every((o) => documentsOf(o.id).length === 0), 'documents');
 

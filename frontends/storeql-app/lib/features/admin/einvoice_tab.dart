@@ -149,7 +149,8 @@ class _ReceivingAddress extends ConsumerWidget {
     if (tenant == null) return const SizedBox(height: 8);
     final cs = Theme.of(context).colorScheme;
     final canEdit = switch (ref.watch(authNotifierProvider).value) {
-      final AuthAuthenticated a => a.isManager,
+      // The business's own details: refused to a manager held to stores.
+      final AuthAuthenticated a => a.isManager && !a.heldToStores,
       _ => false,
     };
     final vat = tenant.vatNumber ?? '';

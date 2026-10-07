@@ -17,6 +17,7 @@ import 'pos_printer_settings_dialog.dart';
 import 'container_return_dialog.dart';
 import 'customer_display.dart';
 import 'customer_display_channel.dart';
+import 'held_card_payment.dart';
 
 /// [pending] badges the Pending destination so unsynced sales are visible from
 /// anywhere in the terminal, not only once the cashier goes looking.
@@ -42,9 +43,22 @@ List<AdaptiveNavDestination> _destinations(int pending) => [
         selectedIcon: Icons.cloud_off,
         badgeCount: pending,
       ),
+      // Sale returns and exchanges (return-controls). Not the deposit-container
+      // action in the app bar, which is called Container deposits.
+      const AdaptiveNavDestination(
+        label: 'Returns',
+        icon: Icons.assignment_return_outlined,
+        selectedIcon: Icons.assignment_return,
+      ),
     ];
 
-const _routes = ['/pos/cart', '/pos/tender', '/pos/cash', '/pos/pending'];
+const _routes = [
+  '/pos/cart',
+  '/pos/tender',
+  '/pos/cash',
+  '/pos/pending',
+  '/pos/returns',
+];
 
 class PosShell extends ConsumerStatefulWidget {
   final String currentLocation;
@@ -66,6 +80,9 @@ class _PosShellState extends ConsumerState<PosShell> {
   @override
   void initState() {
     super.initState();
+    // A card payment the till held when the app last closed is read back from
+    // the device now, at start-up, so it is in hand before any sale is pressed.
+    ref.read(heldCardPaymentProvider.notifier);
     // Keep the open session off the server's idle sweep while the terminal is up.
     _heartbeat = Timer.periodic(const Duration(minutes: 4), (_) {
       if (ref.read(posSessionProvider) != null) {
@@ -85,7 +102,9 @@ class _PosShellState extends ConsumerState<PosShell> {
 
   int get _selectedIndex => _pendingSelected
       ? 3
-      : widget.currentLocation.startsWith('/pos/cash')
+      : widget.currentLocation.startsWith('/pos/returns')
+          ? 4
+          : widget.currentLocation.startsWith('/pos/cash')
           ? 2
           : widget.currentLocation.startsWith('/pos/tender')
               ? 1
@@ -124,13 +143,13 @@ class _PosShellState extends ConsumerState<PosShell> {
       child: AdaptiveNavShell(
         title: 'POS Terminal',
         leadingIcon: Icons.point_of_sale,
-        // Four flat destinations — a bottom bar, per Material's compact-width guidance.
+        // Five flat destinations — a bottom bar, per Material's compact-width guidance.
         compactStyle: CompactNavStyle.bottomBar,
         destinations: _destinations(pending),
         selectedIndex: _selectedIndex,
         onDestinationSelected: (i) => context.go(_routes[i]),
         // Six commands: all on the bar from tablet width, but on a phone only
-        // Returns stays — the rest go into ⋮ so the title keeps its room.
+        // Container deposits stays — the rest go into ⋮ so the title keeps its room.
         actions: [
           AdaptiveActions(actions: [
             if (session != null &&
@@ -147,7 +166,7 @@ class _PosShellState extends ConsumerState<PosShell> {
             if (session != null)
               AdaptiveAction(
                 key: const Key('pos-container-return'),
-                label: 'Returns',
+                label: 'Container deposits',
                 icon: Icons.recycling,
                 showLabel: true,
                 keepOnCompact: true,

@@ -17,7 +17,7 @@ import {
   expect,
   must,
   onboardTenant,
-  register,
+  provisionStaff,
   sellableVariant,
   signInUntil,
   staffUser,
@@ -37,7 +37,7 @@ export function setup() {
   const cashier = staffUser(tenant, 'CASHIER', [store.id]);
   const manager = staffUser(tenant, 'MANAGER', [store.id]);
   const { variantId } = sellableVariant(tenant, 'Role widget');
-  return { tenant, rival, store, storekeeper, cashier, manager, variantId, lead: register('roles-lead'), trainee: register('roles-trainee') };
+  return { tenant, rival, store, storekeeper, cashier, manager, variantId, lead: provisionStaff(tenant, 'roles-lead'), trainee: provisionStaff(tenant, 'roles-trainee') };
 }
 
 export default function ({ tenant, rival, store, storekeeper, cashier, manager, lead, trainee }) {
@@ -56,7 +56,7 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   const roles = call('GET', ROLES, { token: owner });
   expect(roles, '[+] the roles read', 200);
   truthy('[+] ...the four built-in tiers first, a manager holding everything, a cashier the drawer', list(roles).slice(0, 4).map((r) => r.code).join(',') === 'OWNER,MANAGER,STOREKEEPER,CASHIER' && list(roles)[1].permissions.length === 13 && list(roles)[3].permissions.join() === 'purchasing.approve,till.no_sale', list(roles).map((r) => r.code));
-  expect(call('GET', ROLES, { token: cashier.token }), '[-] a cashier cannot read the roles', 403);
+  expect(call('GET', ROLES, { token: cashier.token }), '[-] a cashier cannot read the roles', 403, 'FORBIDDEN');
 
   // ── defining roles, and every way that is wrong ──────────────────────────────
   const shiftLead = { code: 'shift_lead', name: 'Shift lead', baseTier: 'MANAGER', permissions: ['purchasing.approve', 'purchasing.invoices.decide', 'till.manage', 'stock.adjust', 'staff.manage'], description: 'Runs the floor; the owner voids and posts' };
@@ -70,11 +70,11 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   expect(define({ code: 'GOD', name: 'x', baseTier: 'OWNER', permissions: [] }), '[-] standing on the owner', 400, 'ROLE_TIER_INVALID');
   expect(define({ code: 'GOD', name: 'x', baseTier: 'MANAGER', permissions: ['orders.everything'] }), '[-] a permission that is not one', 400, 'ROLE_PERMISSION_UNKNOWN');
   expect(define({ code: 'SUPER_CASHIER', name: 'x', baseTier: 'CASHIER', permissions: ['sales.void'] }), '[-] a cashier who voids sales is a manager, not a cashier', 400, 'ROLE_PERMISSION_OUTSIDE_TIER');
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER' }), '[-] no permissions list at all', 400);
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: Array.from({ length: 51 }, () => 'sales.void') }), '[-] fifty-one permissions', 400);
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, storekeeper.token), '[-] a storekeeper cannot define one', 403);
-  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, cashier.token), '[-] nor a cashier', 403);
-  expect(call('GET', `${ROLES}/SHIFT_LEAD`, { token: rival.owner.token }), '[-] the rival shop sees no such role', 404);
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER' }), '[-] no permissions list at all', 400, 'VALIDATION_FAILED');
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: Array.from({ length: 51 }, () => 'sales.void') }), '[-] fifty-one permissions', 400, 'VALIDATION_FAILED');
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, storekeeper.token), '[-] a storekeeper cannot define one', 403, 'FORBIDDEN');
+  expect(define({ code: 'X_ROLE', name: 'x', baseTier: 'MANAGER', permissions: [] }, cashier.token), '[-] nor a cashier', 403, 'FORBIDDEN');
+  expect(call('GET', `${ROLES}/SHIFT_LEAD`, { token: rival.owner.token }), '[-] the rival shop sees no such role', 404, 'ROLE_NOT_FOUND');
   truthy('[-] ...and its own list has none of ours', !list(call('GET', ROLES, { token: rival.owner.token })).some((r) => r.code === 'SHIFT_LEAD'));
 
   // ── staff take the roles and their tokens carry the permissions ─────────────
@@ -93,8 +93,12 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   // ── every gated decision, refused by name and admitted by tier ───────────────
   expect(journal(lead.token), '[-] the shift lead cannot post a journal', 403, 'PERMISSION_DENIED');
   expect(journal(manager.token), '[+] a plain manager can', 201);
-  expect(call('POST', `/api/order-svc/orders/${lead.userId}/void`, { token: lead.token, body: { reason: 'x' } }), '[-] the shift lead cannot void a sale', 403, 'PERMISSION_DENIED');
-  expect(call('POST', ROLES, { token: lead.token, body: { code: 'JUNIOR', name: 'Junior', baseTier: 'CASHIER', permissions: [] } }), '[+] but may define a role: staff.manage was kept', 201);
+  expect(call('POST', `/api/order-svc/orders/${lead.userId}/void`, { token: lead.token, idem: true, body: { reason: 'x' } }), '[-] the shift lead cannot void a sale', 403, 'PERMISSION_DENIED');
+  // staff.manage was kept, so the refusal is not the permission's: roles belong to the whole business, and a lead held to one store changes only that store.
+  expect(call('POST', ROLES, { token: lead.token, body: { code: 'JUNIOR', name: 'Junior', baseTier: 'CASHIER', permissions: [] } }), '[-] a lead held to one store cannot define a role for the whole business', 403, 'BUSINESS_WIDE_ONLY');
+  expect(define({ code: 'JUNIOR', name: 'Junior', baseTier: 'CASHIER', permissions: [] }), '[+] the owner defines it instead', 201);
+  const reassign = call('POST', STAFF, { token: lead.token, body: { userId: trainee.userId, storeId: store.id, role: 'TRAINEE' } });
+  truthy('[+] ...but manages staff at their own store: staff.manage was kept', [200, 201, 409].includes(reassign.status) && !String(reassign.body).includes('PERMISSION_DENIED'), reassign.body);
   expect(noSale(trainee.token), '[-] the trainee cannot open the drawer', 403, 'PERMISSION_DENIED');
   expect(noSale(cashier.token), '[+] a plain cashier can', 201);
   expect(noSale(trainee.token, { 'X-Permissions': 'till.no_sale' }), '[-] a forged permission header is stripped at the gateway', 403, 'PERMISSION_DENIED');
@@ -120,11 +124,12 @@ export default function ({ tenant, rival, store, storekeeper, cashier, manager, 
   expect(call('DELETE', `${ROLES}/TRAINEE`, { token: owner }), '[-] a role someone holds cannot be deleted', 409, 'ROLE_IN_USE');
   expect(call('DELETE', `${STAFF}/${trainee.userId}?store=${store.id}`, { token: owner }), '[+] the trainee is taken off the store', 200);
   const gone = signInUntil(trainee, (c) => !(c.roles || []).includes('CASHIER'));
-  truthy('[+] ...and at the next sign-in is no longer a cashier (SJ-D51)', !(gone.roles || []).includes('CASHIER') && !gone.tenant, gone);
+  // Made in the business, the login stays in it holding no role — opening nothing, never a login of no business.
+  truthy('[+] ...and at the next sign-in is no longer a cashier, holding no role at all (SJ-D51)', !(gone.roles || []).includes('CASHIER') && (gone.roles || []).length === 0, gone);
   expect(call('DELETE', `${ROLES}/TRAINEE`, { token: owner }), '[+] now the role can go', 204);
   expect(call('GET', `${ROLES}/TRAINEE`, { token: owner }), '[-] and is gone', 404, 'ROLE_NOT_FOUND');
-  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: storekeeper.token }), '[-] a storekeeper cannot delete a role', 403);
-  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: rival.owner.token }), '[-] nor the rival', 404);
+  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: storekeeper.token }), '[-] a storekeeper cannot delete a role', 403, 'FORBIDDEN');
+  expect(call('DELETE', `${ROLES}/JUNIOR`, { token: rival.owner.token }), '[-] nor the rival', 404, 'ROLE_NOT_FOUND');
 
   // ── abuse ────────────────────────────────────────────────────────────────────
   const race = http.batch(Array.from({ length: 20 }, () => ['POST', `${BASE}${ROLES}`, JSON.stringify({ code: 'RACER', name: 'Racer', baseTier: 'CASHIER', permissions: [] }), { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${owner}` }, tags: { name: 'POST /api/tenant-svc/admin/roles (race)' } }]));

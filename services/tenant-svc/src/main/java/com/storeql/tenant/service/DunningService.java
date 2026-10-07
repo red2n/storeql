@@ -40,7 +40,7 @@ import java.util.UUID;
  * <p><b>Paying up lifts only what the platform imposed.</b> A business switched off for {@code
  * NON_PAYMENT} comes back when it pays; one an administrator switched off does not, whatever it
  * pays, because that was a decision somebody took and money does not overrule it. Without the
- * reason on the row the two are indistinguishable, which is why V23 adds it.
+ * reason on the row the two are indistinguishable, which is why tenants.deactivated_reason exists.
  */
 @ApplicationScoped
 public class DunningService {
@@ -78,7 +78,7 @@ public class DunningService {
   public record Step(UUID tenantId, String invoiceNumber, String step) {}
 
   /** An invoice the run could not act on, named so somebody can. */
-  public record Skipped(UUID tenantId, String invoiceNumber, String reason) {}
+  public record Skipped(UUID tenantId, String invoiceNumber, String code, String reason) {}
 
   /** The platform's policy, or the defaults standing in for one. */
   public Policy policy() {
@@ -134,7 +134,7 @@ public class DunningService {
             taken.add(new Step(overdue.tenantId(), overdue.number(), step));
           }
         } catch (ApiException e) {
-          skipped.add(new Skipped(overdue.tenantId(), overdue.number(), e.getMessage()));
+          skipped.add(new Skipped(overdue.tenantId(), overdue.number(), e.code(), e.getMessage()));
           LOG.log(
               System.Logger.Level.WARNING,
               "dunning passed over {0} on {1}: {2}",

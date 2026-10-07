@@ -3,13 +3,13 @@ package com.storeql.notification.messaging;
 import com.storeql.ids.Ids;
 import com.storeql.notification.channel.SmsChannel;
 import com.storeql.notification.client.CustomerClient;
+import com.storeql.notification.json.Jsons;
 import com.storeql.notification.service.Messages;
 import com.storeql.notification.service.Notifier;
 import com.storeql.notification.template.Catalogue;
 import com.storeql.notification.template.Values;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonString;
 import java.io.StringReader;
@@ -80,7 +80,7 @@ class RecallNoticeIssuedHandler {
 
   void handle(String json) {
     Parsed p;
-    try (var reader = Json.createReader(new StringReader(json))) {
+    try (var reader = Jsons.reader(new StringReader(json))) {
       p = parse(reader.readObject());
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "Malformed RecallNoticeIssued payload skipped: " + e.getMessage());
@@ -88,14 +88,13 @@ class RecallNoticeIssuedHandler {
     }
     // In the buyer's own language when they have said which (13.x). What the notice must say is
     // held by the template's required parts: a business's words cannot leave any of them out.
-    String language =
+    // One read of the customer's record serves the language, the email and the phone.
+    CustomerClient.Contact contact =
         p.customerId() == null
-            ? null
-            : customers.languageOf(p.tenantId(), p.customerId()).orElse(null);
-    String email =
-        p.customerId() == null
-            ? null
-            : customers.emailOf(p.tenantId(), p.customerId()).orElse(null);
+            ? CustomerClient.Contact.NONE
+            : customers.contactOf(p.tenantId(), p.customerId());
+    String language = contact.language();
+    String email = contact.email();
     if (email != null) {
       notifier.notifyOnce(
           p.eventId(),
@@ -110,7 +109,7 @@ class RecallNoticeIssuedHandler {
       // till): an order placed before its number was kept in international form carries it as
       // typed, and a local form is never guessed into a number that may not be theirs.
       if ((phone == null || !SmsChannel.E164.matcher(phone).matches()) && p.customerId() != null) {
-        phone = customers.phoneOf(p.tenantId(), p.customerId()).orElse(phone);
+        phone = contact.phone() != null ? contact.phone() : phone;
       }
       if (phone != null && SmsChannel.E164.matcher(phone).matches()) {
         notifier.notifyOnce(

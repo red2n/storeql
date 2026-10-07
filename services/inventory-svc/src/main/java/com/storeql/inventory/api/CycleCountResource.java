@@ -9,6 +9,7 @@ import com.storeql.inventory.dto.Dtos.EnterCountRequest;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -28,7 +29,14 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
-/** Cycle counting (Gap #10): headers, lines, approve/adjust. Extracted from AdminResource. */
+/**
+ * Cycle counting (Gap #10): headers, lines, approve/adjust. Extracted from AdminResource.
+ *
+ * <p>A count ends in stock adjustments, so opening, approving and posting one is {@code
+ * stock.adjust}, as an adjustment by hand is; entering a counted quantity is any staff's work at
+ * the store. The store is named once, on the header, so every step by id holds the caller to that
+ * store here (SJ-D74), and a list naming no store is scoped to the caller's.
+ */
 @Path("/admin/inventory")
 @ApplicationScoped
 @Produces(MediaType.APPLICATION_JSON)
@@ -57,12 +65,15 @@ public class CycleCountResource {
   @POST
   @Path("/cycle-counts")
   public Response createCycleCount(CreateCycleCountRequest req) {
+    ctx.requirePermission(Permissions.STOCK_ADJUST);
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    UUID storeId = uuid(req.storeId(), "storeId");
+    ctx.requireStoreAccess(storeId);
     var result =
         service.createCycleCount(
             tenantId,
-            uuid(req.storeId(), "storeId"),
+            storeId,
             req.name(),
             req.abcClasses() != null ? req.abcClasses() : "A,B,C",
             req.tolerancePct() != null ? req.tolerancePct() : java.math.BigDecimal.valueOf(5));
@@ -91,7 +102,7 @@ public class CycleCountResource {
       @QueryParam("limit") Integer limit) {
     UUID tenantId = ctx.requireTenantId();
     int lim = limit == null || limit < 1 ? 20 : Math.min(limit, 100);
-    var headers = service.listCycleCounts(tenantId, storeId, status, lim);
+    var headers = service.listCycleCounts(tenantId, ctx.scopeStore(storeId), status, lim);
     var items =
         headers.stream().map(cwl -> Mappers.toCycleCountHeader(cwl.header(), cwl.lines())).toList();
     return ApiResponse.ok(items, ApiResponse.Meta.of(ctx.requestId()));
@@ -110,6 +121,7 @@ public class CycleCountResource {
   public ApiResponse<CycleCountHeaderResponse> getCycleCount(@PathParam("id") UUID id) {
     UUID tenantId = ctx.requireTenantId();
     var cwl = service.getCycleCount(tenantId, id);
+    ctx.requireStoreAccess(cwl.header().storeId());
     return ApiResponse.ok(
         Mappers.toCycleCountHeader(cwl.header(), cwl.lines()),
         ApiResponse.Meta.of(ctx.requestId()));
@@ -137,6 +149,7 @@ public class CycleCountResource {
       @PathParam("id") UUID headerId, @PathParam("lineId") UUID lineId, EnterCountRequest req) {
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
+    requireStoreOf(tenantId, headerId);
     var line = service.enterCount(tenantId, headerId, lineId, req.countedQty());
     return ApiResponse.ok(Mappers.toCycleCountLine(line), ApiResponse.Meta.of(ctx.requestId()));
   }
@@ -159,7 +172,9 @@ public class CycleCountResource {
   @POST
   @Path("/cycle-counts/{id}/approve")
   public ApiResponse<CycleCountApproveResult> approveCycleCount(@PathParam("id") UUID headerId) {
+    ctx.requirePermission(Permissions.STOCK_ADJUST);
     UUID tenantId = ctx.requireTenantId();
+    requireStoreOf(tenantId, headerId);
     var result = service.approveWithTolerance(tenantId, headerId);
     return ApiResponse.ok(
         new CycleCountApproveResult(result.autoApproved(), result.flagged()),
@@ -181,10 +196,17 @@ public class CycleCountResource {
   @POST
   @Path("/cycle-counts/{id}/adjust")
   public ApiResponse<CycleCountAdjustResult> adjustCycleCount(@PathParam("id") UUID headerId) {
+    ctx.requirePermission(Permissions.STOCK_ADJUST);
     UUID tenantId = ctx.requireTenantId();
+    requireStoreOf(tenantId, headerId);
     int adjusted = service.adjustCycleCount(tenantId, headerId, ctx.userId());
     return ApiResponse.ok(
         new CycleCountAdjustResult(adjusted), ApiResponse.Meta.of(ctx.requestId()));
+  }
+
+  /** Holds the caller to the count's store; a count of another business is 404, as before. */
+  private void requireStoreOf(UUID tenantId, UUID headerId) {
+    ctx.requireStoreAccess(service.getCycleCount(tenantId, headerId).header().storeId());
   }
 
   private static UUID uuid(String s, String field) {

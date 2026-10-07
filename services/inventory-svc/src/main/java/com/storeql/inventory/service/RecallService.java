@@ -47,6 +47,9 @@ public class RecallService {
 
   private static final Pattern CONTACT_URL = Pattern.compile("^https?://\\S+$");
 
+  /** The whole digits a quantity found may have: {@code qty_found NUMERIC(18,3)} keeps fifteen. */
+  private static final int MOST_WHOLE_DIGITS = 15;
+
   @Inject RecallRepository repo;
   @Inject Jurisdictions jurisdictions;
 
@@ -249,14 +252,34 @@ public class RecallService {
   }
 
   /**
+   * Every variant under an open recall, and under one closed or cancelled at or after {@code
+   * endedSince}: what order-svc judges a till sale replayed from an offline queue against, since a
+   * recall that has ended since still covered the sale when it was rung up.
+   *
+   * @param tenantId owning tenant
+   * @param endedSince the earliest end to include
+   * @return the lines, each saying when its recall opened and, once ended, when and how
+   */
+  public List<ActiveItem> openOrEndedSince(UUID tenantId, Instant endedSince) {
+    return repo.listOpenOrEndedSince(tenantId, endedSince);
+  }
+
+  /**
    * @param requireStoreAccess refuses a caller not assigned to the store; passed in so this class
    *     stays free of the request context
    */
   public StoreAction recordStoreAction(RecordStoreAction cmd, Consumer<UUID> requireStoreAccess) {
     requireStoreAccess.accept(cmd.storeId());
-    if (cmd.qtyFound().signum() < 0 || cmd.qtyFound().stripTrailingZeros().scale() > 3) {
+    // As the action keeps it (NUMERIC(18,3)): sixteen whole digits overflowed the record as a 500.
+    // The body was already held to 32 digits either side, so these costs are bounded.
+    BigDecimal qty = cmd.qtyFound();
+    if (qty.signum() < 0
+        || qty.stripTrailingZeros().scale() > 3
+        || qty.precision() - qty.scale() > MOST_WHOLE_DIGITS) {
       throw ApiException.badRequest(
-          "RECALL_QTY_INVALID", "qtyFound must be zero or more, to at most three decimal places");
+          "RECALL_QTY_INVALID",
+          "qtyFound must be zero or more, to at most fifteen whole digits and three decimal"
+              + " places");
     }
     var action =
         new StoreAction(

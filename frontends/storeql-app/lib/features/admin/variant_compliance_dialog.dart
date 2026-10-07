@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import '../../core/theme.dart';
 
 // ---------------------------------------------------------------------------
@@ -67,6 +69,27 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
   String? _depositMaterial;
   final _depositVolume = TextEditingController();
 
+  // The net content, the tare (NUMERIC(18,4) each) and the container's volume
+  // (whole millilitres, up to 10000) are read the way the app's language
+  // writes a number ([AmountMarks]) and sent as the figures typed. This save
+  // replaces every detail, so one that could not be read was sent as none and
+  // wiped — Romanian's 0,5 kg of net content, the unit price with it. Now it
+  // is refused under its field and nothing is saved.
+  final _marks = AmountMarks.ofApp();
+  static const _measureShape = AmountShape(14, 4);
+  static const _volumeShape = AmountShape(5, 0);
+
+  /// The figure fields, each with the shape it is read in.
+  List<(TextEditingController, AmountShape)> get _figures => [
+        (_netContent, _measureShape),
+        (_tare, _measureShape),
+        (_depositVolume, _volumeShape),
+      ];
+
+  /// [value], a figure the item already holds, written the way the app's
+  /// language writes a number so its field reads it back unchanged.
+  String _held(Object? value) => value is num ? _marks.writeAt(value, 0) : '';
+
   String get _base => '/${ApiConstants.product}';
 
   @override
@@ -115,12 +138,12 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
         _originDetail.text = c['originDetail'] as String? ?? '';
         _restriction = c['restrictionCategory'] as String?;
         _soldBy = c['soldBy'] as String? ?? 'EACH';
-        _netContent.text = (c['netContent'] as num?)?.toString() ?? '';
+        _netContent.text = _held(c['netContent']);
         _netContentUom.text = c['netContentUom'] as String? ?? '';
-        _tare.text = (c['tareWeight'] as num?)?.toString() ?? '';
+        _tare.text = _held(c['tareWeight']);
         _catchWeight = c['catchWeight'] as bool? ?? false;
         _depositMaterial = c['depositMaterial'] as String?;
-        _depositVolume.text = (c['depositVolumeMl'] as num?)?.toString() ?? '';
+        _depositVolume.text = _held(c['depositVolumeMl']);
         _loading = false;
       });
     } catch (e) {
@@ -135,6 +158,10 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
   static String? _blankToNull(String s) => s.trim().isEmpty ? null : s.trim();
 
   Future<void> _save() async {
+    if (figureRefused(_marks, _figures)) {
+      setState(() => _error = figureRefusedMessage);
+      return;
+    }
     final declare = _food && _declarationChecked;
     setState(() {
       _saving = true;
@@ -153,12 +180,13 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
         'ingredients': _blankToNull(_ingredients.text),
         'hsnCode': _blankToNull(_hsn.text),
         'soldBy': _soldBy,
-        'netContent': num.tryParse(_netContent.text.trim()),
+        // The plain decimals typed (JSON-B reads them exactly); blank is none.
+        'netContent': figureOf(_netContent, _measureShape, _marks),
         'netContentUom': _blankToNull(_netContentUom.text),
-        'tareWeight': num.tryParse(_tare.text.trim()),
+        'tareWeight': figureOf(_tare, _measureShape, _marks),
         'catchWeight': _catchWeight,
         'depositMaterial': _depositMaterial,
-        'depositVolumeMl': int.tryParse(_depositVolume.text.trim()),
+        'depositVolumeMl': wholeOf(_depositVolume, _marks, shape: _volumeShape),
       });
       if (declare) {
         await dio.put('$_base/admin/products/variants/$id/allergens', data: {
@@ -372,11 +400,14 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
                         ),
                         const SizedBox(width: 12),
                         Expanded(
-                          child: TextField(
-                            key: const Key('deposit-volume'),
+                          child: FigureField(
+                            fieldKey: const Key('deposit-volume'),
                             controller: _depositVolume,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(labelText: 'Volume (ml)'),
+                            shape: _volumeShape,
+                            marks: _marks,
+                            label: 'Volume (ml)',
+                            hint: '',
+                            onChanged: (_) => setState(() {}),
                           ),
                         ),
                       ],
@@ -385,10 +416,14 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
                     Row(
                       children: [
                         Expanded(
-                          child: TextField(
+                          child: FigureField(
+                            fieldKey: const Key('net-content'),
                             controller: _netContent,
-                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                            decoration: const InputDecoration(labelText: 'Net content'),
+                            shape: _measureShape,
+                            marks: _marks,
+                            label: 'Net content',
+                            hint: '',
+                            onChanged: (_) => setState(() {}),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -402,10 +437,14 @@ class _VariantComplianceDialogState extends ConsumerState<VariantComplianceDialo
                         ),
                         const SizedBox(width: 12),
                         Expanded(
-                          child: TextField(
+                          child: FigureField(
+                            fieldKey: const Key('tare-weight'),
                             controller: _tare,
-                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                            decoration: const InputDecoration(labelText: 'Tare weight'),
+                            shape: _measureShape,
+                            marks: _marks,
+                            label: 'Tare weight',
+                            hint: '',
+                            onChanged: (_) => setState(() {}),
                           ),
                         ),
                       ],

@@ -242,7 +242,7 @@ class ObligationIT {
         obligation(body, "CRA_VULNERABILITY_REPORTING"), containsString("\"status\":\"IN_FORCE\""));
     assertThat(obligation(body, "E_INVOICING_RECEIVE"), containsString("\"scope\":\"DE\""));
     assertThat(obligation(body, "E_INVOICING_ISSUE"), containsString("\"status\":\"UPCOMING\""));
-    // Directive 98/6/EC art.3 (V12): a unit price is EU law too, not the UK's alone.
+    // Directive 98/6/EC art.3 (V6): a unit price is EU law too, not the UK's alone.
     assertThat(obligation(body, "UNIT_PRICING"), containsString("\"scope\":\"EU\""));
     assertThat(
         "in force first, then upcoming",
@@ -307,6 +307,30 @@ class ObligationIT {
   }
 
   @Test
+  @DisplayName("A business whose country cannot be read is told so, never matched to a law")
+  void aBusinessWithNoReadableCountryIsToldSo() throws Exception {
+    // Sign-up no longer takes a country that is no ISO code (OnboardingIT), so a business like this
+    // is one whose row was written before it did, or by hand: its country is overwritten here.
+    String odd = onboard("GB", "GBP");
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps = c.prepareStatement("UPDATE tenant.tenants SET country = ? WHERE id = ?::uuid")) {
+      ps.setString(1, Character.toString(0x3000).repeat(2)); // two ideographic spaces
+      ps.setString(2, odd);
+      assertThat(ps.executeUpdate(), is(1));
+    }
+    Response r = read(odd, "OWNER", null, null);
+    String body = r.readEntity(String.class);
+    assertThat(body, r.getStatus(), is(409));
+    assertThat(body, containsString("TENANT_COUNTRY_MISSING"));
+
+    // Naming a country by hand still works for that business, and a bad one is still refused.
+    assertThat(read(odd, "OWNER", "GB", null).getStatus(), is(200));
+    Response bad = read(odd, "OWNER", "ZZ", null);
+    assertThat(bad.getStatus(), is(400));
+    assertThat(bad.readEntity(String.class), containsString("COUNTRY_INVALID"));
+  }
+
+  @Test
   @DisplayName("Twenty reads at once all answer, with the same rules")
   void concurrentReadsAgree() throws Exception {
     String de = onboard("DE", "EUR");
@@ -321,6 +345,44 @@ class ObligationIT {
       assertThat(bodies.size(), is(1));
     } finally {
       pool.shutdownNow();
+    }
+  }
+
+  @Test
+  @DisplayName(
+      "An obligation row's limit, unit and qualifier reach the sheet; rows without one are unchanged")
+  void anObligationCarriesItsLimit() throws Exception {
+    String code = "T_LIMIT_" + Ids.newId().toString().replace("-", "").substring(20).toUpperCase();
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO tenant.legal_obligations (code, scope_kind, scope, effective_from,"
+                    + " citation, summary, limit_value, limit_unit, qualifier)"
+                    + " VALUES (?, 'COUNTRY', 'NL', DATE '2020-01-01', 'test citation', 'test',"
+                    + " 30, 'DAYS', 'EMAIL')")) {
+      ps.setString(1, code);
+      ps.executeUpdate();
+    }
+    String nl = onboard("NL", "EUR");
+    String row = obligation(sheet(nl, null, null), code);
+    assertThat(row, containsString("\"limitValue\":30"));
+    assertThat(row, containsString("\"limitUnit\":\"DAYS\""));
+    assertThat(row, containsString("\"qualifier\":\"EMAIL\""));
+    String plain = obligation(sheet(nl, null, null), "GDPR");
+    assertThat(plain, not(containsString("limitValue")));
+    assertThat(plain, not(containsString("qualifier")));
+    try (var c = java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var ps =
+            c.prepareStatement(
+                "INSERT INTO tenant.legal_obligations (code, scope_kind, scope, effective_from,"
+                    + " citation, summary, limit_value) VALUES ('T_NOUNIT', 'COUNTRY', 'NL',"
+                    + " DATE '2020-01-01', 'c', 's', 5)")) {
+      try {
+        ps.executeUpdate();
+        throw new AssertionError("a number without its unit must be refused by the database");
+      } catch (java.sql.SQLException expected) {
+        assertThat(expected.getMessage(), containsString("chk_obligation_limit_pair"));
+      }
     }
   }
 

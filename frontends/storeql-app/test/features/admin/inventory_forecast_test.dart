@@ -46,6 +46,8 @@ class _Server implements HttpClientAdapter {
     var body = '{"data":[]}';
     if (o.path.endsWith('/forecasts/run') && o.method == 'POST') {
       body = '{"data":{"storeId":"st-1","variants":2,"byMethod":{"CROSTON_SBA":1,"SES":1},"meanMape":12.5,"horizonDays":28,"computedAt":"2026-09-23T06:00:00Z"}}';
+    } else if (o.path.endsWith('/forecasts/st-1/$_rare')) {
+      body = '{"data":${_row(_rare, 'CROSTON_SBA', true, 'null')}}';
     } else if (o.path.endsWith('/forecasts/st-1/$_steady')) {
       body = '{"data":${_row(_steady, 'SES', false, '12.50').replaceFirst('"points":[]', '"points":[{"day":"2026-09-23","qty":6.3},{"day":"2026-09-24","qty":6.3},{"day":"2026-09-26","qty":9.1}]')}}';
     } else if (o.path.endsWith('/forecasts')) {
@@ -124,6 +126,18 @@ void main() {
     expect(body['horizonDays'], 28);
     expect(find.textContaining('Forecast 2 variants'), findsOneWidget);
     expect(find.textContaining('mean MAPE 12.5%'), findsOneWidget);
+  });
+
+  testWidgets('a fresh item says its waste rate against what sold or went out of date, not what was received',
+      (tester) async {
+    await _pump(tester);
+    await tester.tap(find.text('Croston (SBA)'));
+    await tester.pumpAndSettle();
+    // The server's rate is wasted / (sold + wasted) (Mappers.toForecast): the words must not say
+    // the share of what was *received*, which stock still on the shelf would also count in.
+    expect(find.textContaining('of what sold or went out of date, 1.1% went out of date unsold'),
+        findsOneWidget);
+    expect(find.textContaining('of what was received'), findsNothing);
   });
 
   testWidgets('a row opens the forecast day by day with its weekday profile', (tester) async {

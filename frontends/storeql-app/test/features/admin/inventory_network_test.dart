@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/inventory_network_tab.dart';
@@ -114,6 +115,58 @@ void main() {
     await tester.pumpAndSettle();
     final put = server.requests.firstWhere((r) => r.method == 'PUT' && r.path.endsWith('/network/serving'));
     expect(_body(put), {'storeId': _york, 'warehouseId': _dc, 'leadTimeDays': 1});
+  });
+
+  // The lead time is the whole number of days typed, or it is refused under
+  // the field and nothing is saved. Read as a number literal, 0x10 was saved
+  // as sixteen days, and text that was no number at all was refused unsaid.
+  Future<void> shopAndWarehouse(WidgetTester tester) async {
+    await tester.tap(find.byKey(const Key('network-serve')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('serve-shop')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('York').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('serve-warehouse')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Leeds DC').last);
+    await tester.pumpAndSettle();
+  }
+
+  for (final (locale, typed) in const [
+    ('en_GB', '0x10'),
+    ('ro', '+0x1F'),
+    ('pl', '0X10'),
+    ('ar', 'two'),
+    ('en', '2.'),
+  ]) {
+    testWidgets('in $locale, "$typed" days from the warehouse is refused under the field, nothing saved',
+        (tester) async {
+      Intl.defaultLocale = locale;
+      addTearDown(() => Intl.defaultLocale = null);
+      final server = await _pump(tester);
+      await shopAndWarehouse(tester);
+      final field = find.byKey(const Key('serve-lead'));
+      for (var i = 1; i <= typed.length; i++) {
+        await tester.enterText(field, typed.substring(0, i));
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(const Key('serve-save')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+      expect(tester.widget<TextField>(field).decoration?.errorText, isNotNull);
+    });
+  }
+
+  testWidgets('Save with the days emptied says what is missing, and sends nothing', (tester) async {
+    final server = await _pump(tester);
+    await shopAndWarehouse(tester);
+    await tester.enterText(find.byKey(const Key('serve-lead')), '');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('serve-save')));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose the shop and its warehouse, and enter the days between them.'), findsOneWidget);
+    expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
   });
 
   testWidgets('Propose transfers posts the warehouse with a key; a draft is released', (tester) async {

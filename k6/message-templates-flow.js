@@ -75,11 +75,11 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   expect(call('PUT', ONE('ORDER_CONFIRMED', 'EMAIL', 'polish'), { token: t, body: POLISH }), '[-] a language that is not an ISO 639 code', 400, 'TEMPLATE_LANGUAGE_INVALID');
   expect(call('PUT', ONE('WINNING_TICKET', 'EMAIL', 'pl'), { token: t, body: POLISH }), '[-] a message the platform does not send', 404, 'MESSAGE_UNKNOWN');
   expect(call('PUT', ONE('ORDER_CONFIRMED', 'SMS', 'pl'), { token: t, body: POLISH }), '[-] a form the message is not sent in', 404, 'MESSAGE_FORM_UNKNOWN');
-  expect(call('PUT', PL, { token: t, body: { subject: POLISH.subject, body: 'x'.repeat(40001) } }), '[-] a body past forty thousand characters', 400);
-  expect(call('PUT', PL, { token: cashier.token, body: POLISH }), '[-] a cashier cannot write the words', 403);
-  expect(call('GET', `${ADMIN}/templates`, { token: storekeeper.token }), '[-] nor can a storekeeper read them', 403);
-  expect(call('GET', `${ADMIN}/template-settings`, { token: polish.token, ...shop }), '[-] nor a shopper', [401, 403]);
-  expect(call('GET', `${ADMIN}/templates`, {}), '[-] nor anyone without a token', 401);
+  expect(call('PUT', PL, { token: t, body: { subject: POLISH.subject, body: 'x'.repeat(40001) } }), '[-] a body past forty thousand characters', 400, 'VALIDATION_FAILED');
+  expect(call('PUT', PL, { token: cashier.token, body: POLISH }), '[-] a cashier cannot write the words', 403, 'FORBIDDEN');
+  expect(call('GET', `${ADMIN}/templates`, { token: storekeeper.token }), '[-] nor can a storekeeper read them', 403, 'FORBIDDEN');
+  expect(call('GET', `${ADMIN}/template-settings`, { token: polish.token, ...shop }), '[-] nor a shopper', 403, 'FORBIDDEN');
+  expect(call('GET', `${ADMIN}/templates`, {}), '[-] nor anyone without a token', 401, 'UNAUTHORIZED');
   truthy('[-] none of that saved anything', list(call('GET', `${ADMIN}/templates`, { token: t })).every((m) => m.forms.every((f) => f.written.length === 0)));
 
   // ── saved, as versions ───────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
 
   // ── how the shop signs ───────────────────────────────────────────────────────
   truthy("[+] signed with the business's name until the owner says otherwise", data(call('GET', `${ADMIN}/template-settings`, { token: t })).signedAs.startsWith('templates '), data(call('GET', `${ADMIN}/template-settings`, { token: t })));
-  expect(call('PUT', `${ADMIN}/template-settings`, { token: t, body: { defaultLanguage: 'klingon', signOff: 'x' } }), '[-] a house language that is not one', 400);
+  expect(call('PUT', `${ADMIN}/template-settings`, { token: t, body: { defaultLanguage: 'klingon', signOff: 'x' } }), '[-] a house language that is not one', 400, 'VALIDATION_FAILED');
   const signed = call('PUT', `${ADMIN}/template-settings`, { token: t, body: { defaultLanguage: 'en', signOff: 'Sklep Hollins' } });
   expect(signed, '[+] the owner signs as "Sklep Hollins"', 200);
   truthy('[+] ...and English stays the house language', data(signed).signedAs === 'Sklep Hollins' && data(signed).defaultLanguage === 'en', data(signed));
@@ -109,7 +109,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   // ── the reader's language ────────────────────────────────────────────────────
   const me = (who, method, body) => call(method, '/api/customer-svc/customers/me', { token: who.token, body, ...shop });
   expect(me(polish, 'POST'), '[+] a shopper claims their record', 200);
-  expect(me(polish, 'PUT', { firstName: 'Ola', lastName: 'Nowak', preferredLanguage: 'polish' }), '[-] a language that is not a code', 400);
+  expect(me(polish, 'PUT', { firstName: 'Ola', lastName: 'Nowak', preferredLanguage: 'polish' }), '[-] a language that is not a code', 400, 'VALIDATION_FAILED');
   const chosen = me(polish, 'PUT', { firstName: 'Ola', lastName: 'Nowak', preferredLanguage: 'PL' });
   expect(chosen, '[+] and says they read Polish', 200);
   truthy('[+] ...kept as the code', data(chosen).preferredLanguage === 'pl', data(chosen));
@@ -142,7 +142,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   truthy("[+] theirs goes out in the platform's English, in pounds", inEnglish.language === 'en' && inEnglish.template === 'default' && inEnglish.subject === 'Your order is confirmed' && (inEnglish.body || '').includes(`Total: £${plainOrder.total}`), inEnglish);
 
   // ── back to the platform's words ─────────────────────────────────────────────
-  expect(call('DELETE', PL, { token: cashier.token }), '[-] a cashier cannot retire them', 403);
+  expect(call('DELETE', PL, { token: cashier.token }), '[-] a cashier cannot retire them', 403, 'FORBIDDEN');
   expect(call('DELETE', PL, { token: t }), "[+] the owner goes back to the platform's words", 200);
   expect(call('DELETE', PL, { token: t }), '[-] and cannot do it twice', 404, 'TEMPLATE_NOT_WRITTEN');
   const after = data(call('GET', PL, { token: t }));
@@ -154,5 +154,5 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   // ── abuse ────────────────────────────────────────────────────────────────────
   const flood = http.batch(Array.from({ length: 20 }, () => ['POST', `${BASE}${PL}/preview`, JSON.stringify({ subject: 's', body: 'x'.repeat(40001) }), { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` }, tags: { name: 'POST /api/notification-svc/admin/notifications/templates/preview (flood)' } }]));
   truthy('[-] twenty oversized previews at once: every one refused', flood.every((r) => r.status === 400 || r.status === 413 || r.status === 429), flood.map((r) => r.status).join(','));
-  expect(call('GET', `${ADMIN}/templates`, { token: other.token, ...shop }), '[-] a stranger with a storefront header reads nothing', [401, 403]);
+  expect(call('GET', `${ADMIN}/templates`, { token: other.token, ...shop }), '[-] a stranger with a storefront header reads nothing', 403, 'FORBIDDEN');
 }

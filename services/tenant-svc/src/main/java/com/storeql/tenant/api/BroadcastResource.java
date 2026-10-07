@@ -1,5 +1,6 @@
 package com.storeql.tenant.api;
 
+import com.storeql.tenant.domain.Broadcasts.Broadcast;
 import com.storeql.tenant.dto.BroadcastDtos;
 import com.storeql.tenant.mapper.BroadcastMappers;
 import com.storeql.tenant.service.BroadcastService;
@@ -46,9 +47,23 @@ public class BroadcastResource {
       description =
           "To one store or every open store, to everybody there or one role. Announced to each"
               + " store's devices in the same transaction; only an URGENT notice wakes them. Never"
-              + " edited: withdraw and publish again, so what was acknowledged is what was seen.")
+              + " edited: withdraw and publish again, so what was acknowledged is what was seen. A"
+              + " manager held to stores publishes to one of theirs; a notice to every store is the"
+              + " whole business's, and needs a caller held to none.")
   @APIResponse(responseCode = "201", description = "The notice")
-  @APIResponse(responseCode = "400", description = "BROADCAST_INVALID, BROADCAST_EXPIRY_INVALID")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "BROADCAST_INVALID, BROADCAST_EXPIRY_INVALID, TASK_ID_INVALID (storeId), VALIDATION_FAILED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN below management; STORE_ACCESS_DENIED for a store of the business the caller"
+              + " is not held to; BUSINESS_WIDE_ONLY for a notice to every store from a caller held"
+              + " to stores")
+  @APIResponse(
+      responseCode = "404",
+      description = "STORE_NOT_FOUND: no such store in this business, or not open")
   @POST
   public Response publish(BroadcastDtos.PublishRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
@@ -57,17 +72,25 @@ public class BroadcastResource {
         req.storeId() == null || req.storeId().isBlank()
             ? null
             : StoreTaskResource.uuid(req.storeId(), "storeId");
-    if (storeId != null) ctx.requireStoreAccess(storeId);
+    Instant expiresAt = instant(req.expiresAt());
+    BroadcastService.requirePublishable(
+        req.title(), req.body(), req.priority(), expiresAt, Instant.now());
+    UUID tenantId = ctx.requireTenantId();
+    // The request (400), then the store is the business's (404), then one the caller is held to
+    // (403) — so another business's manager naming our store is told it does not exist. Every
+    // store is the whole business's, which reaches stores a manager held to some cannot see.
+    if (storeId == null) BusinessWide.require(ctx);
+    else ctx.requireStoreAccess(svc.requireStore(tenantId, storeId));
     var notice =
         svc.publish(
-            ctx.requireTenantId(),
+            tenantId,
             req.title(),
             req.body(),
             req.priority(),
             storeId,
             req.role(),
             Boolean.TRUE.equals(req.requiresAck()),
-            instant(req.expiresAt()),
+            expiresAt,
             ctx.requireUserId());
     return Response.status(201)
         .entity(ApiResponse.ok(BroadcastMappers.toDto(notice, null)))
@@ -76,41 +99,81 @@ public class BroadcastResource {
 
   @Operation(
       summary = "The business's notices, newest first",
-      description = "Published ones unless all=true.")
+      description =
+          "Published ones unless all=true. A manager held to stores reads their stores' notices"
+              + " and those to every store; a caller held to none reads them all.")
+  @APIResponse(responseCode = "403", description = "FORBIDDEN below management")
   @GET
   public ApiResponse<List<BroadcastDtos.BroadcastResponse>> list(
       @QueryParam("all") Boolean all, @QueryParam("limit") Integer limit) {
     ctx.requireAnyRole("OWNER", "MANAGER");
     return ApiResponse.ok(
-        svc.broadcasts(ctx.requireTenantId(), !Boolean.TRUE.equals(all), limit).stream()
+        svc
+            .broadcasts(
+                ctx.requireTenantId(), !Boolean.TRUE.equals(all), limit, ctx.reportStores(null))
+            .stream()
             .map(b -> BroadcastMappers.toDto(b, null))
             .toList());
   }
 
-  @Operation(summary = "One notice")
+  @Operation(
+      summary = "One notice",
+      description = "A notice to one store is read at that store; one to every store by anybody.")
+  @APIResponse(responseCode = "400", description = "INVALID_UUID: the path is not an id")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN below management; STORE_ACCESS_DENIED for a notice to a store the caller is not"
+              + " held to")
   @APIResponse(responseCode = "404", description = "BROADCAST_NOT_FOUND")
   @GET
   @Path("/{id}")
   public ApiResponse<BroadcastDtos.BroadcastResponse> one(@PathParam("id") UUID id) {
     ctx.requireAnyRole("OWNER", "MANAGER");
-    return ApiResponse.ok(BroadcastMappers.toDto(svc.broadcast(ctx.requireTenantId(), id), null));
+    return ApiResponse.ok(BroadcastMappers.toDto(readable(id), null));
   }
 
   @Operation(
       summary = "How far a notice reached",
       description =
-          "Per store: how many it is addressed to, how many acknowledged, and who has not — named.")
+          "Per store: how many it is addressed to, how many acknowledged, and who has not — named."
+              + " A manager held to stores reads only their stores' rows, so a notice to every"
+              + " store names nobody at a store they cannot see.")
+  @APIResponse(responseCode = "400", description = "INVALID_UUID: the path is not an id")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN below management; STORE_ACCESS_DENIED for a notice to a store the caller is not"
+              + " held to")
+  @APIResponse(responseCode = "404", description = "BROADCAST_NOT_FOUND")
   @GET
   @Path("/{id}/reach")
   public ApiResponse<List<BroadcastDtos.ReachResponse>> reach(@PathParam("id") UUID id) {
     ctx.requireAnyRole("OWNER", "MANAGER");
+    readable(id);
     return ApiResponse.ok(
-        svc.reach(ctx.requireTenantId(), id).stream().map(BroadcastMappers::toDto).toList());
+        svc.reach(ctx.requireTenantId(), id, ctx.reportStores(null)).stream()
+            .map(BroadcastMappers::toDto)
+            .toList());
   }
 
   @Operation(
       summary = "Withdraw a notice, with the reason",
-      description = "Its acknowledgements stay: they were made against the text that stood.")
+      description =
+          "Its acknowledgements stay: they were made against the text that stood. A notice to one"
+              + " store is withdrawn at that store; one to every store needs a caller held to none,"
+              + " as publishing it did.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED or BODY_REQUIRED: no reason; INVALID_UUID: the path is not an id")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "FORBIDDEN below management; STORE_ACCESS_DENIED for a notice to a store the caller is not"
+              + " held to; BUSINESS_WIDE_ONLY for a notice to every store from a caller held to"
+              + " stores")
+  @APIResponse(responseCode = "404", description = "BROADCAST_NOT_FOUND")
   @APIResponse(responseCode = "409", description = "BROADCAST_WITHDRAWN")
   @POST
   @Path("/{id}/withdrawal")
@@ -118,9 +181,24 @@ public class BroadcastResource {
       @PathParam("id") UUID id, BroadcastDtos.WithdrawRequest req) {
     ctx.requireAnyRole("OWNER", "MANAGER");
     Validations.validate(req);
+    UUID tenantId = ctx.requireTenantId();
+    // The notice must be the business's (404), then the caller's to change (403), before it moves.
+    UUID storeId = svc.broadcast(tenantId, id).storeId();
+    if (storeId == null) BusinessWide.require(ctx);
+    else ctx.requireStoreAccess(storeId);
     return ApiResponse.ok(
         BroadcastMappers.toDto(
-            svc.withdraw(ctx.requireTenantId(), id, req.reason(), ctx.requireUserId()), null));
+            svc.withdraw(tenantId, id, req.reason(), ctx.requireUserId()), null));
+  }
+
+  /**
+   * A notice the caller may read: the business's (404), and, when it is to one store, one of the
+   * caller's (403). A notice to every store reaches every caller's stores, so anybody may read it.
+   */
+  private Broadcast readable(UUID id) {
+    Broadcast b = svc.broadcast(ctx.requireTenantId(), id);
+    if (b.storeId() != null) ctx.requireStoreAccess(b.storeId());
+    return b;
   }
 
   private static Instant instant(String value) {

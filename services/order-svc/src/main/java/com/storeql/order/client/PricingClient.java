@@ -4,6 +4,7 @@ import com.storeql.discovery.ConsulClient;
 import com.storeql.discovery.ServiceInstance;
 import com.storeql.discovery.ServiceRegistry;
 import com.storeql.ids.Ids;
+import com.storeql.order.config.Json;
 import com.storeql.order.config.ServiceConfig;
 import com.storeql.service.ServiceReader;
 import com.storeql.web.ApiException;
@@ -14,7 +15,6 @@ import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
@@ -345,6 +345,12 @@ public class PricingClient {
    */
   static QuotedBasket parseQuote(JsonObject data) {
     JsonArray lineArray = data.getJsonArray("lines");
+    // The quote's own currency decides the unit price's precision: whole yen, three-decimal
+    // dinars. A quote that does not name it is read at the precision its line totals came in.
+    String currency =
+        data.containsKey("currency") && !data.isNull("currency")
+            ? data.getString("currency")
+            : null;
     List<QuotedLine> lines = new ArrayList<>(lineArray.size());
     for (var l : lineArray) {
       JsonObject o = l.asJsonObject();
@@ -354,10 +360,14 @@ public class PricingClient {
       // Reading netTotal here charged the customer the basket discount twice (SJ-D20).
       BigDecimal afterLineDiscount =
           num(o, "lineTotal", BigDecimal.ZERO).subtract(num(o, "discount", BigDecimal.ZERO));
+      int scale =
+          currency != null
+              ? com.storeql.service.Fx.minorUnits(currency)
+              : Math.max(afterLineDiscount.scale(), 0);
       BigDecimal unit =
           qty.signum() == 0
               ? BigDecimal.ZERO
-              : afterLineDiscount.divide(qty, 2, java.math.RoundingMode.HALF_UP);
+              : afterLineDiscount.divide(qty, scale, java.math.RoundingMode.HALF_UP);
       lines.add(
           new QuotedLine(
               unit,

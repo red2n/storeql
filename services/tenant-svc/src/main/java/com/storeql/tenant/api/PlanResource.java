@@ -118,7 +118,15 @@ public class PlanResource {
       summary = "Set a plan's price in one currency",
       description =
           "From a date. An earlier price is never edited: an invoice raised under it must still"
-              + " be explicable next year.")
+              + " be explicable next year. The amount is no finer than the currency's minor units"
+              + " (ISO 4217).")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED or BODY_REQUIRED; CURRENCY_INVALID: not an ISO 4217 code;"
+              + " PLAN_PRICE_INVALID: finer than the currency's minor units (1000.5 JPY);"
+              + " PLAN_PRICE_DATE_INVALID")
+  @APIResponse(responseCode = "403", description = "FORBIDDEN: not the platform administrator")
   @POST
   @Path("/{id}/prices")
   public ApiResponse<PlanDtos.PlanResponse> setPrice(
@@ -131,8 +139,17 @@ public class PlanResource {
   @Operation(
       summary = "Set what a plan includes",
       description =
-          "Replaced whole: a key left out is one the plan no longer names. A key the platform does"
-              + " not enforce is refused (PLAN_ENTITLEMENT_UNKNOWN).")
+          "Replaced whole: a key left out is one the plan no longer names, and `grants: []` names"
+              + " none. A body without `grants` is refused, never read as an empty list. A key the"
+              + " platform does not enforce is refused (PLAN_ENTITLEMENT_UNKNOWN).")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED: no grants list (grants: must not be null), a hole in it, a grant"
+              + " with no key or a limitValue below 0, named by field;"
+              + " PLAN_ENTITLEMENT_UNKNOWN, PLAN_ENTITLEMENT_TWICE (a key named twice, read as"
+              + " stripped), PLAN_ENTITLEMENT_NOT_ENFORCED, PLAN_ENTITLEMENT_SHAPE")
+  @APIResponse(responseCode = "403", description = "FORBIDDEN: not the platform administrator")
   @PUT
   @Path("/{id}/includes")
   public ApiResponse<PlanDtos.PlanResponse> setGrants(
@@ -146,9 +163,18 @@ public class PlanResource {
       summary = "Set what a plan includes of each meter (21.10)",
       description =
           "Replaced whole: a meter left out is one the plan does not name, which leaves it"
-              + " unlimited and uncharged. `included` is per billing period; `hard` refuses use"
+              + " unlimited and uncharged, and `meters: []` names none. A body without `meters` is"
+              + " refused, never read as an empty list. `included` is per billing period; `hard` refuses use"
               + " beyond it rather than charging for it, and only a refusable meter may be hard"
               + " (PLAN_METER_NOT_REFUSABLE): an order is never refused.")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED: no meters list (meters: must not be null), a hole in it or a"
+              + " meter with no key, named by field; REQUEST_BODY_INVALID: an included that is no"
+              + " whole number; PLAN_METER_UNKNOWN, PLAN_METER_TWICE, PLAN_METER_NOT_REFUSABLE,"
+              + " PLAN_METER_INCLUDED_INVALID (an included below 0), PLAN_METER_HARD_UNLIMITED")
+  @APIResponse(responseCode = "403", description = "FORBIDDEN: not the platform administrator")
   @PUT
   @Path("/{id}/meters")
   public ApiResponse<PlanDtos.PlanResponse> setMeters(
@@ -199,7 +225,7 @@ public class PlanResource {
     ctx.requireAnyRole("PLATFORM_ADMIN");
     return ApiResponse.ok(
         new PlanDtos.CatalogueResponse(
-            Plans.CATALOGUE.stream()
+            Plans.enforced().stream()
                 .map(
                     e -> new PlanDtos.CatalogueEntry(e.key(), e.label(), e.limit(), e.enforcedBy()))
                 .toList()));

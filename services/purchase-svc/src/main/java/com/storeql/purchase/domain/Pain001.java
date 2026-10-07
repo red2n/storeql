@@ -199,6 +199,9 @@ public final class Pain001 {
     if (amount == null || amount.signum() <= 0) {
       throw new IllegalArgumentException(who + " is paid nothing");
     }
+    // Two places on purpose, not as an assumption about money: a SEPA credit transfer is in euro
+    // only (Ccy is fixed to EUR and the service writes it for a EUR run alone), and the euro has
+    // two minor units (ISO 4217; the EPC rulebook allows no more).
     if (amount.stripTrailingZeros().scale() > 2) {
       throw new IllegalArgumentException(who + " is paid in fractions of a cent");
     }

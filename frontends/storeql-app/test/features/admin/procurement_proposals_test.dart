@@ -96,4 +96,41 @@ void main() {
     expect(find.textContaining('Proposed 1 draft: Acme Wholesale (1 line'), findsOneWidget);
     expect(find.textContaining('1 skipped'), findsOneWidget);
   });
+
+  // The cover is whole days. Blank is purchase-svc's own 28; text that is not
+  // a number of days ran at 28 as if nothing had been typed, and is now
+  // refused under its field with nothing run.
+  for (final (typed, why) in [
+    ('1,000', 'Type the amount without thousands separators.'),
+    ('15.', 'Whole amounts only.'),
+    ('.', 'Whole amounts only.'),
+    ('-', 'Type the amount without a sign.'),
+    ('+5', 'Type the amount without a sign.'),
+    ('0x10', 'Only digits.'),
+  ]) {
+    testWidgets('a cover of "$typed" is refused under the field, never run at 28', (tester) async {
+      final server = await _pump(tester);
+      await tester.tap(find.byKey(const Key('propose-orders')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('propose-cover')), typed);
+      await tester.pump();
+      expect(tester.widget<TextField>(find.byKey(const Key('propose-cover'))).decoration?.errorText, why);
+      await tester.tap(find.byKey(const Key('propose-run')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.path.endsWith('/proposals/run')), isEmpty);
+    });
+  }
+
+  testWidgets('a cover left blank runs at the 28 days the field starts at', (tester) async {
+    final server = await _pump(tester);
+    await tester.tap(find.byKey(const Key('propose-orders')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('propose-cover')), ' ');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('propose-run')));
+    await tester.pumpAndSettle();
+    final run = server.requests.where((r) => r.path.endsWith('/proposals/run')).single;
+    final body = run.data is String ? jsonDecode(run.data as String) : run.data;
+    expect(body['coverDays'], 28);
+  });
 }

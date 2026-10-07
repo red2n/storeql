@@ -21,6 +21,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -70,14 +72,17 @@ public class StockTurnResource {
    * accept a full ISO-8601 instant (2026-01-31T00:00:00Z), not a bare date. Rows come back
    * slowest-turning first, which is the end of the list worth acting on.
    *
-   * @param storeId the store id (query parameter)
+   * @param storeId a named store (query parameter): checked against the caller's stores, else 403;
+   *     unnamed, a caller held to no store reads the whole business and a caller held to some reads
+   *     exactly those, combined
    * @param from the from (query parameter)
    * @param to the to (query parameter)
    * @param groupBy the group by (query parameter)
    * @param limit the limit (query parameter)
    * @return rows plus whether opening values are complete
    * @throws com.storeql.web.ApiException {@code 400} missing or unparseable from/to, from not
-   *     before to, or unknown groupBy
+   *     before to, or unknown groupBy; {@code 403} STORE_ACCESS_DENIED for a named store the caller
+   *     does not keep
    */
   @Operation(
       summary = "How many times the holding turned over",
@@ -104,11 +109,13 @@ public class StockTurnResource {
     // Required, so Parsing.instant rather than optionalInstant: an absent bound here is a
     // malformed request, not "no filter" (SJ-D9 — the caller gets the field name and the format).
     int clamped = limit == null ? DEFAULT_LIMIT : Math.max(1, Math.min(MAX_LIMIT, limit));
+    UUID parsed = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(parsed);
     StockTurnReportResponse report =
         Mappers.toStockTurnReport(
             service.stockTurnReport(
                 ctx.requireTenantId(),
-                Parsing.optionalUuid(storeId, "storeId"),
+                stores,
                 Parsing.instant(from, "from"),
                 Parsing.instant(to, "to"),
                 turnGrouping(groupBy),
@@ -125,12 +132,15 @@ public class StockTurnResource {
    * the arrival of its oldest remaining batch, and says so. Group by BUCKET for the ladder, or by
    * STORE or VARIANT to find what is in it.
    *
-   * @param storeId the store id (query parameter)
+   * @param storeId a named store (query parameter): checked against the caller's stores, else 403;
+   *     unnamed, a caller held to no store reads the whole business and a caller held to some reads
+   *     exactly those, combined
    * @param asOf the as of (query parameter)
    * @param groupBy the group by (query parameter)
    * @param limit the limit (query parameter)
    * @return rows ordered by value at risk, largest first
-   * @throws com.storeql.web.ApiException {@code 400} unknown groupBy or unparseable asOf/storeId
+   * @throws com.storeql.web.ApiException {@code 400} unknown groupBy or unparseable asOf/storeId;
+   *     {@code 403} STORE_ACCESS_DENIED for a named store the caller does not keep
    */
   @Operation(
       summary = "Stock on hand, aged by time since it last sold",
@@ -151,11 +161,13 @@ public class StockTurnResource {
       @QueryParam("groupBy") String groupBy,
       @QueryParam("limit") Integer limit) {
     int clamped = limit == null ? DEFAULT_LIMIT : Math.max(1, Math.min(MAX_LIMIT, limit));
+    UUID parsed = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(parsed);
     List<DeadStockRowResponse> rows =
         service
             .deadStockReport(
                 ctx.requireTenantId(),
-                Parsing.optionalUuid(storeId, "storeId"),
+                stores,
                 Parsing.optionalInstant(asOf, "asOf"),
                 deadStockGrouping(groupBy),
                 clamped)

@@ -312,4 +312,54 @@ class Gs1ScanIT {
     assertThat(body, viaScan.getStatus(), is(409));
     assertThat(body, containsString("PRODUCT_NOT_ON_SALE_YET"));
   }
+
+  /** A variant with the SKU given and no barcode at all — what a label a till cannot read has. */
+  private String variantWithSku(String tenant, String sku) {
+    String product =
+        id(post("/admin/products", "{\"name\":\"Loose " + Ids.newId() + "\"}", tenant));
+    return id(
+        post("/admin/products/" + product + "/variants", "{\"sku\":\"" + sku + "\"}", tenant));
+  }
+
+  /**
+   * The till's scan box says "or type SKU": when a label will not scan, the cashier types what is
+   * printed under it. Only barcodes and GTINs were ever matched, so a typed SKU found nothing.
+   */
+  @Test
+  @DisplayName("A SKU typed at the till finds its item, in whatever case it is typed")
+  void aTypedSkuFindsItsItem() {
+    String sku = "APL-GALA-" + COUNTER.incrementAndGet();
+    String variant = variantWithSku(T, sku);
+    assertThat(scanned(sku, T), containsString("\"variantId\":\"" + variant + "\""));
+    assertThat(scanned("  " + sku + " ", T), containsString(variant));
+    assertThat(scanned(sku.toLowerCase(java.util.Locale.ROOT), T), containsString(variant));
+    // Another business's staff typing the same SKU find nothing of ours.
+    assertThat(scan(sku, RIVAL).getStatus(), is(404));
+  }
+
+  @Test
+  @DisplayName("A barcode wins over a SKU that happens to read the same")
+  void aBarcodeWinsOverASku() {
+    String code = "DUAL-" + COUNTER.incrementAndGet();
+    String bySku = variantWithSku(T, code);
+    String byBarcode = variantWithBarcode(T, code);
+    String body = scanned(code, T);
+    assertThat(body, containsString(byBarcode));
+    assertThat(body, not(containsString(bySku)));
+  }
+
+  @Test
+  @DisplayName("Two SKUs that differ only in case are never guessed between")
+  void twoSkusDifferingInCaseAreNotGuessed() {
+    String upper = "PLU-AB-" + COUNTER.incrementAndGet();
+    String lower = upper.toLowerCase(java.util.Locale.ROOT);
+    String upperVariant = variantWithSku(T, upper);
+    String lowerVariant = variantWithSku(T, lower);
+    // Typed exactly, each finds its own.
+    assertThat(scanned(upper, T), containsString(upperVariant));
+    assertThat(scanned(lower, T), containsString(lowerVariant));
+    // Typed in a third spelling, it could be either: nothing is guessed.
+    String mixed = "Plu-Ab-" + upper.substring("PLU-AB-".length());
+    assertThat(scan(mixed, T).getStatus(), is(404));
+  }
 }

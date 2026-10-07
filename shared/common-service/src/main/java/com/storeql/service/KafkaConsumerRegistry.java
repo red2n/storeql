@@ -1,5 +1,6 @@
 package com.storeql.service;
 
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -12,6 +13,9 @@ import java.util.concurrent.ConcurrentHashMap;
 final class KafkaConsumerRegistry {
 
   private static final Set<String> FAILED = ConcurrentHashMap.newKeySet();
+
+  /** The loops that are running, by name, so readiness can ask whether each is still answered. */
+  private static final Map<String, KafkaEventLoop> RUNNING = new ConcurrentHashMap<>();
 
   private KafkaConsumerRegistry() {}
 
@@ -37,5 +41,30 @@ final class KafkaConsumerRegistry {
    */
   static Set<String> failedConsumers() {
     return Set.copyOf(FAILED);
+  }
+
+  /** Records a running loop, so readiness can see whether its broker still answers. */
+  static void track(KafkaEventLoop loop) {
+    RUNNING.put(loop.name(), loop);
+  }
+
+  /** Forgets a loop that has stopped. */
+  static void untrack(String loopName) {
+    RUNNING.remove(loopName);
+  }
+
+  /**
+   * @param now the current time, in epoch milliseconds
+   * @param windowMillis how long a broker may go without answering before its loop is stalled
+   * @return the names of running loops whose broker has not answered within the window
+   */
+  // the registry only reads the loops; each is closed by its owner, which also untracks it
+  @SuppressWarnings("PMD.CloseResource")
+  static Set<String> stalledConsumers(long now, long windowMillis) {
+    Set<String> stalled = new java.util.HashSet<>();
+    for (KafkaEventLoop loop : RUNNING.values()) {
+      if (!loop.isHealthy(now, windowMillis)) stalled.add(loop.name());
+    }
+    return Set.copyOf(stalled);
   }
 }

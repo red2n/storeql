@@ -23,13 +23,23 @@ CREATE INDEX idx_carts_tenant_session
     ON carts (tenant_id, session_id, status)
     WHERE session_id IS NOT NULL;
 
+-- At most one ACTIVE cart per customer and per guest session. Two concurrent "get or create cart"
+-- calls for the same customer or session cannot each insert one: the database refuses the second.
+CREATE UNIQUE INDEX uq_carts_active_customer
+    ON carts (tenant_id, customer_id)
+    WHERE customer_id IS NOT NULL AND status = 'ACTIVE';
+
+CREATE UNIQUE INDEX uq_carts_active_session
+    ON carts (tenant_id, session_id)
+    WHERE session_id IS NOT NULL AND status = 'ACTIVE';
+
 CREATE TABLE cart_items (
     id          UUID            PRIMARY KEY,
     cart_id     UUID            NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
     tenant_id   UUID            NOT NULL,   -- denormalized for tenant-first filtering
     variant_id  UUID            NOT NULL,
     qty         NUMERIC(10,4)   NOT NULL DEFAULT 1,
-    unit_price  NUMERIC(19,4),             -- NULL until pricing-svc enriches the cart view
+    unit_price  NUMERIC(19,4),             -- the caller's price on add; NULL if none, never priced here
     added_at    TIMESTAMPTZ     NOT NULL DEFAULT now(),
     UNIQUE (cart_id, variant_id)            -- addItem upserts qty; no duplicate rows per variant
 );

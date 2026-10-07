@@ -1,10 +1,12 @@
 // Deferred revenue for loyalty points and gift card breakage (17.11), through the gateway. Points a
 // customer earns on a till sale wait until the tenant's accountant sets a point's value and the
 // breakage estimates, then post out of sales into deferred income; spending them releases their
-// share, and the last lapse is breakage. A gift card sold is a liability against the tender, one
-// given away is a cost, and spending one recognises its breakage once. Around it, the refusals and
-// the abuse: the wrong roles, a rival tenant, estimates out of range, a card bought with a card or
-// with store credit, more points spent than held, a replayed tender.
+// share, and the last lapse is breakage. A gift card sold is a line on a paid till sale: a liability
+// taken off that sale's clearing, the money debited once by the sale's own tender; one given away
+// by a manager, for a reason, is a cost; and spending one recognises its breakage once. Around it,
+// the refusals and the abuse: the wrong roles, a rival tenant, estimates out of range, a card given
+// by hand with no reason, with a tender or by a cashier, more points spent than held, a replayed
+// tender.
 //
 //   k6/run.sh deferred-revenue
 import { sleep } from 'k6';
@@ -14,9 +16,11 @@ import {
   call,
   data,
   expect,
+  issueGiftCardByHand,
   must,
   newId,
   poll,
+  sellGiftCard,
   sellingTenant,
   truthy,
   uniq,
@@ -50,7 +54,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   const of = (lines, sourceType, ref) => lines.filter((l) => l.sourceType === sourceType && (!ref || l.sourceRef === ref));
   const view = (token = owner) => data(call('GET', DR, { token }));
   const setEstimates = (body, token = owner) => call('PUT', `${DR}/settings`, { token, body });
-  const giftCard = (body) => call('POST', '/api/order-svc/gift-cards', { token: owner, body: { storeId: store.id, ...body } });
+  const giftCard = (amount, opts) => issueGiftCardByHand(owner, store.id, amount, opts);
   const placeSale = (qty, customerId) =>
     must(call('POST', '/api/order-svc/orders', { token: owner, idem: true, body: { storeId: store.id, channel: 'POS', fulfilmentType: 'INSTORE', items: [{ variantId, qty }], ...(customerId ? { customerId } : {}) } }), 201, 'till sale');
   const pay = (orderId, amount, method, extra = {}, idem = true) =>
@@ -114,7 +118,7 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   truthy('[+] points spent release their share of the expected spend', net(release, '4020') === -released, { released, release });
   expect(call('POST', `/api/customer-svc/customers/${customer.id}/loyalty/redeem`, { token: owner, body: { points: points * 10, reason: 'more than held' } }), '[-] spending more points than are held is refused', [409, 422]);
   const rest = round(points - half);
-  must(call('POST', `/api/customer-svc/customers/${customer.id}/loyalty/adjust`, { token: owner, body: { points: -rest, reason: 'k6 lapse' } }), 200, 'the rest lapse');
+  must(call('POST', `/api/customer-svc/customers/${customer.id}/loyalty/adjust`, { token: owner, idem: true, body: { points: -rest, reason: 'k6 lapse' } }), 200, 'the rest lapse');
   poll(60, () => {
     release = of(ledger(), 'LOYALTY_RELEASE');
     return release.some((l) => l.nominalCode === '4030');
@@ -125,26 +129,41 @@ export default function ({ tenant, rival, store, variantId, storekeeper, cashier
   truthy('[+] only the refused redemption was not posted', release.filter((l) => l.nominalCode === '2330').length === 2, release);
 
   // ── 5. gift cards ──────────────────────────────────────────────────────────
-  expect(giftCard({ amount: 100 }), '[-] a gift card has to say how it was paid for', 400);
-  expect(giftCard({ amount: 100, paidBy: 'GIFT_CARD' }), '[-] a gift card is not bought with another gift card', 400, 'GIFT_CARD_PAID_BY_INVALID');
-  expect(giftCard({ amount: 100, paidBy: 'STORE_CREDIT' }), '[-] nor with store credit', 400, 'GIFT_CARD_PAID_BY_INVALID');
-  const card = must(giftCard({ amount: 100, paidBy: 'CARD' }), 201, 'a gift card sold by card');
-  must(giftCard({ amount: 20, paidBy: 'PROMOTIONAL' }), 201, 'a gift card given away');
+  // A card given away is a manager's hand issue, for a reason; a card a customer pays for is a line
+  // on a till sale, loaded when the sale is paid. Money never reaches a card by a hand issue.
+  expect(giftCard(20, { reason: null }), '[-] a gift card given by hand has to say why', 400, 'GIFT_CARD_REASON_REQUIRED');
+  expect(giftCard(100, { extra: { paidBy: 'CARD' } }), '[-] a gift card paid for by card is a sale, never a hand issue', 409, 'GIFT_CARD_NEEDS_SALE');
+  expect(giftCard(100, { extra: { paidBy: 'STORE_CREDIT' } }), '[-] nor is one bought with store credit by hand', 409, 'GIFT_CARD_NEEDS_SALE');
+  expect(issueGiftCardByHand(cashier.token, store.id, 20), '[-] a cashier cannot give a gift card away', 403, 'GIFT_CARD_NEEDS_SALE');
+  const card = must(giftCard(20, { reason: 'PROMOTION', extra: { paidBy: 'PROMOTIONAL' } }), 201, 'a gift card given away');
+  // The same card sold a further 100 at the till, by the cashier, paid by card. (The API answers no
+  // code for a card a sale makes new, so the sale tops up the card this flow goes on to spend.)
+  const sold = sellGiftCard(tenant, store.id, 100, { code: card.code, token: cashier.token, method: 'CARD' });
+  truthy('[+] a gift card sold is a line of a till sale, loaded only when the sale is paid', num(sold.order.total) === 100 && sold.unpaid === 20 && sold.landed >= 0 && sold.after === 120, sold);
   let loads = [];
   poll(60, () => {
     loads = of(ledger(), 'GIFT_CARD_LOAD');
     return loads.length >= 4;
   });
-  truthy('[+] the card sold is money in card clearing against the liability', net(loads, '1250') === 100 && net(loads, '2310') === -120, loads);
+  truthy('[+] the card sold is a liability, taken off the clearing of the sale that sold it', net(of(loads, 'GIFT_CARD_LOAD', sold.order.id), '1105') === 100 && net(loads, '2310') === -120, loads);
   truthy('[+] the card given away is a cost, and neither is revenue', net(loads, '6420') === 20 && net(loads, '4010') === 0, loads);
+  let soldLines = [];
+  poll(60, () => {
+    soldLines = ledger().filter((l) => l.sourceRef === sold.order.id);
+    return of(soldLines, 'SALE_TENDER').length >= 2;
+  });
+  truthy('[+] the money is in card clearing once, by the sale\'s own tender, and the sale\'s clearing is left at nothing', net(of(soldLines, 'SALE_TENDER'), '1250') === 100 && net(soldLines, '1250') === 100 && net(soldLines, '1105') === 0, soldLines);
 
   const giftSale = placeSale(3);
   const spend = num(giftSale.total);
-  must(call('POST', `/api/order-svc/gift-cards/${card.code}/redeem`, { token: owner, body: { amount: spend, orderId: giftSale.id } }), 200, 'the card spent at the till');
+  // The till charges the card through its redeem; payment-svc records the GIFT_CARD tender itself from
+  // the redemption (a client-posted GIFT_CARD payment is refused: PAYMENT_GIFT_CARD_VIA_REDEEM).
   const tenderKey = newId();
-  const tender = must(pay(giftSale.id, spend.toFixed(2), 'GIFT_CARD', { reference: card.code }, tenderKey), [200, 201], 'a gift card tender');
-  const replay = pay(giftSale.id, spend.toFixed(2), 'GIFT_CARD', { reference: card.code }, tenderKey);
-  truthy('[-] the tender replayed on its key is the same payment', [200, 201].includes(replay.status) && data(replay).id === tender.id, { status: replay.status, first: tender.id, again: data(replay).id });
+  const redeem = () => call('POST', `/api/order-svc/gift-cards/${card.code}/redeem`, { token: owner, idem: tenderKey, body: { amount: spend, orderId: giftSale.id } });
+  const tender = must(redeem(), [200, 201], 'the card spent at the till');
+  const replay = redeem();
+  truthy('[-] the redeem replayed on its key is the same redemption', [200, 201].includes(replay.status) && data(replay).redemptionId === tender.redemptionId, { status: replay.status, first: tender.redemptionId, again: data(replay).redemptionId });
+  expect(pay(giftSale.id, spend.toFixed(2), 'GIFT_CARD', { reference: card.code }), '[-] a gift card tender cannot be posted as a payment', 400, 'PAYMENT_GIFT_CARD_VIA_REDEEM');
   const breakageDue = Math.min(round((spend * 0.1) / 0.9), 12, round(120 - spend));
   let breakage = [];
   poll(60, () => {

@@ -28,6 +28,13 @@ public class RetentionPurgeService {
   @Inject CustomerService customers;
   @Inject Retention retention;
 
+  /** Candidates read per page by the retention purge. */
+  @Inject
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.customer.retention.batch",
+      defaultValue = "1000")
+  int batch;
+
   /**
    * Purges one tenant as its schedule says. Each erasure commits on its own, as an erasure does;
    * the run's announcement follows with what was done.
@@ -43,18 +50,27 @@ public class RetentionPurgeService {
           Set<UUID> heldCustomers = sheet.heldSubjects(Retention.CUSTOMER_RECORDS, "CUSTOMER");
           int rows = 0;
           int held = 0;
-          for (UUID customerId : repo.inactiveSince(tenantId, cutoff)) {
-            if (classHeld || heldCustomers.contains(customerId)) {
-              held++;
-              continue;
+          // A page of candidates at a time, by keyset: an erased customer leaves the set and a held
+          // one stays, so the id of the last seen carries on from where it stopped.
+          int size = Math.max(1, batch);
+          UUID after = null;
+          while (true) {
+            List<UUID> page = repo.inactiveSince(tenantId, cutoff, after, size);
+            for (UUID customerId : page) {
+              if (classHeld || heldCustomers.contains(customerId)) {
+                held++;
+                continue;
+              }
+              try {
+                customers.anonymize(tenantId, customerId);
+                rows++;
+              } catch (ApiException e) {
+                // Erased by someone else since the list was read: nothing to do for this one.
+                LOG.log(Level.DEBUG, "Customer {0} not purged: {1}", customerId, e.getMessage());
+              }
             }
-            try {
-              customers.anonymize(tenantId, customerId);
-              rows++;
-            } catch (ApiException e) {
-              // Erased by someone else since the list was read: nothing to do for this one.
-              LOG.log(Level.DEBUG, "Customer {0} not purged: {1}", customerId, e.getMessage());
-            }
+            if (page.size() < size) break;
+            after = page.get(page.size() - 1);
           }
           Retention.Counts counts = new Retention.Counts(rows, held);
           repo.recordRun(Retention.announce(TOPIC, tenantId, payload).apply(counts));

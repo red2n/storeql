@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -64,9 +65,10 @@ public class LandedCostService {
    * Applies a charge to a receipt.
    *
    * @throws ApiException 400 {@code PURCHASE_LANDED_INVALID}, {@code
-   *     PURCHASE_LANDED_CURRENCY_MISMATCH}; 404 {@code PURCHASE_GRN_NOT_FOUND}, {@code
-   *     PURCHASE_SUPPLIER_NOT_FOUND}; 409 {@code PURCHASE_PERIOD_CLOSED}; 422 {@code
-   *     PURCHASE_LANDED_NOTHING_RECEIVED}, {@code PURCHASE_LANDED_NO_BASIS}
+   *     PURCHASE_LANDED_CURRENCY_MISMATCH}, {@code PURCHASE_AMOUNT_TOO_PRECISE}; 404 {@code
+   *     PURCHASE_GRN_NOT_FOUND}, {@code PURCHASE_SUPPLIER_NOT_FOUND}; 409 {@code
+   *     PURCHASE_PERIOD_CLOSED}; 422 {@code PURCHASE_LANDED_NOTHING_RECEIVED}, {@code
+   *     PURCHASE_LANDED_NO_BASIS}
    */
   public Charge apply(ApplyLandedCostRequest req, TenantContext ctx, String idempotencyKey) {
     ctx.requireAnyRole(ROLES);
@@ -99,7 +101,9 @@ public class LandedCostService {
       throw ApiException.notFound(
           "PURCHASE_SUPPLIER_NOT_FOUND", "No such supplier to charge it to: " + req.chargedBy());
     }
-    BigDecimal amount = Money.round(req.amount(), currency);
+    // A charge is money in the order's currency: whole yen, cents of a pound, thousandths of a
+    // dinar — an amount finer than that is refused, never quietly rounded into another charge.
+    BigDecimal amount = Money.requireMinorUnits(req.amount(), currency, "amount");
     List<Weighed> weighed = weighed(tenantId, po, gr, currency);
     if (weighed.isEmpty()) {
       throw ApiException.unprocessable(
@@ -201,24 +205,32 @@ public class LandedCostService {
   }
 
   /**
-   * The charges on a receipt, on an order, or in the tenant, newest first.
+   * The charges on a receipt, on an order, or in the tenant, newest first. A receipt or order named
+   * is read at its own store; with neither, a caller held to stores reads the charges landed at
+   * those stores.
    *
-   * @throws ApiException 404 when the receipt or order named is not this tenant's
+   * @throws ApiException 404 when the receipt or order named is not this tenant's; 403 {@code
+   *     STORE_ACCESS_DENIED} when it is another store's than the caller's
    */
   public List<Charge> list(TenantContext ctx, UUID grId, UUID poId) {
     UUID tenantId = ctx.requireTenantId();
-    if (grId != null) receipt(tenantId, grId);
+    if (grId != null) ctx.requireStoreAccess(receipt(tenantId, grId).storeId());
     if (poId != null) purchase.getPurchaseOrder(ctx, poId);
-    return repo.list(tenantId, grId, poId, MAX_LIST);
+    Set<UUID> stores = grId == null && poId == null ? ctx.reportStores(null) : null;
+    return repo.list(tenantId, grId, poId, stores, MAX_LIST);
   }
 
   /**
-   * @throws ApiException 404 {@code PURCHASE_LANDED_NOT_FOUND}
+   * @throws ApiException 404 {@code PURCHASE_LANDED_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}
+   *     when the charge landed at another store than the caller's
    */
   public Charge get(TenantContext ctx, UUID id) {
-    return repo.find(ctx.requireTenantId(), id)
-        .orElseThrow(
-            () -> ApiException.notFound("PURCHASE_LANDED_NOT_FOUND", "No such landed cost"));
+    Charge c =
+        repo.find(ctx.requireTenantId(), id)
+            .orElseThrow(
+                () -> ApiException.notFound("PURCHASE_LANDED_NOT_FOUND", "No such landed cost"));
+    ctx.requireStoreAccess(c.storeId());
+    return c;
   }
 
   /** The lines of a charge this tenant owns. */

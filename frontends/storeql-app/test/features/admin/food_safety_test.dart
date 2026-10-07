@@ -4,6 +4,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
@@ -93,6 +95,11 @@ const _overdueFreezer = '''
 {"id":"pt-2","storeId":"store-1","name":"Zzz freezer",
  "checkType":{"id":"t-2","code":"FROZEN_STORAGE","name":"Frozen storage","kind":"TEMPERATURE","maxValue":-18.00},
  "maxValue":-18.00,"frequencyHours":4,"active":true,"dueStatus":"OVERDUE","openFailures":0}''';
+
+const _hotCabinet = '''
+{"id":"pt-4","storeId":"store-1","name":"Hot cabinet",
+ "checkType":{"id":"t-4","code":"HOT_HOLDING","name":"Hot holding","kind":"TEMPERATURE","minValue":63.00,"statutory":true},
+ "minValue":63.00,"frequencyHours":2,"active":true,"dueStatus":"DUE","openFailures":0}''';
 
 const _opening = '''
 {"id":"pt-3","storeId":"store-1","name":"Opening checks",
@@ -258,5 +265,150 @@ void main() {
     final post = adapter.posts.single;
     expect(post.path, endsWith('/inventory-svc/admin/food-safety/points/pt-1/deactivate'));
     expect(_body(post)['reason'], 'Chiller replaced');
+  });
+
+  // A reading is typed the way the app's language writes a number and read
+  // with the shared amount reader, signed: every key stays where it was
+  // typed, and one it cannot read is refused under the field with Save held
+  // back. A filter used to drop such a key unsaid and read what was left, so
+  // a failed statutory reading was recorded as a pass.
+  group('a reading is read as typed, or refused in words', () {
+    setUpAll(initializeDateFormatting);
+    tearDown(() => Intl.defaultLocale = null);
+
+    String fieldText(WidgetTester tester) =>
+        tester.widget<TextField>(find.byKey(const Key('fs-reading'))).controller!.text;
+
+    String? says(WidgetTester tester) =>
+        tester.widget<TextField>(find.byKey(const Key('fs-reading'))).decoration?.errorText;
+
+    bool saveEnabled(WidgetTester tester) =>
+        tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Save')).onPressed != null;
+
+    /// Presses [keys] one at a time, as a person types.
+    Future<void> press(WidgetTester tester, String keys) async {
+      for (final k in keys.split('')) {
+        await tester.enterText(find.byKey(const Key('fs-reading')), fieldText(tester) + k);
+        await tester.pump();
+      }
+    }
+
+    testWidgets('in Arabic, 62\u066B5 at a hot cabinet is 62.5, shown to fail and saved as typed',
+        (tester) async {
+      Intl.defaultLocale = 'ar';
+      final adapter = await _pump(tester, points: '{"data":[$_hotCabinet]}');
+      adapter.recordResponse = _failedRecord;
+      await tester.tap(find.text('Record'));
+      await tester.pumpAndSettle();
+      await press(tester, '62\u066B5');
+      expect(fieldText(tester), '62\u066B5', reason: 'the decimal mark stays where it was typed');
+      expect(says(tester), isNull);
+      expect(find.text('Within the limit'), findsNothing, reason: 'never read as 625');
+      expect(find.textContaining('Outside the limit'), findsOneWidget);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(_body(adapter.posts.single)['value'], 62.5);
+    });
+
+    testWidgets('in English, 62,5 is refused in words and nothing is saved', (tester) async {
+      Intl.defaultLocale = 'en_GB';
+      final adapter = await _pump(tester, points: '{"data":[$_hotCabinet]}');
+      await tester.tap(find.text('Record'));
+      await tester.pumpAndSettle();
+      await press(tester, '62,5');
+      expect(fieldText(tester), '62,5');
+      expect(says(tester),
+          'Type the amount without thousands separators. Decimals go after a point.');
+      expect(find.text('Within the limit'), findsNothing);
+      expect(saveEnabled(tester), isFalse);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(adapter.posts, isEmpty);
+    });
+
+    testWidgets('a freezer\'s \u221218 is minus eighteen, never 18', (tester) async {
+      Intl.defaultLocale = 'en_GB';
+      final adapter = await _pump(tester, points: '{"data":[$_overdueFreezer]}');
+      adapter.recordResponse =
+          '{"data":{"id":"rec-4","pointId":"pt-2","pointName":"Zzz freezer","kind":"TEMPERATURE","value":-18.0,"result":"PASS","openFailure":false,"correctiveActionCount":0}}';
+      await tester.tap(find.text('Record'));
+      await tester.pumpAndSettle();
+      await press(tester, '1-8');
+      expect(fieldText(tester), '1-8');
+      expect(says(tester), 'Only one sign, before the digits.');
+      expect(saveEnabled(tester), isFalse);
+
+      await tester.enterText(find.byKey(const Key('fs-reading')), '');
+      await press(tester, '\u221218');
+      expect(fieldText(tester), '\u221218');
+      expect(says(tester), isNull);
+      expect(find.text('Within the limit'), findsOneWidget);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(_body(adapter.posts.single)['value'], -18);
+    });
+
+    testWidgets('a point\'s limits are written and read in the app\'s language, a minus kept',
+        (tester) async {
+      Intl.defaultLocale = 'ro';
+      final adapter =
+          await _pump(tester, role: 'MANAGER', points: '{"data":[$_chiller]}');
+      await tester.tap(find.text('Setup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Edit'));
+      await tester.pumpAndSettle();
+      TextField field(String key) => tester.widget<TextField>(find.byKey(Key(key)));
+      expect(field('fs-point-max').controller!.text, '8,00',
+          reason: 'written as Romanian writes it, so it reads back unchanged');
+      expect(field('fs-point-max').decoration?.errorText, isNull);
+
+      await tester.enterText(find.byKey(const Key('fs-point-max')), '5.5');
+      await tester.pump();
+      expect(field('fs-point-max').decoration?.errorText,
+          'Type the amount without thousands separators. Decimals go after a comma.');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(adapter.posts, isEmpty, reason: 'never saved at the check type\'s laxer limit');
+
+      await tester.enterText(find.byKey(const Key('fs-point-max')), '5,5');
+      await tester.enterText(find.byKey(const Key('fs-point-min')), '\u22121');
+      await tester.pump();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      final put = adapter.posts.single;
+      expect(_body(put)['minValue'], -1);
+      expect(_body(put)['maxValue'], 5.5);
+    });
+
+    // A sign or a mark alone is no limit and is not blank either: refused
+    // under the field, never saved as blank, which takes the check type's
+    // own (laxer) limit.
+    for (final (locale, min, max) in [
+      ('ro', '-', ','),
+      ('en_GB', '\u2212', '.'),
+      ('en', '+', '.'),
+      ('pl', '-', ','),
+      ('ar', '-', '\u066B'),
+    ]) {
+      testWidgets('in $locale, a limit of "$min" or "$max" alone is refused and nothing is saved',
+          (tester) async {
+        Intl.defaultLocale = locale;
+        final adapter =
+            await _pump(tester, role: 'MANAGER', points: '{"data":[$_chiller]}');
+        await tester.tap(find.text('Setup'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Edit'));
+        await tester.pumpAndSettle();
+        TextField field(String key) => tester.widget<TextField>(find.byKey(Key(key)));
+        await tester.enterText(find.byKey(const Key('fs-point-min')), min);
+        await tester.enterText(find.byKey(const Key('fs-point-max')), max);
+        await tester.pump();
+        expect(field('fs-point-min').decoration?.errorText, 'Type the digits after the sign.');
+        expect(field('fs-point-max').decoration?.errorText, 'Type the amount in digits.');
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+        expect(adapter.posts, isEmpty, reason: 'never saved at the check type\'s laxer limit');
+      });
+    }
   });
 }

@@ -1,4 +1,4 @@
--- Date-code markdown — reduce to clear (readiness review 05.4 and 03.9).
+-- Date-code markdown: reduce to clear.
 --
 -- The single most common daily task on a fresh counter: a batch is a day or two from its date,
 -- and someone stickers it at a lower price so it sells rather than goes in the bin. The sticker
@@ -7,8 +7,8 @@
 -- scans. A markdown here is therefore three things at once: the decision (which batch, how much
 -- off, why, who), the sticker's barcode, and the price the till charges when it reads it.
 --
--- The ladder is the plan (03.9): how much off at how many days to go, so the morning's work is a
--- list the system proposes rather than a judgement made pack by pack.
+-- The ladder is the plan: how much off at how many days to go, so the morning's work is a list the
+-- system proposes rather than a judgement made pack by pack.
 
 -- How much off at how many days to expiry. A store's own ladder wins over the tenant's; a tenant
 -- with none gets the default the service names, and the plan says so.
@@ -44,8 +44,8 @@ CREATE TABLE markdowns (
     -- How many packs were stickered. The till refuses to sell more at this price than this.
     qty            NUMERIC(14,3) NOT NULL,
     currency       CHAR(3)       NOT NULL,
-    original_price NUMERIC(18,2) NOT NULL,
-    markdown_price NUMERIC(18,2) NOT NULL,
+    original_price NUMERIC       NOT NULL,
+    markdown_price NUMERIC       NOT NULL,
     percent_off    NUMERIC(5,2)  NOT NULL,
     reason         TEXT          NOT NULL,
     -- The sticker's EAN-13: 21 + item(5) + price in minor units(5) + check. What the till scans.

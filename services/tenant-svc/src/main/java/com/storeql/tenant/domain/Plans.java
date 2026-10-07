@@ -35,15 +35,25 @@ public final class Plans {
 
   /**
    * An entitlement key, and what it means to the person reading the price list. A key is either a
-   * limit (how many) or a feature (whether at all), never both, and every key here is enforced
-   * somewhere: a promise nobody keeps is worse than no promise.
+   * limit (how many) or a feature (whether at all), never both, and a key is promised only once
+   * something enforces it: a promise nobody keeps is worse than no promise.
    *
    * @param key what the API and the database call it
    * @param label what a person reads
    * @param limit true when the key carries a number, false when it is a yes or no
    * @param enforcedBy the service that refuses when it is exceeded, for the person maintaining this
+   * @param enforced false while the refusal is not built yet: a plan cannot set the key, and the
+   *     entitlement reads do not list it. The owning service's slice flips it in the same change
+   *     that adds its refusal.
    */
-  public record Entitlement(String key, String label, boolean limit, String enforcedBy) {}
+  public record Entitlement(
+      String key, String label, boolean limit, String enforcedBy, boolean enforced) {
+
+    /** A key whose refusal exists. */
+    public Entitlement(String key, String label, boolean limit, String enforcedBy) {
+      this(key, label, limit, enforcedBy, true);
+    }
+  }
 
   /**
    * The code of the plan a business's sandbox sits on (22.8): seeded by migration, sold to nobody,
@@ -65,7 +75,21 @@ public final class Plans {
   /** Megabytes of supplier e-invoice documents the business may keep (21.11). */
   public static final String DOCUMENTS_MB_MAX = "documents.mb.max";
 
-  /** Every key a plan may carry. Adding one here means adding the refusal that enforces it. */
+  /** Photos one product may carry: a count, not a size (product-svc, catalogue-hygiene slice 5). */
+  public static final String IMAGES_PER_PRODUCT_MAX = "images.per-product.max";
+
+  /**
+   * Megabytes of delivery and return proofs (photos, signatures) the business may keep (order-svc).
+   */
+  public static final String PROOFS_MB_MAX = "proofs.mb.max";
+
+  /** Text messages the business may send in a calendar month (notification-svc). */
+  public static final String SMS_PER_MONTH = "sms.per-month";
+
+  /**
+   * Every key the platform has named; a plan may carry only those marked {@code enforced}. Marking
+   * one enforced means adding the refusal that enforces it.
+   */
   public static final List<Entitlement> CATALOGUE =
       List.of(
           new Entitlement(STORES_MAX, "Stores and warehouses", true, "tenant-svc"),
@@ -79,16 +103,43 @@ public final class Plans {
               true,
               "gateway (TenantRateLimitFilter)"),
           new Entitlement(IMAGES_MB_MAX, "Product images (MB)", true, "product-svc"),
+          new Entitlement(DOCUMENTS_MB_MAX, "Purchasing documents (MB)", true, "purchase-svc"),
           new Entitlement(
-              DOCUMENTS_MB_MAX, "Supplier e-invoice documents (MB)", true, "purchase-svc"));
+              IMAGES_PER_PRODUCT_MAX,
+              "Images on one product",
+              true,
+              "product-svc (not yet enforced)",
+              false),
+          new Entitlement(
+              PROOFS_MB_MAX,
+              "Delivery and return proofs (MB)",
+              true,
+              "order-svc (not yet enforced)",
+              false),
+          new Entitlement(
+              SMS_PER_MONTH,
+              "Text messages a month",
+              true,
+              "notification-svc (not yet enforced)",
+              false));
 
   private static final Map<String, Entitlement> BY_KEY =
       CATALOGUE.stream()
           .collect(java.util.stream.Collectors.toUnmodifiableMap(Entitlement::key, e -> e));
 
-  /** The entitlement a key names, or empty when the platform enforces no such thing. */
+  /** The entitlement a key names, or empty when the platform has named no such thing. */
   public static java.util.Optional<Entitlement> entitlement(String key) {
     return java.util.Optional.ofNullable(BY_KEY.get(key == null ? "" : key.strip()));
+  }
+
+  /** The keys whose refusal exists: what a plan may set and what the reads list. */
+  public static List<Entitlement> enforced() {
+    return CATALOGUE.stream().filter(Entitlement::enforced).toList();
+  }
+
+  /** True when the key is named and something refuses when it is exceeded. */
+  public static boolean isEnforced(String key) {
+    return entitlement(key).map(Entitlement::enforced).orElse(false);
   }
 
   // ── the plan itself ─────────────────────────────────────────────────────────

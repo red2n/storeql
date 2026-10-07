@@ -65,14 +65,23 @@ public class MtdResource {
       description =
           "vrn is nine digits with HMRC's check digit (a GB prefix and spaces are allowed);"
               + " provider is SIMULATED or HMRC. Changing the number drops HMRC's grant, which is"
-              + " for one number. Management-only.")
+              + " for one number. The VAT return is HMRC's, in pounds: only a business whose own"
+              + " profile says its home country is GB and its currency GBP may register for it."
+              + " Management-only.")
   @APIResponse(responseCode = "200", description = "The registration as it now stands")
   @APIResponse(
       responseCode = "400",
       description = "A number that fails the check, or an unknown provider")
   @APIResponse(
       responseCode = "409",
-      description = "The provider is not configured on this deployment")
+      description =
+          "VAT_RETURN_NOT_AVAILABLE: the business is not a UK one (home country GB, currency GBP);"
+              + " or MTD_PROVIDER_NOT_CONFIGURED: the provider is not configured on this deployment")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's country and currency could not be read, and"
+              + " nothing is assumed")
   @PUT
   @Path("/registration")
   public Response register(Dtos.RegisterVatRequest req) {
@@ -157,16 +166,24 @@ public class MtdResource {
               + " requires, and files them under the registered number with the taxpayer's"
               + " declaration that they are final. What HMRC answers is recorded, accepted or"
               + " refused, where nothing edits it. client carries what the browser collected for"
-              + " HMRC's fraud-prevention headers. Management-only.")
+              + " HMRC's fraud-prevention headers. A business that is not a UK one (home country GB,"
+              + " currency GBP, by its own profile) files nothing, whatever is on file."
+              + " Management-only.")
   @APIResponse(responseCode = "201", description = "Accepted: the filing with HMRC's receipt")
   @APIResponse(
       responseCode = "400",
       description = "Not declared final, a bad period key, or a period that ends before it starts")
-  @APIResponse(responseCode = "409", description = "This period is already filed and accepted")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "MTD_DUPLICATE_SUBMISSION: this period is already filed and accepted;"
+              + " VAT_RETURN_NOT_AVAILABLE: the business is not a UK one")
   @APIResponse(responseCode = "422", description = "HMRC refused the return; the code is HMRC's")
   @APIResponse(
       responseCode = "503",
-      description = "HMRC could not be reached; the filing is recorded as refused")
+      description =
+          "HMRC could not be reached (the filing is recorded as refused), or"
+              + " TENANT_PROFILE_UNAVAILABLE: the business's country and currency could not be read")
   @POST
   @Path("/submissions")
   public Response submit(Dtos.SubmitVatReturnRequest req) {

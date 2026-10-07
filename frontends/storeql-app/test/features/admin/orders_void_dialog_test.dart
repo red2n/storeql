@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:storeql_app/core/ids.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/orders_screen.dart';
 
@@ -142,6 +143,22 @@ void main() {
       expect(find.text('Void sale'), findsNothing);
       expect(find.text('Return / Refund'), findsOneWidget);
     });
+
+    testWidgets('a paid order is cancelled only by someone who may void — the cancel refunds it',
+        (tester) async {
+      await _pumpMenu(tester, status: 'CONFIRMED', channel: 'ONLINE', canVoid: false);
+      expect(find.text('Cancel'), findsNothing);
+    });
+
+    testWidgets('a paid order offers Cancel to a manager who may void', (tester) async {
+      await _pumpMenu(tester, status: 'CONFIRMED', channel: 'ONLINE');
+      expect(find.text('Cancel'), findsOneWidget);
+    });
+
+    testWidgets('an unpaid order is still anyone\'s to cancel', (tester) async {
+      await _pumpMenu(tester, status: 'PENDING', channel: 'ONLINE', canVoid: false);
+      expect(find.text('Cancel'), findsOneWidget);
+    });
   });
 
   group('the dialog', () {
@@ -236,6 +253,28 @@ void main() {
       expect(opened.server.requests, isEmpty);
       expect(opened.done, 0);
       expect(find.text('Void sale?'), findsNothing);
+    });
+
+    testWidgets('sends an Idempotency-Key, and a retry of the same void reuses it',
+        (tester) async {
+      final opened = await _pumpDialog(tester);
+      opened.server.postStatus = 500;
+      opened.server.refusal = '{"error":{"code":"INTERNAL","message":"try again"}}';
+      await tester.enterText(find.byKey(const Key('void-reason')), 'Rang up twice');
+      await tester.tap(find.widgetWithText(FilledButton, 'Void sale'));
+      await tester.pumpAndSettle();
+      opened.server.postStatus = 200;
+      await tester.tap(find.widgetWithText(FilledButton, 'Void sale'));
+      await tester.pumpAndSettle();
+
+      final keys = [
+        for (final r in opened.server.requests.where((r) => r.method == 'POST'))
+          r.headers['Idempotency-Key'] as String
+      ];
+      expect(keys, hasLength(2));
+      expect(isV7(keys[0]), isTrue);
+      expect(keys[1], keys[0]);
+      expect(opened.done, 1);
     });
   });
 }

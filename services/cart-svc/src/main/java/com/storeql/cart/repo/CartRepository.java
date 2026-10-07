@@ -2,6 +2,7 @@ package com.storeql.cart.repo;
 
 import com.storeql.cart.domain.Domain.Cart;
 import com.storeql.cart.domain.Domain.CartItem;
+import com.storeql.cart.domain.Domain.StaffAction;
 import com.storeql.ids.Ids;
 import com.storeql.service.BaseJdbcRepository;
 import com.storeql.service.RedisCache;
@@ -276,58 +277,57 @@ public class CartRepository extends BaseJdbcRepository {
   }
 
   /**
-   * Marks the customer's ACTIVE cart at the given store as CHECKED_OUT. Called when an OrderPlaced
-   * event arrives for a known customer. No-op if no matching cart exists.
+   * Records an {@code OrderPlaced} as handled and, only the first time this event is seen, marks
+   * the shopper's ACTIVE cart CHECKED_OUT, on one transaction: a close that fails leaves no record,
+   * so the redelivery does the work, and a redelivery of an event that did close one finds its
+   * record and closes nothing (golden rule 7). Without the record, the update would close a newer
+   * ACTIVE cart the shopper opened since the first delivery. A shopper with no cart to close still
+   * has the event recorded.
    *
    * <p>{@code RETURNING id} gives us the affected cart's id (at most one, per the unique
    * active-cart-per-customer index), so both the row cache and the items cache are evicted
    * immediately instead of waiting out {@code CART_TTL_SECONDS}.
+   *
+   * @param eventId the event's {@code eventId}, or an id derived from its order when it has none
+   * @param consumer the name this consumer records its events under
+   * @param tenantId owning tenant; the first condition of the update
+   * @param customerId the shopper's login, which is what holds a cart
+   * @param storeId the store a till sale was made at, which a cart must also name; {@code null} for
+   *     an online order, which closes the shopper's cart whichever store it was filled at: a
+   *     delivery resolves to the store serving the postcode, or is split across several (order
+   *     orchestration), so the store the cart names is not the order's to match
+   * @return {@code true} when this was the first delivery of the event, {@code false} for a
+   *     redelivery, which changed nothing
    */
-  public void markCheckedOutByCustomerAndStore(UUID tenantId, UUID customerId, UUID storeId) {
-    UUID cartId =
+  public boolean markCheckedOutOnce(
+      UUID eventId, String consumer, UUID tenantId, UUID customerId, UUID storeId) {
+    record Outcome(boolean first, UUID cartId) {}
+    Outcome outcome =
         inTx(
             c -> {
-              try (var ps =
-                  c.prepareStatement(
-                      "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
+              if (!markProcessedIfNewTx(c, eventId, consumer)) {
+                return new Outcome(false, null);
+              }
+              String sql =
+                  storeId == null
+                      ? "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
+                          + " WHERE tenant_id = ? AND customer_id = ? AND status = 'ACTIVE'"
+                          + " RETURNING id"
+                      : "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
                           + " WHERE tenant_id = ? AND customer_id = ? AND store_id = ?"
-                          + " AND status = 'ACTIVE' RETURNING id")) {
+                          + " AND status = 'ACTIVE' RETURNING id";
+              try (var ps = c.prepareStatement(sql)) {
                 ps.setObject(1, tenantId);
                 ps.setObject(2, customerId);
-                ps.setObject(3, storeId);
+                if (storeId != null) ps.setObject(3, storeId);
                 try (var rs = ps.executeQuery()) {
-                  return rs.next() ? rs.getObject("id", UUID.class) : null;
+                  return new Outcome(true, rs.next() ? rs.getObject("id", UUID.class) : null);
                 }
               }
             },
             "mark cart checked out");
-    evictCheckedOut(tenantId, customerId, cartId);
-  }
-
-  /**
-   * Marks the shopper's ACTIVE cart checked out, whichever store it was filled at: an online order
-   * is placed at the store its delivery resolves to, or split across several (order orchestration),
-   * and a shopper has one active cart in a tenant (the unique index), so the store the cart names
-   * is not the order's to match.
-   */
-  public void markCheckedOutByCustomer(UUID tenantId, UUID customerId) {
-    UUID cartId =
-        inTx(
-            c -> {
-              try (var ps =
-                  c.prepareStatement(
-                      "UPDATE carts SET status = 'CHECKED_OUT', updated_at = now()"
-                          + " WHERE tenant_id = ? AND customer_id = ? AND status = 'ACTIVE'"
-                          + " RETURNING id")) {
-                ps.setObject(1, tenantId);
-                ps.setObject(2, customerId);
-                try (var rs = ps.executeQuery()) {
-                  return rs.next() ? rs.getObject("id", UUID.class) : null;
-                }
-              }
-            },
-            "mark the shopper's cart checked out");
-    evictCheckedOut(tenantId, customerId, cartId);
+    if (outcome.first()) evictCheckedOut(tenantId, customerId, outcome.cartId());
+    return outcome.first();
   }
 
   private void evictCheckedOut(UUID tenantId, UUID customerId, UUID cartId) {
@@ -345,29 +345,61 @@ public class CartRepository extends BaseJdbcRepository {
    * updated if the new value is non-null.
    */
   public CartItem upsertItem(CartItem item) {
+    return upsertItem(item, null);
+  }
+
+  /**
+   * As {@link #upsertItem(CartItem)}, and when {@code audit} is given, the staff trace of it on the
+   * same transaction.
+   */
+  public CartItem upsertItem(CartItem item, StaffAction audit) {
+    // The cart must be ACTIVE in the database, not in the cache: the row is locked FOR SHARE in the
+    // same statement, so a checkout that commits first is seen (and refused), and one that waits
+    // for this add cannot close the cart under it. A cache that was behind cannot accept an item.
     CartItem result =
         inTx(
             c -> {
               try (var ps =
                   c.prepareStatement(
-                      "INSERT INTO cart_items (id, cart_id, tenant_id, variant_id, qty,"
-                          + " unit_price, added_at) VALUES (?,?,?,?,?,?, now())"
+                      "WITH live AS (SELECT id FROM carts"
+                          + " WHERE tenant_id = ? AND id = ? AND status = 'ACTIVE' FOR SHARE)"
+                          + " INSERT INTO cart_items (id, cart_id, tenant_id, variant_id, qty,"
+                          + " unit_price, added_at)"
+                          + " SELECT ?, live.id, ?, ?, ?, ?, now() FROM live"
                           + " ON CONFLICT (cart_id, variant_id) DO UPDATE SET"
                           + "   qty        = cart_items.qty + EXCLUDED.qty,"
                           + "   unit_price = COALESCE(EXCLUDED.unit_price, cart_items.unit_price)"
                           + " RETURNING id, cart_id, tenant_id, variant_id, qty, unit_price,"
                           + " added_at")) {
-                ps.setObject(1, item.id());
+                ps.setObject(1, item.tenantId());
                 ps.setObject(2, item.cartId());
-                ps.setObject(3, item.tenantId());
-                ps.setObject(4, item.variantId());
-                ps.setBigDecimal(5, item.qty());
-                ps.setBigDecimal(6, item.unitPrice());
+                ps.setObject(3, item.id());
+                ps.setObject(4, item.tenantId());
+                ps.setObject(5, item.variantId());
+                ps.setBigDecimal(6, item.qty());
+                ps.setBigDecimal(7, item.unitPrice());
                 try (var rs = ps.executeQuery()) {
-                  if (rs.next()) return mapItem(rs);
+                  if (rs.next()) {
+                    CartItem written = mapItem(rs);
+                    recordStaffAction(
+                        c,
+                        item.tenantId(),
+                        item.cartId(),
+                        audit == null
+                            ? null
+                            : new StaffAction(
+                                audit.action(),
+                                audit.actorId(),
+                                audit.actorRole(),
+                                written.id(),
+                                written.variantId(),
+                                item.qty()));
+                    return written;
+                  }
                 }
               }
-              throw ApiException.unprocessable("CART_ITEM_UPSERT_FAILED", "upsert returned no row");
+              // no ACTIVE cart in the database: nothing was written
+              throw ApiException.conflict("CART_NOT_ACTIVE", "cart is not active");
             },
             "upsert cart item");
     evictItems(result.tenantId(), result.cartId());
@@ -431,13 +463,28 @@ public class CartRepository extends BaseJdbcRepository {
    * @param qty the new quantity
    */
   public void updateItemQty(UUID tenantId, UUID cartId, UUID itemId, BigDecimal qty) {
-    exec(
-        "UPDATE cart_items SET qty = ? WHERE tenant_id = ? AND cart_id = ? AND id = ?",
-        ps -> {
-          ps.setBigDecimal(1, qty);
-          ps.setObject(2, tenantId);
-          ps.setObject(3, cartId);
-          ps.setObject(4, itemId);
+    updateItemQty(tenantId, cartId, itemId, qty, null);
+  }
+
+  /**
+   * As {@link #updateItemQty(UUID, UUID, UUID, BigDecimal)}, and when {@code audit} is given, the
+   * staff trace of it on the same transaction.
+   */
+  public void updateItemQty(
+      UUID tenantId, UUID cartId, UUID itemId, BigDecimal qty, StaffAction audit) {
+    inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "UPDATE cart_items SET qty = ? WHERE tenant_id = ? AND cart_id = ? AND id = ?")) {
+            ps.setBigDecimal(1, qty);
+            ps.setObject(2, tenantId);
+            ps.setObject(3, cartId);
+            ps.setObject(4, itemId);
+            ps.executeUpdate();
+          }
+          recordStaffAction(c, tenantId, cartId, audit);
+          return null;
         },
         "update cart item qty");
     evictItems(tenantId, cartId);
@@ -451,15 +498,55 @@ public class CartRepository extends BaseJdbcRepository {
    * @param itemId the cart item to delete
    */
   public void deleteItem(UUID tenantId, UUID cartId, UUID itemId) {
-    exec(
-        "DELETE FROM cart_items WHERE tenant_id = ? AND cart_id = ? AND id = ?",
-        ps -> {
-          ps.setObject(1, tenantId);
-          ps.setObject(2, cartId);
-          ps.setObject(3, itemId);
+    deleteItem(tenantId, cartId, itemId, null);
+  }
+
+  /**
+   * As {@link #deleteItem(UUID, UUID, UUID)}, and when {@code audit} is given, the staff trace of
+   * it on the same transaction.
+   */
+  public void deleteItem(UUID tenantId, UUID cartId, UUID itemId, StaffAction audit) {
+    inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "DELETE FROM cart_items WHERE tenant_id = ? AND cart_id = ? AND id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, cartId);
+            ps.setObject(3, itemId);
+            ps.executeUpdate();
+          }
+          recordStaffAction(c, tenantId, cartId, audit);
+          return null;
         },
         "delete cart item");
     evictItems(tenantId, cartId);
+  }
+
+  /** Writes the staff trace of an assisted change, on the change's own transaction. */
+  private static void recordStaffAction(
+      java.sql.Connection c, UUID tenantId, UUID cartId, StaffAction a) throws SQLException {
+    if (a == null) return;
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO cart_staff_actions (id, tenant_id, cart_id, action, item_id, variant_id,"
+                + " qty, actor_id, actor_role, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, Ids.newId());
+      ps.setObject(2, tenantId);
+      ps.setObject(3, cartId);
+      ps.setString(4, a.action());
+      ps.setObject(5, a.itemId());
+      ps.setObject(6, a.variantId());
+      ps.setBigDecimal(7, a.qty());
+      if (a.actorId() == null) {
+        ps.setNull(8, java.sql.Types.OTHER);
+      } else {
+        ps.setObject(8, a.actorId());
+      }
+      ps.setString(9, a.actorRole());
+      ps.setObject(10, Instant.now().atOffset(java.time.ZoneOffset.UTC));
+      ps.executeUpdate();
+    }
   }
 
   // ── Merge ─────────────────────────────────────────────────────────────────

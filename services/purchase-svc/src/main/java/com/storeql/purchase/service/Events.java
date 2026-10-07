@@ -1,6 +1,7 @@
 package com.storeql.purchase.service;
 
 import com.storeql.events.EventPayload;
+import com.storeql.purchase.config.Jsons;
 import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.GoodsReceiptLine;
 import com.storeql.purchase.domain.Domain.VendorReturnLine;
@@ -377,10 +378,11 @@ final class Events {
       java.util.List<com.storeql.purchase.domain.PaymentRuns.Item> items,
       java.math.BigDecimal total) {
     UUID eventId = com.storeql.ids.Ids.derived(run.id(), "remittance:" + supplier.id());
-    var lines = jakarta.json.Json.createArrayBuilder();
+    var lines = Jsons.PROVIDER.createArrayBuilder();
     for (var item : items) {
       var line =
-          jakarta.json.Json.createObjectBuilder()
+          Jsons.PROVIDER
+              .createObjectBuilder()
               .add("type", item.itemType())
               .add("reference", item.reference())
               .add("amount", item.amount());
@@ -388,7 +390,8 @@ final class Events {
       lines.add(line);
     }
     var json =
-        jakarta.json.Json.createObjectBuilder()
+        Jsons.PROVIDER
+            .createObjectBuilder()
             .add("eventId", eventId.toString())
             .add("eventType", "SupplierRemittanceIssued")
             .add("tenantId", tenantId.toString())

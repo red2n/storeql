@@ -14,6 +14,7 @@ import {
   call,
   data,
   expect,
+  gtin13,
   must,
   poll,
   priceVariants,
@@ -42,7 +43,7 @@ export default function ({ t }) {
   const cashier = t.cashier.token;
   const rival = t.rival.owner.token;
   const sf = t.tenant.tenantId;
-  const barcode = `5${String(Date.now()).slice(-12)}`;
+  const barcode = gtin13();
   const move = (id, action, token = owner) => call('POST', `${P}/admin/products/${id}/${action}`, { token });
   const listed = (id) => (data(call('GET', `${P}/catalog/products?limit=100`, { storefront: sf })) || []).some((p) => p.id === id);
   const scan = () => call('GET', `${P}/catalog/variants/by-barcode/${barcode}`, { token: cashier });

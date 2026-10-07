@@ -104,8 +104,12 @@ export default function ({ pl, s1, s2, staff, three, five, twenty, gb, gbStore, 
   const offShelf = shelf(pl, s1.id);
   truthy('[+] with it off the storefront shows no count, however few are left', offShelf.some((r) => r.variantId === three && r.inStock === true) && [three, five, twenty].every((v) => onlyLeft(offShelf, v) == null), offShelf);
   expect(setThreshold(staff.managerS1.token, 5), '[-] a manager held to one shop cannot set a business-wide threshold', 403);
-  expect(setThreshold(staff.keeperS1.token, 5), '[-] ...nor a storekeeper', 403);
-  expect(setThreshold(staff.cashierS1.token, 5), '[-] ...nor a cashier', 403);
+  expect(setThreshold(staff.keeperS1.token, 5), '[-] ...nor a storekeeper', 403, 'FORBIDDEN');
+  // Whole-business catalogue data is an owner's or a business-wide manager's (3 Oct 2026).
+  const category = must(call('POST', '/api/v1/product-svc/admin/categories', { token: owner, body: { name: `Held ${uniq()}` } }), [200, 201], 'a category to protect');
+  expect(call('DELETE', `/api/v1/product-svc/admin/categories/${category.id}`, { token: staff.managerS1.token }), '[-] a manager held to one shop cannot remove a category from every shop', 403, 'BUSINESS_WIDE_ONLY');
+  expect(call('PUT', '/api/v1/product-svc/admin/age-restriction-rules', { token: staff.managerS1.token, body: { country: 'PL', category: 'ALCOHOL', minimumAge: 21 } }), '[-] ...nor set an age rule', 403, 'BUSINESS_WIDE_ONLY');
+  expect(setThreshold(staff.cashierS1.token, 5), '[-] ...nor a cashier', 403, 'FORBIDDEN');
   expect(setThreshold(owner, 0), '[-] a threshold of nothing is refused', 400, 'INVENTORY_LOW_STOCK_THRESHOLD_INVALID');
   expect(setThreshold(owner, 1001), '[-] ...and one over a thousand', 400, 'INVENTORY_LOW_STOCK_THRESHOLD_INVALID');
   expect(setThreshold(gb.owner.token, 1000), '[+] the British owner sets a threshold of a thousand for the British shop', 200);
@@ -155,7 +159,7 @@ export default function ({ pl, s1, s2, staff, three, five, twenty, gb, gbStore, 
     expect(call('GET', `${C}/customers/${customerId}/marketing`, { token: who }), `[-] the British ${name}, naming our customer, reads nothing`, 404, 'CUSTOMER_NOT_FOUND');
     expect(call('PUT', `${C}/customers/${customerId}/marketing`, { token: who, body: { channels: [{ channel: 'EMAIL', granted: true }] } }), `[-] ...and the British ${name} switches nothing on`, 404, 'CUSTOMER_NOT_FOUND');
   }
-  expect(call('GET', `${C}/customers/${customerId}/export`, { token: rivals.OWNER.token }), '[-] the British owner exports nothing of ours', 404);
+  expect(call('GET', `${C}/customers/${customerId}/export`, { token: rivals.OWNER.token }), '[-] the British owner exports nothing of ours', 404, 'CUSTOMER_NOT_FOUND');
   const untouched = data(call('GET', `${C}/customers/${customerId}/export`, { token: owner }));
   truthy('[+] nothing of ours moved: both channels off, the log as it was', (untouched.marketingConsentLog || []).length === logged && channels(untouched.marketingPreferences).EMAIL === false && channels(untouched.marketingPreferences).SMS === false, untouched.marketingPreferences);
   expect(mine('/privacy/consents', 'PUT', { choices: [{ purpose: 'MARKETING', granted: true }] }), '[+] the shopper agrees to marketing again', 200);
@@ -177,9 +181,9 @@ export default function ({ pl, s1, s2, staff, three, five, twenty, gb, gbStore, 
     const theirs = named(rivals[role].token);
     truthy(`[-] the British ${role.toLowerCase()}, naming our staff's ids, names none of them`, theirs.status === 200 && namedIds(theirs).length === 0, list(theirs));
   }
-  expect(named(rivals.STOREKEEPER.token), '[-] the British storekeeper names nobody: it is a manager\'s read', 403);
-  expect(named(rivals.CASHIER.token), '[-] ...nor its cashier names anybody', 403);
-  expect(named(staff.keeperS1.token), '[-] ...nor our own storekeeper', 403);
+  expect(named(rivals.STOREKEEPER.token), '[-] the British storekeeper names nobody: it is a manager\'s read', 403, 'FORBIDDEN');
+  expect(named(rivals.CASHIER.token), '[-] ...nor its cashier names anybody', 403, 'FORBIDDEN');
+  expect(named(staff.keeperS1.token), '[-] ...nor our own storekeeper', 403, 'FORBIDDEN');
   const assignments = (token) => list(call('GET', `${TS}/admin/staff?limit=100`, { token }));
   const managerView = assignments(staff.managerS1.token);
   truthy("[+] the manager's staff list: the first shop's assignments and the business-wide ones only", managerView.length > 0 && managerView.every((a) => a.storeId === s1.id || a.storeId == null) && managerView.some((a) => a.userId === staff.keeperS1.userId), managerView);
@@ -198,15 +202,15 @@ export default function ({ pl, s1, s2, staff, three, five, twenty, gb, gbStore, 
   truthy(`[+] the first shop's storekeeper reads its shelf gaps (${reached}s)`, reached >= 0, row);
   truthy('[+] ...forty pierogi of shelf, three to fill it: thirty-seven to go', Boolean(row) && row.capacity === 40 && Number(row.gap) === 37, row);
   expect(gaps(staff.keeperS1.token, s2.id), "[-] ...not the second shop's", 403, 'STORE_ACCESS_DENIED');
-  expect(gaps(staff.cashierS1.token, s1.id), '[-] a cashier reads no shelf gaps', 403);
+  expect(gaps(staff.cashierS1.token, s1.id), '[-] a cashier reads no shelf gaps', 403, 'FORBIDDEN');
   expect(gaps(staff.managerS1.token, s1.id), "[+] the first shop's manager does", 200);
   const rivalOwnerGaps = gaps(rivals.OWNER.token, s1.id);
   truthy('[-] the British owner, naming our shop, reads an empty report', rivalOwnerGaps.status === 200 && list(rivalOwnerGaps).length === 0, String(rivalOwnerGaps.body).slice(0, 200));
   expect(gaps(rivals.MANAGER.token, s1.id), '[-] the British manager, held to its own shop, reads none of ours', 403, 'STORE_ACCESS_DENIED');
   expect(gaps(rivals.STOREKEEPER.token, s1.id), '[-] ...nor its storekeeper', 403, 'STORE_ACCESS_DENIED');
-  expect(gaps(rivals.CASHIER.token, s1.id), '[-] ...nor its cashier reads our shelf', 403);
-  expect(call('GET', `${I}/admin/inventory/reports/low-stock?storeId=${s1.id}`, { token: staff.keeperS1.token }), '[-] every other report stays with management: low stock', 403);
-  expect(call('GET', `${I}/admin/inventory/reports/valuation?storeId=${s1.id}`, { token: staff.keeperS1.token }), '[-] ...and the valuation', 403);
+  expect(gaps(rivals.CASHIER.token, s1.id), '[-] ...nor its cashier reads our shelf', 403, 'STORE_ACCESS_DENIED');
+  expect(call('GET', `${I}/admin/inventory/reports/low-stock?storeId=${s1.id}`, { token: staff.keeperS1.token }), '[-] every other report stays with management: low stock', 403, 'FORBIDDEN');
+  expect(call('GET', `${I}/admin/inventory/reports/valuation?storeId=${s1.id}`, { token: staff.keeperS1.token }), '[-] ...and the valuation', 403, 'FORBIDDEN');
 
   // ── (e) phone numbers, read in each business's own country ───────────────────────────────────────
   const books = [

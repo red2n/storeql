@@ -42,14 +42,28 @@ public final class DeferredRevenue {
   /** A gift card given away rather than sold: a marketing cost, not a tender. */
   public static final String PAID_BY_PROMOTIONAL = "PROMOTIONAL";
 
+  /**
+   * A card loaded by a return's refund (return controls). The refund's own posting already credits
+   * the gift-card liability, so the load is counted in the pool but posts nothing of its own.
+   */
+  public static final String PAID_BY_RETURN = "RETURN";
+
   private static final BigDecimal HUNDRED = new BigDecimal("100");
   private static final int WORKING_SCALE = 10;
 
   private DeferredRevenue() {}
 
-  /** The tenant accountant's estimates. Percentages are 0 to {@link #MAX_BREAKAGE_PCT}. */
+  /**
+   * The tenant accountant's estimates. Percentages are 0 to {@link #MAX_BREAKAGE_PCT}.
+   *
+   * @param currency the business's currency the estimates were set in (ISO 4217): what is deferred
+   *     and recognised is rounded to its own minor units — whole yen, three decimals of a dinar
+   */
   public record Settings(
-      BigDecimal pointValue, BigDecimal pointsBreakagePct, BigDecimal giftCardBreakagePct) {
+      BigDecimal pointValue,
+      BigDecimal pointsBreakagePct,
+      BigDecimal giftCardBreakagePct,
+      String currency) {
 
     /** The share of points the business expects to be spent. Never zero. */
     BigDecimal pointsSpentShare() {
@@ -102,6 +116,9 @@ public final class DeferredRevenue {
     if (pointValue == null
         || pointValue.signum() <= 0
         || pointValue.compareTo(MAX_POINT_VALUE) > 0
+        // Four places is the precision of a rate, not of money: a point is worth a fraction of
+        // the currency's minor unit (0.0125 of a pound, 0.5 yen), and what it multiplies into is
+        // rounded to the currency's own minor units where it is posted.
         || pointValue.stripTrailingZeros().scale() > 4) {
       return CODE_POINT_VALUE_INVALID;
     }
@@ -115,6 +132,7 @@ public final class DeferredRevenue {
     return pct != null
         && pct.signum() >= 0
         && pct.compareTo(MAX_BREAKAGE_PCT) <= 0
+        // A percentage, not money: two places (12.25%) whatever the currency.
         && pct.stripTrailingZeros().scale() <= 2;
   }
 
@@ -145,15 +163,17 @@ public final class DeferredRevenue {
               ? BigDecimal.ZERO
               : money(
                   net.multiply(standalone)
-                      .divide(net.add(standalone), WORKING_SCALE, RoundingMode.HALF_UP));
+                      .divide(net.add(standalone), WORKING_SCALE, RoundingMode.HALF_UP),
+                  s);
     } else {
-      deferral = money(standalone);
+      deferral = money(standalone, s);
     }
     BigDecimal matched = points.min(pool.unmatched());
     BigDecimal releasedNow =
         matched.signum() == 0
             ? BigDecimal.ZERO
-            : money(deferral.multiply(matched).divide(points, WORKING_SCALE, RoundingMode.HALF_UP));
+            : money(
+                deferral.multiply(matched).divide(points, WORKING_SCALE, RoundingMode.HALF_UP), s);
     PointsPool next =
         new PointsPool(
             pool.outstanding().add(points).subtract(matched),
@@ -199,7 +219,8 @@ public final class DeferredRevenue {
           money(
                   pool.deferred()
                       .multiply(matched)
-                      .divide(expected, WORKING_SCALE, RoundingMode.HALF_UP))
+                      .divide(expected, WORKING_SCALE, RoundingMode.HALF_UP),
+                  s)
               .min(pool.deferred());
     }
     return close(
@@ -225,6 +246,44 @@ public final class DeferredRevenue {
         new PointsPool(pool.outstanding().subtract(matched), pool.deferred(), pool.unmatched()),
         BigDecimal.ZERO,
         "Loyalty points lapsed, ");
+  }
+
+  /**
+   * Points taken back because the sale that earned them was returned or voided (return controls):
+   * the deferral that went with them leaves deferred income and goes back to sales — the inverse of
+   * earning, valued at the pool's average as redemption values it. The refund reversed the whole
+   * sale out of sales, so without this sales would be short by what earning deferred. Points beyond
+   * those outstanding were already spent: the customer owes them, and they release nothing.
+   */
+  public static PointsOutcome reversed(Source src, Settings s, PointsPool pool, BigDecimal points) {
+    if (points == null || points.signum() <= 0) return new PointsOutcome(pool, List.of());
+    BigDecimal matched = points.min(pool.outstanding());
+    if (matched.signum() <= 0) return new PointsOutcome(pool, List.of());
+    BigDecimal back =
+        pool.deferred().signum() <= 0
+            ? BigDecimal.ZERO
+            : money(
+                    pool.deferred()
+                        .multiply(matched)
+                        .divide(pool.outstanding(), WORKING_SCALE, RoundingMode.HALF_UP),
+                    s)
+                .min(pool.deferred());
+    PointsPool next =
+        new PointsPool(
+            pool.outstanding().subtract(matched), pool.deferred().subtract(back), pool.unmatched());
+    if (back.signum() == 0) return new PointsOutcome(next, List.of());
+    return new PointsOutcome(
+        next,
+        LedgerPosting.of(
+                src.tenantId(),
+                src.date(),
+                "Loyalty points taken back with a returned sale " + Handle.of(src.ref()),
+                Domain.SOURCE_LOYALTY_DEFERRAL,
+                src.ref(),
+                src.storeId())
+            .debit(Domain.CODE_DEFERRED_LOYALTY, Domain.NAME_DEFERRED_LOYALTY, back)
+            .credit(Domain.CODE_SALES, Domain.NAME_SALES, back)
+            .build());
   }
 
   /** Posts a release, and sweeps what is left to breakage when no points remain outstanding. */
@@ -265,37 +324,114 @@ public final class DeferredRevenue {
             .build());
   }
 
+  /** The {@code source} a sale's card carries: value sold on the order's own receipt. */
+  public static final String SOURCE_SALE = "SALE";
+
   /**
-   * A gift card sold or reloaded: Dr the account the money went to — or gift cards given away — and
-   * Cr the gift card liability. Not revenue, and no VAT: that falls due when the card is spent.
-   *
-   * @param kind ISSUE or RELOAD
-   * @param paidBy the tender taken, or {@link #PAID_BY_PROMOTIONAL}
+   * A gift card sold or reloaded, without saying where the value came from: as the events before
+   * order-svc named a source were read. See the long form.
    */
   public static List<NominalLedgerEntry> giftCardLoaded(
       Source src, String kind, String paidBy, BigDecimal amount) {
+    return giftCardLoaded(src, kind, paidBy, amount, null, null, null);
+  }
+
+  /**
+   * A gift card sold or reloaded, three ways:
+   *
+   * <ul>
+   *   <li>sold in a sale ({@code source} SALE naming the order): the tender was taken by the sale's
+   *       own payments, which debit the money account and credit sales clearing for everything
+   *       taken, card value included. The confirmed sale credits sales only for the goods, so the
+   *       card's value is what is left on clearing: Dr sales clearing / Cr the liability, on the
+   *       order, and the order nets to zero. It is never debited to a tender again, and a split
+   *       tender has no single one to debit;
+   *   <li>given by hand ({@code paidBy} PROMOTIONAL): value given away, not sold — Dr gift cards
+   *       given away (expense) / Cr the liability, with the reason and note in the description;
+   *   <li>put on by a return's refund ({@code paidBy} RETURN): nothing, the refund owes the card.
+   * </ul>
+   *
+   * A load with no source and a tender named is read as before: Dr that tender's account.
+   *
+   * @param kind ISSUE or RELOAD
+   * @param paidBy the tender taken, or {@link #PAID_BY_PROMOTIONAL}
+   * @param source SALE, RETURN, or a hand reason (GOODWILL, PROMOTION, COMPENSATION, MIGRATION);
+   *     null when the event does not say
+   * @param orderId the sale a SALE card was sold in
+   * @param note what the manager wrote for a hand load
+   */
+  public static List<NominalLedgerEntry> giftCardLoaded(
+      Source src,
+      String kind,
+      String paidBy,
+      BigDecimal amount,
+      String source,
+      UUID orderId,
+      String note) {
     if (amount == null || amount.signum() <= 0) return List.of();
     String how = paidBy == null ? "" : paidBy.trim().toUpperCase(Locale.ROOT);
+    if (PAID_BY_RETURN.equals(how)) return List.of();
+    String why = source == null ? "" : source.trim().toUpperCase(Locale.ROOT);
     boolean given = PAID_BY_PROMOTIONAL.equals(how);
+    boolean inSale = !given && SOURCE_SALE.equals(why) && orderId != null;
+    String verb = "RELOAD".equals(kind) ? "Gift card reloaded" : "Gift card issued";
+    String description;
+    if (given) {
+      description =
+          verb
+              + " free of charge"
+              + (why.isEmpty() ? "" : " (" + why + ")")
+              + (note == null || note.isBlank() ? "" : ": " + note.strip());
+    } else if (inSale) {
+      description = verb + " in sale " + Handle.of(orderId);
+    } else {
+      description = verb + " paid by " + (how.isEmpty() ? "an unrecorded method" : how);
+    }
     LedgerPosting p =
         LedgerPosting.of(
             src.tenantId(),
             src.date(),
-            ("RELOAD".equals(kind) ? "Gift card reloaded" : "Gift card issued")
-                + (given
-                    ? " free of charge"
-                    : " paid by " + (how.isEmpty() ? "an unrecorded method" : how)),
+            description,
             Domain.SOURCE_GIFT_CARD_LOAD,
-            src.ref(),
+            inSale ? orderId : src.ref(),
             src.storeId());
     if (given) {
       p.debit(Domain.CODE_GIFT_CARDS_GIVEN, Domain.NAME_GIFT_CARDS_GIVEN, amount);
+    } else if (inSale) {
+      p.debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, amount);
     } else {
       SalesPosting.Control control = SalesPosting.controlFor(how);
       p.debit(control.code(), control.name(), amount);
     }
     return p.credit(Domain.CODE_GIFT_CARD_LIABILITY, Domain.NAME_GIFT_CARD_LIABILITY, amount)
         .build();
+  }
+
+  /**
+   * The value a sale loaded on a gift card taken back because the sale was voided or cancelled: the
+   * opposite of the sale-loaded posting, Dr the liability / Cr sales clearing, on the order. The
+   * refund of the sale is booked from payment-svc's own event, so with it the order nets to zero.
+   */
+  public static List<NominalLedgerEntry> giftCardLoadReversed(
+      Source src, UUID orderId, BigDecimal amount) {
+    if (amount == null || amount.signum() <= 0) return List.of();
+    return LedgerPosting.of(
+            src.tenantId(),
+            src.date(),
+            "Gift card load reversed with sale " + Handle.of(orderId),
+            Domain.SOURCE_GIFT_CARD_LOAD,
+            orderId,
+            src.storeId())
+        .debit(Domain.CODE_GIFT_CARD_LIABILITY, Domain.NAME_GIFT_CARD_LIABILITY, amount)
+        .credit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, amount)
+        .build();
+  }
+
+  /** The pool after a load is taken back; never below nothing. */
+  public static GiftCardPool loadReversed(GiftCardPool pool, BigDecimal amount) {
+    BigDecimal left = pool.loaded().subtract(amount);
+    return new GiftCardPool(
+        left.signum() < 0 ? BigDecimal.ZERO : left, pool.redeemed(), pool.breakage());
   }
 
   /** The pool after a load. */
@@ -332,8 +468,9 @@ public final class DeferredRevenue {
         money(
             amount
                 .multiply(b)
-                .divide(BigDecimal.ONE.subtract(b), WORKING_SCALE, RoundingMode.HALF_UP));
-    BigDecimal ceiling = money(pool.loaded().multiply(b)).subtract(pool.breakage());
+                .divide(BigDecimal.ONE.subtract(b), WORKING_SCALE, RoundingMode.HALF_UP),
+            s);
+    BigDecimal ceiling = money(pool.loaded().multiply(b), s).subtract(pool.breakage());
     BigDecimal recognised = due.min(ceiling).min(spent.liability()).max(BigDecimal.ZERO);
     return new GiftCardOutcome(
         new GiftCardPool(spent.loaded(), spent.redeemed(), spent.breakage().add(recognised)),
@@ -363,7 +500,8 @@ public final class DeferredRevenue {
     return p.build();
   }
 
-  private static BigDecimal money(BigDecimal v) {
-    return v.setScale(2, RoundingMode.HALF_UP);
+  /** An amount in the business's currency, at that currency's own minor units. */
+  private static BigDecimal money(BigDecimal v, Settings s) {
+    return Money.round(v, s.currency());
   }
 }

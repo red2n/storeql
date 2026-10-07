@@ -128,7 +128,7 @@ class PaymentServiceTest {
 
   private static RecordTenderRequest req(UUID orderId, BigDecimal amount) {
     return new RecordTenderRequest(
-        orderId.toString(), amount, "CARD", null, null, null, null, null, null, null);
+        orderId.toString(), amount, "CARD", null, null, null, null, null, null, null, null);
   }
 
   @Test
@@ -282,6 +282,107 @@ class PaymentServiceTest {
     assertEquals(orderId, tender.orderId());
   }
 
+  // ── the store's own switch on a method (POS-64), and an unknown refund method (RFD-03) ────
+
+  private static com.storeql.payment.client.TenantStoreClient storeEnabling(String... methods) {
+    return new com.storeql.payment.client.TenantStoreClient() {
+      @Override
+      public Optional<java.util.Set<String>> enabledMethods(UUID tenantId, UUID storeId) {
+        return Optional.of(java.util.Set.of(methods));
+      }
+    };
+  }
+
+  private static RecordTenderRequest tenderAt(UUID orderId, UUID storeId, String method) {
+    return new RecordTenderRequest(
+        orderId.toString(),
+        new BigDecimal("10.00"),
+        method,
+        null,
+        null,
+        null,
+        storeId.toString(),
+        null,
+        null,
+        null,
+        null);
+  }
+
+  @Test
+  void aMethodTheStoreSwitchedOffIsRefusedWithNothingRecorded() {
+    PaymentService svc = new PaymentService();
+    int[] recorded = {0};
+    svc.repo =
+        new PaymentRepository() {
+          @Override
+          public PaymentTender createTender(PaymentTender t, OutboxRow event) {
+            recorded[0]++;
+            return t;
+          }
+        };
+    svc.storeClient = storeEnabling("CASH", "CARD");
+    UUID store = Ids.newId();
+
+    var ex =
+        assertThrows(
+            ApiException.class,
+            () ->
+                svc.recordTender(
+                    tenderAt(Ids.newId(), store, "upi"), ctx(Ids.newId(), Ids.newId()), null));
+
+    assertEquals("PAYMENT_METHOD_DISABLED", ex.code());
+    assertEquals(422, ex.status());
+    assertEquals(0, recorded[0]);
+    // A method it has enabled goes through, and so does one the owner cannot switch off.
+    svc.recordTender(tenderAt(Ids.newId(), store, "CARD"), ctx(Ids.newId(), Ids.newId()), null);
+    assertEquals(1, recorded[0]);
+  }
+
+  @Test
+  void anUnreadableStoreSettingFailsOpen() {
+    PaymentService svc = new PaymentService();
+    svc.repo = capturingRepo();
+    svc.storeClient = permissiveStoreClient();
+
+    var tender =
+        svc.recordTender(
+            tenderAt(Ids.newId(), Ids.newId(), "UPI"), ctx(Ids.newId(), Ids.newId()), null);
+
+    assertEquals("UPI", tender.method());
+  }
+
+  @Test
+  void anUnknownRefundMethodIsRefusedBeforeAnyRefundIsTried() {
+    PaymentService svc = new PaymentService();
+    svc.repo =
+        new PaymentRepository() {
+          @Override
+          public RefundTender createRefundGuarded(
+              RefundTender r, OutboxRow event, StoreGuard mayActAt) {
+            throw new AssertionError("nothing may be tried for an unknown method");
+          }
+        };
+
+    var ex =
+        assertThrows(
+            ApiException.class,
+            () ->
+                svc.recordRefund(
+                    staffCtx(Ids.newId()),
+                    Ids.newId(),
+                    new com.storeql.payment.dto.Dtos.RecordRefundRequest(
+                        Ids.newId().toString(),
+                        new BigDecimal("5.00"),
+                        "BITCOIN",
+                        null,
+                        null,
+                        null),
+                    null));
+
+    assertEquals("PAYMENT_INVALID_METHOD", ex.code());
+    assertEquals(400, ex.status());
+  }
+
   // ── N3: store credit as tender ──────────────────────────────────────────────
 
   private static final class RecordingCustomerClient
@@ -329,6 +430,7 @@ class PaymentServiceTest {
         null,
         customerId == null ? null : customerId.toString(),
         "GBP",
+        null,
         null);
   }
 

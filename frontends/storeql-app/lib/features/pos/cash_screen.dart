@@ -9,6 +9,7 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/page_header.dart';
 import '../admin/providers/admin_providers.dart' show tenantInfoProvider;
+import 'cash_management_section.dart';
 import 'cash_providers.dart';
 import 'pos_providers.dart';
 import '../../shared/util/short_ref.dart';
@@ -112,7 +113,10 @@ class _OpenTillViewState extends ConsumerState<_OpenTillView> {
       // Scrolls when the keyboard or large text leaves it too little height.
       child: SingleChildScrollView(
         padding: EdgeInsets.all(context.pageGutter),
-        child: ConstrainedBox(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 360),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -164,6 +168,10 @@ class _OpenTillViewState extends ConsumerState<_OpenTillView> {
               ),
             ],
           ),
+        ),
+            // An owner's or a manager's own tools for this store's tills.
+            const ContentBounds.form(child: TillManagementSection()),
+          ],
         ),
       ),
     );
@@ -283,7 +291,6 @@ class _OpenSessionView extends ConsumerWidget {
                             padding: const EdgeInsets.all(16),
                             child: Column(
                               children: [
-                                _row('Opening float', r.floatAmount, currency),
                                 _row('Gross sales', r.grossSales, currency),
                                 // Refunds come off the sales. None reads 0.00:
                                 // negating zero printed −0.00.
@@ -295,7 +302,19 @@ class _OpenSessionView extends ConsumerWidget {
                                 _row('Net sales', r.netSales, currency,
                                     bold: true),
                                 const Divider(),
-                                _row('Cash drops', r.cashDropsTotal, currency),
+                                // Every term of the expected cash, so a count that
+                                // does not match can be traced to the line that moved.
+                                _row('Opening float', r.floatAmount, currency),
+                                _row('Cash sales', r.cashSales, currency),
+                                _row('Cash refunds',
+                                    r.cashRefunds == 0 ? 0.0 : -r.cashRefunds,
+                                    currency),
+                                _row('Paid in', r.payIns, currency),
+                                _row('Paid out',
+                                    r.payOuts == 0 ? 0.0 : -r.payOuts, currency),
+                                _row('Cash drops',
+                                    r.cashDropsTotal == 0 ? 0.0 : -r.cashDropsTotal,
+                                    currency),
                                 _row('Expected cash in till',
                                     r.expectedCashInTill, currency,
                                     bold: true),
@@ -337,8 +356,9 @@ class _OpenSessionView extends ConsumerWidget {
                           onPressed: () => _closeTill(
                               context, ref, r.expectedCashInTill, currency),
                           icon: const Icon(Icons.lock_outline),
-                          label: const Text('Close till (Z-report)'),
+                          label: const Text('Close till'),
                         ),
+                        const TillManagementSection(),
                       ],
                     ),
                   ),
@@ -417,58 +437,54 @@ class _OpenSessionView extends ConsumerWidget {
 
   Future<void> _closeTill(BuildContext context, WidgetRef ref, double expected,
       String currency) async {
-    final symbol = AppFormat.currencySymbol(currency);
-    final countedCtrl = TextEditingController(text: expected.toStringAsFixed(2));
-    final counted = await showDialog<double>(
+    final closing = await showDialog<({double counted, String? note})>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Close till'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-                'Expected cash: ${AppFormat.money(expected, currencyCode: currency)}'),
-            const SizedBox(height: 12),
-            TextField(
-              controller: countedCtrl,
-              autofocus: true,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: InputDecoration(
-                labelText: 'Counted cash',
-                prefixText: symbol.isEmpty ? null : '$symbol ',
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () =>
-                Navigator.pop(ctx, double.tryParse(countedCtrl.text.trim()) ?? 0),
-            child: const Text('Close till'),
-          ),
-        ],
-      ),
+      builder: (ctx) => _CloseTillDialog(expected: expected, currency: currency),
     );
-    if (counted == null) return;
+    if (closing == null) return;
     try {
       final resp = await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.payment}/admin/cash/till-sessions/$sessionId/close',
-        data: {'countedCash': counted},
+        data: {
+          'countedCash': closing.counted,
+          if (closing.note != null) 'note': closing.note,
+        },
       );
       final z = resp.data['data'] as Map<String, dynamic>;
-      final overShort = (z['overShort'] as num?)?.toDouble() ?? 0;
+      final closed = TillReport.fromJson(z);
+      // Over or short is the count against what the drawer should hold; the
+      // server's figure, else the same subtraction.
+      final overShort =
+          closed.overShort ?? (closing.counted - closed.expectedCashInTill);
       ref.read(activeTillProvider.notifier).closed();
       if (!context.mounted) return;
       showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text('Till closed'),
-          content: Text(overShort == 0
-              ? 'Balanced — no discrepancy.'
-              : '${overShort > 0 ? 'Over' : 'Short'} by '
-                  '${AppFormat.money(overShort.abs(), currencyCode: currency)}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Expected cash: '
+                  '${AppFormat.money(closed.expectedCashInTill, currencyCode: currency)}'),
+              Text('Counted cash: '
+                  '${AppFormat.money(closing.counted, currencyCode: currency)}'),
+              const SizedBox(height: 8),
+              Text(
+                overShort.abs() < 0.005
+                    ? 'Balanced — no discrepancy.'
+                    : '${overShort > 0 ? 'Over' : 'Short'} by '
+                        '${AppFormat.money(overShort.abs(), currencyCode: currency)}',
+                key: const Key('till-closed-over-short'),
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              if (closing.note != null) ...[
+                const SizedBox(height: 8),
+                Text('Note: ${closing.note}'),
+              ],
+            ],
+          ),
           actions: [
             FilledButton(
                 onPressed: () => Navigator.pop(ctx), child: const Text('Done')),
@@ -539,4 +555,96 @@ Future<_AmountReason?> _amountReasonDialog(BuildContext context, String title,
       ],
     ),
   );
+}
+
+/// Closing the till: the cash counted and, optionally, a note on why it
+/// differs from what was expected (kept with the closed session).
+class _CloseTillDialog extends StatefulWidget {
+  final double expected;
+  final String currency;
+  const _CloseTillDialog({required this.expected, required this.currency});
+
+  @override
+  State<_CloseTillDialog> createState() => _CloseTillDialogState();
+}
+
+class _CloseTillDialogState extends State<_CloseTillDialog> {
+  late final TextEditingController _counted =
+      TextEditingController(text: widget.expected.toStringAsFixed(2));
+  final _note = TextEditingController();
+
+  @override
+  void dispose() {
+    _counted.dispose();
+    _note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final symbol = AppFormat.currencySymbol(widget.currency);
+    final counted = double.tryParse(_counted.text.trim());
+    final diff = counted == null ? null : counted - widget.expected;
+    return AlertDialog(
+      title: const Text('Close till'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+                'Expected cash: ${AppFormat.money(widget.expected, currencyCode: widget.currency)}'),
+            const SizedBox(height: 12),
+            TextField(
+              key: const Key('close-counted'),
+              controller: _counted,
+              autofocus: true,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                labelText: 'Counted cash',
+                prefixText: symbol.isEmpty ? null : '$symbol ',
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            if (diff != null && diff.abs() >= 0.005)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '${diff > 0 ? 'Over' : 'Short'} by '
+                  '${AppFormat.money(diff.abs(), currencyCode: widget.currency)}',
+                  key: const Key('close-difference'),
+                ),
+              ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const Key('close-note'),
+              controller: _note,
+              maxLength: 500,
+              decoration: const InputDecoration(
+                labelText: 'Note (optional)',
+                helperText: 'Why the count differs, if it does.',
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(
+          onPressed: counted == null || counted < 0
+              ? null
+              : () {
+                  final note = _note.text.trim();
+                  Navigator.pop(context, (
+                    counted: counted,
+                    note: note.isEmpty ? null : note,
+                  ));
+                },
+          child: const Text('Close till'),
+        ),
+      ],
+    );
+  }
 }

@@ -57,7 +57,8 @@ class RfqTest {
         null,
         null,
         Instant.now(),
-        prices);
+        prices,
+        false);
   }
 
   @Test
@@ -158,5 +159,138 @@ class RfqTest {
             "GBP", List.of(line(LINE_A, 10, 0)), List.of(bid(S1, Rfq.INVITED, null, Map.of())), FX);
     assertThat(c.lines().get(0).prices().isEmpty(), is(true));
     assertThat(c.bids().get(0).rank(), is(nullValue()));
+  }
+
+  @Test
+  void aBidsLineTotalIsInItsOwnCurrencysMinorUnits() {
+    // 3 units at a price finer than any currency's minor unit: the yen has none, the dinar three.
+    Rfq.Comparison c =
+        Rfq.compare(
+            "GBP",
+            List.of(line(LINE_A, 3, 0)),
+            List.of(
+                bid(S1, Rfq.QUOTED, "JPY", Map.of(LINE_A, new BigDecimal("123.4567"))),
+                bid(S2, Rfq.QUOTED, "KWD", Map.of(LINE_A, new BigDecimal("1.23456"))),
+                bid(S3, Rfq.QUOTED, "GBP", Map.of(LINE_A, new BigDecimal("1.23456")))),
+            FX);
+    List<Rfq.Price> prices = c.lines().get(0).prices();
+    assertThat(prices.get(0).lineTotal().toPlainString(), is("370"));
+    assertThat(prices.get(1).lineTotal().toPlainString(), is("3.704"));
+    assertThat(prices.get(2).lineTotal().toPlainString(), is("3.70"));
+    assertThat(c.bids().get(0).total().toPlainString(), is("370"));
+    assertThat(c.bids().get(1).total().toPlainString(), is("3.704"));
+  }
+
+  // ── an award away from the lowest bid needs a reason ───────────────────────
+
+  private static Rfq.Comparison twoLines(List<Rfq.Bid> bids) {
+    return Rfq.compare("GBP", List.of(line(LINE_A, 10, 0), line(LINE_B, 5, 1)), bids, FX);
+  }
+
+  @Test
+  void awardingTheLowestBidNeedsNoReasonAndAnyOtherComparableBidDoes() {
+    Rfq.Comparison c =
+        twoLines(
+            List.of(
+                bid(
+                    S1,
+                    Rfq.QUOTED,
+                    "GBP",
+                    Map.of(LINE_A, new BigDecimal("10.00"), LINE_B, new BigDecimal("4.00"))),
+                bid(
+                    S2,
+                    Rfq.QUOTED,
+                    "EUR",
+                    Map.of(LINE_A, new BigDecimal("11.00"), LINE_B, new BigDecimal("5.00")))));
+    // The euro quote is lowest on A at home (9.35), the pound quote on B.
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S2, LINE_B, S1)), is(List.of()));
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S1, LINE_B, S1)), is(List.of(LINE_A)));
+    assertThat(
+        Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S1, LINE_B, S2)), is(List.of(LINE_A, LINE_B)));
+    // A line not awarded is not judged.
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_B, S1)), is(List.of()));
+  }
+
+  @Test
+  void aTieForLowestIsNotAwayFromIt() {
+    Rfq.Comparison c =
+        twoLines(
+            List.of(
+                bid(
+                    S1,
+                    Rfq.QUOTED,
+                    "GBP",
+                    Map.of(LINE_A, new BigDecimal("10.00"), LINE_B, new BigDecimal("4.00"))),
+                bid(
+                    S2,
+                    Rfq.QUOTED,
+                    "GBP",
+                    Map.of(LINE_A, new BigDecimal("10.000"), LINE_B, new BigDecimal("4.50")))));
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S2)), is(List.of()));
+  }
+
+  @Test
+  void aBidThatCannotBeRankedNeverCountsAsLower() {
+    // S1 is complete and readable at home. S2 priced only line A, lower (a partial bid, unranked).
+    // S3 is complete but in a currency with no rate (unrankable, no home figure).
+    Rfq.Comparison c =
+        twoLines(
+            List.of(
+                bid(
+                    S1,
+                    Rfq.QUOTED,
+                    "GBP",
+                    Map.of(LINE_A, new BigDecimal("10.00"), LINE_B, new BigDecimal("4.00"))),
+                bid(S2, Rfq.QUOTED, "GBP", Map.of(LINE_A, new BigDecimal("1.00"))),
+                bid(
+                    S3,
+                    Rfq.QUOTED,
+                    "JPY",
+                    Map.of(LINE_A, new BigDecimal("1.00"), LINE_B, new BigDecimal("1.00")))));
+    assertThat(c.bids().stream().filter(b -> b.rank() != null).count(), is(1L));
+    // The comparable lowest for A is S1's 10.00: awarding S1 needs no reason though S2 is cheaper.
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S1, LINE_B, S1)), is(List.of()));
+    // The partial bidder's price is readable at home and no higher than the comparable lowest.
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S2)), is(List.of()));
+    // A price with no home figure cannot be shown to be the lowest while something comparable
+    // exists.
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S3)), is(List.of(LINE_A)));
+  }
+
+  @Test
+  void withNothingComparableThereIsNoRankingToDepartFrom() {
+    Rfq.Comparison c =
+        twoLines(
+            List.of(
+                bid(S1, Rfq.QUOTED, "JPY", Map.of(LINE_A, BigDecimal.ONE, LINE_B, BigDecimal.ONE)),
+                bid(S2, Rfq.QUOTED, "GBP", Map.of(LINE_A, BigDecimal.TEN))));
+    assertThat(Rfq.awardedAwayFromLowest(c, Map.of(LINE_A, S1, LINE_B, S1)), is(List.of()));
+  }
+
+  // ── quotes are taken to the end of the day they are due ────────────────────
+
+  @Test
+  void quotingClosesAfterTheDueDayInTheStoresOwnDay() {
+    java.time.LocalDate due = java.time.LocalDate.of(2026, 10, 1);
+    java.time.ZoneId auckland = java.time.ZoneId.of("Pacific/Auckland");
+    java.time.ZoneId honolulu = java.time.ZoneId.of("Pacific/Honolulu");
+    // 2026-10-01T20:00Z is already 2 October in Auckland and still 1 October in Honolulu.
+    Instant moment = Instant.parse("2026-10-01T20:00:00Z");
+    assertThat(Rfq.quotingClosed(due, moment, auckland), is(true));
+    assertThat(Rfq.quotingClosed(due, moment, honolulu), is(false));
+    // The due day itself is open to its last minute.
+    assertThat(
+        Rfq.quotingClosed(due, Instant.parse("2026-10-01T23:59:00Z"), java.time.ZoneOffset.UTC),
+        is(false));
+    // No deadline never closes.
+    assertThat(Rfq.quotingClosed(null, moment, auckland), is(false));
+  }
+
+  @Test
+  void anUnknownZoneNeverClosesQuotingBeforeTheDayHasEndedEverywhere() {
+    java.time.LocalDate due = java.time.LocalDate.of(2026, 10, 1);
+    // Still 1 October at UTC-12 until 12:00Z on 2 October.
+    assertThat(Rfq.quotingClosed(due, Instant.parse("2026-10-02T11:00:00Z"), null), is(false));
+    assertThat(Rfq.quotingClosed(due, Instant.parse("2026-10-02T12:00:00Z"), null), is(true));
   }
 }

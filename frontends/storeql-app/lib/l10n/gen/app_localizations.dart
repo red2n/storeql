@@ -451,6 +451,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ask for a new link'**
   String get resetPasswordRequestNew;
+
+  /// Sign-in card: the way to the business sign-up (/start-business), for someone setting a business up rather than shopping
+  ///
+  /// In en, this message translates to:
+  /// **'Start a business'**
+  String get startBusiness;
+
+  /// Business sign-up page (/start-business): heading
+  ///
+  /// In en, this message translates to:
+  /// **'Start your business'**
+  String get startBusinessTitle;
+
+  /// Business sign-up page: subheading, shown before anything is typed — what the login is for and what comes next
+  ///
+  /// In en, this message translates to:
+  /// **'Create the login you will run your business with. Next, you set up the business and its first store.'**
+  String get startBusinessIntro;
+
+  /// Business sign-up page: the field that repeats the new password
+  ///
+  /// In en, this message translates to:
+  /// **'Confirm password'**
+  String get fieldPasswordConfirm;
+
+  /// Business sign-up page: the confirmation does not match the password above it
+  ///
+  /// In en, this message translates to:
+  /// **'This does not match the password above.'**
+  String get fieldPasswordMismatch;
 }
 
 class _AppLocalizationsDelegate

@@ -8,6 +8,7 @@ import com.storeql.inventory.dto.Dtos.YieldTemplateRequest;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.YieldService;
 import com.storeql.web.ApiResponse;
+import com.storeql.web.Permissions;
 import com.storeql.web.TenantContext;
 import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
@@ -98,8 +99,9 @@ public class YieldResource {
       description =
           "Consumes the primal at the store, makes each cut a batch of its own under the primal's"
               + " lot with the primal's cost apportioned by share, and records the loss against"
-              + " what the template expected. Any staff with access to the store.")
+              + " what the template expected. Needs stock.adjust and access to the store.")
   @APIResponse(responseCode = "201", description = "Recorded")
+  @APIResponse(responseCode = "403", description = "PERMISSION_DENIED, STORE_ACCESS_DENIED")
   @APIResponse(
       responseCode = "400",
       description =
@@ -110,9 +112,17 @@ public class YieldResource {
       responseCode = "409",
       description = "INVENTORY_YIELD_TEMPLATE_ENDED, INVENTORY_YIELD_INPUT_NOT_OWNED")
   @APIResponse(responseCode = "422", description = "INVENTORY_YIELD_INSUFFICIENT_INPUT")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the business's currency, whose minor units the money is"
+              + " kept to, could not be read")
   @POST
   @Path("/runs")
   public Response record(YieldRunRequest req) {
+    // A breakdown draws the primal and makes new stock: stock work, so stock.adjust, at a store
+    // the caller keeps (checked in YieldService.record).
+    ctx.requirePermission(Permissions.STOCK_ADJUST);
     Validations.validate(req);
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toDto(svc.record(ctx, req))))

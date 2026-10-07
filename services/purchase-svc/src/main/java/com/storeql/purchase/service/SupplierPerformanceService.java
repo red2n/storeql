@@ -1,5 +1,6 @@
 package com.storeql.purchase.service;
 
+import com.storeql.purchase.domain.Domain;
 import com.storeql.purchase.domain.Domain.Supplier;
 import com.storeql.purchase.domain.SupplierScorecard;
 import com.storeql.purchase.domain.SupplierScorecard.Card;
@@ -84,6 +85,27 @@ public class SupplierPerformanceService {
         repo.invoiceStats(tenantId, supplierId, p.from(), p.to()));
   }
 
+  /**
+   * What the reader of an order is told about its supplier's record (last 90 days): {@code
+   * SUPPLIER_GRADE_D} on an open order whose supplier is graded D. Shown to management and buying
+   * roles, who may read the scorecard's substance; a till role sees none. Never fails the read a
+   * warning decorates.
+   */
+  public List<String> orderWarnings(TenantContext ctx, Domain.PurchaseOrder po) {
+    if (!(ctx.hasRole("PLATFORM_ADMIN")
+        || ctx.hasRole("OWNER")
+        || ctx.hasRole("MANAGER")
+        || ctx.hasRole("STOREKEEPER"))) {
+      return List.of();
+    }
+    try {
+      return SupplierScorecard.orderWarnings(
+          po.status(), scorecard(ctx, po.supplierId(), null, null).grade());
+    } catch (RuntimeException e) {
+      return List.of();
+    }
+  }
+
   /** Every supplier's scorecard, the best first; those with nothing to judge last, unscored. */
   public List<Card> scorecards(TenantContext ctx, String from, String to) {
     UUID tenantId = ctx.requireTenantId();
@@ -104,7 +126,8 @@ public class SupplierPerformanceService {
   }
 
   /**
-   * A supplier's deliveries in the period, newest first.
+   * A supplier's deliveries in the period, newest first: a caller held to stores reads the
+   * deliveries into those stores (the card itself is the supplier's, judged over the business).
    *
    * @throws ApiException 404 {@code PURCHASE_SUPPLIER_NOT_FOUND}
    */
@@ -115,7 +138,7 @@ public class SupplierPerformanceService {
           "PURCHASE_SUPPLIER_NOT_FOUND", "Supplier not found: " + supplierId);
     }
     Period p = period(from, to);
-    return repo.deliveries(tenantId, supplierId, p.from(), p.to());
+    return repo.deliveries(tenantId, supplierId, p.from(), p.to(), ctx.reportStores(null));
   }
 
   /** The period's figures weighed into the card; a share of nothing is unknown, not zero. */

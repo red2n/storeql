@@ -62,7 +62,7 @@ export default function ({ tenant, rival, variantId, cashier }) {
   expect(call('PUT', `${P}/admin/price-zones/${zone.id}/stores`, { token: owner, body: { storeIds: [rival.stores[0].id] } }), "[-] another business's store is not ours to price", 400, 'PRICING_ZONE_STORE_UNKNOWN');
   expect(call('PUT', `${P}/admin/price-zones/${NOBODY}/stores`, { token: owner, body: { storeIds: [north.id] } }), '[-] a zone nobody made', 404, 'PRICING_ZONE_NOT_FOUND');
   expect(call('POST', `${P}/admin/price-lists`, { token: owner, body: { name: `Nowhere ${uniq()}`, channel: 'ALL', currency: 'GBP', effectiveFrom: '2024-01-01T00:00:00Z', zoneId: NOBODY } }), '[-] a list bound to a zone nobody made', 400, 'PRICING_ZONE_UNKNOWN');
-  expect(call('POST', `${P}/admin/price-zones`, { token: cashier.token, body: { name: 'Till' } }), '[-] a cashier does not draw zones', 403);
+  expect(call('POST', `${P}/admin/price-zones`, { token: cashier.token, body: { name: 'Till' } }), '[-] a cashier does not draw zones', 403, 'FORBIDDEN');
   expect(call('GET', `${P}/admin/price-zones`, { token: rival.owner.token }), '[+] another business reads only its own zones', 200);
   truthy("[+] ...and has none of ours", data(call('GET', `${P}/admin/price-zones`, { token: rival.owner.token })).length === 0, null);
 
@@ -78,7 +78,7 @@ export default function ({ tenant, rival, variantId, cashier }) {
   truthy('[+] the sightings read back newest first', data(call('GET', `${P}/admin/competitor-prices?variantId=${variantId}`, { token: owner })).length === 3, null);
   expect(call('POST', `${P}/admin/competitor-prices`, { token: owner, body: { variantId, competitor: 'Rival C', price: 8.5, currency: 'USD' } }), '[-] a rival\'s price in another currency', 400, 'PRICING_COMPETITOR_CURRENCY_MISMATCH');
   expect(call('POST', `${P}/admin/competitor-prices`, { token: owner, body: { variantId, competitor: 'Rival C', price: 8.5, observedOn: '2999-01-01' } }), '[-] a sighting from the future', 400, 'PRICING_COMPETITOR_DATE_INVALID');
-  expect(call('POST', `${P}/admin/competitor-prices`, { token: cashier.token, body: { variantId, competitor: 'Rival C', price: 8.5 } }), '[-] a cashier does not record rivals', 403);
+  expect(call('POST', `${P}/admin/competitor-prices`, { token: cashier.token, body: { variantId, competitor: 'Rival C', price: 8.5 } }), '[-] a cashier does not record rivals', 403, 'FORBIDDEN');
 
   // ── 4. a rule on the zone's list: proposed, applied, and only the zone moves ─
   const rule = must(call('POST', `${P}/admin/repricing/rules`, { token: owner, body: { name: `North undercut ${uniq()}`, priceListId: zoned.id, strategy: 'UNDERCUT_PERCENT', value: 1, floorPercent: 80, rounding: 'ENDING_99', maxAgeDays: 14 } }), 201, 'a rule');
@@ -103,5 +103,5 @@ export default function ({ tenant, rival, variantId, cashier }) {
   const settled = must(call('POST', `${P}/admin/repricing/rules/${rule.id}/run`, { token: owner, body: {} }), 200, 'run once more');
   truthy('[+] at 7.99 against a rival at 8.50 there is nothing left to propose', settled.proposed === 0, settled);
   truthy('[+] the applied proposal is on the record', data(call('GET', `${P}/admin/repricing/proposals?status=APPLIED`, { token: owner })).length === 1, null);
-  expect(call('GET', `${P}/admin/repricing/proposals`, { token: cashier.token }), '[-] a cashier reads no proposals', 403);
+  expect(call('GET', `${P}/admin/repricing/proposals`, { token: cashier.token }), '[-] a cashier reads no proposals', 403, 'FORBIDDEN');
 }

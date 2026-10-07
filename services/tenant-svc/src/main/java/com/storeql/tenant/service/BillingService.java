@@ -1,8 +1,10 @@
 package com.storeql.tenant.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.service.Fx;
 import com.storeql.tenant.domain.BillingTax;
 import com.storeql.tenant.domain.BillingTax.Treatment;
+import com.storeql.tenant.domain.Countries;
 import com.storeql.tenant.domain.Meters;
 import com.storeql.tenant.domain.Plans;
 import com.storeql.tenant.domain.Plans.Plan;
@@ -59,9 +61,6 @@ public class BillingService {
 
   private static final System.Logger LOG = System.getLogger(BillingService.class.getName());
 
-  /** Two places: an invoice does not print 5 or 5.0. */
-  private static final int MONEY_SCALE = 2;
-
   /**
    * How many periods one run will catch up on. Two years of months: enough that a platform which
    * has not billed for a long while is brought fully up to date, and few enough that a date typed
@@ -111,7 +110,7 @@ public class BillingService {
             req.addressLine2(),
             req.city(),
             req.postcode(),
-            req.country().strip().toUpperCase(java.util.Locale.ROOT),
+            Countries.require(req.country()),
             blankToNull(req.vatNumber()),
             blankToNull(req.companyNumber()),
             req.invoicePrefix().strip().toUpperCase(java.util.Locale.ROOT),
@@ -137,7 +136,7 @@ public class BillingService {
   public List<Subscriptions.VatRate> saveRate(
       com.storeql.tenant.dto.BillingDtos.RateRequest req, UUID actorId) {
     repo.saveRate(
-        req.country().strip().toUpperCase(java.util.Locale.ROOT),
+        Countries.require(req.country()),
         date(req.effectiveFrom()),
         req.rate(),
         req.note(),
@@ -197,7 +196,7 @@ public class BillingService {
         new Subscriptions.Payment(
             Ids.newId(),
             invoiceId,
-            money(req.amount()),
+            paymentAmount(req.amount(), invoice.currency()),
             invoice.currency(),
             req.method(),
             req.provider(),
@@ -239,7 +238,7 @@ public class BillingService {
         new Subscriptions.Payment(
             Ids.newId(),
             invoiceId,
-            money(amount),
+            money(amount, invoice.currency()),
             invoice.currency(),
             Subscriptions.CARD,
             "pay-link",
@@ -531,7 +530,7 @@ public class BillingService {
     BigDecimal net =
         lines.stream().map(InvoiceLine::amount).reduce(BigDecimal.ZERO, BigDecimal::add);
     BigDecimal rate = rateFor(treatment, seller, buyerCountry, issued);
-    BigDecimal tax = money(net.multiply(rate));
+    BigDecimal tax = money(net.multiply(rate), s.currency());
     Instant now = Instant.now();
 
     Invoice invoice =
@@ -547,12 +546,12 @@ public class BillingService {
             periodStart,
             periodEnd,
             s.currency(),
-            money(net),
+            money(net, s.currency()),
             treatment.code(),
             rate,
             tax,
-            money(net).add(tax),
-            BigDecimal.ZERO.setScale(MONEY_SCALE, RoundingMode.UNNECESSARY),
+            money(net, s.currency()).add(tax),
+            BigDecimal.ZERO.setScale(Fx.minorUnits(s.currency()), RoundingMode.UNNECESSARY),
             seller.snapshot(),
             buyer.snapshot(),
             buyer.vatNumber(),
@@ -607,7 +606,8 @@ public class BillingService {
             newPrice,
             s.periodStart(),
             s.periodEnd(),
-            on);
+            on,
+            Fx.minorUnits(s.currency()));
     if (!p.any()) {
       throw ApiException.conflict(
           "BILLING_PERIOD_ENDING",
@@ -618,6 +618,7 @@ public class BillingService {
     int line = 1;
     lines.add(
         prorationLine(
+            s.currency(),
             line++,
             Subscriptions.LINE_CREDIT,
             "Unused "
@@ -628,6 +629,7 @@ public class BillingService {
             p.credit().negate()));
     lines.add(
         prorationLine(
+            s.currency(),
             line,
             Subscriptions.LINE_PRORATION,
             plan.name()
@@ -734,13 +736,13 @@ public class BillingService {
         planName(s.planId()) + ", " + from + " to " + to,
         BigDecimal.ONE,
         s.priceAmount(),
-        money(s.priceAmount()));
+        money(s.priceAmount(), s.currency()));
   }
 
   private static InvoiceLine prorationLine(
-      int no, String kind, String description, BigDecimal amount) {
+      String currency, int no, String kind, String description, BigDecimal amount) {
     return new InvoiceLine(
-        Ids.newId(), no, kind, description, BigDecimal.ONE, amount, money(amount));
+        Ids.newId(), no, kind, description, BigDecimal.ONE, amount, money(amount, currency));
   }
 
   private String planName(UUID planId) {
@@ -791,8 +793,40 @@ public class BillingService {
     return Plans.YEAR.equals(interval) ? from.plusYears(1) : from.plusMonths(1);
   }
 
-  private static BigDecimal money(BigDecimal amount) {
-    return amount.setScale(MONEY_SCALE, RoundingMode.HALF_UP);
+  /**
+   * An amount as an invoice holds it: rounded once, half up, to the minor units of the invoice's
+   * own currency (ISO 4217, through {@link Fx#minorUnits}) — whole yen, a dinar's third decimal —
+   * never an assumed two places, because a business may be billed in any currency a plan is priced
+   * in.
+   */
+  static BigDecimal money(BigDecimal amount, String currency) {
+    return amount.setScale(Fx.minorUnits(currency), RoundingMode.HALF_UP);
+  }
+
+  /**
+   * Money received against an invoice, as it was sent: in the invoice's currency, and no finer than
+   * that currency's smallest unit. A payment of 100.50 yen is refused, not rounded to 101 — a
+   * figure the payer did not send would be recorded as theirs.
+   *
+   * @throws ApiException 400 {@code BILLING_AMOUNT_INVALID}
+   */
+  static BigDecimal paymentAmount(BigDecimal amount, String currency) {
+    int places = Fx.minorUnits(currency);
+    if (amount == null || amount.signum() <= 0) {
+      throw ApiException.badRequest("BILLING_AMOUNT_INVALID", "a payment is more than nothing");
+    }
+    if (amount.stripTrailingZeros().scale() > places) {
+      throw ApiException.badRequest(
+          "BILLING_AMOUNT_INVALID",
+          "this invoice is in "
+              + currency
+              + ", which has "
+              + places
+              + " decimal places: "
+              + amount.toPlainString()
+              + " is not an amount of it");
+    }
+    return amount.setScale(places, RoundingMode.UNNECESSARY);
   }
 
   private static String upper(String s) {

@@ -201,6 +201,17 @@ class RetentionPurgeIT {
       orderService.handlePaymentCaptured(
           Ids.parse(tenant), Ids.parse(id), Ids.newId(), new BigDecimal("5.00"));
     }
+    // An hour old, not "now": the purge judges updated_at (the database's clock) against a cutoff
+    // from this JVM's clock, and a clock step of a second between them (seen on WSL) would leave
+    // an order made "now" not yet due under a 0-day period.
+    exec(
+        PG,
+        "UPDATE \"order\".orders SET updated_at = updated_at - interval '1 hour'"
+            + " WHERE tenant_id = '"
+            + tenant
+            + "' AND id = '"
+            + id
+            + "'");
     return id;
   }
 

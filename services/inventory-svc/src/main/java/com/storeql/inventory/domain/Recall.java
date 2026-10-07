@@ -52,8 +52,14 @@ public final class Recall {
     OTHER
   }
 
+  /**
+   * Who raised the notice. {@code REGULATOR} is whichever authority the business answers to, in any
+   * country; {@code FSA} and {@code FSS} stay valid for the UK regulators that were named first.
+   */
   public enum Source {
     SUPPLIER,
+    MANUFACTURER,
+    REGULATOR,
     FSA,
     FSS,
     INTERNAL,
@@ -308,6 +314,27 @@ public final class Recall {
     return best;
   }
 
+  /** One lot a batch's stock is of: its number and its use-by date. */
+  public record Lot(String batchNo, LocalDate expiry) {}
+
+  /**
+   * The most certain match of any line of a recall's scope for stock of several lots, as a batch is
+   * that was split or merged: the lots it carries beside its own. Each lot is judged as {@link
+   * #classify(List, UUID, String, LocalDate)} judges one, and the most certain verdict stands, so
+   * adding a lot to a batch cannot weaken the verdict.
+   *
+   * @param lots the lots the batch carries, its own and those of the stock it is made from; none
+   *     yields {@code null}
+   * @return null when no lot of the batch matches any line
+   */
+  public static Match classify(List<Scope> scope, UUID variantId, List<Lot> lots) {
+    Match best = null;
+    for (Lot lot : lots) {
+      best = Match.moreCertain(best, classify(scope, variantId, lot.batchNo(), lot.expiry()));
+    }
+    return best;
+  }
+
   public record Release(String reason, UUID releasedBy, Instant releasedAt) {}
 
   public record HeldBatch(
@@ -394,17 +421,30 @@ public final class Recall {
       BigDecimal qtyHeld,
       Reach reach) {}
 
-  /** One scope line of an open recall, as the till checks a scanned item against it. */
+  /**
+   * One scope line of an open recall, as the till checks a scanned item against it — or of one
+   * ended since a given moment, which only order-svc's judgement of a replayed till sale asks for.
+   *
+   * @param openedAt when the recall was opened: order-svc judges a till sale replayed from an
+   *     offline queue by the recalls open when it was rung up, not by one opened after
+   * @param endedAt when it was closed or cancelled; null while it is open. A recall ended since a
+   *     sale was rung up still covered it then, so a replay is judged against it too
+   * @param status OPEN, or how it ended
+   */
   public record ActiveItem(
       UUID recallId,
       String reference,
       Kind kind,
       Hazard hazard,
       String customerNotice,
+      Instant openedAt,
+      Instant endedAt,
+      Status status,
       Scope scope) {
 
     public ActiveItem {
       Objects.requireNonNull(scope, "scope");
+      Objects.requireNonNull(status, "status");
     }
   }
 }

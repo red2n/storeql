@@ -10,6 +10,7 @@ import '../../core/l10n/message_languages.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
+import '../../core/theme.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
@@ -93,19 +94,40 @@ class MessageType {
 }
 
 class MessageTemplate {
+  /// BUSINESS (its own words in this language), DEFAULT_LANGUAGE (the words in
+  /// its default language go out instead: it has none in this language, or its
+  /// own cannot be used, see [storedWordsUnusable]) or DEFAULT (the platform's).
+  /// Whichever it is, these are the words a message would go out in.
   final String source;
   final int? version;
   final String subject;
   final String body;
-  const MessageTemplate(this.source, this.version, this.subject, this.body);
+
+  /// The language these words were asked for, as the server answers it: the
+  /// one a note about [storedWordsUnusable] is about.
+  final String? language;
+
+  /// The language the words shown are written in; that of [source] DEFAULT_LANGUAGE
+  /// is not the one asked for.
+  final String? wordsLanguage;
+
+  /// The business has a live version in this language that cannot be sent (its
+  /// words do not parse), so the words shown are the next ones in the order.
+  final bool storedWordsUnusable;
+  const MessageTemplate(this.source, this.version, this.subject, this.body,
+      {this.language, this.wordsLanguage, this.storedWordsUnusable = false});
 
   bool get isBusiness => source == 'BUSINESS';
+  bool get isDefaultLanguage => source == 'DEFAULT_LANGUAGE';
 
   factory MessageTemplate.fromJson(Map<String, dynamic> j) => MessageTemplate(
         j['source'] as String? ?? 'DEFAULT',
         (j['version'] as num?)?.toInt(),
         j['subject'] as String? ?? '',
         j['body'] as String? ?? '',
+        language: j['language'] as String?,
+        wordsLanguage: j['wordsLanguage'] as String?,
+        storedWordsUnusable: j['storedWordsUnusable'] as bool? ?? false,
       );
 }
 
@@ -502,6 +524,9 @@ class _MessageEditorScreenState extends ConsumerState<MessageEditorScreen> {
       _busy = true;
       _error = null;
       _preview = null;
+      // What was loaded belongs to the language and form shown before: none of
+      // it is said of this one until it has been read.
+      _loaded = null;
     });
     try {
       final t = await ref.read(messagesApiProvider).template(widget.type.type, _form.form, _language);
@@ -557,6 +582,43 @@ class _MessageEditorScreenState extends ConsumerState<MessageEditorScreen> {
           SnackBar(content: Text('Saved as version ${t.version} in ${languageName(_language)}.')),
         );
       });
+
+  static String _sourceLabel(MessageTemplate t) {
+    if (t.isBusiness) return 'Your words · version ${t.version}';
+    if (t.isDefaultLanguage) {
+      // None of its own in this language (never written, retired, or one that
+      // cannot be sent): what goes out is the business's default language's.
+      return 'Sent in your ${languageName(t.wordsLanguage ?? '')} words · version ${t.version}';
+    }
+    return 'The platform\'s words';
+  }
+
+  /// Said when the business has words in this language that cannot be sent, so
+  /// that a language with a version of its own is not told it has none.
+  Widget _unusableNote(MessageTemplate t) {
+    final status = context.status;
+    final language = languageName(t.language ?? _language);
+    final goesOutIn = t.isDefaultLanguage ? 'your ${languageName(t.wordsLanguage ?? '')} words' : "the platform's words";
+    return Container(
+      key: const Key('template-unusable'),
+      padding: const EdgeInsets.all(AppSpacing.sm),
+      decoration: BoxDecoration(color: status.warningContainer, borderRadius: AppRadius.badge),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_outlined, size: 18, color: status.onWarningContainer),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text(
+              'What you wrote in $language has a mistake that stops it being sent, so messages in $language '
+              'go out in $goesOutIn, shown below. Save a new version to replace it.',
+              style: TextStyle(color: status.onWarningContainer),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Future<void> _retire() async {
     final ok = await showDialog<bool>(
@@ -702,11 +764,15 @@ class _MessageEditorScreenState extends ConsumerState<MessageEditorScreen> {
                     if (loaded != null)
                       Chip(
                         key: const Key('template-source'),
-                        label: Text(loaded.isBusiness ? 'Your words · version ${loaded.version}' : 'The platform\'s words'),
+                        label: Text(_sourceLabel(loaded)),
                       ),
                   ],
                 ),
               ),
+              if (loaded != null && loaded.storedWordsUnusable) ...[
+                const SizedBox(height: AppSpacing.sm),
+                _unusableNote(loaded),
+              ],
               const SizedBox(height: AppSpacing.lg),
               if (_form.required.isNotEmpty)
                 Text(

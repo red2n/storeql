@@ -58,9 +58,26 @@ public class AppliedPriceService {
   @Inject PricingService pricing;
 
   /** Whether a tenant's storefront may advertise item reductions, as of its ledger and its law. */
-  private record Verdict(Instant ledgerAt, PriorPrices.Rules rules, boolean advertisable) {}
+  record Verdict(Instant ledgerAt, PriorPrices.Rules rules, boolean advertisable) {}
 
   private final Map<UUID, Verdict> verdicts = new ConcurrentHashMap<>();
+
+  /** Most tenants whose advertising verdict is kept; past it the cache starts afresh. */
+  @Inject
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.pricing.verdict-cache.max-tenants",
+      defaultValue = "5000")
+  int verdictCacheMax = 5000;
+
+  /** Keeps a verdict, bounded: a full cache is emptied (each entry is re-derivable). */
+  void remember(UUID tenantId, Verdict verdict) {
+    if (verdicts.size() >= verdictCacheMax && !verdicts.containsKey(tenantId)) verdicts.clear();
+    verdicts.put(tenantId, verdict);
+  }
+
+  int verdictCount() {
+    return verdicts.size();
+  }
 
   /**
    * Works the due evaluations until none are left or the batch is spent.
@@ -132,6 +149,8 @@ public class AppliedPriceService {
       }
       // Recorded out of order: evaluate the variant again, so the uncertain span it opened closes.
       if (again) repo.enqueue(e.tenantId(), variant, null, "RECHECK");
+      // A whole-tenant run outlives any fixed lease: keep the claim while it makes progress.
+      if (e.variantId() == null) repo.renewLease(e.tenantId(), e.id(), LEASE);
     }
     return appended;
   }
@@ -291,7 +310,7 @@ public class AppliedPriceService {
         all.size() <= REDUCTIONS_LIMIT
             && all.stream()
                 .allMatch(r -> PriorPrices.announceable(true, r.required(), r.prior().status()));
-    verdicts.put(tenantId, new Verdict(ledgerAt, rules, advertisable));
+    remember(tenantId, new Verdict(ledgerAt, rules, advertisable));
     return advertisable;
   }
 

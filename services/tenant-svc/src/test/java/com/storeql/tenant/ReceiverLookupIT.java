@@ -88,7 +88,8 @@ class ReceiverLookupIT {
               .header("X-Roles", "PLATFORM_ADMIN")
               .method(
                   "PATCH",
-                  java.net.http.HttpRequest.BodyPublishers.ofString("{\"status\":\"INACTIVE\"}"))
+                  java.net.http.HttpRequest.BodyPublishers.ofString(
+                      "{\"status\":\"INACTIVE\",\"reason\":\"test suspension\"}"))
               .build();
       return java.net.http.HttpClient.newHttpClient()
           .send(req, java.net.http.HttpResponse.BodyHandlers.ofString())

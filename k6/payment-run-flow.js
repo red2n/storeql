@@ -13,6 +13,7 @@ import { Counter } from 'k6/metrics';
 import {
   ALL_CHECKS_PASS,
   BASE,
+  businessWideManager,
   call,
   data,
   errorCode,
@@ -46,13 +47,16 @@ export function setup() {
   const rival = onboardTenant('payrun-rival', { country: 'GB', currency: 'GBP' });
   const store = tenant.stores[0];
   const { variantId } = sellableVariant(tenant, 'Paid-for widget');
-  const manager = staffUser(tenant, 'MANAGER', [store.id]);
+  // A run gathers every store's invoices and pays them from the business's accounts: the manager
+  // who proposes is the whole business's; one held to a store is refused BUSINESS_WIDE_ONLY.
+  const manager = businessWideManager(tenant);
+  const branchManager = staffUser(tenant, 'MANAGER', [store.id]);
   const storekeeper = staffUser(tenant, 'STOREKEEPER', [store.id]);
   const cashier = staffUser(tenant, 'CASHIER', [store.id]);
-  return { tenant, rival, store, variantId, manager, storekeeper, cashier };
+  return { tenant, rival, store, variantId, manager, branchManager, storekeeper, cashier };
 }
 
-export default function ({ tenant, rival, store, variantId, manager, storekeeper, cashier }) {
+export default function ({ tenant, rival, store, variantId, manager, branchManager, storekeeper, cashier }) {
   const owner = tenant.owner.token;
   const today = new Date().toISOString().slice(0, 10);
   const plusDays = (iso, n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
@@ -111,8 +115,10 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   const expectedTotal = acmeNet + num(b1.inv.grossAmount);
 
   // ── propose ──────────────────────────────────────────────────────────────────
-  expect(propose(storekeeper.token, { payUpTo: today, paymentDate: today }), '[-] a storekeeper cannot propose a payment run', 403);
-  expect(call('GET', RUNS, { token: cashier.token }), '[-] a cashier cannot list payment runs', 403);
+  expect(propose(storekeeper.token, { payUpTo: today, paymentDate: today }), '[-] a storekeeper cannot propose a payment run', 403, 'FORBIDDEN');
+  expect(call('GET', RUNS, { token: cashier.token }), '[-] a cashier cannot list payment runs', 403, 'FORBIDDEN');
+  expect(propose(branchManager.token, { payUpTo: today, paymentDate: today }), '[-] a manager held to one store cannot propose a run: it is the whole business\'s', 403, 'BUSINESS_WIDE_ONLY');
+  expect(call('GET', RUNS, { token: branchManager.token }), '[-] ...nor list the runs', 403, 'BUSINESS_WIDE_ONLY');
   expect(propose(manager.token, { payUpTo: today, paymentDate: plusDays(today, -1) }), '[-] a payment date in the past is refused', 400, 'PURCHASE_PAYMENT_DATE_INVALID');
   expect(propose(manager.token, { payUpTo: plusDays(today, 800), paymentDate: today }), '[-] a run more than a year ahead is refused', 400, 'PURCHASE_PAYMENT_DATE_INVALID');
   expect(propose(manager.token, { payUpTo: today, paymentDate: today, currency: 'EUR' }), '[-] nothing is due in a currency nobody invoiced in', 409, 'PURCHASE_PAYMENT_RUN_NOTHING_DUE');
@@ -131,12 +137,14 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   expect(again, '[-] proposing again finds nothing: the invoices are held by the run', 409, 'PURCHASE_PAYMENT_RUN_NOTHING_DUE');
 
   // ── approve ──────────────────────────────────────────────────────────────────
-  expect(call('GET', `${RUNS}/${run.id}`, { token: rival.owner.token }), '[-] another tenant cannot see the run', 404);
-  expect(act(rival.owner.token, run.id, 'approve'), '[-] ...nor approve it', 404);
+  expect(call('GET', `${RUNS}/${run.id}`, { token: rival.owner.token }), '[-] another tenant cannot see the run', 404, 'PURCHASE_PAYMENT_RUN_NOT_FOUND');
+  expect(act(rival.owner.token, run.id, 'approve'), '[-] ...nor approve it', 404, 'PURCHASE_PAYMENT_RUN_NOT_FOUND');
   expect(call('GET', `${RUNS}/${run.id}/bank-file`, { token: owner }), '[-] there is no bank file before approval', 409, 'PURCHASE_PAYMENT_RUN_NOT_APPROVED');
   expect(act(owner, run.id, 'pay'), '[-] a run is not paid before approval', 409, 'PURCHASE_PAYMENT_RUN_NOT_APPROVED');
   expect(act(manager.token, run.id, 'approve'), '[-] the proposer cannot approve their own run', 403, 'PURCHASE_PAYMENT_RUN_SELF_APPROVAL');
-  expect(act(storekeeper.token, run.id, 'approve'), '[-] nor can a storekeeper', 403);
+  expect(act(storekeeper.token, run.id, 'approve'), '[-] nor can a storekeeper', 403, 'FORBIDDEN');
+  expect(act(branchManager.token, run.id, 'approve'), '[-] nor a manager held to one store', 403, 'BUSINESS_WIDE_ONLY');
+  expect(call('GET', `${RUNS}/${run.id}`, { token: branchManager.token }), '[-] ...who cannot read the run either', 403, 'BUSINESS_WIDE_ONLY');
   const approvedRes = act(owner, run.id, 'approve');
   expect(approvedRes, '[+] the owner approves it', 200);
   truthy('[+] ...and it reads APPROVED', data(approvedRes).status === 'APPROVED', data(approvedRes));
@@ -146,7 +154,7 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   const rows = String(file.body || '').split('\r\n').filter((l) => l.length > 0);
   truthy('[+] the bank file downloads as CSV, never cached', file.status === 200 && String(file.headers['Content-Type'] || '').startsWith('text/csv') && String(file.headers['Cache-Control'] || '').includes('no-store'), { status: file.status, headers: file.headers });
   truthy('[+] ...one payment per supplier with the account in full and the run reference', rows.length === 3 && rows.some((r) => r.includes(',123456,31415926,,,') && r.endsWith(`,GBP,${run.reference}`)) && rows.some((r) => r.includes('DE89370400440532013000,DEUTDEFF')), rows);
-  expect(call('GET', `${RUNS}/${run.id}/bank-file`, { token: rival.owner.token }), '[-] another tenant cannot download it', 404);
+  expect(call('GET', `${RUNS}/${run.id}/bank-file`, { token: rival.owner.token }), '[-] another tenant cannot download it', 404, 'PURCHASE_PAYMENT_RUN_NOT_FOUND');
 
   // ── abuse: twenty payments at once ───────────────────────────────────────────
   const payUrl = `${BASE}${RUNS}/${run.id}/pay`;
@@ -177,7 +185,8 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   expect(act(owner, second.id, 'pay'), '[abuse] a run is not paid to bank details changed after its approval', 409, 'PURCHASE_PAYMENT_RUN_BANK_DETAILS_CHANGED');
   expect(call('GET', `${RUNS}/${second.id}/bank-file`, { token: owner }), '[abuse] ...nor is its bank file produced', 409, 'PURCHASE_PAYMENT_RUN_BANK_DETAILS_CHANGED');
   truthy('[abuse] ...and nothing was posted for it', ledgerFor(second.id).length === 0);
-  expect(act(manager.token, second.id, 'cancel', {}), '[-] cancelling needs a reason', 400);
+  expect(act(branchManager.token, second.id, 'cancel', { reason: 'not mine to cancel' }), '[-] a manager held to one store cannot cancel a run', 403, 'BUSINESS_WIDE_ONLY');
+  expect(act(manager.token, second.id, 'cancel', {}), '[-] cancelling needs a reason', 400, 'VALIDATION_FAILED');
   expect(act(manager.token, second.id, 'cancel', { reason: 'bank details changed after approval' }), '[+] the run is cancelled with a reason', 200);
   expect(act(manager.token, second.id, 'cancel', { reason: 'twice' }), '[-] ...once', 409, 'PURCHASE_PAYMENT_RUN_CANCELLED');
   expect(act(owner, run.id, 'cancel', { reason: 'too late' }), '[-] a paid run cannot be cancelled', 409, 'PURCHASE_PAYMENT_RUN_ALREADY_PAID');

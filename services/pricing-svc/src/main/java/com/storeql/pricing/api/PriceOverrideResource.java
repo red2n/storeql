@@ -50,7 +50,17 @@ public class PriceOverrideResource {
           "Appends a staff-approved ad-hoc price change made at the point of sale. Requires an"
               + " admin/staff role (enforced by AdminAuthorizationFilter).")
   @APIResponse(responseCode = "201", description = "Price override recorded")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "VALIDATION_FAILED: a missing or negative price, or one with more decimals than the"
+              + " business's currency has")
   @APIResponse(responseCode = "403", description = "Caller lacks a staff/admin role")
+  @APIResponse(
+      responseCode = "503",
+      description =
+          "TENANT_PROFILE_UNAVAILABLE: the prices are kept to the business currency's minor"
+              + " units, and the currency could not be read")
   @POST
   public Response create(CreatePriceOverrideRequest req) {
     Validations.validate(req);

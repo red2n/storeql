@@ -390,6 +390,10 @@ class NetworkIT {
                 + transferId
                 + "'");
     assertThat(shipped, containsString("\"variantId\":\"" + APPLES + "\",\"qty\":19.5"));
+    assertThat(
+        "a proposed transfer is stock in transit until it is received",
+        shipped,
+        containsString("\"transferType\":\"INTRANSIT\""));
     String received =
         Envelopes.scalar(
             PG,
@@ -399,6 +403,68 @@ class NetworkIT {
                 + "'");
     assertThat(received, containsString("\"fromStoreId\":\"" + DC + "\""));
     assertThat(received, containsString("\"qty\":19.5"));
+  }
+
+  /**
+   * reporting-svc holds a shipped transfer as stock in transit until the receipt that closes it, so
+   * the shipment says which kind it is: a DIRECT transfer lands as it ships and no receipt follows.
+   */
+  @Test
+  void aShippedTransferSaysWhetherItIsInTransitOrLandsAsItShips() {
+    receive(DC, APPLES, 50);
+    String direct = transfer(null, "5");
+    String inTransit = transfer("INTRANSIT", "7");
+
+    Envelopes.ok(call("POST", "/admin/inventory/transfers/" + direct + "/ship", "{}", "OWNER"));
+    Envelopes.ok(call("POST", "/admin/inventory/transfers/" + inTransit + "/ship", "{}", "OWNER"));
+
+    String directEvent = shippedEvent(direct);
+    assertThat(directEvent, containsString("\"transferType\":\"DIRECT\""));
+    assertThat(directEvent, containsString("\"variantId\":\"" + APPLES + "\",\"qty\":5"));
+    assertThat(shippedEvent(inTransit), containsString("\"transferType\":\"INTRANSIT\""));
+    // A DIRECT transfer is received as it ships (its status is RECEIVED, not SHIPPED), so there is
+    // nothing to receive and no TransferOrderReceived ever follows it.
+    assertThat(
+        code(call("POST", "/admin/inventory/transfers/" + direct + "/receive", "{}", "OWNER"), 422),
+        is("TRANSFER_ORDER_NOT_RECEIVABLE"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*)::text FROM inventory.outbox WHERE event_type = 'TransferOrderReceived'"
+                + " AND aggregate_id = '"
+                + direct
+                + "'"),
+        is("0"));
+  }
+
+  /** A transfer from the warehouse to Leeds; no type asked for makes a DIRECT one. */
+  private String transfer(String type, String qty) {
+    return Envelopes.created(
+            call(
+                "POST",
+                "/admin/inventory/transfers",
+                "{\"fromStoreId\":\""
+                    + DC
+                    + "\",\"toStoreId\":\""
+                    + LEEDS
+                    + "\","
+                    + (type == null ? "" : "\"transferType\":\"" + type + "\",")
+                    + "\"lines\":[{\"variantId\":\""
+                    + APPLES
+                    + "\",\"requestedQty\":"
+                    + qty
+                    + "}]}",
+                "OWNER"))
+        .getString("id");
+  }
+
+  private static String shippedEvent(String transferId) {
+    return Envelopes.scalar(
+        PG,
+        "SELECT payload FROM inventory.outbox WHERE event_type = 'TransferOrderShipped' AND"
+            + " aggregate_id = '"
+            + transferId
+            + "'");
   }
 
   @Test
@@ -517,6 +583,106 @@ class NetworkIT {
                 call("GET", "/admin/inventory/network/proposals?warehouseId=" + DC, null, "OWNER"))
             .size(),
         is(1));
+  }
+
+  // ── who may write, and whose network it is ─────────────────────────────────
+
+  /**
+   * Catalogue TRF depot replenishment gap 1: serving, proposing and releasing are refused on the
+   * server to a cashier (not only hidden in the app), and another business's staff, of every role,
+   * naming our warehouse and shops, change nothing of ours.
+   */
+  @Test
+  void theNetworkIsWrittenByStaffWhoMayAndOnlyInTheirOwnBusiness() {
+    serve(LEEDS, DC, 2);
+    receive(DC, APPLES, 10);
+    plan(LEEDS, APPLES, "5", "1");
+    String body = "{\"warehouseId\":\"" + DC + "\"}";
+    JsonObject run =
+        Envelopes.created(call("POST", "/admin/inventory/network/proposals", body, "STOREKEEPER"));
+    String transferId = run.getJsonArray("transferIds").getString(0);
+    String release = "/admin/inventory/transfers/" + transferId + "/release";
+    String direct = "/admin/inventory/network/serving/" + LEEDS + "/direct/" + PEARS;
+
+    // A till may do none of it.
+    assertThat(
+        call("PUT", "/admin/inventory/network/serving", serving(YORK, DC, 1), "CASHIER")
+            .getStatus(),
+        is(403));
+    assertThat(
+        call("DELETE", "/admin/inventory/network/serving/" + LEEDS, null, "CASHIER").getStatus(),
+        is(403));
+    assertThat(call("PUT", direct, "{}", "CASHIER").getStatus(), is(403));
+    assertThat(call("DELETE", direct, null, "CASHIER").getStatus(), is(403));
+    assertThat(
+        call("POST", "/admin/inventory/network/proposals", body, "CASHIER").getStatus(), is(403));
+    assertThat(call("POST", release, "{}", "CASHIER").getStatus(), is(403));
+
+    // Another business's staff, naming our shops and warehouse: refused or nothing of theirs to act
+    // on, and ours is as it was.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          code(
+              call("PUT", "/admin/inventory/network/serving", serving(YORK, DC, 1), T2, role, YORK),
+              400),
+          is("INVENTORY_SERVING_STORE_UNKNOWN"));
+      assertThat(
+          role,
+          code(
+              call("DELETE", "/admin/inventory/network/serving/" + LEEDS, null, T2, role, LEEDS),
+              404),
+          is("INVENTORY_SERVING_NOT_FOUND"));
+      assertThat(
+          role,
+          code(call("PUT", direct, "{}", T2, role, LEEDS), 404),
+          is("INVENTORY_SERVING_NOT_FOUND"));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          call("PUT", "/admin/inventory/network/serving", serving(YORK, DC, 1), T2, role, YORK)
+              .getStatus(),
+          is(403));
+      assertThat(
+          role,
+          call("DELETE", "/admin/inventory/network/serving/" + LEEDS, null, T2, role, LEEDS)
+              .getStatus(),
+          is(403));
+    }
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER"}) {
+      int status =
+          call("POST", "/admin/inventory/network/proposals", body, T2, role, DC).getStatus();
+      assertThat(role + " proposes " + status, status >= 400 && status < 500, is(true));
+      assertThat(role, call("POST", release, "{}", T2, role, DC).getStatus(), is(404));
+    }
+    assertThat(call("POST", release, "{}", T2, "CASHIER", null).getStatus(), is(403));
+
+    // Ours: one relationship, still Leeds by the DC at two days; one draft, still a draft.
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM inventory.serving_relationships WHERE tenant_id = '" + T + "'"),
+        is("1"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT lead_time_days FROM inventory.serving_relationships WHERE tenant_id = '"
+                + T
+                + "' AND store_id = '"
+                + LEEDS
+                + "'"),
+        is("2"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT status FROM inventory.transfer_orders WHERE id = '" + transferId + "'"),
+        is("DRAFT"));
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.transfer_orders"), is("1"));
+    assertThat(
+        Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM inventory.serving_relationships WHERE tenant_id = '" + T2 + "'"),
+        is("0"));
   }
 
   // ── stock by store, for routing an online order ────────────────────────────

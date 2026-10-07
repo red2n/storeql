@@ -252,6 +252,28 @@ class StorefrontAccountIT {
     assertThat(as("/customers/me/addresses", OTHER_T, alice).get().getStatus(), is(404));
   }
 
+  @Test
+  @DisplayName("An address already linked to another login is not taken over")
+  void anEmailLinkedToAnotherLoginIsRefused() {
+    Shopper first = claimed();
+    Shopper second = new Shopper(Ids.newId().toString(), first.email());
+
+    Response refused =
+        as("/customers/me", T, second).post(Entity.entity("{}", MediaType.APPLICATION_JSON));
+    String body = refused.readEntity(String.class);
+    assertThat(body, refused.getStatus(), is(409));
+    assertThat(body, containsString("CUSTOMER_EMAIL_LINKED_ELSEWHERE"));
+
+    assertThat(
+        "the first login's record is still its own",
+        as("/customers/me", T, first).get(String.class),
+        containsString(first.email()));
+    assertThat(
+        "the second login got no record",
+        as("/customers/me", T, second).get().getStatus(),
+        is(404));
+  }
+
   // ── the wrong input ───────────────────────────────────────────────────────
 
   @Test

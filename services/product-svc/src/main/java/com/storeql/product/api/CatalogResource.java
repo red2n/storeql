@@ -72,7 +72,8 @@ public class CatalogResource {
   @Operation(
       summary = "Browse or search the public catalog",
       description =
-          "Lists ACTIVE products; the online channel further filters to sellable_online, POS"
+          "Lists ACTIVE and DISCONTINUED products (each carries its status; delisted ones are"
+              + " left out); the online channel further filters to sellable_online, POS"
               + " channel to sellable_pos. At least one of q/sku/barcode routes to the search"
               + " path; otherwise the standard filtered list is returned. Tenant comes from"
               + " X-Tenant-Id.")
@@ -223,7 +224,9 @@ public class CatalogResource {
               + " packet whose 2D code says 05012345678900 find the variant a shop entered as"
               + " 5012345678900. What the code carried besides the item — batch, expiry, weight, price"
               + " — comes back in `code`, unconverted and uninterpreted. A code that is not GS1 at all"
-              + " (an internal code, a PLU, a shelf label) is matched exactly and `code` is null.")
+              + " (an internal code, a PLU, a shelf label) is matched exactly and `code` is null."
+              + " Last, a SKU typed from under a label that will not scan: as written, else in any"
+              + " case when only one variant answers to it.")
   @APIResponse(responseCode = "400", description = "code is blank")
   @APIResponse(responseCode = "404", description = "No active variant matches the code")
   @APIResponse(responseCode = "409", description = "The line is listed but not yet on sale")

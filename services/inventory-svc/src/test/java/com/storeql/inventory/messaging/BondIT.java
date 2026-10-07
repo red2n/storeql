@@ -21,6 +21,7 @@ import java.sql.DriverManager;
 import java.time.LocalDate;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -45,8 +46,12 @@ class BondIT {
     System.setProperty("storeql.db.schema", "inventory");
     System.setProperty("storeql.consul.enabled", "false");
     System.setProperty("storeql.kafka.enabled", "false");
-    // The business trades in pounds: the duty a release owes is in its home currency.
-    com.storeql.test.TenantSvcStub.start().with(BondIT.T, "GBP", "GB");
+    // The business trades in pounds: the duty a release owes is in its home currency. A dinar and
+    // a yen business beside it, whose valuations are kept to their own minor units.
+    com.storeql.test.TenantSvcStub.start()
+        .with(BondIT.T, "GBP", "GB")
+        .with(BondIT.KW, "KWD", "KW")
+        .with(BondIT.JP, "JPY", "JP");
   }
 
   private static final String T = "01a090ae-611e-702c-a97b-d1b8025478e1";
@@ -54,6 +59,9 @@ class BondIT {
   private static final String SHOP = "01a090ae-611e-703c-a378-a4972ea461e2";
   private static final String WHISKY = "01a090ae-611e-7037-a4b7-c854f0266ae1";
   private static final String UNRATED = "01a090ae-611e-7037-a4b7-c854f0266ae2";
+  private static final String OTHER_T = "01a090ae-611e-702c-a97b-d1b8025478e9";
+  private static final String KW = "01a090ae-611e-702c-a97b-d1b8025478ea";
+  private static final String JP = "01a090ae-611e-702c-a97b-d1b8025478eb";
   private static final String ORDER = "01a090ae-611e-705c-994c-5daee3fbd0e1";
 
   @Inject WebTarget target;
@@ -91,6 +99,26 @@ class BondIT {
       case "PUT" -> b.put(Entity.entity(json, MediaType.APPLICATION_JSON));
       default -> b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
     };
+  }
+
+  /** A call as staff of any business, with the permission claim and store scope the token bears. */
+  private Response callAs(
+      String method,
+      String path,
+      String json,
+      String tenant,
+      String roles,
+      String permissions,
+      String storeIds) {
+    var b =
+        com.storeql.test.WebTargets.at(target, path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", "01a090ae-611e-700b-bde4-50df0324c3e1")
+            .header("X-Roles", roles);
+    if (permissions != null) b = b.header("X-Permissions", permissions);
+    if (storeIds != null) b = b.header("X-Store-Ids", storeIds);
+    return "GET".equals(method) ? b.get() : b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
   private Response post(String path, String json) {
@@ -243,6 +271,56 @@ class BondIT {
     assertThat(
         whisky.getJsonNumber("dutyPotential").bigDecimalValue(),
         comparesEqualTo(new BigDecimal("25.00")));
+  }
+
+  // ── the currency's own minor units ─────────────────────────────────────────
+
+  /** Three of the whisky received at {@code cost} by a business, and its valuation row read. */
+  private JsonObject valuedAt(String tenant, String cost) {
+    Envelopes.created(
+        callAs(
+            "POST",
+            "/admin/inventory/receive",
+            "{\"storeId\":\""
+                + SHOP
+                + "\",\"variantId\":\""
+                + WHISKY
+                + "\",\"qty\":3,\"batchNo\":\"V-1\",\"costPrice\":"
+                + cost
+                + ",\"expiryDate\":\""
+                + LocalDate.now().plusYears(5)
+                + "\"}",
+            tenant,
+            "OWNER",
+            null,
+            null));
+    JsonArray rows =
+        Envelopes.okArray(
+            callAs(
+                "GET",
+                "/admin/inventory/reports/valuation?groupBy=VARIANT&limit=50",
+                null,
+                tenant,
+                "OWNER",
+                null,
+                null));
+    return Envelopes.find(rows, "groupKey", WHISKY);
+  }
+
+  @Test
+  @DisplayName("A valuation is kept to the business currency's own minor units, never two places")
+  void aValuationIsInTheBusinessCurrencysOwnMinorUnits() {
+    // 3 × KWD 1.2345 is 3.7035: 3.704 in dinars, never 3.70.
+    assertThat(
+        valuedAt(KW, "1.2345").getJsonNumber("value").bigDecimalValue(),
+        is(new BigDecimal("3.704")));
+    // 3 × ¥333.3333 is 999.9999: ¥1,000, never 1000.00.
+    assertThat(
+        valuedAt(JP, "333.3333").getJsonNumber("value").bigDecimalValue(),
+        is(new BigDecimal("1000")));
+    // The pound keeps its pence: 3 × 1.2345 is 3.70 (3.7035).
+    assertThat(
+        valuedAt(T, "1.2345").getJsonNumber("value").bigDecimalValue(), is(new BigDecimal("3.70")));
   }
 
   // ── released to home use: the duty crystallises ────────────────────────────
@@ -416,5 +494,132 @@ class BondIT {
     assertThat(batches.size(), is(1));
     assertThat(batches.getJsonObject(0).getString("dutyStatus"), is("DUTY_SUSPENDED"));
     assertThat(levelAt(BOND, WHISKY).getJsonNumber("available").bigDecimalValue().signum(), is(0));
+  }
+
+  // ── who may release ────────────────────────────────────────────────────────
+
+  /**
+   * Catalogue INV-BOND gap 1: a release crystallises a duty debt, so it is stock work
+   * (stock.adjust) at a store the caller keeps. A till, a role narrowed off the permission and a
+   * keeper of another store are refused, and another business's staff, naming our bonded store,
+   * move nothing.
+   */
+  @Test
+  void aReleaseNeedsStockAdjustAtAStoreTheCallerKeeps() {
+    bondTheWarehouse();
+    rateTheWhisky();
+    Envelopes.created(receive(BOND, WHISKY, 10, "DUTY_SUSPENDED"));
+    String path = "/admin/inventory/bond/releases";
+    String body =
+        "{\"storeId\":\""
+            + BOND
+            + "\",\"variantId\":\""
+            + WHISKY
+            + "\",\"qty\":4,\"reference\":\"gate\"}";
+
+    assertThat(
+        code(callAs("POST", path, body, T, "CASHIER", null, null), 403), is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", "-", null), 403),
+        is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "MANAGER", "-", null), 403), is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", null, SHOP), 403),
+        is("STORE_ACCESS_DENIED"));
+    // Another business, naming our bonded store: no approval of theirs, so nothing to release.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(
+          role,
+          code(callAs("POST", path, body, OTHER_T, role, null, BOND), 409),
+          is("INVENTORY_STORE_NOT_BONDED"));
+    }
+    assertThat(
+        code(callAs("POST", path, body, OTHER_T, "CASHIER", null, BOND), 403),
+        is("PERMISSION_DENIED"));
+
+    // Nothing moved for any of them.
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.bond_releases"), is("0"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.stock_movements WHERE type = 'BOND_RELEASE'"),
+        is("0"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.outbox WHERE event_type = 'DutyReleased'"),
+        is("0"));
+    assertThat(
+        levelAt(BOND, WHISKY).getJsonNumber("inBond").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("10")));
+
+    // The keeper of the bonded store, holding the permission by their tier, releases.
+    Envelopes.created(callAs("POST", path, body, T, "STOREKEEPER", null, BOND));
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.bond_releases"), is("1"));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  private static String approvalActive(String tenant, String store) {
+    return Envelopes.scalar(
+        PG,
+        "SELECT active FROM inventory.bond_approvals WHERE tenant_id = '"
+            + tenant
+            + "' AND store_id = '"
+            + store
+            + "'");
+  }
+
+  /**
+   * Ending an approval is management's and only of a live approval of the caller's own business:
+   * the shop floor and a shopper are refused, a store with no live approval and another business's
+   * manager naming ours are not found, and our approval stays live through all of it.
+   */
+  @Test
+  @DisplayName("Ending a bond approval is management's, of a live approval of one's own business")
+  void endingAnApprovalThatIsNotLiveOrNotOursIsRefused() {
+    bondTheWarehouse();
+    String path = "/admin/inventory/bond/approvals/" + BOND + "/end";
+
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(role, code(callAs("POST", path, "{}", T, role, null, null), 403), is("FORBIDDEN"));
+    }
+    assertThat(callAs("POST", path, "{}", T, "CUSTOMER", null, null).getStatus(), is(403));
+    assertThat(approvalActive(T, BOND), is("true"));
+
+    // A store that never had an approval has none to end.
+    assertThat(
+        code(call("POST", "/admin/inventory/bond/approvals/" + SHOP + "/end", "{}", "OWNER"), 404),
+        is("INVENTORY_BOND_APPROVAL_NOT_FOUND"));
+
+    // Another business's management, naming our store, find no approval of theirs and end none of
+    // ours.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          code(callAs("POST", path, "{}", OTHER_T, role, null, BOND), 404),
+          is("INVENTORY_BOND_APPROVAL_NOT_FOUND"));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role, code(callAs("POST", path, "{}", OTHER_T, role, null, BOND), 403), is("FORBIDDEN"));
+    }
+    assertThat(approvalActive(T, BOND), is("true"));
+
+    // Ours ends once; a second end is not found, and the approval stays ended.
+    assertThat(call("POST", path, "{}", "MANAGER").getStatus(), is(200));
+    assertThat(approvalActive(T, BOND), is("false"));
+    assertThat(
+        code(call("POST", path, "{}", "OWNER"), 404), is("INVENTORY_BOND_APPROVAL_NOT_FOUND"));
+    assertThat(approvalActive(T, BOND), is("false"));
+  }
+
+  @Test
+  @DisplayName("A release period that ends before it starts is refused")
+  void aReleasePeriodEndingBeforeItStartsIsRefused() {
+    assertThat(
+        code(get("/admin/inventory/bond/releases?from=2026-02-01&to=2026-01-01"), 400),
+        is("INVENTORY_PERIOD_INVALID"));
+    assertThat(
+        get("/admin/inventory/bond/releases?from=2026-01-01&to=2026-01-01").getStatus(), is(200));
   }
 }

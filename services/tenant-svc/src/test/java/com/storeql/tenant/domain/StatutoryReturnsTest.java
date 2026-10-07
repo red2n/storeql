@@ -44,7 +44,7 @@ class StatutoryReturnsTest {
         StatutoryReturns.QUARTERLY,
         dueAfter,
         "pricing-svc",
-        "/admin/vat-return",
+        "/vat-return",
         "VATA 1994 sch.11",
         LocalDate.of(2019, 4, 1),
         null);
@@ -59,7 +59,7 @@ class StatutoryReturnsTest {
         StatutoryReturns.DECADAL,
         "P10D",
         "order-svc",
-        "/admin/ereporting/periods",
+        "/admin/ereporting/submissions",
         "CGI art. 290",
         LocalDate.of(2026, 9, 1),
         null);

@@ -45,6 +45,26 @@ public final class EventPayload {
   }
 
   /**
+   * Like {@link #base} but for an event whose tenant may be absent (a platform-scope event, or one
+   * whose subject belongs to no business): the {@code tenantId} member is left out when {@code
+   * tenantId} is null, never written as the text "null".
+   */
+  public static String baseOptionalTenant(String eventType, UUID tenantId, UUID aggregateId) {
+    if (tenantId != null) {
+      return base(eventType, tenantId, aggregateId);
+    }
+    return "{\"eventId\":\""
+        + Ids.newId()
+        + "\",\"eventType\":\""
+        + eventType
+        + "\",\"aggregateId\":\""
+        + aggregateId
+        + "\",\"occurredAt\":\""
+        + Instant.now()
+        + "\"";
+  }
+
+  /**
    * JSON-escapes a string value (backslash and double-quote only). Does not escape control
    * characters (newlines, tabs) — callers embedding free-text fields that may contain them should
    * strip or replace those separately before calling this.

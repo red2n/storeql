@@ -43,7 +43,8 @@ class YieldTest {
             new BigDecimal("500.00"),
             List.of(
                 new Yield.Share(new BigDecimal("34"), new BigDecimal("60")),
-                new Yield.Share(new BigDecimal("44"), new BigDecimal("40"))));
+                new Yield.Share(new BigDecimal("44"), new BigDecimal("40"))),
+            2);
     assertThat(unit.get(0), comparesEqualTo(new BigDecimal("8.82")));
     assertThat(unit.get(1), comparesEqualTo(new BigDecimal("4.55")));
   }
@@ -55,12 +56,47 @@ class YieldTest {
             new BigDecimal("500.00"),
             List.of(
                 new Yield.Share(new BigDecimal("50"), new BigDecimal("60")),
-                new Yield.Share(BigDecimal.ZERO, new BigDecimal("40"))));
+                new Yield.Share(BigDecimal.ZERO, new BigDecimal("40"))),
+            2);
     // Nothing came out of the second cut: its share goes to what did come out.
     assertThat(unit.get(0), comparesEqualTo(new BigDecimal("10.00")));
     assertThat(unit.get(1), is(nullValue()));
     List<BigDecimal> unvalued =
-        Yield.apportion(null, List.of(new Yield.Share(new BigDecimal("50"), new BigDecimal("60"))));
+        Yield.apportion(
+            null, List.of(new Yield.Share(new BigDecimal("50"), new BigDecimal("60"))), 2);
     assertThat(unvalued.get(0), is(nullValue()));
+  }
+
+  /**
+   * The cost of a cut is kept to the business currency's own minor units, never two decimals
+   * assumed: a dinar side keeps its fils, a yen side is whole yen; so are the primal's cost and the
+   * loss at cost.
+   */
+  @Test
+  void costsAreInTheCurrencysOwnMinorUnits() {
+    List<Yield.Share> shares =
+        List.of(
+            new Yield.Share(new BigDecimal("34"), new BigDecimal("60")),
+            new Yield.Share(new BigDecimal("44"), new BigDecimal("40")));
+    // KWD 500.000: 300 over 34 is 8.824 (8.8235…), 200 over 44 is 4.545 (4.5454…).
+    List<BigDecimal> dinar = Yield.apportion(new BigDecimal("500.000"), shares, 3);
+    assertThat(dinar.get(0), is(new BigDecimal("8.824")));
+    assertThat(dinar.get(1), is(new BigDecimal("4.545")));
+    // ¥50,000: 30,000 over 34 is ¥882 (882.35…), 20,000 over 44 is ¥455 (454.54…).
+    List<BigDecimal> yen = Yield.apportion(new BigDecimal("50000"), shares, 0);
+    assertThat(yen.get(0), is(new BigDecimal("882")));
+    assertThat(yen.get(1), is(new BigDecimal("455")));
+
+    assertThat(Yield.amount(new BigDecimal("499.9996"), 3), is(new BigDecimal("500.000")));
+    assertThat(Yield.amount(new BigDecimal("49999.6"), 0), is(new BigDecimal("50000")));
+    // The loss at cost: 22 of 100 lost from a KWD 500.000 side is 110.000; from ¥50,001, ¥11,000.
+    assertThat(
+        Yield.lossAtCost(new BigDecimal("500.000"), new BigDecimal("22"), new BigDecimal("100"), 3),
+        is(new BigDecimal("110.000")));
+    assertThat(
+        Yield.lossAtCost(new BigDecimal("50001"), new BigDecimal("22"), new BigDecimal("100"), 0),
+        is(new BigDecimal("11000")));
+    assertThat(
+        Yield.lossAtCost(null, new BigDecimal("22"), new BigDecimal("100"), 2), is(nullValue()));
   }
 }

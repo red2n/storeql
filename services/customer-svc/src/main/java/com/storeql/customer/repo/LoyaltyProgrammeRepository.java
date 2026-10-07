@@ -13,6 +13,7 @@ import com.storeql.ids.Ids;
 import com.storeql.service.BaseOutboxRepository;
 import com.storeql.service.OutboxRow;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -23,9 +24,11 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * The loyalty programme a business set (13.x) and the sweeps that keep every account true to it:
@@ -35,7 +38,22 @@ import java.util.function.Function;
 @ApplicationScoped
 public class LoyaltyProgrammeRepository extends BaseOutboxRepository {
 
+  /** Accounts locked, read and re-tiered per transaction by the sweep. */
+  @Inject
+  @ConfigProperty(name = "storeql.customer.loyalty.retier-batch", defaultValue = "1000")
+  int retierBatch;
+
   private static final DateTimeFormatter DAY = DateTimeFormatter.ISO_LOCAL_DATE;
+
+  /**
+   * The customers of one business with a lot that has died: the first statement of the expiry
+   * sweep. Binds the business, then the instant the lots are due by. Public so the plan test plans
+   * this very text (V5's idx_loyalty_lots_due is built for it: tenant first, then the expiry).
+   */
+  public static final String DUE_CUSTOMERS_SQL =
+      "SELECT customer_id FROM loyalty_point_lots"
+          + " WHERE tenant_id = ? AND remaining > 0 AND expires_at IS NOT NULL"
+          + " AND expires_at <= ? GROUP BY customer_id ORDER BY customer_id";
 
   /** The business's programme, or the platform's default when it never set one. */
   public LoyaltyProgramme programme(UUID tenantId) {
@@ -162,56 +180,133 @@ public class LoyaltyProgrammeRepository extends BaseOutboxRepository {
     }
   }
 
+  private int batch() {
+    return Math.max(1, retierBatch);
+  }
+
+  /** One page of a re-tier: accounts seen, accounts that changed tier, the last customer seen. */
+  private record RetierPage(int seen, int changed, UUID lastCustomerId) {}
+
   /**
-   * Re-tiers every account of the tenant from what qualifies now. With {@code eventFor}, a tier
-   * that changes is announced; without, it changes quietly.
+   * Re-tiers every account of the tenant from what qualifies now, a keyset page at a time on the
+   * caller's transaction (the programme save, which must leave tiers true when it answers). With
+   * {@code eventFor}, a tier that changes is announced; without, it changes quietly.
    *
    * @return how many accounts changed tier
    */
   private int retier(
       Connection c, LoyaltyProgramme p, Instant now, Function<TierChange, OutboxRow> eventFor)
       throws SQLException {
+    int changed = 0;
+    UUID after = null;
+    while (true) {
+      RetierPage page = retierPage(c, p, now, eventFor, after);
+      changed += page.changed();
+      if (page.seen() < batch()) return changed;
+      after = page.lastCustomerId();
+    }
+  }
+
+  /**
+   * One tenant's re-tier for the sweep: each page of accounts is its own transaction, so a business
+   * with a great many members never holds every account's lock at once, and a point accrual or a
+   * redemption waits at most for one page.
+   */
+  private int retierInPages(
+      LoyaltyProgramme p, Instant now, Function<TierChange, OutboxRow> eventFor) {
+    int changed = 0;
+    UUID after = null;
+    while (true) {
+      final UUID from = after;
+      RetierPage page =
+          inTx(c -> retierPage(c, p, now, eventFor, from), "re-tier loyalty accounts");
+      changed += page.changed();
+      if (page.seen() < batch()) return changed;
+      after = page.lastCustomerId();
+    }
+  }
+
+  /**
+   * At most {@code retierBatch} accounts after {@code after}, locked; their qualifying points in a
+   * single grouped read (none for a lifetime programme, which already holds them); one batched
+   * write for the accounts that changed.
+   */
+  private RetierPage retierPage(
+      Connection c,
+      LoyaltyProgramme p,
+      Instant now,
+      Function<TierChange, OutboxRow> eventFor,
+      UUID after)
+      throws SQLException {
     List<LoyaltyAccount> accounts = new ArrayList<>();
-    try (PreparedStatement ps =
-        c.prepareStatement(
-            "SELECT id, tenant_id, customer_id, points_balance, lifetime_points, tier, created_at,"
-                + " updated_at, qualifying_points, tier_since"
-                + " FROM loyalty_accounts WHERE tenant_id = ? FOR UPDATE")) {
-      ps.setObject(1, p.tenantId());
+    String sql =
+        "SELECT id, tenant_id, customer_id, points_balance, lifetime_points, tier, created_at,"
+            + " updated_at, qualifying_points, tier_since"
+            + " FROM loyalty_accounts WHERE tenant_id = ?"
+            + (after == null ? "" : " AND customer_id > ?")
+            + " ORDER BY customer_id LIMIT ? FOR UPDATE";
+    try (PreparedStatement ps = c.prepareStatement(sql)) {
+      int i = 1;
+      ps.setObject(i++, p.tenantId());
+      if (after != null) ps.setObject(i++, after);
+      ps.setInt(i, batch());
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) accounts.add(CustomerRepository.mapLoyaltyAccount(rs));
       }
     }
+    if (accounts.isEmpty()) return new RetierPage(0, 0, after);
+    Map<UUID, BigDecimal> windowed =
+        p.qualifyingMonths() == null
+            ? Map.of()
+            : LoyaltyLots.qualifyingPointsFor(
+                c,
+                p.tenantId(),
+                accounts.stream().map(LoyaltyAccount::customerId).toList(),
+                p,
+                now);
     int changed = 0;
-    for (LoyaltyAccount a : accounts) {
-      BigDecimal qualifying = LoyaltyLots.qualifyingPoints(c, a, p, now);
-      String tier = p.tierFor(qualifying).name();
-      boolean moved = !tier.equals(a.tier());
-      try (PreparedStatement ps =
-          c.prepareStatement(
-              "UPDATE loyalty_accounts SET qualifying_points = ?, tier = ?,"
-                  + " tier_since = CASE WHEN tier = ? THEN COALESCE(tier_since, ?) ELSE ? END"
-                  + " WHERE tenant_id = ? AND customer_id = ?")) {
-        ps.setBigDecimal(1, qualifying);
-        ps.setString(2, tier);
-        ps.setString(3, tier);
-        ps.setObject(4, LoyaltyLots.odt(now));
-        ps.setObject(5, LoyaltyLots.odt(now));
-        ps.setObject(6, p.tenantId());
-        ps.setObject(7, a.customerId());
-        ps.executeUpdate();
-      }
-      if (moved) {
-        changed++;
-        if (eventFor != null) {
-          insertOutboxRow(
-              c,
-              eventFor.apply(
-                  new TierChange(p.tenantId(), a.customerId(), a.tier(), tier, qualifying)));
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "UPDATE loyalty_accounts SET qualifying_points = ?, tier = ?,"
+                + " tier_since = CASE WHEN tier = ? THEN COALESCE(tier_since, ?) ELSE ? END"
+                + " WHERE tenant_id = ? AND customer_id = ?")) {
+      boolean writes = false;
+      for (LoyaltyAccount a : accounts) {
+        BigDecimal qualifying =
+            p.qualifyingMonths() == null
+                ? a.lifetimePoints()
+                : windowed.getOrDefault(a.customerId(), BigDecimal.ZERO);
+        String tier = p.tierFor(qualifying).name();
+        boolean moved = !tier.equals(a.tier());
+        boolean same =
+            !moved
+                && a.tierSince() != null
+                && a.qualifyingPoints() != null
+                && a.qualifyingPoints().compareTo(qualifying) == 0;
+        if (!same) {
+          ps.setBigDecimal(1, qualifying);
+          ps.setString(2, tier);
+          ps.setString(3, tier);
+          ps.setObject(4, LoyaltyLots.odt(now));
+          ps.setObject(5, LoyaltyLots.odt(now));
+          ps.setObject(6, p.tenantId());
+          ps.setObject(7, a.customerId());
+          ps.addBatch();
+          writes = true;
+        }
+        if (moved) {
+          changed++;
+          if (eventFor != null) {
+            insertOutboxRow(
+                c,
+                eventFor.apply(
+                    new TierChange(p.tenantId(), a.customerId(), a.tier(), tier, qualifying)));
+          }
         }
       }
+      if (writes) ps.executeBatch();
     }
-    return changed;
+    return new RetierPage(accounts.size(), changed, accounts.get(accounts.size() - 1).customerId());
   }
 
   /** Businesses whose points can die, or whose tiers can fall: the ones a sweep has work for. */
@@ -234,76 +329,78 @@ public class LoyaltyProgrammeRepository extends BaseOutboxRepository {
       Instant now,
       Function<Expired, OutboxRow> expiredEvent,
       Function<TierChange, OutboxRow> tierEvent) {
-    return inTx(
-        c -> {
-          LoyaltyProgramme p = programme(c, tenantId);
-          List<UUID> customers = new ArrayList<>();
-          try (PreparedStatement ps =
-              c.prepareStatement(
-                  "SELECT customer_id FROM loyalty_point_lots"
-                      + " WHERE tenant_id = ? AND remaining > 0 AND expires_at IS NOT NULL"
-                      + " AND expires_at <= ? GROUP BY customer_id ORDER BY customer_id")) {
-            ps.setObject(1, tenantId);
-            ps.setObject(2, LoyaltyLots.odt(now));
-            try (ResultSet rs = ps.executeQuery()) {
-              while (rs.next()) customers.add(rs.getObject("customer_id", UUID.class));
-            }
-          }
-          BigDecimal total = BigDecimal.ZERO;
-          int expiredCustomers = 0;
-          for (UUID customerId : customers) {
-            Optional<LoyaltyAccount> locked = lockAccount(c, tenantId, customerId);
-            if (locked.isEmpty()) continue;
-            LoyaltyAccount account = locked.get();
-            List<PointLot> due = LoyaltyLots.dueLots(c, tenantId, customerId, now);
-            BigDecimal points =
-                due.stream().map(PointLot::remaining).reduce(BigDecimal.ZERO, BigDecimal::add);
-            if (points.signum() <= 0) continue;
-            BigDecimal newBalance = account.pointsBalance().subtract(points).max(BigDecimal.ZERO);
-            UUID entryId = Ids.newId();
-            Instant earliest =
-                due.stream().map(PointLot::earnedAt).min(Instant::compareTo).orElse(now);
-            String reason =
-                points.stripTrailingZeros().toPlainString()
-                    + " points earned from "
-                    + DAY.format(earliest.atOffset(java.time.ZoneOffset.UTC))
-                    + " expired under the "
-                    + p.expiryMonths()
-                    + "-month rule";
-            try (PreparedStatement ps =
-                c.prepareStatement(
-                    "INSERT INTO loyalty_ledger (id, tenant_id, customer_id, type, points,"
-                        + " balance_after, order_id, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)")) {
-              ps.setObject(1, entryId);
-              ps.setObject(2, tenantId);
-              ps.setObject(3, customerId);
-              ps.setString(4, LoyaltyLedgerEntry.TYPE_EXPIRE);
-              ps.setBigDecimal(5, points.negate());
-              ps.setBigDecimal(6, newBalance);
-              ps.setObject(7, null);
-              ps.setString(8, reason);
-              ps.setObject(9, LoyaltyLots.odt(now));
-              ps.executeUpdate();
-            }
-            LoyaltyLots.close(c, tenantId, due, entryId);
-            try (PreparedStatement ps =
-                c.prepareStatement(
-                    "UPDATE loyalty_accounts SET points_balance = ?, updated_at = ?"
-                        + " WHERE tenant_id = ? AND customer_id = ?")) {
-              ps.setBigDecimal(1, newBalance);
-              ps.setObject(2, LoyaltyLots.odt(now));
-              ps.setObject(3, tenantId);
-              ps.setObject(4, customerId);
-              ps.executeUpdate();
-            }
-            insertOutboxRow(c, expiredEvent.apply(new Expired(tenantId, customerId, points, now)));
-            total = total.add(points);
-            expiredCustomers++;
-          }
-          int retiered = p.qualifyingMonths() == null ? 0 : retier(c, p, now, tierEvent);
-          return new ExpiryRun(expiredCustomers, total, retiered);
-        },
-        "sweep loyalty expiry");
+    ExpiryRun expiry =
+        inTx(
+            c -> {
+              LoyaltyProgramme p = programme(c, tenantId);
+              List<UUID> customers = new ArrayList<>();
+              try (PreparedStatement ps = c.prepareStatement(DUE_CUSTOMERS_SQL)) {
+                ps.setObject(1, tenantId);
+                ps.setObject(2, LoyaltyLots.odt(now));
+                try (ResultSet rs = ps.executeQuery()) {
+                  while (rs.next()) customers.add(rs.getObject("customer_id", UUID.class));
+                }
+              }
+              BigDecimal total = BigDecimal.ZERO;
+              int expiredCustomers = 0;
+              for (UUID customerId : customers) {
+                Optional<LoyaltyAccount> locked = lockAccount(c, tenantId, customerId);
+                if (locked.isEmpty()) continue;
+                LoyaltyAccount account = locked.get();
+                List<PointLot> due = LoyaltyLots.dueLots(c, tenantId, customerId, now);
+                BigDecimal points =
+                    due.stream().map(PointLot::remaining).reduce(BigDecimal.ZERO, BigDecimal::add);
+                if (points.signum() <= 0) continue;
+                BigDecimal newBalance =
+                    account.pointsBalance().subtract(points).max(BigDecimal.ZERO);
+                UUID entryId = Ids.newId();
+                Instant earliest =
+                    due.stream().map(PointLot::earnedAt).min(Instant::compareTo).orElse(now);
+                String reason =
+                    points.stripTrailingZeros().toPlainString()
+                        + " points earned from "
+                        + DAY.format(earliest.atOffset(java.time.ZoneOffset.UTC))
+                        + " expired under the "
+                        + p.expiryMonths()
+                        + "-month rule";
+                try (PreparedStatement ps =
+                    c.prepareStatement(
+                        "INSERT INTO loyalty_ledger (id, tenant_id, customer_id, type, points,"
+                            + " balance_after, order_id, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)")) {
+                  ps.setObject(1, entryId);
+                  ps.setObject(2, tenantId);
+                  ps.setObject(3, customerId);
+                  ps.setString(4, LoyaltyLedgerEntry.TYPE_EXPIRE);
+                  ps.setBigDecimal(5, points.negate());
+                  ps.setBigDecimal(6, newBalance);
+                  ps.setObject(7, null);
+                  ps.setString(8, reason);
+                  ps.setObject(9, LoyaltyLots.odt(now));
+                  ps.executeUpdate();
+                }
+                LoyaltyLots.close(c, tenantId, due, entryId);
+                try (PreparedStatement ps =
+                    c.prepareStatement(
+                        "UPDATE loyalty_accounts SET points_balance = ?, updated_at = ?"
+                            + " WHERE tenant_id = ? AND customer_id = ?")) {
+                  ps.setBigDecimal(1, newBalance);
+                  ps.setObject(2, LoyaltyLots.odt(now));
+                  ps.setObject(3, tenantId);
+                  ps.setObject(4, customerId);
+                  ps.executeUpdate();
+                }
+                insertOutboxRow(
+                    c, expiredEvent.apply(new Expired(tenantId, customerId, points, now)));
+                total = total.add(points);
+                expiredCustomers++;
+              }
+              return new ExpiryRun(expiredCustomers, total, 0);
+            },
+            "sweep loyalty expiry");
+    // The re-tier is paged, each page on a transaction of its own, after the expiry has committed.
+    LoyaltyProgramme p = programme(tenantId);
+    int retiered = p.qualifyingMonths() == null ? 0 : retierInPages(p, now, tierEvent);
+    return new ExpiryRun(expiry.customers(), expiry.points(), retiered);
   }
 
   /** The points that die within the window, and the first day any do. */

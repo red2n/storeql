@@ -168,7 +168,9 @@ class AuditTrailIT {
     assertThat(
         post(
                 "/orders/" + returnedOrder + "/returns",
-                "{\"reason\":\"chipped\",\"items\":[{\"variantId\":\"" + V + "\",\"qty\":1}]}",
+                "{\"reason\":\"chipped\",\"items\":[{\"variantId\":\""
+                    + V
+                    + "\",\"qty\":1,\"condition\":\"SEALED\"}]}",
                 M2,
                 "MANAGER")
             .getStatus(),
@@ -244,6 +246,13 @@ class AuditTrailIT {
     assertThat(str(ret, "orderId"), is(returnedOrder));
     assertThat(ret.getJsonNumber("amount").bigDecimalValue(), is(new BigDecimal("10.00")));
     assertThat("the refund method", str(ret, "detail"), is("ORIGINAL"));
+    // Its lines, with the condition each came back in, and that no manager was needed.
+    JsonObject returnedLine = ret.getJsonArray("lines").getJsonObject(0);
+    assertThat(returnedLine.getString("variantId"), is(V));
+    assertThat(returnedLine.getString("condition"), is("SEALED"));
+    assertThat(returnedLine.getJsonNumber("qty").bigDecimalValue().intValue(), is(1));
+    assertThat(str(ret, "approvedBy"), is(nullValue()));
+    assertThat(ret.getJsonArray("outsidePolicy").size(), is(0));
 
     // Every event is at the store, and the stream is newest first.
     Instant previous = null;

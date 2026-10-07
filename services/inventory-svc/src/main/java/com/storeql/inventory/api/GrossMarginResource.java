@@ -13,6 +13,8 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.util.Set;
+import java.util.UUID;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -54,10 +56,12 @@ public class GrossMarginResource {
       @QueryParam("to") String to,
       @QueryParam("groupBy") String groupBy,
       @QueryParam("limit") Integer limit) {
+    UUID parsed = Parsing.optionalUuid(storeId, "storeId");
+    Set<UUID> stores = ctx.reportStores(parsed);
     var report =
         service.report(
             ctx.requireTenantId(),
-            Parsing.optionalUuid(storeId, "storeId"),
+            stores,
             Parsing.instant(from, "from"),
             Parsing.instant(to, "to"),
             StockTurnResource.turnGrouping(groupBy),

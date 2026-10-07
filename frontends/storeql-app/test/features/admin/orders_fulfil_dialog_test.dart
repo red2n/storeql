@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/orders_screen.dart';
 
@@ -90,8 +91,8 @@ void main() {
 
     final body = _postBody(server)!;
     expect(body['lines'], [
-      {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966ff6', 'qty': 1},
-      {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966aa1', 'qty': 3},
+      {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966ff6', 'qty': '1'},
+      {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966aa1', 'qty': '3'},
     ]);
     expect(server.requests.singleWhere((r) => r.method == 'POST').path, endsWith('/orders/o-1/fulfil'));
     expect(find.text('Part of the order picked.'), findsOneWidget);
@@ -118,7 +119,7 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
     await tester.pumpAndSettle();
     expect(_postBody(server)!['lines'], [
-      {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966aa1', 'qty': 3},
+      {'variantId': '01a090ae-611e-7011-ae7d-1bd68c966aa1', 'qty': '3'},
     ]);
   });
 
@@ -129,5 +130,52 @@ void main() {
     expect(find.textContaining('3 still outstanding'), findsOneWidget);
     expect(find.text('Picked & packed'), findsWidgets);
     expect(server.requests.where((r) => r.method == 'POST'), hasLength(1));
+  });
+
+  // What goes now is a quantity, to three places, read the way the app's
+  // language writes a number: Romanian's 1,5 was no quantity at all, and a
+  // figure the field cannot read is refused under it with nothing sent.
+  group('quantities are read as typed, or refused', () {
+    tearDown(() => Intl.defaultLocale = null);
+    const mug = '01a090ae-611e-7011-ae7d-1bd68c966ff6';
+    const plate = '01a090ae-611e-7011-ae7d-1bd68c966aa1';
+
+    for (final (locale, typed, sent) in [
+      ('ro', '1,5', '1.5'),
+      ('en_GB', '1.5', '1.5'),
+      ('en', '2.125', '2.125'),
+      ('pl', '0,25', '0.25'),
+      ('ar', '1٫5', '1.5'),
+    ]) {
+      testWidgets('in $locale, $typed now goes as $sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester);
+        expect(tester.widget<TextField>(find.byKey(const Key('fulfil-qty-$mug'))).controller!.text, '3');
+        for (var i = 1; i <= typed.length; i++) {
+          await tester.enterText(find.byKey(const Key('fulfil-qty-$mug')), typed.substring(0, i));
+          await tester.pump();
+        }
+        await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
+        await tester.pumpAndSettle();
+        expect(_postBody(server)!['lines'], [
+          {'variantId': mug, 'qty': sent},
+          {'variantId': plate, 'qty': '3'},
+        ]);
+      });
+    }
+
+    for (final (locale, typed) in [('ro', '1.5'), ('en', '1,5'), ('pl', '2.500'), ('en_GB', '.'), ('ar', '-1')]) {
+      testWidgets('in $locale, $typed now is refused and nothing is sent', (tester) async {
+        Intl.defaultLocale = locale;
+        final server = await _pump(tester);
+        await tester.enterText(find.byKey(const Key('fulfil-qty-$mug')), typed);
+        await tester.pump();
+        expect(tester.widget<TextField>(find.byKey(const Key('fulfil-qty-$mug'))).decoration?.errorText,
+            isNotNull);
+        await tester.tap(find.widgetWithText(FilledButton, 'Picked & packed'));
+        await tester.pumpAndSettle();
+        expect(server.requests.where((r) => r.method == 'POST'), isEmpty);
+      });
+    }
   });
 }

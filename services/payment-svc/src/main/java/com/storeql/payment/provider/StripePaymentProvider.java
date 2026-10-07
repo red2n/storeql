@@ -1,15 +1,18 @@
 package com.storeql.payment.provider;
 
+import com.storeql.ids.Ids;
+import com.storeql.payment.config.Jsons;
 import com.storeql.payment.domain.Domain.PaymentIntent;
+import com.storeql.service.Fx;
 import io.helidon.http.HeaderNames;
 import io.helidon.webclient.api.HttpClientResponse;
 import io.helidon.webclient.api.WebClient;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
+import jakarta.json.JsonString;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -21,6 +24,8 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -38,6 +43,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  */
 @ApplicationScoped
 public class StripePaymentProvider implements PaymentProvider {
+
+  private static final java.util.logging.Logger LOG =
+      java.util.logging.Logger.getLogger(StripePaymentProvider.class.getName());
 
   /** Stripe rejects a signature older than this; so do we, to bound replay. */
   private static final long TOLERANCE_SECONDS = 300;
@@ -105,6 +113,18 @@ public class StripePaymentProvider implements PaymentProvider {
    * @throws ProviderException non-retryable when Stripe rejects the request or no secret key is
    *     configured; retryable when Stripe is unreachable or returns a 5xx
    */
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Stripe charges each currency in its own units, with its documented exceptions ({@link
+   * #minorUnits}): an amount it cannot charge exactly — a dinar's last fils not 0, a fraction of a
+   * krona — is said here, before an intent is recorded or Stripe is asked.
+   */
+  @Override
+  public void requireChargeable(BigDecimal amount, String currency) {
+    minorUnits(amount, currency);
+  }
+
   @Override
   public Authorization authorize(AuthorizeRequest request) {
     Map<String, String> form = new LinkedHashMap<>();
@@ -141,7 +161,12 @@ public class StripePaymentProvider implements PaymentProvider {
   public Capture capture(String providerRef, BigDecimal amount, String idempotencyKey) {
     JsonObject body =
         post("/v1/payment_intents/" + providerRef + "/capture", Map.of(), idempotencyKey);
-    String currency = body.getString("currency", "gbp").toUpperCase(Locale.ROOT);
+    // No currency is ever assumed: an answer that names none is read as the full hold taken,
+    // which is what a manual capture with no amount_to_capture takes.
+    String currency = body.getString("currency", null);
+    if (currency == null) {
+      return new Capture(providerRef, amount, providerRef);
+    }
     long captured =
         body.containsKey("amount_received")
             ? body.getJsonNumber("amount_received").longValue()
@@ -238,17 +263,22 @@ public class StripePaymentProvider implements PaymentProvider {
    */
   static WebhookEvent parseEvent(byte[] rawBody) {
     try (JsonReader reader =
-        Json.createReader(new StringReader(new String(rawBody, StandardCharsets.UTF_8)))) {
+        Jsons.PROVIDER.createReader(
+            new StringReader(new String(rawBody, StandardCharsets.UTF_8)))) {
       JsonObject root = reader.readObject();
       String type = root.getString("type", "");
       JsonObject intent = root.getJsonObject("data").getJsonObject("object");
       if (type.startsWith("charge.dispute.")) {
         return disputeEvent(root.getString("id"), type, intent);
       }
-      String currency = intent.getString("currency", "gbp").toUpperCase(Locale.ROOT);
+      // No currency is ever assumed: with none named the amount is left unread, and the intent's
+      // own amount (in its own currency) is what the service applies.
+      String currency = intent.getString("currency", null);
 
       BigDecimal captured = null;
-      if (intent.containsKey("amount_received") && !intent.isNull("amount_received")) {
+      if (currency != null
+          && intent.containsKey("amount_received")
+          && !intent.isNull("amount_received")) {
         captured = majorUnits(intent.getJsonNumber("amount_received").longValue(), currency);
       }
 
@@ -267,9 +297,40 @@ public class StripePaymentProvider implements PaymentProvider {
           statusForEvent(type, intent.getString("status", "")),
           captured,
           failureCode,
-          failureMessage);
+          failureMessage,
+          null,
+          type.startsWith("payment_intent.") ? ourIntent(intent) : null);
     } catch (RuntimeException e) {
       throw new ProviderException("could not parse Stripe event", false, e);
+    }
+  }
+
+  /**
+   * The intent of ours a PaymentIntent names in the metadata {@link #authorize} sent with it:
+   * {@code intentId} and {@code tenantId}, which are part of the PaymentIntent object the event
+   * carries. Only the pair is a correlation, and each is read as every id is ({@link Ids#parse}:
+   * canonical, UUIDv7). Anything else — no metadata, one id of the two, text that is not an id, an
+   * id of another version, a value that is not a string — names no intent of ours (null), and costs
+   * the event nothing else: such an event is one this service did not tag, which is a fact about
+   * the event and never a failure to read it.
+   *
+   * <p>Called only for {@code payment_intent.*} events, whose object id is the intent's reference:
+   * the metadata of another kind of object (a charge, whose id is {@code ch_…}) says nothing about
+   * the reference the event carries.
+   */
+  private static OurIntent ourIntent(JsonObject paymentIntent) {
+    if (!(paymentIntent.get("metadata") instanceof JsonObject metadata)) return null;
+    UUID tenantId = metadataId(metadata, "tenantId");
+    UUID intentId = metadataId(metadata, "intentId");
+    return tenantId == null || intentId == null ? null : new OurIntent(tenantId, intentId);
+  }
+
+  private static UUID metadataId(JsonObject metadata, String key) {
+    if (!(metadata.get(key) instanceof JsonString text)) return null;
+    try {
+      return Ids.parse(text.getString());
+    } catch (IllegalArgumentException e) {
+      return null;
     }
   }
 
@@ -294,14 +355,7 @@ public class StripePaymentProvider implements PaymentProvider {
       // warning_closed is an inquiry that never became a chargeback: the money never left.
       outcome = "lost".equals(status) ? "LOST" : "WON";
     }
-    long feeMinor = 0;
-    if (dispute.containsKey("balance_transactions") && !dispute.isNull("balance_transactions")) {
-      for (JsonObject t :
-          dispute.getJsonArray("balance_transactions").getValuesAs(JsonObject.class)) {
-        if (t.containsKey("fee") && !t.isNull("fee"))
-          feeMinor += t.getJsonNumber("fee").longValue();
-      }
-    }
+    Fee fee = disputeFee(dispute, currency);
     java.time.Instant dueBy = null;
     if (dispute.containsKey("evidence_details") && !dispute.isNull("evidence_details")) {
       JsonObject details = dispute.getJsonObject("evidence_details");
@@ -326,11 +380,56 @@ public class StripePaymentProvider implements PaymentProvider {
             phase,
             outcome,
             majorUnits(dispute.getJsonNumber("amount").longValue(), currency),
-            majorUnits(feeMinor, currency),
+            fee.amount(),
             currency,
             disputeReason(dispute.getString("reason", "")),
             dispute.getString("network_reason_code", null),
-            dueBy));
+            dueBy,
+            fee.currency()));
+  }
+
+  /** A dispute's fee as Stripe charged it: in major units of its own currency, or not known. */
+  private record Fee(BigDecimal amount, String currency) {}
+
+  /**
+   * The fee Stripe charged for a dispute: the sum of the fees on its balance transactions, each in
+   * that balance transaction's own currency — the account's settlement currency, which is not the
+   * disputed charge's when the account settles in another (a yen charge on an account paid out in
+   * pounds: the fee is 1500 pence, never 1500 yen). Read in that currency's units.
+   *
+   * <p>No balance transaction yet is no fee yet: zero, in the dispute's currency. One that names no
+   * currency, or fees in two currencies, are not guessed at or summed: the fee is not known (null),
+   * said in the log, and what was known before is kept.
+   */
+  private static Fee disputeFee(JsonObject dispute, String disputeCurrency) {
+    if (!dispute.containsKey("balance_transactions") || dispute.isNull("balance_transactions")) {
+      return new Fee(BigDecimal.ZERO, disputeCurrency);
+    }
+    long minor = 0;
+    String in = null;
+    for (JsonObject t :
+        dispute.getJsonArray("balance_transactions").getValuesAs(JsonObject.class)) {
+      if (!t.containsKey("fee") || t.isNull("fee")) continue;
+      long fee = t.getJsonNumber("fee").longValueExact();
+      String code =
+          t.containsKey("currency") && !t.isNull("currency")
+              ? t.getString("currency").toUpperCase(Locale.ROOT)
+              : null;
+      if (code == null || (in != null && !in.equals(code))) {
+        LOG.warning(
+            "Stripe dispute "
+                + dispute.getString("id", "?")
+                + ": a fee "
+                + (code == null ? "in no currency" : "in " + code + " beside one in " + in)
+                + "; the fee is left as it was known");
+        return new Fee(null, null);
+      }
+      in = code;
+      minor = Math.addExact(minor, fee);
+    }
+    return in == null
+        ? new Fee(BigDecimal.ZERO, disputeCurrency)
+        : new Fee(majorUnits(minor, in), in);
   }
 
   /** Stripe's dispute reasons, in the categories this service keeps. */
@@ -382,11 +481,19 @@ public class StripePaymentProvider implements PaymentProvider {
    * case that matters: {@code payment_intent.amount_capturable_updated} carries status {@code
    * requires_capture}, which is Stripe's way of saying authorised.
    *
+   * <p>An event about another kind of object than a PaymentIntent (a charge, say) implies none:
+   * {@link PaymentIntent#STATUS_REQUIRES_ACTION}, which {@code handleWebhook} applies as nothing.
+   * The status such an object carries is its own ({@code succeeded} for a charge), not the
+   * intent's, and the reference the event carries is not an intent's.
+   *
    * @param type the event type
-   * @param intentStatus the intent's own status
+   * @param intentStatus the status of the object the event is about
    * @return the corresponding {@code Domain.PaymentIntent} status
    */
   static String statusForEvent(String type, String intentStatus) {
+    if (!type.startsWith("payment_intent.")) {
+      return PaymentIntent.STATUS_REQUIRES_ACTION;
+    }
     return switch (type) {
       case "payment_intent.succeeded" -> PaymentIntent.STATUS_CAPTURED;
       case "payment_intent.payment_failed" -> PaymentIntent.STATUS_FAILED;
@@ -421,42 +528,137 @@ public class StripePaymentProvider implements PaymentProvider {
   }
 
   /**
-   * Zero-decimal currencies (JPY, KRW…) are quoted in whole units; everything else in hundredths.
-   * Treating them all as hundredths overcharges by 100x on those currencies.
+   * Currencies Stripe quotes in whole units although ISO 4217 gives them minor units: MGA (two in
+   * ISO). Every other Stripe zero-decimal currency (BIF, CLP, DJF, GNF, JPY, KMF, KRW, PYG, RWF,
+   * VND, VUV, XAF, XOF, XPF) has none in ISO 4217 too, so {@link Fx#minorUnits} already says so.
+   */
+  private static final Set<String> WHOLE_THOUGH_ISO_HAS_UNITS = Set.of("MGA");
+
+  /**
+   * Currencies with no minor unit that Stripe still quotes as hundredths, the hundredths always
+   * {@code 00}: 5 ISK is {@code amount=500}, and so is 5 UGX (Stripe's "special cases", kept for
+   * backward compatibility). A fraction of either cannot be charged.
+   */
+  private static final Set<String> WHOLE_AS_HUNDREDTHS = Set.of("ISK", "UGX");
+
+  /**
+   * Stripe's three-decimal currencies (BHD, JOD, KWD, OMR, TND): quoted in thousandths, as ISO 4217
+   * has them, but the last of the three must be 0, so 5.120 KWD is {@code amount=5120} and 5.124
+   * cannot be charged.
+   */
+  private static final Set<String> THREE_DECIMAL_IN_TENS =
+      Set.of("BHD", "JOD", "KWD", "OMR", "TND");
+
+  /**
+   * The power of ten Stripe's {@code amount} is in for a currency: its ISO 4217 minor units
+   * (through common-service {@link Fx#minorUnits}: none for yen or CFA francs, three for a dinar,
+   * two for most), with Stripe's documented exceptions (docs.stripe.com/currencies): MGA whole, ISK
+   * and UGX as hundredths. Getting it wrong charges a hundred times the price (XOF as hundredths)
+   * or a tenth of it (KWD as hundredths).
    *
-   * @param currency ISO-4217 code
+   * @param currency ISO-4217 code, any case
    * @return the exponent to scale by
    */
   static int exponent(String currency) {
-    return switch (currency.toUpperCase(Locale.ROOT)) {
-      case "JPY", "KRW", "VND", "CLP", "ISK" -> 0;
-      default -> 2;
-    };
+    String code = currency.toUpperCase(Locale.ROOT);
+    if (WHOLE_AS_HUNDREDTHS.contains(code)) return 2;
+    if (WHOLE_THOUGH_ISO_HAS_UNITS.contains(code)) return 0;
+    return Fx.minorUnits(code);
   }
 
   /**
-   * Converts a major-unit amount to the minor units Stripe quotes in.
+   * The decimal places Stripe can charge a currency to: its exponent, except whole units for ISK
+   * and UGX and two places (tens of fils) for the three-decimal currencies.
+   */
+  private static int chargeablePlaces(String code) {
+    if (WHOLE_AS_HUNDREDTHS.contains(code)) return 0;
+    if (THREE_DECIMAL_IN_TENS.contains(code)) return 2;
+    return exponent(code);
+  }
+
+  /** An amount longer than this (77 digits) is not money Stripe's twelve-digit amount can hold. */
+  private static final int MOST_UNSCALED_BITS = 256;
+
+  /**
+   * Converts a major-unit amount to the minor units Stripe quotes in. Never rounds: an amount finer
+   * than Stripe can charge in that currency (half a yen, a fifth fils, a fraction of a krona) is
+   * refused before Stripe is asked, since charging another figure than the order's total is not
+   * this driver's decision.
    *
    * @param amount the amount in major units
    * @param currency ISO-4217 code, which decides the exponent
-   * @return the amount in minor units, half-up rounded
+   * @return the amount in minor units, exactly
+   * @throws AmountNotChargeable for an amount Stripe cannot charge exactly, naming the nearest
+   *     amounts it can either side of it
+   * @throws ProviderException non-retryable, for an amount that is not money at all
    */
   static long minorUnits(BigDecimal amount, String currency) {
-    return amount
-        .movePointRight(exponent(currency))
-        .setScale(0, RoundingMode.HALF_UP)
-        .longValueExact();
+    String code = currency.toUpperCase(Locale.ROOT);
+    int places = chargeablePlaces(code);
+    // Judged on the digits written, before any rescaling: never a power of ten as long as an
+    // exponent. Stripe's amount has at most twelve digits; fifteen whole ones is not money.
+    if ((long) amount.precision() - amount.scale() > 15
+        || amount.unscaledValue().bitLength() > MOST_UNSCALED_BITS) {
+      throw new ProviderException(
+          "Stripe cannot charge " + code + " " + amount.toEngineeringString(), false, null);
+    }
+    if (amount.scale() > places && amount.stripTrailingZeros().scale() > places) {
+      // Shown at the currency's own units, as a price is: 1.120 dinars, not 1.12.
+      int units = Math.max(places, Fx.minorUnits(code));
+      BigDecimal step = BigDecimal.ONE.movePointLeft(places);
+      BigDecimal below;
+      BigDecimal above;
+      if ((long) amount.precision() - amount.scale() < -places) {
+        // Under the smallest amount Stripe charges (1E-80000000 among them): worked out without
+        // rescaling, which would build a power of ten as long as the exponent.
+        below = BigDecimal.ZERO;
+        above = step;
+      } else {
+        below = amount.setScale(places, RoundingMode.FLOOR);
+        above = amount.setScale(places, RoundingMode.CEILING);
+      }
+      throw new AmountNotChargeable(
+          "Stripe charges "
+              + code
+              + " to "
+              + places
+              + " decimal place"
+              + (places == 1 ? "" : "s")
+              + ", so "
+              + amount
+              + " cannot be charged exactly",
+          amount,
+          code,
+          below.signum() > 0 ? below.setScale(units) : null,
+          above.setScale(units));
+    }
+    try {
+      return amount
+          .setScale(places, RoundingMode.UNNECESSARY)
+          .movePointRight(exponent(code))
+          .longValueExact();
+    } catch (ArithmeticException e) {
+      throw new ProviderException(
+          "Stripe cannot charge " + code + " " + amount.toPlainString(), false, e);
+    }
   }
 
   /**
-   * Converts a minor-unit amount reported by Stripe back to major units.
+   * Converts a minor-unit amount reported by Stripe back to major units, at the currency's own
+   * minor units (1120 fils is 1.120 dinars, 500 krónur-hundredths is 5 krónur).
    *
    * @param minor the amount in minor units
    * @param currency ISO-4217 code, which decides the exponent
    * @return the amount in major units
    */
   static BigDecimal majorUnits(long minor, String currency) {
-    return BigDecimal.valueOf(minor).movePointLeft(exponent(currency));
+    String code = currency.toUpperCase(Locale.ROOT);
+    BigDecimal major = BigDecimal.valueOf(minor).movePointLeft(exponent(code));
+    int units = Fx.minorUnits(code);
+    // ISK and UGX come back as hundredths that are always 00: said at the currency's own units.
+    return major.scale() > units && major.stripTrailingZeros().scale() <= units
+        ? major.setScale(units, RoundingMode.UNNECESSARY)
+        : major;
   }
 
   /**
@@ -517,7 +719,7 @@ public class StripePaymentProvider implements PaymentProvider {
         if (status >= 400) {
           throw new ProviderException("Stripe rejected the request: " + body, false, null);
         }
-        try (JsonReader reader = Json.createReader(new StringReader(body))) {
+        try (JsonReader reader = Jsons.PROVIDER.createReader(new StringReader(body))) {
           return reader.readObject();
         }
       }

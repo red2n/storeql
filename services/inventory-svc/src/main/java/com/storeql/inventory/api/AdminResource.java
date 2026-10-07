@@ -1,5 +1,6 @@
 package com.storeql.inventory.api;
 
+import com.storeql.inventory.domain.Domain.Batch;
 import com.storeql.inventory.dto.Dtos.AdjustRequest;
 import com.storeql.inventory.dto.Dtos.BatchReceiveRequest;
 import com.storeql.inventory.dto.Dtos.BatchReceiveResult;
@@ -13,6 +14,7 @@ import com.storeql.inventory.dto.Dtos.PurgeResult;
 import com.storeql.inventory.dto.Dtos.ReceiveRequest;
 import com.storeql.inventory.mapper.Mappers;
 import com.storeql.inventory.service.InventoryService;
+import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.Cursor;
 import com.storeql.web.TenantContext;
@@ -32,6 +34,7 @@ import jakarta.ws.rs.core.Response;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
@@ -56,6 +59,11 @@ public class AdminResource {
 
   @Inject InventoryService service;
   @Inject TenantContext ctx;
+
+  /** The most lines one bulk receive takes; each line is its own transaction. */
+  @Inject
+  @ConfigProperty(name = "storeql.inventory.bulk.receive-max-lines", defaultValue = "500")
+  int bulkReceiveMaxLines;
 
   // ── receive ──────────────────────────────────────────────────────────────
 
@@ -103,7 +111,8 @@ public class AdminResource {
             req.supplierId() == null || req.supplierId().isBlank()
                 ? null
                 : uuid(req.supplierId(), "supplierId"),
-            req.dutyStatus());
+            req.dutyStatus(),
+            ctx.userId());
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toBatch(batch)))
         .build();
@@ -130,7 +139,13 @@ public class AdminResource {
       return ApiResponse.ok(new BatchReceiveResult(0, List.of()));
     }
     Validations.validate(req);
+    if (req.items().size() > bulkReceiveMaxLines) {
+      throw ApiException.badRequest(
+          "INVENTORY_BULK_TOO_LARGE",
+          "a bulk receive takes at most " + bulkReceiveMaxLines + " lines");
+    }
     UUID tenantId = ctx.requireTenantId();
+    UUID actorId = ctx.userId();
     int received = 0;
     var errors = new java.util.ArrayList<String>();
     for (var item : req.items()) {
@@ -146,7 +161,11 @@ public class AdminResource {
             "MANUAL",
             null,
             null,
-            null);
+            null,
+            Batch.OWNERSHIP_OWNED,
+            null,
+            Batch.DUTY_PAID,
+            actorId);
         received++;
       } catch (Exception e) {
         errors.add(item.variantId() + ": " + e.getMessage());
@@ -352,22 +371,53 @@ public class AdminResource {
   // ── purge movements (Gap #30) ───────────────────────────────────────────
 
   /**
-   * Purges old stock movements.
+   * Purges old stock movements by archiving them.
    *
-   * <p>Permanently deletes movement history older than the given instant (Gap #30 — used for data
-   * retention housekeeping, not exposed to regular admin users).
+   * <p>Moves movement history older than the given instant (at least 90 days ago) into {@code
+   * stock_movements_archive} and removes it from the live ledger — nothing is destroyed, so {@code
+   * stock_movements} stays append-only (Gap #30, data-retention housekeeping). The move is made in
+   * chunks of {@code storeql.inventory.archive.chunk-rows}, oldest first, each chunk its own
+   * transaction: a failure part-way leaves the earlier chunks archived and the call can simply be
+   * repeated.
+   *
+   * <p>Retention is the whole business's, and management's. The shared filter lets every staff role
+   * into {@code /admin/inventory/**}, so the gate is here: a till or a shelf has no say in which
+   * history leaves the live ledger, and a manager held to some stores has none over the others'.
    *
    * @param req the request body
+   * @return how many movements were moved into the archive
+   * @throws com.storeql.web.ApiException {@code 403 FORBIDDEN} the caller is not management; {@code
+   *     403 BUSINESS_WIDE_ONLY} the caller is held to stores; {@code 400 VALIDATION_FAILED} no
+   *     instant; {@code 400 INVALID_DATE} it is not an ISO-8601 instant; {@code 400
+   *     PURGE_TOO_RECENT} it is less than 90 days ago
    */
   @Operation(
       summary = "Purge old stock movements",
       description =
-          "Permanently deletes movement history older than the given instant (Gap #30 — used for"
-              + " data retention housekeeping, not exposed to regular admin users).")
-  @APIResponse(responseCode = "200", description = "Purge old stock movements")
+          "Moves movement history older than the given instant into the movement archive and"
+              + " removes it from the live ledger: nothing is deleted, so the ledger stays"
+              + " append-only. The instant must be at least 90 days ago (400 PURGE_TOO_RECENT)."
+              + " Movements move in chunks of storeql.inventory.archive.chunk-rows (10,000),"
+              + " oldest first, each chunk its own transaction; a failure part-way leaves the"
+              + " earlier chunks archived and the call can simply be repeated. Answers how many"
+              + " movements were moved (Gap #30, data-retention housekeeping). Retention is the"
+              + " whole business's: management only, and never a caller held to stores.")
+  @APIResponse(responseCode = "200", description = "Movements archived; the count that moved")
+  @APIResponse(
+      responseCode = "400",
+      description = "VALIDATION_FAILED (no instant), INVALID_DATE or PURGE_TOO_RECENT")
+  @APIResponse(
+      responseCode = "403",
+      description = "FORBIDDEN (not management) or BUSINESS_WIDE_ONLY (held to stores)")
   @POST
   @Path("/movements/purge")
   public ApiResponse<PurgeResult> purgeMovements(PurgeMovementsRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    if (!ctx.storeIds().isEmpty()) {
+      throw ApiException.forbidden(
+          "BUSINESS_WIDE_ONLY",
+          "the movement history of the whole business is moved by a caller held to no store");
+    }
     Validations.validate(req);
     UUID tenantId = ctx.requireTenantId();
     java.time.Instant before = com.storeql.web.Parsing.instant(req.before(), "before");

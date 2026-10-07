@@ -96,6 +96,41 @@ void main() {
     expect(find.text('Saved.'), findsOneWidget);
   });
 
+  // The days to answer are a whole number. Blank keeps what is set; text that
+  // is not one was sent as blank and is now refused under its field.
+  for (final (typed, why) in [
+    ('1,000', 'Type the amount without thousands separators.'),
+    ('15.', 'Whole amounts only.'),
+    ('.', 'Whole amounts only.'),
+    ('-', 'Type the amount without a sign.'),
+    ('+5', 'Type the amount without a sign.'),
+    ('0x10', 'Only digits.'),
+  ]) {
+    testWidgets('"$typed" days to answer is refused under the field, never saved as blank',
+        (tester) async {
+      final server = await _pump(tester, (_) {});
+      await tester.enterText(find.byKey(const Key('privacy-response-days')), typed);
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(find.byKey(const Key('privacy-response-days'))).decoration?.errorText,
+        why,
+      );
+      await tester.tap(find.byKey(const Key('privacy-save-settings')));
+      await tester.pumpAndSettle();
+      expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+      expect(find.text('A figure cannot be read. Correct the one marked.'), findsOneWidget);
+    });
+  }
+
+  testWidgets('days to answer left blank keep what is set', (tester) async {
+    final server = await _pump(tester, (_) {});
+    await tester.enterText(find.byKey(const Key('privacy-response-days')), '');
+    await tester.tap(find.byKey(const Key('privacy-save-settings')));
+    await tester.pumpAndSettle();
+    final put = server.requests.singleWhere((r) => r.method == 'PUT');
+    expect((put.data as Map)['responseDays'], isNull);
+  });
+
   testWidgets('a refused period is shown in the server\'s words', (tester) async {
     await _pump(tester, (s) => s.statuses['PUT /customer-svc/customers/privacy/settings'] = 400);
     await tester.enterText(find.byKey(const Key('privacy-response-days')), '91');

@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -109,17 +110,31 @@ public class BroadcastRepository extends BaseOutboxRepository {
         .findFirst();
   }
 
-  /** The business's notices, newest first; published only unless asked for all. */
-  public List<Broadcast> broadcasts(UUID tenantId, boolean publishedOnly, int limit) {
+  /**
+   * The business's notices, newest first; published only unless asked for all.
+   *
+   * <p>Held to stores in the query itself, before the limit, so a page is never cut short by
+   * notices the caller may not see: a store's own notices and those to every store (which reach the
+   * caller's stores too).
+   *
+   * @param stores the caller's stores, or null for every notice of the business
+   */
+  public List<Broadcast> broadcasts(
+      UUID tenantId, boolean publishedOnly, int limit, Set<UUID> stores) {
     return query(
         "SELECT "
             + COLUMNS
             + " FROM store_broadcasts WHERE tenant_id = ?"
             + (publishedOnly ? " AND status = 'PUBLISHED'" : "")
+            + (stores == null ? "" : " AND (store_id IS NULL OR store_id = ANY(?))")
             + " ORDER BY published_at DESC LIMIT ?",
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setInt(2, limit);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
+          ps.setInt(i, limit);
         },
         BroadcastRepository::map,
         "list notices");
@@ -193,6 +208,27 @@ public class BroadcastRepository extends BaseOutboxRepository {
     return out;
   }
 
+  /** When one person acknowledged each notice they have, by notice: one query for their feed. */
+  public Map<UUID, Instant> ackTimesBy(UUID tenantId, UUID userId) {
+    Map<UUID, Instant> out = new LinkedHashMap<>();
+    for (Map.Entry<UUID, Instant> e :
+        query(
+            "SELECT broadcast_id, acked_at FROM store_broadcast_acks WHERE tenant_id = ? AND user_id = ?"
+                + " ORDER BY acked_at",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, userId);
+            },
+            rs ->
+                Map.entry(
+                    rs.getObject("broadcast_id", UUID.class),
+                    rs.getObject("acked_at", OffsetDateTime.class).toInstant()),
+            "a person's acknowledgement times")) {
+      out.put(e.getKey(), e.getValue());
+    }
+    return out;
+  }
+
   /** The notices one person has acknowledged, for their own view. */
   public List<UUID> acknowledgedBy(UUID tenantId, UUID userId) {
     return query(
@@ -216,7 +252,7 @@ public class BroadcastRepository extends BaseOutboxRepository {
     for (Object[] row :
         query(
             "SELECT user_id, store_id, role, base_tier FROM staff_assignments WHERE tenant_id = ?"
-                + " AND (CAST(? AS uuid) IS NULL OR store_id = CAST(? AS uuid)) ORDER BY store_id, user_id",
+                + " AND store_id IS NOT NULL AND (CAST(? AS uuid) IS NULL OR store_id = CAST(? AS uuid)) ORDER BY store_id, user_id",
             ps -> {
               ps.setObject(1, tenantId);
               ps.setObject(2, storeId);
@@ -260,6 +296,19 @@ public class BroadcastRepository extends BaseOutboxRepository {
       if (pair[1] != null && !held.contains(pair[1])) held.add(pair[1]);
     }
     return List.copyOf(held);
+  }
+
+  /** Whether the store is one of the business's, open or not. */
+  public boolean isStore(UUID tenantId, UUID storeId) {
+    return !query(
+            "SELECT 1 AS present FROM stores WHERE tenant_id = ? AND id = ?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, storeId);
+            },
+            rs -> rs.getInt("present"),
+            "whether a store is the business's")
+        .isEmpty();
   }
 
   /** The stores a business-wide notice reaches: every open store. */

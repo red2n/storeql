@@ -60,16 +60,16 @@ class KsefInboxIT {
   private static final String USER = Ids.newId().toString();
 
   /** The buyer: a Polish business, by NIP. */
-  private static final String OUR_NIP = "5260250991";
+  private static final String OUR_NIP = "5260250274";
 
   private static final String OUR_VAT = "PL" + OUR_NIP;
 
   /** The business's own KSeF token, which the stub expects to read back out of the seal. */
   private static final String KSEF_TOKEN = "ksef-token-buyer-1";
 
-  private static final String KSEF_NUMBER = "5260250991-20260914-ABCDEF-01";
+  private static final String KSEF_NUMBER = "5260250274-20260914-ABCDEF-01";
 
-  private static final String SECOND_NUMBER = "5260250991-20260915-ABCDEF-02";
+  private static final String SECOND_NUMBER = "5260250274-20260915-ABCDEF-02";
 
   private static final JsonStub KSEF;
   private static final KeyPair MINISTRY;
@@ -118,7 +118,7 @@ class KsefInboxIT {
         .with(T, "PLN", "PL")
         .withIdentity(T, OUR_VAT, null, null)
         .with(T_OTHER, "PLN", "PL")
-        .withIdentity(T_OTHER, "PL7010001455", null, null);
+        .withIdentity(T_OTHER, "PL7740001454", null, null);
   }
 
   @Inject WebTarget target;
@@ -382,6 +382,45 @@ class KsefInboxIT {
                 + "\"}",
             Ids.newId().toString());
     assertThat(code(unknownNetwork), is("PURCHASE_INBOX_NETWORK_UNKNOWN"));
+
+    // A day that is not written yyyy-MM-dd is refused before anything is asked of the network.
+    String tenant = Ids.newId().toString();
+    assertThat(
+        code(post("/admin/e-invoices/inbox/fetch?from=yesterday", tenant, "OWNER")),
+        is("PURCHASE_INBOX_DATE_INVALID"));
+    assertThat(
+        code(post("/admin/e-invoices/inbox/fetch?to=2026-13-01", tenant, "OWNER")),
+        is("PURCHASE_INBOX_DATE_INVALID"));
+  }
+
+  @Test
+  @DisplayName("A window that ends before it starts, or runs past ninety days, is refused")
+  void aWindowThatEndsBeforeItStartsOrRunsPastNinetyDaysIsRefused() {
+    String tenant = Ids.newId().toString();
+    data(
+        put(
+            "/admin/e-invoices/inbox/settings",
+            "{\"network\":\"KSEF\",\"provider\":\"SIMULATED\",\"providerAccount\":\""
+                + OUR_NIP
+                + "\"}",
+            tenant),
+        200);
+    JsonObject before = data(as("/admin/e-invoices/inbox/settings", tenant, "OWNER").get(), 200);
+
+    assertThat(
+        code(post("/admin/e-invoices/inbox/fetch?from=2026-09-30&to=2026-09-01", tenant, "OWNER")),
+        is("PURCHASE_INBOX_WINDOW_INVALID"));
+    assertThat(
+        code(post("/admin/e-invoices/inbox/fetch?from=2026-01-01&to=2026-06-30", tenant, "OWNER")),
+        is("PURCHASE_INBOX_WINDOW_INVALID"));
+
+    // Both refusals are the same answer to the caller, and neither moved the window on.
+    JsonObject after = data(as("/admin/e-invoices/inbox/settings", tenant, "OWNER").get(), 200);
+    assertThat(after.containsKey("fetchedTo"), is(before.containsKey("fetchedTo")));
+    if (before.containsKey("fetchedTo")) {
+      assertThat(after.getString("fetchedTo"), is(before.getString("fetchedTo")));
+    }
+    assertThat(after.containsKey("lastFetchAt"), is(before.containsKey("lastFetchAt")));
   }
 
   @Test

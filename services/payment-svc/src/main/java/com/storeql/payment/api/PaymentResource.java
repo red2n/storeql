@@ -44,18 +44,49 @@ public class PaymentResource {
    *     twice; falls back to the key on the body when absent
    * @param req the order, amount, method and optional reference/notes
    * @return {@code 201} with the captured tender
-   * @throws com.storeql.web.ApiException {@code 400} for an unknown method or a store-credit tender
-   *     with no customer; {@code 403} without a cashier/manager/owner role; {@code 422} when the
-   *     store owner has switched that method off
+   * @throws com.storeql.web.ApiException {@code 400} for an unknown method, a store-credit tender
+   *     with no customer, or an amount that comes to nothing at the currency's minor unit; {@code
+   *     403} without a cashier/manager/owner role; {@code 422} when the store owner has switched
+   *     that method off
    */
   @Operation(
       summary = "Record a payment tender",
       description =
           "Staff-recorded tender (POS/back-office) for an order. Requires CASHIER, MANAGER, or"
-              + " OWNER.")
+              + " OWNER. The amount is recorded at the currency's own minor unit (whole yen, a"
+              + " dinar's three places), rounded half up as the order's lines are: 3 x 1.10 sent"
+              + " as 3.3000000000000003 is a tender of 3.30. A CARD taken on a card machine names"
+              + " the machine's approved payment (terminalPaymentId): it is recorded once, on its"
+              + " own order, at exactly what the machine took, and that settles the machine for"
+              + " its next sale. A CARD naming none records the order's approval at that amount"
+              + " that nothing records yet, if there is one. On a sale cancelled or voided, a CARD"
+              + " a card machine may have taken for it is refused, named or not: what the machine"
+              + " took goes back to the card.")
   @APIResponse(responseCode = "201", description = "Tender captured")
-  @APIResponse(responseCode = "400", description = "Invalid method or customerId required")
-  @APIResponse(responseCode = "403", description = "Caller lacks a cashier/manager/owner role")
+  @APIResponse(
+      responseCode = "404",
+      description = "TERMINAL_ATTEMPT_NOT_FOUND: no such card machine payment for this business")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "PAYMENT_ORDER_GIVEN_UP (a CARD on a sale cancelled or voided that a card machine may"
+              + " have taken for; details orderId=). Naming a card machine's payment:"
+              + " TERMINAL_ATTEMPT_OTHER_ORDER, TERMINAL_NOT_APPROVED,"
+              + " TERMINAL_ATTEMPT_ALREADY_RECORDED, TERMINAL_ATTEMPT_REFUNDED,"
+              + " TERMINAL_AMOUNT_MISMATCH, TERMINAL_WRONG_STORE, TERMINAL_NOT_A_SALE")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "PAYMENT_INVALID_METHOD, PAYMENT_CUSTOMER_REQUIRED, PAYMENT_GIFT_CARD_VIA_REDEEM,"
+              + " PAYMENT_AMOUNT_INVALID (the amount comes to nothing at the currency's minor"
+              + " unit; any finer figure is taken at that unit, rounded half up, as a till sums in"
+              + " binary floating point), CURRENCY_INVALID, or VALIDATION_FAILED (no amount, not"
+              + " positive, more than ten whole digits or twenty decimal places)")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Caller lacks a cashier/manager/owner role; STORE_ACCESS_DENIED for a store (or a card"
+              + " machine's store) the caller is not held to")
   @APIResponse(responseCode = "422", description = "Payment method disabled for this store")
   @POST
   public Response record(
@@ -101,7 +132,9 @@ public class PaymentResource {
   @APIResponse(
       responseCode = "400",
       description =
-          "Cash tendered online, amount mismatch, or PAYMENT_GROUP_AMOUNT_MISMATCH for a checkout")
+          "Cash tendered online, amount mismatch, PAYMENT_GROUP_AMOUNT_MISMATCH for a checkout,"
+              + " or VALIDATION_FAILED (no amount, not positive, more than ten whole digits or"
+              + " twenty decimal places)")
   @APIResponse(
       responseCode = "404",
       description = "Order or checkout not found, not ONLINE, or not the caller's")
@@ -189,7 +222,8 @@ public class PaymentResource {
   }
 
   /**
-   * Records a refund against a previously captured tender. MANAGER or above only.
+   * Records a refund against a previously captured tender. MANAGER or above only, holding {@code
+   * sales.refund}, and able to act at the store the tender was taken at.
    *
    * @param idempotencyKey the {@code Idempotency-Key} header, so a retry does not refund twice;
    *     falls back to the key on the body when absent
@@ -197,17 +231,43 @@ public class PaymentResource {
    * @param req the payment being refunded against, the amount, method and reason
    * @return {@code 201} with the recorded refund
    * @throws com.storeql.web.ApiException {@code 400} for an unknown method; {@code 403} without a
-   *     manager/owner role; a conflict when the refund would exceed what was captured
+   *     manager/owner role or the permission; {@code 404} for a tender the business does not have,
+   *     then {@code 403 STORE_ACCESS_DENIED} for one taken at a store the caller is not held to; a
+   *     conflict when the refund would exceed what was captured
    */
   @Operation(
       summary = "Record a refund",
       description =
-          "Refund against a previously captured tender for the order. Existence, order-match, and"
-              + " the cumulative refund cap are enforced with the payment row locked. Requires"
-              + " MANAGER or OWNER.")
+          "Refund against a previously captured tender for the order. Existence, the caller's"
+              + " store, order-match, and the cumulative refund cap are enforced with the payment"
+              + " row locked. Requires MANAGER or OWNER holding sales.refund. A refund is the"
+              + " store's where its tender was taken (it lowers that store's expected cash and"
+              + " reports), so a manager held to stores refunds only a tender taken at one of"
+              + " them; one held to none, any tender of the business.")
   @APIResponse(responseCode = "201", description = "Refund recorded")
-  @APIResponse(responseCode = "400", description = "Invalid method")
-  @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
+  @APIResponse(
+      responseCode = "400",
+      description =
+          "PAYMENT_INVALID_METHOD, PAYMENT_AMOUNT_INVALID (finer than the business's currency's"
+              + " minor unit), or VALIDATION_FAILED")
+  @APIResponse(
+      responseCode = "403",
+      description =
+          "Caller lacks a manager/owner role; PERMISSION_DENIED without sales.refund;"
+              + " STORE_ACCESS_DENIED: the tender was taken at a store the caller is not held to"
+              + " (or at no store, which only a caller held to none refunds) — nothing is read"
+              + " back or written")
+  @APIResponse(
+      responseCode = "404",
+      description = "PAYMENT_NOT_FOUND: no such tender for this business (another's included)")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "REFUND_EXCEEDS_PAYMENT (what is refunded and what is owed back to a card count);"
+              + " PAYMENT_REFUND_VIA_TERMINAL: a CARD refund of a tender a card machine took goes"
+              + " back on that machine (POST /payments/terminal/{attemptId}/refunds, named in the"
+              + " details), never in the books alone; PAYMENT_ORDER_MISMATCH;"
+              + " IDEMPOTENCY_KEY_REUSED: the key already made a refund of another tender")
   @POST
   @Path("/by-order/{orderId}/refunds")
   public Response recordRefund(
@@ -218,11 +278,7 @@ public class PaymentResource {
     ctx.requirePermission(com.storeql.web.Permissions.SALES_REFUND);
     Validations.validate(req);
     var refund =
-        svc.recordRefund(
-            ctx.requireTenantId(),
-            orderId,
-            req,
-            effectiveKey(idempotencyKey, req.idempotencyKey()));
+        svc.recordRefund(ctx, orderId, req, effectiveKey(idempotencyKey, req.idempotencyKey()));
     return Response.status(201).entity(ApiResponse.ok(Mappers.toDto(refund))).build();
   }
 

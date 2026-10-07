@@ -21,6 +21,8 @@ public class ExportableData extends TenantDataSpec {
   public Map<String, String> excludedTables() {
     return Map.of(
         "payment_webhook_events",
-        "payment provider deliveries recorded to refuse replays: delivery machinery, and not tied to a business");
+        "payment provider deliveries recorded to refuse replays: delivery machinery, and not tied to a business",
+        "events_handled_since",
+        "when payment-svc began acting on an event kind (voids): delivery machinery, and not tied to a business");
   }
 }

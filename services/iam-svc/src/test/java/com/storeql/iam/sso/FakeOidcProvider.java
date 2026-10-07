@@ -59,6 +59,14 @@ public final class FakeOidcProvider implements AutoCloseable {
   /** Signs the next tokens with this instead of the published key; null for the published key. */
   private volatile Algorithm signer;
 
+  /**
+   * Both endpoints carry a query, as real providers' do (Entra's app-specific keys, a B2C policy):
+   * a client must call them exactly as advertised, never with the query escaped into the path.
+   */
+  static final String JWKS_PATH = "/jwks?appid=storeql";
+
+  static final String TOKEN_PATH = "/token?p=b2c_1_signin";
+
   private volatile String kid = "key-1";
   private volatile boolean discoveryBroken;
 
@@ -136,15 +144,27 @@ public final class FakeOidcProvider implements AutoCloseable {
             + i
             + "/authorize\",\"token_endpoint\":\""
             + i
-            + "/token\",\"jwks_uri\":\""
+            + TOKEN_PATH
+            + "\",\"jwks_uri\":\""
             + i
-            + "/jwks\",\"response_types_supported\":[\"code\"],"
+            + JWKS_PATH
+            + "\",\"response_types_supported\":[\"code\"],"
             + "\"id_token_signing_alg_values_supported\":[\"RS256\"],"
             + "\"code_challenge_methods_supported\":[\"S256\"],"
             + "\"token_endpoint_auth_methods_supported\":[\"client_secret_basic\"]}");
   }
 
+  /** Answers 404, and says so, to a request that is not exactly the advertised path and query. */
+  private boolean asAdvertised(HttpExchange ex, String advertised) throws IOException {
+    URI got = ex.getRequestURI();
+    String raw = got.getRawPath() + (got.getRawQuery() == null ? "" : "?" + got.getRawQuery());
+    if (raw.equals(advertised)) return true;
+    send(ex, 404, "{\"error\":\"not found\",\"path\":\"" + raw + "\"}");
+    return false;
+  }
+
   private void jwks(HttpExchange ex) throws IOException {
+    if (!asAdvertised(ex, JWKS_PATH)) return;
     RSAPublicKey pub = (RSAPublicKey) keys.getPublic();
     Base64.Encoder url = Base64.getUrlEncoder().withoutPadding();
     send(
@@ -160,6 +180,7 @@ public final class FakeOidcProvider implements AutoCloseable {
   }
 
   private void token(HttpExchange ex) throws IOException {
+    if (!asAdvertised(ex, TOKEN_PATH)) return;
     tokenCalls.incrementAndGet();
     String auth = ex.getRequestHeaders().getFirst("Authorization");
     String expected =

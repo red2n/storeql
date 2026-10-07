@@ -75,24 +75,17 @@ public class StoreTaskService {
       boolean required,
       List<Line> lines,
       UUID actorId) {
+    requireWorkable(title, kind, daysOfWeek, dueTime, graceMinutes, lines);
     String name = require(title, "TASK_TITLE_REQUIRED", "a list needs a title");
-    String upperKind = kind == null ? null : kind.strip().toUpperCase(Locale.ROOT);
+    String upperKind = kind.strip().toUpperCase(Locale.ROOT);
     int grace = graceMinutes == null ? 60 : graceMinutes;
-    String problem = StoreTasks.problem(upperKind, daysOfWeek, dueTime, grace);
-    if (problem != null) throw ApiException.badRequest("TASK_LIST_INVALID", problem);
-    if (storeId != null && repo.storeClock(tenantId, storeId).isEmpty()) {
-      throw ApiException.notFound("STORE_NOT_FOUND", "no such store");
-    }
+    if (storeId != null) requireStore(tenantId, storeId);
     UUID id = Ids.newId();
     List<TemplateItem> items = new ArrayList<>();
     int position = 1;
     for (Line line : lines == null ? List.<Line>of() : lines) {
-      String text = blankToNull(line.text());
-      if (text == null) {
-        throw ApiException.badRequest(
-            "TASK_LINE_BLANK", "line " + position + " of the list is blank");
-      }
-      items.add(new TemplateItem(Ids.newId(), id, position++, text, line.required()));
+      items.add(
+          new TemplateItem(Ids.newId(), id, position++, line.text().strip(), line.required()));
     }
     Template template =
         new Template(
@@ -118,6 +111,50 @@ public class StoreTaskService {
   }
 
   /**
+   * A list somebody could work, judged before anything else is — whoever writes it and for
+   * whichever store — so a request that could never be a list is refused as one.
+   *
+   * @throws ApiException 400 {@code TASK_TITLE_REQUIRED}; {@code TASK_LIST_INVALID} for an unknown
+   *     kind, no time, a day outside the week or a weekly list with no day; {@code TASK_LINE_BLANK}
+   */
+  public static void requireWorkable(
+      String title,
+      String kind,
+      Set<Integer> daysOfWeek,
+      LocalTime dueTime,
+      Integer graceMinutes,
+      List<Line> lines) {
+    require(title, "TASK_TITLE_REQUIRED", "a list needs a title");
+    String upperKind = kind == null ? null : kind.strip().toUpperCase(Locale.ROOT);
+    int grace = graceMinutes == null ? 60 : graceMinutes;
+    String problem = StoreTasks.problem(upperKind, daysOfWeek, dueTime, grace);
+    if (problem != null) throw ApiException.badRequest("TASK_LIST_INVALID", problem);
+    int position = 1;
+    for (Line line : lines == null ? List.<Line>of() : lines) {
+      if (blankToNull(line.text()) == null) {
+        throw ApiException.badRequest(
+            "TASK_LINE_BLANK", "line " + position + " of the list is blank");
+      }
+      position++;
+    }
+  }
+
+  /**
+   * The store a list is written for, a day generated or read at, or a job raised at, so the caller
+   * can be judged against it before anything else: it must be the business's — another business's
+   * manager naming our store, even among their own store ids, is told it does not exist — and the
+   * caller then holds it or not (the resource asks).
+   *
+   * @throws ApiException 404 {@code STORE_NOT_FOUND}
+   */
+  public UUID requireStore(UUID tenantId, UUID storeId) {
+    if (repo.storeClock(tenantId, storeId).isEmpty()) {
+      throw ApiException.notFound("STORE_NOT_FOUND", "no such store");
+    }
+    return storeId;
+  }
+
+  /**
    * Withdraws a list: no new days are generated for it, and the days already generated stand.
    *
    * @throws ApiException 404; 409 {@code TASK_LIST_WITHDRAWN} when it already was
@@ -130,8 +167,14 @@ public class StoreTaskService {
     return repo.template(tenantId, templateId).orElse(template);
   }
 
-  public List<Template> templates(UUID tenantId, boolean activeOnly) {
-    return repo.templates(tenantId, activeOnly);
+  /**
+   * The business's lists.
+   *
+   * @param stores the caller's stores ({@code TenantContext.reportStores(null)}): their stores' own
+   *     lists and those for every store; null for a caller held to none, who reads them all
+   */
+  public List<Template> templates(UUID tenantId, boolean activeOnly, Set<UUID> stores) {
+    return repo.templates(tenantId, activeOnly, stores);
   }
 
   public Template template(UUID tenantId, UUID id) {
@@ -223,6 +266,16 @@ public class StoreTaskService {
    * @throws ApiException 400 on a range that is not one or is too long
    */
   public List<Instance> day(UUID tenantId, UUID storeId, LocalDate from, LocalDate to) {
+    requireRange(from, to);
+    return repo.day(tenantId, storeId, from, to);
+  }
+
+  /**
+   * A range of days a store's work may be read over: forwards, and no longer than the limit.
+   *
+   * @throws ApiException 400 {@code TASK_RANGE_INVALID}
+   */
+  public static void requireRange(LocalDate from, LocalDate to) {
     if (from == null || to == null || to.isBefore(from)) {
       throw ApiException.badRequest("TASK_RANGE_INVALID", "a range ends on or after it starts");
     }
@@ -230,7 +283,6 @@ public class StoreTaskService {
       throw ApiException.badRequest(
           "TASK_RANGE_INVALID", "a range covers at most " + MAX_DAYS + " days");
     }
-    return repo.day(tenantId, storeId, from, to);
   }
 
   /** The store's own today, for a member of staff asking what there is to do. */
@@ -268,8 +320,20 @@ public class StoreTaskService {
    *     who does not work at that store
    */
   public Instance tick(UUID tenantId, UUID instanceId, int position, UUID userId) {
+    return tick(tenantId, instanceId, position, userId, false);
+  }
+
+  /**
+   * {@link #tick(UUID, UUID, int, UUID)}, for a caller who may act at any of the business's stores.
+   *
+   * @param anyStore true for management held to no store (an owner, a business-wide manager), who
+   *     works a list at any store without being assigned there; false holds the caller to the
+   *     stores they are assigned at ({@code 409 WORKFORCE_NOT_ASSIGNED} elsewhere)
+   */
+  public Instance tick(
+      UUID tenantId, UUID instanceId, int position, UUID userId, boolean anyStore) {
     Instance task = requireInstance(tenantId, instanceId);
-    requireWorksAt(tenantId, userId, task.storeId());
+    requireWorksAt(tenantId, userId, task.storeId(), anyStore);
     if (!task.open()) {
       throw ApiException.conflict(
           "TASK_NOT_OPEN", "that task is " + task.status().toLowerCase(Locale.ROOT));
@@ -292,8 +356,18 @@ public class StoreTaskService {
    * @throws ApiException 409 {@code TASK_LINES_OUTSTANDING}, {@code TASK_NOT_OPEN}
    */
   public Instance complete(UUID tenantId, UUID instanceId, String note, UUID userId) {
+    return complete(tenantId, instanceId, note, userId, false);
+  }
+
+  /**
+   * {@link #complete(UUID, UUID, String, UUID)}, for a caller who may act at any store.
+   *
+   * @param anyStore as {@link #tick(UUID, UUID, int, UUID, boolean)}
+   */
+  public Instance complete(
+      UUID tenantId, UUID instanceId, String note, UUID userId, boolean anyStore) {
     Instance task = requireInstance(tenantId, instanceId);
-    requireWorksAt(tenantId, userId, task.storeId());
+    requireWorksAt(tenantId, userId, task.storeId(), anyStore);
     if (!task.open()) {
       throw ApiException.conflict(
           "TASK_NOT_OPEN", "that task is " + task.status().toLowerCase(Locale.ROOT));
@@ -319,9 +393,19 @@ public class StoreTaskService {
    *     auditor asks about; 409 {@code TASK_NOT_OPEN}
    */
   public Instance skip(UUID tenantId, UUID instanceId, String reason, UUID userId) {
+    return skip(tenantId, instanceId, reason, userId, false);
+  }
+
+  /**
+   * {@link #skip(UUID, UUID, String, UUID)}, for a caller who may act at any store.
+   *
+   * @param anyStore as {@link #tick(UUID, UUID, int, UUID, boolean)}
+   */
+  public Instance skip(
+      UUID tenantId, UUID instanceId, String reason, UUID userId, boolean anyStore) {
     String why = require(reason, "TASK_REASON_REQUIRED", "say why the task is being skipped");
     Instance task = requireInstance(tenantId, instanceId);
-    requireWorksAt(tenantId, userId, task.storeId());
+    requireWorksAt(tenantId, userId, task.storeId(), anyStore);
     if (!task.open()) {
       throw ApiException.conflict(
           "TASK_NOT_OPEN", "that task is " + task.status().toLowerCase(Locale.ROOT));
@@ -393,7 +477,8 @@ public class StoreTaskService {
 
   // ── plumbing ────────────────────────────────────────────────────────────────
 
-  private void requireWorksAt(UUID tenantId, UUID userId, UUID storeId) {
+  private void requireWorksAt(UUID tenantId, UUID userId, UUID storeId, boolean anyStore) {
+    if (anyStore) return;
     if (!workforce.worksAt(tenantId, userId, storeId)) {
       throw ApiException.conflict(
           "WORKFORCE_NOT_ASSIGNED", "that person is not assigned to that store");

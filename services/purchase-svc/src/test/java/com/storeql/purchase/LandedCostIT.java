@@ -390,23 +390,86 @@ class LandedCostIT {
             "OWNER",
             Ids.newId().toString());
     assertThat(rival.getStatus(), is(404));
+    assertThat(errorCode(rival), is("PURCHASE_GRN_NOT_FOUND"));
     JsonObject c = data(post("/landed-costs", charge(grId, "FREIGHT", "BY_VALUE", "1.00")));
-    assertThat(
-        call("GET", "/landed-costs/" + c.getString("id"), null, OTHER_T, "OWNER", null).getStatus(),
-        is(404));
-    assertThat(
+    Response rivalRead =
+        call("GET", "/landed-costs/" + c.getString("id"), null, OTHER_T, "OWNER", null);
+    assertThat(rivalRead.getStatus(), is(404));
+    assertThat(errorCode(rivalRead), is("PURCHASE_LANDED_NOT_FOUND"));
+    Response rivalReverse =
         call(
-                "POST",
-                "/landed-costs/" + c.getString("id") + "/reversal",
-                "{\"reason\":\"mine\"}",
-                OTHER_T,
-                "OWNER",
-                Ids.newId().toString())
-            .getStatus(),
-        is(404));
+            "POST",
+            "/landed-costs/" + c.getString("id") + "/reversal",
+            "{\"reason\":\"mine\"}",
+            OTHER_T,
+            "OWNER",
+            Ids.newId().toString());
+    assertThat(rivalReverse.getStatus(), is(404));
+    assertThat(errorCode(rivalReverse), is("PURCHASE_LANDED_NOT_FOUND"));
+    assertThat(
+        "the charge is still applied",
+        data(get("/landed-costs/" + c.getString("id"))).getString("status"),
+        is("APPLIED"));
     assertThat(
         call("GET", "/landed-costs?grId=" + grId, null, OTHER_T, "OWNER", Ids.newId().toString())
             .getStatus(),
         is(404));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName("A charge by value over a receipt worth nothing is refused")
+  void aChargeByValueOnAReceiptWorthNothingIsRefused() throws Exception {
+    String[] ids = receivedOrder("2.50", "3.00");
+    // A line can be priced nothing (an RFQ quote of 0 is awarded at 0); the API will not take a
+    // price below a penny, so the order's prices are zeroed where the award would have left them.
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "UPDATE purchase.purchase_order_lines SET unit_price = 0 WHERE po_id = '" + ids[0] + "'");
+    Response refused = post("/landed-costs", charge(ids[1], "FREIGHT", "BY_VALUE", "5.00"));
+    assertThat(refused.getStatus(), is(422));
+    assertThat(errorCode(refused), is("PURCHASE_LANDED_NO_BASIS"));
+    assertThat("nothing was applied", dataArray(get("/landed-costs?grId=" + ids[1])).size(), is(0));
+    // Spread by quantity the same receipt takes the charge: the refusal was about the basis only.
+    Response byQty = post("/landed-costs", charge(ids[1], "FREIGHT", "BY_QUANTITY", "5.00"));
+    assertThat(byQty.getStatus(), is(201));
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName("One key sent many times at once applies one charge")
+  void oneKeySentTwiceAtOnceAppliesOneCharge() throws Exception {
+    String[] ids = receivedOrder("2.50", "3.00");
+    String key = Ids.newId().toString();
+    String body = charge(ids[1], "FREIGHT", "BY_VALUE", "6.00");
+    int n = 8;
+    var pool = java.util.concurrent.Executors.newFixedThreadPool(n);
+    var go = new java.util.concurrent.CountDownLatch(1);
+    java.util.List<java.util.concurrent.Future<String>> answers = new java.util.ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      answers.add(
+          pool.submit(
+              () -> {
+                go.await();
+                Response r = call("POST", "/landed-costs", body, T, "OWNER", key);
+                int status = r.getStatus();
+                if (status == 201 || status == 200) {
+                  r.close();
+                  return Integer.toString(status);
+                }
+                return status + ":" + errorCode(r);
+              }));
+    }
+    go.countDown();
+    for (var f : answers) {
+      String a = f.get();
+      assertThat(
+          a,
+          org.hamcrest.Matchers.anyOf(is("201"), is("200"), is("409:PURCHASE_LANDED_IN_FLIGHT")));
+    }
+    pool.shutdown();
+    assertThat(
+        "one charge, not several", dataArray(get("/landed-costs?grId=" + ids[1])).size(), is(1));
+    String chargeId =
+        dataArray(get("/landed-costs?grId=" + ids[1])).getJsonObject(0).getString("id");
+    assertThat(outboxTypes(chargeId), is("LandedCostApplied,"));
   }
 }

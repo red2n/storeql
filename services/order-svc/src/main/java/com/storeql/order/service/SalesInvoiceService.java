@@ -7,6 +7,7 @@ import com.storeql.einvoice.Rules;
 import com.storeql.einvoice.Violation;
 import com.storeql.ids.Ids;
 import com.storeql.order.client.ServiceReads;
+import com.storeql.order.config.Json;
 import com.storeql.order.domain.Domain.Order;
 import com.storeql.order.domain.Domain.OrderItem;
 import com.storeql.order.domain.Domain.ReturnItem;
@@ -27,7 +28,6 @@ import com.storeql.web.ApiException;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
@@ -48,9 +48,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import org.eclipse.microprofile.config.ConfigProvider;
 
 /**
  * Invoices and credit notes to business buyers (18.9).
@@ -85,18 +88,40 @@ public class SalesInvoiceService {
   @Inject EInvoiceTransportService transport;
 
   // Documents issued in the background of a sale: a till is never kept waiting on four services.
+  // Bounded: a slow dependency makes sales wait in at most this many places, never without limit. A
+  // document that finds the queue full is logged and left for the manager to issue by hand (the
+  // sale stands either way).
   private final ExecutorService background =
-      Executors.newFixedThreadPool(
+      new ThreadPoolExecutor(
           2,
+          2,
+          0L,
+          TimeUnit.MILLISECONDS,
+          new ArrayBlockingQueue<>(
+              Math.max(
+                  1,
+                  ConfigProvider.getConfig()
+                      .getOptionalValue("storeql.order.invoices.background-queue", Integer.class)
+                      .orElse(1000))),
           r -> {
             Thread t = new Thread(r, "sales-invoices");
             t.setDaemon(true);
             return t;
-          });
+          },
+          (r, pool) ->
+              LOG.log(
+                  System.Logger.Level.WARNING,
+                  "background invoice queue is full; the document is left to be issued by hand"));
 
   @PreDestroy
   void stop() {
     background.shutdown();
+    try {
+      if (!background.awaitTermination(10, TimeUnit.SECONDS)) background.shutdownNow();
+    } catch (InterruptedException e) {
+      background.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
   }
 
   /** The business and its buyer, and the business's country. */
@@ -371,6 +396,22 @@ public class SalesInvoiceService {
   // ── building ──────────────────────────────────────────────────────────────────
 
   private static Written write(Document d, Parties parties, List<Line> lines, boolean india) {
+    // EN 16931 BR-25: every line carries its item name (BT-153). A name is never made up for a line
+    // product-svc no longer names; the sale is refused until the catalogue names it.
+    if (!india) {
+      for (int n = 0; n < lines.size(); n++) {
+        if (blank(lines.get(n).name())) {
+          String why =
+              "BR-25: Each Invoice line (BG-25) shall contain the Item name (BT-153), line "
+                  + (n + 1);
+          throw new ApiException(
+              409,
+              "ORDER_INVOICE_NOT_COMPLIANT",
+              "the document would break 1 EN 16931 rule(s): " + why,
+              List.of(why));
+        }
+      }
+    }
     Invoice inv = SalesInvoiceDraft.build(d, parties.seller(), parties.buyer(), lines);
     // The lines at their rates, less the discount, must come to what the sale charged: a sale whose
     // tax does not follow from its lines is not made to look as if it did.

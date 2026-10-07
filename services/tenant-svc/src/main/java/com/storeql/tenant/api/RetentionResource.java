@@ -80,6 +80,7 @@ public class RetentionResource {
   @Path("/{dataClass}")
   public ApiResponse<ClassResponse> set(
       @PathParam("dataClass") String dataClass, SetPeriodRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     return ApiResponse.ok(
         RetentionMappers.toClass(
@@ -117,6 +118,7 @@ public class RetentionResource {
   @POST
   @Path("/holds")
   public Response place(PlaceHoldRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     UUID subjectId =
         req.subjectId() == null || req.subjectId().isBlank()
@@ -147,6 +149,7 @@ public class RetentionResource {
   @POST
   @Path("/holds/{id}/release")
   public ApiResponse<HoldResponse> release(@PathParam("id") String id, ReleaseHoldRequest req) {
+    BusinessWide.require(ctx);
     Validations.validate(req);
     return ApiResponse.ok(
         RetentionMappers.toHold(

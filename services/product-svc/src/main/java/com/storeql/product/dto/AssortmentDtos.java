@@ -57,8 +57,16 @@ public final class AssortmentDtos {
               description =
                   "When it was pushed into the live range. Null while it is still intent.")
           String appliedAt,
-      @Schema(description = "The review that produced it, when it came from one.")
-          String reviewId) {}
+      @Schema(description = "The review that produced it, when it came from one.") String reviewId,
+      @Schema(
+              description =
+                  "When the sweep closed it as refused for good — a de-list of the last stores the"
+                      + " line is sold at, which no range can make apply. Null while it is open or"
+                      + " once applied; a closed change is never due again.")
+          String refusedAt,
+      @Schema(description = "The refusal it was closed with, e.g. ASSORTMENT_LAST_STORE.")
+          String refusalCode,
+      @Schema(description = "The sentence it was closed with.") String refusal) {}
 
   @Schema(name = "RecordAssortmentChangeRequest")
   public record RecordChangeRequest(
@@ -76,9 +84,23 @@ public final class AssortmentDtos {
           @Size(max = 500)
           String reason) {}
 
-  /** A change a sweep could not apply. It stays due, so fixing the cause is enough. */
+  /**
+   * A change a sweep could not apply, and whether it waits: most stay due, so fixing the cause is
+   * enough and the next sweep applies it; a de-list that would leave its line at no store ({@code
+   * ASSORTMENT_LAST_STORE}) is closed as refused for good instead ({@code stillDue} false).
+   */
   @Schema(name = "AssortmentChangeNotApplied")
-  public record NotAppliedResponse(String changeId, String productId, String code, String detail) {}
+  public record NotAppliedResponse(
+      String changeId,
+      String productId,
+      String code,
+      String detail,
+      @Schema(
+              description =
+                  "True when the change stays due and the next sweep tries it again (fix the"
+                      + " cause; nothing is re-entered). False when it was closed as refused for"
+                      + " good (ASSORTMENT_LAST_STORE): reported this once, never due again.")
+          boolean stillDue) {}
 
   @Schema(name = "AssortmentSweepResult")
   public record SweepResponse(

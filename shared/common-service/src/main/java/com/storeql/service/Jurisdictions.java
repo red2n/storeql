@@ -56,7 +56,23 @@ public class Jurisdictions {
 
   /** One obligation as it reaches a country, and the window it applies in. */
   public record Obligation(
-      String code, String scope, LocalDate effectiveFrom, LocalDate effectiveTo) {
+      String code,
+      String scope,
+      LocalDate effectiveFrom,
+      LocalDate effectiveTo,
+      BigDecimal limitValue,
+      String limitUnit,
+      String qualifier) {
+
+    /** An obligation that sets no number and names no case. */
+    public Obligation(String code, String scope, LocalDate effectiveFrom, LocalDate effectiveTo) {
+      this(code, scope, effectiveFrom, effectiveTo, null, null, null);
+    }
+
+    /** True when the law sets a number (a period, a minimum, a share) on this obligation. */
+    public boolean hasLimit() {
+      return limitValue != null && limitUnit != null;
+    }
 
     /** True from its first day to its last, inclusive; an open window never ends. */
     public boolean inForceOn(LocalDate day) {
@@ -372,7 +388,16 @@ public class Jurisdictions {
                 o.getString("code"),
                 o.getString("scope", ""),
                 LocalDate.parse(o.getString("effectiveFrom")),
-                to));
+                to,
+                o.containsKey("limitValue") && !o.isNull("limitValue")
+                    ? o.getJsonNumber("limitValue").bigDecimalValue()
+                    : null,
+                o.containsKey("limitUnit") && !o.isNull("limitUnit")
+                    ? o.getString("limitUnit")
+                    : null,
+                o.containsKey("qualifier") && !o.isNull("qualifier")
+                    ? o.getString("qualifier")
+                    : null));
       }
       return Optional.of(new Sheet(List.copyOf(out), List.copyOf(limits), List.copyOf(schemes)));
     } catch (RuntimeException e) {

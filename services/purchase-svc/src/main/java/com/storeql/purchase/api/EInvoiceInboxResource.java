@@ -1,6 +1,7 @@
 package com.storeql.purchase.api;
 
 import com.storeql.purchase.domain.EInvoiceInbox.Fetch;
+import com.storeql.purchase.service.BusinessWide;
 import com.storeql.purchase.service.EInvoiceFetchService;
 import com.storeql.web.ApiException;
 import com.storeql.web.ApiResponse;
@@ -98,10 +99,13 @@ public class EInvoiceInboxResource {
           "KSeF is the one network that is asked rather than delivered from: a Polish buyer's invoices"
               + " sit in the ministry's system until the buyer fetches them. The credential is never"
               + " returned — only whether one is held.")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not management, or BUSINESS_WIDE_ONLY: a caller held to stores")
   @GET
   @Path("/settings")
   public ApiResponse<SettingsResponse> settings() {
-    ctx.requireAnyRole("OWNER", "MANAGER");
+    businessWideManagement();
     return ApiResponse.ok(toDto(svc.settings(ctx.requireTenantId())));
   }
 
@@ -117,10 +121,13 @@ public class EInvoiceInboxResource {
   @APIResponse(
       responseCode = "409",
       description = "The deployment cannot reach KSeF, or no token is held")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not management, or BUSINESS_WIDE_ONLY: a caller held to stores")
   @PUT
   @Path("/settings")
   public ApiResponse<SettingsResponse> setSettings(SetSettingsRequest req) {
-    ctx.requireAnyRole("OWNER", "MANAGER");
+    businessWideManagement();
     Validations.validate(req);
     return ApiResponse.ok(
         toDto(
@@ -159,10 +166,13 @@ public class EInvoiceInboxResource {
               + " token refused are three different problems with three different remedies. Nothing is"
               + " fetched. For the day a KSeF token is issued, so a shop knows whether tomorrow's"
               + " invoices will arrive rather than finding out from an inbox that stays empty.")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not management, or BUSINESS_WIDE_ONLY: a caller held to stores")
   @GET
   @Path("/readiness")
   public ApiResponse<ReadinessResponse> readiness() {
-    ctx.requireAnyRole("OWNER", "MANAGER");
+    businessWideManagement();
     var r = svc.readiness(ctx.requireTenantId());
     return ApiResponse.ok(
         new ReadinessResponse(
@@ -181,10 +191,13 @@ public class EInvoiceInboxResource {
   @APIResponse(responseCode = "200", description = "What the fetch came to")
   @APIResponse(responseCode = "409", description = "The business fetches from nowhere")
   @APIResponse(responseCode = "422", description = "The network could not be reached, or refused")
+  @APIResponse(
+      responseCode = "403",
+      description = "Not management, or BUSINESS_WIDE_ONLY: a caller held to stores")
   @POST
   @Path("/fetch")
   public Response fetch(@QueryParam("from") String from, @QueryParam("to") String to) {
-    ctx.requireAnyRole("OWNER", "MANAGER");
+    businessWideManagement();
     Fetch f = svc.fetch(ctx, day(from, "from"), day(to, "to"));
     return Response.ok(
             ApiResponse.ok(
@@ -197,6 +210,23 @@ public class EInvoiceInboxResource {
                     f.refused(),
                     f.notes())))
         .build();
+  }
+
+  /**
+   * Management, held to no store. The inbox is the business's — one connection, one credential, the
+   * business's identity at the network, and a fetch that takes every store's invoices and moves the
+   * business's own cursor — so a manager held to stores is refused, as for the business's other
+   * settings.
+   *
+   * @throws ApiException 403 for anyone but management; 403 {@code BUSINESS_WIDE_ONLY} for a caller
+   *     held to stores
+   */
+  private void businessWideManagement() {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    BusinessWide.require(
+        ctx,
+        "The e-invoice inbox's connection and its fetch are the whole business's; they need a"
+            + " caller who is not held to stores");
   }
 
   private static SettingsResponse toDto(EInvoiceFetchService.SettingsView v) {

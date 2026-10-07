@@ -116,8 +116,9 @@ void main() {
     await _pump(tester, const SecurityScreen(), overrides: [mfaStatusProvider.overrideWith((ref) async => status)]);
 
     final cards = find.byType(Card);
-    expect(cards, findsNWidgets(3), reason: 'authenticator app, passkeys, recovery codes');
-    for (var i = 1; i < 3; i++) {
+    expect(cards, findsNWidgets(5),
+        reason: 'authenticator app, passkeys, recovery codes, where you are signed in, sign out everywhere');
+    for (var i = 1; i < 5; i++) {
       final gap = tester.getRect(cards.at(i)).top - tester.getRect(cards.at(i - 1)).bottom;
       expect(gap, AppSpacing.md, reason: 'card $i sits ${AppSpacing.md} below the one above it');
     }

@@ -99,6 +99,7 @@ class CrossDockIT {
     return switch (method) {
       case "GET" -> b.get();
       case "PUT" -> b.put(Entity.entity(json, MediaType.APPLICATION_JSON));
+      case "DELETE" -> b.delete();
       default -> b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
     };
   }
@@ -285,5 +286,148 @@ class CrossDockIT {
                 + plain[0]
                 + "'"),
         is("0"));
+  }
+
+  private int allocationRows(String po) {
+    return list(call("GET", "/purchase-orders/" + po + "/allocations", null, T, "OWNER"), 200)
+        .size();
+  }
+
+  @Test
+  @org.junit.jupiter.api.DisplayName(
+      "Filling from the shops' needs is refused by name and allocates nothing")
+  void aFillIsRefusedByNameAndAllocatesNothing() {
+    // Reached before anything else: the order is not this business's, or the caller may not buy.
+    String[] o = order(DC, null);
+    String fill = "/purchase-orders/" + o[0] + "/lines/" + o[1] + "/allocations/fill";
+    list(
+        call(
+            "PUT",
+            "/purchase-orders/" + o[0] + "/lines/" + o[1] + "/allocations",
+            allocations(LEEDS, "10"),
+            T,
+            "OWNER"),
+        200);
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(role, code(call("POST", fill, "{}", T2, role), 404), is("PURCHASE_PO_NOT_FOUND"));
+    }
+    // The till is refused by role in either business, before the order is looked up.
+    assertThat(call("POST", fill, "{}", T2, "CASHIER").getStatus(), is(403));
+    assertThat(call("POST", fill, "{}", T, "CASHIER").getStatus(), is(403));
+    assertThat(call("POST", fill, "{}", T, "CUSTOMER").getStatus(), is(403));
+    assertThat(allocationRows(o[0]), is(1));
+
+    // inventory-svc cannot say what the shops need: nothing is allocated, the buyer is told why.
+    INVENTORY.on("GET", "/admin/inventory/network/needs", 500, "{}");
+    assertThat(code(post(fill, "{}"), 503), is("PURCHASE_NETWORK_UNAVAILABLE"));
+    JsonArray kept =
+        list(call("GET", "/purchase-orders/" + o[0] + "/allocations", null, T, "OWNER"), 200);
+    assertThat("the earlier allocation stands", kept.size(), is(1));
+    assertThat(
+        kept.getJsonObject(0)
+            .getJsonNumber("qty")
+            .bigDecimalValue()
+            .compareTo(new BigDecimal("10")),
+        is(0));
+
+    // Not a warehouse's order, or not stock the business owns outright.
+    String[] shop = order(LEEDS, null);
+    assertThat(
+        code(
+            post("/purchase-orders/" + shop[0] + "/lines/" + shop[1] + "/allocations/fill", "{}"),
+            400),
+        is("PURCHASE_ALLOCATION_NOT_A_WAREHOUSE"));
+    assertThat(allocationRows(shop[0]), is(0));
+    String[] consigned = order(DC, "CONSIGNMENT");
+    assertThat(
+        code(
+            post(
+                "/purchase-orders/" + consigned[0] + "/lines/" + consigned[1] + "/allocations/fill",
+                "{}"),
+            409),
+        is("PURCHASE_ALLOCATION_STOCK_NOT_OWNED"));
+    assertThat(allocationRows(consigned[0]), is(0));
+
+    // A submitted order is the supplier's: the fill is refused and the allocations stay as sent.
+    data(post("/purchase-orders/" + o[0] + "/submit", ""), 200);
+    assertThat(code(post(fill, "{}"), 409), is("PURCHASE_ALLOCATION_ORDER_NOT_DRAFT"));
+    assertThat(allocationRows(o[0]), is(1));
+  }
+
+  // ── a draft's line is changed or removed only with its allocations in step ─
+
+  private BigDecimal totalNet(String po) {
+    return data(call("GET", "/purchase-orders/" + po, null, T, "OWNER"), 200)
+        .getJsonNumber("totalNet")
+        .bigDecimalValue();
+  }
+
+  @Test
+  void aLineOfferedToShopsIsNotOrderedBelowItsAllocationsNorRemovedWhileAllocated() {
+    String[] o = order(DC, null);
+    String line = "/purchase-orders/" + o[0] + "/lines/" + o[1];
+    list(
+        call("PUT", line + "/allocations", allocations(LEEDS, "25", YORK, "10"), T, "STOREKEEPER"),
+        200);
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
+
+    // Below the 35 already allocated: refused, and the line is as it was.
+    assertThat(
+        code(call("PUT", line, "{\"qty\":30,\"unitPrice\":2.00}", T, "OWNER"), 409),
+        is("PURCHASE_LINE_BELOW_ALLOCATIONS"));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
+    // Down to exactly what is allocated is fine, and the price can move with it.
+    JsonObject amended =
+        data(call("PUT", line, "{\"qty\":35,\"unitPrice\":3.00}", T, "MANAGER"), 200);
+    assertThat(
+        amended.getJsonNumber("qty").bigDecimalValue().compareTo(new BigDecimal("35")), is(0));
+    assertThat(
+        amended.getJsonNumber("unitPrice").bigDecimalValue().compareTo(new BigDecimal("3.00")),
+        is(0));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("105.00")), is(0));
+    // The allocations are untouched.
+    assertThat(
+        list(call("GET", "/purchase-orders/" + o[0] + "/allocations", null, T, "OWNER"), 200)
+            .size(),
+        is(2));
+
+    // Removing an allocated line is refused; cleared first, it goes, and the order totals nothing.
+    assertThat(
+        code(call("DELETE", line, null, T, "OWNER"), 409), is("PURCHASE_LINE_HAS_ALLOCATIONS"));
+    list(call("PUT", line + "/allocations", allocations(), T, "OWNER"), 200);
+    assertThat(call("DELETE", line, null, T, "OWNER").getStatus(), is(204));
+    assertThat(totalNet(o[0]).compareTo(BigDecimal.ZERO), is(0));
+    assertThat(
+        list(call("GET", "/purchase-orders/" + o[0] + "/lines", null, T, "OWNER"), 200).size(),
+        is(0));
+  }
+
+  @Test
+  void anotherBusinessesStaffOfEveryRoleCannotChangeOrRemoveOurLinesAndASubmittedOrderRefuses() {
+    String[] o = order(DC, null);
+    String line = "/purchase-orders/" + o[0] + "/lines/" + o[1];
+    for (String role : new String[] {"OWNER", "MANAGER", "STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          code(call("PUT", line, "{\"qty\":1,\"unitPrice\":1.00}", T2, role), 404),
+          is("PURCHASE_PO_NOT_FOUND"));
+      assertThat(
+          role, code(call("DELETE", line, null, T2, role), 404), is("PURCHASE_PO_NOT_FOUND"));
+    }
+    assertThat(
+        call("PUT", line, "{\"qty\":1,\"unitPrice\":1.00}", T, "CUSTOMER").getStatus(), is(403));
+    assertThat(call("DELETE", line, null, T, "CUSTOMER").getStatus(), is(403));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
+    assertThat(
+        list(call("GET", "/purchase-orders/" + o[0] + "/lines", null, T, "OWNER"), 200).size(),
+        is(1));
+
+    // Once submitted the order is the supplier's: nothing changes on it.
+    data(post("/purchase-orders/" + o[0] + "/submit", ""), 200);
+    assertThat(
+        code(call("PUT", line, "{\"qty\":1,\"unitPrice\":1.00}", T, "OWNER"), 400),
+        is("PURCHASE_PO_NOT_DRAFT"));
+    assertThat(code(call("DELETE", line, null, T, "OWNER"), 400), is("PURCHASE_PO_NOT_DRAFT"));
+    assertThat(totalNet(o[0]).compareTo(new BigDecimal("80.00")), is(0));
   }
 }

@@ -7,7 +7,6 @@ import com.storeql.order.domain.SalesAttribution.Statement;
 import com.storeql.order.domain.SalesAttribution.StatementLine;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
-import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -81,7 +80,7 @@ public class CommissionRepository extends BaseJdbcRepository {
           GROUP BY 1, 2
       )
       SELECT seller_user_id, day,
-             SUM(net)::numeric(18,2) AS net,
+             SUM(net) AS net,
              SUM(units)::numeric(18,3) AS units
       FROM (SELECT * FROM sold UNION ALL SELECT * FROM refunded) both_ways
       GROUP BY 1, 2
@@ -94,7 +93,7 @@ public class CommissionRepository extends BaseJdbcRepository {
 
   private static final String LINE_COLUMNS =
       "id, tenant_id, statement_id, seller_user_id, scheme_id, scheme_name, segment_from,"
-          + " segment_to, threshold_from, rate, amount, commission";
+          + " segment_to, threshold_from, rate, amount, commission, rate_currency, rated_commission";
 
   /**
    * What each seller sold, day by day, over a period.
@@ -102,9 +101,11 @@ public class CommissionRepository extends BaseJdbcRepository {
    * @param storeId one store, or null for every store the business has
    * @param from the first day counted
    * @param to the last day counted, inclusive
+   * @param currency the statement's currency; a day's net is kept to its own minor units
    */
   public List<SellerDay> sellerDays(
       UUID tenantId, UUID storeId, String currency, LocalDate from, LocalDate to) {
+    int scale = com.storeql.service.Fx.minorUnits(currency);
     OffsetDateTime start = from.atStartOfDay().atOffset(ZoneOffset.UTC);
     OffsetDateTime end = to.plusDays(1).atStartOfDay().atOffset(ZoneOffset.UTC);
     return query(
@@ -129,7 +130,7 @@ public class CommissionRepository extends BaseJdbcRepository {
             new SellerDay(
                 rs.getObject("seller_user_id", UUID.class),
                 rs.getObject("day", LocalDate.class),
-                rs.getBigDecimal("net"),
+                rs.getBigDecimal("net").setScale(scale, java.math.RoundingMode.HALF_UP),
                 rs.getBigDecimal("units")),
         "read attributed sales by seller and day");
   }
@@ -142,6 +143,9 @@ public class CommissionRepository extends BaseJdbcRepository {
    * correction. The old one closes when the new one is approved.
    */
   public Statement record(Statement s) {
+    // Money at the statement currency's own minor units, half up, as NUMERIC(18,2) kept it for the
+    // pound: whole yen, three-decimal dinars.
+    int scale = com.storeql.service.Fx.minorUnits(s.currency());
     return inTx(
         c -> {
           try (PreparedStatement ps =
@@ -157,8 +161,8 @@ public class CommissionRepository extends BaseJdbcRepository {
             ps.setObject(5, s.periodEnd());
             ps.setString(6, s.currency());
             ps.setString(7, s.status());
-            ps.setBigDecimal(8, s.netSales());
-            ps.setBigDecimal(9, s.commission());
+            ps.setBigDecimal(8, OrderRepository.money(s.netSales(), scale));
+            ps.setBigDecimal(9, OrderRepository.money(s.commission(), scale));
             ps.setString(10, s.note());
             ps.setObject(11, s.supersedes());
             ps.setObject(12, s.supersededBy());
@@ -174,7 +178,7 @@ public class CommissionRepository extends BaseJdbcRepository {
                   "INSERT INTO commission_statement_lines ("
                       + LINE_COLUMNS
                       + ")"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             for (StatementLine l : s.lines()) {
               ps.setObject(1, l.id());
               ps.setObject(2, l.tenantId());
@@ -184,10 +188,16 @@ public class CommissionRepository extends BaseJdbcRepository {
               ps.setString(6, l.schemeName());
               ps.setObject(7, l.segmentFrom());
               ps.setObject(8, l.segmentTo());
+              // Where the band starts, as the arrangement rated it: a count of units under a
+              // per-unit arrangement (2.125 stays 2.125 on a yen statement, 100 stays 100 on a
+              // dinar one), an amount of the sales under a percentage — never rounded as the
+              // statement's money, which would show a band nobody set.
               ps.setBigDecimal(9, l.thresholdFrom());
               ps.setBigDecimal(10, l.rate());
               ps.setBigDecimal(11, l.amount());
-              ps.setBigDecimal(12, l.commission());
+              ps.setBigDecimal(12, OrderRepository.money(l.commission(), scale));
+              ps.setString(13, l.rateCurrency());
+              ps.setBigDecimal(14, l.ratedCommission());
               ps.addBatch();
             }
             ps.executeBatch();
@@ -507,13 +517,8 @@ public class CommissionRepository extends BaseJdbcRepository {
         rs.getBigDecimal("threshold_from"),
         rs.getBigDecimal("rate"),
         rs.getBigDecimal("amount"),
-        rs.getBigDecimal("commission"));
-  }
-
-  /** Net sales over a period, for a statement's own total. */
-  public BigDecimal netSales(List<SellerDay> days) {
-    BigDecimal total = BigDecimal.ZERO.setScale(2);
-    for (SellerDay d : days) total = total.add(d.net());
-    return total;
+        rs.getBigDecimal("commission"),
+        rs.getString("rate_currency"),
+        rs.getBigDecimal("rated_commission"));
   }
 }

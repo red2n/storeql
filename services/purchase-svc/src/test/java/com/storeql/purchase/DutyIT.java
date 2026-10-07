@@ -166,6 +166,22 @@ class DutyIT {
   }
 
   @Test
+  @org.junit.jupiter.api.DisplayName("A period that ends before it starts is refused by name")
+  void aPeriodThatEndsBeforeItStartsIsRefused() {
+    handler.dutyReleased(released(Ids.newId().toString(), T, "4", "10.00"));
+    assertThat(
+        code(get("/admin/duty/releases?from=2026-12-31&to=2026-01-01"), 400),
+        is("PURCHASE_DUTY_PERIOD_INVALID"));
+    // The same day on both ends is a period of one day, not a refusal.
+    assertThat(get("/admin/duty/releases?from=2026-01-01&to=2026-01-01").getStatus(), is(200));
+    // The refusal reads nothing out: the ledger still holds only the one release's duty.
+    JsonObject tb = Envelopes.ok(get("/nominal-ledger/trial-balance"));
+    assertThat(
+        trialBalanceRow(tb, "5030").getJsonNumber("balance").bigDecimalValue(),
+        comparesEqualTo(new BigDecimal("10.00")));
+  }
+
+  @Test
   void aReleaseFromBondOwesTheDutyOnce() {
     String eventId = Ids.newId().toString();
     handler.dutyReleased(released(eventId, T, "4", "10.00"));

@@ -16,6 +16,7 @@ import { Counter } from 'k6/metrics';
 import {
   ALL_CHECKS_PASS,
   BASE,
+  businessWideManager,
   call,
   data,
   errorCode,
@@ -47,10 +48,13 @@ export function setup() {
   const rival = onboardTenant('bankfile-rival', { country: 'GB', currency: 'GBP' });
   const store = tenant.stores[0];
   const { variantId } = sellableVariant(tenant, 'Filed-for widget');
-  const manager = staffUser(tenant, 'MANAGER', [store.id]);
+  // The accounts payments leave from and every run's file are the whole business's: the finance
+  // manager is held to no store; one held to a store is refused BUSINESS_WIDE_ONLY.
+  const manager = businessWideManager(tenant);
+  const branchManager = staffUser(tenant, 'MANAGER', [store.id]);
   const storekeeper = staffUser(tenant, 'STOREKEEPER', [store.id]);
   const cashier = staffUser(tenant, 'CASHIER', [store.id]);
-  return { tenant, rival, store, variantId, manager, storekeeper, cashier };
+  return { tenant, rival, store, variantId, manager, branchManager, storekeeper, cashier };
 }
 
 const PAIN002 = 'urn:iso:std:iso:20022:tech:xsd:pain.002.001.10';
@@ -87,7 +91,7 @@ const endToEndIds = (xml) => {
   return out;
 };
 
-export default function ({ tenant, rival, store, variantId, manager, storekeeper, cashier }) {
+export default function ({ tenant, rival, store, variantId, manager, branchManager, storekeeper, cashier }) {
   const owner = tenant.owner.token;
   const today = new Date().toISOString().slice(0, 10);
   const plusDays = (iso, n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
@@ -122,14 +126,16 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   const checkOf = (run, supplierId) => ((run && run.suppliers) || []).find((s) => s.supplierId === supplierId)?.bankCheck || {};
 
   // ── paying accounts: validated, gated, masked ────────────────────────────────
-  expect(call('PUT', `${ACCOUNTS}/GBP`, { token: storekeeper.token, body: gbpAccount }), '[-] a storekeeper cannot set the account payments leave from', 403);
-  expect(call('GET', ACCOUNTS, { token: cashier.token }), '[-] a cashier cannot see the paying accounts', 403);
+  expect(call('PUT', `${ACCOUNTS}/GBP`, { token: storekeeper.token, body: gbpAccount }), '[-] a storekeeper cannot set the account payments leave from', 403, 'FORBIDDEN');
+  expect(call('GET', ACCOUNTS, { token: cashier.token }), '[-] a cashier cannot see the paying accounts', 403, 'FORBIDDEN');
   expect(call('PUT', `${ACCOUNTS}/GBP`, { token: owner, body: { ...gbpAccount, sortCode: '40-28-1X' } }), '[-] a sort code that is not six digits is refused', 400, 'PURCHASE_PAYING_ACCOUNT_INVALID');
   expect(call('PUT', `${ACCOUNTS}/EUR`, { token: owner, body: { ...eurAccount, iban: 'NL91 ABNA 0417 1643 01' } }), '[-] an IBAN whose check digits fail is refused', 400, 'PURCHASE_PAYING_ACCOUNT_INVALID');
   expect(call('PUT', `${ACCOUNTS}/EUR`, { token: owner, body: { ...eurAccount, serviceUserNumber: '123456' } }), '[-] a Bacs service user number without a UK account is refused', 400, 'PURCHASE_PAYING_ACCOUNT_INVALID');
   expect(call('PUT', `${ACCOUNTS}/EUR`, { token: owner, body: { accountName: 'Corner Shop', sortCode: '40-28-11', accountNumber: '12345678' } }), '[-] a euro paying account without an IBAN is refused', 400, 'PURCHASE_PAYING_ACCOUNT_INVALID');
   expect(call('PUT', `${ACCOUNTS}/POUNDS`, { token: owner, body: gbpAccount }), '[-] a currency that is not ISO 4217 is refused', 400, 'PURCHASE_INVALID_CURRENCY');
-  expect(call('PUT', `${ACCOUNTS}/GBP`, { token: owner, body: { sortCode: '40-28-11' } }), '[-] an account without its holder\'s name is refused', 400);
+  expect(call('PUT', `${ACCOUNTS}/GBP`, { token: owner, body: { sortCode: '40-28-11' } }), '[-] an account without its holder\'s name is refused', 400, 'VALIDATION_FAILED');
+  expect(call('PUT', `${ACCOUNTS}/GBP`, { token: branchManager.token, body: gbpAccount }), '[-] a manager held to one store cannot set the account the whole business pays from', 403, 'BUSINESS_WIDE_ONLY');
+  expect(call('GET', ACCOUNTS, { token: branchManager.token }), '[-] ...nor read the paying accounts', 403, 'BUSINESS_WIDE_ONLY');
   const setGbp = call('PUT', `${ACCOUNTS}/GBP`, { token: manager.token, body: gbpAccount });
   expect(setGbp, '[+] a finance manager sets the sterling paying account', 200);
   truthy('[+] ...which sends Bacs, and its account number comes back masked, never in full', data(setGbp).sendsBacs === true && data(setGbp).accountNumberMasked === '****5678' && !String(setGbp.body).includes('12345678'), data(setGbp));
@@ -150,8 +156,8 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   truthy('[+] ...crediting Acme 35.00 from the paying account under the run reference, with its contra', records[4]?.startsWith('12345631415926099402811') && records[4].slice(35, 46) === '00000003500' && records[4].slice(64, 82).trim() === gbpRun.reference && records[5]?.startsWith('40281112345678017'), records);
   expect(fileOf(gbpRun.id, 'PAIN001'), '[-] a sterling run is not a SEPA file', 409, 'PURCHASE_BANK_FILE_FORMAT_UNSUPPORTED');
   expect(fileOf(gbpRun.id, 'SWIFT'), '[-] an unknown format is refused', 400, 'PURCHASE_BANK_FILE_FORMAT_UNKNOWN');
-  expect(fileOf(gbpRun.id, 'BACS18', rival.owner.token), '[-] another tenant cannot download it', 404);
-  expect(fileOf(gbpRun.id, 'BACS18', cashier.token), '[-] nor can a cashier', 403);
+  expect(fileOf(gbpRun.id, 'BACS18', rival.owner.token), '[-] another tenant cannot download it', 404, 'PURCHASE_PAYMENT_RUN_NOT_FOUND');
+  expect(fileOf(gbpRun.id, 'BACS18', cashier.token), '[-] nor can a cashier', 403, 'FORBIDDEN');
   const csv = fileOf(gbpRun.id, 'CSV');
   truthy('[+] the CSV is still there for a bank that takes it', csv.status === 200 && header(csv)('Content-Type').startsWith('text/csv'), csv.status);
 
@@ -181,8 +187,8 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
     { e2e: e2e['Muster GmbH'], status: 'ACCP', match: 'CMTC', name: 'MUSTER HANDELS GMBH' },
     { e2e: e2e['Dupont SA'], status: 'ACCP', match: 'MTCH' },
   ]);
-  expect(upload(eurRun.id, answer, cashier.token), '[-] a cashier cannot upload the bank\'s answer', 403);
-  expect(upload(eurRun.id, answer, rival.owner.token), '[-] nor can another tenant', 404);
+  expect(upload(eurRun.id, answer, cashier.token), '[-] a cashier cannot upload the bank\'s answer', 403, 'FORBIDDEN');
+  expect(upload(eurRun.id, answer, rival.owner.token), '[-] nor can another tenant', 404, 'PURCHASE_PAYMENT_RUN_NOT_FOUND');
   expect(upload(eurRun.id, '<?xml version="1.0"?><!DOCTYPE d [<!ENTITY x SYSTEM "file:///etc/passwd">]><d>&x;</d>'), '[abuse] a report carrying a DTD is refused unread', 400, 'PURCHASE_STATUS_REPORT_INVALID');
   expect(upload(eurRun.id, 'not a status report'), '[-] a file that is not XML is refused', 400, 'PURCHASE_STATUS_REPORT_INVALID');
   expect(upload(eurRun.id, answer.replace(`<OrgnlMsgId>${eurRun.reference}`, '<OrgnlMsgId>PAY000000-000000')), '[abuse] a report answering another file is refused', 409, 'PURCHASE_STATUS_REPORT_NOT_FOR_RUN');
@@ -197,9 +203,9 @@ export default function ({ tenant, rival, store, variantId, manager, storekeeper
   expect(heldPay, '[abuse] a run with a held payment is not paid', 409, 'PURCHASE_PAYMENT_RUN_PAYEE_HELD');
   truthy('[abuse] ...and the refusal names who is held and why', String(heldPay.body).includes('Muster GmbH') && String(heldPay.body).includes('CLOSE_MATCH'), String(heldPay.body).slice(0, 400));
 
-  expect(release(eurRun.id, muster.id, {}), '[-] releasing needs a reason', 400);
+  expect(release(eurRun.id, muster.id, {}), '[-] releasing needs a reason', 400, 'VALIDATION_FAILED');
   expect(release(eurRun.id, dupont.id, { reason: 'checked' }), '[-] a payment the bank did not hold is not released', 409, 'PURCHASE_PAYEE_NOT_HELD');
-  expect(release(eurRun.id, muster.id, { reason: 'checked' }, storekeeper.token), '[-] a storekeeper cannot release a held payment', 403);
+  expect(release(eurRun.id, muster.id, { reason: 'checked' }, storekeeper.token), '[-] a storekeeper cannot release a held payment', 403, 'FORBIDDEN');
   const releaseParams = { headers: { Authorization: `Bearer ${owner}`, 'Content-Type': 'application/json' }, tags: { name: 'POST /payment-runs/{id}/payments/{supplierId}/release' } };
   const releaseBody = JSON.stringify({ reason: 'Rang Muster: the bank holds their registered name' });
   const burst = http.batch(Array.from({ length: 10 }, () => ['POST', `${BASE}${RUNS}/${eurRun.id}/payments/${muster.id}/release`, releaseBody, releaseParams]));

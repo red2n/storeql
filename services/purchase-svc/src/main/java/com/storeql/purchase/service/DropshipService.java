@@ -55,11 +55,13 @@ public class DropshipService {
   // ── Arrangements ───────────────────────────────────────────────────────────
 
   /**
-   * @throws ApiException 404 {@code PURCHASE_SUPPLIER_NOT_FOUND}; 409 {@code
-   *     PURCHASE_DROPSHIP_ARRANGEMENT_EXISTS} when the variant already has a live one
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY} for a caller held to stores; 404 {@code
+   *     PURCHASE_SUPPLIER_NOT_FOUND}; 409 {@code PURCHASE_DROPSHIP_ARRANGEMENT_EXISTS} when the
+   *     variant already has a live one
    */
   public DropshipArrangement create(TenantContext ctx, CreateDropshipArrangementRequest req) {
     UUID tenantId = ctx.requireTenantId();
+    requireBusinessWide(ctx);
     Supplier supplier =
         purchases
             .findSupplier(tenantId, req.supplierId())
@@ -88,9 +90,15 @@ public class DropshipService {
     return repo.findAll(ctx.requireTenantId(), limit);
   }
 
-  /** Ends an arrangement: the variant is stocked again, and inventory-svc is told. */
+  /**
+   * Ends an arrangement: the variant is stocked again, and inventory-svc is told.
+   *
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY} for a caller held to stores; 404 {@code
+   *     PURCHASE_DROPSHIP_ARRANGEMENT_NOT_FOUND}
+   */
   public DropshipArrangement end(TenantContext ctx, UUID id) {
     UUID tenantId = ctx.requireTenantId();
+    requireBusinessWide(ctx);
     DropshipArrangement a =
         repo.find(tenantId, id)
             .orElseThrow(
@@ -102,6 +110,19 @@ public class DropshipService {
         id,
         Events.variantSourcingChanged(tenantId, a.variantId(), FULFILMENT_STOCK, null));
     return repo.find(tenantId, id).orElse(a);
+  }
+
+  /**
+   * An arrangement sources a product for every store of the business — its orders at every shop are
+   * raised on the supplier — so making or ending one is the whole business's, never one store's.
+   *
+   * @throws ApiException 403 {@code BUSINESS_WIDE_ONLY} for a caller held to stores
+   */
+  private static void requireBusinessWide(TenantContext ctx) {
+    BusinessWide.require(
+        ctx,
+        "a dropship arrangement sources the product at every store; it needs a caller held to"
+            + " no store");
   }
 
   // ── The order-driven purchase order ────────────────────────────────────────
@@ -128,9 +149,6 @@ public class DropshipService {
     if (wanted.isEmpty()) return;
     List<DropshipArrangement> live = repo.activeFor(tenantId, wanted.keySet());
     if (live.isEmpty()) return;
-    // Idempotent on the event: a redelivered confirmation raises nothing twice.
-    if (!purchases.markProcessedIfNew(Ids.derived(eventId, "dropship"), ORDER_CONSUMER)) return;
-
     String shipTo = shipTo(o);
     Map<String, BigDecimal> vatRates = pricing.findVatRates(tenantId);
     Map<UUID, List<DropshipArrangement>> bySupplier = new LinkedHashMap<>();
@@ -138,6 +156,7 @@ public class DropshipService {
       bySupplier.computeIfAbsent(a.supplierId(), k -> new java.util.ArrayList<>()).add(a);
     }
     Instant now = Instant.now();
+    List<PurchaseRepository.RaisedOrder> raises = new java.util.ArrayList<>();
     for (Map.Entry<UUID, List<DropshipArrangement>> e : bySupplier.entrySet()) {
       Optional<Supplier> supplier = purchases.findSupplier(tenantId, e.getKey());
       if (supplier.isEmpty()) {
@@ -173,9 +192,9 @@ public class DropshipService {
                   null,
                   Domain.PO_SOURCE_DROPSHIP)
               .withDropship(orderId, shipTo);
-      purchases.createPurchaseOrder(po, Events.purchaseOrderCreated(tenantId, po.id()));
+      List<PurchaseOrderLine> lines = new java.util.ArrayList<>();
       for (DropshipArrangement a : e.getValue()) {
-        purchases.addPurchaseOrderLine(
+        lines.add(
             new PurchaseOrderLine(
                 Ids.newId(),
                 tenantId,
@@ -185,14 +204,20 @@ public class DropshipService {
                 a.unitCost(),
                 a.vatCode(),
                 now,
-                "dropship for sale " + Handle.of(orderId) + ", shipped to the customer"),
-            currency,
-            vatRates);
+                "dropship for sale " + Handle.of(orderId) + ", shipped to the customer"));
       }
+      raises.add(
+          new PurchaseRepository.RaisedOrder(
+              po, Events.purchaseOrderCreated(tenantId, po.id()), lines));
+    }
+    // One transaction with the dedupe mark (see raiseOnce): a failure part-way raises nothing and
+    // leaves no mark, so the redelivery raises the lot; a redelivery after success raises nothing.
+    if (!purchases.raiseOnce(eventId, ORDER_CONSUMER, raises, vatRates)) return;
+    for (PurchaseRepository.RaisedOrder r : raises) {
       LOG.log(
           Level.INFO,
           "dropship order {0} raised for sale {1} of tenant {2}",
-          po.id(),
+          r.order().id(),
           orderId,
           tenantId);
     }
@@ -227,9 +252,13 @@ public class DropshipService {
    * arrives here. Posts the cost of goods the business never held against what the supplier will
    * invoice (Dr Purchases - Dropship, Cr Goods Received Not Invoiced).
    *
-   * @throws ApiException 404 {@code PURCHASE_PO_NOT_FOUND}; 409 {@code PURCHASE_PO_NOT_DELIVERABLE}
+   * @throws ApiException 403 for a role outside buying, or {@code STORE_ACCESS_DENIED} for a caller
+   *     held to another store; 404 {@code PURCHASE_PO_NOT_FOUND}; 409 {@code
+   *     PURCHASE_PO_NOT_DELIVERABLE}
    */
   public PurchaseOrder deliver(TenantContext ctx, UUID poId) {
+    // Confirming a delivery posts to the ledger, as a receipt does: warehouse and management work.
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER");
     UUID tenantId = ctx.requireTenantId();
     PurchaseOrder po =
         purchases
@@ -238,6 +267,7 @@ public class DropshipService {
                 () ->
                     ApiException.notFound(
                         "PURCHASE_PO_NOT_FOUND", "Purchase order not found: " + poId));
+    ctx.requireStoreAccess(po.storeId());
     if (!Domain.PO_SOURCE_DROPSHIP.equals(po.source())
         || !Domain.PO_SUBMITTED.equals(po.status())) {
       throw ApiException.conflict(

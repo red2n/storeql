@@ -30,6 +30,14 @@ class _Server implements HttpClientAdapter {
 
   /// Answers the first page with one of every other kind of till event.
   bool everyKind = false;
+
+  /// Answers the first page with the two offline sales flagged for a manager.
+  bool offline = false;
+
+  /// Answers the first page with offline sales a manager synced: one rung up
+  /// by somebody the business does not hold at the store, and one weighed on a
+  /// scale nobody can show was fit when it was rung up.
+  bool synced = false;
   final DateTime now = DateTime.now().toUtc();
 
   /// How long every answer takes.
@@ -61,6 +69,28 @@ class _Server implements HttpClientAdapter {
             '{"id":"e-6","type":"CANCEL","occurredAt":"${_at(2)}","actorId":"u-1","storeId":"s1","orderId":"o-6","reason":"customer asked","detail":"CONFIRMED"},'
             '{"id":"e-7","type":"NO_SALE","occurredAt":"${_at(3)}","actorId":"u-2","storeId":"s1","reason":"change for the float","detail":"u-1"}'
             '],"meta":{}}';
+      } else if (o.queryParameters['type'] == 'OFFLINE_SALE_OF_RECALLED_ITEM') {
+        body = '{"data":[{"id":"e-8","type":"OFFLINE_SALE_OF_RECALLED_ITEM","occurredAt":"${_at(1)}",'
+            '"actorId":"u-2","storeId":"s1","orderId":"o-8","variantId":"v-1","detail":"R-2026-017",'
+            '"reason":"Sold while the till was offline: when it was rung up, item 2 was under '
+            'product recall R-2026-017 (undeclared allergen), every pack."}],"meta":{}}';
+      } else if (synced) {
+        body = '{"data":['
+            '{"id":"e-10","type":"OFFLINE_SALE_OF_RECALLED_ITEM","occurredAt":"${_at(1)}","replayedBy":"u-1","storeId":"s1","orderId":"o-10","variantId":"v-1","detail":"R-2026-017",'
+            '"reason":"Sold while the till was offline: when it was rung up, item 1 was under product recall R-2026-017 (undeclared allergen), every pack."},'
+            '{"id":"e-11","type":"OFFLINE_SALE_ON_UNFIT_SCALE","occurredAt":"${_at(3)}","actorId":"u-2","replayedBy":"u-1","storeId":"s1","orderId":"o-11","variantId":"v-1","detail":"UNKNOWN_AT_SALE",'
+            '"reason":"Sold while the till was offline: item 1 was weighed on Deli 1, which is certified for trade now; whether it could be used for trade here when the sale was rung up cannot be shown, because its latest check was recorded after the sale."}'
+            '],"meta":{}}';
+      } else if (offline) {
+        body = '{"data":['
+            '{"id":"e-8","type":"OFFLINE_SALE_OF_RECALLED_ITEM","occurredAt":"${_at(1)}","actorId":"u-2","storeId":"s1","orderId":"o-8","variantId":"v-1","detail":"R-2026-017",'
+            '"reason":"Sold while the till was offline: when it was rung up, item 2 was under product recall R-2026-017 (undeclared allergen), every pack."},'
+            '{"id":"e-9","type":"OFFLINE_SALE_ON_UNFIT_SCALE","occurredAt":"${_at(3)}","actorId":"u-2","storeId":"s1","orderId":"o-9","variantId":"v-1","detail":"OUT_OF_SERVICE",'
+            '"reason":"Sold while the till was offline: item 1 was weighed on Deli 3 when it could not be used for trade here (it is out of service)."}'
+            '],"meta":{}}';
+      } else if (o.queryParameters['type'] == 'PRICED') {
+        body = '{"data":[{"id":"e-12","type":"PRICED","occurredAt":"${_at(1)}","actorId":"u-1",'
+            '"storeId":"s1","orderId":"o-12","amount":18.5,"reason":"priced: total 18.50"}],"meta":{}}';
       } else if (o.queryParameters['type'] == 'VOID') {
         body = '{"data":[{"id":"e-1","type":"VOID","occurredAt":"${_at(1)}","actorId":"u-1",'
             '"storeId":"s1","orderId":"o-1","reason":"rang up twice"}],"meta":{}}';
@@ -98,6 +128,8 @@ Future<_Server> _pump(WidgetTester tester,
     {bool empty = false,
     bool forbidden = false,
     bool everyKind = false,
+    bool offline = false,
+    bool synced = false,
     Size size = const Size(1200, 1400),
     double textScale = 1,
     Duration delay = Duration.zero}) async {
@@ -108,6 +140,8 @@ Future<_Server> _pump(WidgetTester tester,
     ..empty = empty
     ..forbidden = forbidden
     ..everyKind = everyKind
+    ..offline = offline
+    ..synced = synced
     ..delay = delay;
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))..httpClientAdapter = server;
   await tester.pumpWidget(ProviderScope(
@@ -287,6 +321,86 @@ void main() {
     for (final code in ['STORE_CREDIT', 'CONFIRMED', 'DAMAGED', '4.2 ']) {
       expect(find.textContaining(code), findsNothing, reason: code);
     }
+  });
+
+  testWidgets('an offline sale flagged for a manager reads in words, naming the product',
+      (tester) async {
+    await _pump(tester, offline: true);
+    expect(find.text('Offline sale of a recalled item · Oat milk 1L'), findsOneWidget);
+    expect(find.text('Offline sale on an unfit scale · Oat milk 1L'), findsOneWidget);
+    // Who rang it up, the order, and the server's words for what was wrong.
+    expect(
+        find.textContaining('by ben@shop.test · order o-8 · Sold while the till was offline: '
+            'when it was rung up, item 2 was under product recall R-2026-017'),
+        findsOneWidget);
+    expect(find.textContaining('weighed on Deli 3 when it could not be used for trade here'),
+        findsOneWidget);
+    // A till event like any other, and no code shows through.
+    expect(find.text('Till'), findsNWidgets(2));
+    for (final code in ['OFFLINE_SALE', 'OUT_OF_SERVICE', 'v-1']) {
+      expect(find.textContaining(code), findsNothing, reason: code);
+    }
+  });
+
+  testWidgets(
+      'an offline sale says who rang it up — or that nobody the business holds '
+      'did — and who synced the till, and a scale nobody can show was fit is '
+      'not called unfit', (tester) async {
+    await _pump(tester, synced: true);
+    expect(
+        find.textContaining('rung up by an unknown member of staff · synced by '
+            'ana@shop.test · order o-10 · Sold while the till was offline'),
+        findsOneWidget);
+    expect(
+        find.textContaining(
+            'rung up by ben@shop.test · synced by ana@shop.test · order o-11'),
+        findsOneWidget);
+    expect(find.text('Offline sale on a scale that may not have been fit · Oat milk 1L'),
+        findsOneWidget);
+    expect(find.text('Offline sale on an unfit scale · Oat milk 1L'), findsNothing);
+    expect(find.textContaining('cannot be shown, because its latest check was recorded'),
+        findsOneWidget);
+    for (final code in ['UNKNOWN_AT_SALE', 'Unattributed', 'u-1', 'u-2']) {
+      expect(find.textContaining(code), findsNothing, reason: code);
+    }
+  });
+
+  testWidgets('a sale the cashier synced themselves does not say so twice', (tester) async {
+    await _pump(tester, offline: true);
+    expect(find.textContaining('rung up by ben@shop.test · order o-8'), findsOneWidget);
+    expect(find.textContaining('synced by'), findsNothing);
+  });
+
+  testWidgets('the Action filter offers each kind of offline sale in words and asks the server',
+      (tester) async {
+    final server = await _pump(tester);
+    await tester.tap(find.byKey(const Key('audit-type')));
+    await tester.pumpAndSettle();
+    expect(find.text('Offline sales on unfit scales').last, findsOneWidget);
+    await tester.tap(find.text('Offline sales of recalled items').last);
+    await tester.pumpAndSettle();
+    expect(_trailRequests(server).last.queryParameters['type'], 'OFFLINE_SALE_OF_RECALLED_ITEM');
+    // Only order-svc records these, so the stockroom's ledger is not asked again.
+    expect(server.requests.where((r) => r.path.endsWith('/admin/inventory/movements')), hasLength(1));
+    expect(find.text('Offline sale of a recalled item · Oat milk 1L'), findsOneWidget);
+    expect(find.text(_adjustment), findsNothing);
+  });
+
+  testWidgets('the Action filter offers a price set on an order that was waiting for one, in words, and asks the server',
+      (tester) async {
+    final server = await _pump(tester);
+    await tester.tap(find.byKey(const Key('audit-type')));
+    await tester.pumpAndSettle();
+    expect(find.text('Prices set on orders').last, findsOneWidget);
+    await tester.tap(find.text('Prices set on orders').last);
+    await tester.pumpAndSettle();
+    expect(_trailRequests(server).last.queryParameters['type'], 'PRICED');
+    // Who priced it, the order's total, and the server's own words; never the code.
+    expect(find.text('Price set on an order · £18.50'), findsOneWidget);
+    expect(find.textContaining('by ana@shop.test · order o-12 · priced: total 18.50'), findsOneWidget);
+    expect(find.textContaining('PRICED'), findsNothing);
+    // It is a till event, not an offline sale flagged for a manager.
+    expect(find.textContaining('rung up by'), findsNothing);
   });
 
   testWidgets('on a phone the filters fold behind one button and the trail starts on the first screen',

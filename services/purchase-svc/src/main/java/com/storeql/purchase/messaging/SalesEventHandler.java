@@ -15,8 +15,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Reads the three events that describe a sale and hands them to {@link SalesPostingService} (17.7).
- * A payload that is not what its producer sends is logged and skipped: redelivering it would never
+ * Reads the events that describe a sale and its money (17.7): the sale, its tenders, refunds and
+ * no-receipt returns, the card disputes and the acquirer's settlement. Each goes to {@link
+ * SalesPostingService}, and to the dropship and deferred-revenue services where it applies. A
+ * payload that is not what its producer sends is logged and skipped: redelivering it would never
  * make it parse, and the order's clearing stays open on the report where someone will see it.
  */
 @ApplicationScoped
@@ -99,6 +101,30 @@ public class SalesEventHandler {
           shares);
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "PaymentRefunded not posted, malformed: " + e.getMessage());
+    }
+  }
+
+  /**
+   * {@code NoReceiptReturnRecorded}: a return with no sale behind it, refunded to store credit or a
+   * gift card. Its posting is the only credit this event makes to that liability (a card it loads
+   * is {@code paidBy: RETURN}, counted in the pool but never posted).
+   */
+  public void noReceiptReturn(String json) {
+    try {
+      JsonObject o = EventJson.parse(json);
+      if (!"NoReceiptReturnRecorded".equals(o.getString("eventType", ""))) return;
+      postings.postNoReceiptReturn(
+          Ids.parse(o.getString("eventId")),
+          Ids.parse(o.getString("tenantId")),
+          Ids.parse(o.getString("returnId")),
+          EventJson.optUuid(o, "storeId"),
+          o.getString("refundMethod", null),
+          o.getJsonNumber("amount").bigDecimalValue(),
+          o.containsKey("taxAmount") && !o.isNull("taxAmount")
+              ? o.getJsonNumber("taxAmount").bigDecimalValue()
+              : BigDecimal.ZERO);
+    } catch (RuntimeException e) {
+      LOG.log(Level.WARNING, "NoReceiptReturnRecorded not posted, malformed: " + e.getMessage());
     }
   }
 

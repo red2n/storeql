@@ -1,6 +1,7 @@
 package com.storeql.inventory.dto;
 
 import com.storeql.inventory.dto.Dtos.TransferOrderResponse;
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import java.math.BigDecimal;
@@ -18,7 +19,9 @@ public final class NetworkDtos {
       name = "ServingRequest",
       description = "Which warehouse serves a shop, and how many days a delivery takes.")
   public record ServingRequest(
-      @NotBlank String storeId, @NotBlank String warehouseId, @NotNull Integer leadTimeDays) {}
+      @NotBlank String storeId,
+      @NotBlank String warehouseId,
+      @NotNull @JsonbTypeDeserializer(WholeNumbers.ExactInt.class) Integer leadTimeDays) {}
 
   @Schema(name = "ServingResponse", description = "A shop, its warehouse and what it buys direct.")
   public record ServingResponse(
@@ -58,6 +61,7 @@ public final class NetworkDtos {
   public record TransferProposalRequest(
       @NotBlank String warehouseId,
       @Schema(description = "Days of cover beyond the lead time; 7 when omitted.")
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer coverDays) {}
 
   @Schema(name = "TransferProposalRunResponse")

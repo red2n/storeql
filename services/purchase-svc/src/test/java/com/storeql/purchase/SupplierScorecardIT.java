@@ -9,6 +9,7 @@ import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
+import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonValue;
@@ -295,5 +296,110 @@ class SupplierScorecardIT {
     assertThat(
         Envelopes.ok(get("/suppliers/" + grower + "/scorecard")).getInt("leadTimeDays"), is(2));
     assertThat(absent(deliveries.getJsonObject(0), "promisedDate"), is(true));
+  }
+
+  // ── a poor grade is warned about, never refused ────────────────────────────
+
+  private static JsonArray warnings(JsonObject po) {
+    return po.containsKey("warnings") && !po.isNull("warnings")
+        ? po.getJsonArray("warnings")
+        : Json.createArrayBuilder().build();
+  }
+
+  @Test
+  void anOpenOrderOfAGradeDSupplierCarriesAWarningOnReadAndSubmitButIsNeverRefused() {
+    String late = supplier("Always Late Ltd", 3);
+    // Submitted thirty days ago against a three-day quote, then received in full: 27 days late
+    // (nothing on time), all of it filled, none returned, no invoice yet: (0*40+100*30+100*20)/90
+    // = 55.6 over the parts known, which is a D.
+    String done = submittedOrder(late, 10, null, 30);
+    assertThat(
+        post("/goods-receipts", PurchaseFixtures.receiptJson(done, 10)).getStatus(), is(201));
+    JsonObject card = Envelopes.ok(get("/suppliers/" + late + "/scorecard"));
+    assertThat(card.getString("grade"), is("D"));
+
+    // A fresh draft for them warns on read; submitting it warns too and still goes through.
+    String draft =
+        Envelopes.created(
+                post(
+                    "/purchase-orders",
+                    "{\"supplierId\":\""
+                        + late
+                        + "\",\"storeId\":\""
+                        + STORE
+                        + "\",\"currency\":\"GBP\"}"))
+            .getString("id");
+    assertThat(
+        post("/purchase-orders/" + draft + "/lines", PurchaseFixtures.lineJson(2, "20.00"))
+            .getStatus(),
+        is(201));
+    JsonObject read = Envelopes.ok(get("/purchase-orders/" + draft));
+    assertThat(read.getString("status"), is("DRAFT"));
+    assertThat(warnings(read).getString(0), is("SUPPLIER_GRADE_D"));
+    JsonObject submitted = Envelopes.ok(post("/purchase-orders/" + draft + "/submit", "{}"));
+    assertThat(submitted.getString("status"), is("SUBMITTED"));
+    assertThat(warnings(submitted).getString(0), is("SUPPLIER_GRADE_D"));
+
+    // A finished order says nothing; a till role is shown none; a listing carries none.
+    assertThat(warnings(Envelopes.ok(get("/purchase-orders/" + done))).size(), is(0));
+    assertThat(
+        warnings(Envelopes.ok(call("GET", "/purchase-orders/" + draft, null, T, "CASHIER"))).size(),
+        is(0));
+    assertThat(
+        warnings(Envelopes.ok(call("GET", "/purchase-orders/" + draft, null, T, "STOREKEEPER")))
+            .getString(0),
+        is("SUPPLIER_GRADE_D"));
+    // The other business does not read the order, and so not the warning.
+    assertThat(call("GET", "/purchase-orders/" + draft, null, T2, "OWNER").getStatus(), is(404));
+    assertThat(call("GET", "/purchase-orders/" + draft, null, T2, "MANAGER").getStatus(), is(404));
+
+    // A supplier with a good record, or none, carries no warning.
+    String quiet = supplier("Quiet Farm", null);
+    String other =
+        Envelopes.created(
+                post(
+                    "/purchase-orders",
+                    "{\"supplierId\":\""
+                        + quiet
+                        + "\",\"storeId\":\""
+                        + STORE
+                        + "\",\"currency\":\"GBP\"}"))
+            .getString("id");
+    assertThat(warnings(Envelopes.ok(get("/purchase-orders/" + other))).size(), is(0));
+  }
+
+  // ── catalogue: an open order is no fill rate yet; another business sees no card ──
+
+  @Test
+  void aPartReceivedOpenOrderIsNotAFillRateYetAndAnotherBusinessSeesNoCard() {
+    String halfway = supplier("Half Way Ltd", 3);
+    String po = submittedOrder(halfway, 10, null, 2);
+    assertThat(post("/goods-receipts", PurchaseFixtures.receiptJson(po, 6)).getStatus(), is(201));
+    assertThat(
+        Envelopes.ok(get("/purchase-orders/" + po)).getString("status"), is("PARTIALLY_RECEIVED"));
+
+    JsonObject card = Envelopes.ok(get("/suppliers/" + halfway + "/scorecard"));
+    // The delivery is measured, but the order has not reached its end: no fill rate to judge.
+    assertThat(card.getJsonObject("deliveries").getInt("count"), is(1));
+    JsonObject fill = card.getJsonObject("fill");
+    assertThat(fill.getInt("orders"), is(0));
+    assertThat(absent(fill, "fillRatePct"), is(true));
+
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          call("GET", "/suppliers/" + halfway + "/scorecard", null, T2, role).getStatus(),
+          is(404));
+      assertThat(
+          role,
+          call("GET", "/suppliers/" + halfway + "/deliveries", null, T2, role).getStatus(),
+          is(404));
+    }
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          call("GET", "/suppliers/" + halfway + "/scorecard", null, T2, role).getStatus(),
+          is(403));
+    }
   }
 }

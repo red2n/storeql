@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/input_mode.dart';
 import '../../core/network/api_error.dart';
@@ -259,7 +260,7 @@ class _OrderCardSkeleton extends StatelessWidget {
       );
 }
 
-class _ServerOrderTile extends StatelessWidget {
+class _ServerOrderTile extends ConsumerStatefulWidget {
   final ServerOrderSummary order;
   final String storeName;
   final bool showPrices;
@@ -273,12 +274,76 @@ class _ServerOrderTile extends StatelessWidget {
       this.parts = 1});
 
   @override
+  ConsumerState<_ServerOrderTile> createState() => _ServerOrderTileState();
+}
+
+class _ServerOrderTileState extends ConsumerState<_ServerOrderTile> {
+  bool _cancelling = false;
+
+  /// Asks first, then cancels the shopper's own unpaid order. A refusal is
+  /// shown in words and leaves the order as it was.
+  Future<void> _cancel() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel this order?'),
+        content: const Text(
+            'The items will be released and the order will not be prepared. '
+            'You have not been charged.'),
+        actions: [
+          TextButton(
+              key: const Key('cancel-order-keep'),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep order')),
+          FilledButton(
+              key: const Key('cancel-order-confirm'),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Cancel order')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _cancelling = true);
+    final messenger = ScaffoldMessenger.of(context);
+    final errorColor = Theme.of(context).colorScheme.error;
+    try {
+      await ref
+          .read(storefrontDioProvider)
+          .post('/${ApiConstants.order}/orders/${widget.order.id}/cancel');
+      ref.invalidate(serverOrdersProvider);
+      messenger.showSnackBar(const SnackBar(content: Text('Order cancelled.')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+        content: Text(friendlyError(e, fallback: 'Could not cancel the order.')),
+        backgroundColor: errorColor,
+      ));
+    } finally {
+      if (mounted) setState(() => _cancelling = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final order = widget.order;
+    final storeName = widget.storeName;
+    final showPrices = widget.showPrices;
+    final parts = widget.parts;
     final delivery = order.fulfilmentType == 'DELIVERY';
     // Where a picked order is (ship-from-store); the status itself otherwise.
     final stage = order.stageLabel;
     final slot = order.slot;
     final placed = AppFormat.dateTime(order.placedAt.toIso8601String());
+    // An unpaid order lapses; say when, in words (the list omits it, so the
+    // order is asked for its own).
+    final pending = order.status.toUpperCase() == 'PENDING';
+    final expiresAt = !pending
+        ? null
+        : order.expiresAt ?? ref.watch(orderExpiryProvider(order.id)).value;
+    final lapses = expiresAt == null
+        ? null
+        : expiresAt.isAfter(DateTime.now())
+            ? 'Lapses if not paid by ${AppFormat.dateTime(expiresAt.toIso8601String())}'
+            : 'Lapsing shortly if not paid';
     return _OrderCard(
       orderId: order.id,
       detailKey: Key('order-subtitle-${order.id}'),
@@ -290,15 +355,30 @@ class _ServerOrderTile extends StatelessWidget {
       // The window this order holds (delivery-and-collection-slots), worded
       // with which kind it is, in the store's own local date and clock —
       // never converted on the device.
-      detail: slot == null
-          ? placed
-          : '$placed\n${slotWindowLabel(fulfilmentType: order.fulfilmentType, date: slot.date, startTime: slot.startTime, endTime: slot.endTime)}',
+      detail: [
+        slot == null
+            ? placed
+            : '$placed\n${slotWindowLabel(fulfilmentType: order.fulfilmentType, date: slot.date, startTime: slot.startTime, endTime: slot.endTime)}',
+        ?lapses,
+      ].join('\n'),
       amount: showPrices
           ? AppFormat.money(order.total, currencyCode: order.currency)
           : (delivery ? 'Price on delivery' : 'Price in store'),
       priced: showPrices,
       status: order.status,
       stage: stage == order.status ? null : stage,
+      // Only an order still waiting to be paid for may be cancelled here.
+      footer: order.status.toUpperCase() == 'PENDING'
+          ? Align(
+              alignment: AlignmentDirectional.centerEnd,
+              child: TextButton.icon(
+                key: Key('cancel-order-${order.id}'),
+                onPressed: _cancelling ? null : _cancel,
+                icon: const Icon(Icons.cancel_outlined),
+                label: const Text('Cancel order'),
+              ),
+            )
+          : null,
     );
   }
 }
@@ -356,6 +436,9 @@ class _OrderCard extends StatelessWidget {
   /// status's tone.
   final String? stage;
 
+  /// Something under the row, such as the cancel button of an unpaid order.
+  final Widget? footer;
+
   const _OrderCard({
     required this.orderId,
     required this.where,
@@ -365,6 +448,7 @@ class _OrderCard extends StatelessWidget {
     this.detailKey,
     this.status,
     this.stage,
+    this.footer,
   });
 
   @override
@@ -408,7 +492,11 @@ class _OrderCard extends StatelessWidget {
         return Card(
           child: Padding(
             padding: const EdgeInsets.all(AppSpacing.lg),
-            child: Row(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+            Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 CircleAvatar(
@@ -448,6 +536,12 @@ class _OrderCard extends StatelessWidget {
                       ],
                     ],
                   ),
+                ],
+              ],
+            ),
+                if (footer != null) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  footer!,
                 ],
               ],
             ),

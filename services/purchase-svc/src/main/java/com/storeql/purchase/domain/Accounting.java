@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -106,6 +107,75 @@ public final class Accounting {
 
   public static Optional<Provider> provider(String code) {
     return CATALOGUE.stream().filter(p -> p.code().equals(code)).findFirst();
+  }
+
+  /**
+   * A QuickBooks Online company (realm) id: Intuit's are digits, and every address of the company
+   * is built from it.
+   */
+  public static final Pattern REALM_ID = Pattern.compile("[0-9]{1,32}");
+
+  /**
+   * QuickBooks Online's environments, as its driver reads the {@code environment} setting: in any
+   * case, around any spaces. Left out, a connection is to production.
+   */
+  public static final List<String> QUICKBOOKS_ENVIRONMENTS = List.of("PRODUCTION", "SANDBOX");
+
+  /** Whether a QuickBooks environment setting names the sandbox, read as the driver reads it. */
+  public static boolean quickBooksSandbox(String environment) {
+    return environment != null && "SANDBOX".equals(environment.trim().toUpperCase(Locale.ROOT));
+  }
+
+  /**
+   * Why a setting's value cannot be used, or empty when it can. Every setting goes into an address
+   * or a header, so none may hold a line break or another control character; a QuickBooks realm id
+   * is the company's digits, and its environment one of the two its driver knows — anything else
+   * would have been read as production.
+   */
+  public static Optional<String> settingProblem(String provider, String key, String value) {
+    if (value == null || value.chars().anyMatch(Character::isISOControl)) {
+      return Optional.of("the setting '" + key + "' is one line of text");
+    }
+    if (QUICKBOOKS.equals(provider)
+        && "realmId".equals(key)
+        && !REALM_ID.matcher(value).matches()) {
+      return Optional.of(
+          "QuickBooks Online's realmId is the company id, digits only (Intuit shows it as the"
+              + " Company ID in the company's settings)");
+    }
+    if (QUICKBOOKS.equals(provider)
+        && "environment".equals(key)
+        && !QUICKBOOKS_ENVIRONMENTS.contains(value.trim().toUpperCase(Locale.ROOT))) {
+      return Optional.of(
+          "QuickBooks Online's environment is PRODUCTION or SANDBOX (or left out, for"
+              + " production), not '"
+              + value.trim()
+              + "'");
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * Why a connection's settings, as kept, cannot be used, or empty when they can: a setting the
+   * package needs that is not there, or one {@link #settingProblem} refuses. The rule a connection
+   * is made under, read again before anything is sent, so a connection kept before a rule existed
+   * is refused with its reason rather than sent where it should not go.
+   */
+  public static Optional<String> settingsProblem(String provider, Map<String, String> settings) {
+    Optional<Provider> known = provider(provider);
+    if (known.isPresent()) {
+      for (String key : known.get().required()) {
+        String value = settings.get(key);
+        if (value == null || value.isBlank()) {
+          return Optional.of(known.get().name() + " needs the setting '" + key + "'");
+        }
+      }
+    }
+    for (var e : new java.util.TreeMap<>(settings).entrySet()) {
+      Optional<String> problem = settingProblem(provider, e.getKey(), e.getValue());
+      if (problem.isPresent()) return problem;
+    }
+    return Optional.empty();
   }
 
   /** How long to wait before the next try, by how many have been made. */
@@ -219,6 +289,12 @@ public final class Accounting {
       String error,
       String snippet,
       int durationMs) {}
+
+  /** What a person decided about a push whose outcome was unknown. */
+  public record Resolution(String outcome, UUID by, Instant at, String note) {}
+
+  public static final String LANDED = "LANDED";
+  public static final String NOT_LANDED = "NOT_LANDED";
 
   public record Counts(int pending, int delivered, int failed, int uncertain, int skipped) {}
 

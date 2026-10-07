@@ -46,7 +46,14 @@ public final class SalesAttribution {
    * @param schemeId null for a stretch under no arrangement — the sales are still carried, because
    *     a statement whose sales do not add up to the period's takings is the first thing anybody
    *     queries
+   * @param thresholdFrom where the band starts, as the arrangement rated it and never rounded as
+   *     money: an amount under a percentage arrangement, a count of units under a per-unit one
    * @param amount net sales under a percentage arrangement, units under a per-unit one
+   * @param commission in the statement's currency, at its own minor units
+   * @param rateCurrency the currency a per-unit rate, and what it earned, is in; null for a
+   *     percentage or a stretch under no arrangement
+   * @param ratedCommission what the band earned in {@code rateCurrency} before it was translated
+   *     into the statement's currency; null when it was not translated
    */
   public record StatementLine(
       UUID id,
@@ -60,7 +67,9 @@ public final class SalesAttribution {
       BigDecimal thresholdFrom,
       BigDecimal rate,
       BigDecimal amount,
-      BigDecimal commission) {}
+      BigDecimal commission,
+      String rateCurrency,
+      BigDecimal ratedCommission) {}
 
   /**
    * What a period earned.
@@ -100,9 +109,14 @@ public final class SalesAttribution {
     }
   }
 
-  /** Net sales over a period: what a statement's own total says the shop took. */
-  public static BigDecimal netSales(List<SellerDay> days) {
-    BigDecimal total = BigDecimal.ZERO.setScale(2);
+  /**
+   * Net sales over a period: what a statement's own total says the shop took.
+   *
+   * @param scale the statement currency's minor units ({@code Fx.minorUnits}), so an empty period
+   *     is £0.00, ¥0 or KWD 0.000
+   */
+  public static BigDecimal netSales(List<SellerDay> days, int scale) {
+    BigDecimal total = BigDecimal.ZERO.setScale(scale);
     for (SellerDay d : days) total = total.add(d.net());
     return total;
   }

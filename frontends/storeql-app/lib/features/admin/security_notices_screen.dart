@@ -9,6 +9,8 @@ import '../../core/spacing.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'privacy_screen.dart';
+import '../../core/auth/auth_notifier.dart';
+import 'widgets/business_wide_note.dart';
 
 // ---------------------------------------------------------------------------
 // Security notices the platform has sent this business (21.15).
@@ -171,6 +173,9 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
 
   Widget _notice(BuildContext context, SecurityNotice n) {
     final theme = Theme.of(context);
+    // Acknowledging and recording duties speak for the business: a manager held
+    // to stores reads the notice and does neither (BUSINESS_WIDE_ONLY).
+    final held = heldToStores(ref.watch(authNotifierProvider).value);
     return Card(
       key: Key('notice-${n.id}'),
       child: Padding(
@@ -188,7 +193,9 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
                 ? Chip(
                     label: Text(
                         'Acknowledged ${AppFormat.dateTime(n.acknowledgedAt)}'))
-                : FilledButton.icon(
+                : held
+                    ? const BusinessWideNote()
+                    : FilledButton.icon(
                     key: Key('acknowledge-${n.id}'),
                     onPressed: _busy.contains(n.id) ? null : () => _acknowledge(n),
                     icon: const Icon(Icons.task_alt),
@@ -204,7 +211,7 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
                 key: Key('duties-${n.id}'),
                 style: theme.textTheme.titleSmall,
               ),
-              for (final d in n.duties) _duty(context, n, d),
+              for (final d in n.duties) _duty(context, n, d, held),
             ],
           ],
         ),
@@ -212,7 +219,7 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
     );
   }
 
-  Widget _duty(BuildContext context, SecurityNotice n, NoticeDuty d) {
+  Widget _duty(BuildContext context, SecurityNotice n, NoticeDuty d, bool held) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final overdue = d.state == 'OVERDUE';
@@ -251,7 +258,7 @@ class _SecurityNoticesScreenState extends ConsumerState<SecurityNoticesScreen> {
         ),
       ],
     );
-    final action = d.done
+    final action = d.done || held
         ? null
         : TextButton(
             key: Key('record-${n.id}-${d.duty}'),

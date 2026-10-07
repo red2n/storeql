@@ -21,6 +21,7 @@ import java.util.stream.Collectors;
  * are kept together in {@code code-lists.properties}, one key per list.
  */
 public final class Codes {
+  private static final java.util.regex.Pattern WHITESPACE = java.util.regex.Pattern.compile("\\s+");
 
   /** One published list; the constant's name is its key in {@code code-lists.properties}. */
   public enum CodeList {
@@ -98,7 +99,7 @@ public final class Codes {
     if (codes == null || codes.isBlank()) {
       throw new IllegalStateException(RESOURCE + " has no list " + list.name());
     }
-    return Arrays.stream(codes.strip().split("\\s+"))
+    return Arrays.stream(WHITESPACE.split(codes.strip()))
         .map(code -> normalise(list, code))
         .collect(Collectors.toUnmodifiableSet());
   }

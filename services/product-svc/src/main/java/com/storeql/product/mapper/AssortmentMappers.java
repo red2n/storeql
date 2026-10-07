@@ -7,6 +7,7 @@ import com.storeql.product.domain.Assortment.Line;
 import com.storeql.product.domain.Assortment.Review;
 import com.storeql.product.dto.AssortmentDtos;
 import com.storeql.product.service.AssortmentService;
+import com.storeql.service.Fx;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -45,7 +46,10 @@ public final class AssortmentMappers {
         text(ch.decidedBy()),
         text(ch.createdAt()),
         text(ch.appliedAt()),
-        text(ch.reviewId()));
+        text(ch.reviewId()),
+        text(ch.refusedAt()),
+        ch.refusalCode(),
+        ch.refusalDetail());
   }
 
   public static List<AssortmentDtos.ChangeResponse> changes(List<Change> all) {
@@ -59,7 +63,11 @@ public final class AssortmentMappers {
             .map(
                 n ->
                     new AssortmentDtos.NotAppliedResponse(
-                        n.changeId().toString(), n.productId().toString(), n.code(), n.detail()))
+                        n.changeId().toString(),
+                        n.productId().toString(),
+                        n.code(),
+                        n.detail(),
+                        n.stillDue()))
             .toList());
   }
 
@@ -67,8 +75,8 @@ public final class AssortmentMappers {
     return new AssortmentDtos.LineResponse(
         l.variantId().toString(),
         text(l.unitsSold()),
-        text(l.revenue()),
-        text(l.margin()),
+        money(l.revenue(), l.currency()),
+        money(l.margin(), l.currency()),
         l.currency(),
         l.rankInCategory(),
         l.decision(),
@@ -108,6 +116,17 @@ public final class AssortmentMappers {
 
   private static String text(BigDecimal v) {
     return v == null ? null : v.toPlainString();
+  }
+
+  /**
+   * Money as its currency writes it: to its minor units ({@link Fx#minorUnits}), so a yen figure
+   * has no decimals and a dinar three, whatever scale the column keeps it at. Exact for every
+   * figure taken since 2 Oct 2026, which are refused with more; half up for one kept before.
+   */
+  private static String money(BigDecimal v, String currency) {
+    return v == null
+        ? null
+        : v.setScale(Fx.minorUnits(currency), java.math.RoundingMode.HALF_UP).toPlainString();
   }
 
   private static String text(Instant at) {

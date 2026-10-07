@@ -50,7 +50,8 @@ class PosSessionNotifier extends StateNotifier<PosSession?> {
       final resp = await _ref
           .read(apiClientProvider)
           .dio
-          .get('/${ApiConstants.iam}/auth/pos/sessions');
+          // The caller's own open sessions: the list of everyone's is management's.
+          .get('/${ApiConstants.iam}/auth/pos/sessions/mine');
       final list = (resp.data['data'] as List?) ?? [];
       for (final e in list) {
         final m = e as Map<String, dynamic>;

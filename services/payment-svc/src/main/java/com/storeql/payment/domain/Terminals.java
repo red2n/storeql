@@ -138,6 +138,10 @@ public final class Terminals {
    * One attempt at a terminal.
    *
    * @param paymentId the tender this became, once approved; null for anything that took no money
+   * @param requestedBy who asked; null only for a refund the platform owes (an order cancelled,
+   *     voided or returned to the card), which no person asked for
+   * @param reason why money went back, for a refund; written with the attempt and never changed
+   * @param dueId the money owed back to a card that this refund is for, when it is for one
    */
   public record Attempt(
       UUID id,
@@ -162,7 +166,9 @@ public final class Terminals {
       UUID paymentId,
       Instant requestedAt,
       UUID requestedBy,
-      Instant settledAt) {
+      Instant settledAt,
+      String reason,
+      UUID dueId) {
 
     public boolean approved() {
       return APPROVED.equals(state);
@@ -223,6 +229,40 @@ public final class Terminals {
       UUID refundOf,
       UUID requestedBy,
       Instant at) {
+    return requested(
+        id,
+        tenantId,
+        storeId,
+        terminalId,
+        orderId,
+        amount,
+        currency,
+        kind,
+        refundOf,
+        requestedBy,
+        at,
+        null,
+        null);
+  }
+
+  /**
+   * As above, for a refund: why the money goes back, and the money owed back to a card it is for
+   * (null when it is for none).
+   */
+  public static Attempt requested(
+      UUID id,
+      UUID tenantId,
+      UUID storeId,
+      UUID terminalId,
+      UUID orderId,
+      BigDecimal amount,
+      String currency,
+      String kind,
+      UUID refundOf,
+      UUID requestedBy,
+      Instant at,
+      String reason,
+      UUID dueId) {
     return new Attempt(
         id,
         tenantId,
@@ -248,7 +288,39 @@ public final class Terminals {
         null, // paymentId — set only once an approval becomes a tender
         at,
         requestedBy,
-        null); // settledAt: an unsettled attempt has none, which the schema's CHECK enforces
+        null, // settledAt: an unsettled attempt has none, which the schema's CHECK enforces
+        reason,
+        dueId);
+  }
+
+  /** The same attempt, for the money owed back to a card it was claimed for. */
+  public static Attempt forDue(Attempt a, UUID dueId) {
+    return new Attempt(
+        a.id(),
+        a.tenantId(),
+        a.storeId(),
+        a.terminalId(),
+        a.orderId(),
+        a.amount(),
+        a.currency(),
+        a.kind(),
+        a.refundOf(),
+        a.state(),
+        a.outcomeDetail(),
+        a.scheme(),
+        a.panLast4(),
+        a.authCode(),
+        a.aid(),
+        a.applicationLabel(),
+        a.entryMode(),
+        a.verification(),
+        a.providerRef(),
+        a.paymentId(),
+        a.requestedAt(),
+        a.requestedBy(),
+        a.settledAt(),
+        a.reason(),
+        dueId);
   }
 
   /**

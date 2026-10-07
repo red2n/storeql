@@ -12,9 +12,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Item relationships (Gap #32): e.g. substitute/accessory links between variants. Extracted from
- * {@code ProductRepository}: self-contained, no outbox events, no coupling to any other aggregate,
- * so it only needs the JDBC infra inherited from {@link BaseJdbcRepository}.
+ * Item relationships (Gap #32): e.g. substitute/accessory links between variants. A link is
+ * inserted and deleted, never updated; removing the row is how it is severed. Extracted from {@code
+ * ProductRepository}: self-contained, no outbox events, no coupling to any other aggregate, so it
+ * only needs the JDBC infra inherited from {@link BaseJdbcRepository}.
  */
 @ApplicationScoped
 public class ItemRelationshipRepository extends BaseJdbcRepository {
@@ -65,16 +66,19 @@ public class ItemRelationshipRepository extends BaseJdbcRepository {
    * Deletes a relationship.
    *
    * @param tenantId owning tenant; the first condition of the query
+   * @param variantId the variant it must belong to; another variant's is not found
    * @param id the relationship to act on
    * @return {@code true} when a row was removed, {@code false} when nothing matched
    */
-  public boolean deleteRelationship(UUID tenantId, UUID id) {
+  public boolean deleteRelationship(UUID tenantId, UUID variantId, UUID id) {
     Instant[] found = {null};
     query(
-        "DELETE FROM item_relationships WHERE tenant_id = ? AND id = ? RETURNING id",
+        "DELETE FROM item_relationships WHERE tenant_id = ? AND variant_id = ? AND id = ?"
+            + " RETURNING id",
         ps -> {
           ps.setObject(1, tenantId);
-          ps.setObject(2, id);
+          ps.setObject(2, variantId);
+          ps.setObject(3, id);
         },
         rs -> {
           found[0] = Instant.now();

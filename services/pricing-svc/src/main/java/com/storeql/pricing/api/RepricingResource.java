@@ -50,7 +50,9 @@ public class RepricingResource {
       responseCode = "400",
       description =
           "PRICING_LIST_UNKNOWN, REPRICING_STRATEGY_INVALID, REPRICING_VALUE_INVALID,"
-              + " REPRICING_ROUNDING_INVALID, REPRICING_MAX_AGE_INVALID")
+              + " REPRICING_ROUNDING_INVALID, REPRICING_MAX_AGE_INVALID; VALIDATION_FAILED for an"
+              + " UNDERCUT_AMOUNT value with more decimals than the business's currency has (it is"
+              + " refused, never rounded; a percentage is no money)")
   @APIResponse(responseCode = "409", description = "REPRICING_RULE_NAME_EXISTS")
   @POST
   @Path("/rules")
@@ -106,11 +108,18 @@ public class RepricingResource {
   @Operation(
       summary = "Apply a proposal",
       description =
-          "The proposed price becomes the list's single-unit price for the variant, with the"
-              + " price-changed event every price write raises. A proposal is decided once.")
+          "The proposed price becomes the list's single-unit price for the variant, at the list"
+              + " currency's own minor units (pence, whole yen, fils for dinars) as every list"
+              + " price is kept, with the price-changed event every price write raises. A"
+              + " proposal is decided once.")
   @APIResponse(responseCode = "200", description = "The proposal, applied")
   @APIResponse(responseCode = "404", description = "REPRICING_PROPOSAL_NOT_FOUND")
-  @APIResponse(responseCode = "409", description = "REPRICING_PROPOSAL_DECIDED")
+  @APIResponse(
+      responseCode = "409",
+      description =
+          "REPRICING_PROPOSAL_DECIDED; REPRICING_RULE_NOT_FOUND or REPRICING_NO_PRICE_LIST when"
+              + " the proposal's rule or list no longer exists; PRICING_PROPOSAL_STALE when the"
+              + " rival price behind it is older than the rule trusts")
   @POST
   @Path("/proposals/{id}/apply")
   public Response apply(@PathParam("id") String id) {

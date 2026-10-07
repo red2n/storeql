@@ -4,6 +4,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.ids.Ids;
@@ -67,6 +68,17 @@ class BroadcastIT {
 
   private Answer call(
       String method, String path, String json, String tenant, String user, String roles) {
+    return call(method, path, json, tenant, user, roles, null);
+  }
+
+  private Answer call(
+      String method,
+      String path,
+      String json,
+      String tenant,
+      String user,
+      String roles,
+      String stores) {
     WebTarget t = target;
     int q = path.indexOf('?');
     if (q < 0) {
@@ -85,6 +97,7 @@ class BroadcastIT {
     if (user != null) b = b.header("X-User-Id", user);
     if (tenant != null) b = b.header("X-Tenant-Id", tenant);
     if (roles != null) b = b.header("X-Roles", roles);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
     Response r =
         "GET".equals(method)
             ? b.get()
@@ -422,13 +435,350 @@ class BroadcastIT {
     Answer stranger = ack(shop, Ids.newId().toString(), "CASHIER", id, shop.storeA());
     assertThat(stranger.code(), is("WORKFORCE_NOT_ASSIGNED"));
     Shop rival = shop();
-    assertThat(
-        call("GET", ADMIN + "/" + id, null, rival.tenant(), rival.manager(), "OWNER").status(),
-        is(404));
-    assertThat(ack(rival, rival.cashierA(), "CASHIER", id, rival.storeA()).status(), is(404));
+    Answer theirRead =
+        call("GET", ADMIN + "/" + id, null, rival.tenant(), rival.manager(), "OWNER");
+    assertThat(theirRead.status(), is(404));
+    assertThat(theirRead.code(), is("BROADCAST_NOT_FOUND"));
+    Answer theirAck = ack(rival, rival.cashierA(), "CASHIER", id, rival.storeA());
+    assertThat(theirAck.status(), is(404));
+    assertThat(theirAck.code(), is("BROADCAST_NOT_FOUND"));
     assertThat(current(rival, rival.cashierA(), "CASHIER", rival.storeA()), hasSize(0));
     assertThat(
         call("GET", READ + "?storeId=" + shop.storeA(), null, shop.tenant(), null, null).data(),
         is(nullValue()));
+  }
+
+  /** A notice from the owner, to one store or (null) every store; its id. */
+  private String noticeTo(Shop shop, String storeId, String title) {
+    Answer a =
+        publish(
+            shop,
+            "{\"title\":\""
+                + title
+                + "\",\"body\":\"Read me.\",\"priority\":\"INFO\",\"requiresAck\":true"
+                + (storeId == null ? "" : ",\"storeId\":\"" + storeId + "\"")
+                + "}");
+    assertThat(a.text(), a.status(), is(201));
+    return a.data().getString("id");
+  }
+
+  /** The business's notices as its owner sees them: id to status. */
+  private java.util.Map<String, String> statuses(Shop shop) {
+    Answer all = call("GET", ADMIN + "?all=true", null, shop.tenant(), shop.manager(), "OWNER");
+    assertThat(all.text(), all.status(), is(200));
+    java.util.Map<String, String> out = new java.util.HashMap<>();
+    for (JsonObject n : all.list()) out.put(n.getString("id"), n.getString("status"));
+    return out;
+  }
+
+  @Test
+  @DisplayName(
+      "A branch manager publishes, reads and withdraws at their own store, reads every store's"
+          + " notices only for their store, and never touches another store's")
+  void heldToTheCallersStores() {
+    Shop shop = shop();
+    String atA = noticeTo(shop, shop.storeA(), "For A");
+    String atB = noticeTo(shop, shop.storeB(), "For B");
+    String everywhere = noticeTo(shop, null, "For all");
+    String m = shop.manager();
+    String heldA = shop.storeA();
+
+    // Publishing: their store; never another store, never every store.
+    String toA =
+        "{\"title\":\"Mop\",\"body\":\"Aisle 3.\",\"priority\":\"INFO\",\"storeId\":\""
+            + shop.storeA()
+            + "\"}";
+    String toB = toA.replace(shop.storeA(), shop.storeB());
+    String toAll = "{\"title\":\"Mop\",\"body\":\"Aisle 3.\",\"priority\":\"INFO\"}";
+    Answer own = call("POST", ADMIN, toA, shop.tenant(), m, "MANAGER", heldA);
+    assertThat(own.text(), own.status(), is(201));
+    Answer other = call("POST", ADMIN, toB, shop.tenant(), m, "MANAGER", heldA);
+    assertThat(other.text(), other.status(), is(403));
+    assertThat(other.code(), is("STORE_ACCESS_DENIED"));
+    Answer all = call("POST", ADMIN, toAll, shop.tenant(), m, "MANAGER", heldA);
+    assertThat(all.text(), all.status(), is(403));
+    assertThat(all.code(), is("BUSINESS_WIDE_ONLY"));
+    assertThat("the refusals published nothing", statuses(shop).size(), is(4));
+
+    // The list: A's own and every store's, never B's.
+    Answer listed = call("GET", ADMIN + "?all=true", null, shop.tenant(), m, "MANAGER", heldA);
+    assertThat(listed.text(), listed.status(), is(200));
+    List<String> ids = listed.list().stream().map(n -> n.getString("id")).toList();
+    assertThat(ids.contains(atA) && ids.contains(everywhere), is(true));
+    assertThat("B's notice is not listed", ids.contains(atB), is(false));
+
+    // One notice and its reach: B's refused; every store's read, its reach only A's rows.
+    for (String path : List.of(ADMIN + "/" + atB, ADMIN + "/" + atB + "/reach")) {
+      Answer refused = call("GET", path, null, shop.tenant(), m, "MANAGER", heldA);
+      assertThat(path + " -> " + refused.text(), refused.status(), is(403));
+      assertThat(refused.code(), is("STORE_ACCESS_DENIED"));
+      assertThat(refused.text(), not(containsString(shop.cashierB())));
+    }
+    assertThat(
+        call("GET", ADMIN + "/" + everywhere, null, shop.tenant(), m, "MANAGER", heldA).status(),
+        is(200));
+    Answer reach =
+        call("GET", ADMIN + "/" + everywhere + "/reach", null, shop.tenant(), m, "MANAGER", heldA);
+    assertThat(reach.text(), reach.status(), is(200));
+    assertThat(reach.list(), hasSize(1));
+    assertThat(reach.list().get(0).getString("storeId"), is(shop.storeA()));
+    assertThat("nobody at B is named", reach.text(), not(containsString(shop.cashierB())));
+
+    // Withdrawing: A's own; B's and every store's are refused and stay published.
+    String reason = "{\"reason\":\"sent in error\"}";
+    Answer theirs =
+        call("POST", ADMIN + "/" + atB + "/withdrawal", reason, shop.tenant(), m, "MANAGER", heldA);
+    assertThat(theirs.text(), theirs.status(), is(403));
+    assertThat(theirs.code(), is("STORE_ACCESS_DENIED"));
+    Answer whole =
+        call(
+            "POST",
+            ADMIN + "/" + everywhere + "/withdrawal",
+            reason,
+            shop.tenant(),
+            m,
+            "MANAGER",
+            heldA);
+    assertThat(whole.text(), whole.status(), is(403));
+    assertThat(whole.code(), is("BUSINESS_WIDE_ONLY"));
+    assertThat(statuses(shop).get(atB), is("PUBLISHED"));
+    assertThat(statuses(shop).get(everywhere), is("PUBLISHED"));
+    Answer mine =
+        call("POST", ADMIN + "/" + atA + "/withdrawal", reason, shop.tenant(), m, "MANAGER", heldA);
+    assertThat(mine.text(), mine.status(), is(200));
+
+    // A manager held to no store: every store's reach, and withdraws any notice.
+    Answer wholeReach =
+        call("GET", ADMIN + "/" + everywhere + "/reach", null, shop.tenant(), m, "MANAGER", null);
+    assertThat(wholeReach.list(), hasSize(2));
+    assertThat(
+        call("POST", ADMIN + "/" + atB + "/withdrawal", reason, shop.tenant(), m, "MANAGER", null)
+            .status(),
+        is(200));
+
+    // Another business: its management, held to its own store or to none, finds no such notice;
+    // its staff and shoppers are refused outright; its list holds none of ours.
+    Shop rival = shop();
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      for (String held : new String[] {null, rival.storeA()}) {
+        for (Answer a :
+            List.of(
+                call(
+                    "GET",
+                    ADMIN + "/" + everywhere,
+                    null,
+                    rival.tenant(),
+                    rival.manager(),
+                    role,
+                    held),
+                call(
+                    "GET",
+                    ADMIN + "/" + everywhere + "/reach",
+                    null,
+                    rival.tenant(),
+                    rival.manager(),
+                    role,
+                    held),
+                call(
+                    "POST",
+                    ADMIN + "/" + everywhere + "/withdrawal",
+                    reason,
+                    rival.tenant(),
+                    rival.manager(),
+                    role,
+                    held))) {
+          assertThat(role + " -> " + a.text(), a.status(), is(404));
+          assertThat(a.code(), is("BROADCAST_NOT_FOUND"));
+        }
+        Answer theirList =
+            call("GET", ADMIN + "?all=true", null, rival.tenant(), rival.manager(), role, held);
+        assertThat(theirList.text(), theirList.status(), is(200));
+        assertThat(theirList.list(), hasSize(0));
+      }
+    }
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "CUSTOMER"}) {
+      assertThat(
+          role,
+          call("GET", ADMIN + "/" + everywhere, null, rival.tenant(), rival.cashierA(), role)
+              .status(),
+          is(403));
+      assertThat(
+          role,
+          call(
+                  "POST",
+                  ADMIN + "/" + everywhere + "/withdrawal",
+                  reason,
+                  shop.tenant(),
+                  shop.cashierA(),
+                  role,
+                  shop.storeA())
+              .status(),
+          is(403));
+    }
+    assertThat("nobody else withdrew it", statuses(shop).get(everywhere), is("PUBLISHED"));
+  }
+
+  /** Acknowledging as a caller of some role, held to some stores (none when null). */
+  private Answer ackAs(
+      String tenant, String user, String role, String id, String storeId, String heldTo) {
+    return call(
+        "POST",
+        READ + "/" + id + "/acknowledgement",
+        "{\"storeId\":\"" + storeId + "\"}",
+        tenant,
+        user,
+        role,
+        heldTo);
+  }
+
+  private Answer currentAs(String tenant, String user, String role, String storeId, String heldTo) {
+    return call("GET", READ + "?storeId=" + storeId, null, tenant, user, role, heldTo);
+  }
+
+  private static int acksOf(String tenant) {
+    try (Connection c = PG.dataSource().getConnection()) {
+      c.setSchema("tenant");
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "SELECT count(*) FROM store_broadcast_acks WHERE tenant_id = ?::uuid")) {
+        ps.setString(1, tenant);
+        try (ResultSet rs = ps.executeQuery()) {
+          rs.next();
+          return rs.getInt(1);
+        }
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  @Test
+  @DisplayName(
+      "An owner or a business-wide manager reads and acknowledges a store's notices without being"
+          + " assigned there, as they work its task list; staff below stay held to where assigned")
+  void businessWideManagementAcknowledgesAtAnyStore() {
+    Shop shop = shop();
+    String everywhere = noticeTo(shop, null, "For all");
+    String atB = noticeTo(shop, shop.storeB(), "For B");
+    Answer cashiersOnly =
+        publish(
+            shop,
+            "{\"title\":\"Float\",\"body\":\"Count it.\",\"priority\":\"INFO\",\"requiresAck\":true,"
+                + "\"storeId\":\""
+                + shop.storeB()
+                + "\",\"role\":\"CASHIER\"}");
+    assertThat(cashiersOnly.text(), cashiersOnly.status(), is(201));
+    String forCashiers = cashiersOnly.data().getString("id");
+
+    // The owner, assigned nowhere: reads B's notices to everybody there, and acknowledges them.
+    Answer read = currentAs(shop.tenant(), shop.manager(), "OWNER", shop.storeB(), null);
+    assertThat(read.text(), read.status(), is(200));
+    List<String> seen = read.list().stream().map(n -> n.getString("id")).toList();
+    assertThat(seen.contains(everywhere) && seen.contains(atB), is(true));
+    assertThat(
+        "a notice to the cashiers is not the owner's", seen.contains(forCashiers), is(false));
+    for (String id : List.of(everywhere, atB)) {
+      Answer acked = ackAs(shop.tenant(), shop.manager(), "OWNER", id, shop.storeB(), null);
+      assertThat(acked.text(), acked.status(), is(201));
+    }
+    Answer notAddressed =
+        ackAs(shop.tenant(), shop.manager(), "OWNER", forCashiers, shop.storeB(), null);
+    assertThat(notAddressed.text(), notAddressed.status(), is(409));
+    assertThat(notAddressed.code(), is("BROADCAST_NOT_ADDRESSED"));
+    Answer twice = ackAs(shop.tenant(), shop.manager(), "OWNER", atB, shop.storeB(), null);
+    assertThat(twice.code(), is("BROADCAST_ALREADY_ACKNOWLEDGED"));
+
+    // A business-wide manager, assigned to no store: the same at A.
+    String head = Ids.newId().toString();
+    Answer assigned =
+        call(
+            "POST",
+            "/admin/staff",
+            "{\"userId\":\"" + head + "\",\"businessWide\":true,\"role\":\"MANAGER\"}",
+            shop.tenant(),
+            shop.manager(),
+            "OWNER");
+    assertThat(assigned.text(), assigned.status(), is(201));
+    Answer headAck = ackAs(shop.tenant(), head, "MANAGER", everywhere, shop.storeA(), null);
+    assertThat(headAck.text(), headAck.status(), is(201));
+
+    // A branch manager held to A is told B is not theirs; a cashier whose token names no store is
+    // still held to where they are assigned.
+    Answer branch = ackAs(shop.tenant(), head, "MANAGER", atB, shop.storeB(), shop.storeA());
+    assertThat(branch.text(), branch.status(), is(403));
+    assertThat(branch.code(), is("STORE_ACCESS_DENIED"));
+    Answer cashierElsewhere =
+        ackAs(shop.tenant(), shop.cashierA(), "CASHIER", atB, shop.storeB(), null);
+    assertThat(cashierElsewhere.text(), cashierElsewhere.status(), is(409));
+    assertThat(cashierElsewhere.code(), is("WORKFORCE_NOT_ASSIGNED"));
+    Answer keeperRead =
+        currentAs(shop.tenant(), shop.keeperA(), "STOREKEEPER", shop.storeB(), null);
+    assertThat(keeperRead.code(), is("WORKFORCE_NOT_ASSIGNED"));
+    assertThat("three acknowledgements, all management's", acksOf(shop.tenant()), is(3));
+
+    // The reach still counts B's own staff: the owner was never one of them.
+    Answer reach =
+        call("GET", ADMIN + "/" + atB + "/reach", null, shop.tenant(), shop.manager(), "OWNER");
+    assertThat(reach.list(), hasSize(1));
+    assertThat(reach.list().get(0).getInt("addressed"), is(1));
+    assertThat(reach.list().get(0).getInt("acknowledged"), is(0));
+  }
+
+  @Test
+  @DisplayName(
+      "Publishing, reading and acknowledging judge the store first: not the business's is 404, not"
+          + " the caller's is 403, and nothing is written")
+  void theStoreIsJudgedBeforeTheCaller() {
+    Shop shop = shop();
+    Shop rival = shop();
+    String everywhere = noticeTo(shop, null, "For all");
+    String unknown = Ids.newId().toString();
+    String toUnknown =
+        "{\"title\":\"Mop\",\"body\":\"Aisle 3.\",\"priority\":\"INFO\",\"storeId\":\""
+            + unknown
+            + "\"}";
+    String toOurA = toUnknown.replace(unknown, shop.storeA());
+
+    // Our branch manager naming a store that is nobody's: not found (it was 403).
+    Answer nowhere =
+        call("POST", ADMIN, toUnknown, shop.tenant(), shop.manager(), "MANAGER", shop.storeA());
+    assertThat(nowhere.text(), nowhere.status(), is(404));
+    assertThat(nowhere.code(), is("STORE_NOT_FOUND"));
+    // Another business's management naming our store, held to its own, to ours or to none.
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      for (String held : new String[] {rival.storeA(), shop.storeA(), null}) {
+        Answer theirs = call("POST", ADMIN, toOurA, rival.tenant(), rival.manager(), role, held);
+        assertThat(role + " -> " + theirs.text(), theirs.status(), is(404));
+        assertThat(theirs.code(), is("STORE_NOT_FOUND"));
+      }
+    }
+    assertThat("nothing was published", statuses(shop).size(), is(1));
+    assertThat(statuses(rival).size(), is(0));
+
+    // Another business's staff of every role reading or acknowledging at our store: not found —
+    // never 403 for a store that is not theirs, never 409 for one they are not assigned at.
+    for (String role : new String[] {"CASHIER", "STOREKEEPER", "MANAGER", "OWNER"}) {
+      for (String held : new String[] {rival.storeA(), shop.storeA(), null}) {
+        Answer read = currentAs(rival.tenant(), rival.cashierA(), role, shop.storeA(), held);
+        assertThat(role + " -> " + read.text(), read.status(), is(404));
+        assertThat(read.code(), is("STORE_NOT_FOUND"));
+        Answer acked =
+            ackAs(rival.tenant(), rival.cashierA(), role, everywhere, shop.storeA(), held);
+        assertThat(role + " -> " + acked.text(), acked.status(), is(404));
+        assertThat(acked.code(), is("STORE_NOT_FOUND"));
+      }
+    }
+    // Our cashier at A naming B: the business's, not theirs.
+    Answer ours =
+        ackAs(shop.tenant(), shop.cashierA(), "CASHIER", everywhere, shop.storeB(), shop.storeA());
+    assertThat(ours.text(), ours.status(), is(403));
+    assertThat(ours.code(), is("STORE_ACCESS_DENIED"));
+    // A shopper is no staff at all.
+    assertThat(
+        ackAs(rival.tenant(), Ids.newId().toString(), "CUSTOMER", everywhere, shop.storeA(), null)
+            .status(),
+        is(403));
+    assertThat("nobody acknowledged anything", acksOf(shop.tenant()), is(0));
+    assertThat(acksOf(rival.tenant()), is(0));
   }
 }

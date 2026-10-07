@@ -74,7 +74,15 @@ public class MoveOrderResource {
             .toList();
     var order =
         service.createMoveOrder(
-            tenantId, fromStore, toStore, req.fromZone(), req.toZone(), req.notes(), lines);
+            tenantId,
+            fromStore,
+            toStore,
+            req.fromZone(),
+            req.toZone(),
+            optionalId(req.fromZoneId(), "fromZoneId"),
+            optionalId(req.toZoneId(), "toZoneId"),
+            req.notes(),
+            lines);
     var withLines = service.getMoveOrder(tenantId, order.id());
     return Response.status(Response.Status.CREATED)
         .entity(ApiResponse.ok(Mappers.toMoveOrder(withLines.order(), withLines.lines())))
@@ -168,6 +176,10 @@ public class MoveOrderResource {
     var cancelled = service.cancelMoveOrder(tenantId, id);
     var wl = service.getMoveOrder(ctx.requireTenantId(), cancelled.id());
     return ApiResponse.ok(Mappers.toMoveOrder(wl.order(), wl.lines()));
+  }
+
+  private static UUID optionalId(String s, String field) {
+    return s == null || s.isBlank() ? null : uuid(s, field);
   }
 
   private static UUID uuid(String s, String field) {

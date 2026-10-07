@@ -1,8 +1,8 @@
--- SJ-D39: input VAT. Box 4 of the VAT return (VAT reclaimed on purchases) and box 7 (net
--- purchases) come from the supplier invoices purchase-svc captures; database-per-service means
--- this service cannot read them, so purchase-svc publishes SupplierInvoiceCaptured and this table
--- is the projection. One row per event: the event id is the invoice id, and the unique index is
--- the idempotency — a redelivered event inserts nothing. Tax point is the invoice date.
+-- Input VAT. Box 4 of the VAT return (VAT reclaimed on purchases) and box 7 (net purchases) come
+-- from the supplier invoices purchase-svc captures; database-per-service means this service cannot
+-- read them, so purchase-svc publishes SupplierInvoiceCaptured and this table is the projection.
+-- One row per event: the unique constraint on event_id is the idempotency, so a redelivered event
+-- inserts nothing; invoice_id names the invoice the event carried. Tax point is the invoice date.
 CREATE TABLE input_tax_transactions (
     id             UUID          PRIMARY KEY,
     tenant_id      UUID          NOT NULL,
@@ -12,9 +12,9 @@ CREATE TABLE input_tax_transactions (
     supplier_id    UUID,
     invoice_number VARCHAR(64),
     currency       CHAR(3),
-    net_amount     NUMERIC(18,2) NOT NULL,
-    vat_amount     NUMERIC(18,2) NOT NULL,
-    gross_amount   NUMERIC(18,2) NOT NULL,
+    net_amount     NUMERIC       NOT NULL,
+    vat_amount     NUMERIC       NOT NULL,
+    gross_amount   NUMERIC       NOT NULL,
     tax_point_date TIMESTAMPTZ   NOT NULL,
     created_at     TIMESTAMPTZ   NOT NULL DEFAULT now(),
     CONSTRAINT uq_input_tax_event UNIQUE (event_id)

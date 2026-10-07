@@ -163,4 +163,19 @@ class FxRateIT {
     assertThat(as(BASE + "/USD/history", gb, "STOREKEEPER").get().getStatus(), is(403));
     assertThat(as(BASE, gb, "CUSTOMER").get().getStatus(), is(403));
   }
+
+  @Test
+  @DisplayName("A reason of only Unicode space is no reason, and no rate is stored")
+  void aReasonOfOnlyUnicodeSpaceIsRefused() {
+    String gb = onboard("GB", "GBP");
+    // An ideographic space passes a trim()-based not-blank check and is caught by the service.
+    refused(
+        set(gb, "OWNER", "USD", "{\"rate\":0.79,\"reason\":\"\\u3000\"}"), "FX_REASON_REQUIRED");
+    assertThat(
+        "nothing was stored", ok(as(BASE, gb, "OWNER").get()).getJsonArray("rates").size(), is(0));
+    assertThat(
+        "and no history was written",
+        okArray(as(BASE + "/USD/history", gb, "OWNER").get()).size(),
+        is(0));
+  }
 }

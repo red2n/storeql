@@ -69,6 +69,31 @@ class StorageKeys {
   /// never written by the normal path.
   static const String posOfflineSalesCorrupt = 'pos_offline_sales_corrupt';
 
+  /// A card payment the till left at (or taken by) the card machine, with the
+  /// keys its sale sent it under (features/pos/held_card_payment.dart). The
+  /// till's, not the cashier's: a sign-out keeps it, or the next press after a
+  /// restart would send a second amount to the machine.
+  static const String posHeldCardPayment = 'pos_held_card_payment';
+
+  /// Where an unreadable [posHeldCardPayment] is set aside.
+  static const String posHeldCardPaymentCorrupt =
+      'pos_held_card_payment_corrupt';
+
+  /// The orders this till let go of with a card payment sent for them and
+  /// nothing paid (features/pos/held_card_payment.dart): a card machine's
+  /// approval that turns up on one later is never recorded on it from here.
+  /// The till's, not the cashier's, so a sign-out keeps it.
+  static const String posLetGoCardOrders = 'pos_let_go_card_orders';
+
+  /// What a sign-out leaves on the device: what the till owes the server or a
+  /// card machine, which outlives the cashier's shift.
+  static const Set<String> keptOnSignOut = {
+    posOfflineSales,
+    posHeldCardPayment,
+    posHeldCardPaymentCorrupt,
+    posLetGoCardOrders,
+  };
+
   /// Sales that were taken offline and have since reached the server, kept so a
   /// cashier holding an offline receipt — printed without its legal number —
   /// can find the number the server issued on replay. Device-local, capped.

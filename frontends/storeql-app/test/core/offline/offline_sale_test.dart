@@ -23,6 +23,19 @@ DioException _answered(int status) => DioException(
       ),
     );
 
+DioException _refused(int status, String code) => DioException(
+      requestOptions: RequestOptions(path: '/orders'),
+      type: DioExceptionType.badResponse,
+      response: Response(
+        requestOptions: RequestOptions(path: '/orders'),
+        statusCode: status,
+        data: {'code': code, 'detail': 'refused', 'status': status},
+      ),
+    );
+
+/// Who was signed in at the till when a sale was made: a UUIDv7, as iam-svc mints them.
+const _cashier = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d60';
+
 OfflineSale _sale({
   String id = 'pos-1700000123456',
   String? orderId,
@@ -83,6 +96,41 @@ void main() {
     test('409 stays retryable — payment-svc asks the caller to retry into the '
         'replay path on IDEMPOTENCY_CONFLICT', () {
       expect(isPermanentRejection(_answered(409)), isFalse);
+      expect(isPermanentRejection(_refused(409, 'IDEMPOTENCY_CONFLICT')),
+          isFalse);
+    });
+
+    test('but a replay the server still refuses over a recall or a scale is '
+        'parked, not retried: within its grace order-svc records the sale and '
+        'flags it for a manager, so these come back only for a sale older than '
+        'the grace, judged as made now — the same answer on every attempt, and '
+        'retrying would hold up every sale queued behind it', () {
+      expect(isPermanentRejection(_refused(409, 'ORDER_LINE_RECALLED')),
+          isTrue);
+      expect(isPermanentRejection(_refused(409, 'ORDER_SCALE_NOT_CERTIFIED')),
+          isTrue);
+    });
+
+    test('and so is a card tender payment-svc will not link to the payment its '
+        'card machine took: the sale given up, the approval recorded already, '
+        'put back, or not that sale\'s — no retry changes the answer, and '
+        'taken for "try again" it would hold up every sale queued behind it',
+        () {
+      for (final code in [
+        'PAYMENT_ORDER_GIVEN_UP',
+        'TERMINAL_ATTEMPT_ALREADY_RECORDED',
+        'TERMINAL_ATTEMPT_REFUNDED',
+        'TERMINAL_AMOUNT_MISMATCH',
+        'TERMINAL_WRONG_STORE',
+        'TERMINAL_NOT_APPROVED',
+        'TERMINAL_ATTEMPT_OTHER_ORDER',
+        'TERMINAL_NOT_A_SALE',
+      ]) {
+        expect(isPermanentRejection(_refused(409, code)), isTrue, reason: code);
+      }
+      // A press of the same key still going is asked again.
+      expect(isPermanentRejection(_refused(409, 'TERMINAL_REQUEST_IN_FLIGHT')),
+          isFalse);
     });
 
     test('rate limiting and server faults stay retryable', () {
@@ -113,6 +161,67 @@ void main() {
       expect(back.capturedAt, sale.capturedAt);
       expect(back.orderRequest, sale.orderRequest);
       expect(back.total, 5.0);
+    });
+
+    test('the capture time is written in UTC and reads back as the same moment, '
+        'with who rang the sale up', () {
+      // Whatever zone the till is set to, the stored text is the instant, so
+      // a change of zone or clock setting while the sale waits changes nothing.
+      final local = DateTime.utc(2026, 9, 8, 11, 30).toLocal();
+      final sale = OfflineSale(
+        id: 'pos-1700000123456',
+        capturedAt: local,
+        rungUpBy: _cashier,
+        storeId: 'store-1',
+        currency: 'GBP',
+        orderRequest: const {'storeId': 'store-1'},
+        tenders: const [],
+        total: 5.0,
+        itemCount: 1,
+      );
+      final json = sale.toJson();
+      expect(json['capturedAt'], '2026-09-08T11:30:00.000Z');
+
+      final back = OfflineSale.fromJson(json);
+      expect(back.capturedAt, DateTime.utc(2026, 9, 8, 11, 30));
+      expect(back.capturedAt!.isAtSameMomentAs(local), isTrue);
+      expect(back.rungUpBy, _cashier);
+    });
+
+    test('a capture time an older build stored in local time still reads', () {
+      final legacy = OfflineSale.fromJson({
+        'id': 'pos-1700000123456',
+        'capturedAt': '2026-09-08T12:30:00.000',
+        'storeId': 'store-1',
+        'currency': 'GBP',
+        'orderRequest': const {'storeId': 'store-1'},
+        'tenders': const [],
+        'total': 5.0,
+        'itemCount': 1,
+      });
+      expect(legacy.capturedAt, DateTime(2026, 9, 8, 12, 30));
+      expect(legacy.rungUpBy, isNull, reason: 'that build recorded nobody');
+    });
+
+    test('a capture time that cannot be read stays unknown, never now', () {
+      // Now would put an invented moment on the audit trail as the till's
+      // word; unknown is sent as none, and the server judges the sale as made
+      // now instead.
+      Map<String, dynamic> stored(Object? capturedAt) => {
+            'id': 'pos-1700000123456',
+            'capturedAt': ?capturedAt,
+            'storeId': 'store-1',
+            'currency': 'GBP',
+            'orderRequest': const {'storeId': 'store-1'},
+            'tenders': const [],
+            'total': 5.0,
+            'itemCount': 1,
+          };
+      final spoiled = OfflineSale.fromJson(stored('last Tuesday'));
+      expect(spoiled.capturedAt, isNull);
+      expect(OfflineSale.fromJson(stored(null)).capturedAt, isNull);
+      expect(spoiled.toJson()['capturedAt'], isNull,
+          reason: 'and it stays unknown across a restart');
     });
 
     test('per-tender progress survives persistence', () {
@@ -168,6 +277,19 @@ void main() {
       expect(redeemed.isComplete, isFalse, reason: 'the sale is not journalled');
 
       expect(redeemed.copyWith(posLogDone: true).isComplete, isTrue);
+    });
+
+    test('a gift-card tender is complete once redeemed: the redeem is the tender', () {
+      const redeemedOnly = OfflineTender(
+          body: {'method': 'GIFT_CARD'},
+          amount: 5.0,
+          giftCardCode: 'GC-1',
+          redeemDone: true);
+      expect(redeemedOnly.isComplete, isTrue,
+          reason: 'payment-svc records the tender from the redemption');
+      const other = OfflineTender(body: {'method': 'CASH'}, amount: 5.0);
+      expect(other.isComplete, isFalse);
+      expect(other.copyWith(tenderDone: true).isComplete, isTrue);
     });
 
     test('an older queued sale replays rather than being stuck unjournalled', () {

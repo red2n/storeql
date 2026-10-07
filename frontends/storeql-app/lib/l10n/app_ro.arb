@@ -56,5 +56,10 @@
   "resetPasswordDone": "Parola a fost schimbată — conectează-te cu ea.",
   "resetPasswordDoneStorefront": "Faci cumpărături din magazinul online? Te poți conecta din magazin.",
   "resetPasswordTokenInvalid": "Acest link a expirat sau a fost deja folosit — cere unul nou.",
-  "resetPasswordRequestNew": "Cere un link nou"
+  "resetPasswordRequestNew": "Cere un link nou",
+  "startBusiness": "Pornește o afacere",
+  "startBusinessTitle": "Pornește-ți afacerea",
+  "startBusinessIntro": "Creează contul cu care îți vei conduce afacerea. Apoi configurezi afacerea și primul ei magazin.",
+  "fieldPasswordConfirm": "Confirmă parola",
+  "fieldPasswordMismatch": "Nu se potrivește cu parola introdusă mai sus."
 }

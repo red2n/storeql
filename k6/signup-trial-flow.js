@@ -1,22 +1,28 @@
 // Self-serve signup and trials (21.13), through the gateway: a prospect reads the price list with no
 // login — the plans on sale, what they cost, what they include, how long the trial is; a draft and a
-// plan sold by hand are not on it. A business chooses a plan as it signs up and starts on that plan's
-// trial; a plan not on sale is refused before the business exists; a login owns one business, so a
-// second signup on it is refused — a second trial as much as a second shop. Three days before the
-// trial ends the business is emailed the day and the price; the day it ends it is emailed the first
-// invoice with a link that pays it, with no sign-in; each once, however often the billing run runs.
+// plan sold by hand are not on it. The owner signs up to start a business (POST /auth/register/business):
+// a staff login of no business and no role, which reads no business's data until its own exists, and
+// which the business makes its OWNER; a shopper's sign-up beside it is still a CUSTOMER. A business
+// chooses a plan as it signs up and starts on that plan's trial; a plan not on sale is refused before
+// the business exists; a login owns one business, so a second signup on it is refused — a second
+// trial as much as a second shop. Three days before the trial ends the business is emailed the day
+// and the price; the day it ends it is emailed the first invoice with a link that pays it, with no
+// sign-in; each once, however often the billing run runs.
 //
 //   k6/run.sh signup-trial-flow
 import { Counter } from 'k6/metrics';
 import {
   ALL_CHECKS_PASS,
+  PASSWORD,
   call,
+  claims,
   data,
   expect,
   must,
   platformAdmin,
   poll,
   register,
+  registerBusiness,
   signInUntil,
   truthy,
   uniq,
@@ -68,8 +74,33 @@ export default function ({ admin }) {
   truthy('[-] a plan sold by hand is not on the list', !plans.some((p) => p.id === byHand), plans.map((p) => p.code));
   expect(call('GET', `${PLANS}`), '[-] the platform\'s own price list, with its drafts, is not public', 401);
 
+  // ── signing up to start a business, beside a shopper's sign-up ───────────────────────────────────
+  const owner = registerBusiness(`trial-${tag}-owner`);
+  const founder = claims(owner.token);
+  truthy('[+] a business sign-up is a staff login of no business and no role yet', founder.type === 'STAFF' && !founder.tenant && Array.isArray(founder.roles) && founder.roles.length === 0, founder);
+  expect(call('GET', '/api/iam-svc/auth/me', { token: owner.token }), '[+] ...signed in at once', 200);
+  expect(call('GET', '/api/tenant-svc/admin/tenant', { token: owner.token }), '[-] ...and reads no business before its own exists', 403);
+  expect(call('GET', MINE, { token: owner.token }), '[-] ...nor any business\'s billing', 403);
+  const shopper = register(`trial-${tag}-shopper`);
+  const shopping = claims(shopper.token);
+  truthy('[+] a shopper\'s sign-up is unchanged: a CUSTOMER of no business', shopping.type === 'CUSTOMER' && !shopping.tenant && (shopping.roles || []).length === 1 && shopping.roles[0] === 'CUSTOMER', shopping);
+  const startBusiness = (email, password = PASSWORD) => call('POST', '/api/iam-svc/auth/register/business', { body: { email, password } });
+  expect(startBusiness(owner.email), '[-] an address already signed up cannot start a second business login', 409, 'USER_ALREADY_EXISTS');
+  // A shopper's account and a business account are separate identities (29 Sep 2026): the address a
+  // person shops with starts a business too, as a login of its own, and a sign-in names which it means.
+  const alsoFounder = startBusiness(shopper.email);
+  expect(alsoFounder, '[+] an address a person shops with starts a business too, as a separate login', 201);
+  const made = claims((data(alsoFounder) || {}).accessToken);
+  truthy('[+] ...a staff login of its own, not the shopper\'s', made.type === 'STAFF' && !!made.sub && made.sub !== shopper.userId, made);
+  expect(startBusiness(shopper.email), '[-] ...once: a second business sign-up on it is refused', 409, 'USER_ALREADY_EXISTS');
+  const signIn = (accountType) => claims((data(call('POST', '/api/iam-svc/auth/login', { body: { email: shopper.email, password: PASSWORD, ...(accountType ? { accountType } : {}) } })) || {}).accessToken);
+  const atTheShop = signIn('CUSTOMER');
+  truthy('[+] signing in at a storefront opens the shopper account', atTheShop.sub === shopper.userId && atTheShop.type === 'CUSTOMER', atTheShop);
+  const atWork = signIn(null);
+  truthy('[+] signing in to run a business opens the business account', atWork.sub === made.sub && atWork.type === 'STAFF', atWork);
+  expect(startBusiness(`trial-${tag}-weak-${uniq()}@k6.storeql.test`, 'fourteen chars'), '[-] the password policy holds at a business sign-up', 400, 'PASSWORD_TOO_SHORT');
+
   // ── choosing a plan at signup ───────────────────────────────────────────────────────────────────
-  const owner = register(`trial-${tag}-owner`);
   const signup = (name, planId, token = owner.token) => call('POST', '/api/tenant-svc/onboarding/tenants', { token, body: { businessName: `${name} ${uniq()}`, country: 'GB', currency: 'GBP', ...(planId ? { planId } : {}) } });
   expect(signup('Drafted', drafted), '[-] a plan not on sale cannot be chosen, and no business is left behind', 409, 'PLAN_NOT_SOLD');
   expect(signup('By hand', byHand), '[-] nor one the platform sells only by hand', 409, 'PLAN_NOT_PUBLIC');
@@ -77,6 +108,8 @@ export default function ({ admin }) {
   expect(created, '[+] a business signs up on the plan it chose', 201);
   const tenantId = data(created).id;
   signInUntil(owner, (c) => c.tenant === tenantId && (c.roles || []).includes('OWNER'));
+  const owning = claims(owner.token);
+  truthy('[+] the same login is now the business\'s owner, and owner alone', owning.sub === owner.userId && owning.type === 'STAFF' && (owning.roles || []).length === 1 && owning.roles[0] === 'OWNER', owning);
   const mine = () => (data(call('GET', MINE, { token: owner.token })) || {}).subscription || {};
   const invoices = () => data(call('GET', `${MINE}/invoices?limit=50`, { token: owner.token })) || [];
   const sub = mine();

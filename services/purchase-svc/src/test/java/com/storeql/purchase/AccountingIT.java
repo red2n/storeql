@@ -10,7 +10,7 @@ import static org.hamcrest.Matchers.nullValue;
 
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
-import io.helidon.microprofile.testing.junit5.AddConfig;
+import io.helidon.microprofile.testing.AddConfig;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.json.JsonArray;
@@ -117,6 +117,19 @@ class AccountingIT {
             OWNER),
         400,
         "ACCOUNTING_SETTINGS_INVALID");
+    // A QuickBooks realm id is the company's digits: one no address can be made from is refused
+    // here, never claimed by the clock and left there.
+    assertError(
+        call(
+            "PUT",
+            CONNECTION,
+            "{\"provider\":\"QUICKBOOKS\",\"settings\":{\"realmId\":\"91 30%\"},\"credentials\":{\"accessToken\":\"t\"},\"syncFrom\":\"2026-01-01\"}",
+            T,
+            "OWNER",
+            OWNER),
+        400,
+        "ACCOUNTING_SETTINGS_INVALID");
+    assertError(call("GET", CONNECTION, null, T, "OWNER", OWNER), 404, "ACCOUNTING_NOT_CONNECTED");
     assertError(
         call(
             "PUT",
@@ -127,6 +140,18 @@ class AccountingIT {
             OWNER),
         400,
         "ACCOUNTING_CREDENTIALS_MISSING");
+    // A token expiry that is not an instant is refused by name, and nothing is kept.
+    assertError(
+        call(
+            "PUT",
+            CONNECTION,
+            xeroJson().replace("2026-09-23T10:00:00Z", "tomorrow"),
+            T,
+            "OWNER",
+            OWNER),
+        400,
+        "ACCOUNTING_CREDENTIALS_INVALID");
+    assertError(call("GET", CONNECTION, null, T, "OWNER", OWNER), 404, "ACCOUNTING_NOT_CONNECTED");
     assertError(
         call(
             "PUT",
@@ -435,6 +460,165 @@ class AccountingIT {
         "ACCOUNTING_SYNC_NOT_FOUND");
   }
 
+  // ── an uncertain push is settled by a person, on the record ─────────────────
+
+  private String syncIdOf(String journalId, String status) {
+    return com.storeql.test.Envelopes.find(
+            object(
+                    call("GET", ACCOUNTING + "/syncs?status=" + status, null, T, "OWNER", OWNER),
+                    200)
+                .getJsonArray("items"),
+            "journalId",
+            journalId)
+        .getString("id");
+  }
+
+  private JsonObject syncOf(String id) {
+    return object(call("GET", ACCOUNTING + "/syncs/" + id, null, T, "OWNER", OWNER), 200);
+  }
+
+  @Test
+  @DisplayName(
+      "A person says whether an uncertain push landed: delivered under the package's own reference"
+          + " and never pushed again, or queued to try again; once, and kept on the row")
+  void anUncertainPushIsSettledByAPersonOnTheRecord() throws Exception {
+    object(call("PUT", CONNECTION, simulated(null, "9999"), T, "OWNER", OWNER), 200);
+    String landed = postJournal(LocalDate.now().toString(), "Maybe landed", "9999", "1200");
+    String missing = postJournal(LocalDate.now().toString(), "Maybe not", "9999", "1200");
+    String retried = postJournal(LocalDate.now().toString(), "Retried outright", "9999", "1200");
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    String landedId = syncIdOf(landed, "PENDING");
+    String missingId = syncIdOf(missing, "PENDING");
+    String retriedId = syncIdOf(retried, "PENDING");
+    // No answer came back from a package with no idempotency key: the state the clock never leaves.
+    for (String id : new String[] {landedId, missingId, retriedId}) {
+      com.storeql.test.Envelopes.exec(
+          PG, "UPDATE purchase.accounting_syncs SET status = 'UNCERTAIN' WHERE id = '" + id + "'");
+    }
+    String resolve = ACCOUNTING + "/syncs/" + landedId + "/resolve";
+    String landedBody =
+        "{\"outcome\":\"LANDED\",\"externalId\":\"SIM-4711\",\"note\":\"found in the package\"}";
+
+    // Refused by role and by tenant, and nothing moves.
+    assertThat(call("POST", resolve, landedBody, T, "CASHIER", CASHIER).getStatus(), is(403));
+    assertThat(call("POST", resolve, landedBody, T, "STOREKEEPER", CASHIER).getStatus(), is(403));
+    assertError(
+        call("POST", resolve, landedBody, T2, "OWNER", OWNER), 404, "ACCOUNTING_SYNC_NOT_FOUND");
+    assertError(
+        call("POST", resolve, landedBody, T2, "MANAGER", MANAGER),
+        404,
+        "ACCOUNTING_SYNC_NOT_FOUND");
+    assertError(
+        call("POST", resolve, "{\"outcome\":\"MAYBE\"}", T, "MANAGER", MANAGER),
+        400,
+        "ACCOUNTING_OUTCOME_INVALID");
+    assertError(
+        call("POST", resolve, "{\"outcome\":\"LANDED\"}", T, "MANAGER", MANAGER),
+        400,
+        "ACCOUNTING_EXTERNAL_ID_REQUIRED");
+    assertError(
+        call(
+            "POST",
+            resolve,
+            "{\"outcome\":\"LANDED\",\"externalId\":\"  \"}",
+            T,
+            "MANAGER",
+            MANAGER),
+        400,
+        "ACCOUNTING_EXTERNAL_ID_REQUIRED");
+    // A note longer than the package would take is refused, and the push stays uncertain.
+    assertError(
+        call(
+            "POST",
+            resolve,
+            "{\"outcome\":\"LANDED\",\"externalId\":\"SIM-1\",\"note\":\""
+                + "x".repeat(501)
+                + "\"}",
+            T,
+            "MANAGER",
+            MANAGER),
+        400,
+        "ACCOUNTING_NOTE_TOO_LONG");
+    assertThat(syncOf(landedId).getString("status"), is("UNCERTAIN"));
+
+    // It did land: delivered under the package's reference, who and when on the row.
+    JsonObject done = object(call("POST", resolve, landedBody, T, "MANAGER", MANAGER), 200);
+    assertThat(done.getString("status"), is("DELIVERED"));
+    assertThat(done.getString("externalId"), is("SIM-4711"));
+    assertThat(done.containsKey("deliveredAt"), is(true));
+    JsonObject decision = done.getJsonObject("resolution");
+    assertThat(decision.getString("outcome"), is("LANDED"));
+    assertThat(decision.getString("resolvedBy"), is(MANAGER));
+    assertThat(decision.getString("note"), is("found in the package"));
+    assertThat(decision.containsKey("resolvedAt"), is(true));
+    // Never pushed again: a pass finds nothing to send for it, and its attempts stay as they were.
+    JsonObject pass = object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    assertThat(pass.getInt("delivered"), is(0));
+    JsonObject after = syncOf(landedId);
+    assertThat(after.getString("status"), is("DELIVERED"));
+    assertThat(after.getInt("attempts"), is(1));
+    // Decided once, either way.
+    assertError(
+        call("POST", resolve, landedBody, T, "OWNER", OWNER), 409, "ACCOUNTING_SYNC_NOT_UNCERTAIN");
+    assertError(
+        call("POST", resolve, "{\"outcome\":\"NOT_LANDED\"}", T, "OWNER", OWNER),
+        409,
+        "ACCOUNTING_SYNC_NOT_UNCERTAIN");
+    // A pending one is not uncertain.
+    String pending = postJournal(LocalDate.now().toString(), "Still pending", "9999", "1200");
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    assertError(
+        call(
+            "POST",
+            ACCOUNTING + "/syncs/" + syncIdOf(pending, "PENDING") + "/resolve",
+            "{\"outcome\":\"NOT_LANDED\"}",
+            T,
+            "OWNER",
+            OWNER),
+        409,
+        "ACCOUNTING_SYNC_NOT_UNCERTAIN");
+
+    // It never landed: queued to go now, the decision kept, and when the cause is mended it lands.
+    JsonObject notLanded =
+        object(
+            call(
+                "POST",
+                ACCOUNTING + "/syncs/" + missingId + "/resolve",
+                "{\"outcome\":\"NOT_LANDED\",\"note\":\"checked the package\"}",
+                T,
+                "OWNER",
+                OWNER),
+            200);
+    assertThat(notLanded.getString("status"), is("PENDING"));
+    assertThat(notLanded.getJsonObject("resolution").getString("outcome"), is("NOT_LANDED"));
+    assertThat(notLanded.getJsonObject("resolution").getString("resolvedBy"), is(OWNER));
+    array(
+        call(
+            "PUT",
+            CONNECTION + "/mappings",
+            "{\"mappings\":[{\"nominalCode\":\"9999\",\"externalAccount\":\"SIM-1100\"}]}",
+            T,
+            "OWNER",
+            OWNER),
+        200);
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    JsonObject nowLanded = syncOf(missingId);
+    assertThat(nowLanded.getString("status"), is("DELIVERED"));
+    assertThat(nowLanded.getJsonObject("resolution").getString("outcome"), is("NOT_LANDED"));
+
+    // Trying an uncertain one again by hand is the same word, and is recorded as such.
+    JsonObject retry =
+        object(
+            call(
+                "POST", ACCOUNTING + "/syncs/" + retriedId + "/retry", null, T, "MANAGER", MANAGER),
+            200);
+    JsonObject retryDecision = retry.getJsonObject("resolution");
+    assertThat(retryDecision.getString("outcome"), is("NOT_LANDED"));
+    assertThat(retryDecision.getString("resolvedBy"), is(MANAGER));
+    // A push nobody was unsure about carries no decision.
+    assertThat(syncOf(syncIdOf(pending, "PENDING")).containsKey("resolution"), is(false));
+  }
+
   // ── switched off, switched on, removed ──────────────────────────────────────
 
   @Test
@@ -466,6 +650,145 @@ class AccountingIT {
         com.storeql.test.Envelopes.scalar(
             PG, "SELECT count(*) FROM purchase.accounting_syncs WHERE tenant_id = '" + T + "'"),
         is("0"));
+  }
+
+  @Test
+  @DisplayName("A sync status nobody defined is refused by name, for management only")
+  void aSyncStatusNobodyKnowsIsRefused() {
+    object(call("PUT", CONNECTION, simulated(null), T, "OWNER", OWNER), 200);
+    assertError(
+        call("GET", ACCOUNTING + "/syncs?status=LOST", null, T, "MANAGER", MANAGER),
+        400,
+        "ACCOUNTING_STATUS_INVALID");
+    // Lower case is read as the status it names, so a known one still answers.
+    assertThat(
+        call("GET", ACCOUNTING + "/syncs?status=pending", null, T, "MANAGER", MANAGER).getStatus(),
+        is(200));
+    assertThat(
+        call("GET", ACCOUNTING + "/syncs?status=PENDING", null, T, "CASHIER", CASHIER).getStatus(),
+        is(403));
+    // Another business has no connection to list, whatever it asks for.
+    assertError(
+        call("GET", ACCOUNTING + "/syncs?status=PENDING", null, T2, "OWNER", OWNER),
+        404,
+        "ACCOUNTING_NOT_CONNECTED");
+  }
+
+  @Test
+  @DisplayName(
+      "A journal is left out of the package only with a reason, by management, never once it is in"
+          + " the package, and never another business's; a decision with no outcome is refused too")
+  void aSkipNeedsAReasonAndAJournalOfOurOwn() {
+    object(call("PUT", CONNECTION, simulated(null, "9999"), T, "OWNER", OWNER), 200);
+    String stuck =
+        postJournal(LocalDate.now().toString(), "Refused by the package", "9999", "1200");
+    String taken = postJournal(LocalDate.now().toString(), "Taken by the package", "1001", "1200");
+    object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    String stuckId = syncIdOf(stuck, "PENDING");
+    String takenId = syncIdOf(taken, "DELIVERED");
+    String skip = ACCOUNTING + "/syncs/" + stuckId + "/skip";
+
+    // The reason is the point of it: none, a blank one, a null one, or one longer than the log
+    // keeps is refused by name, and the journal waits as it was. (Both requests are read by the
+    // service, which names each refusal; the request records carry no constraint of their own.)
+    for (String body :
+        new String[] {
+          "{}",
+          "{\"reason\":null}",
+          "{\"reason\":\"   \"}",
+          "{\"reason\":\"" + "x".repeat(501) + "\"}"
+        }) {
+      assertError(call("POST", skip, body, T, "OWNER", OWNER), 400, "ACCOUNTING_REASON_REQUIRED");
+    }
+    for (String body : new String[] {"{}", "{\"outcome\":null}", "{\"outcome\":\"\"}"}) {
+      assertError(
+          call("POST", ACCOUNTING + "/syncs/" + stuckId + "/resolve", body, T, "OWNER", OWNER),
+          400,
+          "ACCOUNTING_OUTCOME_INVALID");
+    }
+    assertThat(syncOf(stuckId).getString("status"), is("PENDING"));
+
+    // Another business's management finds no such push; a shelf, a till or a shopper is turned
+    // away.
+    for (String roles : new String[] {"OWNER", "MANAGER"}) {
+      assertError(
+          call("POST", skip, "{\"reason\":\"not theirs\"}", T2, roles, OWNER),
+          404,
+          "ACCOUNTING_SYNC_NOT_FOUND");
+    }
+    for (String roles : new String[] {"STOREKEEPER", "CASHIER", "CUSTOMER"}) {
+      assertThat(
+          roles,
+          call("POST", skip, "{\"reason\":\"not mine\"}", T, roles, CASHIER).getStatus(),
+          is(403));
+    }
+    assertThat("nothing moved", syncOf(stuckId).getString("status"), is("PENDING"));
+
+    // What is already in the package is not left out of it.
+    assertError(
+        call(
+            "POST",
+            ACCOUNTING + "/syncs/" + takenId + "/skip",
+            "{\"reason\":\"already there\"}",
+            T,
+            "OWNER",
+            OWNER),
+        409,
+        "ACCOUNTING_SYNC_DELIVERED");
+    assertThat(syncOf(takenId).getString("status"), is("DELIVERED"));
+
+    // With a reason, by management, it is left out.
+    assertThat(
+        object(call("POST", skip, "{\"reason\":\"entered by hand\"}", T, "MANAGER", MANAGER), 200)
+            .getString("status"),
+        is("SKIPPED"));
+  }
+
+  @Test
+  @DisplayName(
+      "QuickBooks Online's environment is PRODUCTION or SANDBOX: anything else is refused at"
+          + " connect, and a connection kept with one before the check is refused unsent at push"
+          + " time, with its reason, and its chart is not asked for")
+  void aQuickBooksEnvironmentIsOneTheDriverKnows() {
+    String quickBooks =
+        "{\"provider\":\"QUICKBOOKS\",\"settings\":{\"realmId\":\"9130\",\"environment\":\"%s\"},"
+            + "\"credentials\":{\"accessToken\":\"t\"},\"syncFrom\":\"2026-01-01\"}";
+    for (String environment : new String[] {"PROD", "Sandbx", "live"}) {
+      Response r =
+          call("PUT", CONNECTION, String.format(quickBooks, environment), T, "OWNER", OWNER);
+      String body = r.readEntity(String.class);
+      assertThat(body, r.getStatus(), is(400));
+      assertThat(body, parse(body).getString("code"), is("ACCOUNTING_SETTINGS_INVALID"));
+      assertThat(body, containsString("environment"));
+    }
+    assertError(call("GET", CONNECTION, null, T, "OWNER", OWNER), 404, "ACCOUNTING_NOT_CONNECTED");
+    object(call("PUT", CONNECTION, String.format(quickBooks, "sandbox"), T, "OWNER", OWNER), 200);
+
+    // A connection kept before the check, with an environment its driver never knew: it would have
+    // been sent to production. It is refused before anything leaves, for a person to put right.
+    com.storeql.test.Envelopes.exec(
+        PG,
+        "UPDATE purchase.accounting_connections"
+            + " SET settings = '{\"realmId\":\"9130\",\"environment\":\"PROD\"}'"
+            + " WHERE tenant_id = '"
+            + T
+            + "'");
+    String journal = postJournal(LocalDate.now().toString(), "Kept before the check");
+    JsonObject run = object(call("POST", CONNECTION + "/sync", null, T, "OWNER", OWNER), 200);
+    assertThat(run.getInt("failed"), is(1));
+    assertThat(run.getInt("delivered"), is(0));
+    JsonObject sync = syncOf(syncIdOf(journal, "FAILED"));
+    assertThat(sync.getString("lastError"), containsString("environment"));
+    JsonObject attempt = sync.getJsonArray("attemptLog").getJsonObject(0);
+    // JSON-B leaves a null out: absent and null both mean nothing answered.
+    assertThat(
+        "nothing was sent, so nothing answered",
+        !attempt.containsKey("statusCode") || attempt.isNull("statusCode"),
+        is(true));
+    assertError(
+        call("GET", CONNECTION + "/accounts", null, T, "OWNER", OWNER),
+        409,
+        "ACCOUNTING_SETTINGS_INVALID");
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 package com.storeql.tenant.dto;
 
+import jakarta.json.bind.annotation.JsonbTypeDeserializer;
+import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
-import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -42,12 +43,21 @@ public final class BillingDtos {
           @NotBlank
           @Size(max = 12)
           String invoicePrefix,
-      @Schema(description = "How many days after issue an invoice falls due.") @NotNull @Min(0)
+      // Held to the table's own checks (chk_billing_profile_terms, chk_billing_profile_rate), which
+      // a body past them broke as a 500: terms of 0 to 180 days, a rate below one.
+      @Schema(description = "How many days after issue an invoice falls due: 0 to 180.")
+          @NotNull
+          @Min(0)
+          @Max(180)
+          @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
           Integer paymentTermsDays,
-      @Schema(description = "The platform's own standard rate, as a fraction: 0.2000 for 20%.")
+      @Schema(
+              description =
+                  "The platform's own standard rate, as a fraction below one: 0.2000 for 20%.")
           @NotNull
           @DecimalMin("0.0000")
-          @Digits(integer = 1, fraction = 4)
+          @DecimalMax(value = "1", inclusive = false)
+          @Fits(integer = 1, fraction = 4)
           BigDecimal taxRate,
       @Size(max = 2000) String bankDetails) {}
 
@@ -78,7 +88,13 @@ public final class BillingDtos {
           @NotBlank
           @Size(max = 10)
           String effectiveFrom,
-      @NotNull @DecimalMin("0.0000") @Digits(integer = 1, fraction = 4) BigDecimal rate,
+      // Below one, as chk_platform_vat_rate holds it: 1 to 9.9999 broke it as a 500.
+      @Schema(description = "As a fraction below one: 0.2300 for 23%.")
+          @NotNull
+          @DecimalMin("0.0000")
+          @DecimalMax(value = "1", inclusive = false)
+          @Fits(integer = 1, fraction = 4)
+          BigDecimal rate,
       @Size(max = 500) String note) {}
 
   @Schema(name = "VatRate")
@@ -265,7 +281,15 @@ public final class BillingDtos {
   /** Money the platform has received against an invoice. */
   @Schema(name = "RecordPaymentRequest")
   public record RecordPaymentRequest(
-      @NotNull @DecimalMin("0.01") @Digits(integer = 14, fraction = 2) BigDecimal amount,
+      @Schema(
+              description =
+                  "In the invoice's currency, to no more places than its minor units (ISO 4217:"
+                      + " none for JPY, two for EUR, three for KWD); a finer figure is refused"
+                      + " (BILLING_AMOUNT_INVALID), never rounded.")
+          @NotNull
+          @DecimalMin(value = "0", inclusive = false)
+          @Fits(integer = 14, fraction = 4)
+          BigDecimal amount,
       @Schema(description = "BANK_TRANSFER or CARD.") @NotBlank @Size(max = 20) String method,
       @Size(max = 40) String provider,
       @Size(max = 120) String providerRef,
@@ -311,9 +335,12 @@ public final class BillingDtos {
       @Schema(description = "Days after the due date, e.g. [1, 3, 5, 7].")
           @NotNull
           @Size(min = 1, max = 12)
+          @JsonbTypeDeserializer(WholeNumbers.ExactIntList.class)
           List<@Min(1) @Max(365) Integer> reminderDays,
-      @NotNull @Min(1) @Max(365) Integer suspendAfterDays,
-      @NotNull @Min(2) @Max(730) Integer uncollectibleAfterDays) {}
+      @NotNull @Min(1) @Max(365) @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
+          Integer suspendAfterDays,
+      @NotNull @Min(2) @Max(730) @JsonbTypeDeserializer(WholeNumbers.ExactInt.class)
+          Integer uncollectibleAfterDays) {}
 
   /**
    * @param set false when nobody has set a policy and these are the published defaults — said

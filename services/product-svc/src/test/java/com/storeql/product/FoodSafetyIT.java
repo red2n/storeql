@@ -230,9 +230,10 @@ class FoodSafetyIT {
     assertThat(invented.getStatus(), is(400));
     assertThat(invented.readEntity(String.class), containsString("PRODUCT_UNKNOWN_ALLERGEN"));
 
-    assertThat(
-        put(base, "{\"allergens\":[{\"code\":\"MILK\",\"presence\":\"PROBABLY\"}]}", T).getStatus(),
-        is(400));
+    Response probably =
+        put(base, "{\"allergens\":[{\"code\":\"MILK\",\"presence\":\"PROBABLY\"}]}", T);
+    assertThat(probably.getStatus(), is(400));
+    assertThat(probably.readEntity(String.class), containsString("PRODUCT_INVALID_PRESENCE"));
 
     // Declared twice with different answers: the stricter one matters, so guessing is refused.
     Response twice =
@@ -787,5 +788,77 @@ class FoodSafetyIT {
     String body = get("/catalog/variants/" + v + "/allergens", T).readEntity(String.class);
     assertThat(body, containsString("\"status\":\"DECLARED\""));
     assertThat(body, containsString("EGGS"));
+  }
+
+  // ── refusals the negative-coverage audit found untested (1 Oct 2026) ─────────
+
+  private static String unique(String prefix) {
+    String raw = com.storeql.ids.Ids.newId().toString();
+    return prefix + "-" + raw.substring(raw.length() - 12);
+  }
+
+  @Test
+  @DisplayName("The age rules and an age check need the country, and it must be two letters")
+  void theRulesAndAgeCheckNeedACountry() {
+    String tenant = britishTenant();
+    String wine = variant(tenant, "Wine", unique("WINE"));
+    assertThat(
+        put(
+                "/admin/products/variants/" + wine + "/compliance",
+                "{\"restrictionCategory\":\"ALCOHOL\"}",
+                tenant)
+            .getStatus(),
+        is(200));
+
+    Response rules = getAdmin("/admin/age-restriction-rules", tenant);
+    assertThat(rules.getStatus(), is(400));
+    assertThat(rules.readEntity(String.class), containsString("PRODUCT_COUNTRY_REQUIRED"));
+    Response check = get("/catalog/variants/" + wine + "/age-check", tenant);
+    assertThat(check.getStatus(), is(400));
+    assertThat(check.readEntity(String.class), containsString("PRODUCT_COUNTRY_REQUIRED"));
+
+    Response long3 = getWith("/catalog/variants/" + wine + "/age-check", "country", "GBR", tenant);
+    assertThat(long3.getStatus(), is(400));
+    assertThat(long3.readEntity(String.class), containsString("PRODUCT_INVALID_COUNTRY"));
+    Response blank = getWith("/admin/age-restriction-rules", "country", "  ", tenant);
+    assertThat(blank.getStatus(), is(400));
+    assertThat(blank.readEntity(String.class), containsString("PRODUCT_COUNTRY_REQUIRED"));
+  }
+
+  @Test
+  @DisplayName("An age outside a human life is refused and leaves the rules as they were")
+  void anAgeOutsideAHumanLifeIsRefused() {
+    String tenant = britishTenant();
+    for (int age : new int[] {121, -1}) {
+      Response r =
+          put(
+              "/admin/age-restriction-rules",
+              "{\"country\":\"GB\",\"category\":\"ALCOHOL\",\"minimumAge\":" + age + "}",
+              tenant);
+      assertThat("age " + age, r.getStatus(), is(400));
+      assertThat(r.readEntity(String.class), containsString("PRODUCT_INVALID_AGE"));
+    }
+    String rules =
+        getWith("/admin/age-restriction-rules", "country", "GB", tenant).readEntity(String.class);
+    assertThat(
+        "no rule of ours was written", rules, not(containsString("\"tenantOverride\":true")));
+  }
+
+  @Test
+  @DisplayName("A selling unit outside the four is refused and the compliance stays as it was")
+  void aSellingUnitOutsideTheFourIsRefused() {
+    String tenant = britishTenant();
+    String v = variant(tenant, "Loose rice", unique("RICE"));
+    String path = "/admin/products/variants/" + v + "/compliance";
+    assertThat(
+        put(path, "{\"soldBy\":\"WEIGHT\",\"netContentUom\":\"KG\"}", tenant).getStatus(), is(200));
+
+    Response bad = put(path, "{\"soldBy\":\"CASE\"}", tenant);
+    assertThat(bad.getStatus(), is(400));
+    assertThat(bad.readEntity(String.class), containsString("PRODUCT_INVALID_SOLD_BY"));
+
+    String kept = get("/catalog/variants/" + v + "/compliance", tenant).readEntity(String.class);
+    assertThat(kept, containsString("\"soldBy\":\"WEIGHT\""));
+    assertThat(kept, containsString("\"netContentUom\":\"KG\""));
   }
 }

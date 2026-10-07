@@ -2,9 +2,12 @@ package com.storeql.product;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 
+import com.storeql.ids.Ids;
+import com.storeql.product.repo.ProductRepository;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.RedisSupport;
 import com.storeql.test.TenantSvcStub;
@@ -17,7 +20,16 @@ import jakarta.ws.rs.core.Response;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Types;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
@@ -59,6 +71,9 @@ class CatalogIT {
   private static final String TENANT_B = "01a090ae-611e-700f-b645-a14095230b77";
 
   @Inject WebTarget target;
+
+  /** Any one of the module's repositories is the outbox store the scheduled purge runs through. */
+  @Inject ProductRepository outboxStore;
 
   @AfterAll
   static void stopDb() {
@@ -343,6 +358,116 @@ class CatalogIT {
     assertThat(body, containsString("Request validation failed"));
   }
 
+  /**
+   * A hole in a list of rows is refused whole, the place named, and nothing of the request is
+   * committed. It used to reach the row loop, whose error handler read the row's name and failed: a
+   * {@code 500}, after the category and the row before the hole had been written, which a retry
+   * then met as its own duplicates.
+   */
+  @Test
+  void bulkImportWithANullRowIsRefusedWholeAndWritesNothing() throws Exception {
+    String suffix = Ids.newId().toString();
+    String category = "Holes " + suffix;
+    String product = "Before the hole " + suffix;
+    String sku = "HOLE-" + suffix;
+    int productEvents = outboxCount(TENANT_A, "ProductCreated");
+    int variantEvents = outboxCount(TENANT_A, "VariantCreated");
+
+    for (String body :
+        new String[] {
+          "{\"categories\":[{\"name\":\""
+              + category
+              + "\"}],\"products\":[{\"name\":\""
+              + product
+              + "\",\"categoryName\":\""
+              + category
+              + "\",\"variants\":[{\"sku\":\""
+              + sku
+              + "\"}]},null]}",
+          "{\"categories\":[{\"name\":\""
+              + category
+              + "\"},null],\"products\":[{\"name\":\""
+              + product
+              + "\",\"variants\":[{\"sku\":\""
+              + sku
+              + "\"}]}]}"
+        }) {
+      Response r = post("/admin/import", body, TENANT_A);
+      String answer = r.readEntity(String.class);
+      assertThat(answer, r.getStatus(), is(400));
+      assertThat(answer, containsString("VALIDATION_FAILED"));
+      assertThat(
+          answer,
+          body.contains("},null]}")
+              ? containsString("products[1]: must not be null")
+              : containsString("categories[1]: must not be null"));
+    }
+
+    assertThat("the category was not written", namedRows("categories", category), is(0));
+    assertThat("nor the row before the hole", namedRows("products", product), is(0));
+    assertThat(skuRows(sku), is(0));
+    assertThat(outboxCount(TENANT_A, "ProductCreated"), is(productEvents));
+    assertThat(outboxCount(TENANT_A, "VariantCreated"), is(variantEvents));
+
+    // The same sheet without its hole imports: the refusal was the hole's, not the rows'.
+    Response clean =
+        post(
+            "/admin/import",
+            "{\"categories\":[{\"name\":\""
+                + category
+                + "\"}],\"products\":[{\"name\":\""
+                + product
+                + "\",\"categoryName\":\""
+                + category
+                + "\",\"variants\":[{\"sku\":\""
+                + sku
+                + "\"}]}]}",
+            TENANT_A);
+    String imported = clean.readEntity(String.class);
+    assertThat(imported, clean.getStatus(), is(200));
+    assertThat(imported, containsString("\"errors\":[]"));
+    assertThat(namedRows("categories", category), is(1));
+    assertThat(namedRows("products", product), is(1));
+    assertThat(skuRows(sku), is(1));
+  }
+
+  /** Rows of TENANT_A's {@code product.<table>} with this name. */
+  private static int namedRows(String table, String name) throws SQLException {
+    String sql =
+        switch (table) {
+          case "categories" ->
+              "SELECT count(*) FROM product.categories WHERE tenant_id = ?::uuid AND name = ?";
+          case "products" ->
+              "SELECT count(*) FROM product.products WHERE tenant_id = ?::uuid AND name = ?";
+          default -> throw new IllegalArgumentException(table);
+        };
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps = c.prepareStatement(sql)) {
+      ps.setString(1, TENANT_A);
+      ps.setString(2, name);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    }
+  }
+
+  /** Variants of TENANT_A with this SKU. */
+  private static int skuRows(String sku) throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT count(*) FROM product.product_variants WHERE tenant_id = ?::uuid AND sku ="
+                    + " ?")) {
+      ps.setString(1, TENANT_A);
+      ps.setString(2, sku);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    }
+  }
+
   @Test
   void blankNameIs400() {
     Response bad = post("/admin/products", "{\"name\":\"\"}", TENANT_A);
@@ -474,7 +599,16 @@ class CatalogIT {
     assertThat(memberR.getStatus(), is(400));
 
     // AssignVariantCategorySetRequest.setId/categoryId are @NotBlank.
-    String variantId = "01a090ae-611e-701c-979a-c9c9a3b8be89";
+    // The variant is the business's, found before the body is read (3 Oct 2026).
+    String productId =
+        field(
+            post("/admin/products", "{\"name\":\"Blank ids\"}", TENANT_A).readEntity(String.class),
+            "id");
+    String variantId =
+        field(
+            post("/admin/products/" + productId + "/variants", "{\"sku\":\"BLANK-1\"}", TENANT_A)
+                .readEntity(String.class),
+            "id");
     Response assignR =
         post(
             "/admin/products/variants/" + variantId + "/category-set-assignments",
@@ -559,6 +693,45 @@ class CatalogIT {
       rs.next();
       return rs.getInt(1);
     }
+  }
+
+  /** An imported product announces its category like one made by POST /admin/products. */
+  @Test
+  void anImportedProductAnnouncesItsCategoryAndAnUncategorisedOneDoesNot() throws Exception {
+    String suffix = Ids.newId().toString();
+    String category = "Imported " + suffix;
+    String sku = "IMP-C-" + suffix;
+    String bareSku = "IMP-N-" + suffix;
+    Response r =
+        post(
+            "/admin/import",
+            "{\"categories\":[{\"name\":\""
+                + category
+                + "\"}],\"products\":[{\"name\":\"Categorised "
+                + suffix
+                + "\",\"categoryName\":\""
+                + category
+                + "\",\"variants\":[{\"sku\":\""
+                + sku
+                + "\"}]},{\"name\":\"Bare "
+                + suffix
+                + "\",\"variants\":[{\"sku\":\""
+                + bareSku
+                + "\"}]}]}",
+            TENANT_A);
+    String answer = r.readEntity(String.class);
+    assertThat(answer, r.getStatus(), is(200));
+    assertThat(answer, containsString("\"errors\":[]"));
+    String categorisedId = fieldNear(answer, sku, "productId");
+    String bareId = fieldNear(answer, bareSku, "productId");
+
+    String announced = outbox(TENANT_A, "ProductCategorised", categorisedId);
+    assertThat(announced, containsString(categorisedId));
+    assertThat(announced, containsString("\"categoryPath\":[\""));
+    assertThat(outbox(TENANT_A, "ProductCategorised", bareId), is(""));
+    assertThat(outbox(TENANT_A, "ProductCreated", bareId), not(is("")));
+    // Another business's outbox holds nothing of it.
+    assertThat(outbox(TENANT_B, "ProductCategorised", categorisedId), is(""));
   }
 
   @Test
@@ -685,5 +858,164 @@ class CatalogIT {
             .header("X-Roles", "STOREKEEPER")
             .post(Entity.entity("{}", MediaType.APPLICATION_JSON));
     assertThat(keeper.getStatus(), is(403));
+  }
+
+  // ── the scheduled outbox purge finds its rows through an index (V1__init.sql) ─────────
+
+  @Test
+  void theOutboxPurgeTakesOnlyOldPublishedRowsAndCanFindThemThroughItsIndex() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID oldPublished = Ids.newId();
+    UUID recentPublished = Ids.newId();
+    UUID oldUnpublished = Ids.newId();
+    Instant now = Instant.now();
+    outboxRow(oldPublished, tenant, now.minus(Duration.ofDays(30)), now.minus(Duration.ofDays(29)));
+    outboxRow(
+        recentPublished, tenant, now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)));
+    outboxRow(oldUnpublished, tenant, now.minus(Duration.ofDays(30)), null);
+
+    // What the scheduler runs: published more than a week ago, a batch at a time.
+    int purged = outboxStore.purgePublished(now.minus(Duration.ofDays(7)), 1000);
+
+    assertThat("only the old published row went", purged, is(1));
+    assertThat(outboxRows(oldPublished), is(0));
+    assertThat("a recently published one stays", outboxRows(recentPublished), is(1));
+    assertThat("a row never published is never purged", outboxRows(oldUnpublished), is(1));
+
+    // The purge's own statement, planned with every other way of finding the rows ruled out: it
+    // must be able to use the index on published_at. Without one, each batch read the whole table.
+    String plan =
+        planOf(
+            "SELECT id FROM product.outbox WHERE published_at IS NOT NULL"
+                + " AND published_at < now() - interval '7 days'"
+                + " ORDER BY published_at ASC LIMIT 1000 FOR UPDATE SKIP LOCKED");
+    assertThat(plan, containsString("idx_outbox_published"));
+    // And the index holds only what the purge can take, so it shrinks as the purge runs.
+    assertThat(indexDefinition("idx_outbox_published"), containsString("published_at IS NOT NULL"));
+  }
+
+  /**
+   * The relay's claim, planned as the relay runs it, walks {@code idx_outbox_claim} for its rows
+   * (its check of an aggregate's earlier rows reads {@code idx_outbox_aggregate_pending}): the
+   * broader {@code idx_outbox_unpublished} (every unpublished row by {@code created_at}, dead
+   * letters included) is not in the schema, because the claim is the one statement on the table
+   * that reads the waiting rows in that order and its ordered scan never reads a dead letter.
+   */
+  @Test
+  void theRelaysClaimIsServedByItsOwnIndexAndNoBroaderOneExists() throws Exception {
+    UUID tenant = Ids.newId();
+    Instant now = Instant.now();
+    outboxRow(Ids.newId(), tenant, now.minus(Duration.ofMinutes(5)), null);
+    outboxRow(
+        Ids.newId(), tenant, now.minus(Duration.ofMinutes(4)), now.minus(Duration.ofMinutes(3)));
+
+    // The statement BaseOutboxRepository.claim runs (common-service), conditions and all: not
+    // published, not dead, past its backoff, and not behind a dead or backing-off row of its own
+    // aggregate. Only the limit is a literal here where the relay binds it.
+    String claim =
+        "SELECT o.id, o.aggregate_id, o.topic, o.payload FROM product.outbox o"
+            + " WHERE o.published_at IS NULL AND o.dead_at IS NULL"
+            + " AND o.next_attempt_at <= now()"
+            + " AND NOT EXISTS (SELECT 1 FROM product.outbox p"
+            + "   WHERE p.aggregate_id = o.aggregate_id AND p.published_at IS NULL"
+            + "   AND (p.dead_at IS NOT NULL OR p.next_attempt_at > now())"
+            + "   AND (p.created_at, p.id) < (o.created_at, o.id))"
+            + " ORDER BY o.created_at, o.id LIMIT 100";
+    String plan = planOf(claim);
+    assertThat(plan, plan, containsString("idx_outbox_claim"));
+    assertThat(plan, plan, containsString("idx_outbox_aggregate_pending"));
+    assertThat(plan, plan, not(containsString("idx_outbox_unpublished")));
+    assertThat(
+        "the claim index holds only rows that are neither published nor dead",
+        indexDefinition("idx_outbox_claim"),
+        containsString("published_at IS NULL) AND (dead_at IS NULL)"));
+
+    // The outcome writes go by primary key and the purge by idx_outbox_published (tested above);
+    // the claim reads idx_outbox_claim (planned above) and, for its aggregate check,
+    // idx_outbox_aggregate_pending. No statement needs the broader one.
+    assertThat(
+        "idx_outbox_unpublished (every unpublished row by created_at) is not created",
+        outboxIndexes(),
+        not(hasItem("idx_outbox_unpublished")));
+    assertThat(outboxIndexes(), hasItem("idx_outbox_aggregate_pending"));
+    assertThat(outboxIndexes(), hasItem("idx_outbox_published"));
+  }
+
+  private static void outboxRow(UUID id, UUID tenant, Instant createdAt, Instant publishedAt)
+      throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "INSERT INTO product.outbox (id, event_type, topic, tenant_id, aggregate_id,"
+                    + " payload, created_at, published_at)"
+                    + " VALUES (?, 'PurgeTest', 'storeql.test.purge', ?, ?, '{}', ?, ?)")) {
+      ps.setObject(1, id);
+      ps.setObject(2, tenant);
+      ps.setObject(3, Ids.newId());
+      ps.setObject(4, createdAt.atOffset(ZoneOffset.UTC));
+      if (publishedAt == null) {
+        ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
+      } else {
+        ps.setObject(5, publishedAt.atOffset(ZoneOffset.UTC));
+      }
+      ps.executeUpdate();
+    }
+  }
+
+  private static int outboxRows(UUID id) throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement("SELECT count(*) FROM product.outbox WHERE id = ?")) {
+      ps.setObject(1, id);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    }
+  }
+
+  /** How Postgres would run a statement when a table scan and a sort are not on offer. */
+  private static String planOf(String sql) throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        Statement st = c.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      st.execute("SET enable_bitmapscan = off");
+      st.execute("SET enable_sort = off");
+      StringBuilder plan = new StringBuilder();
+      try (ResultSet rs = st.executeQuery("EXPLAIN " + sql)) {
+        while (rs.next()) {
+          plan.append(rs.getString(1)).append('\n');
+        }
+      }
+      return plan.toString();
+    }
+  }
+
+  private static List<String> outboxIndexes() throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT indexname FROM pg_indexes"
+                    + " WHERE schemaname = 'product' AND tablename = 'outbox'")) {
+      List<String> names = new ArrayList<>();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          names.add(rs.getString(1));
+        }
+      }
+      return names;
+    }
+  }
+
+  private static String indexDefinition(String index) throws SQLException {
+    try (Connection c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'product' AND indexname = ?")) {
+      ps.setString(1, index);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : "";
+      }
+    }
   }
 }

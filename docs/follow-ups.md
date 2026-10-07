@@ -41,7 +41,7 @@ cache — pre-existing, unrelated). Build without it.
 
 ## 2. Decisions to confirm
 
-Two deliberate calls that a second opinion should ratify. Both are cheap to reverse.
+One deliberate call (2a) that a second opinion should ratify; it is cheap to reverse. 2b is settled and stays only because the comment in `V12__product_images.sql` points here.
 
 ### 2a. Brute-force protection fails open
 
@@ -58,23 +58,14 @@ last line.
 the only line that changes. Rate limiting also fails open, but that one is the uncontroversial
 industry default and needs no decision.
 
-### 2b. Legacy product images above 256 KB
+### 2b. Product images above 256 KB (settled)
 
-`V15` adds the size constraint as **`NOT VALID`** — enforced on every new write, but rows written
-under the old 512 KB cap were never re-checked, so any that exist are still serving.
-
-```sql
--- Find rows still in breach:
-SELECT tenant_id, product_id, octet_length(bytes) AS size_bytes
-  FROM product_images
- WHERE octet_length(bytes) >= 262144
- ORDER BY size_bytes DESC;
-
--- Once that returns nothing, promote to fully enforced:
-ALTER TABLE product_images VALIDATE CONSTRAINT product_images_size_under_256kb;
-```
-
-Until that runs, "no image over 256 KB in the system" is true going forward but not retroactively.
+Nothing is pending. `V12__product_images.sql` creates `product_images` with
+`CONSTRAINT chk_product_images_size_under_256kb CHECK (octet_length(bytes) < 262144)` inside the CREATE
+TABLE. The constraint is validated, not `NOT VALID`: it holds for every row from the first, so "no
+image over 256 KB in the system" is true of the table itself and needs no pre-check and no later
+`VALIDATE` step. A local database that ran an older copy of the migrations is reset, not repaired (the
+DEV rule in [ARCHITECTURE](ARCHITECTURE.md): migrations only CREATE).
 
 ---
 
@@ -125,7 +116,7 @@ verify it. Do it with a stack running.
 ## 4. Larger items, if the product pushes that way
 
 Neither is needed now. Both were anticipated by the original design comment in
-`V14__product_images.sql` ("the stack has no object store yet").
+`V12__product_images.sql` ("the stack has no object store yet").
 
 ### 4a. Server-side image normalisation
 
@@ -149,7 +140,7 @@ one move. This is the real fix for the whole class of problem; the client compre
 | Commit | Change |
 |---|---|
 | `ad10044` | Client-side image compression to a 256 KB budget (web canvas / `package:image`) |
-| `47d0518` | 256 KB enforced as a system invariant: service cap + `V15` CHECK constraint |
+| `47d0518` | 256 KB enforced as a system invariant: service cap + a validated `CHECK` constraint on `product_images` (`V12__product_images.sql`) |
 | `21b980e` | Thumbnails decode to their layout box — ~4.9 MB → ~114 KB for the 72×72 tile |
 | `3d95c66` | Product image byte cache bounded by an LRU (16 MB / 200 entries) |
 | `2244d13` | Redis fails open; Lettuce command timeout 60s → 250ms |

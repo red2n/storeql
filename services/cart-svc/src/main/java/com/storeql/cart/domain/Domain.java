@@ -30,6 +30,22 @@ public final class Domain {
       UUID tenantId,
       UUID variantId,
       BigDecimal qty,
-      BigDecimal unitPrice, // null until pricing-svc enriches the view
+      BigDecimal unitPrice, // as the caller gave it on add, null if none; never priced here
       Instant addedAt) {}
+
+  /**
+   * What staff did to a cart that was not theirs, kept with who did it. Written on the same
+   * transaction as the change.
+   *
+   * @param action {@code ADD_ITEM}, {@code SET_QTY} or {@code REMOVE_ITEM}
+   * @param actorId the signed-in staff user; null only when a service made the call
+   * @param actorRole the highest staff role the caller held
+   */
+  public record StaffAction(
+      String action, UUID actorId, String actorRole, UUID itemId, UUID variantId, BigDecimal qty) {
+
+    public static final String ADD_ITEM = "ADD_ITEM";
+    public static final String SET_QTY = "SET_QTY";
+    public static final String REMOVE_ITEM = "REMOVE_ITEM";
+  }
 }

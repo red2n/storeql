@@ -12,7 +12,9 @@ import com.storeql.inventory.dto.Dtos.YieldRunOutputRequest;
 import com.storeql.inventory.dto.Dtos.YieldRunRequest;
 import com.storeql.inventory.dto.Dtos.YieldTemplateRequest;
 import com.storeql.inventory.repo.YieldRepository;
+import com.storeql.service.Fx;
 import com.storeql.service.OutboxRow;
+import com.storeql.service.TenantProfiles;
 import com.storeql.web.ApiException;
 import com.storeql.web.Parsing;
 import com.storeql.web.TenantContext;
@@ -41,6 +43,7 @@ public class YieldService {
   private static final BigDecimal HUNDRED = new BigDecimal("100");
 
   @Inject YieldRepository repo;
+  @Inject TenantProfiles profiles;
 
   // ── Templates ──────────────────────────────────────────────────────────────
 
@@ -201,7 +204,9 @@ public class YieldService {
             ctx.userId(),
             Instant.now(),
             List.copyOf(outputs));
-    return repo.record(draft, YieldService::events);
+    // Costs in the business's own currency's minor units: whole yen, three-decimal dinars.
+    return repo.record(
+        draft, YieldService::events, Fx.minorUnits(profiles.requireCurrency(tenantId)));
   }
 
   /**

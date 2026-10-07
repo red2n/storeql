@@ -547,12 +547,37 @@ public class PricingRepository extends BaseOutboxRepository {
    * @return the items
    */
   public List<PriceListItem> findPriceListItems(UUID tenantId, UUID priceListId) {
+    return findPriceListItems(tenantId, priceListId, null, null, Integer.MAX_VALUE);
+  }
+
+  /**
+   * One page of a price list's items, keyset-paged on {@code (variant_id, min_qty)}.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param priceListId the price list whose items to list
+   * @param afterVariantId the variant of the last row already served, or {@code null} for the first
+   *     page
+   * @param afterMinQty the quantity break of that same row
+   * @param limit the most rows to return
+   * @return the items after the key, in key order
+   */
+  public List<PriceListItem> findPriceListItems(
+      UUID tenantId, UUID priceListId, UUID afterVariantId, BigDecimal afterMinQty, int limit) {
+    boolean keyed = afterVariantId != null && afterMinQty != null;
     return query(
         "SELECT id,tenant_id,price_list_id,variant_id,price,min_qty,created_at,updated_at"
-            + " FROM price_list_items WHERE tenant_id=? AND price_list_id=? ORDER BY variant_id,min_qty",
+            + " FROM price_list_items WHERE tenant_id=? AND price_list_id=?"
+            + (keyed ? " AND (variant_id, min_qty) > (?, ?)" : "")
+            + " ORDER BY variant_id,min_qty LIMIT ?",
         ps -> {
-          ps.setObject(1, tenantId);
-          ps.setObject(2, priceListId);
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          ps.setObject(i++, priceListId);
+          if (keyed) {
+            ps.setObject(i++, afterVariantId);
+            ps.setBigDecimal(i++, afterMinQty);
+          }
+          ps.setInt(i, limit);
         },
         PricingRepository::mapPriceListItem,
         "list price list items");
@@ -957,11 +982,9 @@ public class PricingRepository extends BaseOutboxRepository {
    * engine reads a missing entry as "everything", so an unscoped promotion cannot accidentally
    * become a scoped-to-nothing one.
    *
-   * <p><b>CATEGORY rows are deliberately not resolved here</b> and the service rejects creating
-   * them: the variant→category mapping belongs to product-svc, which publishes no catalogue event
-   * for pricing-svc to project (golden rule #1 forbids reading its tables). Until it does, a
-   * CATEGORY promotion cannot be honoured — and the previous engine's answer to that was to accept
-   * one, store it, and never fire it.
+   * <p>A CATEGORY row is resolved after the scope rows are read, through the catalogue product-svc
+   * announces: every variant of every product whose category path carries that category, so a
+   * parent category reaches its children's products.
    */
   public Map<UUID, Set<UUID>> findPromotionVariantScopes(UUID tenantId, List<UUID> promotionIds) {
     return findPromotionVariantScopes(tenantId, promotionIds, null);
@@ -977,6 +1000,9 @@ public class PricingRepository extends BaseOutboxRepository {
     String placeholders = String.join(",", java.util.Collections.nCopies(promotionIds.size(), "?"));
     Map<UUID, Set<UUID>> out = new java.util.LinkedHashMap<>();
     Set<UUID> unscoped = new java.util.HashSet<>();
+    // Never call query() from inside a row mapper: the outer connection is still held, so a second
+    // checkout per CATEGORY row can starve the pool. Read the scope rows first, resolve after.
+    List<UUID[]> categoryScopes = new java.util.ArrayList<>();
     query(
         "SELECT promotion_id, scope_type, scope_id FROM promotion_items"
             + " WHERE tenant_id = ? AND promotion_id IN ("
@@ -1000,8 +1026,8 @@ public class PricingRepository extends BaseOutboxRepository {
             // product whose category path carries this category, so a parent's scope reaches its
             // children's products. A category nothing was announced for adds no variant — and the
             // set stays present but empty, which the engine reads as "nothing", not "everything".
-            out.computeIfAbsent(promo, k -> new java.util.LinkedHashSet<>())
-                .addAll(findVariantsInCategory(tenantId, scopeId));
+            out.computeIfAbsent(promo, k -> new java.util.LinkedHashSet<>());
+            categoryScopes.add(new UUID[] {promo, scopeId});
           } else {
             // ALL (or a malformed row): this promotion is not variant-scoped at all.
             unscoped.add(promo);
@@ -1009,6 +1035,9 @@ public class PricingRepository extends BaseOutboxRepository {
           return promo;
         },
         "find promotion scopes");
+    for (UUID[] cs : categoryScopes) {
+      out.get(cs[0]).addAll(findVariantsInCategory(tenantId, cs[1]));
+    }
     // An ALL row beats any VARIANT rows alongside it — "everything" is not narrowed by also
     // naming a few things.
     for (UUID id : unscoped) out.remove(id);
@@ -1066,7 +1095,8 @@ public class PricingRepository extends BaseOutboxRepository {
    * SJ-D15's lesson applied before the defect rather than after it — the question is not whether
    * this code is correct but what a replay of it does.
    *
-   * @return true if this call recorded the redemption, false if it had already been recorded
+   * @return true if this call recorded the redemption; false if it had already been recorded or the
+   *     promotion is not this tenant's
    */
   public boolean recordRedemption(
       UUID tenantId,
@@ -1075,27 +1105,33 @@ public class PricingRepository extends BaseOutboxRepository {
       UUID customerId,
       java.math.BigDecimal amount,
       String currency) {
-    try {
-      exec(
-          "INSERT INTO promotion_redemptions"
-              + " (id, tenant_id, promotion_id, order_id, customer_id, amount, currency)"
-              + " VALUES (?,?,?,?,?,?,?)"
-              + " ON CONFLICT (tenant_id, promotion_id, order_id) DO NOTHING",
-          ps -> {
+    // Selected from the tenant's own promotion, so an id that is unknown or belongs to another
+    // business records nothing (the foreign key alone would take any promotion's id). Nothing is
+    // swallowed: a database fault reaches the caller as a fault, not as "already recorded".
+    return inTx(
+        c -> {
+          try (var ps =
+              c.prepareStatement(
+                  "INSERT INTO promotion_redemptions"
+                      + " (id, tenant_id, promotion_id, order_id, customer_id, amount, currency)"
+                      + " SELECT ?::uuid, p.tenant_id, p.id, ?::uuid, ?::uuid, ?::numeric, ?"
+                      + " FROM promotions p WHERE p.tenant_id = ? AND p.id = ?"
+                      + " ON CONFLICT (tenant_id, promotion_id, order_id) DO NOTHING")) {
             ps.setObject(1, Ids.newId());
-            ps.setObject(2, tenantId);
-            ps.setObject(3, promotionId);
-            ps.setObject(4, orderId);
-            ps.setObject(5, customerId);
-            ps.setBigDecimal(6, amount);
-            ps.setString(7, currency);
-          },
-          "record promotion redemption");
-      return true;
-    } catch (RuntimeException e) {
-      // ON CONFLICT already makes this a no-op; the catch is for the race that beats it.
-      return false;
-    }
+            ps.setObject(2, orderId);
+            ps.setObject(3, customerId);
+            // What the offer gave, in the order currency's own minor units.
+            ps.setBigDecimal(
+                4,
+                amount.setScale(
+                    com.storeql.service.Fx.minorUnits(currency), java.math.RoundingMode.HALF_UP));
+            ps.setString(5, currency);
+            ps.setObject(6, tenantId);
+            ps.setObject(7, promotionId);
+            return ps.executeUpdate() > 0;
+          }
+        },
+        "record promotion redemption");
   }
 
   /**
@@ -1179,10 +1215,13 @@ public class PricingRepository extends BaseOutboxRepository {
   }
 
   /**
-   * Records what a promotion applies to.
+   * Records what a promotion applies to, when the promotion is the tenant's own: the row is written
+   * in the same statement that finds the promotion under the tenant, so a promotion of another
+   * business is never scoped, and no scope row names one.
    *
    * @param pi the scope row to persist; its {@code id} must already be a UUIDv7
-   * @return the scope row as stored
+   * @return the scope row as stored, or {@code null} when the tenant has no such promotion (nothing
+   *     was written)
    */
   public PromotionItem addPromotionItem(PromotionItem pi) {
     return inTx(
@@ -1192,13 +1231,16 @@ public class PricingRepository extends BaseOutboxRepository {
           try (var ps =
               c.prepareStatement(
                   "INSERT INTO promotion_items (id,tenant_id,promotion_id,scope_type,scope_id)"
-                      + " VALUES (?,?,?,?,?)")) {
+                      + " SELECT ?,?,?,?,? WHERE EXISTS"
+                      + " (SELECT 1 FROM promotions WHERE tenant_id = ? AND id = ?)")) {
             ps.setObject(1, pi.id());
             ps.setObject(2, pi.tenantId());
             ps.setObject(3, pi.promotionId());
             ps.setString(4, pi.scopeType());
             ps.setObject(5, pi.scopeId());
-            ps.executeUpdate();
+            ps.setObject(6, pi.tenantId());
+            ps.setObject(7, pi.promotionId());
+            if (ps.executeUpdate() == 0) return null;
           }
           com.storeql.pricing.repo.AppliedPriceRepository.enqueue(
               c, pi.tenantId(), null, Instant.now(), "PROMOTION_SCOPED");
@@ -1676,7 +1718,11 @@ public class PricingRepository extends BaseOutboxRepository {
               number = rs.getLong(1);
             }
           }
-          String label = MarkdownLabel.encode(number, draft.markdownPrice());
+          String label =
+              MarkdownLabel.encode(
+                  number,
+                  draft.markdownPrice(),
+                  com.storeql.service.Fx.minorUnits(draft.currency()));
           try (var ins =
               c.prepareStatement(
                   "INSERT INTO markdowns (id, tenant_id, store_id, variant_id, batch_id, batch_no,"
@@ -1897,7 +1943,7 @@ public class PricingRepository extends BaseOutboxRepository {
             "SELECT cv.variant_id FROM catalogue_variants cv"
                 + " JOIN catalogue_products cp"
                 + "   ON cp.tenant_id = cv.tenant_id AND cp.product_id = cv.product_id"
-                + " WHERE cv.tenant_id = ? AND ? = ANY (cp.category_path)",
+                + " WHERE cv.tenant_id = ? AND cp.category_path @> ARRAY[?]::uuid[]",
             ps -> {
               ps.setObject(1, tenantId);
               ps.setObject(2, categoryId);

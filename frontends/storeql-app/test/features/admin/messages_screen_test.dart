@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -23,6 +24,10 @@ class _Server implements HttpClientAdapter {
   final Map<String, ResponseBody Function(RequestOptions)> routes;
   final List<RequestOptions> requests = [];
 
+  /// Routes ("GET /path") whose answer waits until the test completes the
+  /// future held here.
+  final Map<String, Future<void>> holds = {};
+
   _Server(this.routes);
 
   @override
@@ -31,6 +36,7 @@ class _Server implements HttpClientAdapter {
   @override
   Future<ResponseBody> fetch(RequestOptions o, Stream<List<int>>? s, Future<void>? c) async {
     requests.add(o);
+    await holds['${o.method} ${o.path}'];
     final route = routes['${o.method} ${o.path}'];
     return route == null ? jsonResponse('{"error":{"code":"NOT_FOUND","message":"no route"}}', 404) : route(o);
   }
@@ -82,12 +88,16 @@ final _catalogue = jsonEncode({
   ],
 });
 
-String _template(String source, int? version, String subject, String body) => jsonEncode({
+String _template(String source, int? version, String subject, String body,
+        {String language = 'en', String? wordsLanguage, bool storedWordsUnusable = false}) =>
+    jsonEncode({
       'data': {
         'type': 'ORDER_CONFIRMED',
         'form': 'EMAIL',
-        'language': 'en',
+        'language': language,
+        'wordsLanguage': wordsLanguage ?? 'en',
         'source': source,
+        'storedWordsUnusable': storedWordsUnusable,
         'version': version,
         'subject': subject,
         'body': body,
@@ -147,15 +157,19 @@ Future<GoRouter> _pump(
 Map<String, ResponseBody Function(RequestOptions)> _routes({
   String source = 'DEFAULT',
   int? version,
+  String? wordsLanguage,
+  bool storedWordsUnusable = false,
 }) =>
     {
       'GET $_base/templates': (_) => jsonResponse(_catalogue),
       'GET $_base/template-settings': (_) => jsonResponse(_settings),
       'GET $_base/templates/ORDER_CONFIRMED/EMAIL/en': (_) => jsonResponse(
-            _template(source, version, 'Your order is confirmed', 'Thanks for your order!\n\nOrder {{order}}'),
+            _template(source, version, 'Your order is confirmed', 'Thanks for your order!\n\nOrder {{order}}',
+                wordsLanguage: wordsLanguage, storedWordsUnusable: storedWordsUnusable),
           ),
       'GET $_base/templates/ORDER_CONFIRMED/EMAIL/pl': (_) => jsonResponse(
-            _template('BUSINESS', 2, 'Zamówienie {{order}}', 'Dziękujemy! Razem: {{total}}'),
+            _template('BUSINESS', 2, 'Zamówienie {{order}}', 'Dziękujemy! Razem: {{total}}',
+                language: 'pl', wordsLanguage: 'pl'),
           ),
       'PUT $_base/templates/ORDER_CONFIRMED/EMAIL/en': (o) => jsonResponse(
             _template('BUSINESS', 1, (o.data as Map)['subject'] as String, (o.data as Map)['body'] as String),
@@ -215,6 +229,155 @@ void main() {
     expect(find.text('This message has no password'), findsOneWidget);
     final sent = server.sent('POST').single;
     expect(sent.data, {'subject': 'Your order is confirmed', 'body': 'Total: {{total}}'});
+  });
+
+  testWidgets(
+      'a language with no words of its own, or retired, shows the words a message in it would go out in',
+      (tester) async {
+    final server = _Server(_routes(source: 'DEFAULT_LANGUAGE', version: 2, wordsLanguage: 'pl'));
+    await _pump(tester, server);
+    await tester.tap(find.byKey(const Key('messages-open-ORDER_CONFIRMED')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sent in your Polish words · version 2'), findsOneWidget);
+    expect(find.text("The platform's words"), findsNothing, reason: 'those are not what goes out');
+    expect(find.byKey(const Key('template-retire')), findsNothing, reason: 'nothing of its own to retire here');
+    expect(find.byKey(const Key('template-unusable')), findsNothing, reason: 'it has none, not one it cannot use');
+    expect((tester.widget(find.byKey(const Key('template-subject'))) as TextField).controller!.text,
+        'Your order is confirmed');
+  });
+
+  testWidgets('a language whose own words cannot be sent is not told it has none', (tester) async {
+    final server = _Server(_routes(source: 'DEFAULT_LANGUAGE', version: 2, wordsLanguage: 'pl', storedWordsUnusable: true));
+    await _pump(tester, server);
+    await tester.tap(find.byKey(const Key('messages-open-ORDER_CONFIRMED')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('template-unusable')),
+        matching: find.text(
+          'What you wrote in English has a mistake that stops it being sent, so messages in English '
+          'go out in your Polish words, shown below. Save a new version to replace it.',
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Sent in your Polish words · version 2'), findsOneWidget, reason: 'what does go out is still said');
+    expect((tester.widget(find.byKey(const Key('template-subject'))) as TextField).controller!.text,
+        'Your order is confirmed');
+  });
+
+  testWidgets('with no usable words of the business, the note says the platform\'s go out', (tester) async {
+    final server = _Server(_routes(storedWordsUnusable: true));
+    await _pump(tester, server);
+    await tester.tap(find.byKey(const Key('messages-open-ORDER_CONFIRMED')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('template-unusable')),
+        matching: find.text(
+          'What you wrote in English has a mistake that stops it being sent, so messages in English '
+          "go out in the platform's words, shown below. Save a new version to replace it.",
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text("The platform's words"), findsOneWidget);
+  });
+
+  // The note is about the language the loaded words were asked for in: after a
+  // switch it must not name the new language on the old language's flag, while
+  // the new words load or when they never arrive.
+  group('the note about words that cannot be sent follows the language shown', () {
+    const de = 'GET $_base/templates/ORDER_CONFIRMED/EMAIL/de';
+    const fr = 'GET $_base/templates/ORDER_CONFIRMED/EMAIL/fr';
+
+    Future<void> chooseLanguage(WidgetTester tester, String name) async {
+      await tester.tap(find.byKey(const Key('template-language')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(name).last);
+      await tester.pumpAndSettle();
+    }
+
+    Map<String, ResponseBody Function(RequestOptions)> routesWithBrokenGerman() => {
+          ..._routes(),
+          de: (_) => jsonResponse(
+                _template('DEFAULT_LANGUAGE', 2, 'Your order is confirmed', 'Thanks for your order!\n\nOrder {{order}}',
+                    language: 'de', wordsLanguage: 'pl', storedWordsUnusable: true),
+              ),
+        };
+
+    Future<void> openGerman(WidgetTester tester, _Server server) async {
+      await _pump(tester, server);
+      await tester.tap(find.byKey(const Key('messages-open-ORDER_CONFIRMED')));
+      await tester.pumpAndSettle();
+      await chooseLanguage(tester, 'German');
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('template-unusable')),
+          matching: find.textContaining('What you wrote in German has a mistake'),
+        ),
+        findsOneWidget,
+        reason: 'the broken German version is noted while German is shown',
+      );
+    }
+
+    testWidgets('is gone while another language loads', (tester) async {
+      final server = _Server(routesWithBrokenGerman());
+      final answer = Completer<void>();
+      server.holds[fr] = answer.future;
+      server.routes[fr] = (_) => jsonResponse(
+            _template('BUSINESS', 3, 'Commande {{order}}', 'Merci ! {{order}}', language: 'fr', wordsLanguage: 'fr'),
+          );
+      await openGerman(tester, server);
+
+      await chooseLanguage(tester, 'French');
+
+      expect(find.byKey(const Key('template-unusable')), findsNothing, reason: 'French has not been read yet');
+      expect(find.textContaining('What you wrote in'), findsNothing);
+      expect(find.byKey(const Key('template-source')), findsNothing, reason: 'nor has its source');
+
+      answer.complete();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('template-unusable')), findsNothing, reason: 'French has a usable version');
+      expect(find.text('Your words · version 3'), findsOneWidget);
+    });
+
+    testWidgets('is gone when the other language fails to load', (tester) async {
+      final server = _Server(routesWithBrokenGerman());
+      server.routes[fr] = (_) => jsonResponse('{"error":{"code":"BOOM","message":"no"}}', 500);
+      await openGerman(tester, server);
+
+      await chooseLanguage(tester, 'French');
+
+      expect(find.byKey(const Key('template-error')), findsOneWidget, reason: 'the read failed');
+      expect(find.byKey(const Key('template-unusable')), findsNothing, reason: 'nothing is known of French');
+      expect(find.textContaining('What you wrote in'), findsNothing);
+    });
+
+    testWidgets('names the language its own version was written in', (tester) async {
+      final server = _Server({
+        ...routesWithBrokenGerman(),
+        fr: (_) => jsonResponse(
+              _template('DEFAULT', null, 'Your order is confirmed', 'Thanks for your order!',
+                  language: 'fr', wordsLanguage: 'en', storedWordsUnusable: true),
+            ),
+      });
+      await openGerman(tester, server);
+
+      await chooseLanguage(tester, 'French');
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('template-unusable')),
+          matching: find.textContaining('What you wrote in French has a mistake'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('German'), findsNothing, reason: 'the menu has French chosen; German is not named');
+    });
   });
 
   testWidgets('saving writes the version and says so; another language opens its own words', (tester) async {
@@ -348,6 +511,20 @@ void main() {
     await tester.scrollUntilVisible(find.byKey(const Key('template-save')), 200,
         scrollable: find.descendant(of: find.byType(MessageEditorScreen), matching: find.byType(Scrollable)).first);
     expect(find.byKey(const Key('template-body')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('on a phone at 200% text the note about words that cannot be sent lays out without overflowing',
+      (tester) async {
+    final server = _Server(_routes(source: 'DEFAULT_LANGUAGE', version: 2, wordsLanguage: 'pl', storedWordsUnusable: true));
+    await _pump(tester, server, size: const Size(390, 844), textScale: 2);
+    final open = find.byKey(const Key('messages-open-ORDER_CONFIRMED'));
+    await tester.scrollUntilVisible(open, 200);
+    await tester.ensureVisible(open);
+    await tester.pumpAndSettle();
+    await tester.tap(open);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('template-unusable')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

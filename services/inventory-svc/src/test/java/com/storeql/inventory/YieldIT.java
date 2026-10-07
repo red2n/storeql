@@ -20,6 +20,7 @@ import java.sql.DriverManager;
 import java.time.LocalDate;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -36,8 +37,21 @@ class YieldIT {
 
   private static final PostgresSupport PG;
 
+  /**
+   * The businesses as tenant-svc would describe them: a breakdown's costs are kept to the business
+   * currency's minor units, so its currency is read (the currency minor-units sweep) — a pound
+   * business, a dinar business and a yen business.
+   */
+  private static final com.storeql.test.TenantSvcStub TENANTS;
+
   static {
     PG = PostgresSupport.start();
+    TENANTS =
+        com.storeql.test.TenantSvcStub.start()
+            .with(YieldIT.T, "GBP", "GB")
+            .with(YieldIT.T2, "GBP", "GB")
+            .with(YieldIT.KW, "KWD", "KW")
+            .with(YieldIT.JP, "JPY", "JP");
     System.setProperty("storeql.db.url", PG.jdbcUrl());
     System.setProperty("storeql.db.migration-url", PG.jdbcUrl());
     System.setProperty("storeql.db.user", PG.username());
@@ -49,6 +63,8 @@ class YieldIT {
 
   private static final String T = "01a091ae-611e-702c-a97b-d1b8025478e1";
   private static final String T2 = "01a091ae-611e-702c-a97b-d1b8025478e2";
+  private static final String KW = "01a091ae-611e-702c-a97b-d1b8025478e3";
+  private static final String JP = "01a091ae-611e-702c-a97b-d1b8025478e4";
   private static final String STORE = "01a091ae-611e-703c-a378-a4972ea461e1";
   private static final String SIDE = "01a091ae-611e-7037-a4b7-c854f0266ae1";
   private static final String SIRLOIN = "01a091ae-611e-7037-a4b7-c854f0266ae2";
@@ -85,6 +101,25 @@ class YieldIT {
             .header("X-Tenant-Id", tenant)
             .header("X-User-Id", "01a091ae-611e-700b-bde4-50df0324c3e1")
             .header("X-Roles", roles);
+    return "GET".equals(method) ? b.get() : b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
+  }
+
+  private Response callAs(
+      String method,
+      String path,
+      String json,
+      String tenant,
+      String roles,
+      String permissions,
+      String stores) {
+    var b =
+        com.storeql.test.WebTargets.at(target, path)
+            .request()
+            .header("X-Tenant-Id", tenant)
+            .header("X-User-Id", "01a091ae-611e-700b-bde4-50df0324c3e1")
+            .header("X-Roles", roles);
+    if (permissions != null) b = b.header("X-Permissions", permissions);
+    if (stores != null) b = b.header("X-Store-Ids", stores);
     return "GET".equals(method) ? b.get() : b.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
@@ -246,6 +281,163 @@ class YieldIT {
             call("POST", "/admin/inventory/yield/runs", run(id, 100, 34, 44, ""), T2, "OWNER"),
             404),
         is("INVENTORY_YIELD_TEMPLATE_NOT_FOUND"));
+  }
+
+  // ── who may break a primal down ────────────────────────────────────────────
+
+  /**
+   * Catalogue INV yield gap 1: templates are management's (create and end); a breakdown draws stock
+   * and makes new stock, so it needs stock.adjust at a store the caller keeps. Another business's
+   * staff, naming our store and template, find nothing and move nothing.
+   */
+  @Test
+  void aBreakdownNeedsStockAdjustAtAStoreTheCallerKeepsAndTemplatesAreManagements() {
+    String id = template();
+    receiveSide(100, null);
+    String path = "/admin/inventory/yield/runs";
+    String body = run(id, 100, 34, 44, "");
+    String elsewhere = "01a091ae-611e-703c-a378-a4972ea461e9";
+
+    // The till, a role narrowed off the permission and a keeper of another store are refused.
+    assertThat(
+        code(callAs("POST", path, body, T, "CASHIER", null, null), 403), is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", "-", null), 403),
+        is("PERMISSION_DENIED"));
+    assertThat(
+        code(callAs("POST", path, body, T, "STOREKEEPER", null, elsewhere), 403),
+        is("STORE_ACCESS_DENIED"));
+
+    // Templates: staff below management may neither create nor end one.
+    for (String role : new String[] {"STOREKEEPER", "CASHIER"}) {
+      assertThat(
+          role,
+          code(
+              callAs("POST", "/admin/inventory/yield/templates", TEMPLATE, T, role, null, null),
+              403),
+          is("FORBIDDEN"));
+      assertThat(
+          role,
+          code(
+              callAs(
+                  "POST",
+                  "/admin/inventory/yield/templates/" + id + "/end",
+                  "{}",
+                  T,
+                  role,
+                  null,
+                  null),
+              403),
+          is("FORBIDDEN"));
+    }
+
+    // Another business's staff, naming our store and template.
+    for (String role : new String[] {"PLATFORM_ADMIN", "OWNER", "MANAGER", "STOREKEEPER"}) {
+      assertThat(
+          role,
+          code(callAs("POST", path, body, T2, role, null, STORE), 404),
+          is("INVENTORY_YIELD_TEMPLATE_NOT_FOUND"));
+    }
+    for (String role : new String[] {"OWNER", "MANAGER"}) {
+      assertThat(
+          role,
+          code(
+              callAs(
+                  "POST",
+                  "/admin/inventory/yield/templates/" + id + "/end",
+                  "{}",
+                  T2,
+                  role,
+                  null,
+                  null),
+              404),
+          is("INVENTORY_YIELD_TEMPLATE_NOT_FOUND"));
+    }
+    assertThat(
+        code(callAs("POST", path, body, T2, "CASHIER", null, STORE), 403), is("PERMISSION_DENIED"));
+
+    // Nothing moved: no run, the primal untouched, the template live.
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.yield_runs"), is("0"));
+    assertThat(level(SIDE, "onHand"), comparesEqualTo(new BigDecimal("100")));
+    assertThat(
+        Envelopes.okArray(get("/admin/inventory/yield/templates"))
+            .getJsonObject(0)
+            .getBoolean("active"),
+        is(true));
+
+    // The keeper of the store, holding stock.adjust by their tier, records it.
+    Envelopes.created(callAs("POST", path, body, T, "STOREKEEPER", null, STORE));
+    assertThat(Envelopes.scalar(PG, "SELECT count(*) FROM inventory.yield_runs"), is("1"));
+  }
+
+  // ── the currency's own minor units ─────────────────────────────────────────
+
+  /** A breakdown at a business, its side received at {@code unitCost}, costed as recorded. */
+  private JsonObject breakdownAt(String tenant, String unitCost) {
+    String templateId =
+        Envelopes.created(
+                call("POST", "/admin/inventory/yield/templates", TEMPLATE, tenant, "OWNER"))
+            .getString("id");
+    Envelopes.created(
+        call(
+            "POST",
+            "/admin/inventory/receive",
+            "{\"storeId\":\""
+                + STORE
+                + "\",\"variantId\":\""
+                + SIDE
+                + "\",\"qty\":100,\"batchNo\":\"LOT-C\",\"costPrice\":"
+                + unitCost
+                + ",\"expiryDate\":\""
+                + LocalDate.now().plusDays(10)
+                + "\"}",
+            tenant,
+            "OWNER"));
+    return Envelopes.created(
+        call(
+            "POST",
+            "/admin/inventory/yield/runs",
+            run(templateId, 100, 34, 44, ""),
+            tenant,
+            "STOREKEEPER"));
+  }
+
+  private static BigDecimal number(JsonObject o, String field) {
+    return o.getJsonNumber(field).bigDecimalValue();
+  }
+
+  @Test
+  @DisplayName("A dinar breakdown keeps its fils; a yen breakdown is costed in whole yen")
+  void aBreakdownIsCostedInTheBusinessCurrencysOwnMinorUnits() {
+    // KWD 5.001 a kilo on 100 kg is 500.100; sirloin carries 60% over 34 kg (8.8253 → 8.825),
+    // mince 40% over 44 kg (4.5464 → 4.546), and 22 kg lost is 110.022 — never two places.
+    JsonObject dinar = breakdownAt(KW, "5.001");
+    assertThat(number(dinar, "inputCost"), is(new BigDecimal("500.100")));
+    assertThat(number(dinar, "lossAtCost"), is(new BigDecimal("110.022")));
+    JsonArray dinarCuts = dinar.getJsonArray("outputs");
+    assertThat(
+        number(Envelopes.find(dinarCuts, "variantId", SIRLOIN), "unitCost"),
+        is(new BigDecimal("8.825")));
+    assertThat(
+        number(Envelopes.find(dinarCuts, "variantId", MINCE), "unitCost"),
+        is(new BigDecimal("4.546")));
+    // Read back from the table, not only from the answer: the third decimal is kept.
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT input_cost::text FROM inventory.yield_runs WHERE tenant_id = '" + KW + "'"),
+        is("500.100"));
+
+    // ¥500 a kilo on 100 kg is ¥50,000: sirloin ¥882 (882.35), mince ¥455 (454.55), the loss
+    // ¥11,000 — whole yen, never 882.35 or 50000.00.
+    JsonObject yen = breakdownAt(JP, "500");
+    assertThat(number(yen, "inputCost"), is(new BigDecimal("50000")));
+    assertThat(number(yen, "lossAtCost"), is(new BigDecimal("11000")));
+    JsonArray yenCuts = yen.getJsonArray("outputs");
+    assertThat(
+        number(Envelopes.find(yenCuts, "variantId", SIRLOIN), "unitCost"),
+        is(new BigDecimal("882")));
+    assertThat(
+        number(Envelopes.find(yenCuts, "variantId", MINCE), "unitCost"), is(new BigDecimal("455")));
   }
 
   // ── the breakdown: the primal consumed, the cuts made at cost, the loss known ─
@@ -425,5 +617,58 @@ class YieldIT {
         code(post("/admin/inventory/yield/runs", run(templateId, 120, 40, 50, "")), 409),
         is("INVENTORY_YIELD_INPUT_NOT_OWNED"));
     assertThat(level(SIDE, "onHand"), comparesEqualTo(new BigDecimal("150")));
+  }
+
+  // ── refusals ───────────────────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("A cut named twice, in a template or in a run, is refused and nothing is drawn")
+  void aCutNamedTwiceIsRefused() {
+    String twice =
+        "{\"name\":\"Side\",\"inputVariantId\":\""
+            + SIDE
+            + "\",\"outputs\":[{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"expectedPct\":30},{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"expectedPct\":20}]}";
+    assertThat(
+        code(post("/admin/inventory/yield/templates", twice), 400),
+        is("INVENTORY_YIELD_OUTPUT_DUPLICATE"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.yield_templates WHERE tenant_id = '" + T + "'"),
+        is("0"));
+
+    String templateId = template();
+    receiveSide(20, null);
+    String body =
+        "{\"storeId\":\""
+            + STORE
+            + "\",\"templateId\":\""
+            + templateId
+            + "\",\"inputQty\":10,\"outputs\":[{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"qty\":3},{\"variantId\":\""
+            + SIRLOIN
+            + "\",\"qty\":3}]}";
+    assertThat(
+        code(post("/admin/inventory/yield/runs", body), 400),
+        is("INVENTORY_YIELD_OUTPUT_DUPLICATE"));
+    assertThat(
+        Envelopes.scalar(
+            PG, "SELECT count(*) FROM inventory.yield_runs WHERE tenant_id = '" + T + "'"),
+        is("0"));
+    assertThat(level(SIDE, "onHand"), comparesEqualTo(new BigDecimal("20")));
+  }
+
+  @Test
+  @DisplayName("A yield report whose period ends before it starts is refused")
+  void aYieldPeriodEndingBeforeItStartsIsRefused() {
+    assertThat(
+        code(get("/admin/inventory/yield/runs?from=2026-02-01&to=2026-01-01"), 400),
+        is("INVENTORY_PERIOD_INVALID"));
+    assertThat(
+        get("/admin/inventory/yield/runs?from=2026-01-01&to=2026-01-01").getStatus(), is(200));
   }
 }

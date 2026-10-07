@@ -83,6 +83,18 @@ let counter = 0;
  * guard rightly refuses (400 CARD_DATA_NOT_ACCEPTED), failing whichever suite drew it. The millis
  * in base 36 begin with a letter, so no run of thirteen digits can form.
  */
+/**
+ * A valid EAN-13 in the in-store range (prefix 2): twelve digits and their GS1 check digit.
+ * product-svc refuses a barcode shaped like a GTIN whose check digit is wrong.
+ */
+export function gtin13() {
+  counter += 1;
+  const body = `2${String(Date.now()).slice(-8)}${String(counter % 100).padStart(2, '0')}${Math.floor(Math.random() * 10)}`;
+  let sum = 0;
+  for (let i = 0; i < 12; i += 1) sum += Number(body[i]) * (i % 2 === 0 ? 1 : 3);
+  return `${body}${(10 - (sum % 10)) % 10}`;
+}
+
 export function uniq() {
   counter += 1;
   return `${Date.now().toString(36)}${counter.toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
@@ -122,6 +134,10 @@ export function expect(res, label, status, code) {
     const got = `${res.status}${errorCode(res) ? ` ${errorCode(res)}` : ''}`;
     const want = `${statuses.join('/')}${code ? ` ${code}` : ''}`;
     console.error(`✗ ${label}: want ${want}, got ${got} — ${String(res.body).slice(0, 400)}`);
+  } else if (__ENV.PRINT_REFUSAL_CODES && !code && res.status >= 400) {
+    // Learn mode: a refusal checked by its status alone prints the code the server answered, so the
+    // check can be made to assert it (PRINT_REFUSAL_CODES=1 k6 run ...).
+    console.log(`REFUSAL-CODE ${JSON.stringify({ label, status: res.status, code: errorCode(res) || null })}`);
   }
   return ok;
 }
@@ -155,10 +171,22 @@ export function poll(seconds, fn, interval = 1) {
 
 // ── identities ────────────────────────────────────────────────────────────────
 
+/** A shopper's sign-up: a CUSTOMER login of no business, never anybody's staff (see provisionStaff). */
 export function register(label) {
   const email = `${label}-${uniq()}@k6.storeql.test`;
   const res = call('POST', '/api/iam-svc/auth/register', { body: { email, password: PASSWORD } });
   const d = must(res, 201, `register ${email}`);
+  return { email, password: PASSWORD, token: d.accessToken, refreshToken: d.refreshToken, userId: claims(d.accessToken).sub };
+}
+
+/**
+ * "Start a business": the sign-up of a login that is about to own a business — STAFF, with no
+ * tenant and no role until the business it creates makes it that business's OWNER.
+ */
+export function registerBusiness(label) {
+  const email = `${label}-${uniq()}@k6.storeql.test`;
+  const res = call('POST', '/api/iam-svc/auth/register/business', { body: { email, password: PASSWORD } });
+  const d = must(res, 201, `register a business login ${email}`);
   return { email, password: PASSWORD, token: d.accessToken, refreshToken: d.refreshToken, userId: claims(d.accessToken).sub };
 }
 
@@ -275,7 +303,8 @@ const STORE_DEFAULTS = {
  * then add `stores` stores (the first is the default store, with its DEFAULT zone).
  */
 export function onboardTenant(label, { country = 'GB', currency = 'GBP', stores = 1 } = {}) {
-  const owner = register(`${label}-owner`);
+  // An owner signs up as a business, never as a shopper (a shopper's login never reaches the wizard).
+  const owner = registerBusiness(`${label}-owner`);
   const run = uniq();
   const created = call('POST', '/api/tenant-svc/onboarding/tenants', {
     token: owner.token,
@@ -300,9 +329,23 @@ export function addStore(tenant, suffix, type = 'STORE') {
   return { id: store.id, code, name: store.name };
 }
 
+/**
+ * A staff login made in the tenant the one way there is (29 Sep 2026): the owner provisions the
+ * address in the business (`POST /auth/admin/staff-users`), and the login signs in — its token names
+ * the business and holds no role until an assignment binds one. A StaffAssigned binds only a login
+ * already in the business, so a shopper's sign-up (`register`) is never made anybody's staff.
+ */
+export function provisionStaff(tenant, label) {
+  const email = `${label}-${uniq()}@k6.storeql.test`;
+  const res = call('POST', '/api/iam-svc/auth/admin/staff-users', { token: tenant.owner.token, body: { email, password: PASSWORD } });
+  const { userId } = must(res, 200, `provision staff ${email}`);
+  const d = must(login({ email, password: PASSWORD }), 200, `sign in ${email}`);
+  return { email, password: PASSWORD, token: d.accessToken, refreshToken: d.refreshToken, userId };
+}
+
 /** A staff login in the tenant with `role` at `storeIds`, signed in with that role in its token. */
 export function staffUser(tenant, role, storeIds) {
-  const user = register(`${tenant.label}-${role.toLowerCase()}`);
+  const user = provisionStaff(tenant, `${tenant.label}-${role.toLowerCase()}`);
   for (const storeId of storeIds) {
     const res = call('POST', '/api/tenant-svc/admin/staff', {
       token: tenant.owner.token,
@@ -314,8 +357,27 @@ export function staffUser(tenant, role, storeIds) {
   return user;
 }
 
+/**
+ * A manager of the whole business: a business-wide assignment (`businessWide: true`, no store; only
+ * an owner grants it), signed in with MANAGER in its token and no store in `storeIds`. What belongs
+ * to the business as a whole — purchase-svc's payment runs, paying accounts and accounting
+ * connection, tenant-svc's profile and rates — needs a caller held to none; a manager held to a
+ * store (`staffUser(tenant, 'MANAGER', [store.id])`) is refused there 403 BUSINESS_WIDE_ONLY.
+ */
+export function businessWideManager(tenant) {
+  const user = provisionStaff(tenant, `${tenant.label}-manager-bw`);
+  const res = call('POST', '/api/tenant-svc/admin/staff', {
+    token: tenant.owner.token,
+    body: { userId: user.userId, role: 'MANAGER', businessWide: true },
+  });
+  must(res, 201, 'assign a business-wide MANAGER');
+  signInUntil(user, (c) => c.tenant === tenant.tenantId && (c.roles || []).includes('MANAGER') && (c.storeIds || []).length === 0);
+  return user;
+}
+
 export function setTenantStatus(admin, tenantId, status) {
-  return call('PATCH', `/api/tenant-svc/platform/tenants/${tenantId}/status`, { token: admin.token, body: { status } });
+  // Switching a business off must say why; switching it back on needs no reason.
+  return call('PATCH', `/api/tenant-svc/platform/tenants/${tenantId}/status`, { token: admin.token, body: { status, ...(status === 'INACTIVE' ? { reason: 'k6 suspension' } : {}) } });
 }
 
 export function setStoreStatus(tenant, storeId, status) {
@@ -352,7 +414,8 @@ export function sellableVariant(tenant, name, extra = {}) {
   const variant = must(
     call('POST', `/api/product-svc/admin/products/${product.id}/variants`, {
       token: t,
-      body: { sku, barcode: `${run}`.slice(0, 13), unit: 'PCS' },
+      // An internal code, not a GTIN: product-svc checks the GS1 digit of any all-digit code of GTIN length.
+      body: { sku, barcode: `K${run}`.slice(0, 13), unit: 'PCS' },
     }),
     201,
     `create variant ${sku}`
@@ -415,6 +478,70 @@ export function receive(tenant, storeId, variantId, qty, costPrice = '10.00') {
     idem: true,
     body: { storeId, variantId, qty, batchNo: `B-${uniq()}`.slice(0, 32), costPrice },
   });
+}
+
+// ── gift cards ────────────────────────────────────────────────────────────────
+
+/**
+ * A gift card given by hand: a manager's or owner's act, with no sale behind it. It needs a
+ * `reason` (GOODWILL, PROMOTION, COMPENSATION or MIGRATION) and an Idempotency-Key, and takes no
+ * tender: money taken for a card is a sale (see sellGiftCard). Returns the response.
+ */
+export function issueGiftCardByHand(token, storeId, amount, { reason = 'GOODWILL', key = true, extra = {} } = {}) {
+  return call('POST', '/api/order-svc/gift-cards', {
+    token,
+    ...(key ? { idem: key } : {}),
+    body: { storeId, amount, ...(reason ? { reason } : {}), ...extra },
+  });
+}
+
+/**
+ * A gift card sold at the till: a gift-card line (`giftCardLoads`) on a till sale, whose value
+ * reaches the card when the payment that completes the sale is captured — over Kafka, so the
+ * balance is polled.
+ *
+ * The API answers no code for a card a sale makes new (not on the order, not on the payment, and
+ * there is no list), so a flow that goes on to read or spend the card names one it already holds
+ * (`code`) and the sale tops that card up. With no `code` a new card is sold and only the sale
+ * comes back.
+ *
+ * @param tenant the business; its owner reads the card and takes the payment
+ * @param opts.code the card to top up, or none for a new card
+ * @param opts.token who rings the sale up (default the owner; a cashier sells cards too)
+ * @param opts.method the tender the sale is paid with
+ * @param opts.items goods sold on the same sale, if any
+ * @returns { order, before, unpaid, after, landed }: the placed sale; the card's balance before the
+ *   sale, once the sale is placed and not yet paid, and at the end; and the seconds the load took to
+ *   land (-1 when it never did, null when no card was named)
+ */
+export function sellGiftCard(tenant, storeId, amount, { code, token, method = 'CASH', items = [], seconds = 90 } = {}) {
+  const owner = tenant.owner.token;
+  const balance = () =>
+    code ? Number(data(call('GET', `/api/order-svc/gift-cards/${encodeURIComponent(code)}`, { token: owner })).currentBalance) : NaN;
+  const before = balance();
+  const order = must(
+    call('POST', '/api/order-svc/orders', {
+      token: token || owner,
+      idem: true,
+      // `items` is sent even when empty: the request must carry the member, and may carry only cards.
+      body: { storeId, channel: 'POS', fulfilmentType: 'INSTORE', items, giftCardLoads: [{ amount, ...(code ? { code } : {}) }] },
+    }),
+    201,
+    'a gift card sold at the till'
+  );
+  const unpaid = balance();
+  must(
+    call('POST', '/api/payment-svc/payments', { token: owner, idem: true, body: { orderId: order.id, amount: order.total, method, storeId } }),
+    [200, 201],
+    `the gift card sale paid by ${method}`
+  );
+  const want = before + Number(amount);
+  // The sale's own read says which card each line loaded: a new card's code is known only from it.
+  const loadsOf = () => data(call('GET', `/api/order-svc/orders/${order.id}/gift-card-loads`, { token: owner })) || [];
+  const landed = code
+    ? poll(seconds, () => Math.abs(balance() - want) < 0.005)
+    : poll(seconds, () => loadsOf().every((l) => l.status === 'LOADED'));
+  return { order, before, unpaid, after: balance(), landed, loads: loadsOf() };
 }
 
 /** k6 thresholds shared by the functional suites: every check must pass. */

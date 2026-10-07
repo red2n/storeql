@@ -113,6 +113,22 @@ public class ItemTemplateRepository extends BaseOutboxRepository {
         .orElseThrow(() -> ApiException.notFound("TEMPLATE_NOT_FOUND", "Template not found"));
   }
 
+  /** Reads a template on the caller's own connection, so a transaction never needs a second. */
+  private static Optional<ItemTemplate> findTemplateTx(
+      java.sql.Connection c, UUID tenantId, UUID id) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT id, tenant_id, name, description, attributes, status, created_at"
+                + " FROM item_templates WHERE tenant_id=? AND id=?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, id);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) return Optional.of(mapTemplate(rs));
+        return Optional.empty();
+      }
+    }
+  }
+
   /**
    * Records that a template was applied to a variant, with its event — atomically.
    *
@@ -127,7 +143,7 @@ public class ItemTemplateRepository extends BaseOutboxRepository {
     return inTx(
         c -> {
           ItemTemplate tpl =
-              findTemplate(tenantId, templateId)
+              findTemplateTx(c, tenantId, templateId)
                   .orElseThrow(
                       () -> ApiException.notFound("TEMPLATE_NOT_FOUND", "Template not found"));
           // Copy attributes onto the variant (only when template has attributes)

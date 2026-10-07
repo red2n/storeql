@@ -1,8 +1,9 @@
 package com.storeql.payment.dto;
 
-import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -35,7 +36,8 @@ public final class Dtos {
                   "Amount to authorise, in the order's currency. Must equal the order total"
                       + " exactly; it is checked against order-svc, not trusted.")
           @NotNull
-          @DecimalMin("0.01")
+          @Positive
+          @Digits(integer = 14, fraction = 4)
           BigDecimal amount,
       @Schema(
               description =
@@ -83,9 +85,23 @@ public final class Dtos {
                   "UUID of the order this tender is captured against. Online, name the order or"
                       + " the split checkout (groupId), not both.")
           String orderId,
-      @Schema(description = "Amount tendered, in the order's currency.")
+      @Schema(
+              description =
+                  "Amount tendered, in the order's currency. Staff-recorded, it is taken at the"
+                      + " currency's own minor unit (whole yen, a dinar's three places), rounded"
+                      + " half up as the order's lines are: a till sums a sale in binary floating"
+                      + " point, so 3.3000000000000003 is 3.30. One that comes to nothing there is"
+                      + " PAYMENT_AMOUNT_INVALID. Online it must equal the order's total. At most"
+                      + " ten whole digits and twenty decimal places (VALIDATION_FAILED).")
           @NotNull
-          @DecimalMin("0.01")
+          @Positive
+          // Ten whole digits, the columns' NUMERIC(14,4). Twenty places: a till's double for any
+          // real amount is written with at most seventeen significant digits from the fourth
+          // place (the finest minor unit ISO 4217 has), so twenty takes every one and it is
+          // rounded, not refused. The bound is what keeps 1E-80000000 (twelve characters, a
+          // scale of eighty million) from reaching the rounding, which would build a power of ten
+          // that long.
+          @Digits(integer = 10, fraction = 20)
           BigDecimal amount,
       @Schema(description = "CASH, CARD, UPI, WALLET, GIFT_CARD, VOUCHER, or STORE_CREDIT.")
           @NotBlank
@@ -115,7 +131,15 @@ public final class Dtos {
                       + " one tender is captured per part.")
           // One constructor only: JSON-B binds a request body to a record through its single
           // constructor, and a second one makes every body unreadable.
-          String groupId) {}
+          String groupId,
+      @Schema(
+              description =
+                  "CARD at a till: the card machine's approved payment this tender records (the"
+                      + " `id` POST /payments/terminal answered). It is recorded once, on its own"
+                      + " order, at exactly the amount the machine took, and settles the machine"
+                      + " for the next sale. Without it, the oldest approval on the order at this"
+                      + " amount that no tender records yet is the one recorded.")
+          String terminalPaymentId) {}
 
   @Schema(
       name = "GroupPaymentResponse",
@@ -131,9 +155,13 @@ public final class Dtos {
   public record RecordRefundRequest(
       @Schema(description = "UUID of the payment tender being refunded.") @NotBlank
           String paymentId,
-      @Schema(description = "Amount to refund; capped at the tender's remaining captured total.")
+      @Schema(
+              description =
+                  "Amount to refund, in the business's currency and no finer than its minor unit;"
+                      + " capped at the tender's remaining captured total.")
           @NotNull
-          @DecimalMin("0.01")
+          @Positive
+          @Digits(integer = 10, fraction = 4)
           BigDecimal amount,
       @Schema(description = "CASH, CARD, UPI, WALLET, GIFT_CARD, or VOUCHER.") @NotBlank
           String method,
@@ -170,7 +198,13 @@ public final class Dtos {
   public record OpenTillRequest(
       @Schema(description = "UUID of the store the till session is opened at.") @NotBlank
           String storeId,
-      @Schema(description = "Opening cash float amount.") @NotNull @PositiveOrZero
+      @Schema(
+              description =
+                  "Opening cash float, no finer than the business's currency's minor unit"
+                      + " (CASH_AMOUNT_INVALID otherwise).")
+          @NotNull
+          @PositiveOrZero
+          @Digits(integer = 10, fraction = 4)
           BigDecimal floatAmount) {}
 
   @Schema(name = "TillSessionResponse", description = "A cashier till session.")
@@ -189,7 +223,13 @@ public final class Dtos {
 
   @Schema(name = "RecordCashDropRequest", description = "Mid-shift safe drop from the till.")
   public record RecordCashDropRequest(
-      @Schema(description = "Amount removed from the till.") @NotNull @DecimalMin("0.01")
+      @Schema(
+              description =
+                  "Amount removed from the till, no finer than the business's currency's minor unit"
+                      + " (INVALID_DROP_AMOUNT otherwise).")
+          @NotNull
+          @Positive
+          @Digits(integer = 10, fraction = 4)
           BigDecimal amount,
       String notes) {}
 
@@ -199,10 +239,20 @@ public final class Dtos {
 
   @Schema(name = "CloseTillRequest", description = "Close a till session (Z-report).")
   public record CloseTillRequest(
-      @Schema(description = "Physically counted cash in the till at close time.")
+      @Schema(
+              description =
+                  "Physically counted cash in the till at close time, no finer than the business's"
+                      + " currency's minor unit (CASH_AMOUNT_INVALID otherwise).")
           @NotNull
           @PositiveOrZero
-          BigDecimal countedCash) {}
+          @Digits(integer = 10, fraction = 4)
+          BigDecimal countedCash,
+      @Schema(
+              description =
+                  "Why the count differs from expected (optional, up to 500 characters). Kept with"
+                      + " the closed session and announced in TillSessionClosed.")
+          @jakarta.validation.constraints.Size(max = 500)
+          String note) {}
 
   /** Breakdown of sales and refunds per tender method (used in X/Z reports). */
   @Schema(
@@ -225,7 +275,10 @@ public final class Dtos {
       @Schema(description = "Sales/refunds/net breakdown keyed by tender method.")
           Map<String, TenderSummary> tenderSummary,
       BigDecimal cashDropsTotal,
-      @Schema(description = "Float plus cash sales minus cash refunds and cash drops.")
+      @Schema(
+              description =
+                  "Float plus cash sales minus cash refunds, plus pay-ins, minus pay-outs and"
+                      + " cash drops.")
           BigDecimal expectedCashInTill,
       @Schema(description = "Physically counted cash; null for an X-report.")
           BigDecimal countedCash,
@@ -233,7 +286,20 @@ public final class Dtos {
           BigDecimal overShort,
       BigDecimal grossSales,
       BigDecimal totalRefunds,
-      BigDecimal netSales) {}
+      BigDecimal netSales,
+      @Schema(description = "Cash tenders taken at the session's store in the session's window.")
+          BigDecimal cashSales,
+      @Schema(description = "Cash refunds made at the session's store in the session's window.")
+          BigDecimal cashRefunds,
+      @Schema(description = "Cash put in during the session (pay-ins).") BigDecimal payIns,
+      @Schema(description = "Cash taken out during the session (pay-outs).") BigDecimal payOuts,
+      @Schema(
+              description =
+                  "How the money was attributed: WINDOW (everything at the session's store while"
+                      + " it was open). SESSION arrives with registers.")
+          String basis,
+      @Schema(description = "The closer's note on a difference; null on an X-report.")
+          String note) {}
 
   // ── Pay-in / Pay-out (petty cash) ─────────────────────────────────────────
 
@@ -243,7 +309,14 @@ public final class Dtos {
           String tillSessionId,
       @Schema(description = "UUID of the store.") @NotBlank String storeId,
       @Schema(description = "PAY_IN or PAY_OUT.") @NotBlank String direction,
-      @Schema(description = "Amount moved.") @NotNull @DecimalMin("0.01") BigDecimal amount,
+      @Schema(
+              description =
+                  "Amount moved, no finer than the business's currency's minor unit"
+                      + " (CASH_AMOUNT_INVALID otherwise).")
+          @NotNull
+          @Positive
+          @Digits(integer = 10, fraction = 4)
+          BigDecimal amount,
       @Schema(description = "Reason for the movement.") @NotBlank String reason,
       @Schema(description = "UUID of the user who authorised the movement, if applicable.")
           String authorisedBy) {}
@@ -263,11 +336,28 @@ public final class Dtos {
   @Schema(name = "GenerateZReportRequest", description = "Generate (or retrieve) a daily Z-report.")
   public record GenerateZReportRequest(
       @Schema(description = "UUID of the store.") @NotBlank String storeId,
-      @Schema(description = "Business date the report covers, ISO-8601 yyyy-MM-dd.") @NotBlank
+      @Schema(
+              description =
+                  "Business date the report covers, ISO-8601 yyyy-MM-dd; today in the store's own"
+                      + " time zone when omitted.")
           String businessDate,
-      @Schema(description = "Physically counted cash for the day.") @NotNull @PositiveOrZero
+      @Schema(
+              description =
+                  "Physically counted cash for the day, no finer than the report's currency's"
+                      + " minor unit (CASH_AMOUNT_INVALID otherwise).")
+          @NotNull
+          @PositiveOrZero
+          @Digits(integer = 10, fraction = 4)
           BigDecimal countedCash,
-      @Schema(description = "ISO currency code; the tenant's own when omitted.") String currency) {}
+      @Schema(description = "ISO currency code; the tenant's own when omitted.") String currency,
+      @Schema(
+              description =
+                  "To correct a settled day: the id of the stored report being replaced (it must be"
+                      + " the latest version). The correction is a new version; nothing is"
+                      + " overwritten.")
+          String correctionOf,
+      @Schema(description = "Why the day is corrected; required with correctionOf.")
+          String reason) {}
 
   @Schema(
       name = "ZReportResponse",
@@ -289,13 +379,35 @@ public final class Dtos {
       BigDecimal cashDrops,
       BigDecimal payIns,
       BigDecimal payOuts,
-      @Schema(description = "Float plus cash sales minus cash refunds, drops, and pay-outs.")
+      @Schema(
+              description =
+                  "Float plus cash sales minus cash refunds, plus pay-ins, minus pay-outs and"
+                      + " cash drops.")
           BigDecimal expectedCash,
       @Schema(description = "Physically counted cash for the day.") BigDecimal countedCash,
       @Schema(description = "countedCash minus expectedCash.") BigDecimal overShort,
       int transactionCount,
       @Schema(description = "ISO currency code.") String currency,
-      Instant generatedAt) {}
+      Instant generatedAt,
+      @Schema(description = "Cash refunded at the store during the day (a term of expectedCash).")
+          BigDecimal cashRefunds,
+      @Schema(description = "1 for the first report of a day; a correction is the next number.")
+          int version,
+      @Schema(description = "The report this version corrects; null for version 1.")
+          UUID replacesId,
+      @Schema(description = "Why the day was corrected; null for version 1.")
+          String correctionReason,
+      @Schema(description = "IANA zone the day was counted in (the store's own).") String timeZone,
+      @Schema(
+              description =
+                  "True when the store's zone could not be read and UTC was used instead; the day"
+                      + " then runs midnight to midnight UTC.")
+          boolean zoneAssumed,
+      @Schema(
+              description =
+                  "False when this is a stored report answered again; true when this request wrote"
+                      + " it.")
+          boolean regenerated) {}
 
   @Schema(
       name = "TenderMixRowResponse",

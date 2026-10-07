@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
+import '../../core/ids.dart';
 import '../../core/network/api_client.dart';
 
 // Withdrawals and recalls. Opening one takes every pack in scope off sale at
@@ -536,6 +537,22 @@ final recallNoticesProvider = FutureProvider.autoDispose
       ];
     });
 
+/// The recall notices still open against one order, for the return dialogs
+/// ("This is a recall return"). Only notices at the caller's stores come back;
+/// another business's order, or a store not theirs, is an empty list.
+final orderRecallNoticesProvider = FutureProvider.autoDispose
+    .family<List<RecallNotice>, String>((ref, orderId) async {
+      final resp = await ref.read(apiClientProvider).dio.get(
+        _noticesBase,
+        queryParameters: {'orderId': orderId, 'status': 'ISSUED', 'limit': 100},
+      );
+      final data = (resp.data['data'] as List?) ?? const [];
+      return [
+        for (final e in data)
+          if (e is Map) RecallNotice.fromJson(e.cast<String, dynamic>()),
+      ];
+    });
+
 final recallBuyersProgressProvider = FutureProvider.autoDispose
     .family<RecallBuyersProgress, String>((ref, recallId) async {
       final resp = await ref
@@ -596,7 +613,9 @@ Future<void> recordRecallStoreAction(
   Dio dio, {
   required String recallId,
   required String storeId,
-  required double qtyFound,
+
+  /// What was found, as the plain decimal typed: JSON-B reads it exactly.
+  required String qtyFound,
   required String disposition,
   required bool noticeDisplayed,
   String? notes,
@@ -665,10 +684,15 @@ Future<RecallNotice> resolveRecallNotice(
 }
 
 /// The refund: a return of the recalled lines against the order, naming the
-/// notice, so the goods, the money and the notice are settled together.
+/// notice, so the goods, the money and the notice are settled together. A
+/// recall refund is never held by the business's return policy and asks no
+/// condition (the goods go to RECALLED whatever state they are in). Its
+/// Idempotency-Key is derived from the notice, so a retry after a lost answer
+/// replays the first refund rather than making a second.
 Future<void> refundRecallNotice(Dio dio, {required RecallNotice notice}) =>
     dio.post(
       '/${ApiConstants.order}/orders/${notice.orderId}/returns',
+      options: Options(headers: {'Idempotency-Key': derivedId(notice.id, 'recall-refund')}),
       data: {
         'reason': 'Product safety recall ${notice.reference}',
         'recallNoticeId': notice.id,

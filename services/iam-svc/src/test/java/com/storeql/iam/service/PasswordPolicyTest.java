@@ -110,4 +110,16 @@ class PasswordPolicyTest {
     assertDoesNotThrow(() -> p.check(BREACHED, "a@b.io"));
     assertEquals(0, calls);
   }
+
+  @Test
+  void theRangeCacheIsBoundedAndStillAnswersRight() {
+    PasswordPolicy p = PasswordPolicy.of(15, 128, true, base);
+    p.cacheMaxRanges = 3;
+    for (int i = 0; i < 40; i++) {
+      assertEquals(Optional.of(false), p.breached("a phrase nobody leaked number " + i));
+      assertEquals(true, p.cachedRanges() <= 3, "never more than the configured ranges");
+    }
+    assertEquals(3, p.cachedRanges());
+    assertEquals(Optional.of(true), p.breached(BREACHED), "an evicted range is fetched again");
+  }
 }

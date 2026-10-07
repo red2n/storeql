@@ -8,10 +8,12 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * Kafka infrastructure for the automatic-refund path. Polls {@code storeql.order.order-returned},
- * {@code storeql.order.order-cancelled} and {@code storeql.order.container-deposit-refunded}
- * (09.16: the deposit paid back at the till leaves the drawer) and dispatches each record to {@link
- * OrderEventHandler}. Consumer lifecycle is inherited from {@link BaseKafkaConsumer}; all business
- * logic lives in the handler (SRP).
+ * {@code storeql.order.order-cancelled}, {@code storeql.order.order-voided} (a till sale voided
+ * after the fact gives back what it took) and {@code storeql.order.container-deposit-refunded}
+ * (09.16: the deposit paid back at the till leaves the drawer) and {@code
+ * storeql.order.gift-card-redeemed} (the tender follows a card charged) and dispatches each record
+ * to {@link OrderEventHandler}. Consumer lifecycle is inherited from {@link BaseKafkaConsumer}; all
+ * business logic lives in the handler (SRP).
  */
 @ApplicationScoped
 class OrderEventConsumer extends BaseKafkaConsumer {
@@ -29,6 +31,20 @@ class OrderEventConsumer extends BaseKafkaConsumer {
       name = "storeql.kafka.topics.order-cancelled",
       defaultValue = "storeql.order.order-cancelled")
   String cancelledTopic;
+
+  /**
+   * A till sale voided after the fact gives back what it took, as a cancelled order does. On this
+   * group's existing offsets and {@code earliest}, deliberately: its first read of the topic meets
+   * every retained void, and the handler leaves alone those announced before payment-svc began
+   * refunding voids (V11), so history is not refunded twice and no later void is ever missed — a
+   * group of its own at {@code latest} commits nothing until its first record, so a restart before
+   * then would skip the voids announced while it was down.
+   */
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.order-voided",
+      defaultValue = "storeql.order.order-voided")
+  String voidedTopic;
 
   @Inject
   @ConfigProperty(
@@ -48,14 +64,22 @@ class OrderEventConsumer extends BaseKafkaConsumer {
       defaultValue = "storeql.order.order-line-substituted")
   String lineSubstitutedTopic;
 
+  @Inject
+  @ConfigProperty(
+      name = "storeql.kafka.topics.gift-card-redeemed",
+      defaultValue = "storeql.order.gift-card-redeemed")
+  String giftCardRedeemedTopic;
+
   @Override
   protected List<String> topics() {
     return List.of(
         returnedTopic,
         cancelledTopic,
+        voidedTopic,
         containerRefundTopic,
         lineShortClosedTopic,
-        lineSubstitutedTopic);
+        lineSubstitutedTopic,
+        giftCardRedeemedTopic);
   }
 
   @Override

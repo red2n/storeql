@@ -12,6 +12,7 @@ import com.storeql.purchase.domain.Domain.LoyaltyEvent;
 import com.storeql.purchase.domain.Domain.NominalLedgerEntry;
 import com.storeql.service.BaseJdbcRepository;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 /**
  * JDBC persistence for deferred revenue (17.11). Every change to a tenant's points or gift cards
@@ -31,6 +33,11 @@ import java.util.UUID;
  */
 @ApplicationScoped
 public class DeferredRevenueRepository extends BaseJdbcRepository {
+
+  /** How many waiting loyalty events one transaction posts when the estimates are saved. */
+  @Inject
+  @ConfigProperty(name = "storeql.deferred-revenue.backlog-chunk", defaultValue = "500")
+  int backlogChunk;
 
   private static final String SETTINGS_COLUMNS =
       "id, tenant_id, currency, point_value, points_breakage_pct, gift_card_breakage_pct, reason,"
@@ -111,42 +118,66 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
    * @return how many waiting events were posted
    */
   public int saveSettings(DeferredRevenueSettings s, PointsRule rule) {
-    return inTx(
-        c -> {
-          PointsPool pool = lockPointsPool(c, s.tenantId());
-          try (PreparedStatement ps =
-              c.prepareStatement(
-                  "INSERT INTO deferred_revenue_settings (id, tenant_id, currency, point_value,"
-                      + " points_breakage_pct, gift_card_breakage_pct, reason, set_by)"
-                      + " VALUES (?,?,?,?,?,?,?,?)")) {
-            ps.setObject(1, s.id());
-            ps.setObject(2, s.tenantId());
-            ps.setString(3, s.currency());
-            ps.setBigDecimal(4, s.pointValue());
-            ps.setBigDecimal(5, s.pointsBreakagePct());
-            ps.setBigDecimal(6, s.giftCardBreakagePct());
-            ps.setString(7, s.reason());
-            ps.setObject(8, s.setBy());
-            ps.executeUpdate();
-          }
-          List<LoyaltyEvent> waiting = new ArrayList<>();
-          try (PreparedStatement ps =
-              c.prepareStatement(
-                  "SELECT "
-                      + EVENT_COLUMNS
-                      + " FROM loyalty_events WHERE tenant_id = ? AND posted_at IS NULL"
-                      + " ORDER BY received_at, event_id")) {
-            ps.setObject(1, s.tenantId());
-            try (ResultSet rs = ps.executeQuery()) {
-              while (rs.next()) waiting.add(event(rs));
-            }
-          }
-          for (LoyaltyEvent e : waiting) {
-            pool = post(c, s.estimates(), pool, e, rule);
-          }
-          return waiting.size();
-        },
-        "save deferred revenue estimates");
+    int chunk = Math.max(1, backlogChunk);
+    // The first transaction saves the estimates and posts the first chunk; each later one posts the
+    // next, so no transaction holds the tenant's points-pool lock for the whole backlog and the
+    // consumer is never made to wait for all of it. An event that arrives meanwhile finds the new
+    // estimates in force and posts itself.
+    int posted =
+        inTx(
+            c -> {
+              lockPointsPool(c, s.tenantId());
+              insertSettings(c, s);
+              return postWaiting(c, s, rule, chunk);
+            },
+            "save deferred revenue estimates");
+    int last = posted;
+    while (last == chunk) {
+      last = inTx(c -> postWaiting(c, s, rule, chunk), "post waiting loyalty events");
+      posted += last;
+    }
+    return posted;
+  }
+
+  private static void insertSettings(Connection c, DeferredRevenueSettings s) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "INSERT INTO deferred_revenue_settings (id, tenant_id, currency, point_value,"
+                + " points_breakage_pct, gift_card_breakage_pct, reason, set_by)"
+                + " VALUES (?,?,?,?,?,?,?,?)")) {
+      ps.setObject(1, s.id());
+      ps.setObject(2, s.tenantId());
+      ps.setString(3, s.currency());
+      ps.setBigDecimal(4, s.pointValue());
+      ps.setBigDecimal(5, s.pointsBreakagePct());
+      ps.setBigDecimal(6, s.giftCardBreakagePct());
+      ps.setString(7, s.reason());
+      ps.setObject(8, s.setBy());
+      ps.executeUpdate();
+    }
+  }
+
+  /** Posts up to {@code chunk} waiting events, oldest first, under the pool lock. */
+  private int postWaiting(Connection c, DeferredRevenueSettings s, PointsRule rule, int chunk)
+      throws SQLException {
+    PointsPool pool = lockPointsPool(c, s.tenantId());
+    List<LoyaltyEvent> waiting = new ArrayList<>();
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT "
+                + EVENT_COLUMNS
+                + " FROM loyalty_events WHERE tenant_id = ? AND posted_at IS NULL"
+                + " ORDER BY received_at, event_id LIMIT ?")) {
+      ps.setObject(1, s.tenantId());
+      ps.setInt(2, chunk);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) waiting.add(event(rs));
+      }
+    }
+    for (LoyaltyEvent e : waiting) {
+      pool = post(c, s.estimates(), pool, e, rule);
+    }
+    return waiting.size();
   }
 
   /**
@@ -160,7 +191,8 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "INSERT INTO gift_card_loads (tenant_id, transaction_id, gift_card_id, store_id,"
-                      + " kind, paid_by, amount, currency, journal_id) VALUES (?,?,?,?,?,?,?,?,?)"
+                      + " kind, paid_by, amount, currency, journal_id, order_id, source, note)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
                       + " ON CONFLICT (tenant_id, transaction_id) DO NOTHING")) {
             ps.setObject(1, load.tenantId());
             ps.setObject(2, load.transactionId());
@@ -170,7 +202,12 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
             ps.setString(6, load.paidBy());
             ps.setBigDecimal(7, load.amount());
             ps.setString(8, load.currency());
-            ps.setObject(9, posting.get(0).journalId());
+            // A load paid for by a return's refund posts nothing: the refund owes the card.
+            ps.setObject(9, posting.isEmpty() ? null : posting.get(0).journalId());
+            if (load.orderId() == null) ps.setNull(10, java.sql.Types.OTHER);
+            else ps.setObject(10, load.orderId());
+            ps.setString(11, load.source());
+            ps.setString(12, load.note());
             if (ps.executeUpdate() == 0) return false;
           }
           GiftCardPool pool = lockGiftCardPool(c, load.tenantId());
@@ -179,6 +216,30 @@ public class DeferredRevenueRepository extends BaseJdbcRepository {
           return true;
         },
         "record gift card load");
+  }
+
+  /**
+   * Records the value of a gift card load taken back (the sale was voided or cancelled) and its
+   * journal, once per event: the event is marked processed, the pool lowered and the journal
+   * written together.
+   *
+   * @return {@code false} when the event was already recorded
+   */
+  public boolean recordGiftCardLoadReversed(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      BigDecimal amount,
+      List<NominalLedgerEntry> posting) {
+    return inTx(
+        c -> {
+          if (!markProcessedIfNewTx(c, eventId, consumer)) return false;
+          GiftCardPool pool = lockGiftCardPool(c, tenantId);
+          saveGiftCardPool(c, tenantId, DeferredRevenue.loadReversed(pool, amount));
+          LedgerWriter.insert(c, posting);
+          return true;
+        },
+        "record gift card load reversed");
   }
 
   /**

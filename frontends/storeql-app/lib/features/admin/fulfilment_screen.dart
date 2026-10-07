@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
+import '../../core/amount_entry.dart';
 import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/ids.dart';
@@ -16,6 +17,7 @@ import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/page_header.dart';
 import 'providers/admin_providers.dart';
+import 'widgets/figure_field.dart';
 import 'widgets/variant_search.dart';
 
 // ---------------------------------------------------------------------------
@@ -218,7 +220,20 @@ Future<List<SubstituteSuggestion>> _suggestions(
 /// A quantity as a person writes it: 2, not 2.0; 1.5 stays 1.5.
 String qtyText(double q) => q == q.roundToDouble() ? q.toStringAsFixed(0) : q.toString();
 
-num _qtyNumber(double q) => q == q.roundToDouble() ? q.toInt() : q;
+/// What [qty] holds for a line still owing [outstanding], as the plain
+/// decimal typed; or why it cannot stand, in words: unreadable (the field
+/// itself says why), nothing, or more than the line owes.
+({String? qty, String? refusal}) _owedQty(
+    TextEditingController qty, AmountMarks marks, double outstanding) {
+  if (figureRefused(marks, [(qty, AmountShape.quantity)])) {
+    return (qty: null, refusal: figureRefusedMessage);
+  }
+  final plain = figureOf(qty, AmountShape.quantity, marks);
+  final typed = plain == null ? 0 : double.parse(plain);
+  return typed <= 0 || typed > outstanding
+      ? (qty: null, refusal: 'Between 0 and ${qtyText(outstanding)}, what the line still owes.')
+      : (qty: plain, refusal: null);
+}
 
 /// A variant by name, from product-svc's resolve: its product's name, else its
 /// SKU, and a few words while the lookup is under way. Only a variant the
@@ -585,7 +600,8 @@ class _Outstanding extends ConsumerWidget {
       '$_orders/${o.id}/lines/${l.variantId}/substitute',
       {
         'substituteVariantId': result.variantId,
-        'qty': _qtyNumber(result.qty),
+        // The plain decimal typed: JSON-B reads it exactly.
+        'qty': result.qty,
         if (result.reason.isNotEmpty) 'reason': result.reason,
       },
       'Substituted. The shopper is told and pays no more.',
@@ -604,7 +620,8 @@ class _Outstanding extends ConsumerWidget {
       context,
       ref,
       '$_orders/${o.id}/lines/${l.variantId}/short',
-      {'qty': _qtyNumber(result.qty), if (result.reason.isNotEmpty) 'reason': result.reason},
+      // The plain decimal typed: JSON-B reads it exactly.
+      {'qty': result.qty, if (result.reason.isNotEmpty) 'reason': result.reason},
       'Closed short. The shopper is told and refunded.',
       storeId,
       fallback: 'Could not close the line short.',
@@ -614,7 +631,9 @@ class _Outstanding extends ConsumerWidget {
 
 class _SubstituteInput {
   final String variantId;
-  final double qty;
+
+  /// The quantity as the plain decimal typed.
+  final String qty;
   final String reason;
   const _SubstituteInput(this.variantId, this.qty, this.reason);
 }
@@ -633,7 +652,13 @@ class _SubstituteDialog extends ConsumerStatefulWidget {
 class _SubstituteDialogState extends ConsumerState<_SubstituteDialog> {
   /// What was packed, in words; [_choice] is what the request carries.
   final _packed = TextEditingController();
-  late final _qty = TextEditingController(text: qtyText(widget.outstanding));
+
+  /// How many went in the bag: a quantity, read the way the app's language
+  /// writes a number ([AmountMarks]) to three places, starting at what the
+  /// line owes written the same way. One that cannot be read is refused under
+  /// the field and nothing is substituted.
+  final _marks = AmountMarks.ofApp();
+  late final _qty = TextEditingController(text: _marks.writeAt(widget.outstanding, 0));
   final _reason = TextEditingController();
   VariantChoice? _choice;
   String? _error;
@@ -718,12 +743,15 @@ class _SubstituteDialogState extends ConsumerState<_SubstituteDialog> {
                   ? 'Find it by name or SKU'
                   : 'A stand-in above, or find another by name or SKU',
             ),
-            TextField(
-              key: const Key('substitute-qty'),
+            FigureField(
+              fieldKey: const Key('substitute-qty'),
               controller: _qty,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: InputDecoration(
-                  labelText: 'Quantity', helperText: '${qtyText(widget.outstanding)} outstanding'),
+              shape: AmountShape.quantity,
+              marks: _marks,
+              label: 'Quantity',
+              helper: '${qtyText(widget.outstanding)} outstanding',
+              hint: '0',
+              onChanged: (_) => setState(() {}),
             ),
             TextField(
               key: const Key('substitute-reason'),
@@ -743,14 +771,14 @@ class _SubstituteDialogState extends ConsumerState<_SubstituteDialog> {
           key: const Key('substitute-save'),
           onPressed: () {
             final choice = _choice;
-            final qty = double.tryParse(_qty.text.trim());
             if (choice == null) {
               setState(() => _error = 'Say what you packed.');
               return;
             }
-            if (qty == null || qty <= 0 || qty > widget.outstanding) {
-              setState(() => _error =
-                  'Between 0 and ${qtyText(widget.outstanding)}, what the line still owes.');
+            final owed = _owedQty(_qty, _marks, widget.outstanding);
+            final qty = owed.qty;
+            if (qty == null) {
+              setState(() => _error = owed.refusal);
               return;
             }
             Navigator.pop(context, _SubstituteInput(choice.variantId, qty, _reason.text.trim()));
@@ -763,7 +791,8 @@ class _SubstituteDialogState extends ConsumerState<_SubstituteDialog> {
 }
 
 class _ShortInput {
-  final double qty;
+  /// The quantity as the plain decimal typed.
+  final String qty;
   final String reason;
   const _ShortInput(this.qty, this.reason);
 }
@@ -778,7 +807,12 @@ class _ShortDialog extends StatefulWidget {
 }
 
 class _ShortDialogState extends State<_ShortDialog> {
-  late final _qty = TextEditingController(text: qtyText(widget.outstanding));
+  /// How much will never be handed over: a quantity, read the way the app's
+  /// language writes a number ([AmountMarks]) to three places, starting at
+  /// what the line owes written the same way. The shopper is refunded for it,
+  /// so one that cannot be read is refused under the field and nothing closes.
+  final _marks = AmountMarks.ofApp();
+  late final _qty = TextEditingController(text: _marks.writeAt(widget.outstanding, 0));
   final _reason = TextEditingController();
   String? _error;
 
@@ -797,12 +831,15 @@ class _ShortDialogState extends State<_ShortDialog> {
       content: Column(mainAxisSize: MainAxisSize.min, children: [
         Text('The shopper is refunded for what they will not get.',
             style: TextStyle(color: cs.onSurfaceVariant)),
-        TextField(
-          key: const Key('short-qty'),
+        FigureField(
+          fieldKey: const Key('short-qty'),
           controller: _qty,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(
-              labelText: 'Quantity', helperText: '${qtyText(widget.outstanding)} outstanding'),
+          shape: AmountShape.quantity,
+          marks: _marks,
+          label: 'Quantity',
+          helper: '${qtyText(widget.outstanding)} outstanding',
+          hint: '0',
+          onChanged: (_) => setState(() {}),
         ),
         TextField(
           key: const Key('short-reason'),
@@ -819,10 +856,10 @@ class _ShortDialogState extends State<_ShortDialog> {
         FilledButton(
           key: const Key('short-save'),
           onPressed: () {
-            final qty = double.tryParse(_qty.text.trim());
-            if (qty == null || qty <= 0 || qty > widget.outstanding) {
-              setState(() => _error =
-                  'Between 0 and ${qtyText(widget.outstanding)}, what the line still owes.');
+            final owed = _owedQty(_qty, _marks, widget.outstanding);
+            final qty = owed.qty;
+            if (qty == null) {
+              setState(() => _error = owed.refusal);
               return;
             }
             Navigator.pop(context, _ShortInput(qty, _reason.text.trim()));
@@ -974,6 +1011,12 @@ class _DispatchDialogState extends State<_DispatchDialog> {
   final _carrier = TextEditingController();
   final _reference = TextEditingController();
   final _parcels = TextEditingController();
+
+  /// The parcel count is a whole number up to 999 (order-svc's own bound),
+  /// read with the shared reader. Blank is not counted; text that cannot be
+  /// read is refused under the field, never sent as not counted.
+  static const _parcelsShape = AmountShape(3, 0);
+  final _marks = AmountMarks.ofApp();
   String? _error;
 
   @override
@@ -1002,11 +1045,14 @@ class _DispatchDialogState extends State<_DispatchDialog> {
             controller: _reference,
             decoration: const InputDecoration(labelText: 'Reference or tracking number (optional)'),
           ),
-          TextField(
-            key: const Key('dispatch-parcels'),
+          FigureField(
+            fieldKey: const Key('dispatch-parcels'),
             controller: _parcels,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Parcels (optional)'),
+            shape: _parcelsShape,
+            marks: _marks,
+            label: 'Parcels (optional)',
+            hint: '',
+            onChanged: (_) => setState(() {}),
           ),
         ],
       ),
@@ -1020,7 +1066,9 @@ class _DispatchDialogState extends State<_DispatchDialog> {
               setState(() => _error = 'Say who is carrying it.');
               return;
             }
-            final parcels = int.tryParse(_parcels.text.trim());
+            // Unreadable: the field itself says why, and nothing is recorded.
+            if (figureRefused(_marks, [(_parcels, _parcelsShape)])) return;
+            final parcels = wholeOf(_parcels, _marks, shape: _parcelsShape);
             Navigator.pop(context, _DispatchInput(carrier, _reference.text.trim(), parcels));
           },
           child: const Text('Dispatched'),

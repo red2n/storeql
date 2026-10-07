@@ -3,9 +3,11 @@ package com.storeql.customer.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -20,6 +22,7 @@ import com.storeql.customer.repo.CustomerRepository;
 import com.storeql.customer.repo.LoyaltyProgrammeRepository;
 import com.storeql.ids.Ids;
 import com.storeql.service.OutboxRow;
+import com.storeql.web.ApiException;
 import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import java.io.StringReader;
@@ -51,6 +54,10 @@ class CustomerServiceEventsTest {
   @Mock LoyaltyProgrammeRepository programmes;
   @Mock com.storeql.service.TenantProfiles profiles;
   private CustomerService service;
+
+  private static String key() {
+    return Ids.newId().toString();
+  }
 
   @BeforeEach
   void setUp() {
@@ -117,6 +124,7 @@ class CustomerServiceEventsTest {
             eq(CUSTOMER),
             eq(order),
             eq(new BigDecimal("24.00")),
+            eq(new BigDecimal("24.00")),
             any(LoyaltyProgramme.class),
             captor.capture(),
             any());
@@ -135,7 +143,7 @@ class CustomerServiceEventsTest {
 
   @Test
   void everyLoyaltyEventCarriesADistinctId() {
-    ArgumentCaptor<OutboxRow> captor = ArgumentCaptor.forClass(OutboxRow.class);
+    ArgumentCaptor<Function<BigDecimal, OutboxRow>> captor = eventBuilderCaptor();
     when(repo.adjustPoints(
             eq(TENANT),
             eq(CUSTOMER),
@@ -143,13 +151,17 @@ class CustomerServiceEventsTest {
             anyString(),
             any(LoyaltyProgramme.class),
             captor.capture(),
+            any(),
             any()))
         .thenReturn(null);
-    service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "one"));
-    service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "two"));
+    service.adjustPoints(
+        TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "one"), Ids.newId(), key());
+    service.adjustPoints(
+        TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.ONE, "two"), Ids.newId(), key());
 
     List<String> ids =
         captor.getAllValues().stream()
+            .map(build -> build.apply(BigDecimal.ONE))
             .map(e -> Json.createReader(new StringReader(e.payload())).readObject())
             .peek(p -> assertEquals("LoyaltyAdjusted", p.getString("eventType")))
             .map(p -> p.getString("eventId"))
@@ -160,7 +172,7 @@ class CustomerServiceEventsTest {
 
   @Test
   void adjustPointsPublishesLoyaltyAdjustedEvent() {
-    ArgumentCaptor<OutboxRow> captor = ArgumentCaptor.forClass(OutboxRow.class);
+    ArgumentCaptor<Function<BigDecimal, OutboxRow>> captor = eventBuilderCaptor();
     when(repo.adjustPoints(
             eq(TENANT),
             eq(CUSTOMER),
@@ -168,6 +180,7 @@ class CustomerServiceEventsTest {
             anyString(),
             any(LoyaltyProgramme.class),
             captor.capture(),
+            any(),
             any()))
         .thenReturn(
             new LoyaltyAccount(
@@ -182,20 +195,78 @@ class CustomerServiceEventsTest {
                 BigDecimal.TEN,
                 Instant.now()));
 
-    service.adjustPoints(TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.TEN, "manual"));
+    service.adjustPoints(
+        TENANT, CUSTOMER, new AdjustPointsRequest(BigDecimal.TEN, "manual"), Ids.newId(), key());
 
-    OutboxRow event = captor.getValue();
+    OutboxRow event = captor.getValue().apply(BigDecimal.TEN);
     assertNotNull(event);
     assertEquals("LoyaltyAdjusted", event.eventType());
     assertEquals("storeql.customer.loyalty-adjusted", event.topic());
     assertEquals(CUSTOMER, event.aggregateId());
   }
 
+  /**
+   * The event says what moved, not what was asked: a deduction larger than the balance is clamped
+   * where the transaction knows the balance, and the repository hands the event builder the points
+   * it actually took. purchase-svc books the deferred revenue from this figure.
+   */
+  @Test
+  void theAdjustedEventCarriesThePointsThatMovedNotThePointsAskedFor() {
+    ArgumentCaptor<Function<BigDecimal, OutboxRow>> captor = eventBuilderCaptor();
+    when(repo.adjustPoints(
+            eq(TENANT),
+            eq(CUSTOMER),
+            any(),
+            anyString(),
+            any(LoyaltyProgramme.class),
+            captor.capture(),
+            any(),
+            any()))
+        .thenReturn(null);
+
+    service.adjustPoints(
+        TENANT,
+        CUSTOMER,
+        new AdjustPointsRequest(new BigDecimal("-50"), "a correction"),
+        Ids.newId(),
+        key());
+
+    OutboxRow event = captor.getValue().apply(new BigDecimal("-20.00"));
+    JsonObject p = Json.createReader(new StringReader(event.payload())).readObject();
+    assertEquals(0, new BigDecimal("-20").compareTo(p.getJsonNumber("points").bigDecimalValue()));
+    assertEquals(CUSTOMER.toString(), p.getString("customerId"));
+    assertEquals(TENANT.toString(), p.getString("tenantId"));
+  }
+
+  /** A correction of nothing is refused before anything is read or written. */
+  @Test
+  void aCorrectionOfNoPointsIsRefusedAndNothingIsWritten() {
+    ApiException refused =
+        assertThrows(
+            ApiException.class,
+            () ->
+                service.adjustPoints(
+                    TENANT,
+                    CUSTOMER,
+                    new AdjustPointsRequest(new BigDecimal("0.00"), "nothing"),
+                    Ids.newId(),
+                    key()));
+    assertEquals(400, refused.status());
+    assertEquals("VALIDATION_FAILED", refused.code());
+    verify(repo, never())
+        .adjustPoints(any(), any(), any(), anyString(), any(), any(), any(), any());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static ArgumentCaptor<Function<BigDecimal, OutboxRow>> eventBuilderCaptor() {
+    return ArgumentCaptor.forClass(Function.class);
+  }
+
   @Test
   void issueStoreCreditPublishesStoreCreditIssuedEvent() {
     ArgumentCaptor<OutboxRow> captor = ArgumentCaptor.forClass(OutboxRow.class);
     when(repo.issueStoreCredit(
-            eq(TENANT), eq(CUSTOMER), any(), anyString(), any(), any(), captor.capture()))
+            eq(TENANT), eq(CUSTOMER), any(), anyString(), any(), any(), captor.capture(), any()))
         .thenReturn(
             new StoreCreditAccount(
                 Ids.newId(),
@@ -207,7 +278,11 @@ class CustomerServiceEventsTest {
                 Instant.now()));
 
     service.issueStoreCredit(
-        TENANT, CUSTOMER, new IssueStoreCreditRequest(BigDecimal.TEN, "GBP", null, "refund"));
+        TENANT,
+        CUSTOMER,
+        new IssueStoreCreditRequest(BigDecimal.TEN, "GBP", null, "refund"),
+        Ids.newId(),
+        Ids.newId().toString());
 
     OutboxRow event = captor.getValue();
     assertNotNull(event);

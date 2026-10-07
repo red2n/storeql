@@ -11,9 +11,9 @@ import com.storeql.customer.service.PrivacyService;
 import com.storeql.customer.service.PrivacyService.Choice;
 import com.storeql.web.ApiResponse;
 import com.storeql.web.TenantContext;
+import com.storeql.web.Validations;
 import jakarta.enterprise.context.RequestScoped;
 import jakarta.inject.Inject;
-import jakarta.validation.Valid;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
@@ -71,7 +71,8 @@ public class MyPrivacyResource {
       description = "A child without a guardian's consent; or, where the Act binds, no notice yet")
   @PUT
   @Path("/consents")
-  public Response choose(@Valid ChooseRequest req) {
+  public Response choose(ChooseRequest req) {
+    Validations.validate(req);
     List<Choice> choices =
         req.choices().stream()
             .map((ChoiceRequest c) -> new Choice(c.purpose(), c.granted()))
@@ -118,7 +119,8 @@ public class MyPrivacyResource {
   @APIResponse(responseCode = "409", description = "Twenty requests already open")
   @POST
   @Path("/requests")
-  public Response open(@Valid OpenRequestRequest req) {
+  public Response open(OpenRequestRequest req) {
+    Validations.validate(req);
     var r =
         svc.openRequest(
             ctx.requireTenantId(),

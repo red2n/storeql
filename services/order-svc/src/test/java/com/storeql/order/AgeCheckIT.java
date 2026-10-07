@@ -125,9 +125,9 @@ class AgeCheckIT {
     assertThat(
         record("CASHIER", STORE_A, body("REFUSED", ",\"reason\":\"FELT_LIKE_IT\"")).getStatus(),
         is(400));
-    assertThat(
-        record("CASHIER", STORE_A, body("PASSED", ",\"idType\":\"LIBRARY_CARD\"")).getStatus(),
-        is(400));
+    Response unknownId = record("CASHIER", STORE_A, body("PASSED", ",\"idType\":\"LIBRARY_CARD\""));
+    assertThat(unknownId.getStatus(), is(400));
+    assertThat(unknownId.readEntity(String.class), containsString("AGE_CHECK_ID_TYPE_UNKNOWN"));
     // Bean validation: a country that is not two letters, an age outside 1..99.
     assertThat(
         record("CASHIER", STORE_A, body("PASSED", "").replace("\"GB\"", "\"GBR\"")).getStatus(),
@@ -168,8 +168,8 @@ class AgeCheckIT {
     try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
         var ps =
             c.prepareStatement(
-                "INSERT INTO \"order\".store_status (store_id, tenant_id, status, status_changed_at)"
-                    + " VALUES (?, ?, 'ACTIVE', now())")) {
+                "INSERT INTO \"order\".store_status (store_id, tenant_id, status,"
+                    + " status_changed_at) VALUES (?, ?, 'ACTIVE', now())")) {
       ps.setObject(1, Ids.parse(theirs));
       ps.setObject(2, Ids.parse(OTHER_T));
       ps.executeUpdate();
@@ -308,7 +308,8 @@ class AgeCheckIT {
 
   @Test
   @DisplayName(
-      "The record is append-only: nothing updates or deletes it, and the row says what the rule was")
+      "The record is append-only: nothing updates or deletes it, and the row says what the rule"
+          + " was")
   void appendOnly() throws Exception {
     Response r = record("CASHIER", STORE_A, body("REFUSED", ",\"reason\":\"PROXY_SALE\""));
     String id = field(r.readEntity(String.class), "id");
@@ -368,7 +369,8 @@ class AgeCheckIT {
     try (var c = DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
         var ps =
             c.prepareStatement(
-                "SELECT born_before, born_before_policy FROM \"order\".age_verifications WHERE id = ?")) {
+                "SELECT born_before, born_before_policy FROM \"order\".age_verifications WHERE id ="
+                    + " ?")) {
       ps.setObject(1, Ids.parse(id));
       try (var rs = ps.executeQuery()) {
         assertThat(rs.next(), is(true));

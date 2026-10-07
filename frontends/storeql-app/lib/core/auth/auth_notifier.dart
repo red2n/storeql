@@ -39,7 +39,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     state = await AsyncValue.guard(() async {
       final resp = await ref.read(apiClientProvider).dio.post(
         '/${ApiConstants.iam}/auth/login',
-        data: {'email': email, 'password': password},
+        // The business account, where the address also holds a shopper's:
+        // this card signs people in to run a business (the storefront asks
+        // for CUSTOMER). STAFF is also what iam-svc assumes when none is sent.
+        data: {'email': email, 'password': password, 'accountType': 'STAFF'},
       );
       return _afterPassword(resp.data['data'] as Map<String, dynamic>, platform: false);
     });
@@ -187,6 +190,23 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     });
   }
 
+  /// "Start a business": a staff login with no business and no role yet
+  /// (iam-svc `POST /auth/register/business`). Its token names no tenant, so
+  /// [AuthAuthenticated.needsOnboarding] holds and the router opens the setup
+  /// wizard, which creates the business and makes this login its owner.
+  ///
+  /// Unlike [register], a refusal is thrown to the caller rather than kept in
+  /// this notifier's state: the sign-up page says it in its own words, and the
+  /// sign-in card behind it is not left showing a sign-up's error.
+  Future<void> registerBusiness(String email, String password) async {
+    final resp = await ref.read(apiClientProvider).dio.post(
+      '/${ApiConstants.iam}/auth/register/business',
+      data: {'email': email, 'password': password},
+    );
+    state = AsyncValue.data(
+        await _saveAndDecode(resp.data['data'] as Map<String, dynamic>));
+  }
+
   // Called after onboarding steps so the JWT picks up the new tenantId
   Future<void> refresh() async {
     final refresh = await _storage.read(key: StorageKeys.refreshToken);
@@ -208,6 +228,17 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     });
   }
 
+  /// Ends every session of this login (`POST /auth/sessions/revoke-all`), then
+  /// signs this device out too. Throws, and stays signed in, when the server
+  /// refuses: a device left signed in on a failed call would be a false comfort.
+  Future<void> signOutEverywhere() async {
+    await ref
+        .read(apiClientProvider)
+        .dio
+        .post('/${ApiConstants.iam}/auth/sessions/revoke-all');
+    await logout();
+  }
+
   Future<void> logout() async {
     final refresh = await _storage.read(key: StorageKeys.refreshToken);
     if (refresh != null) {
@@ -218,9 +249,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
         );
       } catch (_) {}
     }
-    // Everything except the POS offline queue: unreplayed sales are money the
-    // server has not been told about, and they outlive the cashier's shift.
-    await _storage.deleteAll(keep: const {StorageKeys.posOfflineSales});
+    // Everything except what the till owes: the POS offline queue (unreplayed
+    // sales are money the server has not been told about) and a card payment
+    // held at the machine. Both outlive the cashier's shift.
+    await _storage.deleteAll(keep: StorageKeys.keptOnSignOut);
     state = const AsyncValue.data(AuthUnauthenticated());
   }
 
@@ -260,7 +292,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
         liveAccess.isEmpty ||
         liveRefresh == null ||
         liveRefresh.isEmpty) {
-      await _storage.deleteAll(keep: const {StorageKeys.posOfflineSales});
+      await _storage.deleteAll(keep: StorageKeys.keptOnSignOut);
       state = const AsyncValue.data(AuthUnauthenticated());
       return;
     }

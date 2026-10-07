@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
+import '../../core/reference/iso_reference.dart';
+import '../../shared/widgets/reference_fields.dart';
 import '../../shared/widgets/loading_view.dart';
 import 'einvoice_providers.dart' show eInvoiceSaverProvider;
 import 'einvoice_tab.dart' show ElectronicAddressFields;
@@ -392,8 +394,10 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
       TextEditingController(text: widget.current?.legalName ?? '');
   late final _vat =
       TextEditingController(text: widget.current?.vatNumber ?? '');
-  late final _country =
-      TextEditingController(text: widget.current?.countryCode ?? '');
+  // The country the VAT number is registered in, from the list of every
+  // country; blank is the business's own, which pricing-svc fills in.
+  late String _country =
+      (widget.current?.countryCode ?? '').trim().toUpperCase();
   late final _scheme =
       TextEditingController(text: widget.current?.einvoiceScheme ?? '');
   late final _id =
@@ -405,7 +409,6 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
   void dispose() {
     _legalName.dispose();
     _vat.dispose();
-    _country.dispose();
     _scheme.dispose();
     _id.dispose();
     super.dispose();
@@ -425,7 +428,7 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
         reverseChargeEligible: _registered && _reverseCharge,
         vatNumber: _vat.text,
         legalName: _legalName.text,
-        countryCode: _country.text,
+        countryCode: _country,
         einvoiceScheme: _scheme.text,
         einvoiceId: _id.text,
       );
@@ -443,10 +446,13 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    // A hint, not a default: the business's own country when it is known,
-    // never a country picked for it (multi-location, multi-tenant — SJ-D67).
-    final tenantCountry = ref.watch(tenantInfoProvider).value?.country;
-    final countryHint = (tenantCountry == null || tenantCountry.isEmpty) ? null : tenantCountry;
+    // What blank means, not a default: the business's own country, named when
+    // it is known, never a country picked for it (multi-location — SJ-D67).
+    final tenantCountry = ref.watch(tenantInfoProvider).value?.country.trim();
+    final ownCountry = tenantCountry == null || tenantCountry.isEmpty
+        ? "The business's own"
+        : "The business's own: ${countryName(tenantCountry)} "
+            '(${tenantCountry.toUpperCase()})';
     return AlertDialog(
       title: const Text('VAT registration'),
       content: SizedBox(
@@ -482,48 +488,30 @@ class _VatRegistrationDialogState extends ConsumerState<VatRegistrationDialog> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        key: const Key('customer-vat-number'),
-                        controller: _vat,
-                        enabled: _registered,
-                        decoration: const InputDecoration(
-                          labelText: 'VAT number',
-                          hintText: 'GB123456789 · 29AAGCB7383J1Z4',
-                        ),
-                        validator: (v) =>
-                            _registered && (v ?? '').trim().isEmpty
-                                ? 'A registered business has a VAT number'
-                                : null,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    SizedBox(
-                      width: 96,
-                      child: TextFormField(
-                        key: const Key('customer-vat-country'),
-                        controller: _country,
-                        enabled: _registered,
-                        maxLength: 2,
-                        textCapitalization: TextCapitalization.characters,
-                        decoration: InputDecoration(
-                          labelText: 'Country',
-                          hintText: countryHint,
-                          counterText: '',
-                        ),
-                        validator: (v) {
-                          final t = (v ?? '').trim();
-                          return t.isEmpty ||
-                                  RegExp(r'^[A-Za-z]{2}$').hasMatch(t)
-                              ? null
-                              : 'Two letters';
-                        },
-                      ),
-                    ),
-                  ],
+                TextFormField(
+                  key: const Key('customer-vat-number'),
+                  controller: _vat,
+                  enabled: _registered,
+                  decoration: const InputDecoration(
+                    labelText: 'VAT number',
+                    hintText: 'GB123456789 · 29AAGCB7383J1Z4',
+                  ),
+                  validator: (v) => _registered && (v ?? '').trim().isEmpty
+                      ? 'A registered business has a VAT number'
+                      : null,
+                ),
+                const SizedBox(height: 8),
+                // A list and not two letters typed: every country there is, so
+                // "UK" cannot be sent, and the refusal a country can still meet
+                // reads "Choose a country from the list." truthfully.
+                CountryField(
+                  key: const Key('customer-vat-country'),
+                  label: 'Country of registration',
+                  value: _country,
+                  optional: true,
+                  noneLabel: ownCountry,
+                  enabled: _registered && !_busy,
+                  onChanged: (v) => setState(() => _country = v),
                 ),
                 SwitchListTile.adaptive(
                   key: const Key('customer-vat-reverse-charge'),

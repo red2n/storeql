@@ -39,8 +39,26 @@ public class LogScrubber {
     Filter existing = handler.getFilter();
     if (existing == null || existing == FILTER) {
       handler.setFilter(FILTER);
-    } else {
-      handler.setFilter(record -> existing.isLoggable(record) && scrub(record));
+    } else if (!(existing instanceof Chained)) {
+      // idempotent: a handler already carrying the scrubbing chain is left alone, so installing
+      // twice never stacks filters
+      handler.setFilter(new Chained(existing));
+    }
+  }
+
+  /**
+   * The handler's own filter followed by the scrubber; the type is the "already installed" mark.
+   */
+  private static final class Chained implements Filter {
+    private final Filter existing;
+
+    Chained(Filter existing) {
+      this.existing = existing;
+    }
+
+    @Override
+    public boolean isLoggable(LogRecord record) {
+      return existing.isLoggable(record) && scrub(record);
     }
   }
 

@@ -56,5 +56,10 @@
   "resetPasswordDone": "Hasło zmienione — zaloguj się nim.",
   "resetPasswordDoneStorefront": "Robisz zakupy w sklepie internetowym? Możesz zalogować się w sklepie.",
   "resetPasswordTokenInvalid": "Ten link wygasł albo został już użyty — poproś o nowy.",
-  "resetPasswordRequestNew": "Poproś o nowy link"
+  "resetPasswordRequestNew": "Poproś o nowy link",
+  "startBusiness": "Załóż firmę",
+  "startBusinessTitle": "Załóż swoją firmę",
+  "startBusinessIntro": "Utwórz konto, którym będziesz prowadzić firmę. Następnie skonfigurujesz firmę i jej pierwszy sklep.",
+  "fieldPasswordConfirm": "Potwierdź hasło",
+  "fieldPasswordMismatch": "To nie zgadza się z hasłem podanym powyżej."
 }

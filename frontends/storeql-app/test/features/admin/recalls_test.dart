@@ -327,7 +327,82 @@ void main() {
     await tester.pumpAndSettle();
     final action = adapter.posts.last;
     expect(action.path, endsWith('/recalls/r-1/stores/store-2/actions'));
-    expect(_body(action), {'qtyFound': 2.0, 'disposition': 'DESTROYED', 'noticeDisplayed': true});
+    expect(_body(action), {'qtyFound': '2', 'disposition': 'DESTROYED', 'noticeDisplayed': true});
+  });
+
+  // What a store found of a recalled lot is a quantity to three places: read
+  // the way the app's language writes a number and recorded as the decimal
+  // typed, or refused under its field with nothing recorded. Parsed with a
+  // point, Romanian's 1.250 packs were recorded as one and a quarter found.
+  group('what a store found is read as typed, or refused', () {
+    Future<_Adapter> open(WidgetTester tester, String locale) async {
+      Intl.defaultLocale = locale;
+      final adapter = await _pump(tester, role: 'STOREKEEPER', storeIds: ['store-2']);
+      await tester.tap(find.text('FSA-PRIN-42'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('recall-record-store-2')));
+      await tester.pumpAndSettle();
+      return adapter;
+    }
+
+    String? says(WidgetTester tester) =>
+        tester.widget<TextField>(find.byKey(const Key('recall-qty-found'))).decoration?.errorText;
+
+    for (final (locale, typed, sent) in [
+      ('ro', '2,5', '2.5'),
+      ('en_GB', '2.5', '2.5'),
+      ('en', '1.125', '1.125'),
+      ('pl', '1,125', '1.125'),
+      ('ar', '2\u066B5', '2.5'),
+      ('en_GB', '0', '0'),
+    ]) {
+      testWidgets('in $locale, $typed found is recorded as $sent', (tester) async {
+        final adapter = await open(tester, locale);
+        for (var i = 1; i <= typed.length; i++) {
+          await tester.enterText(find.byKey(const Key('recall-qty-found')), typed.substring(0, i));
+          await tester.pump();
+        }
+        expect(says(tester), isNull);
+        await tester.tap(find.byKey(const Key('recall-action-save')));
+        await tester.pumpAndSettle();
+        final action = adapter.posts.last;
+        expect(action.path, endsWith('/recalls/r-1/stores/store-2/actions'));
+        expect(_body(action)['qtyFound'], sent);
+      });
+    }
+
+    for (final (locale, typed, why) in [
+      ('ro', '1.250', 'Type the amount without thousands separators. Decimals go after a comma.'),
+      ('en_GB', '2,5', 'Type the amount without thousands separators. Decimals go after a point.'),
+      ('en', '2,5', 'Type the amount without thousands separators. Decimals go after a point.'),
+      ('pl', '1.250',
+          'A point may group thousands here. Type the figure without grouping, with any decimals after a comma.'),
+      ('ar', '-2', 'Type the amount without a sign.'),
+      ('en_GB', '.', 'Type the amount in digits.'),
+      ('en', '1e3', 'Only digits and a decimal point.'),
+    ]) {
+      testWidgets('in $locale, "$typed" found is refused under the field and nothing is recorded',
+          (tester) async {
+        final adapter = await open(tester, locale);
+        final before = adapter.posts.length;
+        await tester.enterText(find.byKey(const Key('recall-qty-found')), typed);
+        await tester.pump();
+        expect(says(tester), why);
+        await tester.tap(find.byKey(const Key('recall-action-save')));
+        await tester.pumpAndSettle();
+        expect(adapter.posts.length, before);
+        expect(find.text('A figure cannot be read. Correct the one marked.'), findsOneWidget);
+      });
+    }
+
+    testWidgets('nothing typed is asked for, never recorded as none found', (tester) async {
+      final adapter = await open(tester, 'en_GB');
+      final before = adapter.posts.length;
+      await tester.tap(find.byKey(const Key('recall-action-save')));
+      await tester.pumpAndSettle();
+      expect(adapter.posts.length, before);
+      expect(find.text('Enter how much was found — 0 if none.'), findsOneWidget);
+    });
   });
 
   testWidgets('closing too early names the stores still holding stock', (tester) async {

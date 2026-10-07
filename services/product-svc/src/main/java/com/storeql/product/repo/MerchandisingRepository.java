@@ -691,6 +691,29 @@ public class MerchandisingRepository extends BaseOutboxRepository {
         "category resets");
   }
 
+  /**
+   * The stores each reset touches: the stores of the fixtures its attached layouts are drawn for. A
+   * reset with no layout attached is absent from the map: it touches no store yet.
+   *
+   * @param tenantId the business; the first condition
+   * @return store ids by reset id
+   */
+  public Map<UUID, java.util.Set<UUID>> resetStores(UUID tenantId) {
+    Map<UUID, java.util.Set<UUID>> out = new java.util.HashMap<>();
+    query(
+        "SELECT rp.reset_id, f.store_id FROM category_reset_planograms rp"
+            + " JOIN planograms p ON p.tenant_id = rp.tenant_id AND p.id = rp.planogram_id"
+            + " JOIN merch_fixtures f ON f.tenant_id = p.tenant_id AND f.id = p.fixture_id"
+            + " WHERE rp.tenant_id = ?",
+        ps -> ps.setObject(1, tenantId),
+        rs ->
+            out.computeIfAbsent(
+                    rs.getObject("reset_id", UUID.class), k -> new java.util.HashSet<>())
+                .add(rs.getObject("store_id", UUID.class)),
+        "the stores of the resets");
+    return out;
+  }
+
   private Reset withPlanograms(Reset r) {
     // tenant_id first here too, for the same reason.
     List<UUID> ids =

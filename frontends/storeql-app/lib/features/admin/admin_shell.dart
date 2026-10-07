@@ -23,11 +23,17 @@ class _AdminNavItem {
   /// manager sent there would find nothing but a line saying so.
   final bool ownerOnly;
 
+  /// When true, shown to an owner and to a manager held to no store (a head-office
+  /// manager) only: the page is the whole business's, and a manager held to
+  /// stores would find nothing but a line saying so.
+  final bool businessWideOnly;
+
   const _AdminNavItem({
     required this.destination,
     required this.route,
     this.storekeeperVisible = false,
     this.ownerOnly = false,
+    this.businessWideOnly = false,
   });
 }
 
@@ -311,6 +317,27 @@ const _navItems = [
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
+      label: 'Changes',
+      icon: Icons.history_outlined,
+      selectedIcon: Icons.history,
+      section: 'Data & security',
+    ),
+    // Who changed a store, a person's role or a role: management's, and a
+    // manager held to stores reads only their stores' part.
+    route: '/admin/changes',
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
+      label: 'Security events',
+      icon: Icons.gpp_maybe_outlined,
+      selectedIcon: Icons.gpp_maybe,
+      section: 'Data & security',
+    ),
+    route: '/admin/security-events',
+    businessWideOnly: true,
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
       label: 'Privacy',
       icon: Icons.privacy_tip_outlined,
       selectedIcon: Icons.privacy_tip,
@@ -374,6 +401,7 @@ class AdminShell extends ConsumerWidget {
     final items = _navItems
         .where((i) => !storekeeperOnly || i.storekeeperVisible)
         .where((i) => owner || !i.ownerOnly)
+        .where((i) => !i.businessWideOnly || (auth is AuthAuthenticated && auth.isManager && !auth.heldToStores))
         .toList();
     final routes = items.map((i) => i.route).toList();
     final destinations = items.map((i) => i.destination).toList();
@@ -496,12 +524,15 @@ class _ChangePasswordDialogState extends ConsumerState<ChangePasswordDialog> {
       _loading = true;
       _error = null;
     });
+    // The "your password was changed" email goes out in this language.
+    final language = Localizations.localeOf(context).languageCode;
     try {
       await ref.read(apiClientProvider).dio.put(
         '/${ApiConstants.iam}/auth/change-password',
         data: {
           'currentPassword': _currentCtrl.text,
           'newPassword': _newCtrl.text,
+          'language': language,
         },
       );
       if (!mounted) return;

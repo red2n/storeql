@@ -1,7 +1,6 @@
 package com.storeql.customer.messaging;
 
 import com.storeql.customer.service.MarketingConsentService;
-import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.Initialized;
 import jakarta.enterprise.event.Observes;
@@ -16,7 +15,7 @@ import java.lang.System.Logger.Level;
  * to do — so this runs unconditionally rather than behind a flag.
  *
  * <p>{@code onStart} forces CDI to instantiate this eagerly (Helidon MP gotcha #9); the work itself
- * runs from {@link PostConstruct} so a failure here logs and lets the service start regardless —
+ * runs on a background virtual thread so it never delays start-up and a failure here logs only —
  * this fixes stale data, it does not gate readiness.
  */
 @ApplicationScoped
@@ -26,11 +25,14 @@ public class MarketingPurposeReconciler {
 
   @Inject MarketingConsentService marketing;
 
+  /**
+   * Starts the work on a background virtual thread once the application is up: it can take a while
+   * with many tenants (and calls tenant-svc), and the service must be started, not wait.
+   */
   void onStart(@Observes @Initialized(ApplicationScoped.class) Object event) {
-    /* eager CDI startup */
+    Thread.ofVirtual().name("marketing-purpose-reconciler").start(this::reconcile);
   }
 
-  @PostConstruct
   void reconcile() {
     try {
       int fixed = marketing.reconcilePurposeWithdrawals();

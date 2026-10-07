@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -112,6 +113,13 @@ public class AccountingService {
         throw ApiException.badRequest(
             "ACCOUNTING_SETTINGS_INVALID", provider.name() + " has no setting '" + key + "'");
       }
+    }
+    for (var e : settings.entrySet()) {
+      Accounting.settingProblem(provider.code(), e.getKey(), e.getValue())
+          .ifPresent(
+              problem -> {
+                throw ApiException.badRequest("ACCOUNTING_SETTINGS_INVALID", problem);
+              });
     }
     LocalDate syncFrom;
     try {
@@ -196,8 +204,25 @@ public class AccountingService {
 
   // ── the chart and the mapping ───────────────────────────────────────────────
 
+  /**
+   * The package's chart, read now.
+   *
+   * @throws ApiException 404 {@code ACCOUNTING_NOT_CONNECTED}; 409 {@code
+   *     ACCOUNTING_SETTINGS_INVALID} for a connection kept with settings the package cannot be
+   *     reached by (nothing is sent); 502 {@code ACCOUNTING_PROVIDER_REFUSED}; 503 {@code
+   *     ACCOUNTING_PROVIDER_UNREACHABLE}
+   */
   public List<AccountingPackage.ExternalAccount> accounts(UUID tenantId) {
     Connection c = require(tenantId);
+    Accounting.settingsProblem(c.provider(), c.settings())
+        .ifPresent(
+            problem -> {
+              throw ApiException.conflict(
+                  "ACCOUNTING_SETTINGS_INVALID",
+                  "the connection was kept with a setting the package cannot be reached by: "
+                      + problem
+                      + "; connect it again with the settings put right");
+            });
     AccountingPackage pkg = packageOf(c);
     Credentials creds = freshCredentials(c, pkg, Instant.now());
     try {
@@ -319,8 +344,16 @@ public class AccountingService {
     boolean retryable = true;
     boolean uncertain = false;
     List<NominalLedgerEntry> lines = ledger.findJournal(c.tenantId(), s.journalId());
+    // The rule the connection was made under, read again: one kept before it is refused unsent.
+    Optional<String> unusable = Accounting.settingsProblem(c.provider(), c.settings());
     if (lines.isEmpty()) {
       error = "journal " + s.journalId() + " is no longer in the ledger";
+      retryable = false;
+    } else if (unusable.isPresent()) {
+      // Nothing was sent, so nothing answered (no status code), and the clock cannot mend a
+      // setting: a person connects it again.
+      error = unusable.get() + "; correct the connection's settings and connect again";
+      snippet = error;
       retryable = false;
     } else if (creds == null
         && Accounting.provider(c.provider()).map(Provider::needsCredentials).orElse(true)) {
@@ -331,7 +364,8 @@ public class AccountingService {
         externalId = pkg.push(c, creds, journalOf(lines), account).externalId();
         status = 200;
       } catch (AccountingPackage.Refused r) {
-        status = r.status();
+        // A refusal made before anything was sent had no answer, so it has no status code.
+        status = r.sent() ? r.status() : null;
         error = r.getMessage();
         snippet = r.getMessage();
         retryable = r.retryable();
@@ -340,6 +374,16 @@ public class AccountingService {
         // A push that may have reached a package with no idempotency key must not be sent again by
         // the clock: a second try could book the journal twice. A person decides.
         uncertain = u.requestSent() && !pkg.idempotentWrites();
+      } catch (RuntimeException e) {
+        // A driver's own fault. Counted and kept like a push that got no answer — whether it left
+        // is unknown — so the try is on the log, the attempts run out, and nothing stays claimed
+        // with nobody told.
+        LOG.log(
+            Level.WARNING,
+            "Accounting push of journal " + s.journalId() + " failed in the driver",
+            e);
+        error = e.getClass().getSimpleName() + ": " + e.getMessage();
+        uncertain = !pkg.idempotentWrites();
       }
     }
     int durationMs = (int) Math.min(Integer.MAX_VALUE, (System.nanoTime() - started) / 1_000_000L);
@@ -482,18 +526,61 @@ public class AccountingService {
     return new Page(page, page.get(size - 1).id().toString());
   }
 
-  public record Detail(Sync sync, List<NominalLedgerEntry> lines, List<Attempt> attempts) {}
+  public record Detail(
+      Sync sync,
+      List<NominalLedgerEntry> lines,
+      List<Attempt> attempts,
+      Accounting.Resolution resolution) {}
 
   public Detail sync(UUID tenantId, UUID id) {
     Sync s = repo.sync(tenantId, id).orElseThrow(AccountingService::syncNotFound);
-    return new Detail(s, ledger.findJournal(tenantId, s.journalId()), repo.attempts(tenantId, id));
+    return new Detail(
+        s,
+        ledger.findJournal(tenantId, s.journalId()),
+        repo.attempts(tenantId, id),
+        repo.resolution(tenantId, id).orElse(null));
   }
 
-  public Detail retry(UUID tenantId, UUID id) {
+  public Detail retry(UUID tenantId, UUID id, UUID by) {
     repo.sync(tenantId, id).orElseThrow(AccountingService::syncNotFound);
-    if (!repo.retry(tenantId, id, Instant.now())) {
+    if (!repo.retry(tenantId, id, Instant.now(), by)) {
       throw ApiException.conflict(
           "ACCOUNTING_SYNC_DELIVERED", "This journal is already in the package");
+    }
+    return sync(tenantId, id);
+  }
+
+  /**
+   * A person's word on a push whose outcome was unknown: it landed (delivered under the package's
+   * own reference, never pushed again) or it never did (queued to try again). Once; audited on the
+   * row.
+   *
+   * @throws ApiException 400 {@code ACCOUNTING_OUTCOME_INVALID}, {@code
+   *     ACCOUNTING_EXTERNAL_ID_REQUIRED}; 404 {@code ACCOUNTING_SYNC_NOT_FOUND}; 409 {@code
+   *     ACCOUNTING_SYNC_NOT_UNCERTAIN}
+   */
+  public Detail resolve(
+      UUID tenantId, UUID id, UUID by, String outcome, String externalId, String note) {
+    String o = outcome == null ? "" : outcome.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!Accounting.LANDED.equals(o) && !Accounting.NOT_LANDED.equals(o)) {
+      throw ApiException.badRequest(
+          "ACCOUNTING_OUTCOME_INVALID", "outcome is LANDED or NOT_LANDED");
+    }
+    boolean landed = Accounting.LANDED.equals(o);
+    String reference = blankToNull(externalId == null ? null : externalId.trim());
+    if (landed && (reference == null || reference.length() > DESCRIPTION_MAX)) {
+      throw ApiException.badRequest(
+          "ACCOUNTING_EXTERNAL_ID_REQUIRED",
+          "give the package's own reference for the journal it holds");
+    }
+    String why = blankToNull(note == null ? null : note.trim());
+    if (why != null && why.length() > DESCRIPTION_MAX) {
+      throw ApiException.badRequest("ACCOUNTING_NOTE_TOO_LONG", "the note is too long");
+    }
+    repo.sync(tenantId, id).orElseThrow(AccountingService::syncNotFound);
+    if (!repo.resolveUncertain(tenantId, id, landed, reference, by, why, Instant.now())) {
+      throw ApiException.conflict(
+          "ACCOUNTING_SYNC_NOT_UNCERTAIN", "Only a push whose outcome is uncertain is resolved");
     }
     return sync(tenantId, id);
   }

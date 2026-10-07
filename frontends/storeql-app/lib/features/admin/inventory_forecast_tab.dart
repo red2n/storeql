@@ -196,7 +196,7 @@ class _ForecastTable extends ConsumerWidget {
                             child: Tooltip(
                               message:
                                   'Lives ${r.shelfLifeDays} days by its batches; an order covers no more'
-                                  '${r.wasteRatePct == null ? '' : ' · ${r.wasteRatePct!.toStringAsFixed(1)}% went out of date unsold'}',
+                                  '${r.wasteRatePct == null ? '' : ' · of what sold or went out of date, ${r.wasteRatePct!.toStringAsFixed(1)}% went out of date unsold'}',
                               child: Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                 decoration: BoxDecoration(
@@ -312,7 +312,7 @@ class _ForecastDetail extends ConsumerWidget {
               'Tested on the last ${f.holdoutDays} days: MAPE ${_fmt(f.mape, suffix: '%')}, '
               'bias ${_fmt(f.bias, suffix: '%')}, MASE ${_fmt(f.mase, decimals: 2)}.'
               '${f.fresh ? ' Fresh: lives ${f.shelfLifeDays} days, so an order covers no more' : ''}'
-              '${f.wasteRatePct == null ? '' : '; ${f.wasteRatePct!.toStringAsFixed(1)}% of what was received went out of date unsold'}'
+              '${f.wasteRatePct == null ? '' : '; of what sold or went out of date, ${f.wasteRatePct!.toStringAsFixed(1)}% went out of date unsold'}'
               '${f.fresh || f.wasteRatePct != null ? '.' : ''}'),
           if (f.promotedAheadDays > 0 || f.promotedHistoryDays > 0) ...[
             const SizedBox(height: 8),

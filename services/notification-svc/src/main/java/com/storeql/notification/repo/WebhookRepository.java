@@ -115,15 +115,16 @@ public class WebhookRepository extends BaseJdbcRepository {
 
   private static final String ATTEMPTS =
       "SELECT id, tenant_id, delivery_id, attempt, attempted_at, status_code, error,"
-          + " response_snippet, duration_ms FROM webhook_attempts WHERE delivery_id = ?"
-          + " ORDER BY attempt";
+          + " response_snippet, duration_ms FROM webhook_attempts WHERE tenant_id = ?"
+          + " AND delivery_id = ? ORDER BY attempt";
 
   private static final String REDELIVER =
       "UPDATE webhook_deliveries SET status = 'PENDING', next_attempt_at = ? WHERE tenant_id = ?"
           + " AND id = ?";
 
   private static final String PRUNE =
-      "DELETE FROM webhook_deliveries WHERE created_at < ? AND status <> 'PENDING'";
+      "DELETE FROM webhook_deliveries WHERE id IN (SELECT id FROM webhook_deliveries WHERE"
+          + " created_at < ? AND status <> 'PENDING' LIMIT ?)";
 
   // ── endpoints ──────────────────────────────────────────────────────────────
 
@@ -392,10 +393,14 @@ public class WebhookRepository extends BaseJdbcRepository {
         .findFirst();
   }
 
-  public List<Attempt> attempts(UUID deliveryId) {
+  /** The tries at one delivery of a business, oldest first; another business's are not found. */
+  public List<Attempt> attempts(UUID tenantId, UUID deliveryId) {
     return query(
         ATTEMPTS,
-        ps -> ps.setObject(1, deliveryId),
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, deliveryId);
+        },
         WebhookRepository::readAttempt,
         "webhook attempts");
   }
@@ -445,12 +450,16 @@ public class WebhookRepository extends BaseJdbcRepository {
         "redeliver webhook");
   }
 
-  /** Settled deliveries older than a day are let go, attempts with them. */
-  public int prune(Instant before) {
+  /**
+   * Up to {@code limit} settled deliveries created before {@code before} are let go, attempts with
+   * them; the caller repeats until fewer than {@code limit} go.
+   */
+  public int prune(Instant before, int limit) {
     return inTx(
         c -> {
           try (PreparedStatement ps = c.prepareStatement(PRUNE)) {
             ps.setObject(1, at(before));
+            ps.setInt(2, limit);
             return ps.executeUpdate();
           }
         },

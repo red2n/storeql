@@ -15,11 +15,14 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Item revisions (Gap #12): design/spec versions of a product variant over time, append-only.
- * Extracted from {@code ProductRepository}: has its own outbox event on create, no coupling to any
- * other aggregate. Keeps the same {@link #handleTxSqlException} override the monolith had — a
- * duplicate {@code (tenant_id, variant_id, revision)} insert must still surface as {@code 409
- * DUPLICATE}, not the generic 500 a plain {@code BaseJdbcRepository} would give.
+ * Item revisions (Gap #12): design/spec versions of a product variant over time. Not append-only:
+ * recording a revision marks the variant's {@code ACTIVE} ones effective on or before it {@code
+ * SUPERSEDED} (the one update this class makes). The service's own code never deletes a revision;
+ * only a departed business's erasure does. Extracted from {@code ProductRepository}: has its own
+ * outbox event on create, no coupling to any other aggregate. Keeps the same {@link
+ * #handleTxSqlException} override the monolith had — a duplicate {@code (tenant_id, variant_id,
+ * revision)} insert must still surface as {@code 409 DUPLICATE}, not the generic 500 a plain {@code
+ * BaseJdbcRepository} would give.
  */
 @ApplicationScoped
 public class ItemRevisionRepository extends BaseOutboxRepository {

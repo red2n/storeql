@@ -100,7 +100,8 @@ class DepositContainerIT {
   private String[] variant(String tenant) {
     String product =
         id(post("/admin/products", "{\"name\":\"Cola " + Ids.newId() + "\"}", tenant, "OWNER"));
-    String barcode = String.format("4%012d", Math.abs(System.nanoTime()) % 1_000_000_000_000L);
+    String body = String.format("4%011d", Math.abs(System.nanoTime()) % 100_000_000_000L);
+    String barcode = body + com.storeql.gs1.Gtin.checkDigit(body);
     return new String[] {
       id(
           post(

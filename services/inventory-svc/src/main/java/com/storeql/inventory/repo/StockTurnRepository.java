@@ -12,6 +12,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -46,21 +47,24 @@ public class StockTurnRepository extends BaseJdbcRepository {
    * question about last quarter with today's stock level.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param from inclusive start of the window; required — a turnover ratio has no meaning without
    *     one
    * @param to exclusive end of the window; required
    * @param grouping STORE for the rollup, VARIANT for the per-item detail
    * @param limit maximum rows, already clamped by the caller
+   * @param minorUnits the business currency's minor units: cost of sales and holdings are kept to
+   *     them
    * @return one row per group, slowest-turning first — the end of the list a manager acts on
    */
   public List<StockTurnRow> stockTurn(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       StockTurnGrouping grouping,
-      int limit) {
+      int limit,
+      int minorUnits) {
     // Grouping comes from an enum, never from request text.
     String keyExpr =
         switch (grouping) {
@@ -102,17 +106,17 @@ public class StockTurnRepository extends BaseJdbcRepository {
             + " AS group_key,"
             // A sale out of an uncosted batch contributes nothing to cogs and is reported
             // separately instead -- costing it at zero would flatter both margin and turns.
-            + " SUM(COALESCE(mv.sold_qty, 0) * COALESCE(b.cost_price, 0))::numeric(18,2) AS cogs,"
+            // Money is summed as kept and rounded in Java to the business currency's own minor
+            // units — whole yen, pence, three-decimal dinars — never cast to two places here.
+            + " SUM(COALESCE(mv.sold_qty, 0) * COALESCE(b.cost_price, 0)) AS cogs,"
             + " SUM(CASE WHEN b.cost_price IS NULL THEN COALESCE(mv.sold_qty, 0) ELSE 0 END)"
             + "   ::numeric(18,3) AS uncosted_sale_qty,"
-            + " SUM(COALESCE(mv.qty_open, 0) * COALESCE(b.cost_price, 0))::numeric(18,2)"
-            + "   AS opening_value,"
-            + " SUM(COALESCE(mv.qty_close, 0) * COALESCE(b.cost_price, 0))::numeric(18,2)"
-            + "   AS closing_value"
+            + " SUM(COALESCE(mv.qty_open, 0) * COALESCE(b.cost_price, 0)) AS opening_value,"
+            + " SUM(COALESCE(mv.qty_close, 0) * COALESCE(b.cost_price, 0)) AS closing_value"
             + " FROM inventory_batches b"
             + " LEFT JOIN mv ON mv.batch_id = b.id"
             + " WHERE b.tenant_id = ?"
-            + (storeId != null ? " AND b.store_id = ?" : "")
+            + (stores != null ? " AND b.store_id = ANY(?)" : "")
             // A group that neither held nor sold anything in the window is not a stock-turn
             // finding, it is noise; every variant ever received would otherwise appear forever.
             + " GROUP BY 1"
@@ -136,10 +140,12 @@ public class StockTurnRepository extends BaseJdbcRepository {
           ps.setObject(i++, toTs);
           ps.setObject(i++, tenantId);
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setInt(i, limit);
         },
-        StockTurnRepository::mapTurnRow,
+        rs -> mapTurnRow(rs, minorUnits),
         "compute stock turn");
   }
 
@@ -160,11 +166,11 @@ public class StockTurnRepository extends BaseJdbcRepository {
    * @param to the window's exclusive end — nothing archived after it could affect the replay
    * @return true when the archive holds nothing the replay needed
    */
-  public boolean historyComplete(UUID tenantId, UUID storeId, Instant to) {
+  public boolean historyComplete(UUID tenantId, Set<UUID> stores, Instant to) {
     String sql =
         "SELECT EXISTS (SELECT 1 FROM stock_movements_archive"
             + " WHERE tenant_id = ? AND created_at < ?"
-            + (storeId != null ? " AND store_id = ?" : "")
+            + (stores != null ? " AND store_id = ANY(?)" : "")
             + ") AS purged";
     List<Boolean> found =
         query(
@@ -173,7 +179,9 @@ public class StockTurnRepository extends BaseJdbcRepository {
               int i = 1;
               ps.setObject(i++, tenantId);
               ps.setObject(i++, to.atOffset(ZoneOffset.UTC));
-              if (storeId != null) ps.setObject(i, storeId);
+              if (stores != null) {
+                ps.setArray(i, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+              }
             },
             rs -> rs.getBoolean("purged"),
             "check movement history completeness");
@@ -193,27 +201,33 @@ public class StockTurnRepository extends BaseJdbcRepository {
    * FIFO means a newly received batch of a briskly selling line would otherwise read as untouched.
    *
    * @param tenantId the owning tenant; always the first filter (golden rule #3)
-   * @param storeId restrict to one store, or null for every store in the tenant
+   * @param stores restrict to these stores, or null for every store in the tenant
    * @param asOf the instant ages are measured back from — the caller's clock, so a report run
    *     against a fixed date is reproducible
    * @param grouping BUCKET for the ageing summary, STORE or VARIANT for the detail
    * @param limit maximum rows, already clamped by the caller
+   * @param minorUnits the business currency's minor units: the value at risk is kept to them
    * @return rows ordered by value at risk, largest first
    */
   public List<DeadStockRow> deadStock(
-      UUID tenantId, UUID storeId, Instant asOf, DeadStockGrouping grouping, int limit) {
+      UUID tenantId,
+      Set<UUID> stores,
+      Instant asOf,
+      DeadStockGrouping grouping,
+      int limit,
+      int minorUnits) {
     // Per (store, variant): what is left, what it is worth, and when it last sold.
     String perItem =
         "WITH holding AS ("
             + "  SELECT b.store_id, b.variant_id,"
             + "         SUM(b.remaining_qty)::numeric(18,3) AS on_hand_qty,"
-            + "         SUM(b.remaining_qty * COALESCE(b.cost_price, 0))::numeric(18,2) AS value,"
+            + "         SUM(b.remaining_qty * COALESCE(b.cost_price, 0)) AS value,"
             + "         SUM(CASE WHEN b.cost_price IS NULL THEN b.remaining_qty ELSE 0 END)"
             + "           ::numeric(18,3) AS uncosted_qty,"
             + "         MIN(b.created_at) AS oldest_receipt"
             + "    FROM inventory_batches b"
             + "   WHERE b.tenant_id = ? AND b.remaining_qty > 0"
-            + (storeId != null ? "     AND b.store_id = ?" : "")
+            + (stores != null ? "     AND b.store_id = ANY(?)" : "")
             + "   GROUP BY b.store_id, b.variant_id"
             + "), last_sale AS ("
             + "  SELECT m.store_id, m.variant_id, MAX(m.created_at) AS sold_at"
@@ -223,7 +237,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
             + "     AND NOT EXISTS (SELECT 1 FROM stock_movements v"
             + "                      WHERE v.tenant_id = m.tenant_id AND v.type = 'RECEIVE' AND v.ref_type = 'VOID'"
             + "                        AND v.ref_id = m.ref_id AND v.variant_id = m.variant_id)"
-            + (storeId != null ? "     AND m.store_id = ?" : "")
+            + (stores != null ? "     AND m.store_id = ANY(?)" : "")
             + "   GROUP BY m.store_id, m.variant_id"
             + "), aged AS ("
             + "  SELECT h.store_id, h.variant_id, h.on_hand_qty, h.value, h.uncosted_qty,"
@@ -258,7 +272,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
             + keyExpr
             + " AS group_key,"
             + " SUM(on_hand_qty)::numeric(18,3) AS on_hand_qty,"
-            + " SUM(value)::numeric(18,2) AS value,"
+            + " SUM(value) AS value,"
             + " SUM(uncosted_qty)::numeric(18,3) AS uncosted_qty,"
             // The oldest thing in the group, not the average: an average age hides the one line
             // that has not moved in two years behind twenty that moved yesterday.
@@ -276,31 +290,57 @@ public class StockTurnRepository extends BaseJdbcRepository {
         ps -> {
           int i = 1;
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setObject(i++, tenantId);
-          if (storeId != null) ps.setObject(i++, storeId);
+          if (stores != null) {
+            ps.setArray(i++, ps.getConnection().createArrayOf("uuid", stores.toArray()));
+          }
           ps.setObject(i++, asOfTs);
           ps.setInt(i, limit);
         },
-        StockTurnRepository::mapDeadStockRow,
+        rs -> mapDeadStockRow(rs, minorUnits),
         "age dead stock");
   }
 
-  private static StockTurnRow mapTurnRow(ResultSet rs) throws SQLException {
-    BigDecimal opening = rs.getBigDecimal("opening_value");
-    BigDecimal closing = rs.getBigDecimal("closing_value");
-    BigDecimal cogs = rs.getBigDecimal("cogs");
+  private static StockTurnRow mapTurnRow(ResultSet rs, int minorUnits) throws SQLException {
+    return turnRow(
+        rs.getString("group_key"),
+        rs.getBigDecimal("cogs"),
+        rs.getBigDecimal("uncosted_sale_qty"),
+        rs.getBigDecimal("opening_value"),
+        rs.getBigDecimal("closing_value"),
+        minorUnits);
+  }
+
+  /**
+   * One group's turn: the money rounded half up to the currency's minor units, the average holding
+   * from those, and the ratio (four decimals, a ratio not money).
+   */
+  static StockTurnRow turnRow(
+      String groupKey,
+      BigDecimal cogsSum,
+      BigDecimal uncostedSaleQty,
+      BigDecimal openingSum,
+      BigDecimal closingSum,
+      int minorUnits) {
+    BigDecimal opening = openingSum.setScale(minorUnits, java.math.RoundingMode.HALF_UP);
+    BigDecimal closing = closingSum.setScale(minorUnits, java.math.RoundingMode.HALF_UP);
+    BigDecimal cogs = cogsSum.setScale(minorUnits, java.math.RoundingMode.HALF_UP);
     // The ratio and days-on-hand are derived in Java rather than in SQL so the divide-by-zero
     // case can return null. Zero turns and "there was nothing to turn" are different findings,
     // and SQL's NULLIF would collapse both into the same empty cell.
     BigDecimal average =
-        opening.add(closing).divide(BigDecimal.valueOf(2), 2, java.math.RoundingMode.HALF_UP);
+        opening
+            .add(closing)
+            .divide(BigDecimal.valueOf(2), minorUnits, java.math.RoundingMode.HALF_UP);
     BigDecimal ratio =
         average.signum() == 0 ? null : cogs.divide(average, 4, java.math.RoundingMode.HALF_UP);
     return new StockTurnRow(
-        rs.getString("group_key"),
+        groupKey,
         cogs,
-        rs.getBigDecimal("uncosted_sale_qty"),
+        uncostedSaleQty,
         opening,
         closing,
         average,
@@ -308,7 +348,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
         null); // daysOnHand needs the window length; the service fills it in.
   }
 
-  private static DeadStockRow mapDeadStockRow(ResultSet rs) throws SQLException {
+  private static DeadStockRow mapDeadStockRow(ResultSet rs, int minorUnits) throws SQLException {
     // wasNull() reports on the *last* column read, so the age has to be resolved before any
     // other getter runs -- inlining it into the constructor call would have tested the column
     // read immediately before it instead.
@@ -317,7 +357,7 @@ public class StockTurnRepository extends BaseJdbcRepository {
     return new DeadStockRow(
         rs.getString("group_key"),
         rs.getBigDecimal("on_hand_qty"),
-        rs.getBigDecimal("value"),
+        rs.getBigDecimal("value").setScale(minorUnits, java.math.RoundingMode.HALF_UP),
         rs.getBigDecimal("uncosted_qty"),
         daysIdle,
         rs.getBoolean("never_sold"));

@@ -98,8 +98,15 @@ String channelLabel(String? channel) =>
       _ => humanizeCode(channel),
     };
 
-/// The material statuses a batch can be in, in the order a person picks from.
-const batchMaterialStatuses = ['AVAILABLE', 'QUARANTINE', 'HOLD', 'REJECTED'];
+/// The material statuses a batch can be in, in the order a person picks from:
+/// the five inventory-svc accepts and its database holds a batch to.
+const batchMaterialStatuses = [
+  'AVAILABLE',
+  'QUARANTINE',
+  'INSPECTION',
+  'DAMAGED',
+  'RECALLED',
+];
 
 /// A batch's material status in words — the same on the Batches badges, in
 /// their filter and in the dialog that changes it.
@@ -107,18 +114,21 @@ String materialStatusLabel(String? status) =>
     switch ((status ?? '').toUpperCase()) {
       'AVAILABLE' => 'Available',
       'QUARANTINE' => 'In quarantine',
-      'HOLD' => 'On hold',
-      'REJECTED' => 'Rejected',
+      'INSPECTION' => 'Under inspection',
+      'DAMAGED' => 'Damaged',
+      'RECALLED' => 'Recalled',
       _ => humanizeCode(status),
     };
 
-/// Green when the batch can be sold, amber while it is held back, red once it
-/// is rejected; grey for anything else.
+/// Green when the batch can be sold, amber while it is held back, blue while
+/// it waits to be checked, red once it is damaged or recalled; grey for
+/// anything else.
 StatusTone materialStatusTone(String? status) =>
     switch ((status ?? '').toUpperCase()) {
       'AVAILABLE' => StatusTone.success,
-      'QUARANTINE' || 'HOLD' => StatusTone.warning,
-      'REJECTED' => StatusTone.error,
+      'QUARANTINE' => StatusTone.warning,
+      'INSPECTION' => StatusTone.info,
+      'DAMAGED' || 'RECALLED' => StatusTone.error,
       _ => StatusTone.neutral,
     };
 
@@ -132,4 +142,111 @@ String tillPhoneLabel(String? choice) => switch ((choice ?? '').toUpperCase()) {
       'REQUIRED' => 'Required',
       'OFF' => "Don't ask",
       _ => 'Optional',
+    };
+
+/// The conditions a returned item can come back in (return-controls), in the
+/// order a person picks from. Nothing is preselected: the person looks.
+const returnConditions = ['SEALED', 'OPENED', 'DAMAGED', 'FAULTY'];
+
+/// A returned item's condition in words, with where it goes for the ones the
+/// shelf cares about — see [returnConditionHint].
+String returnConditionLabel(String? condition) =>
+    switch ((condition ?? '').toUpperCase()) {
+      'SEALED' => 'Sealed',
+      'OPENED' => 'Opened',
+      'DAMAGED' => 'Damaged',
+      'FAULTY' => 'Faulty',
+      _ => humanizeCode(condition),
+    };
+
+/// Where a returned item goes for its condition, in words.
+String returnConditionHint(String? condition) =>
+    switch ((condition ?? '').toUpperCase()) {
+      'SEALED' => 'back on sale',
+      'OPENED' => 'checked before resale',
+      'DAMAGED' || 'FAULTY' => 'off sale',
+      _ => '',
+    };
+
+/// Why a return needed a manager (order-svc's reason codes), in words.
+String returnReasonLabel(String? code) =>
+    switch ((code ?? '').toUpperCase()) {
+      'WINDOW' => "Past the business's return window",
+      'CEILING' => "Over the cashier's refund limit",
+      'FAULTY_PAST_WINDOW' => 'Faulty goods past the window',
+      'NO_RECEIPT' => 'No receipt to find the sale by',
+      _ => humanizeCode(code),
+    };
+
+/// How a return is paid back, in words.
+String refundMethodLabel(String? method) =>
+    switch ((method ?? '').toUpperCase()) {
+      'ORIGINAL' => 'Back to how they paid',
+      'STORE_CREDIT' => 'Store credit',
+      'GIFT_CARD' => 'Gift card',
+      _ => humanizeCode(method),
+    };
+
+/// What kind of return a record is (return-controls slice 2): an exchange
+/// settles against a new basket, a no-receipt return has no sale behind it.
+String returnKindLabel(String? kind) => switch ((kind ?? '').toUpperCase()) {
+      'EXCHANGE' => 'Exchange',
+      'NO_RECEIPT' => 'Return without a receipt',
+      'REFUND' || 'RETURN' => 'Return',
+      _ => humanizeCode(kind),
+    };
+
+/// A refusal of a return, an exchange or a gift-card charge at the till, in
+/// words the cashier can act on. Null for a code this does not know, so the
+/// caller shows the server's own message.
+String? returnRefusalLabel(String? code) =>
+    switch ((code ?? '').toUpperCase()) {
+      'ORDER_RETURN_CONDITION_REQUIRED' ||
+      'ORDER_RETURN_CONDITION_INVALID' =>
+        'Say what condition each returned item is in.',
+      'ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER' =>
+        'Store credit needs a customer. Choose one, or pay it back another way.',
+      'ORDER_RECEIPT_NOT_FOUND' =>
+        'No sale has that receipt number at this store. Check it and try again.',
+      'ORDER_RECEIPT_AMBIGUOUS' =>
+        'More than one sale matches that number. Type the full receipt number.',
+      'ORDER_NO_RECEIPT_RETURNS_OFF' =>
+        'This business does not take returns without a receipt.',
+      'ORDER_NO_RECEIPT_OVER_CEILING' =>
+        "That is over the most this business gives back without a receipt.",
+      'ORDER_NO_RECEIPT_METHOD_INVALID' =>
+        'Without a receipt the refund goes to store credit or a gift card only.',
+      'ORDER_RETURN_NEEDS_MANAGER' => 'A manager must take this one.',
+      'GIFT_CARD_NOT_FOUND' => 'No gift card has that code.',
+      'GIFT_CARD_INSUFFICIENT_BALANCE' =>
+        "The gift card doesn't have enough on it. Take a smaller amount from it, or another payment.",
+      'GIFT_CARD_EXPIRED' => 'That gift card has expired.',
+      'GIFT_CARD_CURRENCY_MISMATCH' =>
+        "That gift card is in a different currency and can't be used here.",
+      'GIFT_CARD_NOT_ACTIVE' => 'That gift card is not active.',
+      _ => null,
+    };
+
+/// Where a product recall or withdrawal came from, in the order a person picks
+/// from: no country's regulator is named, `REGULATOR` is whichever one applies.
+const recallSourceChoices = [
+  'REGULATOR',
+  'MANUFACTURER',
+  'SUPPLIER',
+  'INTERNAL',
+  'OTHER',
+];
+
+/// A recall's source in words. `FSA` and `FSS` are no longer offered but stay
+/// readable on the recalls already opened under them.
+String recallSourceLabel(String? source) =>
+    switch ((source ?? '').toUpperCase()) {
+      'REGULATOR' => 'A regulator',
+      'MANUFACTURER' => 'The manufacturer',
+      'SUPPLIER' => 'The supplier',
+      'INTERNAL' => 'Our own check',
+      'OTHER' => 'Other',
+      'FSA' => 'Food Standards Agency',
+      'FSS' => 'Food Standards Scotland',
+      _ => humanizeCode(source),
     };

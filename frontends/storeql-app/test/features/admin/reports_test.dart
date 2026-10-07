@@ -3,9 +3,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
+import 'package:storeql_app/core/auth/auth_notifier.dart';
+import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
 import 'package:storeql_app/features/admin/reports_screen.dart';
+
+import '../../support/fake_api.dart' show RoleAuth;
 
 // ---------------------------------------------------------------------------
 // The four reports horizon 1 built server-side and never gave a client. Two
@@ -55,6 +60,22 @@ class _RecordingAdapter implements HttpClientAdapter {
 
   ({String path, Map<String, dynamic> query}) callTo(String fragment) =>
       calls.firstWhere((c) => c.path.contains(fragment));
+}
+
+/// A manager whose role was narrowed to [permissions] (20.10), held to none.
+class _NarrowedManager extends AuthNotifier {
+  final List<String> permissions;
+  _NarrowedManager({required this.permissions});
+
+  @override
+  Future<AuthState> build() async => AuthAuthenticated(
+        accessToken: 'a',
+        refreshToken: 'r',
+        userId: 'u',
+        tenantId: 't',
+        roles: const ['MANAGER'],
+        permissions: permissions,
+      );
 }
 
 ({ProviderContainer container, _RecordingAdapter adapter}) _harness(
@@ -262,7 +283,7 @@ void main() {
   });
 
   group('the screen', () {
-    Future<void> pump(WidgetTester tester, _RecordingAdapter adapter) async {
+    Future<void> pump(WidgetTester tester, _RecordingAdapter adapter, {AuthNotifier? auth}) async {
       // Tall enough that the whole sidebar is built: a report below the fold
       // of a lazy list is not "unreachable", only unscrolled.
       tester.view.physicalSize = const Size(1400, 1300);
@@ -272,7 +293,13 @@ void main() {
       final dio = Dio(BaseOptions(baseUrl: 'http://test'))
         ..httpClientAdapter = adapter;
       await tester.pumpWidget(ProviderScope(
-        overrides: [apiClientProvider.overrideWithValue(_FakeApiClient(dio))],
+        key: UniqueKey(),
+        overrides: [
+          apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
+          // The owner unless the test names someone: a report the whole
+          // business's waits for the sign-in before it asks.
+          authNotifierProvider.overrideWith(() => auth ?? RoleAuth('OWNER')),
+        ],
         child: const MaterialApp(home: Scaffold(body: ReportsScreen())),
       ));
       await tester.pumpAndSettle();
@@ -485,6 +512,34 @@ void main() {
       expect(find.text('Deferred income (2330)'), findsOneWidget);
     });
 
+    // Loyalty points and gift cards are spent at any of the business's stores: purchase-svc
+    // answers a manager held to stores 403 BUSINESS_WIDE_ONLY on the deferred revenue and on
+    // its estimates. Such a manager is told who reads it and nothing is asked; a head-office
+    // manager reads it and is offered the estimates.
+    const heldNote = "Loyalty points and gift cards are the whole business's: only an owner or a "
+        'head-office manager reads their deferred revenue.';
+
+    testWidgets('a manager held to stores is told who reads deferred revenue, and nothing is asked',
+        (tester) async {
+      final adapter = _RecordingAdapter()..bodyFor['deferred-revenue'] = waiting;
+      await pump(tester, adapter, auth: RoleAuth('MANAGER', storeIds: const ['s-1']));
+      await openDeferredRevenue(tester);
+      expect(find.text(heldNote), findsOneWidget);
+      expect(find.byKey(const Key('set-estimates')), findsNothing);
+      expect(find.text('Deferred income (2330)'), findsNothing);
+      expect(adapter.requests.where((r) => r.path.contains('deferred-revenue')), isEmpty);
+    });
+
+    testWidgets('a head-office manager reads deferred revenue and is offered the estimates',
+        (tester) async {
+      final adapter = _RecordingAdapter()..bodyFor['deferred-revenue'] = waiting;
+      await pump(tester, adapter, auth: RoleAuth('MANAGER'));
+      await openDeferredRevenue(tester);
+      expect(find.text(heldNote), findsNothing);
+      expect(find.byKey(const Key('set-estimates')), findsOneWidget);
+      expect(find.text('Deferred income (2330)'), findsOneWidget);
+    });
+
     testWidgets('estimates need a reason, a refusal is shown in words, and what is saved is what was typed',
         (tester) async {
       final adapter = _RecordingAdapter()..bodyFor['deferred-revenue'] = waiting;
@@ -519,13 +574,86 @@ void main() {
       final put = adapter.requests.lastWhere((r) => r.method == 'PUT');
       expect(put.path, contains('/nominal-ledger/deferred-revenue/settings'));
       expect(put.data, {
-        'pointValue': 0.05,
-        'pointsBreakagePct': 20.0,
-        'giftCardBreakagePct': 10.0,
+        'pointValue': '0.05',
+        'pointsBreakagePct': '20',
+        'giftCardBreakagePct': '10',
         'reason': 'Two years of scheme data',
       });
       expect(find.byKey(const Key('save-estimates')), findsNothing);
     });
+
+    // A point's value (to four places, as purchase-svc keeps it) and the two
+    // breakage percentages are read the way the app's language writes a
+    // number and sent as the decimals typed, or refused under the field with
+    // nothing saved: parsed with a point, Romanian's 0,05 was no value at all.
+    for (final (locale, value, points, cards, sent) in [
+      ('ro', '0,05', '12,5', '10', ('0.05', '12.5', '10')),
+      ('en_GB', '0.0125', '20', '7.5', ('0.0125', '20', '7.5')),
+      ('en', '1', '0', '0.25', ('1', '0', '0.25')),
+      ('pl', '0,005', '33,33', '5', ('0.005', '33.33', '5')),
+      ('ar', '0\u066B05', '12\u066B5', '10', ('0.05', '12.5', '10')),
+    ]) {
+      testWidgets('in $locale, estimates of $value, $points % and $cards % are saved as typed', (tester) async {
+        Intl.defaultLocale = locale;
+        addTearDown(() => Intl.defaultLocale = null);
+        final adapter = _RecordingAdapter()
+          ..bodyFor['deferred-revenue'] = waiting
+          ..bodyFor['deferred-revenue/settings'] = '{"data":{}}';
+        await pump(tester, adapter);
+        await openDeferredRevenue(tester);
+        await tester.tap(find.byKey(const Key('set-estimates')));
+        await tester.pumpAndSettle();
+        for (final (key, text) in [
+          ('estimate-point-value', value),
+          ('estimate-points-breakage', points),
+          ('estimate-gift-card-breakage', cards),
+        ]) {
+          for (var i = 1; i <= text.length; i++) {
+            await tester.enterText(find.byKey(Key(key)), text.substring(0, i));
+            await tester.pump();
+          }
+          expect(tester.widget<TextField>(find.byKey(Key(key))).decoration?.errorText, isNull,
+              reason: '$key "$text"');
+        }
+        await tester.enterText(find.byKey(const Key('estimate-reason')), 'Scheme data');
+        await tester.tap(find.byKey(const Key('save-estimates')));
+        await tester.pumpAndSettle();
+        expect(adapter.requests.lastWhere((r) => r.method == 'PUT').data, {
+          'pointValue': sent.$1,
+          'pointsBreakagePct': sent.$2,
+          'giftCardBreakagePct': sent.$3,
+          'reason': 'Scheme data',
+        });
+      });
+    }
+
+    for (final (locale, key, typed) in [
+      ('ro', 'estimate-point-value', '0.05'),
+      ('en', 'estimate-points-breakage', '12,5'),
+      ('pl', 'estimate-point-value', '1.250'),
+      ('en_GB', 'estimate-gift-card-breakage', '.'),
+      ('ar', 'estimate-point-value', '-1'),
+    ]) {
+      testWidgets('in $locale, "$typed" in $key is refused and nothing is saved', (tester) async {
+        Intl.defaultLocale = locale;
+        addTearDown(() => Intl.defaultLocale = null);
+        final adapter = _RecordingAdapter()..bodyFor['deferred-revenue'] = waiting;
+        await pump(tester, adapter);
+        await openDeferredRevenue(tester);
+        await tester.tap(find.byKey(const Key('set-estimates')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byKey(const Key('estimate-point-value')), '1');
+        await tester.enterText(find.byKey(const Key('estimate-points-breakage')), '1');
+        await tester.enterText(find.byKey(const Key('estimate-gift-card-breakage')), '1');
+        await tester.enterText(find.byKey(Key(key)), typed);
+        await tester.enterText(find.byKey(const Key('estimate-reason')), 'Scheme data');
+        await tester.pump();
+        expect(tester.widget<TextField>(find.byKey(Key(key))).decoration?.errorText, isNotNull);
+        await tester.tap(find.byKey(const Key('save-estimates')));
+        await tester.pumpAndSettle();
+        expect(adapter.requests.where((r) => r.method == 'PUT'), isEmpty);
+      });
+    }
 
     testWidgets('an empty trial balance says so, and opens the journal dialog', (tester) async {
       await pump(tester, _RecordingAdapter());
@@ -538,6 +666,61 @@ void main() {
       await tester.tap(find.byKey(const Key('post-journal')));
       await tester.pumpAndSettle();
       expect(find.text('Post a journal'), findsOneWidget);
+    });
+
+    // purchase-svc posts a manual journal only for a caller holding
+    // finance.journal, and answers a manager held to two or more stores who
+    // names none 403 BUSINESS_WIDE_ONLY: such a manager picks one of theirs.
+    Future<void> openTrialBalance(WidgetTester tester) async {
+      await tester.ensureVisible(find.text('Trial Balance', skipOffstage: false).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Trial Balance').last);
+      await tester.pumpAndSettle();
+    }
+
+    const stores = '{"data":[{"id":"s-1","name":"High Street"},{"id":"s-2","name":"Market Square"},'
+        '{"id":"s-3","name":"Riverside"}],"meta":{"nextCursor":null}}';
+
+    testWidgets('a manager held to two stores posts a journal at one of theirs', (tester) async {
+      await pump(tester, _RecordingAdapter()..bodyFor['admin/stores'] = stores,
+          auth: RoleAuth('MANAGER', storeIds: const ['s-1', 's-2']));
+      await openTrialBalance(tester);
+      await tester.tap(find.byKey(const Key('post-journal')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('journal-store')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('journal-store')));
+      await tester.pumpAndSettle();
+      expect(find.text('Market Square'), findsWidgets);
+      expect(find.text('Riverside'), findsNothing);
+    });
+
+    testWidgets('a manager held to one store is asked no store', (tester) async {
+      await pump(tester, _RecordingAdapter()..bodyFor['admin/stores'] = stores,
+          auth: RoleAuth('MANAGER', storeIds: const ['s-1']));
+      await openTrialBalance(tester);
+      await tester.tap(find.byKey(const Key('post-journal')));
+      await tester.pumpAndSettle();
+      expect(find.text('Post a journal'), findsOneWidget);
+      expect(find.byKey(const Key('journal-store')), findsNothing);
+    });
+
+    testWidgets('a head-office manager posts the business\'s own journal, asked no store',
+        (tester) async {
+      await pump(tester, _RecordingAdapter()..bodyFor['admin/stores'] = stores,
+          auth: RoleAuth('MANAGER'));
+      await openTrialBalance(tester);
+      await tester.tap(find.byKey(const Key('post-journal')));
+      await tester.pumpAndSettle();
+      expect(find.text('Post a journal'), findsOneWidget);
+      expect(find.byKey(const Key('journal-store')), findsNothing);
+    });
+
+    testWidgets('a manager whose role does not post journals is not offered it', (tester) async {
+      await pump(tester, _RecordingAdapter(),
+          auth: _NarrowedManager(permissions: const ['purchasing.approve']));
+      await openTrialBalance(tester);
+      expect(find.text('Nothing was posted in this range.'), findsOneWidget);
+      expect(find.byKey(const Key('post-journal')), findsNothing);
     });
 
     testWidgets('the four that finish the pack are reachable too', (tester) async {

@@ -17,7 +17,11 @@ class RoleAuth extends AuthNotifier {
   final String role;
   final bool sandbox;
 
-  RoleAuth(this.role, {this.sandbox = false});
+  /// The stores the token names; empty is a login held to none (an owner, a
+  /// head-office manager).
+  final List<String> storeIds;
+
+  RoleAuth(this.role, {this.sandbox = false, this.storeIds = const []});
 
   @override
   Future<AuthState> build() async => AuthAuthenticated(
@@ -27,6 +31,7 @@ class RoleAuth extends AuthNotifier {
         tenantId: 't',
         roles: [role],
         sandbox: sandbox,
+        storeIds: storeIds,
       );
 }
 

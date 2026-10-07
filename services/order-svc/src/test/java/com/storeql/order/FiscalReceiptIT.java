@@ -70,12 +70,10 @@ class FiscalReceiptIT {
   // ── harness ────────────────────────────────────────────────────────────────
 
   private Response post(String path, String json, String tenant) {
-    return target
-        .path(path)
-        .request()
-        .header("X-Tenant-Id", tenant)
-        .header("X-Roles", "OWNER")
-        .post(Entity.entity(json, MediaType.APPLICATION_JSON));
+    var req = target.path(path).request().header("X-Tenant-Id", tenant).header("X-Roles", "OWNER");
+    // A void is retryable, so it carries a key: a fresh one for each attempt here.
+    if (path.endsWith("/void")) req = req.header("Idempotency-Key", Ids.newId().toString());
+    return req.post(Entity.entity(json, MediaType.APPLICATION_JSON));
   }
 
   /** Placing an order needs an Idempotency-Key (golden rule 11); a fresh one per call. */

@@ -191,7 +191,10 @@ class _SaleTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
     final failed = sale.status == OfflineSaleStatus.failed;
-    final at = AppFormat.dateTime(sale.capturedAt.toUtc().toIso8601String());
+    final capturedAt = sale.capturedAt;
+    final at = capturedAt == null
+        ? 'time not recorded'
+        : AppFormat.dateTime(capturedAt.toUtc().toIso8601String());
 
     return ListTile(
       leading: Icon(

@@ -1,7 +1,9 @@
 package com.storeql.order.dto;
 
+import com.storeql.order.domain.Quantities;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -23,14 +25,31 @@ public final class Dtos {
   @Schema(name = "OrderItemRequest")
   public record OrderItemRequest(
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
       @Schema(
               description =
-                  "Optional when server-side pricing is enforced (ignored there); required and"
-                      + " trusted only in legacy mode. Zero is allowed (e.g. a price-hidden"
-                      + " storefront that never resolves a real price client-side, or a genuine"
-                      + " free/comped item) — server-side pricing enforcement re-resolves the"
-                      + " real price regardless.")
+                  "How many, or how much of a weighed or measured product: counted to three"
+                      + " decimal places and never rounded — finer is 400 VALIDATION_FAILED. A POS"
+                      + " sale's line is the till's reading: a label's net weight read to as many"
+                      + " as five places (GS1 AI 3105, 0.37512) or weighings added in floating"
+                      + " point (0.30000000000000004) is the reading it is within a billionth of,"
+                      + " at most six places, counted at the gram below (0.375, 0.300) and"
+                      + " charged, held and kept at that; finer, or under 0.001, is 400. The body"
+                      + " takes up to twenty places for a till's double.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.TILL_PLACES)
+          BigDecimal qty,
+      @Schema(
+              description =
+                  "The net unit price as the client has it. Under server-side pricing"
+                      + " enforcement the price charged is always the server's, never this — on a"
+                      + " POS sale it is read for one thing only: with the quantity, the goods as"
+                      + " the till rang them up, up to which a full-basket staff discount is capped"
+                      + " at the order's subtotal rather than refused (a discount above them is"
+                      + " still refused). Required and trusted only in legacy mode, where it is"
+                      + " money typed and refused when finer than the currency. Zero is allowed"
+                      + " (a price-hidden storefront that never resolves a real price"
+                      + " client-side, or a genuine free/comped item).")
           @PositiveOrZero
           BigDecimal unitPrice,
       String notes,
@@ -38,15 +57,28 @@ public final class Dtos {
               description =
                   "For a line sold by weight: the weighing instrument the reading came from, from"
                       + " tenant-svc's register (Weights and Measures Act 1985 s.11). The till"
-                      + " refuses to sell by weight from an instrument that is not certified, and"
-                      + " the line records which one it was.")
+                      + " offers only certified instruments, and the order is refused (409"
+                      + " ORDER_SCALE_NOT_CERTIFIED) when the order's store's register does not"
+                      + " hold it or it is not certified today. The line records which it was.")
           String weighingInstrumentId,
       @Schema(
               description =
                   "The reduce-to-clear markdown a scanned sticker named (05.4): the line is priced"
                       + " at the sticker and stands outside every promotion. pricing-svc checks it"
                       + " is live, in date, for this product at this store, with packs left.")
-          String markdownId) {}
+          String markdownId,
+      @Schema(
+              description =
+                  "The lot the pack declared, when a GS1 2D code carried it (AI 10). Checked"
+                      + " against open recalls: a pack of a recalled lot is refused (409"
+                      + " ORDER_LINE_RECALLED). Not stored.")
+          @Size(max = 64)
+          String batchNo,
+      @Schema(
+              description =
+                  "The expiry the pack declared (AI 17), as an ISO date. Checked against open"
+                      + " recalls with batchNo. Not stored.")
+          String expiry) {}
 
   @Schema(
       name = "PlaceOrderRequest",
@@ -65,7 +97,10 @@ public final class Dtos {
                   "Manual staff discount off the subtotal. Honoured whether or not pricing"
                       + " enforcement is on: staff only, never above the subtotal, and never above"
                       + " the caller role's configured percentage ceiling. Requires"
-                      + " discountReason.")
+                      + " discountReason. In the order currency's minor units; on a POS sale,"
+                      + " where the till works it out in floating point, rounded half up to"
+                      + " them, and capped at the subtotal when no more than the goods as the"
+                      + " till rang them up (its lines added unrounded, then rounded once).")
           @PositiveOrZero
           BigDecimal discountAmount,
       @Schema(description = "Why the discount was given. Required whenever discountAmount is set.")
@@ -128,7 +163,305 @@ public final class Dtos {
               description =
                   "The chosen occurrence's start (ISO instant), exactly as"
                       + " GET /storefront/fulfilment-slots gave it.")
-          String slotStartsAt) {}
+          String slotStartsAt,
+      @Schema(
+              description =
+                  "A till sale replayed from the till's offline queue: when the cashier completed"
+                      + " it (ISO instant). A sale made offline has already happened, so a replay"
+                      + " captured no later than now and no further back than"
+                      + " storeql.order.offline-replay.grace-hours (24) is always placed; a line"
+                      + " a recall covered, or a scale not fit for trade weighed, at that moment"
+                      + " is written on the audit trail for a manager"
+                      + " (OFFLINE_SALE_OF_RECALLED_ITEM, OFFLINE_SALE_ON_UNFIT_SCALE). A capture"
+                      + " time up to storeql.order.offline-replay.clock-skew-seconds (300) after"
+                      + " now is a till clock a little ahead, taken as captured now. A capture"
+                      + " time outside those bounds is"
+                      + " judged as a sale made now and refused as one, in words for a manager."
+                      + " POS only; not read online, and absent for a sale made now.")
+          String capturedAt,
+      @Schema(
+              description =
+                  "A till sale replayed from the till's offline queue: the user id of whoever was"
+                      + " signed in at the till when the sale was made, which may not be whoever"
+                      + " sends the queue. Its audit-trail entries name them only when they are a"
+                      + " login of this business allowed at this store; otherwise the entries"
+                      + " read as rung up by an unknown member of staff, and the sale is placed"
+                      + " all the same. A UUIDv7 or absent (400 INVALID_UUID otherwise). POS"
+                      + " only; not read online.")
+          String rungUpBy,
+      @Schema(
+              description =
+                  "Gift cards sold on this order (a GIFT_CARD_LOAD line each): the card is issued,"
+                      + " or the named card topped up, when the order is paid, for what was paid."
+                      + " Added to the total with no VAT, no stock and no fulfilment; an order may"
+                      + " carry only these, and then send items as an empty list ([]): items is"
+                      + " required.")
+          @Valid
+          List<GiftCardLoadRequest> giftCardLoads) {
+
+    /** A builder with every member unset; name only what the request carries. */
+    public static Builder builder() {
+      return new Builder();
+    }
+
+    /** A builder starting from this request, to change a member or two. */
+    public Builder toBuilder() {
+      Builder b = new Builder();
+      b.storeId = storeId;
+      b.customerId = customerId;
+      b.channel = channel;
+      b.fulfilmentType = fulfilmentType;
+      b.items = items;
+      b.taxAmount = taxAmount;
+      b.discountAmount = discountAmount;
+      b.discountReason = discountReason;
+      b.currency = currency;
+      b.notes = notes;
+      b.couponCodes = couponCodes;
+      b.idempotencyKey = idempotencyKey;
+      b.taxExempt = taxExempt;
+      b.exemptReason = exemptReason;
+      b.deliveryLine1 = deliveryLine1;
+      b.deliveryLine2 = deliveryLine2;
+      b.deliveryCity = deliveryCity;
+      b.deliveryPostalCode = deliveryPostalCode;
+      b.deliveryRecipientName = deliveryRecipientName;
+      b.deliveryRecipientPhone = deliveryRecipientPhone;
+      b.contactPhone = contactPhone;
+      b.paymentMethod = paymentMethod;
+      b.awaitingPrice = awaitingPrice;
+      b.sellerUserId = sellerUserId;
+      b.allowSubstitutions = allowSubstitutions;
+      b.slotWindowId = slotWindowId;
+      b.slotStartsAt = slotStartsAt;
+      b.capturedAt = capturedAt;
+      b.rungUpBy = rungUpBy;
+      b.giftCardLoads = giftCardLoads;
+      return b;
+    }
+
+    /**
+     * Named construction of a {@link PlaceOrderRequest}; a member added later touches nothing here.
+     */
+    public static final class Builder {
+      private String storeId;
+      private String customerId;
+      private String channel;
+      private String fulfilmentType;
+      private List<OrderItemRequest> items;
+      private BigDecimal taxAmount;
+      private BigDecimal discountAmount;
+      private String discountReason;
+      private String currency;
+      private String notes;
+      private List<String> couponCodes;
+      private String idempotencyKey;
+      private Boolean taxExempt;
+      private String exemptReason;
+      private String deliveryLine1;
+      private String deliveryLine2;
+      private String deliveryCity;
+      private String deliveryPostalCode;
+      private String deliveryRecipientName;
+      private String deliveryRecipientPhone;
+      private String contactPhone;
+      private String paymentMethod;
+      private Boolean awaitingPrice;
+      private String sellerUserId;
+      private Boolean allowSubstitutions;
+      private String slotWindowId;
+      private String slotStartsAt;
+      private String capturedAt;
+      private String rungUpBy;
+      private List<GiftCardLoadRequest> giftCardLoads;
+
+      private Builder() {}
+
+      public Builder storeId(String v) {
+        this.storeId = v;
+        return this;
+      }
+
+      public Builder customerId(String v) {
+        this.customerId = v;
+        return this;
+      }
+
+      public Builder channel(String v) {
+        this.channel = v;
+        return this;
+      }
+
+      public Builder fulfilmentType(String v) {
+        this.fulfilmentType = v;
+        return this;
+      }
+
+      public Builder items(List<OrderItemRequest> v) {
+        this.items = v;
+        return this;
+      }
+
+      public Builder taxAmount(BigDecimal v) {
+        this.taxAmount = v;
+        return this;
+      }
+
+      public Builder discountAmount(BigDecimal v) {
+        this.discountAmount = v;
+        return this;
+      }
+
+      public Builder discountReason(String v) {
+        this.discountReason = v;
+        return this;
+      }
+
+      public Builder currency(String v) {
+        this.currency = v;
+        return this;
+      }
+
+      public Builder notes(String v) {
+        this.notes = v;
+        return this;
+      }
+
+      public Builder couponCodes(List<String> v) {
+        this.couponCodes = v;
+        return this;
+      }
+
+      public Builder idempotencyKey(String v) {
+        this.idempotencyKey = v;
+        return this;
+      }
+
+      public Builder taxExempt(Boolean v) {
+        this.taxExempt = v;
+        return this;
+      }
+
+      public Builder exemptReason(String v) {
+        this.exemptReason = v;
+        return this;
+      }
+
+      public Builder deliveryLine1(String v) {
+        this.deliveryLine1 = v;
+        return this;
+      }
+
+      public Builder deliveryLine2(String v) {
+        this.deliveryLine2 = v;
+        return this;
+      }
+
+      public Builder deliveryCity(String v) {
+        this.deliveryCity = v;
+        return this;
+      }
+
+      public Builder deliveryPostalCode(String v) {
+        this.deliveryPostalCode = v;
+        return this;
+      }
+
+      public Builder deliveryRecipientName(String v) {
+        this.deliveryRecipientName = v;
+        return this;
+      }
+
+      public Builder deliveryRecipientPhone(String v) {
+        this.deliveryRecipientPhone = v;
+        return this;
+      }
+
+      public Builder contactPhone(String v) {
+        this.contactPhone = v;
+        return this;
+      }
+
+      public Builder paymentMethod(String v) {
+        this.paymentMethod = v;
+        return this;
+      }
+
+      public Builder awaitingPrice(Boolean v) {
+        this.awaitingPrice = v;
+        return this;
+      }
+
+      public Builder sellerUserId(String v) {
+        this.sellerUserId = v;
+        return this;
+      }
+
+      public Builder allowSubstitutions(Boolean v) {
+        this.allowSubstitutions = v;
+        return this;
+      }
+
+      public Builder slotWindowId(String v) {
+        this.slotWindowId = v;
+        return this;
+      }
+
+      public Builder slotStartsAt(String v) {
+        this.slotStartsAt = v;
+        return this;
+      }
+
+      public Builder capturedAt(String v) {
+        this.capturedAt = v;
+        return this;
+      }
+
+      public Builder rungUpBy(String v) {
+        this.rungUpBy = v;
+        return this;
+      }
+
+      public Builder giftCardLoads(List<GiftCardLoadRequest> v) {
+        this.giftCardLoads = v;
+        return this;
+      }
+
+      public PlaceOrderRequest build() {
+        return new PlaceOrderRequest(
+            storeId,
+            customerId,
+            channel,
+            fulfilmentType,
+            items,
+            taxAmount,
+            discountAmount,
+            discountReason,
+            currency,
+            notes,
+            couponCodes,
+            idempotencyKey,
+            taxExempt,
+            exemptReason,
+            deliveryLine1,
+            deliveryLine2,
+            deliveryCity,
+            deliveryPostalCode,
+            deliveryRecipientName,
+            deliveryRecipientPhone,
+            contactPhone,
+            paymentMethod,
+            awaitingPrice,
+            sellerUserId,
+            allowSubstitutions,
+            slotWindowId,
+            slotStartsAt,
+            capturedAt,
+            rungUpBy,
+            giftCardLoads);
+      }
+    }
+  }
 
   @Schema(
       name = "PriceOrderRequest",
@@ -183,9 +516,13 @@ public final class Dtos {
   @Schema(name = "FulfilLine")
   public record FulfilLine(
       @NotNull String variantId,
-      @Schema(description = "Units handed over now; at most what is still outstanding.")
+      @Schema(
+              description =
+                  "Units handed over now, to three decimal places; at most what is still"
+                      + " outstanding.")
           @NotNull
           @jakarta.validation.constraints.Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
           BigDecimal qty) {}
 
   @Schema(name = "OrderResponse")
@@ -269,7 +606,56 @@ public final class Dtos {
                   "contactPhone in international form, e.g. +919886021001 (a phone at the till):"
                       + " read in the store's own country, then the business's. Absent when no"
                       + " number was given, or the one given could not be read.")
-          String contactPhoneE164) {}
+          String contactPhoneE164,
+      @Schema(
+              description =
+                  "When a PENDING order lapses if it is not paid (ISO instant): its creation plus"
+                      + " the business's unpaid-order limit, or the platform's default while it has"
+                      + " set none. Absent once the order is no longer waiting for payment.")
+          String expiresAt) {
+
+    /** This answer with the time a PENDING order lapses; unchanged when it is null. */
+    public OrderResponse withExpiresAt(String at) {
+      if (at == null) return this;
+      return new OrderResponse(
+          id,
+          storeId,
+          customerId,
+          loginId,
+          channel,
+          fulfilmentType,
+          status,
+          subtotal,
+          taxAmount,
+          discountAmount,
+          promotionDiscount,
+          total,
+          currency,
+          notes,
+          createdAt,
+          updatedAt,
+          items,
+          taxExempt,
+          exemptReason,
+          deliveryLine1,
+          deliveryLine2,
+          deliveryCity,
+          deliveryPostalCode,
+          deliveryRecipientName,
+          deliveryRecipientPhone,
+          contactPhone,
+          paymentMethod,
+          depositAmount,
+          deposits,
+          sellerUserId,
+          group,
+          handover,
+          allowSubstitutions,
+          slot,
+          contactPhoneE164,
+          at);
+    }
+  }
 
   @Schema(
       name = "SlotResponse",
@@ -313,8 +699,12 @@ public final class Dtos {
           "Close a line short (substitutions for out-of-stock online lines): the quantity that will"
               + " never be handed over comes off the order and the money for it goes back.")
   public record ShortCloseRequest(
-      @Schema(description = "How much to close; everything still outstanding when omitted.")
+      @Schema(
+              description =
+                  "How much to close, to three decimal places; everything still outstanding when"
+                      + " omitted.")
           @DecimalMin("0.001")
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
           BigDecimal qty,
       @Schema(description = "Why, for the history.") @Size(max = 200) String reason) {}
 
@@ -325,8 +715,11 @@ public final class Dtos {
               + " more than the original, the original closed short for the quantity.")
   public record SubstituteRequest(
       @Schema(description = "The variant put in the bag.") @NotBlank String substituteVariantId,
-      @Schema(description = "How much; everything still outstanding when omitted.")
+      @Schema(
+              description =
+                  "How much, to three decimal places; everything still outstanding when omitted.")
           @DecimalMin("0.001")
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
           BigDecimal qty,
       @Schema(
               description =
@@ -426,25 +819,49 @@ public final class Dtos {
   @Schema(name = "ReturnItemRequest")
   public record ReturnItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
-      @Schema(description = "Condition of the returned item, e.g. NEW, DAMAGED.")
+      @Schema(description = "How much comes back, to three decimal places; never rounded.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
+          BigDecimal qty,
+      @Schema(
+              description =
+                  "Required. SEALED goes back on sale; OPENED to inspection; DAMAGED and FAULTY"
+                      + " off sale. Missing is 400 ORDER_RETURN_CONDITION_REQUIRED, any other"
+                      + " value 400 ORDER_RETURN_CONDITION_INVALID.")
           String condition) {}
 
   @Schema(name = "CreateReturnRequest")
   public record CreateReturnRequest(
       @NotBlank String reason,
-      @Schema(description = "Defaults to refunding via the order's original payment method.")
+      @Schema(
+              description =
+                  "ORIGINAL (the default: back to how the sale was paid), STORE_CREDIT (the sale"
+                      + " must name a customer) or GIFT_CARD.")
           String refundMethod,
       @NotNull @Valid List<ReturnItemRequest> items,
       @Schema(
               description =
                   "The recall notice this refund settles (05.10): the notice is marked refunded"
                       + " in the same transaction. Must be a notice about this order.")
-          String recallNoticeId) {}
+          String recallNoticeId,
+      @Schema(
+              description =
+                  "GIFT_CARD only: the code of this business's card to top up. Absent, a new card"
+                      + " is issued for the refund.")
+          @Size(max = 64)
+          String giftCardCode) {}
 
   @Schema(name = "ReturnItemResponse")
   public record ReturnItemResponse(
-      String id, String variantId, BigDecimal qty, BigDecimal refundAmount, String condition) {}
+      String id,
+      String variantId,
+      BigDecimal qty,
+      BigDecimal refundAmount,
+      String condition,
+      @Schema(description = "A no-receipt line only: one unit at today's price, VAT included.")
+          BigDecimal unitPrice,
+      @Schema(description = "A no-receipt line only: the VAT in the line.") BigDecimal taxAmount) {}
 
   @Schema(name = "ReturnResponse")
   public record ReturnResponse(
@@ -461,7 +878,191 @@ public final class Dtos {
           String createdBy,
       String createdAt,
       String completedAt,
-      List<ReturnItemResponse> items) {}
+      List<ReturnItemResponse> items,
+      @Schema(
+              description =
+                  "The sales.refund holder who allowed a return outside the policy; null when it"
+                      + " was within it.")
+          String approvedBy,
+      @Schema(
+              description =
+                  "Why it needed a manager: WINDOW, CEILING or FAULTY_PAST_WINDOW; empty when it"
+                      + " was within the policy.")
+          List<String> outsidePolicy,
+      @Schema(
+              description =
+                  "GIFT_CARD only, on the response to the return itself: the card the refund went"
+                      + " on, with its code as the issue endpoint shows it.")
+          ReturnGiftCardResponse giftCard,
+      @Schema(
+              description =
+                  "A direct exchange only: the sale the returned goods pay towards; null"
+                      + " otherwise.")
+          String exchangeOrderId,
+      @Schema(description = "True for a return taken with no receipt, when orderId is null.")
+          boolean noReceipt,
+      @Schema(description = "The customer a no-receipt refund goes to; null when none is named.")
+          String customerId) {}
+
+  @Schema(name = "ExchangeRequest")
+  public record ExchangeRequest(
+      @NotBlank String reason,
+      @NotNull @Valid List<ReturnItemRequest> returnItems,
+      @NotNull @Valid List<@NotNull ExchangeNewItemRequest> newItems,
+      @Schema(
+              description =
+                  "The customer the new sale is for; the returned sale's customer when absent.")
+          String customerId) {}
+
+  @Schema(name = "ExchangeNewItemRequest")
+  public record ExchangeNewItemRequest(
+      @NotBlank String variantId,
+      @Schema(
+              description =
+                  "As on a till sale's line, for the new sale is one: the till scans the new"
+                      + " basket, so a label's net weight read to as many as five places (GS1 AI"
+                      + " 3105, 0.37512) or weighings added in floating point"
+                      + " (0.30000000000000004) is the reading it is within a billionth of, at"
+                      + " most six places, counted at the gram below (0.375, 0.300) and charged,"
+                      + " held and kept at that; finer, or under 0.001, is 400 VALIDATION_FAILED"
+                      + " naming newItems[i].qty. The body takes up to twenty places for a till's"
+                      + " double.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.TILL_PLACES)
+          BigDecimal qty,
+      @Schema(
+              description =
+                  "As on a till sale's line: the certified weighing instrument a weighed item was"
+                      + " read on. Refused (409 ORDER_SCALE_NOT_CERTIFIED) as on a sale when the"
+                      + " store's register does not hold it or it is not certified today.")
+          String weighingInstrumentId,
+      @Schema(
+              description =
+                  "As on a till sale's line: the reduce-to-clear markdown a scanned sticker named"
+                      + " (05.4). The new sale's line is priced at the sticker, as a sale's is.")
+          String markdownId,
+      @Schema(
+              description =
+                  "As on a till sale's line: the lot the pack declared (GS1 AI 10). A pack of a"
+                      + " recalled lot is refused (409 ORDER_LINE_RECALLED), as on a sale. Not"
+                      + " stored.")
+          @Size(max = 64)
+          String batchNo,
+      @Schema(
+              description =
+                  "As on a till sale's line: the expiry the pack declared (AI 17), as an ISO"
+                      + " date, checked against open recalls with batchNo; not a date is 400"
+                      + " ORDER_LINE_EXPIRY_INVALID naming newItems[i].expiry. Not stored.")
+          String expiry) {
+    // One constructor only: JSON-B (Yasson) builds a record through its canonical constructor
+    // only when it is the record's sole one, so a second would refuse every exchange body.
+  }
+
+  @Schema(name = "NoReceiptReturnRequest")
+  public record NoReceiptReturnRequest(
+      @NotBlank String storeId,
+      @NotBlank String reason,
+      @Schema(
+              description =
+                  "STORE_CREDIT or GIFT_CARD. Never ORIGINAL: there is no sale to pay back.")
+          @NotBlank
+          String refundMethod,
+      @Schema(description = "Required for STORE_CREDIT: the customer whose credit it goes to.")
+          String customerId,
+      @Schema(
+              description =
+                  "The phone or email the customer gives, kept for the record and never logged.")
+          @NotBlank
+          @Size(max = 200)
+          String customerContact,
+      @Schema(description = "GIFT_CARD only: a card of this business to top up; absent, a new one.")
+          @Size(max = 64)
+          String giftCardCode,
+      @NotNull @Valid List<ReturnItemRequest> items) {}
+
+  @Schema(name = "ReturnGiftCardResponse")
+  public record ReturnGiftCardResponse(String id, String code, BigDecimal balance) {}
+
+  @Schema(name = "ReturnableLineResponse")
+  public record ReturnableLineResponse(
+      String variantId,
+      @Schema(description = "What was handed over.") BigDecimal soldQty,
+      @Schema(description = "What has already come back.") BigDecimal returnedQty,
+      @Schema(description = "What can still come back: sold less returned.")
+          BigDecimal returnableQty,
+      @Schema(description = "The price paid for one, before any refund.") BigDecimal unitPrice) {}
+
+  @Schema(
+      name = "ReceiptLookupResponse",
+      description = "A sale found by its receipt, with how much of each line can still come back.")
+  public record ReceiptLookupResponse(
+      OrderResponse order,
+      @Schema(description = "The printed fiscal number, when one has been issued.")
+          String receiptNumber,
+      List<ReturnableLineResponse> lines) {}
+
+  @Schema(name = "PendingLimitRequest")
+  public record PendingLimitRequest(
+      @Schema(
+              description =
+                  "Whole hours an unpaid order is held before it is cancelled, 1 or more"
+                      + " (ORDER_PENDING_LIMIT_INVALID otherwise); null puts the platform's own"
+                      + " default back.")
+          Integer pendingLimitHours) {}
+
+  @Schema(name = "PendingLimitResponse")
+  public record PendingLimitResponse(
+      @Schema(description = "The business's own limit; null while it has set none.")
+          Integer pendingLimitHours,
+      @Schema(description = "The hours in force: the business's own, else the platform's default.")
+          int effectiveHours,
+      boolean usingDefault) {}
+
+  @Schema(name = "PriceWaitRequest")
+  public record PriceWaitRequest(
+      @Schema(
+              description =
+                  "Minutes an order waits for a price before a manager is told; null for never.")
+          Integer flagMinutes,
+      @Schema(
+              description =
+                  "Minutes before the order is cancelled and its stock released; null for never."
+                      + " Not before flagMinutes (ORDER_PRICE_WAIT_INVALID).")
+          Integer cancelMinutes) {}
+
+  @Schema(name = "PriceWaitResponse")
+  public record PriceWaitResponse(Integer flagMinutes, Integer cancelMinutes) {}
+
+  @Schema(name = "ReturnPolicyRequest")
+  public record ReturnPolicyRequest(
+      @Schema(description = "Calendar days from handover in which a cashier may take a return.")
+          @NotNull
+          @Min(1)
+          @Max(3650)
+          Integer windowDays,
+      @Schema(
+              description =
+                  "The most a cashier may refund on one return, in the business's home currency;"
+                      + " absent for no ceiling.")
+          @PositiveOrZero
+          BigDecimal cashierCeiling,
+      @Schema(description = "Whether a return with no receipt may be taken at all.") @NotNull
+          Boolean noReceiptAllowed,
+      @Schema(description = "The most a no-receipt return may refund, home currency.")
+          @PositiveOrZero
+          BigDecimal noReceiptCeiling) {}
+
+  @Schema(name = "ReturnPolicyResponse")
+  public record ReturnPolicyResponse(
+      int windowDays,
+      BigDecimal cashierCeiling,
+      boolean noReceiptAllowed,
+      BigDecimal noReceiptCeiling,
+      @Schema(description = "The business's home currency, which the ceilings are in.")
+          String currency,
+      @Schema(description = "True while the business has set nothing and the default applies.")
+          boolean usingDefault) {}
 
   // ── Post-void (Gap #14) ───────────────────────────────────────────────────
 
@@ -502,7 +1103,12 @@ public final class Dtos {
               description =
                   "The delivery or collection window this order holds (delivery and collection"
                       + " slots); null for a till sale or an order at a store with no windows.")
-          SlotResponse slot) {}
+          SlotResponse slot,
+      @Schema(
+              description =
+                  "When an order still waiting for payment lapses, as an ISO instant; absent for"
+                      + " an order that is not PENDING.")
+          String expiresAt) {}
 
   @Schema(name = "VoidRequest")
   public record VoidRequest(
@@ -519,7 +1125,11 @@ public final class Dtos {
   @Schema(name = "LayawayItemRequest")
   public record LayawayItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @Schema(description = "To three decimal places; never rounded.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
+          BigDecimal qty,
       @NotNull @Positive BigDecimal unitPrice) {}
 
   @Schema(name = "CreateLayawayRequest")
@@ -566,7 +1176,12 @@ public final class Dtos {
 
   // ── Gift cards (Gap #14) ──────────────────────────────────────────────────
 
-  @Schema(name = "IssueGiftCardRequest")
+  @Schema(
+      name = "IssueGiftCardRequest",
+      description =
+          "A manager's issue of a gift card with no sale behind it. A card a customer pays for is a"
+              + " GIFT_CARD_LOAD line on the sale (giftCardLoads on the order), issued when the"
+              + " sale is paid; a cashier cannot issue one (GIFT_CARD_NEEDS_SALE).")
   public record IssueGiftCardRequest(
       @NotBlank String storeId,
       @Schema(description = "Initial stored-value amount.") @NotNull @Positive BigDecimal amount,
@@ -575,24 +1190,70 @@ public final class Dtos {
                   "ISO 4217 currency code. Defaults to the tenant's own currency; a value that contradicts it is rejected with ORDER_CURRENCY_MISMATCH.")
           String currency,
       String expiresAt,
-      @Schema(description = PAID_BY_DESCRIPTION) @NotBlank String paidBy) {}
+      @Schema(description = HAND_PAID_BY_DESCRIPTION) String paidBy,
+      @Schema(description = REASON_DESCRIPTION) String reason,
+      @Schema(description = "A note kept with the reason and who gave it.") @Size(max = 200)
+          String note) {}
 
-  @Schema(name = "ReloadGiftCardRequest")
+  @Schema(
+      name = "ReloadGiftCardRequest",
+      description =
+          "A manager's top-up of a gift card with no sale behind it; a card topped up by a"
+              + " customer's payment is a GIFT_CARD_LOAD line naming its code.")
   public record ReloadGiftCardRequest(
       @NotNull @Positive BigDecimal amount,
       String reference,
-      @Schema(description = PAID_BY_DESCRIPTION) @NotBlank String paidBy) {}
+      @Schema(description = HAND_PAID_BY_DESCRIPTION) String paidBy,
+      @Schema(description = REASON_DESCRIPTION) String reason,
+      @Schema(description = "A note kept with the reason and who gave it.") @Size(max = 200)
+          String note) {}
 
-  static final String PAID_BY_DESCRIPTION =
-      "How the value was paid for: CASH, CARD, UPI or WALLET, or PROMOTIONAL for value given away."
-          + " A gift card sold is a liability against the money taken (17.11); another gift card,"
-          + " a voucher or store credit is refused with GIFT_CARD_PAID_BY_INVALID.";
+  static final String REASON_DESCRIPTION =
+      "Required: why value is being given, one of GOODWILL, PROMOTION, COMPENSATION or MIGRATION"
+          + " (GIFT_CARD_REASON_REQUIRED otherwise). Kept with who gave it.";
+
+  static final String HAND_PAID_BY_DESCRIPTION =
+      "Optional, and only PROMOTIONAL when given: value handed out by hand is given away. Money"
+          + " taken for a card is a sale (GIFT_CARD_NEEDS_SALE).";
+
+  /** A gift-card line on a sale: value the customer pays for with the order. */
+  @Schema(
+      name = "GiftCardLoadRequest",
+      description =
+          "A gift card sold as a line of the order. The card is issued (or topped up, when code"
+              + " names one) when the order is paid, for this amount, and not before.")
+  public record GiftCardLoadRequest(
+      @Schema(description = "What the card is loaded with, in the order's currency.")
+          @NotNull
+          @Positive
+          BigDecimal amount,
+      @Schema(description = "An existing card of this business to top up; absent for a new card.")
+          String code) {}
+
+  @Schema(
+      name = "GiftCardLoadResponse",
+      description =
+          "A gift card sold on an order. PENDING until the sale is paid (no card, no code); then"
+              + " LOADED with the card's id and code, whether it is a NEW card or a TOP_UP, and when.")
+  public record GiftCardLoadResponse(
+      String id,
+      BigDecimal amount,
+      @Schema(description = "PENDING or LOADED.") String status,
+      String giftCardId,
+      @Schema(description = "The card's code; absent while PENDING.") String code,
+      @Schema(description = "NEW or TOP_UP; absent while PENDING.") String kind,
+      @Schema(description = "ISO instant the card was loaded; absent while PENDING.")
+          String loadedAt) {}
 
   @Schema(name = "RedeemGiftCardRequest")
   public record RedeemGiftCardRequest(
       @NotNull @Positive BigDecimal amount,
-      @Schema(description = "UUID of the order this redemption pays for, if any.") String orderId,
+      @Schema(description = "UUID of the order this redemption pays for.") @NotBlank String orderId,
       String reference) {}
+
+  @Schema(name = "RedeemGiftCardResponse")
+  public record RedeemGiftCardResponse(
+      String redemptionId, String giftCardId, BigDecimal amount, BigDecimal balance) {}
 
   @Schema(name = "GiftCardResponse")
   public record GiftCardResponse(
@@ -622,7 +1283,11 @@ public final class Dtos {
   @Schema(name = "SpecialOrderItemRequest")
   public record SpecialOrderItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @Schema(description = "To three decimal places; never rounded.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.SCALE)
+          BigDecimal qty,
       @NotNull @Positive BigDecimal unitPrice,
       String notes) {}
 
@@ -733,7 +1398,15 @@ public final class Dtos {
   @Schema(name = "ParkedSaleItemRequest")
   public record ParkedSaleItemRequest(
       @NotBlank String variantId,
-      @NotNull @Positive BigDecimal qty,
+      @Schema(
+              description =
+                  "As on a till sale: three decimal places; a label's finer weight or a"
+                      + " double's noise is the reading it stands for, counted at the gram below;"
+                      + " anything finer 400 VALIDATION_FAILED.")
+          @NotNull
+          @Positive
+          @Digits(integer = Quantities.WHOLE_DIGITS, fraction = Quantities.TILL_PLACES)
+          BigDecimal qty,
       @NotNull @PositiveOrZero BigDecimal unitPrice,
       @PositiveOrZero BigDecimal discountAmount,
       String notes,
@@ -745,7 +1418,7 @@ public final class Dtos {
       @NotBlank String storeId,
       String customerId,
       String customerName,
-      List<@NotNull ParkedSaleItemRequest> items,
+      List<@NotNull @Valid ParkedSaleItemRequest> items,
       String notes) {}
 
   @Schema(name = "ResumeParkedSaleRequest")
@@ -775,7 +1448,11 @@ public final class Dtos {
       String notes,
       String parkedAt,
       @Schema(description = "When this parked sale is auto-discarded if not resumed.")
-          String expiresAt) {}
+          String expiresAt,
+      @Schema(description = "The cashier who parked it.") String parkedBy,
+      @Schema(description = "When it was picked back up; null while it is open.") String resumedAt,
+      @Schema(description = "Who picked it back up, which may not be who parked it.")
+          String resumedBy) {}
 
   // ── No-sale / open-drawer log ─────────────────────────────────────────────
 
@@ -1088,8 +1765,16 @@ public final class Dtos {
               + " why.")
   public record AuditEventResponse(
       String id,
-      @Schema(description = "DISCOUNT, VOID, NO_SALE, CANCEL or RETURN.") String type,
-      String occurredAt,
+      @Schema(
+              description =
+                  "DISCOUNT, VOID, NO_SALE, CANCEL, RETURN, PRICED (a catalogue-mode order given its"
+                      + " price by a manager), OFFLINE_SALE_OF_RECALLED_ITEM (a till"
+                      + " sale replayed from the offline queue, recorded although a recall"
+                      + " covered the line when it was rung up) or OFFLINE_SALE_ON_UNFIT_SCALE"
+                      + " (the same, for a line weighed on a scale not fit for trade then).")
+          String type,
+      @Schema(description = "When it happened; for an offline sale, when the cashier rang it up.")
+          String occurredAt,
       @Schema(description = "The member of staff responsible; null when the log recorded nobody.")
           String actorId,
       String storeId,
@@ -1101,8 +1786,35 @@ public final class Dtos {
               description =
                   "The log's own qualifier: the role that authorised a discount, the status a"
                       + " cancel came from, a return's refund method, the supervisor who"
-                      + " authorised a no-sale.")
-          String detail) {}
+                      + " authorised a no-sale, the reference of the recall an offline sale sold"
+                      + " under, the register's standing of the scale one was weighed on"
+                      + " (NOT_REGISTERED when the store's register does not hold it,"
+                      + " UNKNOWN_AT_SALE when the register cannot show it was fit then).")
+          String detail,
+      @Schema(description = "The product line an offline sale's entry is about; null for the rest.")
+          String variantId,
+      @Schema(
+              description =
+                  "Who sent an offline sale from the till's queue, which may be somebody other"
+                      + " than who rang it up (actorId, null when that was not a member of staff"
+                      + " the business holds at the store); null for the rest.")
+          String replayedBy,
+      @Schema(
+              description =
+                  "A return only: the sales.refund holder who allowed it outside the policy.")
+          String approvedBy,
+      @Schema(
+              description =
+                  "A return only: why it needed a manager (WINDOW, CEILING, FAULTY_PAST_WINDOW);"
+                      + " empty when within the policy.")
+          List<String> outsidePolicy,
+      @Schema(description = "A return only: the lines, quantities and conditions.")
+          List<AuditReturnLineResponse> lines,
+      @Schema(description = "A return only: true when it was taken with no receipt.")
+          boolean noReceipt) {}
+
+  @Schema(name = "AuditReturnLineResponse")
+  public record AuditReturnLineResponse(String variantId, BigDecimal qty, String condition) {}
 
   // ── Deposit return (09.16) ────────────────────────────
 

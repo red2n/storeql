@@ -64,4 +64,22 @@ class TenantContextTest {
     assertNull(none.scopeStore(null), "held to no store: every store");
     assertEquals(b, none.scopeStore(b));
   }
+
+  @Test
+  void aReportReadsTheCallersStoresTogether() {
+    UUID a = Ids.newId();
+    UUID b = Ids.newId();
+    UUID c = Ids.newId();
+    TenantContext two = new TenantContext();
+    two.set(Ids.newId(), Ids.newId(), Set.of("MANAGER"), Set.of(a, b), "req");
+    assertEquals(Set.of(a, b), two.reportStores(null), "several stores, none named: all of them");
+    assertEquals(Set.of(b), two.reportStores(b));
+    ApiException other = assertThrows(ApiException.class, () -> two.reportStores(c));
+    assertEquals(403, other.status(), "a store the caller does not keep");
+
+    TenantContext none = new TenantContext();
+    none.set(Ids.newId(), Ids.newId(), Set.of("OWNER"), Set.of(), "req");
+    assertNull(none.reportStores(null), "held to no store: the whole business");
+    assertEquals(Set.of(c), none.reportStores(c));
+  }
 }

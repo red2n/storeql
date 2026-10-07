@@ -381,10 +381,10 @@ class MarkdownServiceTest {
   @Test
   void reducedPriceRoundsHalfUp() {
     assertThat(
-        MarkdownService.reducedPrice(new BigDecimal("1.99"), new BigDecimal("50")),
+        MarkdownService.reducedPrice(new BigDecimal("1.99"), new BigDecimal("50"), 2),
         comparesEqualTo(new BigDecimal("1.00")));
     assertThat(
-        MarkdownService.reducedPrice(new BigDecimal("0.10"), new BigDecimal("75")),
+        MarkdownService.reducedPrice(new BigDecimal("0.10"), new BigDecimal("75"), 2),
         comparesEqualTo(new BigDecimal("0.03")));
   }
 
@@ -392,7 +392,18 @@ class MarkdownServiceTest {
   void aStepOnTheLadderCanBeAnyWholeOrFractionalPercentage() {
     MarkdownStep s = new MarkdownStep(2, new BigDecimal("33.33"));
     assertThat(
-        MarkdownService.reducedPrice(new BigDecimal("3.00"), s.percentOff()),
+        MarkdownService.reducedPrice(new BigDecimal("3.00"), s.percentOff(), 2),
         comparesEqualTo(new BigDecimal("2.00")));
+  }
+
+  /** A reduced price is rounded to the currency's own minor units: whole yen, fils for dinars. */
+  @Test
+  void aReducedPriceIsInTheCurrencysOwnUnits() {
+    assertThat(
+        MarkdownService.reducedPrice(new BigDecimal("199"), new BigDecimal("50"), 0),
+        org.hamcrest.Matchers.is(new BigDecimal("100")));
+    assertThat(
+        MarkdownService.reducedPrice(new BigDecimal("1.235"), new BigDecimal("30"), 3),
+        org.hamcrest.Matchers.is(new BigDecimal("0.865")));
   }
 }

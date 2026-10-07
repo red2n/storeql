@@ -270,8 +270,8 @@ These are the URLs you use when running `docker compose up` on your laptop (base
 
 The owner registers via the standard onboarding flow (see [docs/onboarding-and-locations.md](onboarding-and-locations.md)):
 
-1. Register at `https://app.storeql.com/#/register`
-2. Create their tenant at `https://app.storeql.com/#/onboarding`
+1. Sign up at `https://app.storeql.com/#/start-business` (*Start a business* on the sign-in card) — a login with no business yet
+2. Signed in, they land in the setup wizard at `https://app.storeql.com/#/onboarding` and create their tenant and first store
 3. Future logins: `https://app.storeql.com/#/login` → lands on **Admin Dashboard**
 4. From the dashboard: create stores, add zones, provision staff, seed the product catalogue
 

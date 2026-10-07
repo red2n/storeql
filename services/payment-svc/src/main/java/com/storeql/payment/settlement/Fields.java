@@ -19,6 +19,9 @@ final class Fields {
       DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
   private static final int LONGEST_REFERENCE = 255;
 
+  /** The longest an amount's cell may be, its spaces taken out, before it is read at all. */
+  static final int LONGEST_AMOUNT = 40;
+
   private Fields() {}
 
   /** Where a row sits in the file a person opens: the header is line 1. */
@@ -35,10 +38,25 @@ final class Fields {
   static BigDecimal amount(String cell, int row, String column) {
     if (cell == null) return null;
     String text = cell.replace(" ", "");
+    // Bounded before it is read: reading a number, and stripping its trailing zeros, cost time
+    // that grows faster than its length, and a cell may be 2,000 characters in a file of 20,000
+    // lines. Forty characters hold any amount a payout carries (fourteen whole digits, a sign, a
+    // point and four places) with twenty zeros to spare.
+    if (text.length() > LONGEST_AMOUNT) {
+      throw new SettlementFileException(INVALID, at(row) + column + " is too long to be an amount");
+    }
     try {
       BigDecimal value = new BigDecimal(text);
-      if (value.precision() - value.scale() > 14) {
+      if ((long) value.precision() - value.scale() > 14) {
         throw new SettlementFileException(INVALID, at(row) + column + " is too large an amount");
+      }
+      // Judged on the digits written before it is rescaled: 1E-80000000 is twelve characters, and
+      // rescaling it to four places would build a power of ten eighty million digits long.
+      // Trailing zeros are not precision (10.000000 is four places), and the bound on the cell
+      // above bounds what stripping them costs.
+      if (value.scale() > 4 && value.stripTrailingZeros().scale() > 4) {
+        throw new SettlementFileException(
+            INVALID, at(row) + column + " has more than four decimal places");
       }
       return value.setScale(4, java.math.RoundingMode.UNNECESSARY);
     } catch (NumberFormatException e) {

@@ -86,6 +86,21 @@ class _StubAuthNotifier extends AuthNotifier {
   Future<AuthState> build() async => const AuthUnauthenticated();
 }
 
+/// The cashier signed in at the till when the sale is made.
+const _cashierId = '01a0f2b0-611e-7000-8000-0000000000a1';
+
+class _SignedInCashier extends AuthNotifier {
+  @override
+  Future<AuthState> build() async => const AuthAuthenticated(
+        accessToken: 'a',
+        refreshToken: 'r',
+        userId: _cashierId,
+        tenantId: '01a0f2b0-611e-702c-a97b-d1b8025478f1',
+        roles: ['CASHIER'],
+        storeIds: ['store-1'],
+      );
+}
+
 const _line = PosLine(
   variantId: 'v-1',
   sku: 'SKU-1',
@@ -102,7 +117,9 @@ class _LoadedCart extends PosCartNotifier {
 }
 
 Future<_FailingAdapter> _pumpTender(WidgetTester tester,
-    {int? rejectStatus}) async {
+    {int? rejectStatus,
+    AuthNotifier Function()? auth,
+    bool showPrices = true}) async {
   final adapter = _FailingAdapter()..rejectStatus = rejectStatus;
   final dio = Dio(BaseOptions(baseUrl: 'http://test'))
     ..httpClientAdapter = adapter;
@@ -114,13 +131,20 @@ Future<_FailingAdapter> _pumpTender(WidgetTester tester,
           OfflineQueueNotifier(ref, storage: _MemStorage(), autoSync: false)),
       posStoresProvider.overrideWith((ref) async => const []),
       posSessionProvider.overrideWith((ref) => _NoopPosSessionNotifier(ref)),
-      authNotifierProvider.overrideWith(_StubAuthNotifier.new),
+      authNotifierProvider.overrideWith(auth ?? _StubAuthNotifier.new),
       posCartProvider.overrideWith((ref) => _LoadedCart()),
       posStoreProvider.overrideWith((ref) => 'store-1'),
       posWalkInPhoneProvider.overrideWith((ref) => '07700900000'),
+      // A store that shows no prices: the till places the order without
+      // taking payment (catalog mode).
+      if (!showPrices) posShowPricesProvider.overrideWith((ref) => false),
     ],
     child: const MaterialApp(home: Scaffold(body: TenderScreen())),
   ));
+  // In the app the router watches the sign-in from the start, so it has long
+  // been read by the time a sale is made. Nothing here reads it until the sale
+  // does, so it is read now and left to settle, as the router would have.
+  _container(tester).read(authNotifierProvider);
   await tester.pumpAndSettle();
   return adapter;
 }
@@ -220,6 +244,48 @@ void main() {
     expect(container.read(posCartProvider), isEmpty);
     expect(container.read(posWalkInPhoneProvider), '');
     expect(container.read(posDiscountProvider), 0);
+  });
+
+  testWidgets('a sale queued offline names the cashier who rang it up',
+      (tester) async {
+    // The queue outlives a sign-out, and anybody may press Sync now, so the
+    // audit trail can only name who made the sale if the till kept it with the
+    // sale at the moment it was made — not whoever's session replays it.
+    await _pumpTender(tester, auth: _SignedInCashier.new);
+    await _tenderAndComplete(tester);
+
+    final queued = _container(tester).read(offlineQueueProvider).single;
+    expect(queued.rungUpBy, _cashierId);
+    expect(queued.capturedAt, isNotNull,
+        reason: 'when it was rung up, for the server to judge it then');
+    expect(queued.toJson()['rungUpBy'], _cashierId,
+        reason: 'kept in the stored queue, which outlives the sign-in');
+  });
+
+  testWidgets('an order placed without prices names the cashier too',
+      (tester) async {
+    // Catalog mode takes no payment but still queues the order when the
+    // server cannot be reached; it is recorded by its own path, which must
+    // keep who rang it up as the tendered sale does.
+    await _pumpTender(tester, auth: _SignedInCashier.new, showPrices: false);
+    await tester.tap(find.widgetWithText(FilledButton, 'Place order'));
+    await tester.pumpAndSettle();
+
+    final queued = _container(tester).read(offlineQueueProvider).single;
+    expect(queued.orderRequest['awaitingPrice'], isTrue);
+    expect(queued.total, 0);
+    expect(queued.rungUpBy, _cashierId);
+    expect(queued.capturedAt, isNotNull);
+  });
+
+  testWidgets('a sale made with nobody signed in names nobody', (tester) async {
+    // The server then records the entry as rung up by an unknown member of
+    // staff; the till never guesses who it was.
+    await _pumpTender(tester);
+    await _tenderAndComplete(tester);
+
+    expect(_container(tester).read(offlineQueueProvider).single.rungUpBy,
+        isNull);
   });
 
   testWidgets('a sale the server rejects is not queued', (tester) async {

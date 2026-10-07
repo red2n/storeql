@@ -75,6 +75,8 @@ class OrderServiceTillPhoneTest {
     svc.profiles = profiles;
     svc.windows = windows;
     svc.jurisdictions = org.mockito.Mockito.mock(com.storeql.service.Jurisdictions.class);
+    // Stop-sale and certified scales: nothing here is recalled or weighed; a mock refuses nothing.
+    svc.saleChecks = org.mockito.Mockito.mock(SaleChecks.class);
     lenient().when(profiles.requireCurrency(TENANT)).thenReturn("INR");
     lenient().when(profiles.requireCountry(TENANT)).thenReturn("IN");
     when(ctx.requireTenantId()).thenReturn(TENANT);
@@ -83,7 +85,9 @@ class OrderServiceTillPhoneTest {
     lenient().when(tenants.resolveFulfilment(any(), any())).thenReturn(Optional.empty());
     lenient().when(config.pricingEnforce()).thenReturn(false);
     lenient()
-        .when(repo.createOrder(any(), anyList(), any(), any(), anyList(), anyList()))
+        .when(
+            repo.createOrder(
+                any(), anyList(), any(), any(), anyList(), anyList(), anyList(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
   }
 
@@ -103,36 +107,25 @@ class OrderServiceTillPhoneTest {
   }
 
   private static PlaceOrderRequest sale(String channel, UUID customerId, String phone) {
-    return new PlaceOrderRequest(
-        SHOP.toString(),
-        customerId == null ? null : customerId.toString(),
-        channel,
-        "POS".equals(channel) ? "INSTORE" : "PICKUP",
-        List.of(
-            new OrderItemRequest(
-                VARIANT.toString(), BigDecimal.ONE, BigDecimal.TEN, null, null, null)),
-        null,
-        null,
-        null,
-        "INR",
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        phone,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null);
+    return PlaceOrderRequest.builder()
+        .storeId(SHOP.toString())
+        .customerId(customerId == null ? null : customerId.toString())
+        .channel(channel)
+        .fulfilmentType("POS".equals(channel) ? "INSTORE" : "PICKUP")
+        .items(
+            List.of(
+                new OrderItemRequest(
+                    VARIANT.toString(),
+                    BigDecimal.ONE,
+                    BigDecimal.TEN,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)))
+        .currency("INR")
+        .contactPhone(phone)
+        .build();
   }
 
   @Test

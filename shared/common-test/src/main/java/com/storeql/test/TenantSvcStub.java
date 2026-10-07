@@ -1,6 +1,10 @@
 package com.storeql.test;
 
+import com.sun.net.httpserver.Filter;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -10,6 +14,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * where discovery is off. Each tenant answers with the currency and country it was registered with;
  * an unregistered tenant is {@code 404}, so a test that forgets to register one sees the refusal a
  * real unknown tenant would get rather than a borrowed default.
+ *
+ * <p>Under a store, {@code GET /admin/stores/{id}/weighing-instruments/{instrumentId}} answers for
+ * one instrument of the store's register (certified scales), given with {@link #withInstrument}:
+ * {@code 404 INSTRUMENT_NOT_FOUND} for one the business did not register at that store.
  *
  * <p>Start it in the test's static initialiser, before Helidon boots: it points {@code
  * storeql.clients.tenant-svc.url} at itself.
@@ -27,6 +35,12 @@ public final class TenantSvcStub implements AutoCloseable {
   private final java.util.Map<String, String> retention =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final Map<String, java.util.List<String>> fxRates = new ConcurrentHashMap<>();
+
+  /** Each business's weighing instruments by id, as the register answers for one of them. */
+  private final Map<String, Map<String, String>> instruments = new ConcurrentHashMap<>();
+
+  /** Businesses whose register of weighing instruments answers 503, to prove a fail-open. */
+  private final java.util.Set<String> instrumentsDown = ConcurrentHashMap.newKeySet();
 
   /** Percentage of net each business's people earn, for the commission rating route. */
   private final Map<String, String> commissionPercent = new ConcurrentHashMap<>();
@@ -46,6 +60,37 @@ public final class TenantSvcStub implements AutoCloseable {
     this.server = server;
   }
 
+  /**
+   * A query escaped into the path ("…/schemes%3Fall=true") is what Helidon's WebClient sends for a
+   * "?" written into a path string. The JDK server routes by the decoded path's prefix, which would
+   * still answer it and so hide the bug; here it is not found, so a client that does it fails its
+   * test rather than passing it.
+   */
+  private static final Filter NO_ESCAPED_QUERY =
+      new Filter() {
+        @Override
+        public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+          if (exchange.getRequestURI().getRawPath().contains("%3F")) {
+            JsonStub.reply(
+                exchange,
+                404,
+                "{\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"a query escaped into the path\"}}");
+            return;
+          }
+          chain.doFilter(exchange);
+        }
+
+        @Override
+        public String description() {
+          return "refuses a query escaped into the path";
+        }
+      };
+
+  /** Every route goes through {@link #NO_ESCAPED_QUERY}. */
+  private static void route(HttpServer server, String path, HttpHandler handler) {
+    server.createContext(path, handler).getFilters().add(NO_ESCAPED_QUERY);
+  }
+
   /** Starts the stub on a free local port and points the client property at it. */
   public static TenantSvcStub start() {
     HttpServer server = JsonStub.serve("tenant-svc-stub");
@@ -53,7 +98,8 @@ public final class TenantSvcStub implements AutoCloseable {
     // What a plan allows the business (21.8, 21.11), as Entitlements reads it: the grants of the
     // limits given with withLimit, and an empty list — unrestricted — for a business given none.
     // The JDK server routes by the longest matching context, so this wins over /admin/tenant.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/plan/limits",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -74,7 +120,8 @@ public final class TenantSvcStub implements AutoCloseable {
           }
           JsonStub.reply(exchange, 200, "{\"data\":{\"grants\":[" + grants + "]}}");
         });
-    server.createContext(
+    route(
+        server,
         "/admin/tenant",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -93,7 +140,8 @@ public final class TenantSvcStub implements AutoCloseable {
     // What a period of sales earns, as tenant-svc answers it (store operations & workforce). A flat
     // percentage per business here: the marginal-band rule is tenant-svc's own to prove, and what a
     // caller's test needs is a deterministic answer and the figures it was asked about.
-    server.createContext(
+    route(
+        server,
         "/admin/workforce/commission/rate",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -107,7 +155,8 @@ public final class TenantSvcStub implements AutoCloseable {
           String percent = tenant == null ? null : stub.commissionPercent.get(tenant);
           JsonStub.reply(exchange, 200, rated(body, percent));
         });
-    server.createContext(
+    route(
+        server,
         "/platform/tenants/by-einvoice-address",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -141,7 +190,8 @@ public final class TenantSvcStub implements AutoCloseable {
           }
         });
     // The longer context wins, so the obligations route is not answered as a profile.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/obligations",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -165,7 +215,8 @@ public final class TenantSvcStub implements AutoCloseable {
         });
     // A tenant's exchange rates (03.x): the home currency from its profile and the rates given
     // with withFxRate; a tenant with none keeps only its home currency.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/fx-rates",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -191,7 +242,8 @@ public final class TenantSvcStub implements AutoCloseable {
                   + "]}}");
         });
     // A tenant's retention schedule (21.16), as registered; a tenant with none has an empty one.
-    server.createContext(
+    route(
+        server,
         "/admin/tenant/retention",
         exchange -> {
           stub.requests.incrementAndGet();
@@ -207,7 +259,8 @@ public final class TenantSvcStub implements AutoCloseable {
         });
     // A tenant's stores, one page; a tenant with none registered has none. Under it, one of them
     // by id, and 404 for a store that is not the tenant's.
-    server.createContext(
+    route(
+        server,
         STORES,
         exchange -> {
           String tenant = exchange.getRequestHeaders().getFirst("X-Tenant-Id");
@@ -216,6 +269,28 @@ public final class TenantSvcStub implements AutoCloseable {
                   ? java.util.List.of()
                   : stub.stores.getOrDefault(tenant, java.util.List.of());
           String rest = exchange.getRequestURI().getPath().substring(STORES.length());
+          // One weighing instrument of a store's register (certified scales): 404
+          // INSTRUMENT_NOT_FOUND unless the business registered it at that store, as tenant-svc
+          // answers for another store's or another business's, and 503 where made unreadable.
+          String[] parts = rest.split("/");
+          if (parts.length == 4 && "weighing-instruments".equals(parts[2])) {
+            if (tenant != null && stub.instrumentsDown.contains(tenant)) {
+              JsonStub.reply(exchange, 503, "{\"error\":{\"code\":\"DOWN\",\"message\":\"no\"}}");
+              return;
+            }
+            Map<String, String> held =
+                tenant == null ? Map.of() : stub.instruments.getOrDefault(tenant, Map.of());
+            String found = held.get(parts[3]);
+            if (found == null || !found.contains("\"storeId\":\"" + parts[1] + "\"")) {
+              JsonStub.reply(
+                  exchange,
+                  404,
+                  "{\"error\":{\"code\":\"INSTRUMENT_NOT_FOUND\",\"message\":\"no such scale\"}}");
+            } else {
+              JsonStub.reply(exchange, 200, "{\"data\":" + found + "}");
+            }
+            return;
+          }
           if (rest.length() > 1) {
             String opening = "{\"id\":\"" + rest.substring(1) + "\"";
             String found = own.stream().filter(s -> s.startsWith(opening)).findFirst().orElse(null);
@@ -525,6 +600,72 @@ public final class TenantSvcStub implements AutoCloseable {
                 + ",\"geoLng\":"
                 + lng
                 + "}");
+    return this;
+  }
+
+  /**
+   * Registers a weighing instrument in a store's register (certified scales), as tenant-svc's
+   * {@code GET /admin/stores/{storeId}/weighing-instruments/{id}} answers for it: certified only
+   * when its standing is {@code CERTIFIED}.
+   *
+   * @param standing the register's word for it: CERTIFIED, NEVER_VERIFIED, FAILED, REPAIRED_SINCE,
+   *     OVERDUE, OUT_OF_SERVICE or RETIRED
+   */
+  public TenantSvcStub withInstrument(
+      String tenantId, String storeId, String instrumentId, String identifier, String standing) {
+    return withInstrument(tenantId, storeId, instrumentId, identifier, standing, null, null);
+  }
+
+  /**
+   * Registers a weighing instrument as {@link #withInstrument(String, String, String, String,
+   * String)} does, with what the register gives beside its standing, from which a client works out
+   * when an unfit scale lapsed.
+   *
+   * @param latestVerification the latest history entry as tenant-svc answers it, a JSON object such
+   *     as {@code {"kind":"RE_VERIFICATION","passed":true,"nextDue":"2026-09-28",
+   *     "recordedAt":"2025-09-28T10:00:00Z"}}; null to leave it out
+   * @param updatedAt when the instrument was last changed, an ISO instant; null to leave it out
+   */
+  public TenantSvcStub withInstrument(
+      String tenantId,
+      String storeId,
+      String instrumentId,
+      String identifier,
+      String standing,
+      String latestVerification,
+      String updatedAt) {
+    String status =
+        "OUT_OF_SERVICE".equals(standing) || "RETIRED".equals(standing) ? standing : "IN_SERVICE";
+    boolean certified = "CERTIFIED".equals(standing);
+    String latest =
+        latestVerification == null ? "" : ",\"latestVerification\":" + latestVerification;
+    String changed = updatedAt == null ? "" : ",\"updatedAt\":\"" + updatedAt + "\"";
+    instruments
+        .computeIfAbsent(tenantId, t -> new ConcurrentHashMap<>())
+        .put(
+            instrumentId,
+            "{\"id\":\""
+                + instrumentId
+                + "\",\"storeId\":\""
+                + storeId
+                + "\",\"identifier\":\""
+                + identifier
+                + "\",\"status\":\""
+                + status
+                + "\",\"certified\":"
+                + certified
+                + ",\"standing\":\""
+                + standing
+                + "\""
+                + latest
+                + changed
+                + "}");
+    return this;
+  }
+
+  /** Makes a business's register of weighing instruments unreadable (503), to prove a fail-open. */
+  public TenantSvcStub instrumentsUnreadable(String tenantId) {
+    instrumentsDown.add(tenantId);
     return this;
   }
 

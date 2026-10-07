@@ -1,6 +1,7 @@
 package com.storeql.product.dto;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
@@ -54,7 +55,14 @@ public final class Dtos {
                       + " and refused at the till until launched (item lifecycle).")
           String status,
       @Schema(description = "For a NEW_LINE: the day it is meant to go on sale (ISO date).")
-          String launchOn) {}
+          String launchOn,
+      @Schema(
+              description =
+                  "UUIDs of the stores it is sold at; empty or absent for every store. Each must be"
+                      + " one of the business's and the caller's. A manager held to stores never"
+                      + " creates one sold at every store: naming none, theirs is sold at all the"
+                      + " stores they are held to.")
+          List<String> storeIds) {}
 
   /** Replace a product's store assortment. Empty/null = sold at all stores. */
   @Schema(
@@ -135,9 +143,11 @@ public final class Dtos {
           String hsnCode,
       @Schema(description = "EACH, WEIGHT, VOLUME or LENGTH. Defaults to EACH.") String soldBy,
       @Schema(description = "Net quantity in the pack, for the unit price a shelf edge must show.")
+          @Digits(integer = 14, fraction = 4)
           BigDecimal netContent,
       @Schema(description = "UOM code for netContent, e.g. KG, L.") String netContentUom,
       @Schema(description = "Packaging weight a scale deducts before pricing.")
+          @Digits(integer = 14, fraction = 4)
           BigDecimal tareWeight,
       @Schema(
               description =
@@ -299,7 +309,11 @@ public final class Dtos {
       String manufacturerPn,
       @Schema(description = "Free-form JSON attribute payload.") String attributes,
       @Schema(description = "Base unit of measure code, e.g. EA, CS.") String unit,
-      @Schema(description = "ACTIVE or DELISTED.") String status,
+      @Schema(
+              description =
+                  "ACTIVE (on sale), or INACTIVE once delisted (DELETE .../variants/{id}); POST"
+                      + " .../relist puts it back.")
+          String status,
       String createdAt,
       String updatedAt) {}
 
@@ -316,7 +330,11 @@ public final class Dtos {
       String manufacturerPn,
       @Schema(description = "Free-form JSON attribute payload.") String attributes,
       @Schema(description = "Base unit of measure code, e.g. EA, CS.") String unit,
-      @Schema(description = "ACTIVE or DELISTED.") String status,
+      @Schema(
+              description =
+                  "ACTIVE (on sale), or INACTIVE once delisted (DELETE .../variants/{id}); POST"
+                      + " .../relist puts it back.")
+          String status,
       String createdAt,
       String updatedAt,
       @Schema(description = "The HSN or SAC code, when one is recorded (18.9).") String hsnCode,
@@ -509,20 +527,34 @@ public final class Dtos {
           String brandName,
       Boolean sellableOnline,
       Boolean sellablePos,
-      @Schema(description = "UUIDs of the stores this product is assorted to.")
+      @Schema(
+              description =
+                  "UUIDs of the stores this product is assorted to. One that is not a UUIDv7 is"
+                      + " this row's error, and the product is not created.")
           List<String> storeIds,
       @NotNull @Valid List<ImportVariantRequest> variants) {}
 
   /**
    * {@code mode}: "ADD" (default) creates new products/variants (duplicate SKUs error); "REPLACE"
    * upserts by SKU — reuses the product by (name, category) and replaces any existing variant with
-   * the same SKU, so re-importing a sheet overrides rather than duplicates.
+   * the same SKU, so re-importing a sheet overrides rather than duplicates. Any other word is
+   * refused ({@code 400 IMPORT_MODE_INVALID}), never read as ADD.
+   *
+   * <p>The rows are checked one by one by {@code ProductService.bulkImport}, so that a row that
+   * breaks a constraint is that row's error and the rest is imported: this request is not validated
+   * as a whole before it runs.
    */
   @Schema(name = "BulkImportRequest")
   public record BulkImportRequest(
       @Valid List<ImportCategoryRequest> categories,
       @Valid List<ImportProductRequest> products,
-      @Schema(description = "ADD (default, duplicate SKUs error) or REPLACE (upsert by SKU).")
+      @Schema(
+              description =
+                  "ADD (default, duplicate SKUs error) or REPLACE (upsert by SKU: the variant"
+                      + " already holding a row's SKU is dropped and the row's own written, for an"
+                      + " owner or a manager of the whole business; a manager held to stores never"
+                      + " drops one, and a SKU already held is that variant's error). Any other"
+                      + " value is refused.")
           String mode) {}
 
   /**
@@ -537,7 +569,7 @@ public final class Dtos {
   @Schema(name = "SupplierCsvImportRequest")
   public record SupplierCsvImportRequest(
       @Schema(description = "Raw CSV text (GTBJ supplier format).") @NotBlank String csv,
-      @Schema(description = "ADD (default) or REPLACE.") String mode,
+      @Schema(description = "ADD (default) or REPLACE. Any other value is refused.") String mode,
       @Schema(description = "Maps a CSV store name/column value to a tenant-svc store UUID.")
           java.util.Map<String, String> storeNameToId,
       @Schema(

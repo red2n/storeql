@@ -19,6 +19,8 @@ import java.util.UUID;
 public class PosSessionService {
 
   @Inject PosSessionRepository repo;
+  @Inject com.storeql.iam.repo.UserRepository users;
+  @Inject com.storeql.iam.client.MqttSessionRevoker mqttSessions;
   @Inject TenantStatusRepository tenantStatusRepo;
   @Inject StoreStatusRepository storeStatusRepo;
   @Inject com.storeql.iam.repo.StoreTypeRepository storeTypes;
@@ -100,23 +102,59 @@ public class PosSessionService {
    * @throws ApiException {@code POS_SESSION_NOT_FOUND} (404) when no such session exists in this
    *     tenant
    */
-  public void end(TenantContext ctx, UUID sessionId) {
+  public void end(TenantContext ctx, UUID sessionId, String reason) {
+    UUID tenantId = ctx.requireTenantId();
     var session =
         repo.find(sessionId)
             .orElseThrow(() -> ApiException.notFound("POS_SESSION_NOT_FOUND", "session not found"));
-    if (!session.tenantId().equals(ctx.requireTenantId()))
+    if (!session.tenantId().equals(tenantId))
       throw ApiException.notFound("POS_SESSION_NOT_FOUND", "session not found");
-    repo.end(sessionId);
+    UUID caller = ctx.requireUserId();
+    if (caller.equals(session.userId())) {
+      repo.end(sessionId);
+      return;
+    }
+    if (!ctx.hasRole("OWNER") && !ctx.hasRole("MANAGER"))
+      throw ApiException.forbidden(
+          "POS_SESSION_NOT_YOURS", "only the session's own cashier or a manager may end it");
+    ctx.requireStoreAccess(session.storeId());
+    String why = reason == null ? "" : reason.trim();
+    if (why.isEmpty() || why.length() > 200)
+      throw ApiException.badRequest(
+          "POS_SESSION_REASON_REQUIRED", "a reason of 1..200 characters is required");
+    if (repo.endBySupervisor(sessionId, caller, why)) {
+      users.audit(
+          tenantId,
+          session.userId(),
+          "POS_SESSION_ENDED_BY_SUPERVISOR",
+          sessionId + " by " + caller);
+      mqttSessions.revoke(tenantId, session.userId());
+    }
   }
 
   /**
-   * Lists every currently open POS session in the tenant, across all stores.
+   * Lists the open POS sessions a manager may see: management only, and only at the caller's stores
+   * (every store for a caller held to none).
    *
-   * @param ctx caller context; supplies the tenant
+   * @param ctx caller context
+   * @param storeId optionally one store, which the caller must keep
    * @return the active sessions
+   * @throws ApiException 403 when the caller is not OWNER or MANAGER; 403 STORE_ACCESS_DENIED for a
+   *     store the caller does not keep
    */
-  public List<PosSession> listActive(TenantContext ctx) {
-    return repo.listActive(ctx.requireTenantId());
+  public List<PosSession> listActive(TenantContext ctx, UUID storeId) {
+    ctx.requireAnyRole("OWNER", "MANAGER");
+    return repo.listActive(ctx.requireTenantId(), ctx.reportStores(storeId));
+  }
+
+  /**
+   * The caller's own open sessions, for any signed-in member (a till re-attaching after a restart).
+   *
+   * @param ctx caller context
+   * @return the caller's active sessions
+   */
+  public List<PosSession> listMine(TenantContext ctx) {
+    return repo.listActiveOf(ctx.requireTenantId(), ctx.requireUserId());
   }
 
   /**

@@ -19,6 +19,12 @@ public interface AccountEmailSender {
   boolean live();
 
   /**
+   * The channel this email goes out on, as the notification log records it: the one that carries it
+   * (or would have, when {@link #live} is false), spelt as every other email in the log is.
+   */
+  String channel();
+
+  /**
    * Attempts delivery. Never throws: a transport failure is caught and reported as {@code false} so
    * the caller writes its log row once, as NOT_SENT, rather than retrying into a possible second
    * send.

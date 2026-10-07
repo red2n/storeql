@@ -48,6 +48,9 @@ import com.storeql.inventory.domain.Domain.TransferOrderLine;
 import com.storeql.inventory.domain.Domain.ValuationGrouping;
 import com.storeql.inventory.domain.Domain.ValuationRow;
 import com.storeql.inventory.domain.Domain.ZoneGlMapping;
+import com.storeql.inventory.domain.LotMerges;
+import com.storeql.inventory.domain.ReturnDisposition;
+import com.storeql.inventory.domain.SerialNumbers;
 import com.storeql.inventory.repo.AbcAnalysisRepository;
 import com.storeql.inventory.repo.CostingRepository;
 import com.storeql.inventory.repo.CycleCountRepository;
@@ -67,6 +70,7 @@ import com.storeql.inventory.repo.SafetyStockRepository;
 import com.storeql.inventory.repo.SerialRepository;
 import com.storeql.inventory.repo.SuggestionRepository;
 import com.storeql.inventory.repo.ThresholdRepository;
+import com.storeql.service.Fx;
 import com.storeql.service.OutboxRow;
 import com.storeql.web.ApiException;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -90,12 +94,21 @@ public class InventoryService {
   private static final System.Logger LOG = System.getLogger(InventoryService.class.getName());
 
   @Inject ServiceConfig config;
+
+  /** The most batches the expiring list returns, soonest first. */
+  @Inject
+  @org.eclipse.microprofile.config.inject.ConfigProperty(
+      name = "storeql.inventory.expiring.max-rows",
+      defaultValue = "500")
+  int expiringMaxRows;
+
   @Inject InventoryRepository repo;
   @Inject com.storeql.inventory.repo.BondRepository bonds;
   @Inject com.storeql.inventory.repo.ShrinkageRepository shrinkageRepo;
   @Inject com.storeql.inventory.repo.ValuationRepository valuationRepo;
   @Inject com.storeql.inventory.repo.LowStockRepository lowStockRepo;
   @Inject com.storeql.inventory.repo.StockTurnRepository stockTurnRepo;
+  @Inject com.storeql.service.TenantProfiles tenantProfiles;
   @Inject LotGenealogyRepository lotGenealogyRepo;
   @Inject ThresholdRepository thresholdRepo;
   @Inject SuggestionRepository suggestionRepo;
@@ -225,6 +238,48 @@ public class InventoryService {
       String ownership,
       UUID ownerSupplierId,
       String dutyStatus) {
+    return receive(
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        batchNo,
+        costPrice,
+        expiry,
+        refType,
+        refId,
+        zoneId,
+        idempotencyKey,
+        ownership,
+        ownerSupplierId,
+        dutyStatus,
+        null);
+  }
+
+  /**
+   * As above, for a receipt a person entered by hand: {@code actorId} is the signed-in user, kept
+   * on the receipt's movement ({@code stock_movements.actor_id}) so the ledger says who received
+   * the stock. A {@code null} actor (no signed-in user on the request) leaves the movement
+   * unattributed; a receipt an event causes goes through {@code receiveOnce} and never names one.
+   *
+   * @param actorId the authenticated user who entered the receipt, or {@code null}
+   */
+  public Batch receive(
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      String batchNo,
+      BigDecimal costPrice,
+      LocalDate expiry,
+      String refType,
+      UUID refId,
+      UUID zoneId,
+      String idempotencyKey,
+      String ownership,
+      UUID ownerSupplierId,
+      String dutyStatus,
+      UUID actorId) {
     String owned = ownershipOf(ownership, ownerSupplierId);
     String duty = dutyStatusOf(dutyStatus);
     if (Batch.DUTY_SUSPENDED.equals(duty) && !bonds.isBonded(tenantId, storeId)) {
@@ -261,7 +316,13 @@ public class InventoryService {
             batchId,
             Events.stockReceived(tenantId, storeId, variantId, batchId, qty));
     try {
-      return repo.receive(batch, refType, refId, event, idempotencyKey);
+      return repo.receive(
+          batch,
+          refType,
+          refId,
+          event,
+          idempotencyKey,
+          actorId == null ? MovementAttribution.system() : MovementAttribution.by(actorId, null));
     } catch (ApiException e) {
       // Idempotent replay: a retried receipt with the same key gets the original batch back
       // instead of double-counting stock (golden rule #11).
@@ -393,6 +454,31 @@ public class InventoryService {
       UUID variantId,
       BigDecimal qty,
       UUID orderId) {
+    return receiveReturnFromOrderOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        orderId,
+        ReturnDisposition.ON_SALE);
+  }
+
+  /**
+   * As above, the goods put where the till's condition says (return controls): back on sale, held
+   * for a check, or off sale as damaged or recalled. Each arrival is a batch of its own carrying
+   * the sale's lot, cost and date, so an off-sale return is never merged into stock on sale.
+   */
+  public boolean receiveReturnFromOrderOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID orderId,
+      ReturnDisposition where) {
     return repo.receiveBackOnce(
         dedupeId,
         consumerName,
@@ -404,7 +490,37 @@ public class InventoryService {
         "RETURN",
         "RET-" + Ids.shortRef(orderId),
         InventoryService::stockReceivedEvent,
-        true);
+        true,
+        where);
+  }
+
+  /**
+   * Restocks a line of a no-receipt return (return controls): there is no sale to trace, so the
+   * goods arrive as an anonymous batch of their own, placed by the till's condition, with a RECEIVE
+   * movement of reference type {@code NO_RECEIPT_RETURN} pointing at the return. Costless — no cost
+   * is known for goods nobody can trace, as with any anonymous return.
+   */
+  public boolean receiveNoReceiptReturnOnce(
+      UUID dedupeId,
+      String consumerName,
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      BigDecimal qty,
+      UUID returnId,
+      ReturnDisposition where) {
+    return repo.receiveNoReceiptOnce(
+        dedupeId,
+        consumerName,
+        tenantId,
+        storeId,
+        variantId,
+        qty,
+        returnId,
+        "NO_RECEIPT_RETURN",
+        "RET-" + Ids.shortRef(returnId),
+        InventoryService::stockReceivedEvent,
+        where);
   }
 
   /**
@@ -670,8 +786,8 @@ public class InventoryService {
    * from the last {@code POST /planning/run} and ignore safety stock and reorder points; and from
    * {@code levelsSummary}, which counts SKUs under one flat number for a dashboard tile.
    */
-  public List<LowStockRow> lowStockReport(UUID tenantId, UUID storeId, int limit) {
-    return lowStockRepo.lowStock(tenantId, storeId, limit);
+  public List<LowStockRow> lowStockReport(UUID tenantId, Set<UUID> stores, int limit) {
+    return lowStockRepo.lowStock(tenantId, stores, limit);
   }
 
   // ---- valuation report ----
@@ -684,8 +800,8 @@ public class InventoryService {
    * silently costing unknown stock at nothing understates it.
    */
   public List<ValuationRow> valuationReport(
-      UUID tenantId, UUID storeId, ValuationGrouping grouping, int limit) {
-    return valuationRepo.value(tenantId, storeId, grouping, limit);
+      UUID tenantId, Set<UUID> stores, ValuationGrouping grouping, int limit) {
+    return valuationRepo.value(tenantId, stores, grouping, limit, minorUnits(tenantId));
   }
 
   // ---- shrinkage report ----
@@ -701,11 +817,11 @@ public class InventoryService {
    * @param grouping validated by the resource against {@link ShrinkageGrouping}
    */
   public List<ShrinkageRow> shrinkageReport(
-      UUID tenantId, UUID storeId, Instant from, Instant to, ShrinkageGrouping grouping) {
+      UUID tenantId, Set<UUID> stores, Instant from, Instant to, ShrinkageGrouping grouping) {
     if (from != null && to != null && !from.isBefore(to))
       throw ApiException.badRequest(
           "INVENTORY_INVALID_PERIOD", "from must be before to — got " + from + " and " + to);
-    return shrinkageRepo.aggregate(tenantId, storeId, from, to, grouping);
+    return shrinkageRepo.aggregate(tenantId, stores, from, to, grouping);
   }
 
   /**
@@ -714,7 +830,7 @@ public class InventoryService {
    */
   public List<ShrinkageRow> shrinkageByVariant(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       String reasonCode,
@@ -723,7 +839,7 @@ public class InventoryService {
     if (from != null && to != null && !from.isBefore(to))
       throw ApiException.badRequest(
           "INVENTORY_INVALID_PERIOD", "from must be before to — got " + from + " and " + to);
-    return shrinkageRepo.topVariants(tenantId, storeId, from, to, reasonCode, actorId, limit);
+    return shrinkageRepo.topVariants(tenantId, stores, from, to, reasonCode, actorId, limit);
   }
 
   // ---- stock turn & dead stock ----
@@ -743,7 +859,7 @@ public class InventoryService {
    */
   public StockTurnReport stockTurnReport(
       UUID tenantId,
-      UUID storeId,
+      Set<UUID> stores,
       Instant from,
       Instant to,
       StockTurnGrouping grouping,
@@ -757,7 +873,9 @@ public class InventoryService {
     int windowDays = (int) Math.max(1, days);
 
     List<StockTurnRow> rows =
-        stockTurnRepo.stockTurn(tenantId, storeId, from, to, grouping, limit).stream()
+        stockTurnRepo
+            .stockTurn(tenantId, stores, from, to, grouping, limit, minorUnits(tenantId))
+            .stream()
             .map(r -> withDaysOnHand(r, windowDays))
             .toList();
 
@@ -765,7 +883,7 @@ public class InventoryService {
     // archive is asked whether the purge took any the window needed. Asking the archive rather
     // than inferring from the oldest retained movement is the difference between "history is
     // missing" and "there is no history yet", which a young tenant has plenty of.
-    boolean historyComplete = stockTurnRepo.historyComplete(tenantId, storeId, to);
+    boolean historyComplete = stockTurnRepo.historyComplete(tenantId, stores, to);
     return new StockTurnReport(rows, historyComplete, windowDays);
   }
 
@@ -800,9 +918,28 @@ public class InventoryService {
    * @param grouping validated by the resource against {@link DeadStockGrouping}
    */
   public List<DeadStockRow> deadStockReport(
-      UUID tenantId, UUID storeId, Instant asOf, DeadStockGrouping grouping, int limit) {
+      UUID tenantId, Set<UUID> stores, Instant asOf, DeadStockGrouping grouping, int limit) {
     return stockTurnRepo.deadStock(
-        tenantId, storeId, asOf == null ? Instant.now() : asOf, grouping, limit);
+        tenantId,
+        stores,
+        asOf == null ? Instant.now() : asOf,
+        grouping,
+        limit,
+        minorUnits(tenantId));
+  }
+
+  /**
+   * The business currency's minor units, which a report's money is kept to: whole yen, pence,
+   * three-decimal dinars. A read-only report fails open: when tenant-svc cannot say the currency
+   * the figures are given at {@code Fx}'s documented precision for an unknown currency rather than
+   * the report refused — the stored figures are untouched either way.
+   */
+  private int minorUnits(UUID tenantId) {
+    return com.storeql.service.Fx.minorUnits(
+        tenantProfiles
+            .find(tenantId)
+            .map(com.storeql.service.TenantProfiles.Profile::currency)
+            .orElse(null));
   }
 
   // ---- adjust ----
@@ -1355,8 +1492,11 @@ public class InventoryService {
    * @param autoQty how many to generate when {@code serials} is absent
    * @param prefix the prefix for generated numbers
    * @return the registered serial numbers
-   * @throws ApiException a 400 when more than 200 serials are supplied at once, or when neither a
-   *     list nor a quantity is given
+   * @throws ApiException a 400 when more than 200 serials are supplied at once, when neither a list
+   *     nor a quantity is given, or when a supplied number is blank; a 404 when the batch is not
+   *     this business's; a 409 SERIAL_ALREADY_REGISTERED (details name each number) when a supplied
+   *     number is repeated or already registered, nothing being written; a 409
+   *     SERIAL_GENERATION_EXHAUSTED when a generated number kept clashing
    */
   public List<SerialNumber> registerSerials(
       UUID tenantId,
@@ -1367,22 +1507,50 @@ public class InventoryService {
       Integer autoQty,
       String prefix) {
     List<String> serialNos;
+    boolean supplied = false;
+    String pfx = "SN";
     if (serials != null && !serials.isEmpty()) {
       if (serials.size() > 200)
         throw new ApiException(
             400, "TOO_MANY_SERIALS", "max 200 serials per call", List.of(), null);
-      serialNos = serials;
+      try {
+        serialNos = SerialNumbers.normalise(serials);
+      } catch (IllegalArgumentException e) {
+        throw new ApiException(
+            400, "SERIAL_NO_BLANK", "a serial number cannot be blank", List.of(), e);
+      }
+      List<String> repeats = SerialNumbers.repeated(serialNos);
+      if (!repeats.isEmpty()) {
+        throw new ApiException(
+            409,
+            "SERIAL_ALREADY_REGISTERED",
+            "the same serial number is given more than once; nothing was registered",
+            repeats,
+            null);
+      }
+      supplied = true;
     } else if (autoQty != null && autoQty > 0) {
       if (autoQty > 200)
         throw new ApiException(400, "TOO_MANY_SERIALS", "autoQty max 200", List.of(), null);
-      String pfx = prefix == null || prefix.isBlank() ? "SN" : prefix;
+      pfx = prefix == null || prefix.isBlank() ? "SN" : prefix.trim();
       serialNos = new ArrayList<>();
       for (int i = 0; i < autoQty; i++) {
-        serialNos.add(generateSerialNo(pfx, i));
+        serialNos.add(SerialNumbers.generate(pfx));
       }
     } else {
       throw new ApiException(
           400, "SERIALS_REQUIRED", "provide serials list or autoQty > 0", List.of(), null);
+    }
+    Batch batch =
+        repo.getBatch(tenantId, batchId)
+            .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "No such batch"));
+    if (!batch.storeId().equals(storeId) || !batch.variantId().equals(variantId)) {
+      throw new ApiException(
+          400,
+          "SERIAL_BATCH_MISMATCH",
+          "the batch is not that variant's stock at that store",
+          List.of(),
+          null);
     }
     Instant now = Instant.now();
     var domainSerials =
@@ -1407,7 +1575,9 @@ public class InventoryService {
             tenantId,
             batchId,
             Events.serialsRegistered(tenantId, batchId, domainSerials.size()));
-    return serialRepo.registerSerials(domainSerials, event);
+    final String generatedPrefix = pfx;
+    return serialRepo.registerSerials(
+        domainSerials, supplied ? null : () -> SerialNumbers.generate(generatedPrefix), event);
   }
 
   /**
@@ -1501,14 +1671,6 @@ public class InventoryService {
     return serialRepo.listSerialHistory(tenantId, serialId);
   }
 
-  private static String generateSerialNo(String prefix, int index) {
-    String rand =
-        Long.toHexString(System.nanoTime() ^ ((long) index * 0x9E3779B97F4A7C15L))
-            .toUpperCase(Locale.ROOT)
-            .substring(0, 8);
-    return prefix + "-" + rand;
-  }
-
   // ---- demand history (Gap #7) ----
 
   /**
@@ -1558,6 +1720,8 @@ public class InventoryService {
    * @param toStoreId the to store id
    * @param fromZone the from zone
    * @param toZone the to zone
+   * @param fromZoneId tenant-svc's zone the stock is drawn from, or null for anywhere in the store
+   * @param toZoneId tenant-svc's zone the stock is put down in, or null
    * @param notes free-text notes
    * @param lines the lines to store
    * @return the created move order
@@ -1568,8 +1732,14 @@ public class InventoryService {
       UUID toStoreId,
       String fromZone,
       String toZone,
+      UUID fromZoneId,
+      UUID toZoneId,
       String notes,
       List<MoveOrderLine> lines) {
+    if (fromZoneId != null && fromZoneId.equals(toZoneId) && fromStoreId.equals(toStoreId)) {
+      throw ApiException.badRequest(
+          "MOVE_ORDER_SAME_ZONE", "A move from a zone to the same zone moves nothing");
+    }
     if (lines == null || lines.isEmpty()) {
       throw new ApiException(
           400, "NO_LINES", "Move order must have at least one line", List.of(), null);
@@ -1587,7 +1757,9 @@ public class InventoryService {
             notes,
             MoveOrder.DRAFT,
             now,
-            null);
+            null,
+            fromZoneId,
+            toZoneId);
     List<MoveOrderLine> withIds =
         lines.stream()
             .map(
@@ -1625,7 +1797,7 @@ public class InventoryService {
     MoveOrder order =
         repo.findMoveOrder(tenantId, id)
             .orElseThrow(() -> ApiException.notFound("MOVE_ORDER_NOT_FOUND", "No such move order"));
-    return new MoveOrderWithLines(order, repo.listMoveOrderLines(id));
+    return new MoveOrderWithLines(order, repo.listMoveOrderLines(tenantId, id));
   }
 
   /**
@@ -1652,7 +1824,7 @@ public class InventoryService {
                 id,
                 Events.moveOrderCompleted(
                     tenantId, id, existing.fromStoreId(), existing.toStoreId())));
-    return new MoveOrderWithLines(picked, repo.listMoveOrderLines(id));
+    return new MoveOrderWithLines(picked, repo.listMoveOrderLines(tenantId, id));
   }
 
   /**
@@ -1811,6 +1983,7 @@ public class InventoryService {
                     id,
                     existing.fromStoreId(),
                     existing.toStoreId(),
+                    existing.transferType(),
                     repo.listTransferOrderLines(tenantId, id))));
     return new TransferOrderWithLines(shipped, repo.listTransferOrderLines(tenantId, id));
   }
@@ -2466,10 +2639,6 @@ public class InventoryService {
     return repo.expiredHeldReservationsWithTenant(limit);
   }
 
-  static UUID parseUuid(String s, String field) {
-    return com.storeql.web.Parsing.uuid(s, field);
-  }
-
   // ── Gap #16: Physical Inventory ──────────────────────────────────────────
 
   /**
@@ -2516,38 +2685,34 @@ public class InventoryService {
    * @param storeId the store id
    * @return the matching rows
    */
-  public List<PhysicalInventory> listPhysicalInventories(UUID tenantId, String storeId) {
-    UUID storeUuid = storeId != null ? parseUuid(storeId, "storeId") : null;
-    return physicalInventoryRepo.listPhysicalInventories(tenantId, storeUuid);
+  public List<PhysicalInventory> listPhysicalInventories(UUID tenantId, UUID storeId) {
+    return physicalInventoryRepo.listPhysicalInventories(tenantId, storeId);
   }
 
   /**
-   * Adds a tag.
+   * Adds a tag, recording what the books hold for it now as the quantity the count is measured from
+   * — never a number the caller supplies, since the variance posted on completion is counted minus
+   * this.
    *
    * @param tenantId owning tenant
-   * @param piId the pi id
-   * @param variantId the product variant concerned
-   * @param zoneId the zone id
-   * @param systemQty the system qty
+   * @param piId the physical inventory
+   * @param variantId the product variant to count
+   * @param zoneId the zone it is counted in, or {@code null} for the whole store
    * @return the added tag
-   * @throws ApiException a 404 when no such tag exists in this tenant
+   * @throws ApiException 404 {@code PI_NOT_FOUND}; 409 {@code PI_ALREADY_COMPLETED}
    */
-  public PhysicalInventoryTag addTag(
-      UUID tenantId, UUID piId, UUID variantId, UUID zoneId, BigDecimal systemQty) {
-    getPhysicalInventory(tenantId, piId);
-    var tag =
-        new PhysicalInventoryTag(
-            Ids.newId(),
-            tenantId,
-            piId,
-            variantId,
-            zoneId,
-            systemQty,
-            null,
-            null,
-            PhysicalInventoryTag.OPEN,
-            null);
-    return physicalInventoryRepo.addTag(tag);
+  public PhysicalInventoryTag addTag(UUID tenantId, UUID piId, UUID variantId, UUID zoneId) {
+    PhysicalInventory pi = getPhysicalInventory(tenantId, piId);
+    if (PhysicalInventory.COMPLETED.equals(pi.status())) {
+      throw alreadyCompleted();
+    }
+    return physicalInventoryRepo
+        .addTag(Ids.newId(), tenantId, piId, variantId, zoneId)
+        .orElseThrow(InventoryService::alreadyCompleted);
+  }
+
+  private static ApiException alreadyCompleted() {
+    return ApiException.conflict("PI_ALREADY_COMPLETED", "Physical inventory already completed");
   }
 
   /**
@@ -2575,10 +2740,11 @@ public class InventoryService {
    *
    * @param tenantId owning tenant
    * @param piId the physical inventory to complete
+   * @param actorId who completed it, recorded on every adjustment it posts
    * @return the completed physical inventory
    * @throws ApiException a 404 when no such physical inventory exists in this tenant
    */
-  public PhysicalInventory completePhysicalInventory(UUID tenantId, UUID piId) {
+  public PhysicalInventory completePhysicalInventory(UUID tenantId, UUID piId, UUID actorId) {
     getPhysicalInventory(tenantId, piId);
     var event =
         new OutboxRow(
@@ -2587,7 +2753,7 @@ public class InventoryService {
             tenantId,
             piId,
             Events.physicalInventoryCompleted(tenantId, piId));
-    return physicalInventoryRepo.completePhysicalInventory(tenantId, piId, event);
+    return physicalInventoryRepo.completePhysicalInventory(tenantId, piId, event, actorId);
   }
 
   /**
@@ -3034,49 +3200,38 @@ public class InventoryService {
   /**
    * Splits part of a batch into a new one, recording the genealogy link.
    *
-   * <p>The child inherits the parent's cost and expiry, and the link is what lets a recall trace
-   * from either end.
+   * <p>The quantity moves: it leaves the source batch and arrives in the child, which is the
+   * source's own stock (same store, variant, cost, expiry, grade, zone, ownership, duty and
+   * condition) under the source's lot number, or the one the caller names. Nothing is received or
+   * sold, so the business holds the same as before and the ledger shows the move as two {@code
+   * LOT_SPLIT} movements that net to zero. The child, both movements, the genealogy link, the lot
+   * action and the event are one transaction. The link is what lets a trace follow the stock from
+   * either end (the lot genealogy's ancestors and descendants), and what lets a recall of the
+   * source's lot reach a child given a number of its own. A child joins the recalls that hold its
+   * source.
    *
    * @param tenantId owning tenant
    * @param sourceBatchId the batch to split from
    * @param qty the quantity to move into the new batch
-   * @param batchNo the new batch's number, or {@code null} to mint one
+   * @param batchNo the new batch's number, or {@code null} or blank to keep the source's
    * @param notes free-text note recorded against the split
-   * @return the source and new batches as they now stand
-   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when the source does not exist; a conflict
-   *     when the quantity exceeds what the source holds
+   * @param actorId the user performing the split, or {@code null} for a call with no signed-in user
+   * @param idempotencyKey the request's Idempotency-Key, or {@code null}; a request sent again with
+   *     the same key gets the first split's result and moves nothing
+   * @return the new batch as it now stands, and the action that records the split
+   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when the source does not exist in this
+   *     tenant; {@code INSUFFICIENT_QTY} (422) when the quantity exceeds what the source holds;
+   *     {@code IDEMPOTENCY_KEY_REUSED} (409) when the key made a different action
    */
   public LotSplitResult splitLot(
-      UUID tenantId, UUID sourceBatchId, BigDecimal qty, String batchNo, String notes) {
-    Batch source =
-        repo.getBatch(tenantId, sourceBatchId)
-            .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Source batch not found"));
-    if (source.remainingQty().compareTo(qty) < 0) {
-      throw ApiException.unprocessable(
-          "INSUFFICIENT_QTY", "Split qty exceeds remaining qty on source batch");
-    }
-    String newBatchNo =
-        batchNo != null ? batchNo : source.batchNo() + "-SPLIT-" + Ids.shortRef(Ids.newId());
+      UUID tenantId,
+      UUID sourceBatchId,
+      BigDecimal qty,
+      String batchNo,
+      String notes,
+      UUID actorId,
+      String idempotencyKey) {
     UUID newBatchId = Ids.newId();
-    Batch splitBatch =
-        new Batch(
-            newBatchId,
-            tenantId,
-            source.storeId(),
-            source.variantId(),
-            newBatchNo,
-            qty,
-            qty,
-            source.costPrice(),
-            source.expiryDate(),
-            Instant.now(),
-            Batch.STATUS_ACTIVE,
-            Batch.MATERIAL_AVAILABLE,
-            null,
-            source.grade(),
-            source.zoneId(),
-            source.ownership(),
-            source.ownerSupplierId());
     OutboxRow splitEvent =
         new OutboxRow(
             "LotSplit",
@@ -3084,11 +3239,19 @@ public class InventoryService {
             tenantId,
             sourceBatchId,
             Events.lotSplit(tenantId, sourceBatchId, newBatchId, qty));
-    Batch newBatch = repo.receive(splitBatch, "LOT_SPLIT", sourceBatchId, splitEvent, null);
-    LotAction action =
-        lotActionRepo.insertLotAction(
-            tenantId, LotAction.SPLIT, sourceBatchId, newBatch.id(), qty, notes);
-    return new LotSplitResult(newBatch, action);
+    InventoryRepository.Split split =
+        repo.splitBatch(
+            tenantId,
+            sourceBatchId,
+            newBatchId,
+            Ids.newId(),
+            qty,
+            batchNo,
+            notes,
+            MovementAttribution.by(actorId, null),
+            idempotencyKey,
+            splitEvent);
+    return new LotSplitResult(split.child(), split.action());
   }
 
   public record LotMergeResult(Batch targetBatch, LotAction action) {}
@@ -3096,18 +3259,32 @@ public class InventoryService {
   /**
    * Merges quantity from one batch into another, recording the genealogy link.
    *
-   * <p>Merging mixes provenance, so the link matters: after this, a recall on either source has to
-   * reach the merged batch.
+   * <p>The quantity moves: it leaves the source batch and joins the target, which must be at the
+   * same store, of the same variant, in the same material status and grade and with the same
+   * ownership and duty status. Nothing is received, written off or sold, so the business holds the
+   * same as before and the ledger shows the move as two {@code LOT_MERGE} movements that net to
+   * zero. The target's unit cost becomes the average of the two weighted by quantity, rounded to
+   * the business currency's minor units, and its use-by date the earlier of the two. The movements,
+   * the {@code MERGE} link in the genealogy, the lot action and the event are one transaction.
+   *
+   * <p>Merging mixes provenance, so the link matters: a recall of either batch's lot reaches the
+   * merged batch, and the merged batch joins the recalls that hold the source.
    *
    * @param tenantId owning tenant
    * @param sourceBatchId the batch to take stock from
    * @param targetBatchId the batch to merge it into
    * @param qty the quantity to move
    * @param notes free-text note recorded against the merge
-   * @param actorId the user performing the merge
-   * @return both batches as they now stand
-   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when either batch does not exist; a conflict
-   *     when the quantity exceeds what the source holds
+   * @param actorId the user performing the merge, or {@code null} for a call with no signed-in user
+   * @param idempotencyKey the request's Idempotency-Key, or {@code null}; a request sent again with
+   *     the same key gets the first merge's result and moves nothing
+   * @return the target as it now stands, and the action that records the merge
+   * @throws ApiException {@code BATCH_NOT_FOUND} (404) when either batch does not exist in this
+   *     tenant; 422 {@code INSUFFICIENT_QTY} when the quantity exceeds what the source holds, or
+   *     {@code INVENTORY_LOT_MERGE_*} when the two cannot be merged ({@link
+   *     InventoryRepository#mergeBatches}); 503 {@code TENANT_PROFILE_UNAVAILABLE} when their costs
+   *     differ, the key has made no merge and the business's currency cannot be read; {@code
+   *     IDEMPOTENCY_KEY_REUSED} (409) when the key made a different action
    */
   public LotMergeResult mergeLot(
       UUID tenantId,
@@ -3115,17 +3292,23 @@ public class InventoryService {
       UUID targetBatchId,
       BigDecimal qty,
       String notes,
-      UUID actorId) {
+      UUID actorId,
+      String idempotencyKey) {
     Batch source =
         repo.getBatch(tenantId, sourceBatchId)
             .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Source batch not found"));
     Batch target =
         repo.getBatch(tenantId, targetBatchId)
             .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Target batch not found"));
-    if (source.remainingQty().compareTo(qty) < 0) {
-      throw ApiException.unprocessable(
-          "INSUFFICIENT_QTY", "Merge qty exceeds remaining qty on source batch");
-    }
+    // The currency is read before the transaction, not inside it: the merge holds row locks while
+    // it runs, and a call to tenant-svc would be made under them. Equal costs are left as they are
+    // and need no currency.
+    // A retry under a key that already made a merge answers it and needs no currency.
+    boolean replay = idempotencyKey != null && lotActionRepo.keyUsed(tenantId, idempotencyKey);
+    Integer minorUnits =
+        !replay && LotMerges.needsBlend(source.costPrice(), target.costPrice())
+            ? Integer.valueOf(Fx.minorUnits(tenantProfiles.requireCurrency(tenantId)))
+            : null;
     OutboxRow mergeEvent =
         new OutboxRow(
             "LotMerge",
@@ -3133,31 +3316,19 @@ public class InventoryService {
             tenantId,
             sourceBatchId,
             Events.lotMerge(tenantId, sourceBatchId, targetBatchId, qty));
-    OutboxRow addEvent =
-        new OutboxRow(
-            "LotMergeIn",
-            "storeql.inventory.lot-merge-in",
+    InventoryRepository.Merge merged =
+        repo.mergeBatches(
             tenantId,
+            sourceBatchId,
             targetBatchId,
-            Events.lotMerge(tenantId, sourceBatchId, targetBatchId, qty));
-    // Deduct from source and add to target atomically — see mergeLotAdjust's Javadoc.
-    repo.mergeLotAdjust(
-        tenantId,
-        source.storeId(),
-        source.variantId(),
-        mergeEvent,
-        target.storeId(),
-        target.variantId(),
-        addEvent,
-        qty,
-        MovementAttribution.by(actorId, null));
-    Batch updated =
-        repo.getBatch(tenantId, targetBatchId)
-            .orElseThrow(() -> ApiException.notFound("BATCH_NOT_FOUND", "Target batch not found"));
-    LotAction action =
-        lotActionRepo.insertLotAction(
-            tenantId, LotAction.MERGE, sourceBatchId, targetBatchId, qty, notes);
-    return new LotMergeResult(updated, action);
+            Ids.newId(),
+            qty,
+            notes,
+            MovementAttribution.by(actorId, null),
+            idempotencyKey,
+            minorUnits,
+            mergeEvent);
+    return new LotMergeResult(merged.target(), merged.action());
   }
 
   /**
@@ -3185,7 +3356,7 @@ public class InventoryService {
     if (withinDays < 1 || withinDays > 3650) {
       throw ApiException.badRequest("INVALID_DAYS", "withinDays must be 1–3650");
     }
-    return repo.listExpiringBatches(tenantId, storeId, withinDays);
+    return repo.listExpiringBatches(tenantId, storeId, withinDays, Math.max(1, expiringMaxRows));
   }
 
   // ── Tier-1 Gap #25: Grade control ─────────────────────────────────────────
@@ -3297,6 +3468,13 @@ public class InventoryService {
   }
 
   // ── Tier-1 Gap #28: Order modifiers ──────────────────────────────────────
+
+  /** The plan with this id in this tenant. @throws ApiException 404 {@code ROP_PLAN_NOT_FOUND} */
+  public ReorderPointPlan getRopPlanById(UUID tenantId, UUID id) {
+    return ropRepo
+        .findRopPlanById(tenantId, id)
+        .orElseThrow(() -> ApiException.notFound("ROP_PLAN_NOT_FOUND", "No such ROP plan"));
+  }
 
   /**
    * Updates a rop order modifiers.
@@ -3586,6 +3764,23 @@ public class InventoryService {
    */
   public List<PickingRuleAssignment> listPickingRuleAssignments(UUID tenantId, int limit) {
     return pickingRuleRepo.listPickingRuleAssignments(tenantId, limit);
+  }
+
+  /**
+   * One picking rule assignment of the tenant.
+   *
+   * @param tenantId owning tenant
+   * @param id the assignment
+   * @return the assignment
+   * @throws ApiException a 404 when no such assignment exists in this tenant
+   */
+  public PickingRuleAssignment getPickingRuleAssignment(UUID tenantId, UUID id) {
+    return pickingRuleRepo.listPickingRuleAssignments(tenantId, Integer.MAX_VALUE).stream()
+        .filter(a -> a.id().equals(id))
+        .findFirst()
+        .orElseThrow(
+            () ->
+                ApiException.notFound("ASSIGNMENT_NOT_FOUND", "Picking rule assignment not found"));
   }
 
   /**

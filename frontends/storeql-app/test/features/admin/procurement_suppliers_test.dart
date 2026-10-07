@@ -42,7 +42,8 @@ class _Server implements HttpClientAdapter {
   }
 }
 
-Future<_Server> _pump(WidgetTester tester, {String role = 'MANAGER'}) async {
+Future<_Server> _pump(WidgetTester tester,
+    {String role = 'MANAGER', List<String> storeIds = const []}) async {
   tester.view.physicalSize = const Size(1200, 1000);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -51,7 +52,7 @@ Future<_Server> _pump(WidgetTester tester, {String role = 'MANAGER'}) async {
   await tester.pumpWidget(ProviderScope(
     overrides: [
       apiClientProvider.overrideWithValue(FakeApiClient(dio)),
-      authNotifierProvider.overrideWith(() => RoleAuth(role)),
+      authNotifierProvider.overrideWith(() => RoleAuth(role, storeIds: storeIds)),
     ],
     child: const MaterialApp(home: ProcurementScreen()),
   ));
@@ -85,6 +86,55 @@ void main() {
     expect(body['currency'], 'JPY', reason: 'what was not touched is sent as it was');
     expect(body['vatNumber'], 'GB999999973');
     expect(find.text('Supplier updated.'), findsOneWidget);
+  });
+
+  // The terms and the quoted lead time are whole days. Text that is not a
+  // number of days was saved as 30 days, or as no lead time, and is now
+  // refused under its field with nothing saved.
+  for (final (typed, why) in [
+    ('1,000', 'Type the amount without thousands separators.'),
+    ('15.', 'Whole amounts only.'),
+    ('.', 'Whole amounts only.'),
+    ('-', 'Type the amount without a sign.'),
+    ('+5', 'Type the amount without a sign.'),
+    ('0x10', 'Only digits.'),
+  ]) {
+    testWidgets('terms of "$typed" are refused under the field, never saved as 30 days',
+        (tester) async {
+      final server = await _pump(tester);
+      await tester.tap(find.byTooltip('Edit supplier'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('supplier-terms')), typed);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.text(why), findsOneWidget);
+      expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+    });
+
+    testWidgets('a lead time of "$typed" is refused under the field, never saved as none',
+        (tester) async {
+      final server = await _pump(tester);
+      await tester.tap(find.byTooltip('Edit supplier'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('supplier-lead-time')), typed);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.text(why), findsOneWidget);
+      expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+    });
+  }
+
+  testWidgets('a lead time typed is saved as typed; left blank it is left out', (tester) async {
+    final server = await _pump(tester);
+    await tester.tap(find.byTooltip('Edit supplier'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('supplier-lead-time')), '7');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    final put = server.requests.singleWhere((r) => r.method == 'PUT');
+    final body = (put.data is String ? jsonDecode(put.data as String) : put.data) as Map;
+    expect(body['leadTimeDays'], 7);
+    expect(body['paymentTermsDays'], 30);
   });
 
   testWidgets('the refusal for an open order in the old currency is shown in words',
@@ -127,5 +177,26 @@ void main() {
     await _pump(tester, role: 'CASHIER');
     expect(find.text('Yen By Mistake'), findsOneWidget);
     expect(find.byTooltip('Edit supplier'), findsNothing);
+  });
+
+  // A supplier's terms and bank details are every store's: purchase-svc answers a manager held
+  // to stores 403 BUSINESS_WIDE_ONLY on PUT /suppliers/{id}. Such a manager reads the supplier,
+  // is not offered the correction, and is told who makes one; a head-office manager is.
+  testWidgets('a manager held to stores reads a supplier and is told who corrects one',
+      (tester) async {
+    final server = await _pump(tester, storeIds: const ['01a0b000-0000-7000-8000-0000000000a1']);
+    expect(find.text('Yen By Mistake'), findsOneWidget);
+    expect(find.byTooltip('Edit supplier'), findsNothing);
+    expect(find.text('Only an owner or a head-office manager corrects a supplier.'), findsOneWidget);
+    // Adding one is still theirs.
+    expect(find.text('Add supplier'), findsOneWidget);
+    expect(server.requests.where((r) => r.method == 'PUT'), isEmpty);
+  });
+
+  testWidgets('a head-office manager held to no store is offered the correction, and no note',
+      (tester) async {
+    await _pump(tester);
+    expect(find.byTooltip('Edit supplier'), findsOneWidget);
+    expect(find.text('Only an owner or a head-office manager corrects a supplier.'), findsNothing);
   });
 }

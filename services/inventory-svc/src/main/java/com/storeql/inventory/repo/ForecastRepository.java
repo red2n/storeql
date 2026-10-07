@@ -145,6 +145,100 @@ public class ForecastRepository extends BaseJdbcRepository {
     return out;
   }
 
+  /**
+   * One page of the variants that have a daily bucket at a store in the window, in id order, so a
+   * run can read the store's history a page of variants at a time instead of all at once.
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param storeId the store
+   * @param variantId one variant, or null for every variant with a bucket
+   * @param from the first day, inclusive
+   * @param to the last day, inclusive
+   * @param after the last variant of the previous page, or null for the first page
+   * @param limit the page size
+   * @return up to {@code limit} variant ids greater than {@code after}
+   */
+  public List<UUID> variantsWithDemand(
+      UUID tenantId,
+      UUID storeId,
+      UUID variantId,
+      LocalDate from,
+      LocalDate to,
+      UUID after,
+      int limit) {
+    StringBuilder sb =
+        new StringBuilder(
+            "SELECT DISTINCT variant_id FROM demand_history"
+                + " WHERE tenant_id = ? AND store_id = ? AND bucket_type = 'DAY'"
+                + " AND bucket_date >= ? AND bucket_date <= ?");
+    if (variantId != null) {
+      sb.append(" AND variant_id = ?");
+    }
+    if (after != null) {
+      sb.append(" AND variant_id > ?");
+    }
+    sb.append(" ORDER BY variant_id LIMIT ?");
+    return query(
+        sb.toString(),
+        ps -> {
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          ps.setObject(i++, storeId);
+          ps.setObject(i++, from);
+          ps.setObject(i++, to);
+          if (variantId != null) {
+            ps.setObject(i++, variantId);
+          }
+          if (after != null) {
+            ps.setObject(i++, after);
+          }
+          ps.setInt(i, limit);
+        },
+        rs -> rs.getObject("variant_id", UUID.class),
+        "variants with demand");
+  }
+
+  /**
+   * Daily demand buckets of the named variants at a store between two days (one page of a run).
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   * @param storeId the store
+   * @param variantIds the variants of the page
+   * @param from the first day, inclusive
+   * @param to the last day, inclusive
+   * @return variant → (day → quantity), days with no bucket absent
+   */
+  public Map<UUID, Map<LocalDate, BigDecimal>> dailyDemandFor(
+      UUID tenantId, UUID storeId, List<UUID> variantIds, LocalDate from, LocalDate to) {
+    if (variantIds.isEmpty()) {
+      return new LinkedHashMap<>();
+    }
+    List<DailyDemandRow> rows =
+        query(
+            "SELECT variant_id, bucket_date, demand_qty FROM demand_history"
+                + " WHERE tenant_id = ? AND store_id = ? AND bucket_type = 'DAY'"
+                + " AND bucket_date >= ? AND bucket_date <= ? AND variant_id = ANY(?)"
+                + " ORDER BY variant_id, bucket_date",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, storeId);
+              ps.setObject(3, from);
+              ps.setObject(4, to);
+              ps.setArray(5, ps.getConnection().createArrayOf("uuid", variantIds.toArray()));
+            },
+            rs ->
+                new DailyDemandRow(
+                    rs.getObject("variant_id", UUID.class),
+                    rs.getObject("bucket_date", LocalDate.class),
+                    rs.getBigDecimal("demand_qty")),
+            "daily demand of a page of variants");
+    Map<UUID, Map<LocalDate, BigDecimal>> out = new LinkedHashMap<>();
+    for (DailyDemandRow r : rows) {
+      out.computeIfAbsent(r.variantId(), k -> new TreeMap<>()).put(r.day(), r.qty());
+    }
+    return out;
+  }
+
   /** Writes a run's forecasts, replacing each (store, variant)'s earlier one; the id stays. */
   public void upsertAll(List<DemandForecast> rows) {
     if (rows.isEmpty()) {

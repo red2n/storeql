@@ -420,4 +420,65 @@ class WeighingInstrumentIT {
       }
     }
   }
+
+  @Test
+  @DisplayName(
+      "An instrument's markings are held to what it keeps: a capacity of nothing broke the table's"
+          + " own check and 1E+15 overflowed NUMERIC(18,4), both 500s; now 400 and none is made."
+          + " A store's coordinates are on the globe: 1000 overflowed NUMERIC(9,6)")
+  void markingsAndCoordinatesAreHeld() {
+    setUpTenants();
+    for (String bad : java.util.List.of("0", "-15", "1E+15", "15.00001")) {
+      Response capacity =
+          create(
+              storeA,
+              tenantA,
+              "OWNER",
+              null,
+              scale("").replace("\"maxCapacity\":15", "\"maxCapacity\":" + bad));
+      String body = capacity.readEntity(String.class);
+      assertThat(bad + " -> " + body, capacity.getStatus(), is(400));
+      assertThat(body, containsString("VALIDATION_FAILED"));
+      assertThat(body, containsString("maxCapacity: "));
+      Response interval =
+          create(
+              storeA,
+              tenantA,
+              "OWNER",
+              null,
+              scale("").replace("\"scaleInterval\":0.005", "\"scaleInterval\":" + bad));
+      String text = interval.readEntity(String.class);
+      assertThat(bad + " -> " + text, interval.getStatus(), is(400));
+      assertThat(text, containsString("scaleInterval: "));
+    }
+    String made =
+        com.storeql.test.Envelopes.scalar(
+            PG,
+            "SELECT count(*) FROM tenant.weighing_instruments WHERE tenant_id = '"
+                + tenantA
+                + "' AND max_capacity <= 0");
+    assertThat(made, is("0"));
+
+    String stores = "SELECT count(*) FROM tenant.stores WHERE tenant_id = '" + tenantA + "'";
+    String before = com.storeql.test.Envelopes.scalar(PG, stores);
+    for (String geo :
+        java.util.List.of(
+            "\"geoLat\":1000", "\"geoLat\":90.5", "\"geoLng\":-180.5", "\"geoLat\":51.5073511")) {
+      Response r =
+          as("/admin/stores", tenantA, "OWNER", null)
+              .post(
+                  Entity.entity(
+                      "{\"name\":\"Far\",\"code\":\"F-"
+                          + Ids.newId()
+                          + "\",\"country\":\"GB\",\"timezone\":\"Europe/London\","
+                          + geo
+                          + "}",
+                      MediaType.APPLICATION_JSON));
+      String body = r.readEntity(String.class);
+      assertThat(geo + " -> " + body, r.getStatus(), is(400));
+      assertThat(body, containsString("VALIDATION_FAILED"));
+      assertThat(body, containsString(geo.contains("geoLat") ? "geoLat: " : "geoLng: "));
+    }
+    assertThat("no store was made", com.storeql.test.Envelopes.scalar(PG, stores), is(before));
+  }
 }
