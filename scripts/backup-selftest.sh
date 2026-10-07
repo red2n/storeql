@@ -33,8 +33,17 @@ cleanup() {
 trap cleanup EXIT
 
 psqlpg() { docker exec -i "$1" psql -U storeql -d storeql -At -q -v ON_ERROR_STOP=1 "${@:2}"; }
+# The image starts a temporary server to create POSTGRES_DB and run its init scripts, then restarts.
+# pg_isready answers during that first phase, before the database exists, so wait for the final
+# server (its "ready" line is the second one in the log) and for a query on the database to work.
 wait_ready() {
-  for _ in $(seq 1 90); do docker exec "$1" pg_isready -U storeql -d storeql >/dev/null 2>&1 && return 0; sleep 1; done
+  for _ in $(seq 1 90); do
+    if [ "$(docker logs "$1" 2>&1 | grep -c 'database system is ready to accept connections')" -ge 2 ] \
+      && docker exec "$1" psql -U storeql -d storeql -At -c 'SELECT 1' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
   return 1
 }
 # The backup image against the throwaway server, with the recipient and identity given.

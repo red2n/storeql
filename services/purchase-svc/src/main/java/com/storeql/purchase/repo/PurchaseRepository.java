@@ -301,7 +301,12 @@ public class PurchaseRepository extends BaseOutboxRepository {
   }
 
   /** A draft order an event raises: the order, its lines, and the event that announces it. */
-  public record RaisedOrder(PurchaseOrder order, OutboxRow event, List<PurchaseOrderLine> lines) {}
+  public record RaisedOrder(PurchaseOrder order, OutboxRow event, List<PurchaseOrderLine> lines) {
+    /** Keeps its own copy, so the caller's list cannot change the order being raised. */
+    public RaisedOrder {
+      lines = List.copyOf(lines);
+    }
+  }
 
   /**
    * Raises the draft orders of one event, once. The dedupe mark, every order, each order's lines

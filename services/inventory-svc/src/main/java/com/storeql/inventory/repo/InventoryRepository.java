@@ -659,6 +659,15 @@ public class InventoryRepository extends BaseOutboxRepository {
         "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was used for something else");
   }
 
+  private static ApiException keyReused(SQLException cause) {
+    return new ApiException(
+        409,
+        "IDEMPOTENCY_KEY_REUSED",
+        "this Idempotency-Key was used for something else",
+        List.of(),
+        cause);
+  }
+
   /** The lot action an Idempotency-Key made, or null when there is no key or it made none. */
   private static LotAction lotActionOfKeyTx(Connection c, UUID tenantId, String idempotencyKey)
       throws SQLException {
@@ -687,7 +696,7 @@ public class InventoryRepository extends BaseOutboxRepository {
           c, id, tenantId, actionType, sourceBatchId, resultBatchId, qty, notes, idempotencyKey);
     } catch (SQLException e) {
       if (UNIQUE_VIOLATION.equals(e.getSQLState()) && idempotencyKey != null) {
-        throw keyReused();
+        throw keyReused(e);
       }
       throw e;
     }

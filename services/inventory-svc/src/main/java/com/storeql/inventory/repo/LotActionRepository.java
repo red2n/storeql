@@ -57,7 +57,9 @@ public class LotActionRepository extends BaseJdbcRepository {
       ps.setString(7, notes);
       ps.setString(8, idempotencyKey);
       try (ResultSet rs = ps.executeQuery()) {
-        rs.next();
+        if (!rs.next()) {
+          throw new SQLException("the lot action insert returned no row");
+        }
         return mapLotAction(rs);
       }
     }
