@@ -224,12 +224,19 @@ class OutboxRetryIT {
           idleInTransaction.set(
               Integer.parseInt(
                   scalar(
-                      "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-                          + " AND state LIKE 'idle in transaction%'")));
+                      "SELECT count(*) FROM pg_stat_activity a WHERE a.datname = current_database()"
+                          + " AND a.state LIKE 'idle in transaction%'"
+                          // the drain's own transaction holds the advisory drain lock and nothing
+                          // else; any other lock (a row, a table, a transaction id) is the fault
+                          + " AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid"
+                          + " AND l.locktype NOT IN ('advisory', 'virtualxid'))")));
           return new OutboxStore.PublishOutcome(
               rows.stream().map(OutboxStore.PendingOutbox::id).toList(), Map.of());
         });
-    assertEquals(0, idleInTransaction.get(), "a broker outage must not hold row locks open");
+    assertEquals(
+        0,
+        idleInTransaction.get(),
+        "a broker outage must not hold row or table locks open (the drain lock is an advisory one)");
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────

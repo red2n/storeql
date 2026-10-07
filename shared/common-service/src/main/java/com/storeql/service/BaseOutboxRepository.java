@@ -65,12 +65,20 @@ public abstract class BaseOutboxRepository extends BaseJdbcRepository implements
   }
 
   /**
-   * Takes this schema's drain right on a connection of its own. A session-level lock, so it spans
-   * the whole drain and not a transaction: nothing here holds row locks while Kafka is written to.
+   * Takes this schema's drain right on a connection of its own, held by a transaction that does
+   * nothing else: the lock is a transaction-level advisory lock, so ending the transaction (or
+   * losing the connection) gives it back. No row is locked and no write is open while Kafka is
+   * written to.
+   *
+   * <p>It is not a session-level lock on purpose. Every service reaches Postgres through PgBouncer
+   * in transaction pooling mode, where a session-level lock is not given back reliably: the unlock
+   * statement can run on a different server connection than the lock did, answers {@code false}
+   * instead of failing, and leaves the lock on the first connection until PgBouncer recycles it (up
+   * to half an hour), during which no drain publishes anything and nothing is logged. A transaction
+   * keeps one server connection for its whole length, so lock and release always meet there.
    */
   // not try-with-resources: the connection is handed to the lease on success, and closed here only
   // when the lock is not taken or the attempt fails
-  @SuppressWarnings("PMD.UseTryWithResources")
   @Override
   public Optional<DrainLease> tryDrainLock() {
     Connection c;
@@ -81,8 +89,9 @@ public abstract class BaseOutboxRepository extends BaseJdbcRepository implements
     }
     boolean held = false;
     try {
+      c.setAutoCommit(false);
       try (PreparedStatement ps =
-              c.prepareStatement("SELECT pg_try_advisory_lock(" + DRAIN_KEY + ")");
+              c.prepareStatement("SELECT pg_try_advisory_xact_lock(" + DRAIN_KEY + ")");
           ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
           held = rs.getBoolean(1);
@@ -92,14 +101,14 @@ public abstract class BaseOutboxRepository extends BaseJdbcRepository implements
     } catch (SQLException e) {
       throw dbError("take the outbox drain lock", e);
     } finally {
-      if (!held) closeQuietly(c);
+      if (!held) endAndClose(c);
     }
   }
 
   /** The schema-scoped key of the drain lock: one drainer per schema, whichever service it is. */
   private static final String DRAIN_KEY = "hashtext(current_schema()), hashtext('outbox')";
 
-  /** Holds the drain connection, and gives the lock back before the connection goes to the pool. */
+  /** Holds the drain connection and its open transaction; closing ends both and frees the lock. */
   private final class Lease implements DrainLease {
     private final Connection c;
 
@@ -107,29 +116,34 @@ public abstract class BaseOutboxRepository extends BaseJdbcRepository implements
       this.c = c;
     }
 
-    // not try-with-resources: the connection must close after the lock is released, on every path
-    @SuppressWarnings("PMD.UseTryWithResources")
     @Override
     public void close() {
-      try (PreparedStatement ps =
-          c.prepareStatement("SELECT pg_advisory_unlock(" + DRAIN_KEY + ")")) {
-        ps.executeQuery().close();
-      } catch (SQLException e) {
-        // A connection that cannot release its lock must not go back to the pool holding it.
-        LOG.log(
-            Level.WARNING,
-            "outbox drain lock not released, discarding its connection: {0}",
-            e.getMessage());
-        try {
-          c.abort(Runnable::run);
-          return;
-        } catch (SQLException ignored) {
-          // fall through to a plain close
-        }
-      } finally {
-        closeQuietly(c);
+      endAndClose(c);
+    }
+  }
+
+  /**
+   * Ends the transaction that holds the drain right and returns the connection to the pool. A
+   * connection that cannot be rolled back is aborted rather than handed back with a transaction
+   * open.
+   */
+  private static void endAndClose(Connection c) {
+    try {
+      c.rollback();
+      c.setAutoCommit(true);
+    } catch (SQLException e) {
+      LOG.log(
+          Level.WARNING,
+          "outbox drain transaction not ended, discarding its connection: {0}",
+          e.getMessage());
+      try {
+        c.abort(Runnable::run);
+        return;
+      } catch (SQLException ignored) {
+        // fall through to a plain close
       }
     }
+    closeQuietly(c);
   }
 
   private static final System.Logger LOG = System.getLogger(BaseOutboxRepository.class.getName());
