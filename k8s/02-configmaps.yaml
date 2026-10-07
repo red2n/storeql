@@ -49,7 +49,22 @@ data:
         project: 'storeql'
         env: 'k3s'
 
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    # Firing alerts go to Alertmanager, which decides who is told (storeql-alertmanager-config).
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager:9093']
+
     scrape_configs:
+      - job_name: 'alertmanager'
+        metrics_path: /metrics
+        static_configs:
+          - targets: ['alertmanager:9093']
+            labels: { service: 'alertmanager', layer: 'infra' }
+
       - job_name: 'prometheus'
         metrics_path: /metrics
         static_configs:
@@ -164,6 +179,245 @@ data:
           - targets: ['consul:8500']
             labels: { service: 'consul', layer: 'infra' }
 
+---
+# The alert rules Prometheus evaluates. A copy of infra/prometheus/rules/alerts.yml (the compose
+# stack mounts the whole rules directory); scripts/k8s-hardening-check.py fails CI if the two differ.
+# infra/prometheus/rules/backups.yml is deliberately NOT here: nothing on Kubernetes produces the
+# storeql_backup_* metrics it reads, so loading it would raise a permanent false alert.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storeql-prometheus-rules
+  namespace: storeql
+data:
+  alerts.yml: |
+    groups:
+
+      # ── Service availability ─────────────────────────────────────────────────────
+      - name: service-availability
+        rules:
+          - alert: ServiceDown
+            expr: up == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Service {{ $labels.job }} is DOWN"
+              description: "{{ $labels.job }} ({{ $labels.instance }}) has been unreachable for more than 1 minute."
+
+          - alert: ServiceRestartDetected
+            expr: resets(jvm_uptime_seconds[5m]) > 0
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.job }} restarted"
+              description: "JVM uptime on {{ $labels.job }} reset — possible crash or redeploy."
+
+      # ── JVM memory ──────────────────────────────────────────────────────────────
+      - name: jvm-memory
+        rules:
+          - alert: HeapUsageHigh
+            expr: memory_usedHeap_bytes / memory_maxHeap_bytes > 0.85
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High heap on {{ $labels.job }}: {{ $value | humanizePercentage }}"
+              description: "Heap on {{ $labels.job }} has been above 85% for 5 minutes. Risk of OOM."
+
+          - alert: HeapUsageCritical
+            expr: memory_usedHeap_bytes / memory_maxHeap_bytes > 0.95
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "CRITICAL heap on {{ $labels.job }}: {{ $value | humanizePercentage }}"
+              description: "Heap on {{ $labels.job }} is above 95%. OOM imminent."
+
+      # ── JVM threads ─────────────────────────────────────────────────────────────
+      - name: jvm-threads
+        rules:
+          - alert: ThreadCountHigh
+            expr: thread_count > 300
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High thread count on {{ $labels.job }}: {{ $value }}"
+              description: "Thread count on {{ $labels.job }} exceeded 300 for 5 minutes."
+
+      # ── PostgreSQL ───────────────────────────────────────────────────────────────
+      - name: postgres
+        rules:
+          - alert: PostgresDown
+            expr: pg_up == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "PostgreSQL is DOWN"
+              description: "postgres_exporter cannot reach PostgreSQL."
+
+          - alert: PostgresConnectionsHigh
+            expr: sum(pg_stat_activity_count) > 200
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "PostgreSQL connections high: {{ $value }}"
+              description: "More than 200 active connections to PostgreSQL for 5 minutes."
+
+          - alert: PostgresSlowQueriesDetected
+            expr: max(pg_stat_activity_max_tx_duration{state="active"}) > 30
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "A PostgreSQL transaction has been active for {{ $value }}s"
+
+      # ── Redis ────────────────────────────────────────────────────────────────────
+      - name: redis
+        rules:
+          - alert: RedisDown
+            expr: redis_up == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Redis is DOWN"
+
+          - alert: RedisMemoryHigh
+            expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Redis memory high: {{ $value | humanizePercentage }}"
+              description: "Redis memory usage exceeded 85% of the 256 MB limit."
+
+      # ── Node / host ──────────────────────────────────────────────────────────────
+      - name: node
+        rules:
+          - alert: HostHighCpuLoad
+            expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 80
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Host CPU load high: {{ $value | humanize }}%"
+
+          - alert: HostLowDiskSpace
+            expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 15
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Low disk space: {{ $value | humanize }}% free on /"
+
+          - alert: HostMemoryPressure
+            expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) < 0.10
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Host memory low: {{ $value | humanizePercentage }} available"
+
+      # ── Script integrity on the web shell (PCI DSS 11.6.1) ──────────────────────
+      - name: script-integrity
+        rules:
+          - alert: ScriptIntegrityDrift
+            expr: storeql_script_integrity_drift > 0
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "A script on the web shell changed or appeared"
+              description: "The gateway's script integrity monitor found {{ $value }} difference(s) between the scripts the web shell serves and its inventory. See GET /admin/security/script-integrity on the gateway."
+
+          - alert: ScriptIntegrityUnchecked
+            expr: storeql_script_integrity_drift < 0
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "The web shell could not be checked for script integrity"
+              description: "The gateway could not read the web shell's entry page or inventory for 30 minutes, so its scripts are unverified."
+
+      # ── WAL archiving ───────────────────────────────────────────────────────────
+      # Postgres's own archiver counters come from postgres_exporter, which runs in compose and on
+      # Kubernetes alike. A WAL archive that is failing is a restore to a moment that will not work.
+      - name: wal-archive
+        rules:
+          - alert: WalArchiveFailing
+            expr: increase(pg_stat_archiver_failed_count[15m]) > 0
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "PostgreSQL cannot archive its WAL"
+              description: "archive_command is failing: the WAL piles up under pg_wal and no restore to a moment is possible past the last archived segment. Check the backups volume and its permissions."
+
+      # ── The alert path itself ───────────────────────────────────────────────────
+      # An Alertmanager that cannot send (a wrong SMTP host, an expired token, an unreachable webhook)
+      # looks healthy and tells nobody, and so does a Prometheus that cannot reach it. Both are critical
+      # so the alert also takes the webhook route, which does not depend on the mail that may be failing.
+      # They show in Prometheus's own alert page even when nothing is delivered.
+      - name: alerting
+        rules:
+          - alert: AlertNotificationsFailing
+            # A failed send that Alertmanager then retried successfully raises the rate for one window and
+            # is gone before 10 minutes; a route that keeps failing keeps the rate up and fires.
+            expr: sum by (integration) (rate(alertmanager_notifications_failed_total[5m])) > 0
+            for: 10m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Alertmanager cannot deliver {{ $labels.integration }} notifications"
+              description: "Sending through {{ $labels.integration }} has kept failing for 10 minutes, so alerts are not reaching anyone by that route. Check the receiver in alertmanager.yml (host, credentials, reachability); Alertmanager's log says why."
+
+          - alert: PrometheusCannotReachAlertmanager
+            expr: rate(prometheus_notifications_errors_total[5m]) > 0 or max(prometheus_notifications_alertmanagers_discovered) < 1
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Prometheus cannot deliver alerts to Alertmanager"
+              description: "Prometheus has errors sending to Alertmanager or has none configured, so nothing that fires is routed to anyone. Check that Alertmanager is up and that prometheus.yml's alerting section names it."
+---
+# Who is told when an alert fires. Out of the box NOBODY is: the default receiver has no
+# integration, so a firing alert shows in Prometheus's alert page and in Alertmanager's (kubectl -n
+# storeql port-forward svc/alertmanager 9093) and nobody is sent anything. Add your receivers here
+# (mail, Slack, PagerDuty, a webhook) and keep their passwords and tokens out of this file: put each in
+# the Secret storeql-alertmanager-secrets (mounted at /etc/alertmanager/secrets) and name it with
+# smtp_auth_password_file or authorization.credentials_file. The pod can reach the internet on 443,
+# 465 and 587 (05-network-policies.yaml). A change here reaches the pod only after
+# kubectl -n storeql rollout restart deployment/alertmanager. k8s/README.md, "Alerting".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storeql-alertmanager-config
+  namespace: storeql
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: unconfigured
+      group_by: ['alertname', 'job']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - matchers: ['severity="critical"']
+          receiver: unconfigured
+          repeat_interval: 1h
+    receivers:
+      - name: unconfigured
+    inhibit_rules:
+      - source_matchers: ['alertname=~"ServiceDown|PostgresDown|RedisDown"']
+        target_matchers: ['severity="warning"']
+        equal: ['job', 'instance']
 ---
 # Grafana datasources — Prometheus only. Loki/Tempo/Zipkin are intentionally not
 # deployed in this k3s cut (see k8s/README.md); add their datasources back here if/when

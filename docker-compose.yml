@@ -72,6 +72,7 @@ volumes:
   redis_data:
   kafka_data:
   prometheus_data:
+  alertmanager_data:
   grafana_data:
   pgadmin_data:
   loki_data:
@@ -595,6 +596,8 @@ services:
       - --storage.tsdb.retention.time=7d
       - --web.enable-lifecycle
       - --web.enable-remote-write-receiver
+      # The links in an alert mail ("Source") are built from this; the container id is no use to a person.
+      - --web.external-url=${PROMETHEUS_EXTERNAL_URL:-http://localhost:9090}
     mem_limit: ${PROMETHEUS_MEM_LIMIT:-512m}
     ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
     volumes:
@@ -604,6 +607,39 @@ services:
     networks: [storeql_network]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Alertmanager — Prometheus evaluates the rules in infra/prometheus/rules; this routes what fires to
+  # people (mail, webhook), groups it, silences repeats and lets an operator silence it by hand.
+  # Locally it mails Mailpit (http://localhost:8025). For a real deployment point
+  # ALERTMANAGER_CONFIG_FILE at your own copy of infra/alertmanager/alertmanager.yml (receivers) and put
+  # passwords in files under ALERTMANAGER_SECRETS_DIR, never in the config. docker-compose.prod.yml
+  # refuses to start without ALERTMANAGER_CONFIG_FILE. After changing the file:
+  # docker compose restart alertmanager.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: storeql-alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --data.retention=120h
+      - --cluster.listen-address=   # one replica: no gossip
+      # The links in an alert mail ("View in Alertmanager") are built from this.
+      - --web.external-url=${ALERTMANAGER_EXTERNAL_URL:-http://localhost:9093}
+    mem_limit: ${ALERTMANAGER_MEM_LIMIT:-128m}
+    ports: ["127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"]
+    volumes:
+      - ${ALERTMANAGER_CONFIG_FILE:-./infra/alertmanager/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro
+      # Passwords and tokens for the receivers, one file each (smtp_auth_password_file and the like in
+      # the config point at /etc/alertmanager/secrets/<name>). Git ignores everything in this directory.
+      - ${ALERTMANAGER_SECRETS_DIR:-./infra/alertmanager/secrets}:/etc/alertmanager/secrets:ro
+      - alertmanager_data:/alertmanager
+    networks: [storeql_network]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/healthy || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

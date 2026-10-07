@@ -12,6 +12,12 @@ global:
 rule_files:
   - /etc/prometheus/rules/*.yml
 
+# Firing alerts go to Alertmanager, which decides who is told (infra/alertmanager/alertmanager.yml).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
 scrape_configs:
 
   # ── Prometheus self-monitoring ──────────────────────────────────────────────
@@ -20,6 +26,15 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
         labels: { service: 'prometheus', layer: 'infra' }
+
+  # Alertmanager is watched like everything else: ServiceDown (up == 0) covers it, so a router that has
+  # stopped is itself an alert (it can only show in Prometheus, which is why Alertmanager also gets its
+  # own container health check).
+  - job_name: 'alertmanager'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['alertmanager:9093']
+        labels: { service: 'alertmanager', layer: 'infra' }
 
   # ── Platform services ───────────────────────────────────────────────────────
   - job_name: 'gateway'
@@ -76,6 +91,36 @@ scrape_configs:
     static_configs:
       - targets: ['order-svc:8080']
         labels: { service: 'order-svc', layer: 'business' }
+
+  - job_name: 'cart-svc'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['cart-svc:8080']
+        labels: { service: 'cart-svc', layer: 'business' }
+
+  - job_name: 'payment-svc'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['payment-svc:8080']
+        labels: { service: 'payment-svc', layer: 'business' }
+
+  - job_name: 'customer-svc'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['customer-svc:8080']
+        labels: { service: 'customer-svc', layer: 'business' }
+
+  - job_name: 'notification-svc'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['notification-svc:8080']
+        labels: { service: 'notification-svc', layer: 'business' }
+
+  - job_name: 'reporting-svc'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['reporting-svc:8080']
+        labels: { service: 'reporting-svc', layer: 'business' }
 
   # ── Infrastructure exporters ────────────────────────────────────────────────
 

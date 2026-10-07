@@ -1,0 +1,229 @@
+# Unit tests for infra/prometheus/rules (alerts.yml and backups.yml), run by scripts/prometheus-rules-check.sh (and CI).
+# They live outside rules/ because Prometheus loads every file in rules/ as rules.
+evaluation_interval: 15s
+rule_files:
+  - ../rules/alerts.yml
+  - ../rules/backups.yml
+
+tests:
+  # A service that has been up all along must not be reported as restarted. Its uptime rises with every
+  # scrape; the rule once used changes(), which counts every rise, so every service "restarted" all day.
+  - interval: 15s
+    input_series:
+      - series: 'jvm_uptime_seconds{job="iam-svc",instance="iam-svc:8080"}'
+        values: '1000+15x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ServiceRestartDetected
+        exp_alerts: []
+
+  # A restart (uptime falls back to near zero) is reported.
+  - interval: 15s
+    input_series:
+      - series: 'jvm_uptime_seconds{job="iam-svc",instance="iam-svc:8080"}'
+        values: '1000 1015 1030 5 20 35 50 65'
+    alert_rule_test:
+      - eval_time: 105s
+        alertname: ServiceRestartDetected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: iam-svc
+              instance: 'iam-svc:8080'
+            exp_annotations:
+              summary: "iam-svc restarted"
+              description: "JVM uptime on iam-svc reset — possible crash or redeploy."
+
+  # A service that stops answering is critical after a minute, not before.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="order-svc",instance="order-svc:8080"}'
+        values: '1 1 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 2m15s
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: order-svc
+              instance: 'order-svc:8080'
+            exp_annotations:
+              summary: "Service order-svc is DOWN"
+              description: "order-svc (order-svc:8080) has been unreachable for more than 1 minute."
+
+  # A notification route that keeps failing is critical once it has failed for ten minutes, not before.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{integration="email",reason="other"}'
+        values: '0+1x30'
+      - series: 'alertmanager_notifications_failed_total{integration="webhook",reason="other"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: AlertNotificationsFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AlertNotificationsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              integration: email
+            exp_annotations:
+              summary: "Alertmanager cannot deliver email notifications"
+              description: "Sending through email has kept failing for 10 minutes, so alerts are not reaching anyone by that route. Check the receiver in alertmanager.yml (host, credentials, reachability); Alertmanager's log says why."
+
+  # One failed send that was then retried and delivered must not raise it.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{integration="email",reason="other"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AlertNotificationsFailing
+        exp_alerts: []
+
+  # Prometheus that cannot hand its alerts to Alertmanager is critical; one that can is not.
+  - interval: 1m
+    input_series:
+      - series: 'prometheus_notifications_errors_total{alertmanager="http://alertmanager:9093/api/v2/alerts"}'
+        values: '0+2x20'
+      - series: 'prometheus_notifications_alertmanagers_discovered'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: PrometheusCannotReachAlertmanager
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: PrometheusCannotReachAlertmanager
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              alertmanager: 'http://alertmanager:9093/api/v2/alerts'
+            exp_annotations:
+              summary: "Prometheus cannot deliver alerts to Alertmanager"
+              description: "Prometheus has errors sending to Alertmanager or has none configured, so nothing that fires is routed to anyone. Check that Alertmanager is up and that prometheus.yml's alerting section names it."
+  - interval: 1m
+    input_series:
+      - series: 'prometheus_notifications_errors_total{alertmanager="http://alertmanager:9093/api/v2/alerts"}'
+        values: '0x20'
+      - series: 'prometheus_notifications_alertmanagers_discovered'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PrometheusCannotReachAlertmanager
+        exp_alerts: []
+
+  # PostgresSlowQueriesDetected reads a gauge of seconds: a transaction active for two minutes at 120 s
+  # fires after its two-minute wait; one at 5 s never does. (It once used rate() and could not fire.)
+  - interval: 15s
+    input_series:
+      - series: 'pg_stat_activity_max_tx_duration{state="active",datname="storeql"}'
+        values: '120x40'
+      - series: 'pg_stat_activity_max_tx_duration{state="active",datname="other"}'
+        values: '5x40'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PostgresSlowQueriesDetected
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PostgresSlowQueriesDetected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "A PostgreSQL transaction has been active for 120s"
+  - interval: 15s
+    input_series:
+      - series: 'pg_stat_activity_max_tx_duration{state="active",datname="storeql"}'
+        values: '5x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: PostgresSlowQueriesDetected
+        exp_alerts: []
+
+  # Heap: 90 percent used for six minutes is a warning, not a critical.
+  - interval: 15s
+    input_series:
+      - series: 'memory_usedHeap_bytes{job="order-svc",instance="order-svc:8080"}'
+        values: '900x40'
+      - series: 'memory_maxHeap_bytes{job="order-svc",instance="order-svc:8080"}'
+        values: '1000x40'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HeapUsageHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, job: order-svc, instance: 'order-svc:8080' }
+            exp_annotations:
+              summary: "High heap on order-svc: 90%"
+              description: "Heap on order-svc has been above 85% for 5 minutes. Risk of OOM."
+      - eval_time: 6m
+        alertname: HeapUsageCritical
+        exp_alerts: []
+
+  # A WAL archive that fails even once in fifteen minutes is critical at once.
+  - interval: 1m
+    input_series:
+      - series: 'pg_stat_archiver_failed_count'
+        values: '0 0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: WalArchiveFailing
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WalArchiveFailing
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "PostgreSQL cannot archive its WAL"
+              description: "archive_command is failing: the WAL piles up under pg_wal and no restore to a moment is possible past the last archived segment. Check the backups volume and its permissions."
+
+  # Backups (compose only). No metric at all for half an hour is "no backup has ever reported".
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackupMissing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BackupMissing
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "No backup has ever reported"
+              description: "The backup job's metrics are not being scraped: is the backup service running, and node-exporter reading /backups/metrics?"
+
+  # A backup last taken more than 26 hours ago is critical after fifteen more minutes; a fresh one is not;
+  # a base backup older than nine days is a warning.
+  # (a sample every minute: Prometheus drops a series five minutes after its last sample)
+  - interval: 1m
+    input_series:
+      - series: 'storeql_backup_last_success_timestamp_seconds'
+        values: '0x15000'
+      - series: 'storeql_backup_base_last_timestamp_seconds'
+        values: '0x15000'
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: BackupStale
+        exp_alerts: []
+      - eval_time: 28h
+        alertname: BackupStale
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "The last successful backup is more than 26 hours old"
+              description: "A daily backup did not land. Check the backup service's log (docker compose logs backup) and take one by hand: docker compose run --rm backup now."
+      - eval_time: 8d
+        alertname: BaseBackupStale
+        exp_alerts: []
+      - eval_time: 10d
+        alertname: BaseBackupStale
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "No base backup for point-in-time recovery in nine days"
+              description: "A restore to a moment replays every archived WAL segment since the last base backup; the longer since, the longer that takes. docker compose run --rm backup base."

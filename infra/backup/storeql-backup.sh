@@ -177,6 +177,16 @@ write_metrics() { # t, duration, bytes, tables, rows
   mv "$tmp" "$METRICS/storeql_backup.prom"
 }
 
+# The metrics file is written after a dump, and a fresh stack takes its dump before its first base
+# backup, so the base backup's own timestamp would read 0 (and BaseBackupStale would fire) until the
+# next night's dump. Bring just that line up to date; nothing else in the file is the base backup's.
+refresh_base_metric() { # unix seconds of the base backup just taken
+  local file="$METRICS/storeql_backup.prom" tmp="$METRICS/storeql_backup.prom.tmp"
+  [ -f "$file" ] || return 0
+  sed "s/^storeql_backup_base_last_timestamp_seconds .*/storeql_backup_base_last_timestamp_seconds $1/" "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
 # ── base ──────────────────────────────────────────────────────────────────────────────────────
 cmd_base() {
   ensure_dirs
@@ -195,6 +205,7 @@ cmd_base() {
     '{name: $name, takenAt: $takenAt, takenAtEpoch: $takenAtEpoch, startWalFile: $startWalFile, bytes: $bytes,
       durationSeconds: ($duration | tonumber), backupLabel: $label}' > "$dir/manifest.json"
   prune_bases
+  refresh_base_metric "${t1%.*}"
   log "base backup $ts: $(stat -c %s "$dir/base.tar.gz") bytes in $(secs "$t0" "$t1")s, WAL from $start_file"
   echo "$ts"
 }

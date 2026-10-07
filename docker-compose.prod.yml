@@ -30,6 +30,7 @@
 #   POSTGRES_PASSWORD — Postgres superuser password (strong, unique)
 #   REDIS_PASSWORD    — Redis AUTH password (strong, unique)
 #   GRAFANA_PASSWORD  — Grafana admin password (strong, unique)
+#   ALERTMANAGER_CONFIG_FILE — your Alertmanager config with real receivers (mail, on-call webhook)
 #   PGADMIN_PASSWORD  — pgAdmin login password (strong, unique)
 #   <SVC>_DB_PASSWORD — one per service (IAM_DB_PASSWORD, TENANT_DB_PASSWORD,
 #                       INVENTORY_DB_PASSWORD, ORDER_DB_PASSWORD, PURCHASE_DB_PASSWORD,
@@ -103,6 +104,14 @@ services:
   pgadmin:
     environment:
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:?Set a strong PGADMIN_PASSWORD in .env — no dev default in production}
+
+  # The base file's Alertmanager mails Mailpit and posts to the webhook sink, neither of which exists in
+  # production, so an alert would reach nobody. Compose cannot require a mounted file, so the variable
+  # is made required through the container's environment: the stack refuses to start until
+  # ALERTMANAGER_CONFIG_FILE names a config with your own receivers (docs/vps-deployment.md).
+  alertmanager:
+    environment:
+      STOREQL_ALERTMANAGER_CONFIG_FILE: ${ALERTMANAGER_CONFIG_FILE:?Set ALERTMANAGER_CONFIG_FILE in .env to a copy of infra/alertmanager/alertmanager.yml with your own receivers — the default mails a test inbox that does not exist in production}
 
   # ── Per-service Postgres role passwords: required in production ───────────────
   # infra/postgres-init-roles.sql creates one LOGIN role per service (golden rule

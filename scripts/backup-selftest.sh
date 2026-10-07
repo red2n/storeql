@@ -111,6 +111,8 @@ check "retention keeps only the newest when asked to keep one" "[ '$kept' = 1 ] 
 # ── a base backup, archived WAL, and a restore to a moment ───────────────────────────────────────
 base="$(backup -e STOREQL_BACKUP_RECIPIENT="$RECIPIENT" "$IMAGE" base 2>"$WORK/base.log")"
 check "a base backup is taken for point-in-time recovery" "[ -n '$base' ] && docker run --rm -v $VOL:/backups:ro $IMAGE sh -c 'test -f /backups/base/$base/base.tar.gz && test -f /backups/base/$base/manifest.json'"
+# A fresh stack takes its dump before its first base backup; the metric must follow the base backup, not wait for the next dump.
+check "the base backup's own timestamp reaches the metrics file" "docker run --rm -v $VOL:/backups:ro $IMAGE sh -c 'grep -Eq \"^storeql_backup_base_last_timestamp_seconds [1-9]\" /backups/metrics/storeql_backup.prom'"
 # Each marker committed on its own, then the segment switched: an insert and a switch in one statement
 # string share a transaction, and its commit lands after the switch, in a segment nobody archives yet.
 psqlpg "$PG" -c "INSERT INTO app.markers (label) VALUES ('before')" -c "SELECT pg_switch_wal()" >/dev/null

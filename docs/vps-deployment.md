@@ -393,8 +393,9 @@ docker compose run --rm backup now                    # one now, to see it work
 ```
 
 Bind the `backups` volume to a disk other than the database's (`docker-compose.prod.yml`), or copy
-`/backups` to object storage after each run. Grafana's `backups` alerts say when a backup is missing,
-late, unencrypted, or the WAL archive is failing.
+`/backups` to object storage after each run. Prometheus's `backups` alerts say when a backup is missing,
+late, unencrypted, or the WAL archive is failing, and Alertmanager mails them to you, once you have told it where
+(next section).
 
 A backup is only as good as its last restore. `scripts/backup-drill.sh` rehearses the whole thing
 against the running stack — backup, verify, restore into a fresh server and compare, then a recovery to
@@ -418,3 +419,30 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
 ### Suspend / reactivate a tenant
 
 Log in to the platform admin console at `https://app.storeql.com/#/platform/login` and use the Tenant Management UI. Suspension is propagated via a `TenantStatusChanged` Kafka event — all of that tenant's staff immediately lose the ability to log in or refresh tokens.
+
+## Alerts: who is told
+
+Prometheus evaluates the rules in `infra/prometheus/rules` and Alertmanager (`http://localhost:9093` through an SSH
+tunnel, `-L 9093:localhost:9093`) sends what fires to a person. **The default configuration mails a test inbox
+(Mailpit) that does not exist in production, so `docker-compose.prod.yml` refuses to start until you set
+`ALERTMANAGER_CONFIG_FILE` in `.env`.** Copy `infra/alertmanager/alertmanager.yml`, replace the receivers with yours
+(your mail server, an on-call webhook), and keep passwords in files:
+
+```bash
+cp infra/alertmanager/alertmanager.yml /etc/storeql/alertmanager.yml     # edit the receivers
+mkdir -p /etc/storeql/alertmanager-secrets && install -m 0644 smtp-password.txt /etc/storeql/alertmanager-secrets/
+# .env:
+ALERTMANAGER_CONFIG_FILE=/etc/storeql/alertmanager.yml
+ALERTMANAGER_SECRETS_DIR=/etc/storeql/alertmanager-secrets
+ALERTMANAGER_EXTERNAL_URL=https://alerts.example.com        # the address your mail's links should open
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d alertmanager
+```
+
+In the config, `auth_password_file: /etc/alertmanager/secrets/smtp-password`. A change to the file is picked up
+by `docker compose restart alertmanager`. To prove the path works end to end, post a test alert and look for the
+mail after the 30-second group wait:
+
+```bash
+curl -XPOST localhost:9093/api/v2/alerts -H 'Content-Type: application/json' \
+  -d '[{"labels":{"alertname":"Test","severity":"critical","job":"manual","instance":"x"}}]'
+```
