@@ -353,7 +353,9 @@ export function staffUser(tenant, role, storeIds) {
     });
     must(res, 201, `assign ${role}`);
   }
-  signInUntil(user, (c) => c.tenant === tenant.tenantId && (c.roles || []).includes(role));
+  // The assignments reach iam-svc one event at a time: a token minted after the first has the role
+  // but not yet every store, and a sale at the missing one is STORE_ACCESS_DENIED.
+  signInUntil(user, (c) => c.tenant === tenant.tenantId && (c.roles || []).includes(role) && storeIds.every((id) => (c.storeIds || []).includes(id)));
   return user;
 }
 

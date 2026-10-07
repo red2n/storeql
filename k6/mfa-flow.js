@@ -142,6 +142,7 @@ export default async function ({ tenant, cashier, manager, shopper, bystander, a
   expect(call('GET', `${AUTH}/me`, { token: cashierToken, headers: { 'X-Auth-Scope': 'mfa-enrol' } }), '[abuse] a scope header sent by a client changes nothing', 200);
 
   // One login's waiting sign-in is no use with another login's code.
+  breather();
   const cashiersWait = must(login(cashier), 200, 'cashier sign-in').mfaToken;
   expect(answerSecondFactor(cashiersWait, 'TOTP', nextCode(ownerApp)), '[abuse] the owner\'s code does not answer the cashier\'s sign-in', 401, 'MFA_CODE_INVALID');
   expect(answerSecondFactor(cashiersWait, 'TOTP', nextCode(cashierFactor.app)), '[+] the cashier\'s own does', 200);

@@ -68,6 +68,9 @@ export default function ({ admin, tenant, rival, cashier, colleague, manager }) 
   expect(call('POST', '/api/iam-svc/auth/login', { body: { email: `nobody-${uniq()}@k6.storeql.test`, password: PASSWORD } }), '[-] login: unknown user', 401, 'INVALID_CREDENTIALS');
   expect(call('POST', '/api/iam-svc/auth/platform-login', { body: { email, password: PASSWORD } }), '[-] platform-login: a customer is not a platform admin', 401, 'INVALID_CREDENTIALS');
   expect(call('POST', '/api/iam-svc/auth/login', { body: { email: admin.email, password: admin.password } }), '[-] login: platform admin must use platform-login', 401, 'INVALID_CREDENTIALS');
+  // Four refused sign-ins in a row; a fifth failure from this host, the refusals of the next block
+  // included, would lock it for fifteen minutes. A sign-in that works clears the count.
+  expect(login(user), '[+] login still works after those refusals', 200);
   expect(
     call('POST', '/api/iam-svc/bootstrap/admin', { body: { email: `second-admin-${uniq()}@k6.storeql.test`, password: PASSWORD } }),
     '[-] bootstrap: only once per deployment',
