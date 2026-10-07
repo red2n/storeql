@@ -72,6 +72,7 @@ cd k8s
 # 2. Everything else
 kubectl apply -f 00-namespace.yaml
 kubectl apply -f 02-configmaps.yaml
+kubectl apply -f 05-network-policies.yaml   # default deny, then only the conversations the architecture has
 kubectl apply -f 10-postgres.yaml -f 11-pgbouncer.yaml -f 12-consul.yaml \
                -f 13-kafka.yaml -f 14-redis.yaml
 kubectl apply -f 15-observability.yaml
@@ -181,6 +182,41 @@ Platform admin login: `https://app.storeql.com/#/platform/login`.
   requirement for production in `docs/vps-deployment.md` §5). `STOREQL_ORDER_RESERVE_ENFORCE`
   is left at `"false"` — flip it to `"true"` once you've actually seeded inventory for
   your tenants, or every online checkout will 409 on stock.
+
+## Alerting
+
+Prometheus loads the alert rules (`storeql-prometheus-rules`, a copy of `infra/prometheus/rules/alerts.yml` kept equal by
+`scripts/k8s-hardening-check.py`) and sends what fires to Alertmanager (`15-observability.yaml`). **Out of the box nobody is
+told:** the `storeql-alertmanager-config` ConfigMap has a receiver with no integration, so a firing alert shows in
+Prometheus's alert page and in Alertmanager's (`kubectl -n storeql port-forward svc/alertmanager 9093`) and nothing is sent.
+**The backup alerts (`infra/prometheus/rules/backups.yml`) are not loaded here:** nothing on Kubernetes produces the
+`storeql_backup_*` metrics they read (the CronJob writes them to its claim, and the node exporter has no textfile collector),
+so loading them would raise a permanent false alert. A stalled backup is therefore not alerted on Kubernetes until that path
+exists; the WAL archive alert (`WalArchiveFailing`) does work, because it reads Postgres's own counters.
+
+Add a receiver before you rely on it. Mail through your provider, with the password in a Secret rather than in the ConfigMap:
+
+```bash
+kubectl -n storeql create secret generic storeql-alertmanager-secrets --from-file=smtp-password=./smtp-password.txt
+kubectl -n storeql edit configmap storeql-alertmanager-config      # add the receiver below, point both routes at it
+kubectl -n storeql rollout restart deployment/alertmanager         # the file is a subPath mount: an edit is not seen until then
+```
+
+```yaml
+receivers:
+  - name: ops
+    email_configs:
+      - to: 'oncall@example.com'
+        from: 'alerts@example.com'
+        smarthost: 'smtp.example.com:587'
+        auth_username: 'alerts@example.com'
+        auth_password_file: /etc/alertmanager/secrets/smtp-password
+        send_resolved: true
+```
+
+The pod may reach the internet on ports 443, 465 and 587, and no private address (`05-network-policies.yaml`), so a mail
+relay or webhook inside the cluster or on your own network needs a policy of its own. That file is only in force once it is
+applied, which is why it is in the deploy order above.
 
 ## Backups
 

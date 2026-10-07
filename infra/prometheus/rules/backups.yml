@@ -1,0 +1,44 @@
+# Backup alerts for the compose stack (also the VPS). The backup job writes its metrics to a file
+# that the node exporter reads through its textfile collector (docker-compose.yml: node-exporter
+# mounts the backups volume). Kubernetes does not read them (the CronJob only writes the file to its
+# claim and the node exporter there has no textfile collector), so these rules are not loaded there;
+# k8s/README.md says so. Prometheus in compose loads every file in this directory.
+groups:
+  # A backup nobody has taken lately is a restore that will not work when it is needed.
+  - name: backups
+    rules:
+      - alert: BackupMissing
+        expr: absent(storeql_backup_last_success_timestamp_seconds)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No backup has ever reported"
+          description: "The backup job's metrics are not being scraped: is the backup service running, and node-exporter reading /backups/metrics?"
+
+      - alert: BackupStale
+        expr: time() - storeql_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The last successful backup is more than 26 hours old"
+          description: "A daily backup did not land. Check the backup service's log (docker compose logs backup) and take one by hand: docker compose run --rm backup now."
+
+      - alert: BackupUnencrypted
+        expr: storeql_backup_encrypted == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backups are being written unencrypted"
+          description: "STOREQL_BACKUP_RECIPIENT is not set; every dump on the backups volume is readable as it is."
+
+      - alert: BaseBackupStale
+        expr: time() - storeql_backup_base_last_timestamp_seconds > 9 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No base backup for point-in-time recovery in nine days"
+          description: "A restore to a moment replays every archived WAL segment since the last base backup; the longer since, the longer that takes. docker compose run --rm backup base."

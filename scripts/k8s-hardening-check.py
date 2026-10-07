@@ -64,6 +64,50 @@ for f, d in workloads:
     for m in [m for c in spec.get("containers", []) for m in c.get("volumeMounts", [])]:
         need(m["name"] in volume_names, f"{where}: mount {m['name']} has a volume or a claim template")
 
+# The alert rules Prometheus loads on Kubernetes are a copy of the file the compose stack mounts; a copy
+# that drifts would alert on different things in each place.
+rules_cm = [d for _, d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "storeql-prometheus-rules"]
+need(len(rules_cm) == 1, "the ConfigMap storeql-prometheus-rules exists")
+if rules_cm:
+    need(
+        rules_cm[0]["data"].get("alerts.yml", "").strip() == open("infra/prometheus/rules/alerts.yml").read().strip(),
+        "storeql-prometheus-rules alerts.yml equals infra/prometheus/rules/alerts.yml",
+    )
+alertmanager = [d for _, d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "alertmanager"]
+need(len(alertmanager) == 1, "Alertmanager is deployed")
+need(
+    any(p["spec"].get("podSelector") == {"matchLabels": {"app": "alertmanager"}} for p in policies),
+    "a NetworkPolicy for Alertmanager",
+)
+
+# The wiring that was once missing altogether (Prometheus loaded no rules and had no Alertmanager): the
+# config names the rules and the Alertmanager, the pod mounts the rules, and the network lets the
+# alerts through in both directions.
+prom_cm = [d for _, d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "storeql-prometheus-config"]
+if prom_cm:
+    prom_cfg = yaml.safe_load(prom_cm[0]["data"]["prometheus.yml"])
+    need("/etc/prometheus/rules/*.yml" in prom_cfg.get("rule_files", []), "Prometheus loads /etc/prometheus/rules/*.yml (rule_files)")
+    targets = [t for am in prom_cfg.get("alerting", {}).get("alertmanagers", []) for sc in am.get("static_configs", []) for t in sc.get("targets", [])]
+    need("alertmanager:9093" in targets, "Prometheus sends alerts to alertmanager:9093 (alerting)")
+prom_dep = [d for _, d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "prometheus"]
+if prom_dep:
+    pspec = prom_dep[0]["spec"]["template"]["spec"]
+    need(any(m.get("mountPath") == "/etc/prometheus/rules" for c in pspec["containers"] for m in c.get("volumeMounts", [])), "Prometheus mounts the rules at /etc/prometheus/rules")
+    need(any(v.get("configMap", {}).get("name") == "storeql-prometheus-rules" for v in pspec.get("volumes", [])), "Prometheus's rules volume is storeql-prometheus-rules")
+prom_pol = [p for p in policies if p["spec"].get("podSelector") == {"matchLabels": {"app": "prometheus"}}]
+need(
+    any(port.get("port") == 9093 for p in prom_pol for rule in p["spec"].get("egress", []) for port in rule.get("ports", [])),
+    "the Prometheus NetworkPolicy lets it reach Alertmanager on 9093",
+)
+am_pol = [p for p in policies if p["spec"].get("podSelector") == {"matchLabels": {"app": "alertmanager"}}]
+need(
+    any(
+        f.get("podSelector", {}).get("matchLabels", {}).get("app") == "prometheus" and port.get("port") == 9093
+        for p in am_pol for rule in p["spec"].get("ingress", []) for f in rule.get("from", []) for port in rule.get("ports", [])
+    ),
+    "the Alertmanager NetworkPolicy admits Prometheus on 9093",
+)
+
 if problems:
     print("k8s hardening: %d problem(s)" % len(problems))
     for p in problems:

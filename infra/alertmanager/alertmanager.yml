@@ -1,0 +1,50 @@
+# StoreQL — Alertmanager configuration for the local stack (docker-compose.yml).
+#
+# Prometheus (infra/prometheus/rules/alerts.yml) decides WHEN something is wrong; this decides WHO is
+# told and how often. Locally every mail goes to Mailpit (http://localhost:8025) and every critical
+# alert also posts to the webhook sink, so the whole path can be seen working without any account.
+#
+# In a real deployment point ALERTMANAGER_CONFIG_FILE (.env) at a copy of this file with your own
+# receivers: the mail server, the on-call webhook (PagerDuty, Opsgenie, Slack ...). Passwords and
+# tokens never go in the file: put each in a file under ALERTMANAGER_SECRETS_DIR (mounted at
+# /etc/alertmanager/secrets) and name it with smtp_auth_password_file or
+# authorization.credentials_file. docs/ARCHITECTURE.md ("Alerts reach a person") says more.
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'mailpit:1025'
+  smtp_from: 'alerts@storeql.local'
+  smtp_require_tls: false # Mailpit takes plain SMTP; set true (and the *_file secrets) for a real server
+
+route:
+  receiver: ops-email
+  # One message per kind of alert per job, not one per instance of it. A burst across several jobs
+  # (a whole host going down) is therefore several messages, one for each job.
+  group_by: ['alertname', 'job']
+  group_wait: 30s       # wait for the rest of a group to arrive before the first message
+  group_interval: 5m    # then tell of new members of the group at most this often
+  repeat_interval: 4h   # and repeat what is still firing
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: ops-critical
+      repeat_interval: 1h
+
+receivers:
+  - name: ops-email
+    email_configs:
+      - to: 'ops@storeql.local'
+        send_resolved: true
+  - name: ops-critical
+    email_configs:
+      - to: 'ops@storeql.local'
+        send_resolved: true
+    webhook_configs:
+      - url: 'http://webhook-sink:8080/alerts'
+        send_resolved: true
+
+inhibit_rules:
+  # A service that is down is the news; its heap, thread and restart warnings are noise. Only these
+  # three say that something is down: another critical (a full disk, a stale backup) says nothing about
+  # the other warnings on the same host, which may be the cause, and must still arrive.
+  - source_matchers: ['alertname=~"ServiceDown|PostgresDown|RedisDown"']
+    target_matchers: ['severity="warning"']
+    equal: ['job', 'instance']

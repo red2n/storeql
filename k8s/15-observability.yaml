@@ -189,6 +189,7 @@ spec:
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
             - { name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml }
+            - { name: rules, mountPath: /etc/prometheus/rules }
             - { name: data, mountPath: /prometheus }
           readinessProbe:
             httpGet: { path: /-/healthy, port: 9090 }
@@ -204,7 +205,85 @@ spec:
       volumes:
         - { name: tmp, emptyDir: {} }
         - { name: config, configMap: { name: storeql-prometheus-config } }
+        - { name: rules, configMap: { name: storeql-prometheus-rules } }
         - { name: data, persistentVolumeClaim: { claimName: prometheus-data } }
+
+---
+# Alertmanager: routes what Prometheus's rules fire to people, groups it and holds silences. One
+# replica (no clustering: --cluster.listen-address= is empty), silences on a small claim.
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: storeql
+spec:
+  selector: { app: alertmanager }
+  ports: [{ port: 9093, targetPort: 9093 }]
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: storeql
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # PVC is ReadWriteOnce — avoid two pods mounting it during rollout
+  selector: { matchLabels: { app: alertmanager } }
+  template:
+    metadata: { labels: { app: alertmanager } }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+            - --data.retention=120h
+            - --cluster.listen-address=
+          ports: [{ containerPort: 9093 }]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: config, mountPath: /etc/alertmanager/alertmanager.yml, subPath: alertmanager.yml }
+            - { name: secrets, mountPath: /etc/alertmanager/secrets, readOnly: true }
+            - { name: data, mountPath: /alertmanager }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: 9093 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: 9093 }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: config, configMap: { name: storeql-alertmanager-config } }
+        - { name: secrets, secret: { secretName: storeql-alertmanager-secrets, optional: true } } # receiver passwords and tokens, if you have any
+        - { name: data, persistentVolumeClaim: { claimName: alertmanager-data } }
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alertmanager-data
+  namespace: storeql
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources: { requests: { storage: 1Gi } } # silences and the notification log
 
 ---
 apiVersion: v1

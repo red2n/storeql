@@ -53,7 +53,7 @@ The workload is counters, a bounded queue and a read API, all I/O-bound. Rust's 
 - **Hot path.** The gateway sits on every request. Recording must be asynchronous and cheap; the flow-guard k6 suites cover this area and must stay green.
 - **Personal data.** A failure record carries a user id and a route: keep it 24 hours and cover it in the business's erasure. No bodies, query strings or raw paths.
 - **Trace context across Kafka is not confirmed** (no propagation found in the code; not tested at runtime). A trace-based "completed" would show false successes, so the first version defines completed as the HTTP result.
-- **Observability gaps that do not block this:** local Prometheus scrapes 9 of 12 services; Tempo's span-metrics generator is configured with no processors; there is no Alertmanager, so alert rules fire to nowhere.
+- **Observability gaps that do not block this:** local Prometheus scraped 7 of 12 business services until 7 Oct 2026 (now all 12); Tempo's span-metrics generator is configured with no processors; alert rules had no Alertmanager until 7 Oct 2026 (now added: see ARCHITECTURE, Alerts reach a person) and the Kubernetes Prometheus did not load them at all (fixed in the same change).
 - **An approvals count can mislead:** a business that has not set purchase approval limits shows zero pending purchase orders because routing is off, not because nothing waits.
 
 ## Decisions taken (6 Oct 2026, the owner)
