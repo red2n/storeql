@@ -4,10 +4,12 @@ import com.storeql.payment.domain.Domain.PaymentIntent;
 import com.storeql.payment.domain.Domain.PaymentTender;
 import com.storeql.payment.domain.Domain.RefundTender;
 import com.storeql.payment.domain.Domain.TenderMixRow;
+import com.storeql.payment.domain.PendingWork;
 import com.storeql.payment.dto.Dtos.PaymentIntentResponse;
 import com.storeql.payment.dto.Dtos.RefundResponse;
 import com.storeql.payment.dto.Dtos.TenderMixRowResponse;
 import com.storeql.payment.dto.Dtos.TenderResponse;
+import com.storeql.payment.dto.PendingWorkDtos.PendingWorkResponse;
 
 /** Maps payment-svc domain records to the DTOs served over HTTP. */
 public final class Mappers {
@@ -86,5 +88,10 @@ public final class Mappers {
         r.failedCount(),
         r.netAmount(),
         r.shareOfNet());
+  }
+
+  /** What waits for a person in payments on the wire (the system-health screen). */
+  public static PendingWorkResponse toDto(PendingWork w) {
+    return new PendingWorkResponse(w.cardRefundDuesNeedingAttention());
   }
 }

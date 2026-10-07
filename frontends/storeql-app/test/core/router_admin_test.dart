@@ -6,7 +6,9 @@ import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/features/admin/admin_shell.dart';
 import 'package:storeql_app/features/admin/messages_screen.dart';
 import 'package:storeql_app/features/admin/pricing_screen.dart';
+import 'package:storeql_app/features/admin/procurement_screen.dart';
 import 'package:storeql_app/features/admin/sales_screen.dart';
+import 'package:storeql_app/features/admin/system_health_screen.dart';
 import 'package:storeql_app/features/platform/security_incidents_screen.dart';
 
 import '../support/app_router_harness.dart';
@@ -96,6 +98,31 @@ void main() {
     expect(find.byType(SalesScreen), findsOneWidget);
     final tabs = DefaultTabController.of(tester.element(find.byType(TabBar)));
     expect(tabs.index, 3, reason: 'Receipts');
+  });
+
+  testWidgets('a link to one of Procurement\'s tabs opens Procurement on that tab', (tester) async {
+    final router = await followLink(tester, '/admin/procurement?tab=payments', role: 'OWNER', replies: _replies);
+    expect(router.state.uri.path, '/admin/procurement');
+    expect(find.byType(ProcurementScreen), findsOneWidget);
+    expect(DefaultTabController.of(tester.element(find.byType(TabBar))).index, 4, reason: 'Payments');
+  });
+
+  testWidgets('Procurement with no tab, or one it does not have, opens on its first', (tester) async {
+    await followLink(tester, '/admin/procurement?tab=nonsense', role: 'OWNER', replies: _replies);
+    expect(DefaultTabController.of(tester.element(find.byType(TabBar))).index, 0);
+  });
+
+  testWidgets('System health has an address of its own in the admin shell', (tester) async {
+    final router = await followLink(tester, '/admin/system-health', role: 'OWNER', replies: _replies);
+    expect(router.state.uri.path, '/admin/system-health');
+    expect(find.byType(AdminShell), findsOneWidget);
+    expect(find.byType(SystemHealthScreen), findsOneWidget);
+  });
+
+  testWidgets('a storekeeper following a link to System health is sent home', (tester) async {
+    final router = await followLink(tester, '/admin/system-health', role: 'STOREKEEPER', replies: _replies);
+    expect(router.state.uri.path, '/admin/inventory');
+    expect(find.byType(SystemHealthScreen), findsNothing);
   });
 
   testWidgets('Pricing with no tab, or one it does not have, opens on its first', (tester) async {

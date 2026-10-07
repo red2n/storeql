@@ -35,5 +35,8 @@ public class ProblemResponseFilter implements ContainerResponseFilter {
             envelope.meta());
     response.setEntity(problem, response.getEntityAnnotations(), Problems.PROBLEM_JSON);
     response.getHeaders().putSingle("Content-Type", Problems.MEDIA_TYPE);
+    if (envelope.error().code() != null) {
+      response.getHeaders().putSingle(HttpHeaders.ERROR_CODE, envelope.error().code());
+    }
   }
 }

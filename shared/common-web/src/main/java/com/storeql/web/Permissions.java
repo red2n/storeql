@@ -37,6 +37,7 @@ public final class Permissions {
   public static final String CUSTOMERS_PRIVACY = "customers.privacy";
   public static final String STAFF_MANAGE = "staff.manage";
   public static final String FINANCE_PAYMENTS = "finance.payments";
+  public static final String SYSTEM_HEALTH = "system.health";
 
   /** Every permission, with the sentence a screen shows beside its checkbox. */
   private static final Map<String, String> CATALOGUE;
@@ -64,6 +65,10 @@ public final class Permissions {
     m.put(
         FINANCE_PAYMENTS,
         "Propose, approve and pay supplier payment runs, and change a supplier's bank details");
+    m.put(
+        SYSTEM_HEALTH,
+        "See how healthy the system is: request counts, recent failures and work waiting for a"
+            + " person");
     CATALOGUE = Map.copyOf(m);
   }
 

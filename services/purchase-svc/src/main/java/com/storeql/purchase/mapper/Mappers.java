@@ -9,6 +9,7 @@ import com.storeql.purchase.domain.Domain.PurchaseOrder;
 import com.storeql.purchase.domain.Domain.PurchaseOrderLine;
 import com.storeql.purchase.domain.Domain.Supplier;
 import com.storeql.purchase.domain.LandedCost;
+import com.storeql.purchase.domain.PendingWork;
 import com.storeql.purchase.domain.SpendAuthority;
 import com.storeql.purchase.domain.SupplierScorecard;
 import com.storeql.purchase.dto.Dtos;
@@ -25,6 +26,7 @@ import com.storeql.purchase.dto.Dtos.PurchaseOrderLineResponse;
 import com.storeql.purchase.dto.Dtos.PurchaseOrderResponse;
 import com.storeql.purchase.dto.Dtos.SkippedItemResponse;
 import com.storeql.purchase.dto.Dtos.SupplierResponse;
+import com.storeql.purchase.dto.PendingWorkDtos.PendingWorkResponse;
 import com.storeql.purchase.service.ProposalService;
 import java.util.List;
 
@@ -674,5 +676,15 @@ public final class Mappers {
         r.run().skipped().stream()
             .map(x -> new SkippedItemResponse(x.variantId(), x.reason()))
             .toList());
+  }
+
+  /** What waits for a person in purchasing on the wire (the system-health screen). */
+  public static PendingWorkResponse toDto(PendingWork w) {
+    return new PendingWorkResponse(
+        w.purchaseOrdersPendingApproval(),
+        w.paymentRunsProposed(),
+        w.supplierInvoicesFlagged(),
+        w.accountingSyncsUncertain(),
+        w.approvalsRouted());
   }
 }

@@ -6,6 +6,7 @@ import com.auth0.jwt.algorithms.Algorithm;
 import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.storeql.gateway.GatewayConfig;
+import com.storeql.gateway.flow.FlowAttributes;
 import com.storeql.ids.Ids;
 import com.storeql.web.HttpHeaders;
 import jakarta.annotation.Priority;
@@ -273,6 +274,7 @@ public class JwtAuthFilter implements ContainerRequestFilter {
           return;
         }
         ctx.getHeaders().putSingle(HttpHeaders.TENANT_ID, tenant);
+        attribute(ctx, tenant, null);
         return;
       }
     }
@@ -365,8 +367,10 @@ public class JwtAuthFilter implements ContainerRequestFilter {
           return;
         }
         ctx.getHeaders().putSingle(HttpHeaders.TENANT_ID, tenant);
+        attribute(ctx, tenant, null);
       }
     }
+    attribute(ctx, tenantId, userId);
     if (roles != null && !roles.isEmpty()) {
       ctx.getHeaders().putSingle(HttpHeaders.ROLES, String.join(",", roles));
     }
@@ -398,6 +402,23 @@ public class JwtAuthFilter implements ContainerRequestFilter {
     // Restore preserved tenant ID for onboarding paths (flow guard: user provides tenant context)
     if (preservedTenantId != null && !preservedTenantId.isBlank() && tenantId == null) {
       ctx.getHeaders().putSingle(HttpHeaders.TENANT_ID, preservedTenantId.trim());
+    }
+  }
+
+  /**
+   * Tells the health screen's flow recording whom this request is for, now that it is verified: a
+   * token's business and subject, an API key's business and id, or the storefront a guest names
+   * that the status gate has passed. Properties, not the identity headers, because a request
+   * refused before this filter runs, or on the two onboarding paths that keep a client's {@code
+   * X-Tenant-Id}, still carries what the client wrote there. Not set for a request that failed
+   * authentication: nobody's business was verified, so none is shown the refusal.
+   */
+  private static void attribute(ContainerRequestContext ctx, String tenantId, String userId) {
+    if (tenantId != null && !tenantId.isBlank()) {
+      ctx.setProperty(FlowAttributes.TENANT_ID, tenantId.trim());
+    }
+    if (userId != null && !userId.isBlank()) {
+      ctx.setProperty(FlowAttributes.USER_ID, userId);
     }
   }
 
@@ -797,6 +818,7 @@ public class JwtAuthFilter implements ContainerRequestFilter {
           ctx.getHeaders().putSingle(HttpHeaders.STORE_IDS, String.join(",", active.storeIds()));
         }
         ctx.getHeaders().putSingle(HttpHeaders.AUTH_METHODS, "api-key");
+        attribute(ctx, active.tenantId(), active.keyId());
       }
     }
   }

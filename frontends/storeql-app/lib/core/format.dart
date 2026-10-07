@@ -111,6 +111,16 @@ class AppFormat {
   static String count(num n, {String? locale}) =>
       NumberFormat.decimalPattern(locale ?? AppFormat.locale).format(n);
 
+  /// A share of a whole as a percent: `0.004` reads `0.4%`, `0` reads `0%`,
+  /// `1` reads `100%`. Places beyond [maxDecimals] are rounded away, none are
+  /// padded.
+  static String percent(num fraction, {int maxDecimals = 1, String? locale}) {
+    final f = NumberFormat.percentPattern(locale ?? AppFormat.locale)
+      ..minimumFractionDigits = 0
+      ..maximumFractionDigits = maxDecimals;
+    return f.format(fraction);
+  }
+
   /// A locale-formatted date, e.g. `23 Jun 2026`. Accepts an ISO-8601 string;
   /// returns the input unchanged if it can't be parsed, or '' when null/blank.
   static String date(String? iso, {String? locale}) {
@@ -144,6 +154,14 @@ class AppFormat {
     final dt = _parse(iso);
     if (dt == null) return iso ?? '';
     return DateFormat.Hm(locale ?? AppFormat.locale).format(dt);
+  }
+
+  /// A time of day to the second on the 24-hour clock, e.g. `14:05:09`: for a
+  /// figure that refreshes every few seconds, where the minute says nothing.
+  static String timeSeconds(String? iso, {String? locale}) {
+    final dt = _parse(iso);
+    if (dt == null) return iso ?? '';
+    return DateFormat.Hms(locale ?? AppFormat.locale).format(dt);
   }
 
   static DateTime? _parse(String? iso) {

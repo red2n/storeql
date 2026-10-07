@@ -9,6 +9,7 @@ import com.storeql.customer.domain.Domain.LoyaltyLedgerEntry;
 import com.storeql.customer.domain.Domain.LoyaltyView;
 import com.storeql.customer.domain.Domain.StoreCreditAccount;
 import com.storeql.customer.domain.LoyaltyProgramme;
+import com.storeql.customer.domain.PendingWork;
 import com.storeql.customer.dto.Dtos.AddressResponse;
 import com.storeql.customer.dto.Dtos.CustomerResponse;
 import com.storeql.customer.dto.Dtos.ExpiringSoonResponse;
@@ -19,6 +20,7 @@ import com.storeql.customer.dto.Dtos.LoyaltyProgrammeResponse;
 import com.storeql.customer.dto.Dtos.NextTierResponse;
 import com.storeql.customer.dto.Dtos.StoreCreditAccountResponse;
 import com.storeql.customer.dto.Dtos.TierResponse;
+import com.storeql.customer.dto.PendingWorkDtos.PendingWorkResponse;
 import java.math.BigDecimal;
 import java.time.Instant;
 
@@ -215,6 +217,11 @@ public final class Mappers {
         e.notice(),
         e.actorId() == null ? null : e.actorId().toString(),
         ts(e.recordedAt()));
+  }
+
+  /** What waits for a person in customer records on the wire (the system-health screen). */
+  public static PendingWorkResponse toDto(PendingWork w) {
+    return new PendingWorkResponse(w.privacyRequestsOpen());
   }
 
   private static String ts(Instant i) {

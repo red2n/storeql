@@ -15,6 +15,12 @@ public final class HttpHeaders {
   /** Correlation id propagated from the gateway through every hop and into events. */
   public static final String REQUEST_ID = "X-Request-Id";
 
+  /**
+   * The stable code of an error answer, also in its body. A header so the gateway can record what
+   * went wrong with a request without reading, or buffering, a body it only relays.
+   */
+  public static final String ERROR_CODE = "X-Error-Code";
+
   /** Tenant id extracted from the verified JWT by the gateway. */
   public static final String TENANT_ID = "X-Tenant-Id";
 

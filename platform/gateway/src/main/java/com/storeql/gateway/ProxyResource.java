@@ -77,7 +77,7 @@ public class ProxyResource {
     return resolve(service)
         .map(
             instance -> {
-              String requestId = newRequestId();
+              String requestId = requestIdOf(inboundHeaders);
               var req =
                   webClient
                       .get(instance.baseUri() + "/" + path)
@@ -119,7 +119,7 @@ public class ProxyResource {
     return resolve(service)
         .map(
             instance -> {
-              String requestId = newRequestId();
+              String requestId = requestIdOf(inboundHeaders);
               var req =
                   webClient
                       .post(instance.baseUri() + "/" + path)
@@ -162,7 +162,7 @@ public class ProxyResource {
     return resolve(service)
         .map(
             instance -> {
-              String requestId = newRequestId();
+              String requestId = requestIdOf(inboundHeaders);
               var req =
                   webClient
                       .put(instance.baseUri() + "/" + path)
@@ -205,7 +205,7 @@ public class ProxyResource {
     return resolve(service)
         .map(
             instance -> {
-              String requestId = newRequestId();
+              String requestId = requestIdOf(inboundHeaders);
               var req =
                   webClient
                       .patch(instance.baseUri() + "/" + path)
@@ -246,7 +246,7 @@ public class ProxyResource {
     return resolve(service)
         .map(
             instance -> {
-              String requestId = newRequestId();
+              String requestId = requestIdOf(inboundHeaders);
               var req =
                   webClient
                       .delete(instance.baseUri() + "/" + path)
@@ -347,7 +347,13 @@ public class ProxyResource {
    * Server} and anything internal still stay behind.
    */
   static final java.util.List<String> RELAYED_RESPONSE_HEADERS =
-      java.util.List.of("Content-Disposition", "Cache-Control");
+      java.util.List.of(
+          "Content-Disposition",
+          "Cache-Control",
+          // The stable code of an error answer, for the health screen's list of failures: the
+          // gateway never reads a relayed body, so a service that names the code here is the only
+          // way it is known. The code is in the body already; this adds nothing a client lacks.
+          "X-Error-Code");
 
   /** The allowlisted headers present on a service's response, by name, in list order. */
   static java.util.Map<String, String> relayedResponseHeaders(io.helidon.http.Headers upstream) {
@@ -515,7 +521,13 @@ public class ProxyResource {
         .forEach((key, values) -> req.queryParam(key, values.toArray(String[]::new)));
   }
 
-  private static String newRequestId() {
-    return Ids.newId().toString();
+  /**
+   * The id {@code RequestIdFilter} minted for this request and wrote over any the client sent, so
+   * that the service, the answer and the health screen all name the request the same way. Minting
+   * here is only for a request that somehow never passed that filter.
+   */
+  static String requestIdOf(jakarta.ws.rs.core.HttpHeaders inbound) {
+    String id = inbound.getHeaderString(HttpHeaders.REQUEST_ID);
+    return id == null || id.isBlank() ? Ids.newId().toString() : id;
   }
 }

@@ -30,6 +30,9 @@ CREATE TABLE payment_runs (
     CONSTRAINT uq_payment_run_reference UNIQUE (tenant_id, reference)
 );
 CREATE INDEX idx_payment_runs_tenant ON payment_runs (tenant_id, created_at DESC);
+-- The runs waiting for a second person. A business keeps every run it ever made and has a few
+-- proposed, so the waiting-work count (stopped at its cap) must find them without walking the rest.
+CREATE INDEX idx_payment_runs_tenant_proposed ON payment_runs (tenant_id) WHERE status = 'PROPOSED';
 
 -- One row per document a run settles: an invoice it pays, or a supplier credit note it offsets.
 CREATE TABLE payment_run_items (

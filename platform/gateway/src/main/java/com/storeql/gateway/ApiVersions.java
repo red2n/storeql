@@ -32,7 +32,7 @@ public final class ApiVersions {
   /**
    * Whether a path segment is a version label ({@code v} and digits), without compiling a regex.
    */
-  static boolean isVersionSegment(String segment) {
+  public static boolean isVersionSegment(String segment) {
     if (segment == null || segment.length() < 2 || segment.charAt(0) != 'v') return false;
     for (int i = 1; i < segment.length(); i++) {
       char c = segment.charAt(i);

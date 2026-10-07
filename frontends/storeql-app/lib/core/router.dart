@@ -379,6 +379,13 @@ final routerProvider = Provider<GoRouter>((ref) {
             ),
           ),
           GoRoute(
+            path: '/admin/system-health',
+            builder: (_, _) => DeferredWidget(
+              libraryLoader: admin_lib.loadLibrary,
+              builder: (_) => admin_lib.SystemHealthScreen(),
+            ),
+          ),
+          GoRoute(
             path: '/admin/changes',
             builder: (_, _) => DeferredWidget(
               libraryLoader: admin_lib.loadLibrary,
@@ -408,9 +415,12 @@ final routerProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: '/admin/procurement',
-            builder: (_, _) => DeferredWidget(
+            // `?tab=payments` opens that tab (ProcurementScreen.tabNames).
+            builder: (_, state) => DeferredWidget(
               libraryLoader: admin_lib.loadLibrary,
-              builder: (_) => admin_lib.ProcurementScreen(),
+              builder: (_) => admin_lib.ProcurementScreen(
+                initialTab: state.uri.queryParameters['tab'],
+              ),
             ),
           ),
           GoRoute(

@@ -26,6 +26,7 @@ export 'tenant_data_screen.dart';
 export 'security_notices_screen.dart';
 export 'audit_trail_screen.dart';
 export 'security_events_screen.dart';
+export 'system_health_screen.dart';
 export 'business_changes_screen.dart';
 export 'stores_screen.dart';
 export 'orders_screen.dart';

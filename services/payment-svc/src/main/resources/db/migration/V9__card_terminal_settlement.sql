@@ -104,6 +104,11 @@ CREATE INDEX idx_card_refund_dues_order ON card_refund_dues (tenant_id, order_id
 CREATE INDEX idx_card_refund_dues_payment
     ON card_refund_dues (tenant_id, payment_id) WHERE payment_id IS NOT NULL;
 CREATE INDEX idx_card_refund_dues_sale ON card_refund_dues (tenant_id, sale_attempt_id);
+-- One due for every card refund the business ever makes, and the system-health screen counts the ones
+-- waiting for a person every few seconds, across all its stores: the partial index holds only those few
+-- rows, where the store-led index above would be walked end to end for each store.
+CREATE INDEX idx_card_refund_dues_tenant_state
+    ON card_refund_dues (tenant_id, state) WHERE state = 'NEEDS_ATTENTION';
 
 COMMENT ON TABLE terminal_attempt_decisions IS
     'What a person saw on a card machine that did not answer. Append-only, decided once.';

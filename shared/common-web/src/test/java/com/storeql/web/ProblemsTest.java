@@ -82,6 +82,10 @@ class ProblemsTest {
     assertEquals("Order not found", p.title());
     assertEquals("req-9", p.requestId());
     assertEquals(Problems.MEDIA_TYPE, headers.getFirst("Content-Type"));
+    assertEquals(
+        "ORDER_NOT_FOUND",
+        headers.getFirst(HttpHeaders.ERROR_CODE),
+        "the code is also a header, so the gateway can record it without reading the body");
 
     ContainerResponseContext ok = mock(ContainerResponseContext.class);
     when(ok.getEntity()).thenReturn(ApiResponse.ok("fine"));

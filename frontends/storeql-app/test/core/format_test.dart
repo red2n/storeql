@@ -175,10 +175,34 @@ void main() {
     });
   });
 
+  group('AppFormat.percent', () {
+    test('a share of a whole, to one place at most', () {
+      expect(AppFormat.percent(0.004), '0.4%');
+      expect(AppFormat.percent(0.0123), '1.2%');
+      expect(AppFormat.percent(0.05), '5%');
+      expect(AppFormat.percent(0), '0%');
+      expect(AppFormat.percent(1), '100%');
+    });
+
+    test('a finer share keeps the places asked for', () {
+      expect(AppFormat.percent(0.00123, maxDecimals: 2), '0.12%');
+      expect(AppFormat.percent(0.00004), '0%');
+    });
+
+    test('follows the locale, not the country', () {
+      expect(AppFormat.percent(0.5, locale: 'de'), '50\u00A0%');
+    });
+  });
+
   group('AppFormat.time and dateOf', () {
     test('a time of day on the 24-hour clock', () {
       expect(AppFormat.time(DateTime(2026, 9, 23, 14, 5).toIso8601String()), '14:05');
       expect(AppFormat.time(null), '');
+    });
+
+    test('a time of day to the second', () {
+      expect(AppFormat.timeSeconds(DateTime(2026, 9, 23, 14, 5, 9).toIso8601String()), '14:05:09');
+      expect(AppFormat.timeSeconds(null), '');
     });
 
     test('a date already in hand is written as the date', () {
