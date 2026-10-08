@@ -65,8 +65,10 @@
         <!-- GHSA-g3pr-3p32-fp23, GHSA-w737-wx49-qj23 — via Helidon metrics -->
         <version.lib.micrometer>1.15.12</version.lib.micrometer>
         <version.lib.micrometer-prometheus>1.15.12</version.lib.micrometer-prometheus>
-        <!-- GHSA-xx22-p4ch-683r — kafka-clients 3.9.2 brings the maintained fork at 1.10.1 -->
-        <lz4-java.version>1.11.3</lz4-java.version>
+        <!-- GHSA-xx22-p4ch-683r — kafka-clients 3.9.2 brings the maintained fork at 1.10.1;
+             GHSA-mcr4-qmvw-px4g (high), GHSA-gm45-99xc-r7wv (medium), GHSA-343h-94h5-c4wr (low) —
+             fixed 1.11.4 -->
+        <lz4-java.version>1.11.4</lz4-java.version>
         <!-- GHSA-rcgg-9c38-7xpx: unbounded memory from a W3C baggage header, and the gateway reads
              headers from the internet -->
         <version.lib.opentelemetry>1.62.0</version.lib.opentelemetry>
