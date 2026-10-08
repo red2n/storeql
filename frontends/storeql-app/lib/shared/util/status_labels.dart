@@ -250,3 +250,89 @@ String recallSourceLabel(String? source) =>
       'FSS' => 'Food Standards Scotland',
       _ => humanizeCode(source),
     };
+
+/// What each stable error code the gateway and the services answer with means to
+/// a person reading the system-health failures (their `code`). Only the codes
+/// a refused or failed request carries: a normal business answer (a 404, a 409)
+/// is not a failure and never reaches that list.
+const _failureCodeWords = {
+  'UNAUTHORIZED': 'The sign-in was missing or had expired',
+  'TOKEN_LOCKED': 'Too many invalid sign-ins from one address, so it was paused',
+  'LOGIN_LOCKED': 'Too many failed sign-in attempts, so sign-in was paused',
+  'RATE_LIMITED': 'Too many requests too quickly',
+  'PLAN_RATE_LIMIT_REACHED': "The business reached its plan's requests-a-minute allowance",
+  'PAYLOAD_TOO_LARGE': 'The request was too large',
+  'TENANT_INACTIVE': 'The business is switched off',
+  'API_KEY_ROUTE_FORBIDDEN': "An API key tried something only a person's sign-in may do",
+  'API_KEY_CHECK_UNAVAILABLE': 'An API key could not be checked just now',
+  'AUTH_KEYS_UNAVAILABLE': 'Sign-ins could not be verified just now',
+  'MFA_ENROLMENT_REQUIRED': 'The sign-in has to set up a second step first',
+  'UPSTREAM_UNAVAILABLE': 'A service could not be reached',
+  'UPSTREAM_TIMEOUT': 'A service took too long to answer',
+  'UPSTREAM_ERROR': 'A service answered with an error',
+  'UPSTREAM_CIRCUIT_OPEN': 'A service is being left alone after repeated failures',
+  'INTERNAL_ERROR': 'The service hit an unexpected error',
+  'PERMISSION_DENIED': "The person's role does not allow it",
+  'STORE_ACCESS_DENIED': 'The person tried a store that is not theirs',
+  'BUSINESS_WIDE_ONLY': 'Only people not held to particular stores may do this',
+};
+
+/// Why a request failed, in words: its stable [code] when the page knows it,
+/// else what its HTTP [status] means. The raw code and status are shown beside
+/// it, small, for the person quoting it; they are never the words themselves.
+String failureReason(int? status, String? code) {
+  final said = _failureCodeWords[(code ?? '').toUpperCase()];
+  if (said != null) return said;
+  return switch (status) {
+    401 => 'The sign-in was refused',
+    403 => 'The request was not allowed',
+    413 => 'The request was too large',
+    429 => 'Too many requests',
+    500 => 'The service hit an error',
+    502 => 'A service could not be reached',
+    503 => 'A service was unavailable',
+    504 => 'A service took too long to answer',
+    final s? when s >= 500 => 'A service failed',
+    _ => 'The request failed',
+  };
+}
+
+/// What each part of the platform does, for the system-health areas: the gateway
+/// names a request's area by the service it went to (`order-svc`), a person
+/// thinks of what it is for. A service this does not know reads as its own name
+/// in words.
+const _routeGroupWords = {
+  'iam': 'Sign-in and accounts',
+  'tenant': 'Business and stores',
+  'product': 'Products',
+  'inventory': 'Stock',
+  'pricing': 'Prices',
+  'cart': 'Baskets',
+  'order': 'Orders',
+  'payment': 'Payments',
+  'purchase': 'Purchasing',
+  'customer': 'Customers',
+  'notification': 'Messages',
+  'reporting': 'Reports',
+};
+
+/// A request area in words: `order-svc` and `order` both read *Orders*.
+String routeGroupLabel(String? group) {
+  final name = (group ?? '').trim().toLowerCase().replaceFirst(RegExp(r'-svc$'), '');
+  if (name.isEmpty) return 'Other';
+  return _routeGroupWords[name] ?? humanizeCode(name);
+}
+
+/// Whether a failed request went wrong (*Failed*: the system could not answer)
+/// or was turned away (*Refused*: a bad sign-in, a missing right, a limit).
+String failureKindLabel(int? status) => switch (status) {
+      401 || 403 || 413 || 429 => 'Refused',
+      _ => 'Failed',
+    };
+
+/// The tone of [failureKindLabel]: red when the system failed, amber when it
+/// refused.
+StatusTone failureKindTone(int? status) => switch (status) {
+      401 || 403 || 413 || 429 => StatusTone.warning,
+      _ => StatusTone.error,
+    };

@@ -35,6 +35,8 @@ No query — including simple lookups and list queries — may execute without a
 
 This applies equally to `UPDATE` and `DELETE`. A bare `UPDATE table SET ...` with no `WHERE` is forbidden.
 
+**A bounded count is the one shape whose outer query has no `WHERE`:** `SELECT count(*) AS n FROM (SELECT 1 FROM t WHERE tenant_id = ? AND status = 'X' LIMIT ?) AS waiting` counts a derived table, and the predicate (tenant first) and the bound are in the inner select, which is the only access to the table. Use it when a figure is polled and "N or more" will do (the system-health screen's waiting-work counts, `PendingWorkCount.CAP`); `count(*)` and `count(1)` are the same work in PostgreSQL, what costs is the rows visited.
+
 ### 1.3 Tenant filter is always the first WHERE condition
 Per the golden rule in CLAUDE.md: `tenant_id` from the JWT, first predicate, every time. See golden rule #3.
 

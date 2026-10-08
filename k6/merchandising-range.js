@@ -251,11 +251,15 @@ export default function () {
   truthy('[+] and a sweep today applies nothing', data(post(`${RANGE}/changes/apply`, {})).applied === 0);
 
   // The cluster gains a shop AFTER the decision — membership is read on the day it is applied.
-  expect(
-    post(`${RANGE}/clusters/${cluster.id}/stores`, { storeIds: [store, second_store.id] }),
-    '[+] a cluster names its shops, and the same list sent twice is not an error',
-    200,
-  );
+  // product-svc asks tenant-svc about a store it has not met at most every thirty seconds, so a shop
+  // opened a moment ago may be unknown for a while: ask again until it is found.
+  let named = post(`${RANGE}/clusters/${cluster.id}/stores`, { storeIds: [store, second_store.id] });
+  poll(40, () => {
+    if (named.status !== 404) return true;
+    named = post(`${RANGE}/clusters/${cluster.id}/stores`, { storeIds: [store, second_store.id] });
+    return named.status !== 404;
+  }, 3);
+  expect(named, '[+] a cluster names its shops, and the same list sent twice is not an error', 200);
   const swept = data(call('POST', `${RANGE}/changes/apply?asOf=${isoDay(3)}`, { token: owner, body: {} }));
   truthy('[+] on the day, the change is applied', swept.applied === 1, swept);
   const after = data(get(`/api/product-svc/admin/products/${ranged.id}/stores`));

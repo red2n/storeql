@@ -199,6 +199,44 @@ public class GatewayConfig {
   @ConfigProperty(name = "storeql.gateway.security-txt.preferred-languages")
   java.util.Optional<String> securityTxtPreferredLanguages;
 
+  // ── System-health flow recording ───────────────────────────────────────────
+  // Every request is described in a record and counted per business in Redis for the health screen
+  // (GET /api/v1/system-health). Recording is asynchronous: a bounded queue the request thread
+  // never waits on, drained by one background thread in batches.
+
+  /** Off switch for the recording and nothing else: request ids are minted either way. */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.flow.enabled", defaultValue = "true")
+  boolean flowEnabled;
+
+  /**
+   * Records that may wait to be written. Past it a success is dropped and counted; a failure takes
+   * the place of the oldest success.
+   */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.flow.queue-size", defaultValue = "10000")
+  int flowQueueSize;
+
+  /** Records written to Redis in one round trip. */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.flow.batch-size", defaultValue = "500")
+  int flowBatchSize;
+
+  /** How long the background writer sleeps between writes: the screen is this far behind. */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.flow.flush-interval-ms", defaultValue = "1000")
+  long flowFlushIntervalMs;
+
+  /** The longest the writer waits after Redis refused a write, doubling from the flush interval. */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.flow.backoff-max-ms", defaultValue = "30000")
+  long flowBackoffMaxMs;
+
+  /** Failures kept per business, newest first, and none older than 24 hours whatever the cap. */
+  @Inject
+  @ConfigProperty(name = "storeql.gateway.flow.failure-cap", defaultValue = "500")
+  int flowFailureCap;
+
   /** Parsed once at startup — these are consulted on every proxied request. */
   // ── API versioning (22.8) ──────────────────────────────────────────────────
   // The versions the door answers, the one new integrations are pointed at, and the alias's dates.
@@ -306,6 +344,30 @@ public class GatewayConfig {
 
   public int redisRequestQueueSize() {
     return redisRequestQueueSize;
+  }
+
+  public boolean flowEnabled() {
+    return flowEnabled;
+  }
+
+  public int flowQueueSize() {
+    return flowQueueSize;
+  }
+
+  public int flowBatchSize() {
+    return flowBatchSize;
+  }
+
+  public long flowFlushIntervalMs() {
+    return flowFlushIntervalMs;
+  }
+
+  public long flowBackoffMaxMs() {
+    return flowBackoffMaxMs;
+  }
+
+  public int flowFailureCap() {
+    return flowFailureCap;
   }
 
   public boolean cardDataGuardEnabled() {

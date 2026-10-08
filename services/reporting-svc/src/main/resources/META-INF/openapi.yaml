@@ -14,6 +14,11 @@ tags:
     description: Cross-store on-hand, supply/demand netting, and movement-statistics reports.
   - name: Sales Reports
     description: Revenue summary and daily revenue buckets, net of refunds; voided sales left out.
+  - name: System Health
+    description: >-
+      Work waiting for a person, counted by the services that own each queue. A count stops at a
+      cap (1000) so its cost never grows with the queue: a capped count is flagged and means that
+      many or more. The answer is kept for a few seconds per business.
 components:
   schemas:
     Problem:

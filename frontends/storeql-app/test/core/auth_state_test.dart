@@ -76,6 +76,30 @@ void main() {
     });
   });
 
+  group('system.health', () {
+    AuthAuthenticated login(List<String> roles, [List<String>? permissions]) => AuthAuthenticated(
+          accessToken: 'a',
+          refreshToken: 'r',
+          userId: 'u-1',
+          tenantId: 't-1',
+          roles: roles,
+          permissions: permissions,
+        );
+
+    test('a manager holds it by default, as the server\'s catalogue says; no other tier does', () {
+      expect(login([UserRoles.manager]).hasPermission('system.health'), isTrue);
+      expect(login([UserRoles.storekeeper]).hasPermission('system.health'), isFalse);
+      expect(login([UserRoles.cashier]).hasPermission('system.health'), isFalse);
+      expect(login([UserRoles.customer]).hasPermission('system.health'), isFalse);
+    });
+
+    test('an owner always does; a claim narrows a manager to what it names', () {
+      expect(login([UserRoles.owner], const []).hasPermission('system.health'), isTrue);
+      expect(login([UserRoles.manager], const ['staff.manage']).hasPermission('system.health'), isFalse);
+      expect(login([UserRoles.manager], const ['system.health']).hasPermission('system.health'), isTrue);
+    });
+  });
+
   group('storeIds', () {
     test('defaults to empty (unrestricted) when not supplied', () {
       final auth = _auth(roles: [UserRoles.owner]);

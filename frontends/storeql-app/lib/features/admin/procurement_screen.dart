@@ -31,13 +31,32 @@ import 'widgets/business_wide_note.dart';
 import 'widgets/figure_field.dart';
 
 class ProcurementScreen extends ConsumerWidget {
-  const ProcurementScreen({super.key});
+  const ProcurementScreen({super.key, this.initialTab});
+
+  /// The tab to open on, by its address name (`/admin/procurement?tab=payments`);
+  /// the first when null or one this screen does not have.
+  final String? initialTab;
+
+  /// Each tab's name in an address, in the order the tabs are shown.
+  static const tabNames = [
+    'purchase-orders',
+    'invoices',
+    'e-invoices',
+    'suppliers',
+    'payments',
+    'consignment',
+    'sourcing',
+  ];
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final canPay = canRunPayments(ref.watch(authNotifierProvider).value);
+    final start = tabNames.indexOf(initialTab ?? '');
     return DefaultTabController(
-      length: 7,
+      // A link to another tab while Procurement is open starts it again on that tab.
+      key: ValueKey(initialTab),
+      length: tabNames.length,
+      initialIndex: start < 0 ? 0 : start,
       child: Builder(
         // A Builder gives this subtree a context below DefaultTabController,
         // so DefaultTabController.of(context) below can find it.

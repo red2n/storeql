@@ -61,6 +61,10 @@ CREATE TABLE accounting_syncs (
 );
 CREATE INDEX idx_accounting_syncs_due ON accounting_syncs (next_attempt_at) WHERE status = 'PENDING';
 CREATE INDEX idx_accounting_syncs_tenant ON accounting_syncs (tenant_id, id DESC);
+-- One push per journal makes this the largest table the system-health screen counts, and it counts the
+-- pushes waiting for a person every few seconds: the partial index holds only those few rows, where the
+-- tenant index above would be walked end to end.
+CREATE INDEX idx_accounting_syncs_tenant_status ON accounting_syncs (tenant_id, status) WHERE status = 'UNCERTAIN';
 
 CREATE TABLE accounting_sync_attempts (
     id           UUID        PRIMARY KEY,

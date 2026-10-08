@@ -28,14 +28,25 @@ class _AdminNavItem {
   /// stores would find nothing but a line saying so.
   final bool businessWideOnly;
 
+  /// A permission the login must hold (`AuthAuthenticated.hasPermission`: an
+  /// owner always, a claim narrows, else the tier's defaults) for the page to
+  /// be listed. Pair it with [businessWideOnly] when the page is the whole
+  /// business's.
+  final String? permission;
+
   const _AdminNavItem({
     required this.destination,
     required this.route,
     this.storekeeperVisible = false,
     this.ownerOnly = false,
     this.businessWideOnly = false,
+    this.permission,
   });
 }
+
+/// Every page the menu can list, by address: where a link from another page
+/// (a waiting-work tile) may lead and be sure the app has the page.
+List<String> get adminRoutes => [for (final i in _navItems) i.route];
 
 /// The pages a storekeeper-only login is offered: each must be one the router
 /// lets them open (`storekeeperAdminAllowed`), which is one whose reads the
@@ -338,6 +349,20 @@ const _navItems = [
   ),
   _AdminNavItem(
     destination: AdaptiveNavDestination(
+      label: 'System health',
+      icon: Icons.monitor_heart_outlined,
+      selectedIcon: Icons.monitor_heart,
+      section: 'Data & security',
+    ),
+    route: '/admin/system-health',
+    // The whole business's traffic and waiting work, for whoever holds the
+    // permission (the IT person the owner trusts, or a manager); a manager held
+    // to stores is refused it by the server, so is not offered it.
+    permission: 'system.health',
+    businessWideOnly: true,
+  ),
+  _AdminNavItem(
+    destination: AdaptiveNavDestination(
       label: 'Privacy',
       icon: Icons.privacy_tip_outlined,
       selectedIcon: Icons.privacy_tip,
@@ -402,6 +427,7 @@ class AdminShell extends ConsumerWidget {
         .where((i) => !storekeeperOnly || i.storekeeperVisible)
         .where((i) => owner || !i.ownerOnly)
         .where((i) => !i.businessWideOnly || (auth is AuthAuthenticated && auth.isManager && !auth.heldToStores))
+        .where((i) => i.permission == null || (auth is AuthAuthenticated && auth.hasPermission(i.permission!)))
         .toList();
     final routes = items.map((i) => i.route).toList();
     final destinations = items.map((i) => i.destination).toList();

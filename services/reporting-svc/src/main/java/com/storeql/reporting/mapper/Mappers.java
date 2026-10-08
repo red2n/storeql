@@ -231,4 +231,21 @@ public final class Mappers {
   private static String key(UUID storeId, UUID variantId) {
     return storeId + ":" + variantId;
   }
+
+  /**
+   * Waiting work on the wire: kinds by name, a count the source could not give left null, and
+   * whether each count stopped at the cap.
+   */
+  public static com.storeql.reporting.dto.Dtos.WaitingWorkReport toWaitingWorkReport(
+      com.storeql.reporting.domain.PendingWork.Report report) {
+    return new com.storeql.reporting.dto.Dtos.WaitingWorkReport(
+        report.generatedAt(),
+        report.items().stream()
+            .map(
+                i ->
+                    new com.storeql.reporting.dto.Dtos.WaitingWorkItem(
+                        i.kind().name(), i.label(), i.count(), i.capped(), i.opens(), i.note()))
+            .toList(),
+        report.unreachable().stream().map(Enum::name).toList());
+  }
 }

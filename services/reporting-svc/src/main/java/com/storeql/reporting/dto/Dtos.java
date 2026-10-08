@@ -1,5 +1,7 @@
 package com.storeql.reporting.dto;
 
+import com.storeql.web.PendingWorkCount;
+import jakarta.json.bind.annotation.JsonbNillable;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -143,4 +145,49 @@ public final class Dtos {
       name = "LabourReport",
       description = "Labour against sales, day by day, newest day first.")
   public record LabourReport(List<LabourDayRow> rows) {}
+
+  // ── System health: work waiting for a person ─────────────────────────────
+
+  @JsonbNillable
+  @Schema(
+      name = "WaitingWorkItem",
+      description = "One kind of work waiting for a person, counted by the service that owns it.")
+  public record WaitingWorkItem(
+      @Schema(
+              description =
+                  "PURCHASE_ORDER_APPROVAL, PAYMENT_RUN, SUPPLIER_INVOICE, ACCOUNTING_SYNC,"
+                      + " CARD_REFUND or PRIVACY_REQUEST.")
+          String kind,
+      @Schema(description = "The kind in words.") String label,
+      @Schema(
+              description =
+                  "How many wait, counted to at most "
+                      + PendingWorkCount.CAP
+                      + " (see capped). Null when the owning service could not be reached: unknown,"
+                      + " not zero.")
+          Long count,
+      @Schema(
+              description =
+                  "True when the count stopped at the cap of "
+                      + PendingWorkCount.CAP
+                      + ": that many or more wait. False for a smaller count and for a null one.")
+          boolean capped,
+      @Schema(
+              description =
+                  "The admin app route that settles it; null when no screen exists for it yet.")
+          String opens,
+      @Schema(
+              description =
+                  "A caution about the count, or null. Set on PURCHASE_ORDER_APPROVAL when the"
+                      + " deployment has no purchase approval limits configured, so no order is held.")
+          String note) {}
+
+  @Schema(
+      name = "WaitingWorkReport",
+      description = "Work waiting for a person, one item per kind in a fixed order.")
+  public record WaitingWorkReport(
+      Instant generatedAt,
+      List<WaitingWorkItem> items,
+      @Schema(description = "The kinds whose count could not be had; their count is null.")
+          List<String> unreachable) {}
 }

@@ -1102,6 +1102,11 @@ services:
       # Per-IP budget. The k6 regression suite drives ~50 VUs from one host IP and peaks
       # well above 10k/min; 10k caused mid-run 429 cascades. Local-dev/load-test value only.
       storeql.gateway.rate-limit.requests-per-minute: "30000"
+      # Failed sign-ins from one address before it is locked out. A successful sign-in clears only
+      # its own account's count, never the address's, so a suite that checks several wrong
+      # passwords (iam-crud, mfa-flow) needs more than the production five. Local-dev value only;
+      # k6/run.sh hands the live value to the gateway suites.
+      storeql.gateway.brute-force.max-failures: "${GATEWAY_BRUTE_FORCE_MAX_FAILURES:-15}"
       # Script integrity on the web shell (PCI DSS 11.6.1): the monitor reads the shell's inventory
       # and checks the served scripts against it on a schedule; drift is a gauge Prometheus alerts on.
       storeql.gateway.script-integrity.web-url: http://storeql-app:8080
