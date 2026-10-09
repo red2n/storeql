@@ -7,6 +7,7 @@ import '../../core/network/api_client.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import '../../shared/util/short_ref.dart';
+import 'pos_price.dart';
 import '../storefront/storefront_providers.dart' show DepositScheme;
 import 'markdown_label.dart';
 
@@ -41,8 +42,21 @@ class PosLine {
   /// metres — for one sold by weight, volume or length. It was a whole number,
   /// which meant the till could not sell a single loose item by weight.
   final double qty;
+
+  /// What one unit costs the customer, VAT included: the price the till shows,
+  /// adds up and tenders. (Pricing-svc's own `unitPrice` is the price before
+  /// VAT; the till never charges that.)
   final double unitPrice;
   final String currency;
+
+  /// The VAT code and rate the price was taxed at, when pricing-svc said: what
+  /// the receipt's VAT table is made from when the till is offline.
+  final String? vatCode;
+  final double? vatRate;
+
+  /// Whether [unitPrice] is a shelf price, VAT inside it (rather than a net
+  /// price with VAT added): the receipt then prints a VAT table and says so.
+  final bool taxInclusive;
 
   /// EACH, WEIGHT, VOLUME or LENGTH.
   final String soldBy;
@@ -100,6 +114,9 @@ class PosLine {
     required this.qty,
     required this.unitPrice,
     required this.currency,
+    this.vatCode,
+    this.vatRate,
+    this.taxInclusive = false,
     this.soldBy = 'EACH',
     this.unit,
     this.weighingInstrumentId,
@@ -164,6 +181,9 @@ class PosLine {
     qty: qty ?? this.qty,
     unitPrice: unitPrice,
     currency: currency,
+    vatCode: vatCode,
+    vatRate: vatRate,
+    taxInclusive: taxInclusive,
     soldBy: soldBy ?? this.soldBy,
     unit: unit ?? this.unit,
     weighingInstrumentId: weighingInstrumentId ?? this.weighingInstrumentId,
@@ -474,7 +494,9 @@ Future<PosLine> scanBarcode(WidgetRef ref, String rawCode) async {
     '/${ApiConstants.pricing}/prices/resolve',
     data: {'variantId': variantId, 'channel': 'POS', 'qty': 1},
   );
-  final p = priceResp.data['data'] as Map<String, dynamic>;
+  final price = ResolvedPosPrice.fromJson(
+    priceResp.data['data'] as Map<String, dynamic>,
+  );
 
   // 3. The return-scheme deposit on the container (09.16): the catalogue says
   // what the drink comes in, the scheme where this store trades says whether it
@@ -509,8 +531,11 @@ Future<PosLine> scanBarcode(WidgetRef ref, String rawCode) async {
     qty: measured ? labelWeight : 1,
     soldBy: measured ? 'WEIGHT' : 'EACH',
     unit: measured ? 'kg' : null,
-    unitPrice: (p['unitPrice'] as num?)?.toDouble() ?? 0,
-    currency: p['currency'] as String? ?? '',
+    unitPrice: price.gross,
+    currency: price.currency,
+    vatCode: price.vatCode,
+    vatRate: price.vatRate,
+    taxInclusive: price.taxInclusive,
     depositMaterial: material,
     depositVolumeMl: volumeMl,
     depositEach: covered ? scheme.depositEach : 0,
@@ -548,6 +573,8 @@ final posStoresProvider = FutureProvider.autoDispose<List<StoreInfo>>((
               .toList() ??
           const ['CASH', 'CARD'],
       tillPhone: normaliseTillPhone(m['tillPhone']),
+      businessName: m['businessName'] as String?,
+      vatNumber: m['vatNumber'] as String?,
       line1: m['line1'] as String?,
       city: m['city'] as String?,
       country: m['country'] as String?,
@@ -806,6 +833,9 @@ class PosOffer {
   final double unitPrice;
   final String currency;
   final bool inStock;
+  final String? vatCode;
+  final double? vatRate;
+  final bool taxInclusive;
 
   const PosOffer({
     required this.variantId,
@@ -814,6 +844,9 @@ class PosOffer {
     required this.unitPrice,
     required this.currency,
     required this.inStock,
+    this.vatCode,
+    this.vatRate,
+    this.taxInclusive = false,
   });
 
   PosLine toLine() => PosLine(
@@ -823,6 +856,9 @@ class PosOffer {
     qty: 1,
     unitPrice: unitPrice,
     currency: currency,
+    vatCode: vatCode,
+    vatRate: vatRate,
+    taxInclusive: taxInclusive,
   );
 }
 
@@ -847,15 +883,20 @@ final posProductOfferProvider = FutureProvider.autoDispose
         '/${ApiConstants.pricing}/prices/resolve',
         data: {'variantId': variantId, 'channel': 'POS', 'qty': 1},
       );
-      final p = priceResp.data['data'] as Map<String, dynamic>;
+      final price = ResolvedPosPrice.fromJson(
+        priceResp.data['data'] as Map<String, dynamic>,
+      );
       final avail = await ref.watch(posAvailabilityProvider.future);
       return PosOffer(
         variantId: variantId,
         sku: v['sku'] as String? ?? '',
         name: product.name,
-        unitPrice: (p['unitPrice'] as num?)?.toDouble() ?? 0,
-        currency: p['currency'] as String? ?? '',
+        unitPrice: price.gross,
+        currency: price.currency,
         inStock: avail[variantId] ?? true,
+        vatCode: price.vatCode,
+        vatRate: price.vatRate,
+        taxInclusive: price.taxInclusive,
       );
     });
 

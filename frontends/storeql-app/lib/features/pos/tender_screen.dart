@@ -23,6 +23,8 @@ import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import 'pos_fiscal_receipt.dart';
 import 'pos_providers.dart';
+import 'pos_quote.dart';
+import 'pos_vat.dart';
 import 'pos_terminal.dart';
 import 'pos_receipt.dart';
 import 'pos_receipt_printer.dart';
@@ -437,17 +439,14 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     // An exchange's new order is already priced by the server.
     if (ref.read(posExchangeSettlementProvider) != null) return 0;
     // Off the goods only: a gift card being sold is never discounted.
-    final subtotal = ref.read(posCartProvider.notifier).goodsTotal;
-    return ref.read(posDiscountProvider).clamp(0, subtotal).toDouble();
+    return ref.read(posTotalsProvider).discountOf(ref.read(posDiscountProvider));
   }
 
   /// Goods less the discount, plus the return-scheme deposits on the sale's
   /// containers (09.16): the deposit is due in full whatever the discount.
   double get _due =>
       ref.read(posExchangeSettlementProvider)?.due ??
-      ref.read(posCartProvider.notifier).total -
-      _discount +
-      ref.read(posCartProvider.notifier).deposits;
+      ref.read(posTotalsProvider).due(ref.read(posDiscountProvider));
 
   double get _paid => _tenders.fold(0.0, (s, t) => s + t.amount);
   double get _remaining => (_due - _paid).clamp(0.0, double.infinity);
@@ -1159,9 +1158,19 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
         return;
       }
 
+      // A sale at shelf prices is receipted from the server's own document, so
+      // the printed VAT table is the one in the books; asked only then, and
+      // never blocking the receipt (the till makes the table itself if it fails).
+      final vatFromServer = cart.isNotEmpty &&
+              productLines(cart).isNotEmpty &&
+              productLines(cart).every((l) => l.taxInclusive)
+          ? await fetchReceiptVat(dio, orderId)
+          : null;
+
       // Capture everything needed for the receipt before clearing state.
       final receiptData = _buildReceiptData(
         orderId: orderId,
+        vatFromServer: vatFromServer,
         fiscalNumber: fiscalNumber,
         fiscalStamp: fiscalStamp,
         fiscalNumberNote: fiscalNumber == null
@@ -3263,6 +3272,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     String? fiscalNumber,
     String? fiscalNumberNote,
     FiscalStamp? fiscalStamp,
+    PosReceiptVat? vatFromServer,
   }) {
     final subtotal = cartSnapshot.fold<double>(0, (s, l) => s + l.lineTotal);
     final deposit = cartSnapshot.fold<double>(0, (s, l) => s + l.depositTotal);
@@ -3282,6 +3292,23 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final cashierEmail = authState is AuthAuthenticated
         ? authState.email
         : null;
+    // A sale at shelf prices carries the seller and a VAT table: the server's
+    // when it was asked, else the till's own from what it rang up (so a sale made
+    // offline prints the same table the server would have).
+    final goods = productLines(cartSnapshot);
+    final PosReceiptVat? vat = goods.isNotEmpty && goods.every((l) => l.taxInclusive)
+        ? PosReceiptVat(
+            sellerName: vatFromServer?.sellerName ?? store.businessName,
+            vatNumber: vatFromServer?.vatNumber ?? store.vatNumber,
+            rows: vatFromServer != null && vatFromServer.rows.isNotEmpty
+                ? vatFromServer.rows
+                : offlineVatTable(
+                    cartSnapshot,
+                    discount,
+                    AppFormat.minorUnits(currency),
+                  ),
+          )
+        : null;
     return PosReceiptData(
       orderId: orderId,
       storeName: store.name,
@@ -3300,6 +3327,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
       fiscalNumber: fiscalNumber,
       fiscalNumberNote: fiscalNumberNote,
       fiscalStamp: fiscalStamp,
+      vat: vat,
     );
   }
 
@@ -3778,8 +3806,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final customer = settlement != null ? null : ref.watch(posCustomerProvider);
     final tillPhone = ref.watch(posTillPhoneProvider);
     final currency = _currency;
-    // Recompute reactively (watch so discount/cart edits refresh the figures).
+    // Recompute reactively (watch so discount/cart edits and the server's quote
+    // of the basket refresh the figures).
     ref.watch(posDiscountProvider);
+    ref.watch(posTotalsProvider);
     final due = _due;
     final remaining = _remaining;
     final settled = remaining <= 0.001;

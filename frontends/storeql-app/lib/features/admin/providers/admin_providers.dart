@@ -217,6 +217,12 @@ class StoreInfo {
   /// default and what an older server with no opinion means.
   final String tillPhone;
 
+  /// The business the store belongs to, and its VAT number when it has set one:
+  /// public business data the till heads a receipt with. Only the storefront
+  /// store list carries them.
+  final String? businessName;
+  final String? vatNumber;
+
   const StoreInfo({
     required this.id,
     required this.name,
@@ -236,6 +242,8 @@ class StoreInfo {
     this.showPrices = true,
     this.enabledPaymentMethods = const ['CASH', 'CARD'],
     this.tillPhone = 'OPTIONAL',
+    this.businessName,
+    this.vatNumber,
   });
 
   factory StoreInfo.fromJson(Map<String, dynamic> j) => StoreInfo(
@@ -260,6 +268,8 @@ class StoreInfo {
                 .toList() ??
             const ['CASH', 'CARD'],
         tillPhone: normaliseTillPhone(j['tillPhone']),
+        businessName: j['businessName'] as String?,
+        vatNumber: j['vatNumber'] as String?,
       );
 }
 

@@ -11,6 +11,7 @@ import 'package:qr/qr.dart';
 import '../../core/format.dart';
 import 'pos_fiscal_receipt.dart';
 import 'pos_providers.dart';
+import 'pos_vat.dart';
 import '../../shared/util/short_ref.dart';
 
 class PosReceiptData {
@@ -48,6 +49,11 @@ class PosReceiptData {
   /// printed once, under the totals. Empty for a sale that sold none.
   final List<SoldGiftCard> soldCards;
 
+  /// A sale at shelf prices: who is selling and the VAT table, whose gross
+  /// column adds up to what the goods cost. Null for a sale priced net, whose
+  /// receipt is drawn as it always was.
+  final PosReceiptVat? vat;
+
   const PosReceiptData({
     required this.orderId,
     required this.storeName,
@@ -67,7 +73,31 @@ class PosReceiptData {
     this.fiscalNumberNote,
     this.fiscalStamp,
     this.soldCards = const [],
+    this.vat,
   });
+
+  /// The same receipt, now carrying the seller and the VAT table.
+  PosReceiptData withVat(PosReceiptVat? v) => PosReceiptData(
+    orderId: orderId,
+    storeName: storeName,
+    storeAddress: storeAddress,
+    dateTime: dateTime,
+    cashierEmail: cashierEmail,
+    items: items,
+    subtotal: subtotal,
+    discount: discount,
+    deposit: deposit,
+    total: total,
+    currency: currency,
+    tenders: tenders,
+    change: change,
+    customerName: customerName,
+    fiscalNumber: fiscalNumber,
+    fiscalNumberNote: fiscalNumberNote,
+    fiscalStamp: fiscalStamp,
+    soldCards: soldCards,
+    vat: v,
+  );
 
   /// The same receipt, now carrying the codes of the cards it sold.
   PosReceiptData withSoldCards(List<SoldGiftCard> cards) => PosReceiptData(
@@ -89,6 +119,7 @@ class PosReceiptData {
     fiscalNumberNote: fiscalNumberNote,
     fiscalStamp: fiscalStamp,
     soldCards: cards,
+    vat: vat,
   );
 
   /// The same receipt, now carrying the number that was not issued in time.
@@ -115,6 +146,7 @@ class PosReceiptData {
     fiscalNumber: stamp.fullNumber,
     fiscalStamp: stamp,
     soldCards: soldCards,
+    vat: vat,
   );
 
   String get shortId => shortRef(orderId).toUpperCase();
@@ -223,6 +255,34 @@ class PosReceiptData {
         ? '<div>${_esc(storeAddress!)}</div>'
         : '';
 
+    // The seller, when the sale was at shelf prices: the name the business is
+    // registered under and its VAT number, as a VAT receipt carries them.
+    final v = vat;
+    final sellerBlock = v == null
+        ? ''
+        : [
+            if (v.sellerName != null && v.sellerName != storeName)
+              '<div data-seller="name">${_esc(v.sellerName!)}</div>',
+            if (v.vatNumber != null)
+              '<div data-seller="vat-number">VAT No. ${_esc(v.vatNumber!)}</div>',
+          ].join('\n    ');
+
+    // The VAT table: what was paid at each code, the net of it and the VAT in
+    // it. Its gross column adds up to the goods; the prices above include VAT.
+    final vatBlock = v == null || v.rows.isEmpty
+        ? ''
+        : '''
+  <hr class="divider">
+  <div class="vat" data-vat-table="1">
+    <div class="fiscal-note">Prices include VAT</div>
+    <table class="vat-table">
+      <thead><tr><th>VAT</th><th>Rate</th><th>Gross</th><th>Net</th><th>VAT</th></tr></thead>
+      <tbody>
+${v.rows.map((r) => '        <tr><td>${_esc(r.code ?? '-')}</td><td>${_esc(_rate(r.rate))}</td><td>${_esc(_fmt(r.gross))}</td><td>${_esc(_fmt(r.net))}</td><td>${_esc(_fmt(r.vat))}</td></tr>').join('\n')}
+      </tbody>
+    </table>
+  </div>''';
+
     // The receipt number is the legal one or nothing. This row used to read
     // "Receipt #" over the first eight characters of the order's UUID, which is
     // an order reference wearing a receipt number's label.
@@ -328,6 +388,8 @@ class PosReceiptData {
     .change-row td { font-size: 14px; color: #006600; padding-top: 4px; }
     .footer { text-align: center; font-size: 11px; color: #444; margin-top: 12px; line-height: 1.6; }
     .receipt-no { font-size: 12px; letter-spacing: 1px; }
+    .vat-table th, .vat-table td { font-size: 11px; text-align: right; }
+    .vat-table th:first-child, .vat-table td:first-child { text-align: left; }
     .fiscal { font-size: 10px; line-height: 1.5; }
     .fiscal-note { font-size: 9px; word-break: break-all; margin-top: 2px; }
     .mono { font-family: 'Courier New', Courier, monospace; }
@@ -341,6 +403,7 @@ class PosReceiptData {
   <div class="center">
     <div class="store-name">${_esc(storeName)}</div>
     $addressLine
+    $sellerBlock
   </div>
 
   <hr class="divider-solid">
@@ -381,6 +444,7 @@ class PosReceiptData {
     $tenderRows
     $changeRow
   </table>
+  $vatBlock
   $fiscalBlock
   $giftCardBlock
   $codeBlock
@@ -395,6 +459,13 @@ class PosReceiptData {
   <script>window.onload = function () { window.print(); };</script>
 </body>
 </html>''';
+  }
+
+  /// A rate as the shopper reads it: `20%`, `5%`, `7.5%`; a dash when unknown.
+  static String _rate(double? r) {
+    if (r == null) return '-';
+    final pct = (r * 100 * 1000).round() / 1000;
+    return '${pct == pct.roundToDouble() ? pct.toInt() : pct}%';
   }
 
   static String _esc(String s) => s

@@ -252,6 +252,9 @@ class _PriceListsTab extends ConsumerWidget {
             auth.roles.contains('MANAGER') ||
             auth.roles.contains('PLATFORM_ADMIN'));
     final header = <Widget>[
+        // What stands between the business and selling at shelf prices: priced items with no VAT
+        // category. Shown only while there are any.
+        if (management) const _VatReadinessCard(),
         // The business's exchange rates (03.x): what a price is shown in, what a foreign order is
         // measured in.
         FxRatesCard(management: management && !heldToStores(auth), heldToStores: heldToStores(auth)),
@@ -304,6 +307,7 @@ class _PriceListsTab extends ConsumerWidget {
                         [
                           if (l.channel != null) _channelWords(l.channel),
                           if (l.currency != null) l.currency,
+                          if (l.includesVat) 'prices include VAT',
                           if (l.effectiveFrom != null)
                             'from ${AppFormat.date(l.effectiveFrom)}',
                         ].whereType<String>().join(' · '),
@@ -370,6 +374,8 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
   // 03.x: a list bound to a price zone prices that zone's stores and no other.
   String? _zoneId;
   DateTime _from = DateTime.now();
+  // Whether the prices typed on this list are the shelf price, VAT inside it.
+  bool _includesVat = false;
   bool _loading = false;
   String? _error;
 
@@ -399,6 +405,8 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
               'channel': _channel,
               if (_currency != null) 'currency': _currency,
               if (_zoneId != null) 'zoneId': _zoneId,
+              // Left out when off: the server's default is prices without VAT.
+              if (_includesVat) 'taxMode': 'INCLUSIVE',
               'effectiveFrom': effectiveFromInstant(_from),
             },
           );
@@ -419,7 +427,8 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
       title: const Text('New price list'),
       content: SizedBox(
         width: 400,
-        child: Column(
+        // Scrolls on a short window: the form grew a line when prices could include VAT.
+        child: SingleChildScrollView(child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -479,8 +488,21 @@ class _PriceListDialogState extends ConsumerState<_PriceListDialog> {
               ],
               onChanged: (v) => setState(() => _zoneId = v),
             ),
+            const SizedBox(height: 4),
+            SwitchListTile(
+              key: const Key('price-list-includes-vat'),
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Prices include VAT'),
+              subtitle: const Text(
+                'Turn this on when the prices you type are the shelf price, VAT '
+                'already inside. It cannot be changed afterwards, and all of a '
+                'business\'s price lists work the same way.',
+              ),
+              value: _includesVat,
+              onChanged: (v) => setState(() => _includesVat = v),
+            ),
           ],
-        ),
+        )),
       ),
       actions: _dialogActions(context, _loading, _submit, 'Create'),
     );
@@ -502,7 +524,10 @@ class _PriceListItemsDialog extends ConsumerWidget {
           FilledButton.icon(
             onPressed: () => showDialog(
               context: context,
-              builder: (_) => _PriceListItemDialog(priceListId: priceList.id),
+              builder: (_) => _PriceListItemDialog(
+                priceListId: priceList.id,
+                includesVat: priceList.includesVat,
+              ),
             ),
             icon: const Icon(Icons.add, size: 18),
             label: const Text('Add item'),
@@ -577,7 +602,13 @@ class _PriceListItemsDialog extends ConsumerWidget {
 
 class _PriceListItemDialog extends ConsumerStatefulWidget {
   final String priceListId;
-  const _PriceListItemDialog({required this.priceListId});
+
+  /// The list's prices are shelf prices, VAT inside: the field says so.
+  final bool includesVat;
+  const _PriceListItemDialog({
+    required this.priceListId,
+    this.includesVat = false,
+  });
 
   @override
   ConsumerState<_PriceListItemDialog> createState() =>
@@ -678,7 +709,7 @@ class _PriceListItemDialogState extends ConsumerState<_PriceListItemDialog> {
                       decimal: true,
                     ),
                     decoration: InputDecoration(
-                      labelText: 'Price',
+                      labelText: widget.includesVat ? 'Price (VAT included)' : 'Price',
                       hintText: _marks.hint(2),
                       errorText: _says(_priceCtrl),
                       errorMaxLines: 4,
@@ -707,6 +738,192 @@ class _PriceListItemDialogState extends ConsumerState<_PriceListItemDialog> {
         ),
       ),
       actions: _dialogActions(context, _loading, _submit, 'Add'),
+    );
+  }
+}
+
+// ── VAT readiness ────────────────────────────────────────────────────────────
+
+/// Priced items with no VAT category, and VAT codes with no rate: what has to be
+/// put right before a business can sell at shelf prices. Nothing is drawn while
+/// there is nothing to put right.
+class _VatReadinessCard extends ConsumerWidget {
+  const _VatReadinessCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final r = ref.watch(vatReadinessProvider).value;
+    if (r == null || r.ready) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    final labels =
+        ref
+            .watch(
+              variantLabelsProvider(
+                variantIdsKey(r.gaps.map((g) => g.variantId)),
+              ),
+            )
+            .value ??
+        const <String, VariantLabel>{};
+    final shelf = r.taxMode == 'INCLUSIVE';
+    final n = r.variantsWithoutCategory;
+    return Card(
+      key: const Key('vat-readiness-card'),
+      color: cs.tertiaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.rule_outlined, color: cs.onTertiaryContainer),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    n > 0
+                        ? '$n priced item${n == 1 ? '' : 's'} ${n == 1 ? 'has' : 'have'} no VAT category'
+                        : 'Some VAT codes have no rate',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: cs.onTertiaryContainer,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              n == 0
+                  ? 'Set a rate for ${r.codesWithoutRate.join(', ')} under VAT rates; until then items on '
+                        'those codes cannot be priced.'
+                  : shelf
+                  ? 'At shelf prices the VAT in a price is worked from its category, so these '
+                        'cannot be sold until each has one.'
+                  : 'They are charged the standard rate until each has a category. A business '
+                        'that puts VAT inside its shelf prices needs every item categorised first.',
+              style: TextStyle(color: cs.onTertiaryContainer),
+            ),
+            if (n > 0) ...[
+              const SizedBox(height: 8),
+              for (final g in r.gaps.take(5))
+                Text(
+                  '• ${variantDisplayName(g.variantId, labels)}'
+                  '${g.priceListName == null ? '' : ' (${g.priceListName})'}',
+                  style: TextStyle(color: cs.onTertiaryContainer),
+                ),
+              if (n > 5)
+                Text(
+                  'and ${n - 5} more',
+                  style: TextStyle(color: cs.onTertiaryContainer),
+                ),
+              const SizedBox(height: 8),
+              FilledButton.tonalIcon(
+                key: const Key('vat-readiness-fix'),
+                onPressed: () => showDialog(
+                  context: context,
+                  builder: (_) => _VatCategoryBatchDialog(gaps: r.gaps),
+                ),
+                icon: const Icon(Icons.checklist_outlined, size: 18),
+                label: Text(
+                  r.gaps.length < n
+                      ? 'Set a category for the first ${r.gaps.length}'
+                      : 'Set a category for all of them',
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One VAT code for a page of uncategorised items, all or none.
+class _VatCategoryBatchDialog extends ConsumerStatefulWidget {
+  final List<VatGap> gaps;
+  const _VatCategoryBatchDialog({required this.gaps});
+
+  @override
+  ConsumerState<_VatCategoryBatchDialog> createState() =>
+      _VatCategoryBatchDialogState();
+}
+
+class _VatCategoryBatchDialogState
+    extends ConsumerState<_VatCategoryBatchDialog> {
+  String? _code;
+  bool _loading = false;
+  String? _error;
+
+  Future<void> _submit() async {
+    if (_code == null) {
+      setState(
+        () => _error = 'Choose the VAT code these items are sold under.',
+      );
+      return;
+    }
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      await ref
+          .read(apiClientProvider)
+          .dio
+          .post(
+            '/${ApiConstants.pricing}/product-vat-categories/batch',
+            data: {
+              'items': [
+                for (final g in widget.gaps)
+                  {'variantId': g.variantId, 'vatCode': _code},
+              ],
+            },
+          );
+      if (!mounted) return;
+      ref.invalidate(vatReadinessProvider);
+      Navigator.pop(context);
+    } catch (e) {
+      setState(() {
+        _loading = false;
+        _error = friendlyError(e, fallback: 'Could not set the VAT category.');
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rates = ref.watch(vatRatesProvider).value ?? const <VatRate>[];
+    return AlertDialog(
+      title: const Text('Set a VAT category'),
+      content: SizedBox(
+        width: 400,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _errorBox(context, _error),
+            Text(
+              'These ${widget.gaps.length} items will be sold under one VAT code. '
+              'Items under other codes are set one at a time, under Products.',
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              key: const Key('vat-batch-code'),
+              initialValue: _code,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'VAT code *'),
+              items: [
+                for (final r in rates)
+                  DropdownMenuItem(
+                    value: r.code,
+                    child: Text('${r.code} — ${r.name}'),
+                  ),
+              ],
+              onChanged: (v) => setState(() => _code = v),
+            ),
+          ],
+        ),
+      ),
+      actions: _dialogActions(context, _loading, _submit, 'Set'),
     );
   }
 }
