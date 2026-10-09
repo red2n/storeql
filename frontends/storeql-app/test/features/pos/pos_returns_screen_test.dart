@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -79,6 +80,9 @@ class _Server implements HttpClientAdapter {
   List<String?> openTill = [null];
   int _asked = 0;
 
+  /// While set, the question "which till is open" is not answered.
+  Completer<void>? holdOpenTill;
+
   /// Answers, in order, to POST /returns, /exchange and /returns/no-receipt.
   final List<_Reply> returnReplies = [];
   final List<_Reply> exchangeReplies = [];
@@ -107,6 +111,8 @@ class _Server implements HttpClientAdapter {
     requests.add(o);
     final path = o.path;
     if (o.method == 'GET' && path.endsWith('/till-sessions/current')) {
+      final hold = holdOpenTill;
+      if (hold != null) await hold.future;
       final answer =
           openTill[_asked < openTill.length ? _asked : openTill.length - 1];
       _asked++;
@@ -562,6 +568,171 @@ void main() {
       expect(find.text('· No receipt to find the sale by'), findsOneWidget);
     });
   });
+  // An exchange's cash back leaves a drawer too (the refund of the difference
+  // and the legs that net against each other), so it names the drawer open now,
+  // as a refund does: order-svc carries it on the event and payment-svc counts
+  // the cash there while that is this business's open session at the sale's
+  // store. The server never refuses an exchange over it, so there is no second
+  // try without it - only a drawer that could not be read, which goes out naming
+  // none after a few seconds at most.
+  group('the drawer an exchange comes out of', () {
+    /// One jam back, a marmalade in its place, and Exchange not yet pressed.
+    Future<void> readyToExchange(WidgetTester tester) async {
+      await _findSale(tester);
+      await _oneJamBack(tester);
+      await _tap(tester, _actionSegment('Exchange'));
+      await _addNewItem(tester, 'MARM-1');
+      await tester.ensureVisible(find.byKey(const Key('returns-submit')));
+      await tester.pumpAndSettle();
+    }
+
+    /// ... and pressed.
+    Future<void> exchangeJamForMarmalade(WidgetTester tester) async {
+      await readyToExchange(tester);
+      await _tap(tester, find.byKey(const Key('returns-submit')));
+    }
+
+    testWidgets('names the open drawer, so its report counts the cash back',
+        (tester) async {
+      final server = _Server();
+      final container = await _pump(tester, server,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer('till-1'))]);
+      // As the POS shell does from the moment the terminal is on.
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+
+      await exchangeJamForMarmalade(tester);
+
+      final post = server.posts('/orders/o-1/exchange').single;
+      final body = post.data as Map<String, dynamic>;
+      expect(body['tillSessionId'], 'till-1');
+      expect(body['returnItems'], [
+        {'variantId': 'v-1', 'qty': 1, 'condition': 'SEALED'}
+      ]);
+      expect(body['newItems'], [
+        {'variantId': 'v-2', 'qty': 1}
+      ]);
+      expect(isV7(post.headers['Idempotency-Key'] as String), isTrue);
+      expect(find.byKey(const Key('returns-done')), findsOneWidget);
+    });
+
+    testWidgets('with no drawer open it names none, and is not held back',
+        (tester) async {
+      final server = _Server();
+      final container = await _pump(tester, server,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer(null))]);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+
+      await exchangeJamForMarmalade(tester);
+
+      final post = server.posts('/orders/o-1/exchange').single;
+      expect((post.data as Map).containsKey('tillSessionId'), isFalse,
+          reason: 'no guess: with no drawer the cash is "not at a till"');
+      expect(isV7(post.headers['Idempotency-Key'] as String), isTrue);
+      expect(find.byKey(const Key('returns-done')), findsOneWidget);
+    });
+
+    testWidgets(
+        'a drawer the terminal could not read a moment ago is read again, so '
+        'the exchange still names it', (tester) async {
+      final server = _Server()..openTill = ['down', 'till-7'];
+      final container = await _pump(tester, server);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+
+      await exchangeJamForMarmalade(tester);
+
+      final body =
+          server.posts('/orders/o-1/exchange').single.data as Map<String, dynamic>;
+      expect(body['tillSessionId'], 'till-7');
+    });
+
+    testWidgets(
+        'a read still going is waited for, not skipped: the exchange names '
+        'the drawer it finds', (tester) async {
+      final server = _Server()
+        ..openTill = ['till-3']
+        ..holdOpenTill = Completer<void>();
+      final container = await _pump(tester, server);
+      container.read(saleTillProvider);
+      await tester.pump();
+
+      await readyToExchange(tester);
+      await tester.tap(find.byKey(const Key('returns-submit')));
+      await tester.pump(const Duration(seconds: 1));
+      expect(server.posts('/exchange'), isEmpty,
+          reason: 'the drawer is still being looked up');
+
+      server.holdOpenTill!.complete();
+      await tester.pumpAndSettle();
+
+      final body =
+          server.posts('/orders/o-1/exchange').single.data as Map<String, dynamic>;
+      expect(body['tillSessionId'], 'till-3');
+    });
+
+    testWidgets(
+        'a read that never answers does not stop the exchange: after a few '
+        'seconds it goes out naming none', (tester) async {
+      final server = _Server()..holdOpenTill = Completer<void>();
+      final container = await _pump(tester, server);
+      container.read(saleTillProvider);
+      await tester.pump();
+
+      await readyToExchange(tester);
+      await tester.tap(find.byKey(const Key('returns-submit')));
+      await tester.pump(const Duration(seconds: 1));
+      expect(server.posts('/exchange'), isEmpty,
+          reason: 'it gives the read a moment first');
+
+      // The payment service never answers: a few seconds, no more.
+      for (var i = 0; i < 4 && server.posts('/exchange').isEmpty; i++) {
+        await tester.pump(const Duration(seconds: 3));
+      }
+      await tester.pumpAndSettle();
+
+      final post = server.posts('/orders/o-1/exchange').single;
+      expect((post.data as Map).containsKey('tillSessionId'), isFalse);
+      expect(find.byKey(const Key('returns-done')), findsOneWidget);
+
+      // The read lands late: for the next sale, not this one.
+      server.holdOpenTill!.complete();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets(
+        'a retry of the same exchange keeps its key, naming the drawer open '
+        'when it is sent', (tester) async {
+      final server = _Server();
+      server.exchangeReplies.addAll([
+        _Reply(503, _problem(503, 'SERVICE_UNAVAILABLE', 'Try again shortly.')),
+        const _Reply(201, '{"data":{}}'),
+      ]);
+      final container = await _pump(tester, server,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer('till-1'))]);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+      await exchangeJamForMarmalade(tester);
+      expect(find.byKey(const Key('returns-error')), findsOneWidget);
+
+      // A till opened while the first answer was lost.
+      container.read(saleTillProvider.notifier).opened('till-2');
+      await tester.pumpAndSettle();
+      await _tap(tester, find.byKey(const Key('returns-submit')));
+
+      final posts = server.posts('/orders/o-1/exchange');
+      expect(posts, hasLength(2));
+      expect((posts[0].data as Map)['tillSessionId'], 'till-1');
+      expect((posts[1].data as Map)['tillSessionId'], 'till-2');
+      expect(posts[1].headers['Idempotency-Key'],
+          posts[0].headers['Idempotency-Key'],
+          reason: 'the drawer is where the cash is counted, not what the '
+              'exchange is: order-svc answers a retry from its key');
+      expect(isV7(posts[1].headers['Idempotency-Key'] as String), isTrue);
+    });
+  });
+
   group('the drawer a refund comes out of', () {
     testWidgets('a refund names the open drawer, so its report counts the cash',
         (tester) async {
