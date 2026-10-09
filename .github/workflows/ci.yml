@@ -119,6 +119,25 @@ jobs:
       - name: Prove the healthcheck script on this machine and in each base image
         run: scripts/healthcheck-selftest.sh
 
+  # The migration freeze (intent/forward-only-migrations.md). Until the first release tag exists the
+  # check passes and says so; from v0.1.0 a published migration is immutable, a new one is numbered
+  # above the tag's highest and a destructive move carries its contract marker. The full history is
+  # fetched because the check reads the tags.
+  migrations:
+    name: Migration freeze
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Prove the check, then run it
+        run: |
+          scripts/migration-freeze-check.py --self-test
+          scripts/migration-freeze-check.py
+
   # ── Alerting ───────────────────────────────────────────────────────────────
   # The alert rules (promtool check and unit tests: a healthy service must not alert, a restart must)
   # and the Prometheus and Alertmanager configs, read by the tools that will read them.

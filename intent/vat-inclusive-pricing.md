@@ -1,0 +1,100 @@
+# VAT-inclusive pricing: the shelf price is the price, on the quote, the receipt, the refund and the ledger
+
+| | |
+|---|---|
+| **Status** | CONFIRMED |
+| **Author** | the user, from the UK pilot assessment (verified in the code by arithmetic) · 2026-10-09 |
+| **Roadmap** | new: pilot gate, VAT slices V1 to V4 in the merged plan; Readiness 03 (pricing) and 18 (tax) rows say Built, this is the depth they did not say |
+| **Services** | pricing-svc owns price lists, the tax mode and VAT categories and rates · order-svc owns the lines, `paid_gross` and the receipt document · payment-svc carries the refund's VAT · purchase-svc posts the ledger · tenant-svc exposes the seller's legal name and VAT number · the Flutter POS shell |
+| **Builds on** | `price_lists`, `price_list_items`, `markdowns`, `vat_rates`, `product_vat_categories`, `PricingService.quoteBasket`/`resolve`, `PricingClient.parseQuote`, `order_items`/`return_items`, `ReturnValue`, `OrderSplit`, `SalesPosting`, `PaymentRefunded`, the POS cart/tender/receipt screens, the return policy and gift-card intents |
+| **Built in** | (not yet built) |
+
+## Problem
+
+Shelf prices in a UK supermarket include VAT: a pack at 1.29 costs 1.29 at the till. StoreQL holds net prices at two decimals and derives the gross as net plus VAT rounded, so a gross price is only reachable if some net price produces it. Checked by arithmetic over every net price: **16.7% of shelf prices between 1.00 and 99.99 cannot be produced at 20% VAT (1.29 is one) and 4.8% at 5% (1.99 is one)**. A variant with no VAT category is silently charged the standard rate, so zero-rated food is overcharged 20% without a word. The POS tenders net amounts, the POS and email receipts carry no VAT breakdown, a refund re-derives each line's discount share by net weight, and nothing feeds the VAT return from real sales. A customer's first week of trading would show a wrong penny on one price in six.
+
+## Outcome
+
+A business that sells at VAT-inclusive shelf prices enters the shelf price, and exactly that price is quoted, tendered, receipted, refunded and returned, in 2-, 0- and 3-decimal currencies. The VAT inside each line is carried as an amount from the quote to the ledger and never recomputed from a net. The receipt shows the seller's name and VAT number and a VAT table by rate that adds up to the total. A business in retail mode cannot sell an item with no VAT category: it is refused, and a readiness list names every such item. Existing businesses and B2B price lists are unchanged.
+
+## Who and where
+
+- **Personas** ([PRD §2](../PRD.md)): the store owner and manager (price entry, VAT categories), the cashier (the till), the customer's finance person (the VAT table, the return), the accountant.
+- **Channels:** POS first; the storefront shows the shelf price but the pilot keeps the online shop closed. **Scope:** per business (its price lists); VAT per product category.
+- **Roles that can write:** `pricing.write` for lists, items and categories (OWNER and MANAGER by default); the refusals apply to every caller.
+- **Sandbox tenant:** behaves the same.
+
+## Scope
+
+- **In:** `price_lists.tax_mode` (`EXCLUSIVE` default, `INCLUSIVE`); the shared pure `TaxInclusive.vatInside`; the quote contract (additive fields), the till's gross basket quote, `order_items.paid_gross`, the refund's VAT through order, payment and ledger, one server receipt document with the VAT table and the seller's VAT number, the VAT-category-required refusal and the readiness list, one batch VAT endpoint, fixes to the sites that use a literal two decimals or `Currency.getDefaultFractionDigits`.
+- **Out, on purpose:**
+  - **A VAT retail scheme calculation** (daily gross takings by rate). VAT is worked per line on the final payable gross and summed; the accountant confirms the scheme (question 1).
+  - **The VAT return's feed from sales** (`tax_transactions`), the reporting rename of gross/net fields, the email receipt wording, the offline Dart port of the VAT split, storefront/cart VAT lines, substitution and short-close in INCLUSIVE mode, container deposits and the EN 16931 / fiscal paths in INCLUSIVE mode: none is needed to ring up and refund staff test sales; they are built before the first VAT quarter and before offline use or the online shop (slice V5).
+  - **A second tax mode flag on the business.** The list owns what its numbers mean.
+  - **Per-store price differences by tax mode**, and **Natasha's Law or HFSS** work: separate items.
+
+## Data and flow
+
+- **Owned by** pricing-svc: `price_lists.tax_mode`, `markdowns.tax_mode`; order-svc: `orders.tax_inclusive`, `order_items.paid_gross`; return and refund lines carry the VAT amount. No table is new. All are folded into the original `CREATE TABLE` (the last use of the fold rule, see [forward-only-migrations](forward-only-migrations.md)).
+- **Needs from other services:** order-svc reads the quote from pricing-svc (REST); the seller's legal name and VAT number from tenant-svc through the cashier-safe `/storefront/config`.
+- **Events published:** `OrderConfirmed` gains per-line `vatAmount`, `vatCode`, `vatRate`, `grossTotal`; `OrderReturned` gains per-line VAT; `PaymentRefunded` gains `vatAmount`. All additive, each already carries `eventId`.
+- **Retryable writes** (Idempotency-Key): unchanged; a quote is a read.
+- **New error codes:** `PRICING_TAX_MODE_MIXED`, `PRICING_PROMOTIONS_IN_OTHER_MODE` (409), `PRICING_VAT_CATEGORY_REQUIRED` (409, on a price write), `PRICING_VAT_CATEGORY_MISSING` (409, on a quote), `PRICING_TAX_MODE_IMMUTABLE` (409).
+
+## Money, time and limits
+
+- **Currency:** the business's own; every split uses `Fx.minorUnits(currency)`, never a literal 2 or the JDK's default fraction digits. Money is `BigDecimal`/`NUMERIC` with the currency stored.
+- **Ledger postings:** a sale posts Dr takings, Cr sales (net) and Cr VAT output from the order's carried VAT; a refund debits VAT output by the VAT inside the refunded lines (capped by what the sale holds), not by the sale's blended ratio.
+- **Dates:** the quote may take an `asOf`; nothing else.
+- **Plan limits:** none.
+
+## Constraints
+
+- Location-neutral: nothing is country-coded. UK retail turns the mode on by creating its price lists `INCLUSIVE`; another market chooses.
+- Existing `EXCLUSIVE` behaviour and every existing test stay as they are (a golden test pins `100.00` to `120.00`).
+- Golden rule 13 (money) and 14 (UTC) unchanged. Tenant isolation: the one-mode and promotion guards are per business.
+- Lands **before the first release tag**: the schema edits are folds of pricing V1/V7, order V1 and payment V1. After the tag the same changes are one additive file per service.
+
+## Open questions
+
+1. **Which VAT scheme and which rounding does the accountant want** (per line, per rate, or from daily takings)? Recommended: per line on the final payable gross, summed; the receipt's per-rate VAT is the sum of that rate's lines. → **As recommended for the dry run; the accountant confirms before the first VAT quarter** (HMRC accepts any reasonable, consistently applied method as long as the VAT recorded is the VAT charged. Claude, 2026-10-09)
+2. **What is the order identity on an INCLUSIVE order?** The old identity `total = subtotal + tax − discount − promo + deposit + cards` double-counts the VAT relief of a discount if the discount is gross and the tax is post-discount. → **For an INCLUSIVE order every line's `line_total` is the net AFTER every discount (`paid_gross − vat_amount`), `subtotal` is their sum, `tax` is the sum of the lines' VAT, and `total = subtotal + tax + deposit + cards = Σ paid_gross + deposit + cards`.** The discount columns record what was given, in gross, for the receipt and the discount reports, and are not subtracted again; `orders.tax_inclusive` says which identity holds. Reporting's net sales (`line_total`) stay net and correct. (Claude, 2026-10-09)
+3. **How does a business change its list mode?** The mode is immutable once a list has items. → **Create a new list in the other mode and activate it; the old list is deactivated; activation is refused while another active list has a different mode (`PRICING_TAX_MODE_MIXED`) or while absolute-valued promotions (flat, basket flat, spend threshold, mix-and-match) are active (`PRICING_PROMOTIONS_IN_OTHER_MODE`), because their amounts would change meaning.** A list with zero items may still have its mode corrected. (Claude, 2026-10-09)
+4. **How many bulk VAT calls?** Two designs proposed two. → **One: `POST /product-vat-categories/batch`, up to 500 rows, per-row results, one price catch-up per call** (the importer needs the row results; the readiness fixer uses the same call). (Claude, 2026-10-09)
+5. **Does the customer run basket promotions** (3 for £5, meal deals), or only single-item reductions and reduced-to-clear stickers? Decides how soon the till's basket quote matters for them (the quote is built now; this sets the dry-run test list).
+6. **Legal trading name, address, VAT number and any wording** (rate letters, "VAT receipt", a returns line) for the receipt, and whether any product changes VAT rate by circumstance (hot or cold food). For the customer.
+
+## Acceptance
+
+- [ ] **Property test:** every shelf price from 0.01 to 999.99 at 20%, 5% and 0% round-trips exactly through quote, order, receipt, a full refund and a partial refund, in a 2-decimal, a 0-decimal and a 3-decimal currency — `TaxInclusiveTest`, `QuoteInclusiveIT`.
+- [ ] `EXCLUSIVE` stays exactly as it was: a 100.00 net quotes 120.00 at 20%, and every existing quote, order and k6 expectation is unchanged — `QuoteExclusiveGoldenIT`, the existing suites.
+- [ ] A shelf price of 1.29 at 20% and 1.99 at 5% are quoted, ordered, receipted and refunded as exactly 1.29 and 1.99 — `QuoteInclusiveIT`, `OrderInclusiveIT`, k6 `vat-inclusive-flow`.
+- [ ] The order identity holds on an INCLUSIVE order across an ordinary sale, a split-group checkout, an exchange, a no-receipt return and a manual discount: `total = Σ paid_gross + deposit + cards`, `Σ line_total + tax = Σ paid_gross`, and the parts of a split sum to the shelf total — `OrderInclusiveIdentityIT`.
+- [ ] A refund returns exactly what was paid for the line (the discount shared by running totals), its VAT reaches `return_items.tax_amount`, `PaymentRefunded` and the ledger, and the VAT output debit equals the VAT inside the refunded lines — `ReturnInclusiveIT`, `SalesPostingRefundIT`.
+- [ ] A manual staff discount on an INCLUSIVE order reduces the VAT; on an EXCLUSIVE order it does not (today's behaviour) — `OrderInclusiveDiscountIT`.
+- [ ] Pricing a variant with no VAT category on an INCLUSIVE list is refused (`PRICING_VAT_CATEGORY_REQUIRED`), quoting one is refused (`PRICING_VAT_CATEGORY_MISSING`) naming the variant, the readiness list names every such item with a cursor, and an EXCLUSIVE business keeps the standard-rate fallback and appears in the same list — `VatReadinessIT`.
+- [ ] The batch call applies up to 500 rows with per-row results, refuses the 501st, and runs one price catch-up — `ProductVatCategoryBatchIT`.
+- [ ] The mixed-mode and promotion guards, the immutable mode and repricing apply on an INCLUSIVE variant with no category are refused — `TaxModeGuardsIT`.
+- [ ] **Tenant isolation:** another business's staff of every role, even naming our store, and a shopper get 404 or an empty readiness list; one business's INCLUSIVE list or active promotions never block another's activation — `VatReadinessIT`, `TaxModeGuardsIT`.
+- [ ] The POS shows and tenders gross: the basket total equals the server's quote, and a 2xx label price divided by the unit price gives the right quantity at 20% and 5% — Flutter `pos_gross_basket_test`, `variable_measure_barcode_test`, `customer_display_test`.
+- [ ] The receipt document (HTML and the ESC/POS print) shows seller name and VAT number, lines at the shelf price, discounts, and a VAT table by rate whose gross column sums to the total — `ReceiptDocumentTest`, `pos_receipt_escpos_test`.
+- [ ] A literal 2 or `getDefaultFractionDigits` in the touched money paths is `Fx.minorUnits`; the sites outside them are listed on this page — an ArchUnit rule over the touched packages.
+
+## Screens
+
+Admin: a price list gets a tax-mode choice at creation and a VAT-readiness card on the pricing screen; POS: basket, tender and receipt show gross and a VAT table. Design-system cards for the changed POS screens are updated with the build.
+
+## Decisions
+
+- **Gross is the truth for a tax-inclusive list.** `price_list_items.price` means gross when its list is `INCLUSIVE` and net otherwise (one column, the meaning written in its comment); markdowns copy the list's mode so a sticker is a shelf price.
+- **VAT = `gross × r / (1 + r)` as ONE `BigDecimal` division to the currency's minor units, HALF_UP; net = gross − VAT** (`TaxInclusive.vatInside`, shared). 1.29 at 20% is exactly 0.215, so 0.22. Gross minus a rounded net, as `ContainerDeposits` does, can differ by a minor unit.
+- **Carry, never recompute.** `order_items.paid_gross` is the gross the customer paid for the line after every discount, with `vat_amount = vatInside(paid_gross)`; refunds, revenue per unit and the fiscal figures read it and the carried VAT by running totals (`round(x·k/n)` after minus before). No discount share is re-derived at return time for an INCLUSIVE order.
+- **Quote contract: add, never repurpose.** `QuoteLineResponse` gains a distinctly named net-before-share field and `lineGross`; the basket gains `taxInclusive` and `vatByRate`; `PricingClient.parseQuote` reads the new field when present and the old identity (`lineTotal − discount`, SJ-D20) otherwise. The mesh deploys in any order.
+- **Basket and staff discounts are shared by gross value, largest remainder, then each line's VAT is recomputed from its final gross**, so a point-of-sale discount reduces VAT. Zero-rated lines do not absorb relief that belongs to taxed lines.
+- **The silent standard-rate fallback is replaced, for a retail-mode business, by a refusal and a list.** An `EXCLUSIVE` business keeps today's fallback so nothing existing breaks.
+- **The importer writes prices in the list's mode and never falls back to "any list".** Its price step passes the tax mode from its mapping and refuses a mismatch; the old supplier CSV's price step is refused when the target list is `INCLUSIVE`, since it writes trade prices ([catalogue-import](catalogue-import.md)).
+- **One receipt document, produced on the server** (`GET /orders/{id}/receipt-document`, built by a pure `ReceiptDocument`), used by the POS, the ESC/POS print and later the email, so three renderers cannot drift. The QR payload is unchanged.
+
+## Flow Tests entry
+
+Adds a "VAT-inclusive pricing" flow under Catalogue, pricing and promotions and extends Ringing up a sale and Returns; cases are added with the build.
