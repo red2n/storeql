@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
@@ -9,6 +12,7 @@ import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/core/offline/offline_queue.dart';
 import 'package:storeql_app/core/storage/app_storage.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
+import 'package:storeql_app/features/pos/cash_providers.dart';
 import 'package:storeql_app/features/pos/pos_providers.dart';
 import 'package:storeql_app/features/pos/pos_session_providers.dart';
 import 'package:storeql_app/features/pos/tender_screen.dart';
@@ -126,10 +130,29 @@ class _Server implements HttpClientAdapter {
       .toList();
 }
 
+/// The drawer the terminal has read, one read per step (the last repeats): a
+/// session id, `null` for none open, or [down] for a read that fails.
+class _Drawer extends SaleTillNotifier {
+  _Drawer(this.steps);
+
+  static const down = 'down';
+
+  final List<String?> steps;
+  int reads = 0;
+
+  @override
+  Future<String?> build() async {
+    final step = steps[math.min(reads++, steps.length - 1)];
+    if (step == down) throw StateError('payment-svc is down');
+    return step;
+  }
+}
+
 Future<(_Server, ProviderContainer)> _pump(
   WidgetTester tester, {
   String? redeemRefusal,
   bool exchange = false,
+  List<Override> overrides = const [],
 }) async {
   tester.view.physicalSize = const Size(800, 1200);
   tester.view.devicePixelRatio = 1;
@@ -161,6 +184,7 @@ Future<(_Server, ProviderContainer)> _pump(
         posExchangeSettlementProvider.overrideWith((ref) =>
             const PosExchangeSettlement(
                 orderId: 'order-xchg', due: 4.0, currency: 'GBP', lines: [_jam])),
+      ...overrides,
     ],
     child: const MaterialApp(home: Scaffold(body: TenderScreen())),
   ));
@@ -242,4 +266,114 @@ void main() {
     expect(container.read(posCartProvider), isNotEmpty,
         reason: 'the exchange never touched the sale in the cart');
   });
+
+  // The card is the tender, so the drawer it is rung on is named on the redeem
+  // itself: order-svc carries it on GiftCardRedeemed and payment-svc records the
+  // GIFT_CARD tender in that drawer while it is this business's open session at
+  // the order's store, else "not at a till". A charge is never refused over it,
+  // so there is no second try without it.
+  group('the drawer a gift card is charged on', () {
+    testWidgets('the redeem names the open drawer, under a UUIDv7 key',
+        (tester) async {
+      final (server, container) = await _pump(tester,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer(['till-1']))]);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+
+      await _giftCardAndComplete(tester);
+
+      final redeem = server.posts('/gift-cards/GC-1/redeem').single;
+      expect(redeem.data,
+          {'amount': 12.0, 'orderId': 'order-1', 'tillSessionId': 'till-1'});
+      expect(isV7(redeem.headers['Idempotency-Key'] as String), isTrue);
+      expect(server.posts('/payments'), isEmpty);
+      expect(find.text('Sale complete'), findsOneWidget);
+    });
+
+    testWidgets('with no drawer open it names none', (tester) async {
+      final (server, container) = await _pump(tester,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer([null]))]);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+
+      await _giftCardAndComplete(tester);
+
+      final redeem = server.posts('/gift-cards/GC-1/redeem').single;
+      expect(redeem.data, {'amount': 12.0, 'orderId': 'order-1'},
+          reason: 'no guess: with no drawer the card is charged "not at a till"');
+      expect(isV7(redeem.headers['Idempotency-Key'] as String), isTrue);
+      expect(find.text('Sale complete'), findsOneWidget);
+    });
+
+    testWidgets(
+        'a drawer the terminal could not read a moment ago is read again, so '
+        'the redeem still names it', (tester) async {
+      final (server, container) = await _pump(tester, overrides: [
+        saleTillProvider.overrideWith(() => _Drawer([_Drawer.down, 'till-7']))
+      ]);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+
+      await _giftCardAndComplete(tester);
+
+      expect(server.posts('/gift-cards/GC-1/redeem').single.data,
+          {'amount': 12.0, 'orderId': 'order-1', 'tillSessionId': 'till-7'});
+    });
+
+    testWidgets(
+        "an exchange's difference paid by gift card names the drawer too",
+        (tester) async {
+      final (server, container) = await _pump(tester,
+          exchange: true,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer(['till-1']))]);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+
+      await _giftCardAndComplete(tester);
+
+      expect(server.posts('/gift-cards/GC-1/redeem').single.data, {
+        'amount': 4.0,
+        'orderId': 'order-xchg',
+        'tillSessionId': 'till-1',
+      });
+    });
+
+    testWidgets(
+        'a sale the network drops on is queued with the drawer, so its redeem '
+        'names it when it is replayed', (tester) async {
+      final (server, container) = await _pump(tester,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer(['till-1']))]);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+      // The line drops for the redeem: the sale is kept on the till.
+      container.read(apiClientProvider).dio.httpClientAdapter =
+          _DropsRedeem(server);
+
+      await _giftCardAndComplete(tester);
+
+      final queued = container.read(offlineQueueProvider).single;
+      expect(queued.tenders.single.giftCardCode, 'GC-1');
+      expect(queued.tenders.single.body['tillSessionId'], 'till-1');
+    });
+  });
+}
+
+/// The network is gone for the redeem; everything else is answered.
+class _DropsRedeem implements HttpClientAdapter {
+  _DropsRedeem(this.server);
+
+  final _Server server;
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+      RequestOptions o, Stream<List<int>>? s, Future<void>? c) {
+    if (o.path.endsWith('/redeem')) {
+      throw DioException(
+          requestOptions: o, type: DioExceptionType.connectionError);
+    }
+    return server.fetch(o, s, c);
+  }
 }

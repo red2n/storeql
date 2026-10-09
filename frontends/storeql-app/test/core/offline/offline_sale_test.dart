@@ -144,6 +144,60 @@ void main() {
     });
   });
 
+  group('the drawer a tender was rung on', () {
+    const drawer = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d70';
+
+    test('is the one the tender was taken with, and none when it named none',
+        () {
+      expect(
+          const OfflineTender(
+              body: {'method': 'CASH', 'tillSessionId': drawer},
+              amount: 5.0).tillSessionId,
+          drawer);
+      expect(const OfflineTender(body: {'method': 'CASH'}, amount: 5.0).tillSessionId,
+          isNull);
+      expect(
+          const OfflineTender(
+              body: {'method': 'CASH', 'tillSessionId': ''},
+              amount: 5.0).tillSessionId,
+          isNull,
+          reason: 'an empty id is no drawer');
+      expect(
+          const OfflineTender(
+              body: {'method': 'CASH', 'tillSessionId': null},
+              amount: 5.0).tillSessionId,
+          isNull);
+    });
+
+    test('survives persistence with the sale', () {
+      final sale = _sale(tenders: const [
+        OfflineTender(
+            body: {'method': 'GIFT_CARD', 'tillSessionId': drawer},
+            amount: 5.0,
+            giftCardCode: 'GC-1'),
+      ]);
+
+      final back = OfflineSale.fromJson(sale.toJson());
+
+      expect(back.tenders.single.tillSessionId, drawer);
+    });
+
+    test('is on the gift-card redeem a tender owes, and only when there is one',
+        () {
+      const named = OfflineTender(
+          body: {'method': 'GIFT_CARD', 'tillSessionId': drawer},
+          amount: 5.0,
+          giftCardCode: 'GC-1');
+      const unnamed = OfflineTender(
+          body: {'method': 'GIFT_CARD'}, amount: 5.0, giftCardCode: 'GC-1');
+
+      expect(giftCardRedeemBody(named, 'order-1'),
+          {'amount': 5.0, 'orderId': 'order-1', 'tillSessionId': drawer});
+      expect(giftCardRedeemBody(unnamed, 'order-1'),
+          {'amount': 5.0, 'orderId': 'order-1'});
+    });
+  });
+
   group('OfflineSale', () {
     test('round-trips through JSON with its idempotency base intact', () {
       // The id IS the idempotency base. If persistence lost or changed it, every

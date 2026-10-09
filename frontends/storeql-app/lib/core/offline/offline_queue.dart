@@ -264,7 +264,7 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
           if (!t.redeemDone) {
             await dio.post(
               '/${ApiConstants.order}/gift-cards/$code/redeem',
-              data: {'amount': t.amount, 'orderId': current.orderId},
+              data: giftCardRedeemBody(t, current.orderId),
               options: Options(
                   headers: {'Idempotency-Key': derivedId(current.id, 'gift:$i')}),
             );

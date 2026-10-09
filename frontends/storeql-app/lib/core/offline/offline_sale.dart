@@ -213,6 +213,15 @@ class OfflineTender {
   /// records the tender from that); any other once its payment is recorded.
   bool get isComplete => giftCardCode != null ? redeemDone : tenderDone;
 
+  /// The till session (the drawer) the sale was rung on, as it was when the
+  /// tender was taken: kept in [body], so a sale that waited for the network is
+  /// counted in the drawer it was rung on, not the one open when it replays.
+  /// Null when none was open.
+  String? get tillSessionId {
+    final id = body['tillSessionId'];
+    return id is String && id.isNotEmpty ? id : null;
+  }
+
   OfflineTender copyWith({bool? tenderDone, bool? redeemDone}) => OfflineTender(
         body: body,
         amount: amount,
@@ -322,6 +331,26 @@ const _permanentConflicts = {
 bool cardApprovalAlreadyRecorded(Object error, Map<String, dynamic> body) =>
     body['terminalPaymentId'] != null &&
     apiErrorCode(error) == 'TERMINAL_ATTEMPT_ALREADY_RECORDED';
+
+/// The body of order-svc's `POST /gift-cards/{code}/redeem` for [tender], the
+/// card that pays towards [orderId]: the amount, the order and, when the sale
+/// was rung on a drawer, that drawer.
+///
+/// The card is the tender, so it names the drawer a typed tender would
+/// ([OfflineTender.tillSessionId]): order-svc carries it on `GiftCardRedeemed`,
+/// and payment-svc records the GIFT_CARD tender in that drawer while it is the
+/// business's open session at the order's store, else "not at a till". The
+/// redeem is never refused over it: only payment-svc's `POST /payments` answers
+/// a drawer it will not count (and [postTender] then sends that tender again
+/// naming none), so a redeem has no second try without the drawer.
+///
+/// One body for the live press and for a replay from the offline queue.
+Map<String, dynamic> giftCardRedeemBody(OfflineTender tender, String? orderId) =>
+    {
+      'amount': tender.amount,
+      'orderId': orderId,
+      'tillSessionId': ?tender.tillSessionId,
+    };
 
 /// What payment-svc answers a tender that names a till session it will not
 /// count the money in: not open any more, at another store, or not there.

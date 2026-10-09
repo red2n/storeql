@@ -968,7 +968,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           try {
             await dio.post(
               '/${ApiConstants.order}/gift-cards/$giftCode/redeem',
-              data: {'amount': t.amount, 'orderId': orderId},
+              data: giftCardRedeemBody(t, orderId),
               options: Options(
                   headers: {'Idempotency-Key': derivedId(idemBase, 'gift:$i')}),
             );

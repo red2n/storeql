@@ -432,6 +432,49 @@ void main() {
     expect(h.adapter.countOf('/payments'), 0);
   });
 
+  test('a replayed gift-card redeem names the drawer the sale was rung on, as it was',
+      () async {
+    // The card is the tender, so the redeem carries the drawer the tender
+    // would: the one stored with the sale, not the one open when it replays.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(tenders: const [
+      OfflineTender(
+          body: {'method': 'GIFT_CARD', 'tillSessionId': _drawer},
+          amount: 5.0,
+          giftCardCode: 'GC-1'),
+      OfflineTender(
+          body: {'method': 'CASH', 'tillSessionId': _drawer}, amount: 2.0),
+    ]));
+    await notifier.sync();
+
+    final redeem = h.adapter.calls.singleWhere((c) => c.path.endsWith('/redeem'));
+    expect(redeem.data,
+        {'amount': 5.0, 'orderId': 'order-1', 'tillSessionId': _drawer});
+    expect(redeem.idempotencyKey, derivedId(_saleId, 'gift:0'));
+    expect(isV7(redeem.idempotencyKey!), isTrue);
+    final payment = h.adapter.calls.singleWhere((c) => c.path.endsWith('/payments'));
+    expect((payment.data as Map)['tillSessionId'], _drawer);
+    expect(h.container.read(offlineQueueProvider), isEmpty);
+  });
+
+  test('a gift-card sale queued with no drawer replays its redeem naming none',
+      () async {
+    // Rung with no till open (or queued by a build that named none): the card
+    // is charged "not at a till", never in whichever drawer is open at replay.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(tenders: const [
+      OfflineTender(
+          body: {'method': 'GIFT_CARD'}, amount: 5.0, giftCardCode: 'GC-1'),
+    ]));
+    await notifier.sync();
+
+    final redeem = h.adapter.calls.singleWhere((c) => c.path.endsWith('/redeem'));
+    expect((redeem.data as Map).containsKey('tillSessionId'), isFalse);
+    expect(isV7(redeem.idempotencyKey!), isTrue);
+  });
+
   test('a redeemed gift card is not charged again on a later replay', () async {
     final h = _harness();
     final notifier = h.container.read(offlineQueueProvider.notifier);
