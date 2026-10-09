@@ -1938,6 +1938,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   /// An exchange's order is not the sale's to cancel: it stands with the
   /// return it settles. An order that cannot be cancelled now is still let
   /// go, and remembered by the till as such.
+  ///
+  /// It names no drawer: an order is let go only when nothing is recorded on
+  /// it ([HeldCardPayment.mayBeRecorded] is empty), so no cash is handed back
+  /// (unlike [_closeHeld], which cancels a sale that has tenders recorded).
   static Future<void> _giveUpOrder(Dio dio, HeldCardPayment held) async {
     final orderId = held.orderId;
     if (orderId == null || orderId.isEmpty || held.sale.settlement != null) {
@@ -2373,11 +2377,21 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     );
     if (reason == null || !mounted) return;
     setState(() => _processing = true);
+    // The cash the earlier sale took is handed back out of the drawer open now,
+    // so the cancel names it: order-svc carries it on OrderCancelled and
+    // payment-svc counts the refund there while it is this business's open
+    // session at the tender's store, else "not at a till". It is settled as a
+    // sale's is ([_completeClaimed]) - a read of the open till still in flight,
+    // or failed a moment ago, is given a few seconds, never longer - and the
+    // cancel is never refused over it, so there is no second try without it. The
+    // notifier is kept before the first await because `ref` goes with the screen.
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    if (!tillCtl.settled) await tillCtl.settle();
     final orderId = held.orderId;
     if (orderId != null && orderId.isNotEmpty) {
       try {
         await dio.post('/${ApiConstants.order}/orders/$orderId/cancel',
-            data: {'reason': reason});
+            data: {'reason': reason, 'tillSessionId': ?tillCtl.drawer});
       } catch (e) {
         // A cancel whose answer was lost, then sent again, finds the order
         // already cancelled: that is the cancel done.

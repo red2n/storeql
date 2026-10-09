@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -133,6 +134,28 @@ class _Drawer extends SaleTillNotifier {
 
   @override
   Future<String?> build() async => id;
+}
+
+/// A drawer whose reads are scripted: each read takes the next step (the last
+/// repeats) - a session id, `null` for none open, or [down] for a read that
+/// fails - and waits on [hold] first while it is set.
+class _ScriptedDrawer extends SaleTillNotifier {
+  _ScriptedDrawer(this.steps);
+
+  static const down = 'down';
+
+  final List<String?> steps;
+  Completer<void>? hold;
+  int reads = 0;
+
+  @override
+  Future<String?> build() async {
+    final step = steps[math.min(reads++, steps.length - 1)];
+    final waiting = hold;
+    if (waiting != null) await waiting.future;
+    if (step == down) throw StateError('payment-svc is down');
+    return step;
+  }
 }
 
 const _jam = PosLine(
@@ -3319,6 +3342,192 @@ void main() {
       expect(find.text('Sale complete'), findsOneWidget);
       expect(server.termKeys, hasLength(1));
       expect(server.orderKeys, hasLength(1));
+    });
+  });
+
+  // A manager cancels the earlier sale of a held card payment (its cash, gift
+  // card or store credit already recorded on its order, so a new order would
+  // take them again): the cash it took is handed back out of a drawer, so the
+  // cancel names the one open now - order-svc carries it on OrderCancelled and
+  // payment-svc counts the refund there while it is this business's open
+  // session at the tender's store, else "not at a till". A cancel is never
+  // refused over it, so there is no second try without it.
+  group('the drawer a cancelled earlier sale hands back from', () {
+    /// A held sale with cash recorded on its order and the basket then changed,
+    /// up to the dialog where a manager may cancel the earlier sale.
+    Future<(_Server, ProviderContainer)> toTheEarlierSale(
+        WidgetTester tester, List<Override> overrides) async {
+      final server = _Server(presses: {
+        0: ['DECLINED'],
+        1: ['APPROVED'],
+      });
+      final container = await _pump(tester, server,
+          device: _MemStorage(), role: 'MANAGER', overrides: overrides);
+      await _addCash(tester, amount: '6.00');
+      await _addCard(tester);
+      await _finish(tester);
+      await tester.pump(const Duration(seconds: 5)); // the snackbar goes
+      await tester.pumpAndSettle();
+      container.read(posCartProvider.notifier).setQty('v-jam', 3);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Remove tender').last);
+      await tester.pumpAndSettle();
+      await _addCash(tester);
+      await _pressComplete(tester);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('tender-held-recorded')), findsOneWidget);
+      return (server, container);
+    }
+
+    /// Cancel the earlier sale, saying why, and press the confirming button.
+    Future<void> cancelIt(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('tender-held-close')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('tender-close-reason-field')),
+          'Customer added a jar');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('tender-close-confirm')));
+      await tester.pump(const Duration(milliseconds: 1));
+    }
+
+    testWidgets('the cancel names the open drawer, which hands the cash back',
+        (tester) async {
+      final (server, container) = await toTheEarlierSale(tester,
+          [saleTillProvider.overrideWith(() => _Drawer('drawer-1'))]);
+
+      await cancelIt(tester);
+      await tester.pumpAndSettle();
+
+      final cancel = server.orderCancels.single;
+      expect(cancel.path, endsWith('/orders/order-1/cancel'));
+      expect(cancel.data,
+          {'reason': 'Customer added a jar', 'tillSessionId': 'drawer-1'});
+      expect(container.read(heldCardPaymentProvider), isNull);
+    });
+
+    testWidgets('with no drawer open it names none, and is not held back',
+        (tester) async {
+      final (server, container) = await toTheEarlierSale(
+          tester, [saleTillProvider.overrideWith(() => _Drawer(null))]);
+
+      await cancelIt(tester);
+      await tester.pumpAndSettle();
+
+      expect(server.orderCancels.single.data, {'reason': 'Customer added a jar'},
+          reason: 'no guess: with no drawer the cash is "not at a till"');
+      expect(container.read(heldCardPaymentProvider), isNull);
+    });
+
+    testWidgets(
+        'a drawer being read again is waited for, not skipped: the cancel '
+        'names the drawer it finds', (tester) async {
+      final drawer = _ScriptedDrawer(['drawer-1', 'drawer-2']);
+      final (server, container) = await toTheEarlierSale(
+          tester, [saleTillProvider.overrideWith(() => drawer)]);
+      // The server would not count the first drawer: the terminal reads again,
+      // and the answer is still on its way when the cancel is confirmed.
+      drawer.hold = Completer<void>();
+      container.read(saleTillProvider.notifier).refused('drawer-1');
+      await tester.pump();
+
+      await cancelIt(tester);
+      await tester.pump(const Duration(seconds: 1));
+      expect(server.orderCancels, isEmpty,
+          reason: 'the drawer is still being looked up');
+
+      drawer.hold!.complete();
+      await tester.pumpAndSettle();
+
+      expect(server.orderCancels.single.data,
+          {'reason': 'Customer added a jar', 'tillSessionId': 'drawer-2'});
+    });
+
+    testWidgets(
+        'a drawer the terminal could not read a moment ago is read again, so '
+        'the cancel still names it', (tester) async {
+      final drawer =
+          _ScriptedDrawer(['drawer-1', _ScriptedDrawer.down, 'drawer-3']);
+      final (server, container) = await toTheEarlierSale(
+          tester, [saleTillProvider.overrideWith(() => drawer)]);
+      container.read(saleTillProvider.notifier).refused('drawer-1');
+      await tester.pumpAndSettle();
+      expect(container.read(saleTillProvider).hasError, isTrue);
+
+      await cancelIt(tester);
+      await tester.pumpAndSettle();
+
+      expect(server.orderCancels.single.data,
+          {'reason': 'Customer added a jar', 'tillSessionId': 'drawer-3'});
+    });
+
+    testWidgets(
+        'a read that never answers does not stop the cancel: after a few '
+        'seconds it goes out naming none, and the till can sell again',
+        (tester) async {
+      final drawer = _ScriptedDrawer(['drawer-1', 'drawer-2']);
+      final (server, container) = await toTheEarlierSale(
+          tester, [saleTillProvider.overrideWith(() => drawer)]);
+      drawer.hold = Completer<void>(); // the payment service never answers
+      container.read(saleTillProvider.notifier).refused('drawer-1');
+      await tester.pump();
+
+      await cancelIt(tester);
+      await tester.pump(const Duration(seconds: 1));
+      expect(server.orderCancels, isEmpty,
+          reason: 'it gives the read a moment first');
+      for (var i = 0; i < 4 && server.orderCancels.isEmpty; i++) {
+        await tester.pump(const Duration(seconds: 3));
+      }
+      await tester.pumpAndSettle();
+
+      expect(server.orderCancels.single.data, {'reason': 'Customer added a jar'});
+      expect(container.read(heldCardPaymentProvider), isNull,
+          reason: 'the earlier sale is let go: the till can sell again');
+      drawer.hold!.complete();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets(
+        'an order let go unfinished hands back nothing, so its cancel names '
+        'no drawer', (tester) async {
+      // A card that took nothing, then the basket changed: the held order has
+      // no tender recorded on it, so giving it up moves no cash.
+      final server = _Server(presses: {
+        0: ['TIMED_OUT'],
+        1: ['APPROVED'],
+      });
+      final container = await _pump(tester, server,
+          device: _MemStorage(),
+          role: 'MANAGER',
+          overrides: [saleTillProvider.overrideWith(() => _Drawer('drawer-1'))]);
+      await _addCard(tester);
+      await _finish(tester);
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+
+      container.read(posCartProvider.notifier).setQty('v-jam', 3);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Remove tender').first);
+      await tester.pumpAndSettle();
+      await _addCash(tester);
+      await _pressComplete(tester);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('tender-held-settle')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('tender-settle-not-taken')));
+      await tester.enterText(
+          find.byKey(const Key('tender-settle-reason-field')), 'Screen blank');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('tender-settle-confirm')));
+      await _letTimePass(tester);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sale complete'), findsOneWidget);
+      final cancel = server.orderCancels.single;
+      expect(cancel.path, endsWith('/orders/order-1/cancel'));
+      expect((cancel.data as Map).containsKey('tillSessionId'), isFalse,
+          reason: 'nothing was recorded on that order: nothing is handed back');
+      expect(container.read(heldCardPaymentProvider), isNull);
     });
   });
 
