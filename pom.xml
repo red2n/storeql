@@ -104,6 +104,9 @@
 
         <!-- Quality tooling versions -->
         <archunit.version>1.5.1</archunit.version>
+        <!-- Mockito: the one version every module's unit tests run on (gateway, common-web, order,
+             payment, customer). Raised here once, never in a module (22.11). -->
+        <mockito.version>5.24.0</mockito.version>
         <spotbugs-plugin.version>4.10.4.1</spotbugs-plugin.version>
         <pmd-plugin.version>3.28.0</pmd-plugin.version>
         <fmt-plugin.version>2.29</fmt-plugin.version>
@@ -264,6 +267,14 @@
                 <artifactId>archunit-junit5</artifactId>
                 <version>${archunit.version}</version>
                 <scope>compile</scope>
+            </dependency>
+
+            <!-- Quality: Mockito — unit-test doubles; the version is declared once, here -->
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-junit-jupiter</artifactId>
+                <version>${mockito.version}</version>
+                <scope>test</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
