@@ -84,10 +84,22 @@ Fixes arrive as pull requests: `.github/dependabot.yml` watches Maven, the app's
 
 `docker-publish.yml`'s `cleanup` job runs after every publish and keeps only the **2 most recent tagged versions** per package (`keep-n-tagged: 2`), deleting older versions and any untagged/dangling manifests. That means:
 
-- You can always roll back **one** build (the previous `latest`/tag).
-- Going back further than that requires re-tagging from source (`git tag` + re-push, or `workflow_dispatch` off an older commit) — older GHCR versions are not kept indefinitely, by design.
+- You can always roll back **one** build of `main` (the previous `latest`).
+- **A released version is never pruned.** An image carrying a version tag (`0.1.0`: three dotted numbers, which no other tag this workflow makes has) is excluded from the cleanup (`exclude-tags: '*.*.*'`, checked by `scripts/supply-chain-check.py`), and the manual `scripts/ghcr-prune.sh` skips it the same way. A customer's rollback target stays pullable, with its attestations and signature. Builds of `main` between releases still age out.
 - Signatures and attestations are stored in GHCR as children of the image they belong to. The cleanup action treats them that way: they stay while their image stays and go when it goes (`delete-orphaned-images` sweeps any whose image is already gone), so keeping two versions keeps two *verifiable* versions.
 - Cleanup runs with `if: always()`, so one flaky service image in a publish run doesn't leave the other 14 packages un-pruned.
+
+## Deploying a release to a pilot or production host
+
+A host runs a **named release**, never `latest`: `STOREQL_TAG=0.1.1` in `.env` selects every image, and `docker-compose.prod.yml` refuses to start without it. Set up once per host: `STOREQL_ENV=prod` in `.env` (what the host says it is; `scripts/redeploy.sh --wipe-data` is refused unless it is `dev` or `ci`), and the two data volumes created by hand, `docker volume create storeql_pgdata storeql_backups`, which the prod overlay declares **external** so `docker compose down -v` or a changed project name cannot remove them (bind `storeql_backups` to a disk of its own).
+
+```
+scripts/deploy-release.sh --check 0.1.1     # pulls the images, checks the volumes and the host; touches nothing
+scripts/deploy-release.sh 0.1.1             # the upgrade, in a closed window
+scripts/deploy-release.sh --rollback        # back to the release the host ran before the last upgrade
+```
+
+The upgrade takes a **backup and verifies it** (checksum, decryption, `pg_restore` reading it end to end) before anything is stopped, stops the edge so nobody is served half-migrated, starts every other service on the new images (each migrates its own schema first in `strict` mode and is not ready until it has), waits for them, starts the edge, makes a smoke request, and only then records the release (`.storeql-deploy/release`, with the previous one and a line per deploy in `history.jsonl`). A failure after the edge is stopped undoes nothing by itself: it prints the exact rollback line and the backup to restore. **Rolling back is running the previous images**, which is safe because every migration since the first tag is additive; the one exception is a release carrying a `-- storeql:contract` migration, which an older image cannot run on, and that rolls back by restoring the pre-upgrade backup (`docs/BACKUP-AND-RESTORE.md`). `scripts/deploy-release-selftest.sh` proves the order and every refusal against a fake `docker`; the policy is [intent/forward-only-migrations](../intent/forward-only-migrations.md).
 
 ## Why `docker-publish.yml` builds per-service, not per-run
 

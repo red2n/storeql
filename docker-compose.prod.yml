@@ -16,6 +16,9 @@
 #     Forcing each variable to be set makes every ${VAR:-dev_default} consumer
 #     elsewhere in the base file resolve to the real value too.
 #
+# A named release, and data that survives: STOREQL_TAG must be set (the release, 0.1.0), and the
+# Postgres and backup volumes are external (see the volumes block below).
+#
 # Firewall: allow ports 80 and 443 inbound only.
 # All other host ports (8090 gateway, 8088 storeql-app, 8081 Kafka UI, etc.) are
 # bound to 127.0.0.1 in docker-compose.yml so they are unreachable on the public
@@ -76,6 +79,10 @@ services:
       # Restore the production rate-limit budget (dev file bumps to 30,000 to
       # avoid 429s while the k6 multi-tenant load test drives ~50 VUs from one IP)
       storeql.gateway.rate-limit.requests-per-minute: "100"
+      # The release this host runs: every image in the base file is `${STOREQL_TAG:-latest}`, and a
+      # customer's host runs a named release (0.1.0), never `latest`. Required here so compose will not
+      # start without one; scripts/deploy-release.sh sets it and refuses anything but MAJOR.MINOR.PATCH.
+      STOREQL_RELEASE: ${STOREQL_TAG:?Set STOREQL_TAG in .env to the release to run, for example 0.1.0 - never latest}
 
   # ── Datastore secrets: required in production (fail-fast) ─────────────────────
   # Each override re-references the secret with ${VAR:?...}. If the var is unset,
@@ -200,3 +207,13 @@ volumes:
     name: storeql_caddy_data
   caddy_config:
     name: storeql_caddy_config
+  # The two volumes a customer's data lives in are made once by hand (docker volume create
+  # storeql_pgdata storeql_backups) and are external here, so `docker compose down -v` and a changed
+  # project name cannot remove or orphan them, and a host without them refuses to start rather than
+  # starting an empty database. The backups volume should be bound to a disk of its own.
+  pgdata:
+    external: true
+    name: storeql_pgdata
+  backups:
+    external: true
+    name: storeql_backups

@@ -506,6 +506,10 @@ jobs:
           package: ${{ matrix.package }}
           # Keep the 2 most recent tagged versions (current + previous build).
           keep-n-tagged: 2
+          # A release is kept for ever: a customer's rollback target must not age out. A version tag
+          # is three dotted parts (0.1.0), which no other tag this workflow makes has; an image that
+          # carries one stays, with its attestations and signature.
+          exclude-tags: '*.*.*'
           # Remove dangling/untagged manifests left behind by older pushes. The action counts an
           # image's platform layers, attestations and cosign signatures as its children: they go
           # when it goes and stay while it stays, and are never pruned as "untagged" by themselves.

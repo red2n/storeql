@@ -138,6 +138,34 @@ jobs:
           scripts/migration-freeze-check.py --self-test
           scripts/migration-freeze-check.py
 
+      - name: Prove that a data wipe is refused on a machine that is not dev or ci
+        run: scripts/redeploy-guard-selftest.sh
+
+      - name: Prove the deploy script (backup before stop, the refusals, the rollback line)
+        run: scripts/deploy-release-selftest.sh
+
+  # The upgrade path (intent/forward-only-migrations.md), on a throwaway Postgres with the Flyway the
+  # services run: release N+1 migrates N's database and keeps its data, N's code still runs on an
+  # additive N+1, a contract release is not rollback-safe, an edited published file is refused.
+  upgrade:
+    name: Upgrade path
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 25 (the jars still target release 21)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Prove the upgrade path
+        run: |
+          mvn -q -B -pl shared/common-service -am dependency:build-classpath -Dmdep.outputFile="$RUNNER_TEMP/flyway.cp"
+          FLYWAY_CLASSPATH="$(cat "$RUNNER_TEMP/flyway.cp")" scripts/upgrade-selftest.sh
+
   # ── Alerting ───────────────────────────────────────────────────────────────
   # The alert rules (promtool check and unit tests: a healthy service must not alert, a restart must)
   # and the Prometheus and Alertmanager configs, read by the tools that will read them.

@@ -4,7 +4,8 @@
 # the web UI (admin/storefront/POS) + Swagger UI (API docs), all in Docker.
 #
 #   ./scripts/redeploy.sh                 # rebuild jars + web bundle + all storeql images
-#   ./scripts/redeploy.sh --wipe-data     # ALSO drop DB/Kafka volumes (fresh data)
+#   ./scripts/redeploy.sh --wipe-data     # ALSO drop DB/Kafka volumes (fresh data); only when
+#                                         #   STOREQL_ENV is dev or ci (refused otherwise)
 #   ./scripts/redeploy.sh --no-build      # skip Maven + Flutter (reuse existing artifacts)
 #   ./scripts/redeploy.sh --pull          # DANGER: docker system prune -a (wipes ALL local
 #                                         #   images/containers, not just StoreQL), then pull
@@ -80,6 +81,18 @@ env_set() {
     printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
   fi
 }
+
+# ── 0b. Wiping data is for a developer's machine and CI, never for a pilot or production ────────
+# STOREQL_ENV says what this machine is: dev, ci, or prod (anything else, or nothing, is not dev).
+# --wipe-data drops the database volumes and writes a new platform-admin credential, so it is
+# refused before anything is touched. A customer's data is restored from a backup, never wiped.
+STOREQL_ENV="${STOREQL_ENV:-$(env_get STOREQL_ENV || true)}"
+if $WIPE_DATA && [ "$STOREQL_ENV" != "dev" ] && [ "$STOREQL_ENV" != "ci" ]; then
+  red "--wipe-data refused: STOREQL_ENV is '${STOREQL_ENV:-unset}', not dev or ci."
+  red "It drops the database volumes. If this is a developer machine, put STOREQL_ENV=dev in .env;"
+  red "if it holds a customer's data, restore from a backup instead (docs/BACKUP-AND-RESTORE.md)."
+  exit 1
+fi
 
 # The seal on iam-svc's token signing keys + config-svc shared token: process-wide infra
 # secrets, not tied to any DB row, so generate once on first sight and never rotate

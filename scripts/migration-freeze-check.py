@@ -13,6 +13,9 @@ forward migration. This check reads the repository against the latest release ta
     naming a release tag that exists, is reachable from HEAD and is at least one release older than the
     latest tag.
 
+It also reads the docs that state the rule (CLAUDE.md, docs/ARCHITECTURE.md, docs/coding-standards.md,
+.claude/commands/migration.md): each must carry the policy marker and none may keep the old "DEV only" wording.
+
 Before any tag exists the fold rule still applies, so the check passes and says so. Repeatable (R__) and
 afterMigrate files are exempt (they must stay idempotent).
 
@@ -32,6 +35,16 @@ DIR_RE = re.compile(r"^((?:services|platform|shared)/[^/]+)/src/main/resources/d
 VERSION_RE = re.compile(r"^V(\d+(?:\.\d+)*)__.+\.sql$")
 MARKER_RE = re.compile(r"^--\s*storeql:contract\s+after=(v\d+\.\d+\.\d+)\s+reason=(\S.*)$")
 TAG_PATTERN = "v[0-9]*.[0-9]*.[0-9]*"
+POLICY_DOCS = ["CLAUDE.md", "docs/ARCHITECTURE.md", "docs/coding-standards.md", ".claude/commands/migration.md"]
+POLICY_MARKER = "<!-- migration-policy:v1 -->"
+STALE_WORDING = [
+    "While the product is in DEV (nothing deployed)",
+    "While the product is in DEV a migration only",
+    "The product is in DEV and nothing is deployed",
+    "rule is revisited with the owner",
+    "numbers run 1..n, no gaps",
+    "files `1..n` with no gaps",
+]
 DESTRUCTIVE = [
     (re.compile(r"\bDROP\s+(TABLE|COLUMN|SCHEMA|TYPE)\b", re.I), "DROP"),
     (re.compile(r"\bRENAME\b", re.I), "RENAME"),
@@ -102,6 +115,23 @@ def tag_is_older(root, after, latest):
                       capture_output=True).returncode != 0:
         return f"names {after}, which is not an ancestor of {latest}"
     return None
+
+
+def policy_problems(root):
+    out = []
+    for rel in POLICY_DOCS:
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            out.append(f"{rel}: missing; it states the migration policy")
+            continue
+        if POLICY_MARKER not in text:
+            out.append(f"{rel}: does not carry the migration policy ({POLICY_MARKER}); it must say fold until the first tag, forward-only from it")
+        for stale in STALE_WORDING:
+            if stale in text:
+                out.append(f"{rel}: still says '{stale}'; the policy is fold until the first tag, forward-only from it")
+    return out
 
 
 def check(root):
@@ -253,6 +283,34 @@ def self_test():
     except Exception as e:  # a clone that cannot be made is a failed self-test, not a skipped one
         failures.append(f"this repository's real history could not be used: {e}")
 
+    # the docs that state the policy
+    def policy_dir(mutate=None):
+        pd = tempfile.mkdtemp()
+        for rel in POLICY_DOCS:
+            os.makedirs(os.path.dirname(os.path.join(pd, rel)) or pd, exist_ok=True)
+            with open(os.path.join(pd, rel), "w", encoding="utf-8") as f:
+                f.write("Migrations. " + POLICY_MARKER + "\n")
+        if mutate:
+            mutate(pd)
+        return pd
+
+    pd = policy_dir()
+    if policy_problems(pd):
+        failures.append(f"policy docs that carry the marker: wanted a pass, got {policy_problems(pd)}")
+    shutil.rmtree(pd)
+    pd = policy_dir(lambda d: open(os.path.join(d, "CLAUDE.md"), "w").write("Migrations. While the product is in DEV (nothing deployed) a migration only CREATEs. " + POLICY_MARKER + "\n"))
+    if not any("CLAUDE.md" in p and "still says" in p for p in policy_problems(pd)):
+        failures.append("a doc that keeps the old DEV-only wording: wanted it named")
+    shutil.rmtree(pd)
+    pd = policy_dir(lambda d: open(os.path.join(d, "docs/ARCHITECTURE.md"), "w").write("Migrations: fold.\n"))
+    if not any("docs/ARCHITECTURE.md" in p and "does not carry" in p for p in policy_problems(pd)):
+        failures.append("a doc that lost the policy marker: wanted it named")
+    shutil.rmtree(pd)
+    pd = policy_dir(lambda d: os.remove(os.path.join(d, ".claude/commands/migration.md")))
+    if not any("missing" in p for p in policy_problems(pd)):
+        failures.append("a policy doc that is gone: wanted it named")
+    shutil.rmtree(pd)
+
     if failures:
         for f in failures:
             print("SELF-TEST FAILED: " + f, file=sys.stderr)
@@ -265,6 +323,7 @@ if __name__ == "__main__":
         self_test()
         sys.exit(0)
     found, note = check(ROOT)
+    found = policy_problems(ROOT) + found
     for p in found:
         print(p, file=sys.stderr)
     if found:
