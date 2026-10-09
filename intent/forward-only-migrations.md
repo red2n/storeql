@@ -66,7 +66,7 @@ None. Backfills in a migration are one bounded set-based statement; anything lar
 - [x] `deploy-release.sh` refuses to run without a verified backup taken just before; `redeploy.sh --wipe-data` refuses unless `STOREQL_ENV` is `dev` or `ci`.
 - [x] GHCR cleanup keeps semver-tagged images; `scripts/supply-chain-check.py` fails a workflow edit that drops the exclusion; `scripts/verify-release.sh` passes on `v0.1.0`.
 - [x] The policy reads the same in CLAUDE.md, `docs/coding-standards.md`, `docs/ARCHITECTURE.md`, `.claude/commands/migration.md` and `FlywayRunner`'s message, and says "until the first tag fold, from the tag forward-only" — `scripts/migration-freeze-check.py` reads the four docs for the policy marker and the stale wording (self-test: 4 more cases).
-- [ ] `scripts/backup-drill.sh` passes after the last fold and before the tag.
+- [x] `scripts/backup-drill.sh` passes after the last fold and before the tag — 9 Oct 2026 11:32 UTC on the rebuilt stack (all service schemas, including the importer's and the card rule's): 447 tables and 114,548 rows restored and every count matched the manifest in 5.1 s, and point-in-time recovery served the earlier write and not the later one (entry in `docs/RESTORE-REHEARSAL.md`). Re-run it if a further schema change lands before the tag.
 
 ## Screens
 

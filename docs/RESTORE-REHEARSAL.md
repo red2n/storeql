@@ -45,3 +45,11 @@ older rehearsal, a live dump restored, from before the backup job existed. How i
 - Full restore: fresh server up 1.4s, restored with the roles re-applied and every table compared in 4.5s: **every table matched: 438 tables, 26203 rows, restore 4.0s**
 - Point in time: base backup 3.6s, WAL archived within 4.6s of the switch, recovery to `2026-10-07 15:30:09.793456+00` served in 1.6s: **the earlier write back, the later one not** (1 marker rows on the recovered server; archive_timeout 5min bounds the data at risk)
 - 18.8s in all
+
+## 2026-10-09 11:32 UTC
+
+- Drill: `scripts/backup-drill.sh` against `storeql-postgres`/`storeql`; the backup taken by the stack's backup job, restored on PostgreSQL 16.15
+- Backup `storeql-20261009T113226Z.dump`: 447 tables, 114548 rows, 6792221 bytes, encrypted no; taken in 2.7s, verified as stored (checksum, decryption, every entry) in 1.1s
+- Full restore: fresh server up 2.6s, restored with the roles re-applied and every table compared in 5.1s: **every table matched: 447 tables, 114548 rows, restore 4.0s**
+- Point in time: base backup 4.3s, WAL archived within 4.7s of the switch, recovery to `2026-10-09 11:32:43.087846+00` served in 2.7s: **the earlier write back, the later one not** (1 marker rows on the recovered server; archive_timeout 5min bounds the data at risk)
+- 23.6s in all
