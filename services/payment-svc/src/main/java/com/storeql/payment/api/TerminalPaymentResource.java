@@ -357,8 +357,12 @@ public class TerminalPaymentResource {
               + " recorded tender, the books' refund in that method and its PaymentRefunded are"
               + " written with it, and the due no longer holds the tender; an approval never"
               + " recorded on a sale has nothing in the books to reverse, so it is closed by the"
-              + " acquirer's refund only (CARD). The due ends REFUNDED_ANOTHER_WAY. Needs"
-              + " sales.refund.")
+              + " acquirer's refund only (CARD). Money handed over from a till may name"
+              + " tillSessionId, the drawer it left: that drawer's report then counts the refund"
+              + " (and a cash one lowers its expected cash). It must be this business's, open and"
+              + " at the card payment's store, judged with the refund on its transaction, and a"
+              + " retry under the same key is answered whatever became of the drawer. The due ends"
+              + " REFUNDED_ANOTHER_WAY. Needs sales.refund.")
   @APIResponse(responseCode = "200", description = "Recorded — read `state` and `anotherWay`")
   @APIResponse(
       responseCode = "400",

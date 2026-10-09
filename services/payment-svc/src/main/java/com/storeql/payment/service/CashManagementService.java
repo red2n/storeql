@@ -184,14 +184,20 @@ public class CashManagementService {
    * <p>The over/short figure is the counted cash less what the float, cash sales, cash refunds and
    * drops say should be in the drawer. Terminal — the session cannot be reopened afterwards.
    *
+   * <p>One unit of work: the session is locked (waiting for any write to the drawer already under
+   * way, which is then counted), the figures are read under that lock, the over/short is worked
+   * from them, and the session is closed with {@code TillSessionClosed} announcing the same
+   * figures. The answer is built from those figures, not read again after the commit.
+   *
    * @param tenantId owning tenant
    * @param sessionId the session to close
    * @param req the cash actually counted in the drawer
    * @param ctx caller context, checked for access to the session's store
    * @return the final totals, including over/short
    * @throws ApiException {@code TILL_SESSION_NOT_FOUND} (404) when no such session exists in this
-   *     tenant; {@code TILL_CLOSED} (400) when it is already closed; {@code CASH_AMOUNT_INVALID}
-   *     (400) for a count finer than the business's currency's minor unit, the till left open
+   *     tenant; {@code TILL_CLOSED} (400) when it is already closed; {@code TILL_ALREADY_CLOSED}
+   *     (409) when another close of it won the race; {@code CASH_AMOUNT_INVALID} (400) for a count
+   *     finer than the business's currency's minor unit, the till left open
    */
   public TillReportResponse zReport(
       UUID tenantId, UUID sessionId, CloseTillRequest req, TenantContext ctx) {
