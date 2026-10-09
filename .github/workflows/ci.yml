@@ -195,6 +195,9 @@ jobs:
       - name: Drive the backup, verify, restore and point-in-time recovery against throwaway containers
         run: scripts/backup-selftest.sh
 
+      - name: Prove the off-site copy (verified, never deletes, refuses unencrypted dumps)
+        run: scripts/offsite-backup-selftest.sh
+
   # The release path's supply-chain promises (22.10, 22.11): every published image built with an
   # SBOM and max-mode provenance, scanned for known vulnerabilities, then attested and signed by
   # digest; the release carrying its SBOM, checksums and provenance; the scan running on pull
