@@ -81,6 +81,255 @@ public class PricingClient {
   }
 
   /**
+   * The VAT codes the business has a rate for, upper-cased: what a dry run checks a file's mapped
+   * codes against, so a code with no rate is found before a till refuses to quote it.
+   *
+   * @return the codes, or empty when pricing-svc cannot be asked (nothing is then claimed either
+   *     way)
+   */
+  public java.util.Optional<java.util.Set<String>> configuredVatCodes(Caller caller) {
+    try {
+      var instance = registry.resolve(PRICING_SERVICE);
+      if (instance.isEmpty()) return java.util.Optional.empty();
+      Answered res =
+          answered(caller.stamp(webClient.get(instance.get().baseUri() + "/vat-rates")), null);
+      if (res.status() != 200) return java.util.Optional.empty();
+      try (JsonReader reader = Json.createReader(new StringReader(res.body()))) {
+        var arr = reader.readObject().getJsonArray("data");
+        java.util.Set<String> codes = new java.util.HashSet<>();
+        for (int i = 0; i < arr.size(); i++) {
+          codes.add(arr.getJsonObject(i).getString("code").toUpperCase(java.util.Locale.ROOT));
+        }
+        return java.util.Optional.of(codes);
+      }
+    } catch (RuntimeException e) {
+      LOG.log(System.Logger.Level.WARNING, "pricing-svc's VAT rates could not be read", e);
+      return java.util.Optional.empty();
+    }
+  }
+
+  /**
+   * A price list as the import needs to know it: its currency, and whether its prices include VAT.
+   */
+  public record ListInfo(String id, String currency, String taxMode, boolean active) {}
+
+  private String baseOrFail() {
+    return registry
+        .resolve(PRICING_SERVICE)
+        .orElseThrow(
+            () ->
+                new ApiException(
+                    503,
+                    "PRICING_UNAVAILABLE",
+                    "no healthy pricing-svc instance in discovery",
+                    List.of(),
+                    null))
+        .baseUri();
+  }
+
+  private static ApiException noAnswer(String what, Throwable cause) {
+    LOG.log(System.Logger.Level.WARNING, "pricing-svc gave no answer: " + what, cause);
+    return new ApiException(503, "PRICING_UNAVAILABLE", what, List.of(), cause);
+  }
+
+  /**
+   * A price list of the business, as pricing-svc holds it.
+   *
+   * @throws ApiException 404 {@code IMPORT_PRICE_LIST_NOT_FOUND} when it is not the business's; 503
+   *     when pricing-svc gave no answer
+   */
+  public ListInfo priceList(Caller caller, String id) {
+    Answered res;
+    try {
+      res = answered(caller.stamp(webClient.get(baseOrFail() + "/price-lists/" + id)), null);
+    } catch (ApiException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      throw noAnswer("the price list could not be read", e);
+    }
+    if (res.status() == 404) {
+      throw ApiException.notFound(
+          "IMPORT_PRICE_LIST_NOT_FOUND", "price list " + id + " is not one of this business's");
+    }
+    if (res.status() != 200) {
+      throw new ApiException(
+          503, "PRICING_UNAVAILABLE", "pricing-svc answered HTTP " + res.status(), List.of(), null);
+    }
+    try (JsonReader reader = Json.createReader(new StringReader(res.body()))) {
+      var d = reader.readObject().getJsonObject("data");
+      return new ListInfo(
+          d.getString("id"),
+          d.getString("currency", null),
+          d.getString("taxMode", "EXCLUSIVE"),
+          d.getBoolean("active", true));
+    } catch (RuntimeException e) {
+      throw noAnswer("the price list could not be read", e);
+    }
+  }
+
+  /** Makes an ALL-channel price list, effective now, in the given tax mode; returns its id. */
+  public String createPriceList(Caller caller, String name, String currency, String taxMode) {
+    String body =
+        Json.createObjectBuilder()
+            .add("name", name)
+            .add("channel", "ALL")
+            .add("currency", currency)
+            .add("taxMode", taxMode)
+            .add("effectiveFrom", Instant.now().toString())
+            .build()
+            .toString();
+    Answered res;
+    try {
+      res =
+          answered(
+              caller
+                  .stamp(webClient.post(baseOrFail() + "/admin/price-lists"))
+                  .header(HeaderNames.CONTENT_TYPE, "application/json"),
+              body);
+    } catch (ApiException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      throw noAnswer("the price list could not be made", e);
+    }
+    if (res.status() != 201) {
+      throw refusal(res, "the price list could not be made");
+    }
+    try (JsonReader reader = Json.createReader(new StringReader(res.body()))) {
+      return reader.readObject().getJsonObject("data").getString("id");
+    }
+  }
+
+  /** One variant and the VAT code it is sold under. */
+  public record VatItem(String variantId, String vatCode) {}
+
+  /**
+   * Gives variants their VAT categories, all or none (pricing-svc's batch call, at most 500 rows).
+   *
+   * @throws ApiException pricing-svc's own refusal ({@code PRICING_VAT_BATCH_INVALID}, naming the
+   *     rows) or 503
+   */
+  public int setVatCategories(Caller caller, List<VatItem> items) {
+    if (items.isEmpty()) return 0;
+    JsonArrayBuilder arr = Json.createArrayBuilder();
+    for (VatItem i : items) {
+      arr.add(
+          Json.createObjectBuilder().add("variantId", i.variantId()).add("vatCode", i.vatCode()));
+    }
+    String body = Json.createObjectBuilder().add("items", arr).build().toString();
+    Answered res;
+    try {
+      res =
+          answered(
+              caller
+                  .stamp(webClient.post(baseOrFail() + "/product-vat-categories/batch"))
+                  .header(HeaderNames.CONTENT_TYPE, "application/json"),
+              body);
+    } catch (ApiException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      throw noAnswer("the VAT categories may not have been set", e);
+    }
+    if (res.status() != 200) {
+      throw refusal(res, "the VAT categories were not set");
+    }
+    try (JsonReader reader = Json.createReader(new StringReader(res.body()))) {
+      return reader.readObject().getJsonObject("data").getInt("assigned", items.size());
+    }
+  }
+
+  /**
+   * Sets prices on one named price list (at most 500 rows). What pricing-svc says about each row is
+   * reported; a row it refuses does not stop the others.
+   *
+   * @throws ApiException 503 when pricing-svc gave no answer, or its refusal of the call as a whole
+   */
+  public BatchResult setPricesOn(Caller caller, String priceListId, List<PriceItem> items) {
+    if (items.isEmpty()) return new BatchResult(0, List.of());
+    try {
+      return postChunk(caller, baseOrFail(), priceListId, items);
+    } catch (NoAnswer e) {
+      throw noAnswer(e.reason, e);
+    }
+  }
+
+  /**
+   * The prices a list holds, by variant id (the single-unit price of each), read a page at a time.
+   *
+   * @throws ApiException 404 {@code IMPORT_PRICE_LIST_NOT_FOUND}; 503 when pricing-svc gave no
+   *     answer
+   */
+  public java.util.Map<String, java.math.BigDecimal> pricesOn(Caller caller, String priceListId) {
+    java.util.Map<String, java.math.BigDecimal> out = new java.util.HashMap<>();
+    String after = null;
+    do {
+      Answered res;
+      try {
+        var req =
+            webClient
+                .get(baseOrFail() + "/price-lists/" + priceListId + "/items")
+                .queryParam("limit", "1000");
+        if (after != null) req = req.queryParam("after", after);
+        res = answered(caller.stamp(req), null);
+      } catch (ApiException e) {
+        throw e;
+      } catch (RuntimeException e) {
+        throw noAnswer("the prices could not be read", e);
+      }
+      if (res.status() == 404) {
+        throw ApiException.notFound(
+            "IMPORT_PRICE_LIST_NOT_FOUND",
+            "price list " + priceListId + " is not one of this business's");
+      }
+      if (res.status() != 200) {
+        throw new ApiException(
+            503,
+            "PRICING_UNAVAILABLE",
+            "pricing-svc answered HTTP " + res.status(),
+            List.of(),
+            null);
+      }
+      try (JsonReader reader = Json.createReader(new StringReader(res.body()))) {
+        var root = reader.readObject();
+        for (var item : root.getJsonArray("data").getValuesAs(jakarta.json.JsonObject.class)) {
+          var min =
+              !item.containsKey("minQty") || item.isNull("minQty")
+                  ? null
+                  : item.getJsonNumber("minQty").bigDecimalValue();
+          if (min == null || min.compareTo(java.math.BigDecimal.ONE) <= 0) {
+            out.put(item.getString("variantId"), item.getJsonNumber("price").bigDecimalValue());
+          }
+        }
+        var meta = root.getJsonObject("meta");
+        after =
+            meta == null || !meta.containsKey("nextCursor") || meta.isNull("nextCursor")
+                ? null
+                : meta.getString("nextCursor");
+      } catch (RuntimeException e) {
+        throw noAnswer("the prices could not be read", e);
+      }
+    } while (after != null);
+    return out;
+  }
+
+  /** The refusal pricing-svc gave, with its own code when it sent one. */
+  private static ApiException refusal(Answered res, String what) {
+    String code = "PRICING_REFUSED";
+    String message = what + ": pricing-svc answered HTTP " + res.status();
+    try (JsonReader reader = Json.createReader(new StringReader(res.body()))) {
+      var o = reader.readObject();
+      if (o.containsKey("code")) code = o.getString("code");
+      if (o.containsKey("error") && !o.isNull("error")) {
+        var e = o.getJsonObject("error");
+        if (e.containsKey("code")) code = e.getString("code");
+        if (e.containsKey("message")) message = e.getString("message");
+      }
+    } catch (RuntimeException ignored) {
+      // The words stay generic; the status is said.
+    }
+    return new ApiException(res.status() >= 500 ? 503 : 409, code, message, List.of(), null);
+  }
+
+  /**
    * The rows of a call that was not made because the circuit breaker is open: every one of them,
    * not priced, and why.
    *

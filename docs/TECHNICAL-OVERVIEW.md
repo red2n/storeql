@@ -37,7 +37,7 @@ These aren't aspirational guidelines — they're enforced on every service and c
 
 **In plain terms:** inventory, orders, payments, and customers are handled by separate, independently deployable pieces of the system rather than one giant program — so a bug or outage in one area doesn't take the rest down, and each area can be scaled or changed on its own schedule.
 
-**Technically:** strict microservices (database-per-service) on Helidon MP / Java 21. No service ever reads another service's tables or does a cross-service SQL join. Data needed from another service is fetched via its REST API or consumed from its Kafka events — the same rule a completely external integration partner would have to follow.
+**Technically:** strict microservices (database-per-service) on Helidon MP / Java 25. No service ever reads another service's tables or does a cross-service SQL join. Data needed from another service is fetched via its REST API or consumed from its Kafka events — the same rule a completely external integration partner would have to follow.
 
 ### 3.3 A single, controlled entry point
 
@@ -91,14 +91,14 @@ These aren't aspirational guidelines — they're enforced on every service and c
 
 | Layer | Technology |
 |---|---|
-| Backend runtime | Java 21, Helidon MP 4.x (MicroProfile/CDI/JAX-RS) |
+| Backend runtime | Java 25 (jars target release 21), Helidon MP 4.x (MicroProfile/CDI/JAX-RS) |
 | Database | PostgreSQL, one schema per service, pooled via PgBouncer, migrated with Flyway |
 | Messaging | Apache Kafka (KRaft mode), transactional outbox pattern |
 | Service discovery | Consul |
 | Config | Centralized config service (no secrets or env-specific values in code/images) |
 | Observability | Prometheus + Grafana (metrics), Zipkin/Tempo (tracing), Loki (logs) |
 | Frontend | Flutter (web + Android/iOS targets), Riverpod 2.x, go_router, dio — one codebase, 4 shells |
-| Testing | JUnit 5, Testcontainers, ArchUnit, SpotBugs, PMD |
+| Testing | JUnit 6 (Jupiter), Testcontainers, ArchUnit, SpotBugs, PMD |
 
 ## 5. Security posture (summary)
 

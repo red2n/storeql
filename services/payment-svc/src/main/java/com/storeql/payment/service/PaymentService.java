@@ -3,6 +3,7 @@ package com.storeql.payment.service;
 import com.storeql.ids.Ids;
 import com.storeql.payment.client.OrderClient;
 import com.storeql.payment.domain.CardSettlement;
+import com.storeql.payment.domain.CardTenderRule;
 import com.storeql.payment.domain.Domain.PaymentTender;
 import com.storeql.payment.domain.Domain.RefundTender;
 import com.storeql.payment.dto.Dtos.RecordRefundRequest;
@@ -66,6 +67,9 @@ public class PaymentService {
   @Inject com.storeql.payment.client.TenantStoreClient storeClient;
   @Inject com.storeql.payment.client.CustomerClient customerClient;
   @Inject TerminalService terminals;
+  @Inject com.storeql.payment.repo.TerminalRepository terminalRepo;
+  @Inject com.storeql.payment.repo.CardSettingsRepository cardSettings;
+  @Inject com.storeql.payment.repo.CashManagementRepository tillSessions;
 
   /**
    * Staff-recorded tender (POS/back-office) — the caller's role is the trust boundary.
@@ -102,6 +106,17 @@ public class PaymentService {
                       ApiException.notFound(
                           "TERMINAL_ATTEMPT_NOT_FOUND", "No such payment on a terminal"));
     }
+    // The drawer this money is taken in, when the till names one: a session of this business at the
+    // tender's store that the caller may act at. A tender that names a session and no store is that
+    // session's store's. Whether it is still open is judged by the transaction that writes the
+    // tender, after a retry is answered, so a retry of a tender that was taken is never refused
+    // because its drawer has since closed.
+    UUID tillSessionId = null;
+    if (req.tillSessionId() != null && !req.tillSessionId().isBlank()) {
+      var session = namedTillSession(tenantId, Ids.parse(req.tillSessionId()), storeId, ctx);
+      tillSessionId = session.id();
+      if (storeId == null) storeId = session.storeId();
+    }
     if (storeId != null) {
       ctx.requireStoreAccess(storeId);
     }
@@ -113,8 +128,113 @@ public class PaymentService {
           "A tender comes to nothing at "
               + (currency == null ? "four decimal places" : currency + "'s minor unit"));
     }
+    // A caller held to exactly one store takes a card there when the tender names none.
+    UUID heldStore = ctx.storeIds().size() == 1 ? ctx.storeIds().iterator().next() : null;
     return capture(
-        withAmount(req, amount), tenantId, Ids.parse(req.orderId()), storeId, idempotencyKey);
+        withAmount(req, amount),
+        tenantId,
+        Ids.parse(req.orderId()),
+        storeId,
+        idempotencyKey,
+        new Till(heldStore, tillSessionId));
+  }
+
+  /**
+   * A tender typed in at a till: held to the till's card rule. The store its caller is held to, if
+   * one, and the till session the money is taken in, if the till names one.
+   */
+  private record Till(UUID heldStore, UUID sessionId) {}
+
+  /**
+   * The till session a till names for the money it takes or gives: this business's (another's is
+   * not found), one the caller may act at, and at {@code storeId} when the money names one. Whether
+   * it is open is not asked here: that is judged on the transaction that writes the money (see
+   * {@link PaymentRepository#createTender}), where a close cannot slip in between the check and the
+   * write, and only after a retry has been answered.
+   *
+   * @throws ApiException 404 {@code TILL_SESSION_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}; 409
+   *     {@code TILL_SESSION_OTHER_STORE}
+   */
+  private com.storeql.payment.domain.Domain.TillSession namedTillSession(
+      UUID tenantId, UUID sessionId, UUID storeId, TenantContext ctx) {
+    var session =
+        tillSessions
+            .findSession(tenantId, sessionId)
+            .orElseThrow(
+                () -> ApiException.notFound("TILL_SESSION_NOT_FOUND", "Till session not found"));
+    ctx.requireStoreAccess(session.storeId());
+    if (storeId != null && !storeId.equals(session.storeId())) {
+      throw ApiException.conflict(
+          "TILL_SESSION_OTHER_STORE", "That till session is at another store");
+    }
+    return session;
+  }
+
+  /**
+   * Refuses a drawer that has closed, before anything is spent on money that would be refused on
+   * it. The write judges it again on its own transaction; this is only to refuse early where
+   * something outside the transaction (a customer's store credit) would otherwise have been used.
+   *
+   * @throws ApiException 404 {@code TILL_SESSION_NOT_FOUND}; 409 {@code TILL_SESSION_NOT_OPEN}
+   */
+  private void requireStillOpen(UUID tenantId, UUID sessionId) {
+    var session =
+        tillSessions
+            .findSession(tenantId, sessionId)
+            .orElseThrow(
+                () -> ApiException.notFound("TILL_SESSION_NOT_FOUND", "Till session not found"));
+    if (!com.storeql.payment.domain.Domain.TillSession.STATUS_OPEN.equals(session.status())) {
+      throw ApiException.conflict("TILL_SESSION_NOT_OPEN", "That till session is closed");
+    }
+  }
+
+  /**
+   * The till's card rule for a CARD tender typed in at a till (intent card-payments, slice 1).
+   *
+   * @throws ApiException 409 {@code PAYMENT_CARD_NEEDS_TERMINAL} where the store has a card machine
+   *     and the owner has not allowed a standalone one; 400 {@code PAYMENT_CARD_REFERENCE_REQUIRED}
+   *     (or {@code _INVALID}) where a typed tender is allowed but carries no usable reference
+   */
+  private CardTenderRule.Decision cardRule(
+      UUID tenantId, UUID storeId, UUID orderId, RecordTenderRequest req) {
+    boolean names = req.terminalPaymentId() != null && !req.terminalPaymentId().isBlank();
+    UUID store = storeId;
+    if (!names && store == null) {
+      // The order's own store is where the money was taken; a till names it, a caller that did not
+      // is asked about the order. An order-svc that cannot answer leaves the reference rule only.
+      try {
+        var order = orderClient.getOrder(tenantId, orderId);
+        store = order == null || order.storeId() == null ? null : Ids.parse(order.storeId());
+      } catch (ApiException e) {
+        if (e.status() < 500) throw e;
+      }
+    }
+    boolean hasMachine = !names && store != null && terminalRepo.hasActiveAt(tenantId, store);
+    boolean standalone = hasMachine && cardSettings.standaloneAllowed(tenantId, store);
+    CardTenderRule.Decision decision =
+        CardTenderRule.decide(names, hasMachine, standalone, req.reference());
+    if (!decision.allowed()) {
+      throw new ApiException(
+          decision.refusalStatus(), decision.refusalCode(), decision.refusal(), List.of());
+    }
+    return decision;
+  }
+
+  /** The same tender with the reference as typed, trimmed. */
+  private static RecordTenderRequest withReference(RecordTenderRequest req, String reference) {
+    return new RecordTenderRequest(
+        req.orderId(),
+        req.amount(),
+        req.method(),
+        reference,
+        req.idempotencyKey(),
+        req.notes(),
+        req.storeId(),
+        req.customerId(),
+        req.currency(),
+        req.groupId(),
+        req.terminalPaymentId(),
+        req.tillSessionId());
   }
 
   /** The same tender at another amount: the one the till meant, at the currency's units. */
@@ -130,7 +250,8 @@ public class PaymentService {
         req.customerId(),
         req.currency(),
         req.groupId(),
-        req.terminalPaymentId());
+        req.terminalPaymentId(),
+        req.tillSessionId());
   }
 
   /**
@@ -214,6 +335,22 @@ public class PaymentService {
 
   private PaymentTender capture(
       RecordTenderRequest req, UUID tenantId, UUID orderId, UUID storeId, String idempotencyKey) {
+    return capture(req, tenantId, orderId, storeId, idempotencyKey, null);
+  }
+
+  /**
+   * @param till set when the tender is staff-recorded (a till), so a CARD one is held to the till's
+   *     card rule; null for an online payment
+   */
+  private PaymentTender capture(
+      RecordTenderRequest typed,
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String idempotencyKey,
+      Till till) {
+    RecordTenderRequest req = typed;
+    String entryMode = null;
     String method = req.method().toUpperCase(Locale.ROOT);
     if (!VALID_METHODS.contains(method))
       throw ApiException.badRequest(
@@ -228,12 +365,21 @@ public class PaymentService {
           "charge the card through order-svc's redeem; the tender follows");
     }
     requireMethodEnabledForStore(tenantId, storeId, method);
+    if (till != null && PaymentTender.METHOD_CARD.equals(method)) {
+      CardTenderRule.Decision rule =
+          cardRule(tenantId, storeId != null ? storeId : till.heldStore(), orderId, req);
+      entryMode = rule.entryMode();
+      if (CardTenderRule.STANDALONE.equals(entryMode)) {
+        req = withReference(req, rule.reference());
+      }
+    }
     if (PaymentTender.METHOD_CASH.equals(method)) {
       requireUnderCashLimit(tenantId, orderId, storeId, req);
     }
 
     if (PaymentTender.METHOD_STORE_CREDIT.equals(method)) {
-      return captureStoreCredit(req, tenantId, orderId, storeId);
+      return captureStoreCredit(
+          req, tenantId, orderId, storeId, till == null ? null : till.sessionId());
     }
 
     UUID attemptId = terminalPaymentOf(req, method);
@@ -256,8 +402,16 @@ public class PaymentService {
 
     // A card machine's approval named by the till is recorded as exactly this tender, or refused;
     // that is what settles the machine for its next sale.
-    if (attemptId != null) return repo.createTerminalTender(tender, captured, attemptId);
-    return repo.createTender(tender, captured);
+    UUID sessionId = till == null ? null : till.sessionId();
+    if (attemptId != null) {
+      return sessionId == null
+          ? repo.createTerminalTender(tender, captured, attemptId)
+          : repo.createTerminalTender(tender, captured, attemptId, sessionId);
+    }
+    if (sessionId != null) return repo.createTender(tender, captured, entryMode, sessionId);
+    return entryMode == null
+        ? repo.createTender(tender, captured)
+        : repo.createTender(tender, captured, entryMode);
   }
 
   /**
@@ -289,7 +443,7 @@ public class PaymentService {
    * (503) rejects the tender rather than inflating {@code paid_amount}.
    */
   private PaymentTender captureStoreCredit(
-      RecordTenderRequest req, UUID tenantId, UUID orderId, UUID storeId) {
+      RecordTenderRequest req, UUID tenantId, UUID orderId, UUID storeId, UUID tillSessionId) {
     if (req.customerId() == null || req.customerId().isBlank())
       throw ApiException.badRequest(
           "PAYMENT_CUSTOMER_REQUIRED", "customerId is required for a STORE_CREDIT tender");
@@ -302,6 +456,9 @@ public class PaymentService {
     if (existing.isPresent()) {
       return existing.get();
     }
+    // The balance is spent before the tender is written, so a drawer that has closed is refused
+    // first; the write judges it again on its own transaction.
+    if (tillSessionId != null) requireStillOpen(tenantId, tillSessionId);
 
     customerClient.redeemStoreCredit(tenantId, customerId, req.amount(), currency, orderId);
 
@@ -320,10 +477,13 @@ public class PaymentService {
             Instant.now(),
             storeId);
 
-    return repo.createTender(
-        tender,
+    var announced =
         Events.paymentCaptured(
-            tenantId, tenderId, orderId, req.amount(), PaymentTender.METHOD_STORE_CREDIT, storeId));
+            tenantId, tenderId, orderId, req.amount(), PaymentTender.METHOD_STORE_CREDIT, storeId);
+    // Rung at a till, the tender names the drawer like any other: it is that drawer's takings.
+    return tillSessionId == null
+        ? repo.createTender(tender, announced)
+        : repo.createTender(tender, announced, null, tillSessionId);
   }
 
   /**
@@ -525,6 +685,14 @@ public class PaymentService {
     // inside ONE transaction with the payment row locked — checking them here first would be a
     // TOCTOU race letting two concurrent refunds together exceed the original payment.
     Set<UUID> heldTo = Set.copyOf(ctx.storeIds());
+    // The drawer a refund is paid out of, when the till names one: this business's, at a store the
+    // caller may act at. That it is open, and at the store the tender was taken at, is judged
+    // inside
+    // the transaction that holds the tender, after a retry is answered.
+    UUID tillSessionId = null;
+    if (req.tillSessionId() != null && !req.tillSessionId().isBlank()) {
+      tillSessionId = namedTillSession(tenantId, Ids.parse(req.tillSessionId()), null, ctx).id();
+    }
     return repo.createRefundGuarded(
         refund,
         Events.paymentRefunded(
@@ -535,7 +703,8 @@ public class PaymentService {
             List.of(
                 new com.storeql.payment.domain.Domain.RefundAllocation(
                     Ids.parse(req.paymentId()), method, req.amount(), null))),
-        storeId -> requireMayRefundAt(heldTo, storeId));
+        storeId -> requireMayRefundAt(heldTo, storeId),
+        tillSessionId);
   }
 
   /**
@@ -627,6 +796,41 @@ public class PaymentService {
       BigDecimal requestedAmount,
       String reason,
       String kind) {
+    refundForOrderEvent(eventId, consumer, tenantId, orderId, requestedAmount, reason, kind, null);
+  }
+
+  /**
+   * As above, with the VAT inside the refunded amount when the order carried it (a line closed
+   * short or substituted on a sale at shelf prices); null for an order priced net.
+   */
+  public void refundForOrderEvent(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      String kind,
+      BigDecimal vatAmount) {
+    refundForOrderEvent(
+        eventId, consumer, tenantId, orderId, requestedAmount, reason, kind, vatAmount, null);
+  }
+
+  /**
+   * As above, for a sale voided or a held sale cancelled at a till: {@code tillSessionId} is the
+   * drawer the cash went back out of (kept only while it is this business's open session at the
+   * tender's own store; else the refund is counted at no drawer, never refused).
+   */
+  public void refundForOrderEvent(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      String kind,
+      BigDecimal vatAmount,
+      UUID tillSessionId) {
     UUID refundBatchId = Ids.newId();
     repo.refundOrderOnce(
         eventId,
@@ -637,8 +841,20 @@ public class PaymentService {
         reason,
         null,
         new CardSettlement.OwedBack(eventId, kind, null, null, null),
+        tillSessionId,
         (amt, shares) ->
-            Events.paymentRefunded(tenantId, refundBatchId, orderId, amt, shares, kind));
+            Events.paymentRefunded(
+                tenantId,
+                refundBatchId,
+                orderId,
+                amt,
+                shares,
+                kind,
+                null,
+                null,
+                null,
+                null,
+                vatRefunded(vatAmount, amt, requestedAmount, null)));
     putBackOnCards(tenantId, orderId);
   }
 
@@ -684,6 +900,12 @@ public class PaymentService {
    */
   public boolean refundVoidForOrderEvent(
       UUID eventId, String consumer, UUID tenantId, UUID orderId) {
+    return refundVoidForOrderEvent(eventId, consumer, tenantId, orderId, null);
+  }
+
+  /** As above, for a void made at a till that named its session: the drawer the cash left. */
+  public boolean refundVoidForOrderEvent(
+      UUID eventId, String consumer, UUID tenantId, UUID orderId, UUID tillSessionId) {
     Instant since = voidsHandledSince();
     if (com.storeql.payment.domain.EventCutoff.predates(eventId, since)) {
       LOG.log(
@@ -697,7 +919,8 @@ public class PaymentService {
           since);
       return false;
     }
-    refundForOrderEvent(eventId, consumer, tenantId, orderId, null, "Sale voided", null);
+    refundForOrderEvent(
+        eventId, consumer, tenantId, orderId, null, "Sale voided", null, null, tillSessionId);
     return true;
   }
 
@@ -716,7 +939,27 @@ public class PaymentService {
    * What an {@code OrderReturned} says about where the money goes; {@code customerId} may be null,
    * and {@code currency} is the sale's, so store credit is credited in it rather than guessed.
    */
-  public record ReturnRefund(String method, UUID returnId, UUID customerId, String currency) {
+  public record ReturnRefund(
+      String method,
+      UUID returnId,
+      UUID customerId,
+      String currency,
+      /**
+       * The VAT inside the return's value as the sale carried it (a sale at shelf prices); null for
+       * a sale priced net, whose refund the ledger splits in the sale's own ratio.
+       */
+      BigDecimal vatAmount,
+      /** The till session the cash was paid out of, when the till named one; else null. */
+      UUID tillSessionId) {
+    public ReturnRefund(
+        String method, UUID returnId, UUID customerId, String currency, BigDecimal vatAmount) {
+      this(method, returnId, customerId, currency, vatAmount, null);
+    }
+
+    public ReturnRefund(String method, UUID returnId, UUID customerId, String currency) {
+      this(method, returnId, customerId, currency, null, null);
+    }
+
     public ReturnRefund(String method, UUID returnId, UUID customerId) {
       this(method, returnId, customerId, null);
     }
@@ -751,6 +994,7 @@ public class PaymentService {
         reason,
         ret.toLiability() ? ret.method() : null,
         new CardSettlement.OwedBack(eventId, null, ret.method(), ret.returnId(), ret.customerId()),
+        ret.tillSessionId(),
         (amt, shares) ->
             Events.paymentRefunded(
                 tenantId,
@@ -762,8 +1006,27 @@ public class PaymentService {
                 ret.method(),
                 ret.returnId(),
                 ret.customerId(),
-                ret.currency()));
+                ret.currency(),
+                vatRefunded(ret.vatAmount(), amt, requestedAmount, ret.currency())));
     putBackOnCards(tenantId, orderId);
+  }
+
+  /**
+   * The VAT inside what was actually refunded: the return's carried VAT in full when all of it was
+   * refunded, in proportion when the captured tenders could cover only part, never more than the
+   * refund itself. Null when the return carried none.
+   */
+  static BigDecimal vatRefunded(
+      BigDecimal carried, BigDecimal refunded, BigDecimal requested, String currency) {
+    if (carried == null || refunded == null || requested == null || requested.signum() <= 0) {
+      return null;
+    }
+    if (refunded.compareTo(requested) >= 0) return carried.min(refunded);
+    int units = currency == null ? carried.scale() : com.storeql.service.Fx.minorUnits(currency);
+    return carried
+        .multiply(refunded)
+        .divide(requested, units, java.math.RoundingMode.HALF_UP)
+        .min(refunded);
   }
 
   /** The tender an exchange leaves on the new order: what the returned goods pay towards it. */
@@ -787,6 +1050,24 @@ public class PaymentService {
       UUID orderId,
       UUID storeId,
       BigDecimal amount) {
+    return recordGiftCardRedemption(
+        eventId, consumer, tenantId, redemptionId, orderId, storeId, amount, null);
+  }
+
+  /**
+   * As above, for a card charged at a till that named its drawer: {@code tillSessionId} is kept on
+   * the tender only while it is this business's open session at the store the card was charged at,
+   * else the tender is taken at no till. A charge that has happened is never refused over it.
+   */
+  public boolean recordGiftCardRedemption(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID redemptionId,
+      UUID orderId,
+      UUID storeId,
+      BigDecimal amount,
+      UUID tillSessionId) {
     UUID tenderId = Ids.newId();
     PaymentTender tender =
         new PaymentTender(
@@ -806,7 +1087,8 @@ public class PaymentService {
         consumer,
         tender,
         Events.paymentCaptured(
-            tenantId, tenderId, orderId, amount, PaymentTender.METHOD_GIFT_CARD, storeId));
+            tenantId, tenderId, orderId, amount, PaymentTender.METHOD_GIFT_CARD, storeId),
+        tillSessionId);
   }
 
   /** What an exchange {@code OrderReturned} says: the new order and how the value splits. */
@@ -817,7 +1099,69 @@ public class PaymentService {
       BigDecimal refundAmount,
       UUID returnId,
       UUID customerId,
-      String currency) {}
+      String currency,
+      /** The VAT inside the whole return, when the sale carried it; null otherwise. */
+      BigDecimal vatAmount,
+      /**
+       * The till session the exchange was rung on, when the till named one; else null. The cash
+       * back leaves that drawer, and the legs that net against each other are counted in it.
+       */
+      UUID tillSessionId) {
+
+    public ExchangeReturn(
+        UUID exchangeOrderId,
+        UUID storeId,
+        BigDecimal exchangeAmount,
+        BigDecimal refundAmount,
+        UUID returnId,
+        UUID customerId,
+        String currency,
+        BigDecimal vatAmount) {
+      this(
+          exchangeOrderId,
+          storeId,
+          exchangeAmount,
+          refundAmount,
+          returnId,
+          customerId,
+          currency,
+          vatAmount,
+          null);
+    }
+
+    public ExchangeReturn(
+        UUID exchangeOrderId,
+        UUID storeId,
+        BigDecimal exchangeAmount,
+        BigDecimal refundAmount,
+        UUID returnId,
+        UUID customerId,
+        String currency) {
+      this(
+          exchangeOrderId,
+          storeId,
+          exchangeAmount,
+          refundAmount,
+          returnId,
+          customerId,
+          currency,
+          null,
+          null);
+    }
+
+    /**
+     * The part of the return's VAT that sits in what the new sale takes (the exchange), or null.
+     */
+    BigDecimal exchangeVat() {
+      if (vatAmount == null || refundAmount.signum() <= 0) return null;
+      int units =
+          currency == null ? vatAmount.scale() : com.storeql.service.Fx.minorUnits(currency);
+      return vatAmount
+          .multiply(exchangeAmount)
+          .divide(refundAmount, units, java.math.RoundingMode.HALF_UP)
+          .min(vatAmount);
+    }
+  }
 
   /**
    * An exchange, once per event, on one transaction: the returned value (capped at what the
@@ -841,6 +1185,7 @@ public class PaymentService {
             extra,
             "Exchange",
             ex.storeId(),
+            ex.tillSessionId(),
             (amt, shares) ->
                 Events.paymentRefunded(
                     tenantId,
@@ -852,7 +1197,8 @@ public class PaymentService {
                     METHOD_EXCHANGE,
                     ex.returnId(),
                     ex.customerId(),
-                    ex.currency()),
+                    ex.currency(),
+                    vatRefunded(ex.exchangeVat(), amt, ex.exchangeAmount(), ex.currency())),
             (amt, shares) ->
                 Events.paymentRefunded(
                     tenantId,
@@ -864,7 +1210,11 @@ public class PaymentService {
                     "ORIGINAL",
                     ex.returnId(),
                     ex.customerId(),
-                    ex.currency()),
+                    ex.currency(),
+                    ex.vatAmount() == null
+                        ? null
+                        : vatRefunded(
+                            ex.vatAmount().subtract(ex.exchangeVat()), amt, extra, ex.currency())),
             amt ->
                 Events.paymentCaptured(
                     tenantId, tenderId, ex.exchangeOrderId(), amt, METHOD_EXCHANGE, ex.storeId()),

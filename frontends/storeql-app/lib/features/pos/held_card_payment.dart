@@ -258,6 +258,7 @@ Map<String, dynamic> _tenderToJson(PosTender t) => {
       'customerId': t.customerId,
       'terminalId': t.terminalId,
       'terminalReceiptLine': t.terminalReceiptLine,
+      'reference': t.reference,
     };
 
 PosTender _tenderFromJson(Map<String, dynamic> j) => PosTender(
@@ -268,6 +269,7 @@ PosTender _tenderFromJson(Map<String, dynamic> j) => PosTender(
       customerId: j['customerId'] as String?,
       terminalId: j['terminalId'] as String?,
       terminalReceiptLine: j['terminalReceiptLine'] as String?,
+      reference: j['reference'] as String?,
     );
 
 /// A sale that stopped with a card payment sent to the machine and no answer

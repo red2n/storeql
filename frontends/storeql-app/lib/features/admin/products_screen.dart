@@ -1,6 +1,5 @@
 import 'product_safety_dialog.dart';
 import 'package:dio/dio.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
@@ -10,6 +9,7 @@ import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/util/image_compress.dart';
+import '../../shared/util/pick_file.dart';
 import '../../shared/widgets/barcode_scanner_sheet.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
@@ -347,19 +347,15 @@ class _ProductsScreenState extends ConsumerState<ProductsScreen> {
         }
         return;
       }
-      final picked = await FilePicker.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp'],
-        withData: true,
+      final file = await pickFileWithBytes(
+        const ['jpg', 'jpeg', 'png', 'webp'],
       );
-      final file = picked?.files.firstOrNull;
-      final bytes = file?.bytes;
-      if (file == null || bytes == null) return;
+      if (file == null) return;
 
       final CompressedImage upload;
       try {
         upload = await compressProductImage(
-          bytes,
+          file.bytes,
           sourceContentType: contentTypeForExtension(file.extension),
         );
       } on ImageCompressException catch (e) {

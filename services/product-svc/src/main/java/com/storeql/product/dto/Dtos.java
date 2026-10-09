@@ -381,7 +381,18 @@ public final class Dtos {
    *     label, matched exactly and carrying nothing besides itself
    */
   @Schema(name = "ScanResponse")
-  public record ScanResponse(VariantScanResponse item, ScannedCodeResponse code) {}
+  public record ScanResponse(
+      VariantScanResponse item,
+      ScannedCodeResponse code,
+      @Schema(
+              description =
+                  "Set only when the scanned code is one the business keeps as an alias of this item"
+                      + " (an old EAN, a multipack, a case, a PLU) rather than its own barcode: what kind,"
+                      + " and how many units one scan stands for.")
+          AliasMatchResponse alias) {}
+
+  @Schema(name = "AliasMatch")
+  public record AliasMatchResponse(String kind, int packQty) {}
 
   // ── UOM ──────────────────────────────────────────────────────────────────
 

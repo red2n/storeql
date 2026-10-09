@@ -75,6 +75,28 @@ public class CategoryRepository extends BaseJdbcRepository {
   }
 
   /**
+   * Looks a category up by name under one parent (or at the top when {@code parentId} is null).
+   *
+   * @param tenantId owning tenant; the first condition of the query
+   */
+  public Optional<Category> findCategoryByNameUnder(UUID tenantId, UUID parentId, String name) {
+    return query(
+            "SELECT id, tenant_id, parent_id, name, status, created_at, updated_at"
+                + " FROM categories WHERE tenant_id = ? AND name = ? AND status = 'ACTIVE'"
+                + (parentId == null ? " AND parent_id IS NULL" : " AND parent_id = ?")
+                + " ORDER BY created_at, id LIMIT 1",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, name);
+              if (parentId != null) ps.setObject(3, parentId);
+            },
+            CategoryRepository::mapCategory,
+            "find category by name under a parent")
+        .stream()
+        .findFirst();
+  }
+
+  /**
    * Looks a category up by id.
    *
    * @param tenantId owning tenant; the first condition of the query

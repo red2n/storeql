@@ -17,6 +17,7 @@ import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import '../admin/recall_providers.dart';
 import '../admin/recall_return_choice.dart';
+import 'cash_providers.dart';
 import 'pos_providers.dart';
 import 'pos_recall_check.dart';
 
@@ -425,11 +426,24 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       });
       return;
     }
+    // The drawer the cash goes back out of is settled first: a read of the open
+    // till still in flight, or failed a moment ago, is given a few seconds
+    // ([SaleTillNotifier.settle]) rather than the refund going out naming none.
+    // Never refused over it: with no drawer the refund is "not at a till".
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    if (!tillCtl.settled) {
+      setState(() => _submitting = true);
+      await tillCtl.settle();
+      if (!mounted) return;
+      setState(() => _submitting = false);
+    }
     final body = <String, dynamic>{
       'reason': _reason,
       'refundMethod': _method,
       if (topUp) 'giftCardCode': giftCode,
       if (_recall != null) 'recallNoticeId': _recall!.id,
+      // The drawer the cash goes back out of, so its report counts it.
+      'tillSessionId': ?tillCtl.drawer,
       'items': items,
     };
     final key = _keyForAttempt(
@@ -460,6 +474,19 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
     }
     // The recall check a sale runs, over the new basket, before anything is sent.
     if (!await _newBasketPassesRecallCheck()) return;
+    // The drawer the cash back goes out of, settled as a refund's is (see
+    // [_submit]): a read of the open till still in flight, or failed a moment
+    // ago, is given a few seconds. order-svc never refuses an exchange over the
+    // drawer - payment-svc counts the cash there only while it is this
+    // business's open session at the sale's store, else "not at a till" - so
+    // there is no second try without it.
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    if (!tillCtl.settled) {
+      setState(() => _submitting = true);
+      await tillCtl.settle();
+      if (!mounted) return;
+      setState(() => _submitting = false);
+    }
     final newItems = [
       for (final l in _newItems)
         {'variantId': l.variantId, 'qty': _qtyValue(l.qty), ...packFieldsOf(l)},
@@ -469,6 +496,8 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       'returnItems': items,
       'newItems': newItems,
       if (sale.customerId != null) 'customerId': sale.customerId,
+      // The drawer the cash back goes out of, so its report counts it.
+      'tillSessionId': ?tillCtl.drawer,
     };
     final key = _keyForAttempt('exchange|${sale.orderId}|$_reason|'
         '${_itemsSignature(items)}|'

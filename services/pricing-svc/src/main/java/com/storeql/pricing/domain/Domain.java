@@ -74,7 +74,34 @@ public final class Domain {
       Instant effectiveTo,
       boolean active,
       Instant createdAt,
-      UUID zoneId) {
+      UUID zoneId,
+      String taxMode) {
+
+    /** A list bound to a zone (or none) and net, as every list was before tax modes. */
+    public PriceList(
+        UUID id,
+        UUID tenantId,
+        String name,
+        String channel,
+        String currency,
+        Instant effectiveFrom,
+        Instant effectiveTo,
+        boolean active,
+        Instant createdAt,
+        UUID zoneId) {
+      this(
+          id,
+          tenantId,
+          name,
+          channel,
+          currency,
+          effectiveFrom,
+          effectiveTo,
+          active,
+          createdAt,
+          zoneId,
+          TAX_EXCLUSIVE);
+    }
 
     /** A tenant-wide list, bound to no price zone: what every store falls back to (03.x). */
     public PriceList(
@@ -103,6 +130,21 @@ public final class Domain {
     public static final String CHANNEL_ALL = "ALL";
     public static final String CHANNEL_ONLINE = "ONLINE";
     public static final String CHANNEL_POS = "POS";
+
+    /** Prices on the list are net and VAT is added to them. */
+    public static final String TAX_EXCLUSIVE = "EXCLUSIVE";
+
+    /** Prices on the list are shelf prices, VAT included. */
+    public static final String TAX_INCLUSIVE = "INCLUSIVE";
+
+    /**
+     * Whether the list's prices are shelf prices with VAT inside.
+     *
+     * @return {@code true} for a tax-inclusive list
+     */
+    public boolean taxInclusive() {
+      return TAX_INCLUSIVE.equals(taxMode);
+    }
   }
 
   /** A single price for a variant within a price list, optionally qty-break-tiered. */
@@ -115,6 +157,11 @@ public final class Domain {
       BigDecimal minQty,
       Instant createdAt,
       Instant updatedAt) {}
+
+  /**
+   * A priced variant the business has not categorised for VAT: a gap before a tax-inclusive start.
+   */
+  public record VatGap(UUID variantId, String priceListName, String taxMode, BigDecimal price) {}
 
   /**
    * Time-bounded promotional discount. type=PERCENT: value is percentage off (e.g. 10 = 10% off).
@@ -341,9 +388,10 @@ public final class Domain {
       boolean unitPriceRequired,
       PriorPrice priorPrice,
       boolean priorPriceRequired,
-      DisplayPrice display) {
+      DisplayPrice display,
+      boolean taxInclusive) {
 
-    /** A price with no display currency asked for. */
+    /** A price with no display currency asked for, and net. */
     public ResolvedPrice(
         UUID variantId,
         BigDecimal unitPrice,
@@ -372,7 +420,8 @@ public final class Domain {
           unitPriceRequired,
           priorPrice,
           priorPriceRequired,
-          null);
+          null,
+          false);
     }
 
     public ResolvedPrice withDisplay(DisplayPrice d) {
@@ -390,7 +439,31 @@ public final class Domain {
           unitPriceRequired,
           priorPrice,
           priorPriceRequired,
-          d);
+          d,
+          taxInclusive);
+    }
+
+    /**
+     * The same price marked as a shelf price: {@code totalWithVat} is exactly what the shelf says,
+     * {@code vatAmount} is the VAT inside it and {@code unitPrice} is what is left.
+     */
+    public ResolvedPrice withTaxInclusive(boolean inclusive) {
+      return new ResolvedPrice(
+          variantId,
+          unitPrice,
+          vatCode,
+          vatRate,
+          vatAmount,
+          totalWithVat,
+          currency,
+          priceListId,
+          promotionApplied,
+          unitPricing,
+          unitPriceRequired,
+          priorPrice,
+          priorPriceRequired,
+          display,
+          inclusive);
     }
   }
 
@@ -557,7 +630,21 @@ public final class Domain {
       UUID cancelledBy,
       String cancelReason,
       /** What has sold at this price so far, across every order. */
-      BigDecimal redeemedQty) {
+      BigDecimal redeemedQty,
+      /**
+       * The tax mode of the list the sticker was cut from; EXCLUSIVE, or INCLUSIVE for a shelf
+       * price.
+       */
+      String taxMode) {
+
+    /**
+     * Whether the sticker's prices are shelf prices with VAT inside.
+     *
+     * @return {@code true} for a sticker cut from a tax-inclusive list
+     */
+    public boolean taxInclusive() {
+      return PriceList.TAX_INCLUSIVE.equals(taxMode);
+    }
 
     public static final String STATUS_ACTIVE = "ACTIVE";
     public static final String STATUS_CANCELLED = "CANCELLED";

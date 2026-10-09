@@ -1,20 +1,17 @@
 # Production runtime image for a StoreQL Helidon service.
 # Build the whole reactor first (mvn clean install), then build this image per-service:
 #   docker build -f Dockerfile.svc --build-arg SVC_PATH=services/sample-svc --build-arg SVC_JAR=sample-svc -t storeql/sample-svc .
-# Pinned to 21-jre, and NOT for the reason a bot will assume. The jars target release 21
-# (maven.compiler.release), CI builds and tests on 21, and 25 is not a security fix — but the
-# blocking reason is that eclipse-temurin:21-jre ships curl and 25-jre does NOT. Every healthcheck in
-# docker-compose.yml is `curl -fsS .../health/live`, so on the 25 base every service reports
-# unhealthy even though the application starts perfectly, dependents never start, and the whole stack
-# fails to come up — which is how the k6 suites are run, so it takes the platform's entire live
-# verification with it. (Kubernetes is unaffected: its probes are httpGet and need nothing in the
-# image.)
+# Runs on Temurin 25 (the current LTS), pinned to the Ubuntu 24.04 ("noble") variant so the operating
+# system never moves under a version bump. The jars still target release 21 (maven.compiler.release), so
+# going back to 21 is this one line and nothing else.
 #
-# Moving to a newer JRE is a deliberate change, not a version bump: the compose healthchecks have to
-# move to something the image actually has in the same commit, and the stack has to be brought up and
-# swept afterwards. Dependabot #41 did the bump alone; the application ran on 25.0.4 — Helidon booted,
-# Flyway migrated, the probes answered — and the stack still would not start.
-FROM eclipse-temurin:21-jre
+# The 25 JRE image ships neither curl, wget nor nc. The container healthcheck therefore does not use
+# them: infra/healthcheck.sh needs only bash, and docker-compose.yml calls it as
+# `healthcheck /health/live`. An 18 Sep 2026 bump changed this line alone, every healthcheck was still
+# `curl`, no service ever reported healthy and the whole stack failed to start (Kubernetes was never
+# affected: its probes are httpGet). Moving the base is a deliberate change, never a bot's bump: the
+# healthcheck moves with it and the stack is brought up and swept afterwards (intent/jdk-25.md).
+FROM eclipse-temurin:25-jre-noble
 
 ARG SVC_PATH
 ARG SVC_JAR
@@ -33,10 +30,16 @@ WORKDIR /app
 COPY ${SVC_PATH}/target/${SVC_JAR}.jar /app/app.jar
 COPY ${SVC_PATH}/target/libs /app/libs
 
+# The container healthcheck (see the note on the base above).
+COPY infra/healthcheck.sh /usr/local/bin/healthcheck
+RUN chmod 0755 /usr/local/bin/healthcheck
+
 # In containers, advertise the container hostname to Consul so its health check is reachable on the compose network.
 ENV STOREQL_ADVERTISE_HOST=""
 
 USER 10001:10001
 EXPOSE 8080
 # Container-aware JVM defaults; per-service heap is tuned via JAVA_TOOL_OPTIONS in compose.
-ENTRYPOINT ["java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-jar", "/app/app.jar"]
+# --enable-native-access: the JNI libraries on the classpath (Argon2, lz4, Netty) are granted native access
+# explicitly, so JDK 24+ does not print a restricted-method warning for each at start-up.
+ENTRYPOINT ["java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/app.jar"]

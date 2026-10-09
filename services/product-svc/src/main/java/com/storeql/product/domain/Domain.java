@@ -91,6 +91,9 @@ public final class Domain {
   /** Carrier for a variant + its parent product, used by the POS barcode-scan lookup. */
   public record VariantWithProduct(Variant variant, Product product) {}
 
+  /** A scanned code that is not the variant's own barcode: which kind, and how many units it is. */
+  public record AliasHit(VariantWithProduct found, String kind, int packQty) {}
+
   // ── Gap #33: Supplier / Customer Cross-References ────────────────────────
 
   /**

@@ -8,7 +8,7 @@
 #
 # Usage:
 #   cp .env.example .env && nano .env   # set real secrets
-#   mvn clean install -DskipTests       # build all JARs (JDK 21)
+#   mvn clean install -DskipTests       # build all JARs (JDK 25, release 21)
 #   docker compose up -d --build        # build images + start everything
 #
 # Ports exposed to the host (developers need these):
@@ -112,8 +112,9 @@ x-svc-depends: &svc-depends
   config:    { condition: service_healthy }
 
 x-svc-healthcheck: &svc-healthcheck
-# eclipse-temurin:21-jre ships curl but not wget.
-  test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:8080/health/live || exit 1"]
+# The Temurin 25 JRE image has no curl, wget or nc: `healthcheck` is infra/healthcheck.sh, baked into
+# Dockerfile.svc (bash only). CMD, not CMD-SHELL: sh has no /dev/tcp.
+  test: ["CMD", "healthcheck", "/health/live"]
   interval: 10s
   timeout: 5s
   retries: 12
@@ -749,7 +750,7 @@ services:
     healthcheck:
       # /health/ready, not the aggregate /health: what depends_on waits for is "can it serve",
       # and a probe pointed at the aggregate takes on every check a service ever registers.
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:8080/health/ready || exit 1"]
+      test: ["CMD", "healthcheck", "/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -1147,7 +1148,7 @@ services:
     healthcheck:
       # /health/ready, not the aggregate /health: what depends_on waits for is "can it serve",
       # and a probe pointed at the aggregate takes on every check a service ever registers.
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:8080/health/ready || exit 1"]
+      test: ["CMD", "healthcheck", "/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 12

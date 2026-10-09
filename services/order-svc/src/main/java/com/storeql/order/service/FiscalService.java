@@ -289,11 +289,7 @@ public class FiscalService {
                     .multiply(i.lineTotal())
                     .divide(order.subtotal(), 4, RoundingMode.HALF_UP);
       }
-      BigDecimal rate =
-          i.lineTotal().signum() == 0
-              ? BigDecimal.ZERO.setScale(2)
-              : vat.multiply(BigDecimal.valueOf(100))
-                  .divide(i.lineTotal(), 2, RoundingMode.HALF_UP);
+      BigDecimal rate = com.storeql.order.domain.LineRate.percent(i.vatRate(), vat, i.lineTotal());
       byRate.merge(rate, i.lineTotal().add(vat), BigDecimal::add);
     }
     // A discount or a rounding leaves the lines' sum off the order's total; the total is what was

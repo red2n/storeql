@@ -103,6 +103,11 @@ public final class Mappers {
    * @param pl the price list to convert
    * @return its API representation
    */
+  public static com.storeql.pricing.dto.Dtos.VatGapResponse toDto(Domain.VatGap g) {
+    return new com.storeql.pricing.dto.Dtos.VatGapResponse(
+        g.variantId(), g.priceListName(), g.taxMode(), g.price());
+  }
+
   public static PriceListResponse toDto(PriceList pl) {
     return new PriceListResponse(
         pl.id(),
@@ -114,7 +119,8 @@ public final class Mappers {
         pl.effectiveTo() != null ? pl.effectiveTo().toString() : null,
         pl.active(),
         pl.createdAt() != null ? pl.createdAt().toString() : null,
-        pl.zoneId());
+        pl.zoneId(),
+        pl.taxMode());
   }
 
   /**
@@ -170,7 +176,8 @@ public final class Mappers {
                 rp.display().currency(),
                 rp.display().rate(),
                 rp.display().unitPrice(),
-                rp.display().totalWithVat()));
+                rp.display().totalWithVat()),
+        rp.taxInclusive());
   }
 
   /**

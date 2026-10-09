@@ -556,6 +556,25 @@ public final class TenantSvcStub implements AutoCloseable {
   }
 
   /**
+   * Registers one of a tenant's stores with the time zone tenant-svc keeps for it (an IANA name):
+   * what a business's day is cut by wherever a record is dated by the store's own calendar day.
+   */
+  public TenantSvcStub withStoreIn(
+      String tenantId, String storeId, String country, String timezone) {
+    stores
+        .computeIfAbsent(tenantId, t -> new java.util.concurrent.CopyOnWriteArrayList<>())
+        .add(
+            "{\"id\":\""
+                + storeId
+                + "\",\"country\":\""
+                + country
+                + "\",\"timezone\":\""
+                + timezone
+                + "\"}");
+    return this;
+  }
+
+  /**
    * Registers one of a tenant's warehouses (type WAREHOUSE), as tenant-svc's {@code GET
    * /admin/stores} lists it: a stock-only site that serves shops (depot / DC replenishment).
    */

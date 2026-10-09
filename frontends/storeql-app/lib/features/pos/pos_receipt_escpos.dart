@@ -12,6 +12,7 @@ library;
 
 import 'dart:typed_data';
 
+import '../../core/format.dart';
 import 'pos_receipt_data.dart';
 
 /// The paper a receipt printer takes, as printable columns at the default font.
@@ -66,6 +67,16 @@ class EscPosReceipt {
         _line(b, line);
       }
     }
+    // The seller, when the sale was at shelf prices: registered name and VAT number.
+    final seller = d.vat;
+    if (seller != null) {
+      if (seller.sellerName != null && seller.sellerName != d.storeName) {
+        for (final line in _wrap(seller.sellerName!, _cols)) {
+          _line(b, line);
+        }
+      }
+      if (seller.vatNumber != null) _line(b, 'VAT No. ${seller.vatNumber}');
+    }
     b.add([_esc, 0x61, 0]);
     _divider(b, '=');
 
@@ -114,6 +125,7 @@ class EscPosReceipt {
     }
     if (d.change > 0.005) _row(b, 'Change', _money(d.currency, d.change));
 
+    _vatTable(b, d);
     _fiscal(b, d);
 
     // The gift cards this sale issued: the code is the customer's to keep.
@@ -153,6 +165,37 @@ class EscPosReceipt {
       b.add([_gs, 0x56, 66, 0]);
     }
     return b.toBytes();
+  }
+
+  // ── the VAT table of a sale at shelf prices ──────────────────────────────
+
+  void _vatTable(BytesBuilder b, PosReceiptData d) {
+    final v = d.vat;
+    if (v == null || v.rows.isEmpty) return;
+    _divider(b, '-');
+    _line(b, 'Prices include VAT');
+    // code and rate on the left; gross, net and VAT right-aligned in an equal share of the rest.
+    const first = 8;
+    final w = (_cols - first) ~/ 3;
+    final units = AppFormat.minorUnits(d.currency);
+    String col(String s) => s.length >= w ? s.substring(0, w) : ' ' * (w - s.length) + s;
+    _line(b, 'VAT'.padRight(first) + col('Gross') + col('Net') + col('VAT'));
+    for (final r in v.rows) {
+      final code = r.code ?? '-';
+      final rate = r.rate == null ? '' : ' ${_pct(r.rate!)}';
+      _line(
+        b,
+        _fit('$code$rate', first).padRight(first) +
+            col(r.gross.toStringAsFixed(units)) +
+            col(r.net.toStringAsFixed(units)) +
+            col(r.vat.toStringAsFixed(units)),
+      );
+    }
+  }
+
+  static String _pct(double r) {
+    final pct = (r * 100 * 1000).round() / 1000;
+    return '${pct == pct.roundToDouble() ? pct.toInt() : pct}%';
   }
 
   // ── the regime's stamp (18.5) ────────────────────────────────────────────
@@ -261,7 +304,9 @@ class EscPosReceipt {
     return out.isEmpty ? [''] : out;
   }
 
-  static String _money(String currency, double v) => '$currency ${v.toStringAsFixed(2)}';
+  /// Money at the currency's own minor units: whole yen, pence, three-decimal dinars.
+  static String _money(String currency, double v) =>
+      '$currency ${v.toStringAsFixed(AppFormat.minorUnits(currency))}';
 
   static String _fmtDate(DateTime t) {
     final d = t.toLocal();

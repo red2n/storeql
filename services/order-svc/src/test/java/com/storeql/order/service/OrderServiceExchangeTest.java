@@ -68,7 +68,7 @@ class OrderServiceExchangeTest {
 
   private static ExchangeRequest request(
       List<ReturnItemRequest> returned, List<ExchangeNewItemRequest> bought, String customer) {
-    return new ExchangeRequest("wrong size", returned, bought, customer);
+    return new ExchangeRequest("wrong size", returned, bought, customer, null);
   }
 
   private static ExchangeRequest good() {

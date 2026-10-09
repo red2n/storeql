@@ -43,7 +43,7 @@ Per the golden rule in CLAUDE.md: `tenant_id` from the JWT, first predicate, eve
 ---
 
 ### 1.4 Migration files
-Flyway's standard name: `V<n>__<description>.sql`, lowercase snake_case words that say what the file creates (`V5__input_vat.sql`). Each service numbers its files `1..n` with no gaps; a new table is the next number. While the product is in DEV a migration only creates (see [ARCHITECTURE §7](ARCHITECTURE.md#7-anatomy-of-one-service)): a change to a table goes into the `CREATE TABLE` in the file that creates it, and existing files are not renumbered afterwards. `validateMigrationNaming` is on, so a misspelled file name fails startup instead of being skipped.
+Flyway's standard name: `V<n>__<description>.sql`, lowercase snake_case words that say what the file creates (`V5__input_vat.sql`). Each service's versions are unique integers (a new table is the next number; after the first release tag a gap left by a lost numbering race is allowed). <!-- migration-policy:v1 --> Until the first release tag a migration only creates, and a change to a table goes into the `CREATE TABLE` in the file that creates it; from the tag on, published files are frozen and a change is a new additive migration, a destructive move carrying its `-- storeql:contract` marker (the full rule: [ARCHITECTURE §7](ARCHITECTURE.md#7-anatomy-of-one-service)). `validateMigrationNaming` is on, so a misspelled file name fails startup instead of being skipped.
 
 ### 1.5 Table and column names
 Tables: plural lowercase snake_case (`order_items`; a log, a projection or a ledger may be singular: `audit_log`). Columns: singular lowercase snake_case; a timestamp ends `_at`, a date `_on`, an id `_id`.

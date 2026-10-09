@@ -504,7 +504,18 @@ public final class Dtos {
       @Schema(description = "qty less what was handed over and what was closed short.")
           BigDecimal outstandingQty,
       @Schema(description = "The line this one stands in for, when it is a substitute.")
-          String substitutesItemId) {}
+          String substitutesItemId,
+      @Schema(
+              description =
+                  "What the customer paid for the line after every discount, VAT included, on an"
+                      + " order sold at shelf prices; absent on an order priced net."
+                      + " lineTotal is what is left once vatAmount is taken out of it.")
+          BigDecimal grossTotal,
+      @Schema(description = "The shelf price of one unit before any promotion, when known.")
+          BigDecimal listUnitPrice,
+      @Schema(description = "The VAT code the line was taxed under, when known.") String vatCode,
+      @Schema(description = "The rate it was taxed at, as a fraction: 0.2000 for 20%.")
+          BigDecimal vatRate) {}
 
   @Schema(
       name = "FulfilRequest",
@@ -612,7 +623,14 @@ public final class Dtos {
                   "When a PENDING order lapses if it is not paid (ISO instant): its creation plus"
                       + " the business's unpaid-order limit, or the platform's default while it has"
                       + " set none. Absent once the order is no longer waiting for payment.")
-          String expiresAt) {
+          String expiresAt,
+      @Schema(
+              description =
+                  "True when the order was sold at shelf prices, VAT inside: subtotal is then the"
+                      + " lines' net after every discount, total the sum of what they were paid"
+                      + " plus deposits, and discountAmount and promotionDiscount are what was"
+                      + " given, already inside the lines.")
+          boolean taxInclusive) {
 
     /** This answer with the time a PENDING order lapses; unchanged when it is null. */
     public OrderResponse withExpiresAt(String at) {
@@ -653,9 +671,64 @@ public final class Dtos {
           allowSubstitutions,
           slot,
           contactPhoneE164,
-          at);
+          at,
+          taxInclusive);
     }
   }
+
+  @Schema(
+      name = "ReceiptDocumentResponse",
+      description =
+          "The receipt of a sale at shelf prices, VAT inside, built once on the server: lines at the"
+              + " shelf price, a VAT table by code whose gross adds up to what the lines were paid,"
+              + " and the seller's legal name and VAT number when the business has set them. The"
+              + " till's screen, the thermal print and the emailed copy are all drawn from it.")
+  public record ReceiptDocumentResponse(
+      String orderId,
+      @Schema(description = "The last eight characters of the order id: what staff say aloud.")
+          String reference,
+      String status,
+      String currency,
+      @Schema(description = "When the sale was placed, UTC.") String issuedAt,
+      @Schema(description = "The store's own zone; date and time below are in it.") String timeZone,
+      String localDate,
+      String localTime,
+      ReceiptSellerResponse seller,
+      List<ReceiptLineResponse> lines,
+      @Schema(description = "The staff discount that was given; already inside the lines.")
+          BigDecimal staffDiscount,
+      @Schema(description = "What the whole-basket offers took off; already inside the lines.")
+          BigDecimal promotionDiscount,
+      @Schema(description = "The container deposit added to the sale.") BigDecimal deposit,
+      @Schema(description = "What the customer pays: the lines plus the deposit.") BigDecimal total,
+      List<ReceiptVatRowResponse> vat,
+      @Schema(description = "The VAT inside the total.") BigDecimal vatTotal,
+      List<ReceiptTenderResponse> tenders) {}
+
+  @Schema(name = "ReceiptSellerResponse")
+  public record ReceiptSellerResponse(String legalName, String tradingName, String vatNumber) {}
+
+  @Schema(name = "ReceiptLineResponse")
+  public record ReceiptLineResponse(
+      String variantId,
+      @Schema(description = "The product's name; absent when product-svc could not say.")
+          String name,
+      BigDecimal qty,
+      @Schema(description = "The shelf price of one before any offer; absent when not recorded.")
+          BigDecimal listUnitPrice,
+      @Schema(description = "What the customer paid for the line, VAT included.")
+          BigDecimal lineGross,
+      @Schema(description = "What offers and discounts took off the shelf price of the line.")
+          BigDecimal saved,
+      String vatCode,
+      BigDecimal vatRate) {}
+
+  @Schema(name = "ReceiptVatRowResponse")
+  public record ReceiptVatRowResponse(
+      String vatCode, BigDecimal rate, BigDecimal gross, BigDecimal net, BigDecimal vat) {}
+
+  @Schema(name = "ReceiptTenderResponse")
+  public record ReceiptTenderResponse(String method, BigDecimal amount) {}
 
   @Schema(
       name = "SlotResponse",
@@ -850,7 +923,14 @@ public final class Dtos {
                   "GIFT_CARD only: the code of this business's card to top up. Absent, a new card"
                       + " is issued for the refund.")
           @Size(max = 64)
-          String giftCardCode) {}
+          String giftCardCode,
+      @Schema(
+              description =
+                  "At a till: the till session the cash refund is paid out of, so that drawer's"
+                      + " report counts it. Used by payment-svc only when it is this business's"
+                      + " session at the sale's own store; otherwise the refund is not counted at"
+                      + " any till. A refund is never refused over it.")
+          String tillSessionId) {}
 
   @Schema(name = "ReturnItemResponse")
   public record ReturnItemResponse(
@@ -912,7 +992,15 @@ public final class Dtos {
       @Schema(
               description =
                   "The customer the new sale is for; the returned sale's customer when absent.")
-          String customerId) {}
+          String customerId,
+      @Schema(
+              description =
+                  "At a till: the till session the exchange is rung on, so that drawer's report"
+                      + " counts the cash back (and the legs that net against each other). Used by"
+                      + " payment-svc only while it is this business's open session at the sale's"
+                      + " own store; otherwise the exchange is counted at no till. An exchange is"
+                      + " never refused over it. A UUIDv7, else 400 INVALID_UUID.")
+          String tillSessionId) {}
 
   @Schema(name = "ExchangeNewItemRequest")
   public record ExchangeNewItemRequest(
@@ -1115,7 +1203,13 @@ public final class Dtos {
       @Schema(description = "Why the sale is voided; recorded on the void log and the receipt.")
           @NotBlank
           @Size(max = 500)
-          String reason) {}
+          String reason,
+      @Schema(
+              description =
+                  "At a till: the till session the cash goes back out of; see CreateReturnRequest. On a"
+                      + " cancel (POST /orders/{id}/cancel) it is the drawer that hands back the"
+                      + " cash a held sale had taken.")
+          String tillSessionId) {}
 
   @Schema(name = "VoidResponse")
   public record VoidResponse(String orderId, String reason, String voidedAt) {}
@@ -1249,7 +1343,15 @@ public final class Dtos {
   public record RedeemGiftCardRequest(
       @NotNull @Positive BigDecimal amount,
       @Schema(description = "UUID of the order this redemption pays for.") @NotBlank String orderId,
-      String reference) {}
+      String reference,
+      @Schema(
+              description =
+                  "At a till: the till session the card is charged on, so the GIFT_CARD tender"
+                      + " payment-svc records is that drawer's. Kept by payment-svc only while it is"
+                      + " this business's open session at the order's store; otherwise the tender is"
+                      + " taken at no till. A charge is never refused over it. A UUIDv7, else 400"
+                      + " INVALID_UUID.")
+          String tillSessionId) {}
 
   @Schema(name = "RedeemGiftCardResponse")
   public record RedeemGiftCardResponse(

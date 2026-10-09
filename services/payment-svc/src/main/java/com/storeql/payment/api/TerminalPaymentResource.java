@@ -357,8 +357,12 @@ public class TerminalPaymentResource {
               + " recorded tender, the books' refund in that method and its PaymentRefunded are"
               + " written with it, and the due no longer holds the tender; an approval never"
               + " recorded on a sale has nothing in the books to reverse, so it is closed by the"
-              + " acquirer's refund only (CARD). The due ends REFUNDED_ANOTHER_WAY. Needs"
-              + " sales.refund.")
+              + " acquirer's refund only (CARD). Money handed over from a till may name"
+              + " tillSessionId, the drawer it left: that drawer's report then counts the refund"
+              + " (and a cash one lowers its expected cash). It must be this business's, open and"
+              + " at the card payment's store, judged with the refund on its transaction, and a"
+              + " retry under the same key is answered whatever became of the drawer. The due ends"
+              + " REFUNDED_ANOTHER_WAY. Needs sales.refund.")
   @APIResponse(responseCode = "200", description = "Recorded — read `state` and `anotherWay`")
   @APIResponse(
       responseCode = "400",
@@ -372,7 +376,9 @@ public class TerminalPaymentResource {
       description =
           "Not a manager or owner; PERMISSION_DENIED: the caller's role does not hold"
               + " sales.refund; STORE_ACCESS_DENIED: held to other stores")
-  @APIResponse(responseCode = "404", description = "CARD_REFUND_DUE_NOT_FOUND")
+  @APIResponse(
+      responseCode = "404",
+      description = "CARD_REFUND_DUE_NOT_FOUND; TILL_SESSION_NOT_FOUND (the drawer named)")
   @APIResponse(
       responseCode = "409",
       description =
@@ -380,7 +386,9 @@ public class TerminalPaymentResource {
               + " machine has not been asked: POST …/retry first), TERMINAL_REQUEST_IN_FLIGHT or"
               + " TERMINAL_REFUND_UNDECIDED (a refund of it is not accounted for),"
               + " CARD_REFUND_DUE_NOT_IN_BOOKS (an approval never recorded goes back on its card"
-              + " only: method CARD), IDEMPOTENCY_KEY_REUSED; details state=…")
+              + " only: method CARD), IDEMPOTENCY_KEY_REUSED; details state=…; TILL_SESSION_NOT_OPEN"
+              + " or TILL_SESSION_OTHER_STORE (the drawer named is closed, or at another store than"
+              + " the card payment)")
   @POST
   @Path("/refund-dues/{id}/another-way")
   public ApiResponse<TerminalDtos.RefundDueResponse> anotherWay(
@@ -396,7 +404,16 @@ public class TerminalPaymentResource {
     ctx.requireStoreAccess(svc.due(tenantId, id).storeId());
     var due =
         svc.refundedAnotherWay(
-            tenantId, id, req.method(), req.reference(), req.reason(), ctx.requireUserId(), key);
+            tenantId,
+            id,
+            req.method(),
+            req.reference(),
+            req.reason(),
+            ctx.requireUserId(),
+            key,
+            req.tillSessionId() == null || req.tillSessionId().isBlank()
+                ? null
+                : com.storeql.ids.Ids.parse(req.tillSessionId()));
     return ApiResponse.ok(TerminalMappers.toDto(due, svc.closureOf(tenantId, id).orElse(null)));
   }
 

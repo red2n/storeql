@@ -11,7 +11,7 @@ import java.util.TreeMap;
 import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.postgresql.ds.PGSimpleDataSource;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Reusable Postgres Testcontainer support for service integration tests (docs/ARCHITECTURE.md §16).
@@ -135,9 +135,9 @@ public final class PostgresSupport implements AutoCloseable {
           + " AND column_default ~ '^''[^'']+''(::[a-z ]+)?$'"
           + " ORDER BY 1";
 
-  private final PostgreSQLContainer<?> container;
+  private final PostgreSQLContainer container;
 
-  private PostgresSupport(PostgreSQLContainer<?> container) {
+  private PostgresSupport(PostgreSQLContainer container) {
     this.container = container;
   }
 
@@ -150,8 +150,8 @@ public final class PostgresSupport implements AutoCloseable {
    */
   public static PostgresSupport start() {
     @SuppressWarnings("resource")
-    PostgreSQLContainer<?> c =
-        new PostgreSQLContainer<>("postgres:16-alpine")
+    PostgreSQLContainer c =
+        new PostgreSQLContainer("postgres:16-alpine")
             .withDatabaseName("storeql_test")
             .withUsername("storeql")
             .withPassword("storeql");

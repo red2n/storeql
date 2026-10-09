@@ -126,7 +126,9 @@ final class ItCalls {
     Response r =
         "GET".equals(method)
             ? b.get()
-            : b.post(Entity.entity(json == null ? "{}" : json, MediaType.APPLICATION_JSON));
+            : "PUT".equals(method)
+                ? b.put(Entity.entity(json == null ? "{}" : json, MediaType.APPLICATION_JSON))
+                : b.post(Entity.entity(json == null ? "{}" : json, MediaType.APPLICATION_JSON));
     String text = r.readEntity(String.class);
     return new Answer(
         r.getStatus(),

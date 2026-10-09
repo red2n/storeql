@@ -74,6 +74,7 @@ class QuantityBoundsTest {
                   "wrong size",
                   List.of(new ReturnItemRequest(V, BigDecimal.ONE, "SEALED")),
                   List.of(new ExchangeNewItemRequest(V, q, null, null, null, null)),
+                  null,
                   null));
 
   @Test
@@ -141,6 +142,7 @@ class QuantityBoundsTest {
             "wrong size",
             List.of(new ReturnItemRequest(V, BigDecimal.ONE, "SEALED")),
             withAHole,
+            null,
             null));
   }
 }

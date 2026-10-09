@@ -191,7 +191,18 @@ public final class TerminalDtos {
       @Schema(description = "Why no card machine could put it back. Kept, with who and when.")
           @NotBlank
           @Size(max = 500)
-          String reason) {}
+          String reason,
+      @Schema(
+              description =
+                  "The till session (a UUIDv7) the money was handed over from, so that drawer's"
+                      + " report counts the refund and a cash one lowers its expected cash. It must"
+                      + " be this business's, open, and at the store the card payment was taken at"
+                      + " (404 TILL_SESSION_NOT_FOUND, 409 TILL_SESSION_NOT_OPEN or"
+                      + " TILL_SESSION_OTHER_STORE, nothing written); a retry under the same key is"
+                      + " answered whatever became of the drawer. Absent, the refund is counted at"
+                      + " no drawer, as it always was. Ignored for a card payment never recorded"
+                      + " on a sale, which has nothing in the books.")
+          String tillSessionId) {}
 
   /**
    * Takes a card for an order.

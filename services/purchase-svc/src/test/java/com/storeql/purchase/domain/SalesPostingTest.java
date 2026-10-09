@@ -173,6 +173,81 @@ class SalesPostingTest {
 
   @Test
   @DisplayName(
+      "A refund debits VAT output by the VAT the sale carried inside it, not the blended ratio")
+  void aRefundTakesBackTheCarriedVat() {
+    // Three at 1.29 sold for 3.87 with 0.65 VAT inside; refunded one at a time. The blended ratio
+    // would take 0.22 three times (0.66, a penny more than the sale holds); the carried VAT is
+    // 0.22, 0.21, 0.22 and adds up to the sale's VAT exactly.
+    BigDecimal vat = BigDecimal.ZERO;
+    BigDecimal sales = BigDecimal.ZERO;
+    for (String carried : new String[] {"0.22", "0.21", "0.22"}) {
+      var lines =
+          SalesPosting.refund(
+              TENANT,
+              ORDER,
+              STORE,
+              List.of(new SalesPosting.Allocation("CARD", d("1.29"))),
+              d("3.87"),
+              d("0.65"),
+              "GBP",
+              true,
+              DAY,
+              null,
+              d(carried));
+      same(balance(lines, Domain.CODE_VAT_OUTPUT), carried);
+      same(balance(lines, Domain.CODE_CARD_CLEARING), "-1.29");
+      vat = vat.add(balance(lines, Domain.CODE_VAT_OUTPUT));
+      sales = sales.add(balance(lines, Domain.CODE_SALES));
+    }
+    same(vat, "0.65");
+    same(sales, "3.22");
+  }
+
+  @Test
+  @DisplayName(
+      "Carried VAT is never more than the refund takes of the sale, nor than the sale holds")
+  void carriedVatIsCapped() {
+    var lines =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CARD", d("1.00"))),
+            d("30.00"),
+            d("5.00"),
+            "GBP",
+            true,
+            DAY,
+            null,
+            d("9.00"));
+
+    // 9.00 claimed inside a 1.00 refund: at most the 1.00 itself.
+    same(balance(lines, Domain.CODE_VAT_OUTPUT), "1.00");
+    same(balance(lines, Domain.CODE_SALES), "0.00");
+  }
+
+  @Test
+  @DisplayName("With no carried VAT the sale's own ratio still applies, as before")
+  void noCarriedVatKeepsTheRatio() {
+    var lines =
+        SalesPosting.refund(
+            TENANT,
+            ORDER,
+            STORE,
+            List.of(new SalesPosting.Allocation("CASH", d("10.00"))),
+            d("30.00"),
+            d("5.00"),
+            "GBP",
+            true,
+            DAY,
+            null,
+            null);
+
+    same(balance(lines, Domain.CODE_VAT_OUTPUT), "1.67");
+  }
+
+  @Test
+  @DisplayName(
       "A refund's VAT share is rounded to the sale's own currency: whole yen, thousandths of a dinar")
   void aRefundsVatShareIsRoundedInTheSalesOwnCurrency() {
     // ¥1,000 back of a ¥1,100 sale carrying ¥100 VAT: 90.909… is ¥91, never 90.91 — a ledger

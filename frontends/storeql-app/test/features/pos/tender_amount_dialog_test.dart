@@ -164,6 +164,54 @@ void main() {
     }
   });
 
+  testWidgets(
+      'a card on a machine the till does not drive asks for its receipt '
+      'reference: required, and backing out adds nothing', (tester) async {
+    await _pump(tester);
+    await _open(tester, 'Card');
+    await tester.tap(find.widgetWithText(FilledButton, 'Add'));
+    await tester.pumpAndSettle();
+
+    // Asked for, and the button that adds the payment is off until one is typed.
+    expect(find.byKey(const Key('tender-machine-reference')), findsOneWidget);
+    FilledButton ok() => tester.widget<FilledButton>(
+        find.byKey(const Key('tender-machine-reference-ok')));
+    expect(ok().onPressed, isNull);
+    await tester.enterText(
+        find.byKey(const Key('tender-machine-reference-field')), '   ');
+    await tester.pump();
+    expect(ok().onPressed, isNull, reason: 'spaces are not a reference');
+
+    // Backing out adds no card payment, and the sale is still unpaid.
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('tender-machine-reference')), findsNothing);
+    expect(
+        tester
+            .widget<FilledButton>(
+                find.widgetWithText(FilledButton, 'Complete Sale'))
+            .onPressed,
+        isNull,
+        reason: 'no card payment was staged');
+
+    // Typing one adds it.
+    await _open(tester, 'Card');
+    await tester.tap(find.widgetWithText(FilledButton, 'Add'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('tender-machine-reference-field')), 'AUTH 4821');
+    await tester.pump();
+    expect(ok().onPressed, isNotNull);
+    await tester.tap(find.byKey(const Key('tender-machine-reference-ok')));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<FilledButton>(
+                find.widgetWithText(FilledButton, 'Complete Sale'))
+            .onPressed,
+        isNotNull);
+  });
+
   testWidgets('a finite amount above zero in pence switches Add on',
       (tester) async {
     await _pump(tester);
@@ -245,6 +293,12 @@ void main() {
     // The card is staged for exactly what was typed, not a whole dinar more.
     await _type(tester, '129.99');
     await tester.tap(find.widgetWithText(FilledButton, 'Add'));
+    await tester.pumpAndSettle();
+    // A card on a machine the till does not drive asks for its receipt reference.
+    await tester.enterText(
+        find.byKey(const Key('tender-machine-reference-field')), 'AUTH 4821');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('tender-machine-reference-ok')));
     await tester.pumpAndSettle();
     expect(find.byType(AlertDialog), findsNothing);
     expect(find.textContaining('129.99'), findsWidgets);

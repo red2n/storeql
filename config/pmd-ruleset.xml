@@ -70,7 +70,7 @@
     <!-- ── Best practices ──────────────────────────────────────────────────── -->
     <rule ref="category/java/bestpractices.xml">
 
-        <!-- JUnit 5 test classes and methods do not need to be public. -->
+        <!-- JUnit Jupiter test classes and methods do not need to be public. -->
         <exclude name="JUnitTestContainsTooManyAsserts"/>
 
         <!-- ArchUnit @ArchTest fields are static but assigned in tests via injection —

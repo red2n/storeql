@@ -98,7 +98,12 @@ public class SalesEventHandler {
           Ids.parse(o.getString("tenantId")),
           Ids.parse(o.getString("orderId")),
           store,
-          shares);
+          shares,
+          // The VAT inside the refund, when the sale carried it (additive: absent from an older
+          // payment-svc, and the sale's own ratio is used).
+          o.containsKey("vatAmount") && !o.isNull("vatAmount")
+              ? o.getJsonNumber("vatAmount").bigDecimalValue()
+              : null);
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "PaymentRefunded not posted, malformed: " + e.getMessage());
     }

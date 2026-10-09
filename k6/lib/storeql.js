@@ -29,6 +29,12 @@ const UUID_SEGMENT = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
  */
 export function call(method, path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  // The till's card rule: a card typed at a till carries the card machine's receipt reference. The
+  // suites that tender a card as a convenience get one here; one that tests the rule itself says
+  // `raw: true` and sends exactly what it means to.
+  if (!opts.raw && method === 'POST' && path.split('?')[0].endsWith('/api/payment-svc/payments')) {
+    opts = { ...opts, body: withCardRef(opts.body) };
+  }
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
   if (opts.storefront) headers['X-Storefront-Tenant'] = opts.storefront;
   if (opts.idem) headers['Idempotency-Key'] = opts.idem === true ? newKey() : opts.idem;
@@ -40,6 +46,18 @@ export function call(method, path, opts = {}) {
   // Ids in the URL would give every request its own metric series.
   const name = `${method} ${path.split('?')[0].replace(UUID_SEGMENT, '{id}')}`;
   return http.request(method, `${BASE}${path}`, body, { headers, tags: { name } });
+}
+
+/** A card machine's receipt reference, as a cashier would read it off the slip. */
+export function cardRef() {
+  return `K6-${uniq()}`.slice(0, 40);
+}
+
+/** A typed CARD tender body with a reference; anything else (cash, a machine's approval) as it was. */
+export function withCardRef(body) {
+  if (!body || typeof body !== 'object') return body;
+  if (String(body.method || '').toUpperCase() !== 'CARD' || body.reference || body.terminalPaymentId) return body;
+  return { ...body, reference: cardRef() };
 }
 
 function envelope(res) {

@@ -35,6 +35,28 @@ public class PaymentRepository extends BaseOutboxRepository {
    * surface as an error (golden rule #11).
    */
   public PaymentTender createTender(PaymentTender t, OutboxRow event) {
+    return createTender(t, event, null);
+  }
+
+  /**
+   * As {@link #createTender(PaymentTender, OutboxRow)}, recording how a till card tender was
+   * entered.
+   */
+  public PaymentTender createTender(PaymentTender t, OutboxRow event, String entryMode) {
+    return createTender(t, event, entryMode, null);
+  }
+
+  /**
+   * As above, naming the till session (the drawer) the money was taken in; null for money taken
+   * outside a till. A session is judged here, on the transaction that writes the tender and after a
+   * retry has been answered: it must be this business's and still open (the row is held shared, so
+   * a close waits for this tender or finds it counted), else nothing is written.
+   *
+   * @throws com.storeql.web.ApiException 404 {@code TILL_SESSION_NOT_FOUND}; 409 {@code
+   *     TILL_SESSION_NOT_OPEN}
+   */
+  public PaymentTender createTender(
+      PaymentTender t, OutboxRow event, String entryMode, UUID tillSessionId) {
     return inTx(
         c -> {
           if (t.idempotencyKey() != null) {
@@ -43,7 +65,10 @@ public class PaymentRepository extends BaseOutboxRepository {
               return existing;
             }
           }
-          insertTenderTx(c, t);
+          if (tillSessionId != null) {
+            TillSessionLocks.requireOpenTx(c, t.tenantId(), tillSessionId);
+          }
+          insertTenderTx(c, t, entryMode, tillSessionId);
           insertOutbox(c, event);
           if (PaymentTender.METHOD_CARD.equals(t.method())) recordMatchingApprovalTx(c, t);
           return t;
@@ -119,6 +144,15 @@ public class PaymentRepository extends BaseOutboxRepository {
    *     or {@code TERMINAL_WRONG_STORE}
    */
   public PaymentTender createTerminalTender(PaymentTender t, OutboxRow event, UUID attemptId) {
+    return createTerminalTender(t, event, attemptId, null);
+  }
+
+  /**
+   * As above, naming the till session the card was taken in, judged as {@link #createTender} judges
+   * it: on this transaction, after a retry is answered.
+   */
+  public PaymentTender createTerminalTender(
+      PaymentTender t, OutboxRow event, UUID attemptId, UUID tillSessionId) {
     return inTx(
         c -> {
           if (t.idempotencyKey() != null) {
@@ -126,6 +160,9 @@ public class PaymentRepository extends BaseOutboxRepository {
             if (existing != null) {
               return existing;
             }
+          }
+          if (tillSessionId != null) {
+            TillSessionLocks.requireOpenTx(c, t.tenantId(), tillSessionId);
           }
           Terminals.Attempt sale = CardSettlementSql.lockAttemptTx(c, t.tenantId(), attemptId);
           if (sale == null) {
@@ -156,7 +193,7 @@ public class PaymentRepository extends BaseOutboxRepository {
           if (refusal != null) {
             throw com.storeql.web.ApiException.conflict(refusal, LINK_REFUSALS.get(refusal));
           }
-          insertTenderTx(c, t);
+          insertTenderTx(c, t, "TERMINAL", tillSessionId);
           insertOutbox(c, event);
           CardSettlementSql.recordAsTx(c, t.tenantId(), sale.id(), t.id());
           return t;
@@ -177,12 +214,19 @@ public class PaymentRepository extends BaseOutboxRepository {
 
   private static void insertTenderTx(java.sql.Connection c, PaymentTender t)
       throws java.sql.SQLException {
+    insertTenderTx(c, t, null, null);
+  }
+
+  private static void insertTenderTx(
+      java.sql.Connection c, PaymentTender t, String entryMode, UUID tillSessionId)
+      throws java.sql.SQLException {
     try (var ps =
         c.prepareStatement(
             "INSERT INTO payment_tenders"
                 + " (id, tenant_id, order_id, amount, method, reference,"
-                + "  idempotency_key, status, notes, created_at, store_id)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+                + "  idempotency_key, status, notes, created_at, store_id, entry_mode,"
+                + "  till_session_id)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, t.id());
       ps.setObject(2, t.tenantId());
       ps.setObject(3, t.orderId());
@@ -195,6 +239,8 @@ public class PaymentRepository extends BaseOutboxRepository {
       // pgjdbc cannot infer a SQL type for a raw java.time.Instant.
       ps.setObject(10, t.createdAt().atOffset(java.time.ZoneOffset.UTC));
       ps.setObject(11, t.storeId());
+      ps.setString(12, entryMode);
+      ps.setObject(13, tillSessionId);
       ps.executeUpdate();
     }
   }
@@ -260,6 +306,19 @@ public class PaymentRepository extends BaseOutboxRepository {
    *     PAYMENT_REFUND_VIA_TERMINAL} or {@code REFUND_EXCEEDS_PAYMENT}
    */
   public RefundTender createRefundGuarded(RefundTender r, OutboxRow event, StoreGuard mayActAt) {
+    return createRefundGuarded(r, event, mayActAt, null);
+  }
+
+  /**
+   * As above, naming the till session the refund is paid out of. The drawer is judged here, on this
+   * transaction, once a retry has been answered: it must be this business's and open (409 {@code
+   * TILL_SESSION_NOT_OPEN}; held shared, so a close waits for this refund or finds it counted) and
+   * at the store the tender was taken at (409 {@code TILL_SESSION_OTHER_STORE}). A refund paid out
+   * of a drawer is that drawer's store's -- also for a tender taken at no store -- so the drawer,
+   * the store's reports and its day agree on it.
+   */
+  public RefundTender createRefundGuarded(
+      RefundTender r, OutboxRow event, StoreGuard mayActAt, UUID tillSessionId) {
     return inTx(
         c -> {
           PaymentTender payment = lockTenderTx(c, r.tenantId(), r.paymentId());
@@ -286,6 +345,16 @@ public class PaymentRepository extends BaseOutboxRepository {
           if (!payment.orderId().equals(r.orderId())) {
             throw com.storeql.web.ApiException.conflict(
                 "PAYMENT_ORDER_MISMATCH", "payment does not belong to this order");
+          }
+          UUID refundStore = payment.storeId();
+          if (tillSessionId != null) {
+            UUID sessionStore = TillSessionLocks.requireOpenTx(c, r.tenantId(), tillSessionId);
+            if (refundStore != null && !refundStore.equals(sessionStore)) {
+              throw com.storeql.web.ApiException.conflict(
+                  "TILL_SESSION_OTHER_STORE",
+                  "that till session is at another store than the one this payment was taken at");
+            }
+            refundStore = sessionStore;
           }
 
           // A card a terminal took goes back through that terminal, on the card that paid: a refund
@@ -318,8 +387,9 @@ public class PaymentRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "INSERT INTO refund_tenders"
                       + " (id, tenant_id, order_id, payment_id, amount, method,"
-                      + "  reference, idempotency_key, reason, created_at, store_id)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+                      + "  reference, idempotency_key, reason, created_at, store_id,"
+                      + "  till_session_id)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, r.id());
             ps.setObject(2, r.tenantId());
             ps.setObject(3, r.orderId());
@@ -332,8 +402,10 @@ public class PaymentRepository extends BaseOutboxRepository {
             // pgjdbc cannot infer a SQL type for a raw java.time.Instant.
             ps.setObject(10, r.createdAt().atOffset(java.time.ZoneOffset.UTC));
             // The store the payment was taken at: a refund is that store's, as its Z report and
-            // tender mix read it. Null only for a payment recorded with no store.
-            ps.setObject(11, payment.storeId());
+            // tender mix read it; the drawer's store when it is paid out of one. Null only for a
+            // payment recorded with no store and paid out of no drawer.
+            ps.setObject(11, refundStore);
+            ps.setObject(12, tillSessionId);
             ps.executeUpdate();
           }
           insertOutbox(c, event);
@@ -445,6 +517,39 @@ public class PaymentRepository extends BaseOutboxRepository {
       java.util.function.BiFunction<
               BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
           eventBuilder) {
+    refundOrderOnce(
+        eventId,
+        consumer,
+        tenantId,
+        orderId,
+        requestedAmount,
+        reason,
+        methodOverride,
+        toCard,
+        null,
+        eventBuilder);
+  }
+
+  /**
+   * As above, for a refund a till gave: {@code tillSessionId} is the drawer it was paid out of. It
+   * is kept only if it is this business's OPEN session at the very store the refunded tender was
+   * taken at (the row is held shared, so a close that is under way is waited for and the drawer is
+   * then closed); otherwise the refund is written with none (it is then "not at a till" in the
+   * reports) -- a refund is never refused over where it is counted.
+   */
+  public void refundOrderOnce(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      String methodOverride,
+      CardSettlement.OwedBack toCard,
+      UUID tillSessionId,
+      java.util.function.BiFunction<
+              BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
+          eventBuilder) {
     inTx(
         c -> {
           if (!markProcessedIfNewTx(c, eventId, consumer)) {
@@ -466,6 +571,7 @@ public class PaymentRepository extends BaseOutboxRepository {
               methodOverride,
               null,
               methodOverride == null ? toCard : null,
+              tillSessionId,
               eventBuilder);
           if (givenUp) {
             owedBackUnrecordedTx(c, tenantId, orderId, reason, toCard);
@@ -503,6 +609,11 @@ public class PaymentRepository extends BaseOutboxRepository {
    * <p>With {@code toCard} given, a CARD tender a terminal took is owed back to its card instead of
    * written in the books (see {@link #refundOrderOnce}); what is already owed back counts against
    * what remains, as a refund does.
+   *
+   * <p>{@code tillSessionId} is the drawer a till said the cash went back out of. It is kept on a
+   * refund row only while it is this business's OPEN session at the refund's own store (read with
+   * the row held shared, so a close under way is waited for); else the row carries none and is
+   * counted at no drawer. A refund is never refused over it.
    */
   private BigDecimal refundTx(
       Connection c,
@@ -513,10 +624,12 @@ public class PaymentRepository extends BaseOutboxRepository {
       String methodOverride,
       UUID storeOverride,
       CardSettlement.OwedBack toCard,
+      UUID tillSessionId,
       java.util.function.BiFunction<
               BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
           eventBuilder)
       throws SQLException {
+    UUID sessionStore = TillSessionLocks.openStoreTx(c, tenantId, tillSessionId);
     List<PaymentTender> captured = capturedTendersForUpdateTx(c, tenantId, orderId);
     BigDecimal capturedTotal = BigDecimal.ZERO;
     for (PaymentTender t : captured) {
@@ -551,6 +664,7 @@ public class PaymentRepository extends BaseOutboxRepository {
         continue;
       }
       String method = methodOverride != null ? methodOverride : t.method();
+      UUID refundStore = storeOverride != null ? storeOverride : t.storeId();
       insertRefundTenderTx(
           c,
           tenantId,
@@ -559,7 +673,8 @@ public class PaymentRepository extends BaseOutboxRepository {
           alloc,
           method,
           reason,
-          storeOverride != null ? storeOverride : t.storeId());
+          refundStore,
+          sessionStore != null && sessionStore.equals(refundStore) ? tillSessionId : null);
       shares.add(
           new com.storeql.payment.domain.Domain.RefundAllocation(
               t.id(), method, alloc, t.storeId()));
@@ -581,13 +696,27 @@ public class PaymentRepository extends BaseOutboxRepository {
    */
   public boolean captureGiftCardOnce(
       UUID eventId, String consumer, PaymentTender tender, OutboxRow event) {
+    return captureGiftCardOnce(eventId, consumer, tender, event, null);
+  }
+
+  /**
+   * As above, for a card charged at a till that named its drawer: the tender is that drawer's only
+   * when it is this business's OPEN session at the store the card was charged at, else it is taken
+   * at no till -- a charge that has happened is never refused over where it is counted.
+   */
+  public boolean captureGiftCardOnce(
+      UUID eventId, String consumer, PaymentTender tender, OutboxRow event, UUID tillSessionId) {
     return inTx(
         c -> {
           if (!markProcessedIfNewTx(c, eventId, consumer)) return false;
           if (findTenderByKeyTx(c, tender.tenantId(), tender.idempotencyKey()) != null) {
             return false;
           }
-          insertTenderTx(c, tender);
+          insertTenderTx(
+              c,
+              tender,
+              null,
+              TillSessionLocks.keptAtTx(c, tender.tenantId(), tillSessionId, tender.storeId()));
           insertOutbox(c, event);
           return true;
         },
@@ -604,6 +733,11 @@ public class PaymentRepository extends BaseOutboxRepository {
    * extraRefund} is positive, refund it on the original order to its original tenders — a card a
    * terminal took is owed back to that card ({@code toCard}). Any of the three is skipped when
    * nothing could move. Returns null on a replay.
+   *
+   * <p>All three are rung at one till: {@code tillSessionId} is the drawer it named, kept for each
+   * only while it is this business's open session at the exchange's store, so the cash back leaves
+   * that drawer's expected cash with the sale it reverses, and an exchange is never refused over
+   * where it is counted.
    */
   public ExchangeMoved exchangeOnce(
       UUID eventId,
@@ -614,6 +748,7 @@ public class PaymentRepository extends BaseOutboxRepository {
       BigDecimal extraRefund,
       String reason,
       UUID exchangeStoreId,
+      UUID tillSessionId,
       java.util.function.BiFunction<
               BigDecimal, List<com.storeql.payment.domain.Domain.RefundAllocation>, OutboxRow>
           exchangeRefundEvent,
@@ -636,9 +771,15 @@ public class PaymentRepository extends BaseOutboxRepository {
                   "EXCHANGE",
                   exchangeStoreId,
                   null,
+                  tillSessionId,
                   exchangeRefundEvent);
           if (exchanged.signum() > 0) {
-            insertTenderTx(c, exchangeTender.apply(exchanged));
+            PaymentTender onNewOrder = exchangeTender.apply(exchanged);
+            insertTenderTx(
+                c,
+                onNewOrder,
+                null,
+                TillSessionLocks.keptAtTx(c, tenantId, tillSessionId, onNewOrder.storeId()));
             insertOutbox(c, exchangeCapturedEvent.apply(exchanged));
           }
           BigDecimal original = BigDecimal.ZERO;
@@ -653,6 +794,7 @@ public class PaymentRepository extends BaseOutboxRepository {
                     null,
                     exchangeStoreId,
                     toCard,
+                    tillSessionId,
                     originalRefundEvent);
           }
           return new ExchangeMoved(exchanged, original);
@@ -689,14 +831,15 @@ public class PaymentRepository extends BaseOutboxRepository {
       BigDecimal amount,
       String method,
       String reason,
-      UUID storeId)
+      UUID storeId,
+      UUID tillSessionId)
       throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO refund_tenders"
                 + " (id, tenant_id, order_id, payment_id, amount, method, reason, created_at,"
-                + " store_id)"
-                + " VALUES (?,?,?,?,?,?,?, now(), ?)")) {
+                + " store_id, till_session_id)"
+                + " VALUES (?,?,?,?,?,?,?, now(), ?, ?)")) {
       ps.setObject(1, Ids.newId());
       ps.setObject(2, tenantId);
       ps.setObject(3, orderId);
@@ -705,6 +848,7 @@ public class PaymentRepository extends BaseOutboxRepository {
       ps.setString(6, method);
       ps.setString(7, reason);
       ps.setObject(8, storeId);
+      ps.setObject(9, tillSessionId);
       ps.executeUpdate();
     }
   }

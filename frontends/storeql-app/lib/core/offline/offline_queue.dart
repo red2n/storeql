@@ -12,6 +12,7 @@ import '../storage/app_storage.dart';
 import 'offline_sale.dart';
 import 'offline_synced.dart';
 import 'package:storeql_app/core/ids.dart';
+import '../../features/pos/cash_providers.dart';
 
 /// Store-and-forward queue for POS sales taken while the server was unreachable.
 ///
@@ -41,6 +42,11 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
   /// Tests use this so a background timer cannot fire mid-assertion.
   final bool _autoSync;
 
+  /// Told which till session the server would not count a replayed tender in
+  /// (by default: the drawer the terminal holds, if it is that one, is read
+  /// again, so the next sale names the one open now).
+  final void Function(String sessionId) _onTillSessionRefused;
+
   /// Serialises replay runs: the periodic timer, a manual "Sync now" and an
   /// enqueue can all fire at once, and two concurrent runs would replay the same
   /// sale twice. Idempotency makes that harmless on the server, but it would
@@ -54,9 +60,16 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
   /// what the shell shows as "offline".
   bool get isOffline => _consecutiveFailures > 0;
 
-  OfflineQueueNotifier(this._ref, {AppStorage storage = const AppStorage(), bool autoSync = true})
+  OfflineQueueNotifier(this._ref,
+      {AppStorage storage = const AppStorage(),
+      bool autoSync = true,
+      void Function(String sessionId)? onTillSessionRefused})
       : _storage = storage,
         _autoSync = autoSync,
+        _onTillSessionRefused = onTillSessionRefused ??
+            // A replayed tender the server will not count in its drawer is
+            // recorded naming none; the terminal reads the open till again.
+            ((id) => _ref.read(saleTillProvider.notifier).refused(id)),
         super(const []) {
     _ready = restore().then((_) {
       if (state.isNotEmpty) _scheduleNext();
@@ -251,7 +264,7 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
           if (!t.redeemDone) {
             await dio.post(
               '/${ApiConstants.order}/gift-cards/$code/redeem',
-              data: {'amount': t.amount, 'orderId': current.orderId},
+              data: giftCardRedeemBody(t, current.orderId),
               options: Options(
                   headers: {'Idempotency-Key': derivedId(current.id, 'gift:$i')}),
             );
@@ -260,10 +273,11 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
           }
         } else if (!t.tenderDone) {
           try {
-            await dio.post(
-              '/${ApiConstants.payment}/payments',
-              data: {...t.body, 'orderId': current.orderId},
-              options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'pay:$i')}),
+            await postTender(
+              dio,
+              {...t.body, 'orderId': current.orderId},
+              idempotencyKey: derivedId(current.id, 'pay:$i'),
+              onTillSessionRefused: _onTillSessionRefused,
             );
           } catch (e) {
             // The card machine's approval this tender names is already

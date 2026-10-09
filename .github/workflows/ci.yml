@@ -16,11 +16,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up JDK 21
+      - name: Set up JDK 25 (the jars still target release 21)
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
           cache: maven
 
       - name: Build and verify
@@ -98,6 +98,86 @@ jobs:
           python3 -m pip install --quiet pyyaml
           scripts/k8s-check.sh
 
+  # The container healthcheck of every Java image (intent/jdk-25.md): the Temurin 25 JRE image has no
+  # curl, wget or nc, so a healthcheck that used one reports every service unhealthy and the stack never
+  # starts, which is what reverted the first move to 25. The script is proved against real servers on
+  # this machine and inside the 21 and 25 base images; the files are checked so that no compose
+  # healthcheck or Kubernetes probe of a Java image can use a tool the image lacks.
+  healthchecks:
+    name: Container healthchecks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check the compose healthchecks and the Kubernetes probes
+        run: |
+          python3 -m pip install --quiet pyyaml
+          scripts/compose-healthcheck-check.py --self-test
+          scripts/compose-healthcheck-check.py
+
+      - name: Prove the healthcheck script on this machine and in each base image
+        run: scripts/healthcheck-selftest.sh
+
+  # The migration freeze (intent/forward-only-migrations.md). Until the first release tag exists the
+  # check passes and says so; from v0.1.0 a published migration is immutable, a new one is numbered
+  # above the tag's highest and a destructive move carries its contract marker. The full history is
+  # fetched because the check reads the tags.
+  migrations:
+    name: Migration freeze
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Prove the check, then run it
+        run: |
+          scripts/migration-freeze-check.py --self-test
+          scripts/migration-freeze-check.py
+
+      - name: Prove that a data wipe is refused on a machine that is not dev or ci
+        run: scripts/redeploy-guard-selftest.sh
+
+      - name: Prove the deploy script (backup before stop, the refusals, the rollback line)
+        run: scripts/deploy-release-selftest.sh
+
+  # The upgrade path (intent/forward-only-migrations.md), on a throwaway Postgres with the Flyway the
+  # services run: release N+1 migrates N's database and keeps its data, N's code still runs on an
+  # additive N+1, a contract release is not rollback-safe, an edited published file is refused.
+  upgrade:
+    name: Upgrade path
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 25 (the jars still target release 21)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Prove the upgrade path
+        run: |
+          mvn -q -B -pl shared/common-service -am dependency:build-classpath -Dmdep.outputFile="$RUNNER_TEMP/flyway.cp"
+          FLYWAY_CLASSPATH="$(cat "$RUNNER_TEMP/flyway.cp")" scripts/upgrade-selftest.sh
+
+  # The print bridge a browser till uses to reach a thermal printer (docs/HARDWARE-BENCH.md): the bytes
+  # arrive unchanged, only listed origins may print, only a POST of octets to /print is forwarded.
+  print-bridge:
+    name: Print bridge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Test the print bridge against a fake printer
+        run: python3 -m unittest discover -s tools/print-bridge -p 'test_*.py' -v
+
   # ── Alerting ───────────────────────────────────────────────────────────────
   # The alert rules (promtool check and unit tests: a healthy service must not alert, a restart must)
   # and the Prometheus and Alertmanager configs, read by the tools that will read them.
@@ -126,6 +206,9 @@ jobs:
 
       - name: Drive the backup, verify, restore and point-in-time recovery against throwaway containers
         run: scripts/backup-selftest.sh
+
+      - name: Prove the off-site copy (verified, never deletes, refuses unencrypted dumps)
+        run: scripts/offsite-backup-selftest.sh
 
   # The release path's supply-chain promises (22.10, 22.11): every published image built with an
   # SBOM and max-mode provenance, scanned for known vulnerabilities, then attested and signed by

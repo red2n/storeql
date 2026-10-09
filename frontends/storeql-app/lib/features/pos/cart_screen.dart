@@ -17,6 +17,7 @@ import '../admin/providers/admin_providers.dart';
 import '../admin/providers/staff_names.dart';
 import 'pos_age_check.dart';
 import 'pos_providers.dart';
+import 'pos_quote.dart';
 import 'pos_recall_check.dart';
 import 'pos_weighed_item.dart';
 import 'variable_measure_barcode.dart';
@@ -1686,16 +1687,17 @@ class _TotalsBarState extends ConsumerState<_TotalsBar> {
   Widget build(BuildContext context) {
     final items = ref.watch(posCartProvider);
     final showPrices = ref.watch(posShowPricesProvider);
-    final subtotal = ref.watch(posCartProvider.notifier).total;
+    // What the server says the basket costs (promotions and the VAT in every
+    // line decided there), else the till's own sum of the prices it was given.
+    final totals = ref.watch(posTotalsProvider);
+    final subtotal = totals.goods + totals.cards;
     // A discount comes off the goods; a gift card being sold is never discounted.
-    final goods = ref.watch(posCartProvider.notifier).goodsTotal;
+    final goods = totals.goods;
     final currency = items.isNotEmpty ? items.first.currency : '';
-    final discount = ref
-        .watch(posDiscountProvider)
-        .clamp(0, goods)
-        .toDouble();
-    final deposits = ref.watch(posCartProvider.notifier).deposits;
-    final net = subtotal - discount + deposits;
+    final asked = ref.watch(posDiscountProvider);
+    final discount = totals.discountOf(asked);
+    final deposits = totals.deposits;
+    final net = totals.due(asked);
     final theme = Theme.of(context);
     final tt = theme.textTheme;
     final cs = theme.colorScheme;

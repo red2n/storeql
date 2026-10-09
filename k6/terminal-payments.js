@@ -348,6 +348,15 @@ export default function () {
   truthy('[+] ...shown as money owed back and put back, never recorded as paid', !!lostDue && lostDue.paymentId == null && lostDue.source === 'ORDER_EVENT', lostDue);
   expect(call('POST', PAY, { token: cashier, idem: newKey('pay'), body: { orderId: lost.id, amount: '9.03', method: 'CARD', storeId: store, terminalPaymentId: quiet.id } }),
     '[abuse] the till’s queued tender, replayed, is refused naming the payment', 409, 'PAYMENT_ORDER_GIVEN_UP');
+  // The till's card rule: where the store has a card machine a card cannot be typed in at all, unless the
+  // owner has allowed a standalone machine -- and then only with that machine's receipt reference.
+  const STANDALONE = `/api/payment-svc/admin/payments/stores/${store}/standalone-card`;
+  expect(call('POST', PAY, { raw: true, token: cashier, idem: newKey('pay'), body: { orderId: lost.id, amount: '9.03', method: 'CARD', storeId: store, reference: 'AUTH 9' } }),
+    '[-] a card typed in at a store with a card machine is refused', 409, 'PAYMENT_CARD_NEEDS_TERMINAL');
+  expect(call('PUT', STANDALONE, { token: manager.token, body: { allowed: true } }), '[-] a manager cannot allow a standalone machine', 403);
+  expect(call('PUT', STANDALONE, { token: owner, body: { allowed: true } }), '[+] the owner can', 200);
+  expect(call('POST', PAY, { raw: true, token: cashier, idem: newKey('pay'), body: { orderId: lost.id, amount: '9.03', method: 'CARD', storeId: store } }),
+    '[-] and a typed card then needs the machine\u2019s receipt reference', 400, 'PAYMENT_CARD_REFERENCE_REQUIRED');
   expect(call('POST', PAY, { token: cashier, idem: newKey('pay'), body: { orderId: lost.id, amount: '9.03', method: 'CARD', storeId: store } }),
     '[abuse] ...and not naming it', 409, 'PAYMENT_ORDER_GIVEN_UP');
   truthy('[abuse] ...so the cancelled sale has no tender', (data(call('GET', `${PAY}/by-order/${lost.id}`, { token: owner })) || []).length === 0, 'none');

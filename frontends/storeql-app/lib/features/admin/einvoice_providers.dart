@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
+import '../../shared/util/pick_file.dart';
 
 // ── Supplier e-invoices received (07.13) ─────────────────────────────────────
 //
@@ -256,14 +257,8 @@ const maxEInvoiceBytes = 20 * 1024 * 1024;
 /// tests hand a file in.
 final eInvoicePickerProvider = Provider<Future<PickedDocument?> Function()>(
   (ref) => () async {
-    final r = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['xml', 'pdf'],
-      withData: true,
-    );
-    final f = r == null || r.files.isEmpty ? null : r.files.first;
-    final bytes = f?.bytes;
-    return bytes == null ? null : PickedDocument(bytes, f!.name);
+    final f = await pickFileWithBytes(const ['xml', 'pdf']);
+    return f == null ? null : PickedDocument(f.bytes, f.name);
   },
 );
 

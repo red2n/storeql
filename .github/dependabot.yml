@@ -12,6 +12,14 @@ updates:
     groups:
       maven-minor-and-patch:
         update-types: [minor, patch]
+    # Jersey moves with Helidon, never alone: Helidon 4.x manages Jersey 3.1 (Jakarta EE 10) and
+    # Jersey 4 is Jakarta REST 4 / EE 11. A 4.x json-binding next to the 3.1.11 runtime links by luck,
+    # and a whole 4.x line does not start the services (ServerCdiExtension fails on
+    # org.glassfish.jersey.internal.inject.InstanceBinding). Revisit when a Helidon release manages
+    # Jersey 4 (PR #63 was closed for this).
+    ignore:
+      - dependency-name: 'org.glassfish.jersey.media:jersey-media-json-binding'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: pub
     directory: /frontends/storeql-app
@@ -22,9 +30,15 @@ updates:
         update-types: [minor, patch]
 
   # The base images of Dockerfile.svc and Dockerfile.web: most of an image's findings live there.
+  # A new Java major is a deliberate change (the healthcheck, CI and the stack move with it, see
+  # intent/jdk-25.md), and a bot proposes non-LTS releases too, so only updates within the pinned major
+  # (new Temurin builds of 25) come from here.
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly, day: monday }
+    ignore:
+      - dependency-name: eclipse-temurin
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: /

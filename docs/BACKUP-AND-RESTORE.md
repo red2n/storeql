@@ -34,8 +34,26 @@ late, when backups are unencrypted, when no base backup has been taken in nine d
 Postgres cannot archive its WAL.
 
 Where it lives: the `backups` volume on docker-compose, the `storeql-backups` claim on Kubernetes. **A
-backup on the database's own disk is not a backup**: bind the volume to another disk, or add a copy to
-object storage after each run (`rclone`/`aws s3 cp` of `/backups`); nothing else changes.
+backup on the database's own disk, or on the database's own host, is not a backup.**
+
+### Off-site
+
+`scripts/offsite-backup.sh` copies the dumps, base backups and archived WAL to a place that is not this
+machine and **verifies the copy**: `OFFSITE_REMOTE=offsite:storeql-pilot scripts/offsite-backup.sh`, where
+`offsite` is an rclone remote (an S3-compatible bucket in another provider's account or region, defined in
+`~/.config/rclone/rclone.conf`; the access key should be able to write and list but not delete).
+- What leaves is already encrypted: the identity that reads it is not on the host. A **plain** dump is
+  refused, not copied (`OFFSITE_ALLOW_PLAINTEXT=1` overrides it, for a rehearsal on a laptop).
+- The copy **never deletes** at the destination, so a mistake here cannot empty the off-site copy; how long
+  the bucket keeps things is its own lifecycle rule (keep at least the 14 dumps and 4 base backups, and
+  the WAL back to the oldest base backup).
+- After the copy every file is checked against the volume (size and hash); a missing or different file
+  fails the run. `--verify` checks without copying. The success time is written only after a verified
+  copy, to `.storeql-deploy/offsite.last`, the heartbeat a cron job or an alert reads: run it nightly
+  after the dump (`02:30` UTC) and mail when the heartbeat is older than a day and a half.
+- `scripts/offsite-backup-selftest.sh` proves it against a throwaway volume and a local directory
+  standing in for the bucket (15 checks, in CI). A restore from the off-site copy is part of the monthly
+  drill in [PILOT-HOST-RUNBOOK.md](PILOT-HOST-RUNBOOK.md).
 
 ## Restoring
 

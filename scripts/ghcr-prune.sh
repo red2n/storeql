@@ -141,16 +141,24 @@ for pkg in "${PACKAGES[@]}"; do
     continue
   fi
 
+  # A released version (a tag of three dotted numbers, 0.1.0) is never pruned and is not counted
+  # among the KEEP newest: it is a customer's rollback target. Same rule as the CI cleanup's
+  # exclude-tags '*.*.*'.
+  jq -r '.[] | select((.metadata.container.tags // []) | any(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))
+    | "  release \(.id)  \(.created_at)  [\(.metadata.container.tags | join(", "))]  (always kept)"' <<<"$all"
+
   # The versions we keep: the KEEP newest that carry at least one tag.
   jq -r --argjson keep "$KEEP" '
-    [ .[] | select((.metadata.container.tags // []) | length > 0) ]
+    [ .[] | select((.metadata.container.tags // []) | length > 0)
+          | select((.metadata.container.tags // []) | any(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) | not) ]
     | sort_by(.created_at) | reverse | .[:$keep][]
     | "  keep    \(.id)  \(.created_at)  [\(.metadata.container.tags | join(", "))]"' <<<"$all"
 
   # Delete = every untagged version + tagged versions older than the KEEP newest.
   to_delete=$(jq -r --argjson keep "$KEEP" '
     ( [ .[] | select((.metadata.container.tags // []) | length == 0) ] ) as $untagged
-    | ( [ .[] | select((.metadata.container.tags // []) | length > 0) ]
+    | ( [ .[] | select((.metadata.container.tags // []) | length > 0)
+              | select((.metadata.container.tags // []) | any(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) | not) ]
         | sort_by(.created_at) | reverse | .[$keep:] ) as $oldtagged
     | ($untagged + $oldtagged) | .[].id' <<<"$all")
 

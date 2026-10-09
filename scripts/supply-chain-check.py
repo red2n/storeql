@@ -163,6 +163,11 @@ def problems(texts):
         if f"storeql-{image}" not in pruned:
             out.append(f"docker-publish.yml: cleanup does not know the published image {image}")
 
+    # A tagged release is a customer's rollback target: the pruning must never reach it.
+    cleaners = steps_using(jobs.get("cleanup", {}), "dataaxiom/ghcr-cleanup-action")
+    if not cleaners or any("*.*.*" not in str(s.get("with", {}).get("exclude-tags", "")) for s in cleaners):
+        out.append("docker-publish.yml: the cleanup can delete the image of a released version (exclude-tags '*.*.*')")
+
     release = yaml.safe_load(release_text)
     perms = release.get("permissions") or {}
     for perm in ("contents", "id-token", "attestations"):
@@ -190,6 +195,7 @@ def problems(texts):
 
 # One promise broken at a time: (what was broken, text to find, text to put in its place, file).
 BREAKS = [
+    ("the cleanup able to delete a released version", "          exclude-tags: '*.*.*'\n", "", "publish"),
     ("the SBOM switched off at build", "--sbom=true", "--sbom=false", "publish"),
     ("provenance switched off at build", "--provenance=mode=max", "--provenance=false", "publish"),
     ("the web image built without an SBOM", "          sbom: true\n", "          sbom: false\n", "publish"),

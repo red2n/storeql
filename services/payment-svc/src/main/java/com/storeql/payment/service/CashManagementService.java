@@ -54,6 +54,7 @@ public class CashManagementService {
     UUID storeId = Ids.parse(req.storeId());
     ctx.requireStoreAccess(storeId);
     requireCash(tenantId, req.floatAmount(), CASH_AMOUNT_INVALID);
+    String basis = basisOf(req.basis());
     TillSession session =
         new TillSession(
             Ids.newId(),
@@ -65,8 +66,24 @@ public class CashManagementService {
             null,
             null,
             Instant.now(),
-            null);
+            null,
+            basis);
     return toSessionResponse(repo.openTill(session));
+  }
+
+  /**
+   * The basis a drawer opens on: SESSION, or WINDOW (the default, for a client that sends no
+   * session).
+   *
+   * @throws ApiException {@code TILL_BASIS_INVALID} (400) for anything else
+   */
+  private static String basisOf(String requested) {
+    if (requested == null || requested.isBlank()) return TillSession.BASIS_WINDOW;
+    String basis = requested.strip().toUpperCase(java.util.Locale.ROOT);
+    if (!TillSession.BASIS_WINDOW.equals(basis) && !TillSession.BASIS_SESSION.equals(basis)) {
+      throw ApiException.badRequest("TILL_BASIS_INVALID", "basis is SESSION or WINDOW");
+    }
+    return basis;
   }
 
   /**
@@ -167,14 +184,20 @@ public class CashManagementService {
    * <p>The over/short figure is the counted cash less what the float, cash sales, cash refunds and
    * drops say should be in the drawer. Terminal — the session cannot be reopened afterwards.
    *
+   * <p>One unit of work: the session is locked (waiting for any write to the drawer already under
+   * way, which is then counted), the figures are read under that lock, the over/short is worked
+   * from them, and the session is closed with {@code TillSessionClosed} announcing the same
+   * figures. The answer is built from those figures, not read again after the commit.
+   *
    * @param tenantId owning tenant
    * @param sessionId the session to close
    * @param req the cash actually counted in the drawer
    * @param ctx caller context, checked for access to the session's store
    * @return the final totals, including over/short
    * @throws ApiException {@code TILL_SESSION_NOT_FOUND} (404) when no such session exists in this
-   *     tenant; {@code TILL_CLOSED} (400) when it is already closed; {@code CASH_AMOUNT_INVALID}
-   *     (400) for a count finer than the business's currency's minor unit, the till left open
+   *     tenant; {@code TILL_CLOSED} (400) when it is already closed; {@code TILL_ALREADY_CLOSED}
+   *     (409) when another close of it won the race; {@code CASH_AMOUNT_INVALID} (400) for a count
+   *     finer than the business's currency's minor unit, the till left open
    */
   public TillReportResponse zReport(
       UUID tenantId, UUID sessionId, CloseTillRequest req, TenantContext ctx) {
@@ -183,37 +206,43 @@ public class CashManagementService {
       throw ApiException.badRequest("TILL_CLOSED", "Till session is already closed");
     }
     requireCash(tenantId, req.countedCash(), CASH_AMOUNT_INVALID);
-    Instant closedAt = Instant.now();
-    TillReportResponse open = buildReport(session, null, closedAt, null);
-    BigDecimal overShort = cashExpectation(open, session).overShort(req.countedCash());
     String note = req.note() == null || req.note().isBlank() ? null : req.note().strip();
     // Hook: the approvals mechanism's action "till.close-variance" (a person other than the closer,
     // holding till.manage, agrees a close whose |overShort| is above the business's ceiling) is
     // checked HERE, before the write, once the approvals block exists (intent/approvals.md). The
     // business's variance tolerance (note required above it) belongs here too.
     UUID closedBy = ctx.userId();
-    repo.closeTill(
-        tenantId,
-        sessionId,
-        req.countedCash(),
-        overShort,
-        closedAt,
-        closedBy,
-        note,
-        Events.tillSessionClosed(
+    // One unit of work: the drawer is locked, the figures are read under that lock, the over/short
+    // is worked from them and the session is closed -- so the answer, what is stored and what is
+    // announced are the same figures, and a write that was under way when the close began is in
+    // them (the close waited for it) or was refused (it found the drawer closed).
+    var closed =
+        repo.closeTill(
             tenantId,
             sessionId,
-            session.storeId(),
-            session.openedBy(),
-            closedBy,
-            session.openedAt(),
-            closedAt,
-            session.floatAmount(),
-            open.expectedCashInTill(),
-            req.countedCash(),
-            overShort,
-            note));
-    return buildReport(session, req.countedCash(), closedAt, note);
+            (locked, figures, closedAt) -> {
+              TillReportResponse open = report(locked, figures, null, closedAt, null);
+              BigDecimal overShort = cashExpectation(open, locked).overShort(req.countedCash());
+              return new CashManagementRepository.Closing(
+                  req.countedCash(),
+                  overShort,
+                  closedBy,
+                  note,
+                  Events.tillSessionClosed(
+                      tenantId,
+                      sessionId,
+                      locked.storeId(),
+                      locked.openedBy(),
+                      closedBy,
+                      locked.openedAt(),
+                      closedAt,
+                      locked.floatAmount(),
+                      open.expectedCashInTill(),
+                      req.countedCash(),
+                      overShort,
+                      note));
+            });
+    return report(closed.session(), closed.figures(), req.countedCash(), closed.closedAt(), note);
   }
 
   private static CashExpectation cashExpectation(TillReportResponse r, TillSession session) {
@@ -226,32 +255,38 @@ public class CashManagementService {
         r.cashDropsTotal());
   }
 
+  /**
+   * The session's figures as they stand: over {@code [openedAt, now)} while it is open, over the
+   * window it was open for once it has closed, read together from one snapshot.
+   */
   private TillReportResponse buildReport(TillSession session, BigDecimal countedCash) {
     Instant to = session.closedAt() != null ? session.closedAt() : Instant.now();
-    return buildReport(session, countedCash, to, null);
+    return report(session, repo.figures(session, to), countedCash, to, null);
   }
 
   /**
-   * The session's figures over {@code [openedAt, to)}: tenders and refunds at the session's own
-   * store only (tenant, then store, then the window), the session's own drops and pay-ins and
-   * pay-outs, and the expectation from the one pure formula. Until registers exist the basis is the
-   * window at the store.
+   * The report of {@code session} over {@code figures}: tenders and refunds at the session's own
+   * store only (tenant, then store, then the window) or the session's own, the session's own drops
+   * and pay-ins and pay-outs, and the expectation from the one pure formula. The money is the
+   * session's own on the SESSION basis and the store's in the window on the WINDOW basis (see
+   * {@link TillSession}).
    */
-  private TillReportResponse buildReport(
-      TillSession session, BigDecimal countedCash, Instant to, String note) {
-    Instant from = session.openedAt();
-
-    List<Object[]> salesRows =
-        repo.sumTendersByMethod(session.tenantId(), session.storeId(), from, to);
-    List<Object[]> refundRows =
-        repo.sumRefundsByMethod(session.tenantId(), session.storeId(), from, to);
+  private static TillReportResponse report(
+      TillSession session,
+      CashManagementRepository.Figures figures,
+      BigDecimal countedCash,
+      Instant to,
+      String note) {
+    boolean bySession = TillSession.BASIS_SESSION.equals(session.moneyBasis());
+    Map<String, TenderSummary> notAtTill =
+        bySession ? tenderSummary(figures.tendersNotAtATill(), figures.refundsNotAtATill()) : null;
 
     Map<String, BigDecimal> sales = new HashMap<>();
-    for (Object[] row : salesRows) {
+    for (Object[] row : figures.tenders()) {
       sales.put((String) row[0], (BigDecimal) row[1]);
     }
     Map<String, BigDecimal> refunds = new HashMap<>();
-    for (Object[] row : refundRows) {
+    for (Object[] row : figures.refunds()) {
       refunds.put((String) row[0], (BigDecimal) row[1]);
     }
 
@@ -271,9 +306,9 @@ public class CashManagementService {
     }
     BigDecimal netSales = grossSales.subtract(totalRefunds);
 
-    BigDecimal cashDropsTotal = repo.sumCashDrops(session.tenantId(), session.id());
-    BigDecimal payIns = repo.sumMovements(session.tenantId(), session.id(), "PAY_IN");
-    BigDecimal payOuts = repo.sumMovements(session.tenantId(), session.id(), "PAY_OUT");
+    BigDecimal cashDropsTotal = figures.drops();
+    BigDecimal payIns = figures.payIns();
+    BigDecimal payOuts = figures.payOuts();
     BigDecimal cashSales = sales.getOrDefault("CASH", BigDecimal.ZERO);
     BigDecimal cashRefunds = refunds.getOrDefault("CASH", BigDecimal.ZERO);
     CashExpectation expectation =
@@ -301,8 +336,28 @@ public class CashManagementService {
         cashRefunds,
         payIns,
         payOuts,
-        "WINDOW",
-        note);
+        session.moneyBasis(),
+        note,
+        notAtTill);
+  }
+
+  /** Sales, refunds and net per tender method from two sums. */
+  private static Map<String, TenderSummary> tenderSummary(
+      List<Object[]> salesRows, List<Object[]> refundRows) {
+    Map<String, BigDecimal> sales = new HashMap<>();
+    salesRows.forEach(r -> sales.put((String) r[0], (BigDecimal) r[1]));
+    Map<String, BigDecimal> refunds = new HashMap<>();
+    refundRows.forEach(r -> refunds.put((String) r[0], (BigDecimal) r[1]));
+    var methods = new java.util.TreeSet<String>();
+    methods.addAll(sales.keySet());
+    methods.addAll(refunds.keySet());
+    Map<String, TenderSummary> out = new java.util.LinkedHashMap<>();
+    for (String m : methods) {
+      BigDecimal sold = sales.getOrDefault(m, BigDecimal.ZERO);
+      BigDecimal back = refunds.getOrDefault(m, BigDecimal.ZERO);
+      out.put(m, new TenderSummary(sold, back, sold.subtract(back)));
+    }
+    return Map.copyOf(out);
   }
 
   /**
@@ -334,6 +389,7 @@ public class CashManagementService {
         s.countedCash(),
         s.overShort(),
         s.openedAt(),
-        s.closedAt());
+        s.closedAt(),
+        s.moneyBasis());
   }
 }

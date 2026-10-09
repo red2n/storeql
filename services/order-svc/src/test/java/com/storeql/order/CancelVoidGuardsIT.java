@@ -123,6 +123,39 @@ class CancelVoidGuardsIT {
   }
 
   @Test
+  @DisplayName(
+      "VOID-17: a cancel made at a till names the drawer on OrderCancelled; a bad id is a 400")
+  void aCancelNamesTheDrawer() {
+    String order = onlineOrder().getString("id");
+    String other = onlineOrder().getString("id");
+    String drawer = Ids.newId().toString();
+
+    Response bad =
+        cancel(
+            other,
+            "{\"reason\":\"held sale\",\"tillSessionId\":\"not-an-id\"}",
+            "MANAGER",
+            MANAGER);
+    assertThat(bad.getStatus(), is(400));
+    assertThat(statusOf(other), is("PENDING"));
+
+    JsonObject cancelled =
+        data(
+            cancel(
+                order,
+                "{\"reason\":\"held sale\",\"tillSessionId\":\"" + drawer + "\"}",
+                "MANAGER",
+                MANAGER),
+            200);
+    assertThat(cancelled.getString("status"), is("CANCELLED"));
+
+    assertThat(rig().event(order, "OrderCancelled").getString("tillSessionId"), is(drawer));
+    // A cancel that names none says none.
+    cancel(other, "{\"reason\":\"no drawer\"}", "MANAGER", MANAGER);
+    assertThat(rig().event(other, "OrderCancelled").containsKey("tillSessionId"), is(false));
+  }
+
+  @Test
   @DisplayName("VOID-12: cancelling with no body at all is allowed and records no reason")
   void cancelWithNoBody() {
     JsonObject placed = onlineOrder();
@@ -160,6 +193,39 @@ class CancelVoidGuardsIT {
     assertThat(r.readEntity(String.class), containsString("ORDER_CANNOT_CANCEL"));
     assertThat(statusOf(order), is("FULFILLED"));
     assertThat(rig().events(order, "OrderCancelled"), is(0L));
+  }
+
+  @Test
+  @DisplayName("VOID-16: a void made at a till names the drawer on OrderVoided; a bad id is a 400")
+  void aVoidNamesTheDrawer() {
+    String order = rig().sale(T, STORE, V_A, 1, null, MANAGER);
+    String other = rig().sale(T, STORE, V_A, 1, null, MANAGER);
+    String drawer = Ids.newId().toString();
+
+    Response bad =
+        rig()
+            .post(
+                "/orders/" + other + "/void",
+                "{\"reason\":\"mis-ring\",\"tillSessionId\":\"not-an-id\"}",
+                T,
+                "MANAGER",
+                MANAGER,
+                Ids.newId().toString());
+    assertThat(bad.getStatus(), is(400));
+    assertThat(statusOf(other), is("FULFILLED"));
+
+    data(
+        rig()
+            .post(
+                "/orders/" + order + "/void",
+                "{\"reason\":\"mis-ring\",\"tillSessionId\":\"" + drawer + "\"}",
+                T,
+                "MANAGER",
+                MANAGER,
+                Ids.newId().toString()),
+        200);
+
+    assertThat(rig().event(order, "OrderVoided").getString("tillSessionId"), is(drawer));
   }
 
   @Test

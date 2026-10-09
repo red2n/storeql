@@ -89,7 +89,21 @@ public class PricingClient {
    * the variant's VAT category. Both are authoritative — never overridden by client input when
    * price enforcement is on.
    */
-  public record ResolvedLine(BigDecimal unitPrice, BigDecimal vatAmount) {}
+  public record ResolvedLine(
+      BigDecimal unitPrice,
+      BigDecimal vatAmount,
+      /** The rate applied, as a fraction; null when pricing-svc did not say. */
+      BigDecimal vatRate,
+      /**
+       * True when the price is a shelf price: {@code unitPrice} is then what is left of it once the
+       * VAT inside it is taken out, so {@code unitPrice + vatAmount} is the shelf price itself.
+       */
+      boolean taxInclusive) {
+
+    public ResolvedLine(BigDecimal unitPrice, BigDecimal vatAmount) {
+      this(unitPrice, vatAmount, null, false);
+    }
+  }
 
   /**
    * Returns the effective unit price and VAT for one order line, as decided by pricing-svc (price
@@ -148,7 +162,13 @@ public class PricingClient {
             data.containsKey("vatAmount") && !data.isNull("vatAmount")
                 ? data.getJsonNumber("vatAmount").bigDecimalValue()
                 : BigDecimal.ZERO;
-        return new ResolvedLine(unitPrice, vatAmount);
+        return new ResolvedLine(
+            unitPrice,
+            vatAmount,
+            num(data, "vatRate", null),
+            data.containsKey("taxInclusive")
+                && !data.isNull("taxInclusive")
+                && data.getBoolean("taxInclusive"));
       } catch (RuntimeException e) {
         throw unavailable("malformed response from pricing-svc", e);
       }
@@ -217,12 +237,32 @@ public class PricingClient {
    */
   public record QuotedLine(
       BigDecimal unitPrice,
+      /**
+       * The line's value after its own offers and before the basket's share: net on a net quote,
+       * gross (VAT inside) on a shelf-price quote.
+       */
       BigDecimal lineNet,
       BigDecimal lineVat,
       /** The VAT code the quote applied; null from a pricing-svc that did not say (18.9). */
       String vatCode,
       /** The rate it applied, as a fraction; null from a pricing-svc that did not say (18.9). */
-      BigDecimal vatRate) {
+      BigDecimal vatRate,
+      /**
+       * A shelf-price quote only: what the line finally costs after every offer, the basket's share
+       * included, VAT inside. Null on a net quote.
+       */
+      BigDecimal lineGross,
+      /** The list price of one unit before any offer; null when the quote did not say. */
+      BigDecimal listUnit) {
+
+    public QuotedLine(
+        BigDecimal unitPrice,
+        BigDecimal lineNet,
+        BigDecimal lineVat,
+        String vatCode,
+        BigDecimal vatRate) {
+      this(unitPrice, lineNet, lineVat, vatCode, vatRate, null, null);
+    }
 
     public QuotedLine(BigDecimal unitPrice, BigDecimal lineNet, BigDecimal lineVat) {
       this(unitPrice, lineNet, lineVat, null, null);
@@ -233,11 +273,22 @@ public class PricingClient {
       List<QuotedLine> lines,
       BigDecimal basketDiscount,
       List<AppliedPromotion> applied,
-      java.util.Map<String, String> rejectedCoupons) {
+      java.util.Map<String, String> rejectedCoupons,
+      /** True when the quote is of shelf prices, VAT inside (intent/vat-inclusive-pricing.md). */
+      boolean taxInclusive) {
     public QuotedBasket {
       lines = List.copyOf(lines);
       applied = List.copyOf(applied);
       rejectedCoupons = java.util.Map.copyOf(rejectedCoupons);
+    }
+
+    /** A basket quoted net, as every quote was before shelf prices. */
+    public QuotedBasket(
+        List<QuotedLine> lines,
+        BigDecimal basketDiscount,
+        List<AppliedPromotion> applied,
+        java.util.Map<String, String> rejectedCoupons) {
+      this(lines, basketDiscount, applied, rejectedCoupons, false);
     }
   }
 
@@ -374,7 +425,11 @@ public class PricingClient {
               afterLineDiscount,
               num(o, "vatAmount", BigDecimal.ZERO),
               o.containsKey("vatCode") && !o.isNull("vatCode") ? o.getString("vatCode") : null,
-              num(o, "vatRate", null)));
+              num(o, "vatRate", null),
+              // What a shelf-price quote says the line finally costs, VAT inside; absent on a net
+              // quote, so an older pricing-svc is read exactly as before.
+              num(o, "lineGross", null),
+              num(o, "unitPrice", null)));
     }
 
     List<AppliedPromotion> applied = new ArrayList<>();
@@ -398,7 +453,12 @@ public class PricingClient {
       for (String k : r.keySet()) rejected.put(k, r.getString(k));
     }
 
-    return new QuotedBasket(lines, num(data, "basketDiscount", BigDecimal.ZERO), applied, rejected);
+    boolean inclusive =
+        data.containsKey("taxInclusive")
+            && !data.isNull("taxInclusive")
+            && data.getBoolean("taxInclusive");
+    return new QuotedBasket(
+        lines, num(data, "basketDiscount", BigDecimal.ZERO), applied, rejected, inclusive);
   }
 
   /**

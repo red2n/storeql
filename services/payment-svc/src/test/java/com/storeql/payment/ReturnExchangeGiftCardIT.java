@@ -303,4 +303,92 @@ class ReturnExchangeGiftCardIT {
     assertThat(events(tenant, "PaymentRefunded").size(), is(0));
     assertThat(events(other, "PaymentCaptured").size(), is(0));
   }
+
+  // ── the VAT inside a refund (intent/vat-inclusive-pricing.md) ───────────────
+
+  @Test
+  void aReturnRefundCarriesTheVatInsideIt() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    captureCard(tenant, order, "3.87");
+
+    service.refundReturnForOrderEvent(
+        Ids.newId(),
+        CONSUMER,
+        tenant,
+        order,
+        new BigDecimal("1.29"),
+        "Return refund",
+        new PaymentService.ReturnRefund(
+            "ORIGINAL", Ids.newId(), null, "GBP", new BigDecimal("0.22")));
+
+    String refunded = String.join("\n", events(tenant, "PaymentRefunded"));
+    assertThat(refunded, containsString("\"vatAmount\":0.22"));
+    assertThat(refunded, containsString("\"amount\":1.29"));
+  }
+
+  @Test
+  void aReturnWithNoCarriedVatSaysNone() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    captureCard(tenant, order, "10.00");
+
+    service.refundReturnForOrderEvent(
+        Ids.newId(),
+        CONSUMER,
+        tenant,
+        order,
+        new BigDecimal("4.00"),
+        "Return refund",
+        new PaymentService.ReturnRefund("ORIGINAL", Ids.newId(), null, "GBP"));
+
+    assertThat(
+        String.join("\n", events(tenant, "PaymentRefunded")).contains("vatAmount"), is(false));
+  }
+
+  @Test
+  void aRefundOnlyPartlyCoveredCarriesAProportionOfTheVat() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID order = Ids.newId();
+    captureCard(tenant, order, "5.00");
+
+    // 10.00 asked back with 1.67 of VAT inside it, but only 5.00 is still captured: half.
+    service.refundReturnForOrderEvent(
+        Ids.newId(),
+        CONSUMER,
+        tenant,
+        order,
+        new BigDecimal("10.00"),
+        "Return refund",
+        new PaymentService.ReturnRefund(
+            "ORIGINAL", Ids.newId(), null, "GBP", new BigDecimal("1.67")));
+
+    String refunded = String.join("\n", events(tenant, "PaymentRefunded"));
+    assertThat(refunded, containsString("\"amount\":5.00"));
+    assertThat(refunded, containsString("\"vatAmount\":0.84"));
+  }
+
+  @Test
+  void anExchangeSplitsTheVatBetweenTheNewSaleAndTheOriginalTender() throws Exception {
+    UUID tenant = Ids.newId();
+    UUID oldOrder = Ids.newId();
+    captureCard(tenant, oldOrder, "40.00");
+    var ex =
+        new PaymentService.ExchangeReturn(
+            Ids.newId(),
+            null,
+            new BigDecimal("18.00"),
+            new BigDecimal("30.00"),
+            Ids.newId(),
+            null,
+            "GBP",
+            new BigDecimal("5.00"));
+
+    service.exchangeForOrderEvent(Ids.newId(), CONSUMER, tenant, oldOrder, ex);
+
+    String refunded = String.join("\n", events(tenant, "PaymentRefunded"));
+    // 5.00 of VAT in 30.00: 3.00 of it in the 18.00 exchanged, 2.00 in the 12.00 given back.
+    assertThat(refunded, containsString("\"vatAmount\":3.00"));
+    assertThat(refunded, containsString("\"vatAmount\":2.00"));
+  }
 }

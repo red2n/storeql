@@ -139,7 +139,18 @@ public final class Dtos {
                       + " order, at exactly the amount the machine took, and settles the machine"
                       + " for the next sale. Without it, the oldest approval on the order at this"
                       + " amount that no tender records yet is the one recorded.")
-          String terminalPaymentId) {}
+          String terminalPaymentId,
+      @Schema(
+              description =
+                  "At a till: the till session (the drawer) this money is taken in. It must be an"
+                      + " open session of this business at the tender's store (404"
+                      + " TILL_SESSION_NOT_FOUND, 409 TILL_SESSION_NOT_OPEN / TILL_SESSION_OTHER_STORE);"
+                      + " open is judged on the transaction that writes the tender, after a retry"
+                      + " under the same Idempotency-Key has been answered, so a retry is answered"
+                      + " whatever became of the drawer. A drawer opened on the SESSION basis counts"
+                      + " only the tenders that name it, whatever the method (a store credit or a"
+                      + " card too); without one the tender is shown apart as 'not at a till'.")
+          String tillSessionId) {}
 
   @Schema(
       name = "GroupPaymentResponse",
@@ -167,7 +178,16 @@ public final class Dtos {
           String method,
       String reference,
       String idempotencyKey,
-      @Schema(description = "Reason for the refund.") String reason) {}
+      @Schema(description = "Reason for the refund.") String reason,
+      @Schema(
+              description =
+                  "At a till: the till session a cash refund is paid out of, so that drawer's report"
+                      + " counts it. An open session at the refunded tender's store (404"
+                      + " TILL_SESSION_NOT_FOUND, 409 TILL_SESSION_NOT_OPEN / TILL_SESSION_OTHER_STORE),"
+                      + " judged on the transaction that writes the refund after a retry is answered."
+                      + " The refund is then that drawer's store's, also for a tender taken at no"
+                      + " store.")
+          String tillSessionId) {}
 
   @Schema(name = "TenderResponse", description = "A captured (append-only) payment tender.")
   public record TenderResponse(
@@ -205,7 +225,16 @@ public final class Dtos {
           @NotNull
           @PositiveOrZero
           @Digits(integer = 10, fraction = 4)
-          BigDecimal floatAmount) {}
+          BigDecimal floatAmount,
+      @Schema(
+              description =
+                  "SESSION: this drawer's report counts only the tenders and refunds that name it"
+                      + " (the till sends its session id); money naming none is shown apart as 'not"
+                      + " at a till'. WINDOW (the default): everything at the store while it was"
+                      + " open, for a client that sends no session. Fixed at open.")
+          // One constructor only: JSON-B binds a request body to a record through its single
+          // constructor, and a second one makes every body unreadable.
+          String basis) {}
 
   @Schema(name = "TillSessionResponse", description = "A cashier till session.")
   public record TillSessionResponse(
@@ -219,7 +248,9 @@ public final class Dtos {
       @Schema(description = "countedCash minus expected cash; null while open.")
           BigDecimal overShort,
       Instant openedAt,
-      @Schema(description = "Null while the session is still open.") Instant closedAt) {}
+      @Schema(description = "Null while the session is still open.") Instant closedAt,
+      @Schema(description = "SESSION or WINDOW: whose money the drawer's report counts.")
+          String basis) {}
 
   @Schema(name = "RecordCashDropRequest", description = "Mid-shift safe drop from the till.")
   public record RecordCashDropRequest(
@@ -287,19 +318,35 @@ public final class Dtos {
       BigDecimal grossSales,
       BigDecimal totalRefunds,
       BigDecimal netSales,
-      @Schema(description = "Cash tenders taken at the session's store in the session's window.")
+      @Schema(
+              description =
+                  "Cash tenders in this drawer: on the SESSION basis exactly those that name the"
+                      + " session; on WINDOW every one taken at the session's store while it was"
+                      + " open, whichever drawer it names.")
           BigDecimal cashSales,
-      @Schema(description = "Cash refunds made at the session's store in the session's window.")
+      @Schema(
+              description =
+                  "Cash refunds paid out of this drawer: on the SESSION basis exactly those that"
+                      + " name the session (a return, a void, a cancellation, an exchange's cash"
+                      + " back or a manager's refund naming it); on WINDOW every one made at the"
+                      + " session's store while it was open.")
           BigDecimal cashRefunds,
       @Schema(description = "Cash put in during the session (pay-ins).") BigDecimal payIns,
       @Schema(description = "Cash taken out during the session (pay-outs).") BigDecimal payOuts,
       @Schema(
               description =
-                  "How the money was attributed: WINDOW (everything at the session's store while"
-                      + " it was open). SESSION arrives with registers.")
+                  "How the money was attributed: SESSION (only what names this drawer) or WINDOW"
+                      + " (everything at the session's store while it was open).")
           String basis,
-      @Schema(description = "The closer's note on a difference; null on an X-report.")
-          String note) {}
+      @Schema(description = "The closer's note on a difference; null on an X-report.") String note,
+      @Schema(
+              description =
+                  "SESSION basis only: money taken or refunded at the store in the window that"
+                      + " names no till session (online, back-office, an older client, a refund an"
+                      + " event gave back naming a drawer that was not the business's open one at"
+                      + " the store), by tender method. Counted in no drawer; null on the WINDOW"
+                      + " basis.")
+          Map<String, TenderSummary> notAtTill) {}
 
   // ── Pay-in / Pay-out (petty cash) ─────────────────────────────────────────
 

@@ -390,6 +390,223 @@ class FlywayRunnerTest {
     assertTrue(warnings.get(0).getMessage().contains("42501"), warnings.get(0).getMessage());
   }
 
+  // ── strict mode: a deployment whose migration fails does not serve ───────────
+
+  @Test
+  @DisplayName("lenient is the default, as a deployment without the setting has always behaved")
+  void lenientIsTheDefault() {
+    FlywayRunner runner = runner(newSchema());
+
+    assertEquals("lenient", runner.mode());
+  }
+
+  @Test
+  @DisplayName("a mode nobody defined stops startup instead of quietly being lenient")
+  void anUnknownModeIsRefused() {
+    FlywayRunner runner = runner(newSchema());
+    runner.mode = "strikt";
+
+    IllegalArgumentException refused =
+        assertThrows(IllegalArgumentException.class, () -> runner.onStart(null));
+
+    assertTrue(refused.getMessage().contains("strikt"), refused.getMessage());
+  }
+
+  @Test
+  @DisplayName("strict: a migration whose SQL fails stops startup, naming the file, at ERROR")
+  void strictAFailingMigrationStopsStartup() throws SQLException {
+    write("V1__a.sql", "CREATE TABLE a (id int PRIMARY KEY);");
+    write("V2__broken.sql", "CREATE TABEL b (id int PRIMARY KEY);");
+    String schema = newSchema();
+    FlywayRunner runner = runner(schema);
+    runner.mode = "strict";
+    List<LogRecord> logged = new ArrayList<>();
+
+    FlywayRunner.MigrationFailedException refused =
+        assertThrows(
+            FlywayRunner.MigrationFailedException.class,
+            () -> capture(logged, () -> runner.onStart(null)));
+
+    assertTrue(refused.getMessage().contains("V2__broken.sql"), refused.getMessage());
+    assertEquals(1, levels(logged, Level.SEVERE).size(), String.valueOf(logged));
+    assertFalse(runner.schemaCurrent(), "a half-migrated schema is not current");
+    assertTrue(tableExists(schema, "a"), "the migration before the broken one was applied");
+  }
+
+  @Test
+  @DisplayName("strict: a role with no DDL rights stops startup, where lenient only warned")
+  void strictARoleWithoutDdlRightsStopsStartup() throws SQLException {
+    write("V1__orders.sql", "CREATE TABLE orders (id int PRIMARY KEY);");
+    String schema = newSchema();
+    runner(schema).migrate(locations());
+    String role = "dml_" + Ids.shortRef(Ids.newId());
+    try (Connection c = pg.dataSource().getConnection();
+        Statement st = c.createStatement()) {
+      st.execute("CREATE ROLE \"" + role + "\" LOGIN PASSWORD 'dml'");
+      st.execute("GRANT USAGE ON SCHEMA \"" + schema + "\" TO \"" + role + "\"");
+      st.execute(
+          "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA \""
+              + schema
+              + "\" TO \""
+              + role
+              + "\"");
+    }
+    FlywayRunner dmlOnly = runner(new Settings(pg.jdbcUrl(), schema, role, "dml"));
+    dmlOnly.mode = "strict";
+
+    FlywayRunner.MigrationFailedException refused =
+        assertThrows(FlywayRunner.MigrationFailedException.class, () -> dmlOnly.onStart(null));
+
+    assertTrue(refused.getMessage().contains("42501"), refused.getMessage());
+  }
+
+  @Test
+  @DisplayName("strict: a schema with tables and no history is refused, not baselined over")
+  void strictARefusesANonEmptySchemaWithNoHistory() throws SQLException {
+    String schema = newSchema();
+    try (Connection c = pg.dataSource().getConnection();
+        Statement st = c.createStatement()) {
+      st.execute("CREATE SCHEMA \"" + schema + "\"");
+      st.execute("CREATE TABLE \"" + schema + "\".stray (id int)");
+    }
+    write("V1__orders.sql", "CREATE TABLE orders (id int PRIMARY KEY);");
+    FlywayRunner runner = runner(schema);
+    runner.mode = "strict";
+
+    assertThrows(FlywayRunner.MigrationFailedException.class, () -> runner.onStart(null));
+
+    assertFalse(tableExists(schema, "orders"), "V1 was not run over somebody else's tables");
+    assertFalse(runner.schemaCurrent());
+  }
+
+  @Test
+  @DisplayName("strict: an unreachable database is retried, readiness is DOWN until migrated")
+  void strictAnUnreachableDatabaseIsRetriedAndReadinessFollows() throws Exception {
+    write("V1__orders.sql", "CREATE TABLE orders (id int PRIMARY KEY);");
+    String schema = newSchema();
+    Settings settings = new Settings(closedPortUrl(), schema, pg.username(), pg.password());
+    FlywayRunner runner = runner(settings);
+    runner.mode = "strict";
+    runner.retryBackoffMillis = 25;
+
+    assertDoesNotThrow(() -> runner.onStart(null));
+
+    assertFalse(runner.schemaCurrent());
+    assertTrue(runner.holdsReadiness(), "readiness is held while the schema is not migrated");
+
+    settings.url = pg.jdbcUrl(); // the database comes back
+    long give = System.nanoTime() + 20_000_000_000L;
+    while (!runner.schemaCurrent() && System.nanoTime() < give) {
+      Thread.sleep(25);
+    }
+
+    assertTrue(runner.schemaCurrent(), "the retry migrated once the database answered");
+    assertTrue(tableExists(schema, "orders"));
+    assertFalse(runner.holdsReadiness(), "readiness is not held by the schema");
+  }
+
+  @Test
+  @DisplayName("strict: shutting the service down ends the retry")
+  void strictShutdownEndsTheRetry() throws Exception {
+    write("V1__orders.sql", "CREATE TABLE orders (id int PRIMARY KEY);");
+    String schema = newSchema();
+    Settings settings = new Settings(closedPortUrl(), schema, pg.username(), pg.password());
+    FlywayRunner runner = runner(settings);
+    runner.mode = "strict";
+    runner.retryBackoffMillis = 25;
+    runner.onStart(null);
+
+    runner.stop();
+    settings.url = pg.jdbcUrl();
+    Thread.sleep(400); // far longer than the wait between tries
+
+    assertFalse(runner.schemaCurrent(), "a stopped retry does not migrate");
+    assertFalse(schemaExists(schema));
+  }
+
+  @Test
+  @DisplayName("strict: a migration that fails after the database comes back is not retried")
+  void strictAFailureAfterTheRetryStaysDown() throws Exception {
+    write("V1__a.sql", "CREATE TABLE a (id int PRIMARY KEY);");
+    write("V2__broken.sql", "CREATE TABEL b (id int PRIMARY KEY);");
+    Settings settings = new Settings(closedPortUrl(), newSchema(), pg.username(), pg.password());
+    FlywayRunner runner = runner(settings);
+    runner.mode = "strict";
+    runner.retryBackoffMillis = 25;
+    runner.onStart(null);
+
+    settings.url = pg.jdbcUrl();
+    long give = System.nanoTime() + 20_000_000_000L;
+    while (runner.failure() == null && System.nanoTime() < give) {
+      Thread.sleep(25);
+    }
+
+    assertTrue(runner.failure() != null, "the retry found the broken migration");
+    assertTrue(runner.failure().getMessage().contains("V2__broken.sql"));
+    assertFalse(runner.schemaCurrent());
+    assertTrue(runner.holdsReadiness(), "readiness is held while the schema is not migrated");
+  }
+
+  @Test
+  @DisplayName("strict: two runners starting at once migrate once")
+  void strictTwoRunnersMigrateOnce() throws Exception {
+    for (int v = 1; v <= 5; v++) {
+      write("V" + v + "__t" + v + ".sql", "CREATE TABLE t" + v + " (id int PRIMARY KEY);");
+    }
+    String schema = newSchema();
+    FlywayRunner a = runner(schema);
+    FlywayRunner b = runner(schema);
+    a.mode = "strict";
+    b.mode = "strict";
+    java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.ExecutorService pool =
+        java.util.concurrent.Executors.newFixedThreadPool(2);
+    List<java.util.concurrent.Future<?>> runs = new ArrayList<>();
+    for (FlywayRunner r : List.of(a, b)) {
+      runs.add(
+          pool.submit(
+              () -> {
+                go.await();
+                r.onStart(null);
+                return null;
+              }));
+    }
+    go.countDown();
+    for (java.util.concurrent.Future<?> f : runs) {
+      f.get(60, java.util.concurrent.TimeUnit.SECONDS);
+    }
+    pool.shutdown();
+
+    assertTrue(a.schemaCurrent() && b.schemaCurrent());
+    assertEquals(5, appliedVersions(schema), "each migration ran once, not twice");
+  }
+
+  @Test
+  @DisplayName("off: nothing is migrated here (a Job did it) and the service is not held back")
+  void offMigratesNothing() throws SQLException {
+    write("V1__orders.sql", "CREATE TABLE orders (id int PRIMARY KEY);");
+    String schema = newSchema();
+    FlywayRunner runner = runner(schema);
+    runner.mode = "off";
+
+    runner.onStart(null);
+
+    assertFalse(schemaExists(schema), "no schema was created by this process");
+    assertTrue(runner.schemaCurrent());
+    assertFalse(runner.holdsReadiness(), "readiness is not held by the schema");
+  }
+
+  @Test
+  @DisplayName("lenient: readiness is never held back by the schema, as before")
+  void lenientReadinessIgnoresTheSchema() {
+    write("V1__orders.sql", "CREATE TABLE orders (id int PRIMARY KEY);");
+    FlywayRunner runner = runner(newSchema(), closedPortUrl());
+
+    assertDoesNotThrow(() -> runner.onStart(null));
+
+    assertFalse(runner.holdsReadiness(), "readiness is not held by the schema");
+  }
+
   // ── wiring ───────────────────────────────────────────────────────────────────
 
   @Test
@@ -407,7 +624,7 @@ class FlywayRunnerTest {
 
   /** What the service's own {@code ServiceConfig} would say, with the database and role chosen. */
   private static final class Settings implements ServiceSettings {
-    final String url;
+    volatile String url;
     final String schema;
     final String user;
     final String password;

@@ -1,5 +1,7 @@
 package com.storeql.pricing.api;
 
+import com.storeql.pricing.dto.Dtos.BatchProductVatCategoriesResult;
+import com.storeql.pricing.dto.Dtos.BatchUpsertProductVatCategoriesRequest;
 import com.storeql.pricing.dto.Dtos.UpsertProductVatCategoryRequest;
 import com.storeql.pricing.mapper.Mappers;
 import com.storeql.pricing.service.PricingService;
@@ -55,6 +57,35 @@ public class ProductVatCategoryResource {
     Validations.validate(req);
     return Response.status(200)
         .entity(ApiResponse.ok(Mappers.toDto(svc.upsertProductVatCategory(req, ctx))))
+        .build();
+  }
+
+  /**
+   * Assigns many variants to VAT codes in one call, all or none.
+   *
+   * <p>How a catalogue import and a go-live fix-up give a priced shop its categories: a business
+   * that sells at shelf prices cannot price an item that has none. Every row is checked first; one
+   * wrong row refuses the call and is named, so a half-categorised catalogue is never left behind.
+   *
+   * @param req up to 500 assignments, one per variant
+   * @return how many variants were assigned
+   * @throws com.storeql.web.ApiException {@code 400 PRICING_VAT_BATCH_INVALID} naming the rows
+   */
+  @Operation(
+      summary = "Assign VAT categories to many variants",
+      description =
+          "All or none: every row is checked against this business's VAT rates before any is"
+              + " written. At most 500 rows, one per variant.")
+  @APIResponse(responseCode = "200", description = "Every variant assigned")
+  @APIResponse(responseCode = "400", description = "PRICING_VAT_BATCH_INVALID: nothing assigned")
+  @POST
+  @Path("/batch")
+  public Response batch(BatchUpsertProductVatCategoriesRequest req) {
+    ctx.requireAnyRole("PLATFORM_ADMIN", "OWNER", "MANAGER");
+    Validations.validate(req);
+    return Response.ok(
+            ApiResponse.ok(
+                new BatchProductVatCategoriesResult(svc.upsertProductVatCategories(req, ctx))))
         .build();
   }
 

@@ -120,9 +120,12 @@ public class EReportingRepository extends BaseJdbcRepository {
                  -- A return item's refund_amount is the line's NET unit price times the quantity
                  -- returned (OrderService takes it from the order, not from what the caller asked
                  -- for), so the VAT is computed from the rate rather than divided out of a gross.
-                 -- Dividing would have understated the refund by the VAT on the VAT.
+                 -- Dividing would have understated the refund by the VAT on the VAT. A sale at
+                 -- shelf prices kept the VAT inside what it refunded (tax_amount): that figure is
+                 -- reported as it was refunded, not worked out again from a net.
                  -SUM(ri.refund_amount) AS net,
-                 -SUM(ROUND(ri.refund_amount * COALESCE(oi.vat_rate, 0), 2)) AS vat
+                 -SUM(COALESCE(ri.tax_amount,
+                               ROUND(ri.refund_amount * COALESCE(oi.vat_rate, 0), 2))) AS vat
           FROM returns r
           JOIN return_items ri ON ri.tenant_id = r.tenant_id AND ri.return_id = r.id
           JOIN orders o ON o.tenant_id = r.tenant_id AND o.id = r.order_id

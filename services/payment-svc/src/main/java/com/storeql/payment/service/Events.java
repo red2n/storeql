@@ -155,6 +155,37 @@ final class Events {
       UUID returnId,
       UUID customerId,
       String currency) {
+    return paymentRefunded(
+        tenantId,
+        refundId,
+        orderId,
+        amount,
+        tenders,
+        kind,
+        refundMethod,
+        returnId,
+        customerId,
+        currency,
+        null);
+  }
+
+  /**
+   * As above, also saying the VAT inside the refunded amount when the sale carried it (a sale at
+   * shelf prices): the ledger debits VAT output by exactly that, instead of working it out in the
+   * sale's blended ratio.
+   */
+  static OutboxRow paymentRefunded(
+      UUID tenantId,
+      UUID refundId,
+      UUID orderId,
+      java.math.BigDecimal amount,
+      java.util.List<com.storeql.payment.domain.Domain.RefundAllocation> tenders,
+      String kind,
+      String refundMethod,
+      UUID returnId,
+      UUID customerId,
+      String currency,
+      java.math.BigDecimal vatAmount) {
     // Each tender's share, so the ledger credits the control account the money left from (17.7).
     StringBuilder shares = new StringBuilder();
     for (var t : tenders) {
@@ -182,7 +213,8 @@ final class Events {
                 + (refundMethod == null ? "" : ",\"refundMethod\":\"" + clean(refundMethod) + "\"")
                 + (returnId == null ? "" : ",\"returnId\":\"" + returnId + "\"")
                 + (customerId == null ? "" : ",\"customerId\":\"" + customerId + "\"")
-                + (currency == null ? "" : ",\"currency\":\"" + clean(currency) + "\"")));
+                + (currency == null ? "" : ",\"currency\":\"" + clean(currency) + "\"")
+                + (vatAmount == null ? "" : ",\"vatAmount\":" + vatAmount.toPlainString())));
   }
 
   /**

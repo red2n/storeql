@@ -26,6 +26,11 @@ class LineRevenueTest {
 
   /** An order with only the figures this rule reads; everything else left null or false. */
   private static Order order(String discount, String promotion) throws Exception {
+    return order(discount, promotion, false);
+  }
+
+  private static Order order(String discount, String promotion, boolean inclusive)
+      throws Exception {
     RecordComponent[] parts = Order.class.getRecordComponents();
     Object[] args = new Object[parts.length];
     Class<?>[] types = new Class<?>[parts.length];
@@ -34,6 +39,7 @@ class LineRevenueTest {
       String name = parts[i].getName();
       if (name.equals("discountAmount")) args[i] = d(discount);
       else if (name.equals("promotionDiscount")) args[i] = d(promotion);
+      else if (name.equals("taxInclusive")) args[i] = inclusive;
       else if (types[i] == boolean.class) args[i] = false;
       else if (types[i] == int.class) args[i] = 0;
       else if (types[i] == long.class) args[i] = 0L;
@@ -98,5 +104,19 @@ class LineRevenueTest {
     assertNull(LineRevenue.forQty(Map.of(), A, d("1"), 2));
     var overDiscounted = LineRevenue.unitNet(order("50.00", "0"), List.of(line(A, "1", "10.00")));
     assertEquals(0, LineRevenue.forQty(overDiscounted, A, d("1"), 2).compareTo(d("0.00")));
+  }
+
+  @Test
+  @DisplayName(
+      "at shelf prices the discounts are already inside the lines, so revenue is the line's net")
+  void shelfPriceRevenueTakesNoDiscountOffAgain() throws Exception {
+    // Two lines whose net is already after a 1.00 staff discount and a 1.33 basket offer.
+    Order o = order("1.00", "1.33", true);
+    List<OrderItem> lines = List.of(line(A, "1", "1.00"), line(B, "1", "9.00"));
+
+    Map<UUID, BigDecimal> unit = LineRevenue.unitNet(o, lines);
+
+    assertEquals(0, unit.get(A).compareTo(d("1.00")));
+    assertEquals(0, unit.get(B).compareTo(d("9.00")));
   }
 }

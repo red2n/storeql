@@ -7,6 +7,7 @@ import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../storefront/storefront_providers.dart' show DepositScheme;
+import 'cash_providers.dart';
 import 'pos_providers.dart';
 import 'pos_session_providers.dart';
 import 'package:storeql_app/core/ids.dart';
@@ -92,12 +93,28 @@ class _ContainerReturnDialogState extends ConsumerState<ContainerReturnDialog> {
       _saving = true;
       _error = null;
     });
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    final dio = ref.read(apiClientProvider).dio;
+    final sessions = ref.read(posSessionProvider.notifier);
     try {
-      final resp = await ref.read(apiClientProvider).dio.post(
+      // A read of the open till still in flight, or failed a moment ago, is
+      // given a few seconds before the cashier is told there is none.
+      await tillCtl.settle();
+      if (!mounted) return;
+      final till = tillCtl.drawer;
+      if (till == null) {
+        setState(() {
+          _saving = false;
+          _error = 'Open a till on the Cash tab first: the deposit is paid '
+              'back out of a drawer.';
+        });
+        return;
+      }
+      final resp = await dio.post(
             '/${ApiConstants.order}/orders/container-refunds',
             data: {
               'storeId': storeId,
-              'tillSessionId': session.id,
+              'tillSessionId': till,
               'lines': lines,
             },
             options: Options(headers: {
@@ -109,7 +126,7 @@ class _ContainerReturnDialogState extends ConsumerState<ContainerReturnDialog> {
           ((resp.data['data'] as Map<String, dynamic>)['amount'] as num?)
                   ?.toDouble() ??
               0;
-      ref.read(posSessionProvider.notifier).touch();
+      sessions.touch();
       if (!mounted) return;
       Navigator.pop(context, amount);
     } catch (e) {

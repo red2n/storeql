@@ -11,6 +11,7 @@ import '../../core/spacing.dart';
 import '../../core/theme.dart';
 import '../../shared/widgets/adaptive_actions.dart';
 import '../../shared/widgets/adaptive_nav_shell.dart';
+import 'cash_providers.dart';
 import 'pos_providers.dart';
 import 'pos_session_providers.dart';
 import 'pos_printer_settings_dialog.dart';
@@ -130,6 +131,8 @@ class _PosShellState extends ConsumerState<PosShell> {
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(posSessionProvider);
+    // Read once the terminal is on, so a sale knows the drawer it is rung on.
+    ref.watch(saleTillProvider);
     final pending = ref.watch(offlineQueueCountProvider);
     ref.listen(posCartProvider, (_, _) => _tellDisplay());
     ref.listen(posDiscountProvider, (_, _) => _tellDisplay());

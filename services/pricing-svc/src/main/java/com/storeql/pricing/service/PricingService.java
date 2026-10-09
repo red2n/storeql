@@ -1,6 +1,7 @@
 package com.storeql.pricing.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.money.TaxInclusive;
 import com.storeql.pricing.domain.Domain;
 import com.storeql.pricing.domain.Domain.BasketLine;
 import com.storeql.pricing.domain.Domain.CustomerVatStatus;
@@ -23,6 +24,7 @@ import com.storeql.pricing.domain.Domain.VatReturn;
 import com.storeql.pricing.dto.Dtos.AddPromotionItemRequest;
 import com.storeql.pricing.dto.Dtos.AppliedPromotionResponse;
 import com.storeql.pricing.dto.Dtos.BatchUpsertPriceListItemsRequest;
+import com.storeql.pricing.dto.Dtos.BatchUpsertProductVatCategoriesRequest;
 import com.storeql.pricing.dto.Dtos.BatchUpsertResult;
 import com.storeql.pricing.dto.Dtos.CreatePriceListRequest;
 import com.storeql.pricing.dto.Dtos.CreatePriceOverrideRequest;
@@ -49,8 +51,10 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -197,6 +201,91 @@ public class PricingService {
   }
 
   /**
+   * Assigns many variants to VAT codes at once, all or none: the way a catalogue import and a
+   * go-live fix-up give a priced shop its categories. Every row is checked before anything is
+   * written, and the applied-price ledger is caught up once, not per row.
+   *
+   * @param req the assignments, one per variant
+   * @param ctx caller context; supplies the tenant
+   * @return how many variants were assigned
+   * @throws ApiException {@code PRICING_VAT_BATCH_INVALID} (400) naming the rows that are wrong
+   */
+  public int upsertProductVatCategories(
+      BatchUpsertProductVatCategoriesRequest req, TenantContext ctx) {
+    UUID tenantId = ctx.requireTenantId();
+    Set<String> rates = new java.util.HashSet<>();
+    for (VatRate r : repo.findVatRates(tenantId)) rates.add(r.code());
+    Set<UUID> seen = new java.util.HashSet<>();
+    List<String> problems = new ArrayList<>();
+    List<ProductVatCategory> rows = new ArrayList<>();
+    Instant now = Instant.now();
+    int row = 0;
+    for (UpsertProductVatCategoryRequest item : req.items()) {
+      row++;
+      try {
+        com.storeql.web.Validations.validate(item);
+        UUID variantId = Parsing.uuid(item.variantId(), "variantId");
+        String code = item.vatCode().trim().toUpperCase(java.util.Locale.ROOT);
+        if (!rates.contains(code)) {
+          problems.add(
+              "row " + row + ": VAT code " + code + " is not one of this business's rates");
+        } else if (!seen.add(variantId)) {
+          problems.add("row " + row + ": variant " + variantId + " appears twice");
+        } else {
+          rows.add(new ProductVatCategory(Ids.newId(), tenantId, variantId, code, now, null, now));
+        }
+      } catch (ApiException e) {
+        problems.add("row " + row + ": " + e.getMessage());
+      }
+      if (problems.size() >= 10) break;
+    }
+    if (!problems.isEmpty()) {
+      throw ApiException.badRequest(
+          "PRICING_VAT_BATCH_INVALID", "nothing was assigned: " + String.join("; ", problems));
+    }
+    repo.upsertProductVatCategories(rows);
+    appliedPrices.catchUp(tenantId);
+    return rows.size();
+  }
+
+  /**
+   * What stands between the business and tax-inclusive pricing, or what is wrong with its VAT
+   * set-up if it already uses it: the priced variants with no VAT category (a page of them and how
+   * many in all) and the codes variants are assigned to that have no rate.
+   *
+   * @param ctx caller context; supplies the tenant
+   * @param after the last variant of the previous page, or {@code null}
+   * @param limit page size
+   * @return the readiness report, its gaps page, and the cursor of the next page or {@code null}
+   */
+  public VatReadinessPage vatReadiness(TenantContext ctx, String after, int limit) {
+    UUID tenantId = ctx.requireTenantId();
+    String raw = Cursor.decode(after);
+    UUID cursor = raw == null ? null : Parsing.uuid(raw, "after");
+    List<Domain.VatGap> rows = repo.findVatGaps(tenantId, cursor, limit + 1);
+    Cursor.Page<Domain.VatGap> page = Cursor.page(rows, limit, g -> g.variantId().toString());
+    List<String> modes = repo.findActiveTaxModes(tenantId);
+    int missing = repo.countVatGaps(tenantId);
+    List<String> noRate = repo.findVatCodesWithoutRate(tenantId);
+    return new VatReadinessPage(
+        modes.isEmpty() ? null : modes.get(0),
+        missing,
+        noRate,
+        page.items(),
+        missing == 0 && noRate.isEmpty(),
+        page.nextCursor());
+  }
+
+  /** One page of the VAT readiness report. */
+  public record VatReadinessPage(
+      String taxMode,
+      int variantsWithoutCategory,
+      List<String> codesWithoutRate,
+      List<Domain.VatGap> gaps,
+      boolean ready,
+      String nextCursor) {}
+
+  /**
    * Reads a variant's VAT assignment.
    *
    * <p>Unlike price resolution, which falls back to the standard rate, this reports the absence:
@@ -308,8 +397,27 @@ public class PricingService {
             req.effectiveTo() != null ? Parsing.instant(req.effectiveTo(), "effectiveTo") : null,
             true,
             Instant.now(),
-            zoneId);
+            zoneId,
+            taxModeOf(req.taxMode()));
     return repo.createPriceList(pl);
+  }
+
+  /**
+   * The tax mode a request names: EXCLUSIVE when it names none.
+   *
+   * @throws ApiException 400 {@code PRICING_TAX_MODE_UNKNOWN} for any other word
+   */
+  static String taxModeOf(String raw) {
+    if (raw == null || raw.isBlank()) return PriceList.TAX_EXCLUSIVE;
+    String mode = raw.trim().toUpperCase(java.util.Locale.ROOT);
+    if (!PriceList.TAX_EXCLUSIVE.equals(mode) && !PriceList.TAX_INCLUSIVE.equals(mode)) {
+      throw ApiException.badRequest(
+          "PRICING_TAX_MODE_UNKNOWN",
+          "taxMode is EXCLUSIVE (prices are net, VAT is added) or INCLUSIVE (prices are shelf"
+              + " prices, VAT inside); not "
+              + raw);
+    }
+    return mode;
   }
 
   /**
@@ -370,12 +478,22 @@ public class PricingService {
   private PriceListItem setPrice(
       TenantContext ctx, UUID priceListId, UpsertPriceListItemRequest req) {
     PriceList list = getPriceList(ctx, priceListId);
+    UUID variantId = Ids.parse(req.variantId());
+    // A shelf price's VAT is the rate of the variant's category; with none the rate is a guess,
+    // and a guess is printed on a receipt (intent/vat-inclusive-pricing.md).
+    if (list.taxInclusive() && repo.findProductVatCategory(ctx.tenantId(), variantId).isEmpty()) {
+      throw ApiException.conflict(
+          "PRICING_VAT_CATEGORY_REQUIRED",
+          "variant "
+              + variantId
+              + " has no VAT category; give it one before pricing it on a tax-inclusive list");
+    }
     PriceListItem item =
         new PriceListItem(
             Ids.newId(),
             ctx.tenantId(),
             priceListId,
-            Ids.parse(req.variantId()),
+            variantId,
             priceIn(req.price(), list.currency()),
             req.minQty() != null ? req.minQty() : BigDecimal.ONE,
             Instant.now(),
@@ -714,10 +832,10 @@ public class PricingService {
     String promoApplied = null;
     // The price list's own currency; the tenant's when the list is gone — never a literal (SJ-D53).
     // Its minor units decide every rounding below: whole yen, pence, three-decimal dinars.
+    Optional<PriceList> priceList = repo.findPriceList(tenantId, baseItem.priceListId());
     String currency =
-        repo.findPriceList(tenantId, baseItem.priceListId())
-            .map(PriceList::currency)
-            .orElseGet(() -> profiles.requireCurrency(tenantId));
+        priceList.map(PriceList::currency).orElseGet(() -> profiles.requireCurrency(tenantId));
+    boolean inclusive = priceList.map(PriceList::taxInclusive).orElse(false);
     int scale = com.storeql.service.Fx.minorUnits(currency);
 
     // A single-variant quote runs the same engine as the basket path, on a basket of one, with
@@ -762,10 +880,22 @@ public class PricingService {
       }
     }
 
-    String vatCode = vatCodeFor(tenantId, variantId, asRecorded ? at : null);
+    String vatCode = vatCodeFor(tenantId, variantId, asRecorded ? at : null, inclusive);
     VatRate vatRate = rateFor(tenantId, vatCode, asRecorded ? at : null);
-    BigDecimal vatAmount = vatOn(unitPrice, vatRate, scale);
-    BigDecimal totalWithVat = unitPrice.add(vatAmount);
+    BigDecimal vatAmount;
+    BigDecimal totalWithVat;
+    if (inclusive) {
+      // The shelf price is the price: what the customer pays is what the list says (less any
+      // promotion), and the VAT in it is derived from it, never the other way round.
+      totalWithVat = unitPrice.setScale(scale, RoundingMode.HALF_UP);
+      vatAmount =
+          TaxInclusive.vatInside(
+              totalWithVat, vatRate.exempt() ? BigDecimal.ZERO : vatRate.rate(), scale);
+      unitPrice = totalWithVat.subtract(vatAmount);
+    } else {
+      vatAmount = vatOn(unitPrice, vatRate, scale);
+      totalWithVat = unitPrice.add(vatAmount);
+    }
 
     // 03.13: the unit price of what the shopper pays — VAT and any promotion in — per kilogram,
     // litre, metre, square metre or item. Shown whenever the measure is declared; whether it is
@@ -777,36 +907,55 @@ public class PricingService {
     PriorPrices.Rules rules =
         asRecorded ? PriorPrices.Rules.STRICT : reductionRules(tenantId, storeId);
     return new ResolvedPrice(
-        variantId,
-        unitPrice,
-        vatCode,
-        vatRate.rate(),
-        vatAmount,
-        totalWithVat,
-        currency,
-        baseItem.priceListId(),
-        promoApplied,
-        unitPricing,
-        asRecorded || unitPriceRequired(tenantId, storeId),
-        withPriorPrice && promoApplied != null
-            ? appliedPrices.priorPrice(
-                tenantId,
-                variantId,
-                channel,
-                storeId,
-                totalWithVat,
-                resolveAt(tenantId, req, false, at, false).totalWithVat(),
-                at,
-                rules.progressive())
-            : null,
-        rules.required());
+            variantId,
+            unitPrice,
+            vatCode,
+            vatRate.rate(),
+            vatAmount,
+            totalWithVat,
+            currency,
+            baseItem.priceListId(),
+            promoApplied,
+            unitPricing,
+            asRecorded || unitPriceRequired(tenantId, storeId),
+            withPriorPrice && promoApplied != null
+                ? appliedPrices.priorPrice(
+                    tenantId,
+                    variantId,
+                    channel,
+                    storeId,
+                    totalWithVat,
+                    resolveAt(tenantId, req, false, at, false).totalWithVat(),
+                    at,
+                    rules.progressive())
+                : null,
+            rules.required())
+        .withTaxInclusive(inclusive);
   }
 
   /** A variant's VAT code; with {@code asOf}, as assigned by then. The standard code when none. */
   private String vatCodeFor(UUID tenantId, UUID variantId, Instant asOf) {
-    return repo.findProductVatCategory(tenantId, variantId, asOf)
-        .map(ProductVatCategory::vatCode)
-        .orElse(VatRate.T1);
+    return vatCodeFor(tenantId, variantId, asOf, false);
+  }
+
+  /**
+   * As above; with {@code required}, a variant with no category is refused rather than charged at
+   * the standard rate. A tax-inclusive price's VAT is worked from the rate and printed on a
+   * receipt, so a guessed rate is a wrong receipt.
+   *
+   * @throws ApiException 409 {@code PRICING_VAT_CATEGORY_MISSING} when required and absent
+   */
+  private String vatCodeFor(UUID tenantId, UUID variantId, Instant asOf, boolean required) {
+    var found = repo.findProductVatCategory(tenantId, variantId, asOf);
+    if (found.isEmpty() && required) {
+      throw ApiException.conflict(
+          "PRICING_VAT_CATEGORY_MISSING",
+          "variant "
+              + variantId
+              + " has no VAT category, so the VAT in its shelf price cannot be worked out; give"
+              + " it one under Pricing, VAT readiness");
+    }
+    return found.map(ProductVatCategory::vatCode).orElse(VatRate.T1);
   }
 
   /**
@@ -921,10 +1070,15 @@ public class PricingService {
       return new com.storeql.pricing.domain.Domain.MarkdownReduction(
           null, null, PriorPrices.NO_HISTORY, true, false);
     }
-    VatRate rate = rateFor(tenantId, vatCodeFor(tenantId, m.variantId(), null), null);
-    BigDecimal gross =
-        m.markdownPrice()
-            .add(vatOn(m.markdownPrice(), rate, com.storeql.service.Fx.minorUnits(m.currency())));
+    BigDecimal gross;
+    if (m.taxInclusive()) {
+      gross = m.markdownPrice();
+    } else {
+      VatRate rate = rateFor(tenantId, vatCodeFor(tenantId, m.variantId(), null), null);
+      gross =
+          m.markdownPrice()
+              .add(vatOn(m.markdownPrice(), rate, com.storeql.service.Fx.minorUnits(m.currency())));
+    }
     var prior =
         appliedPrices.priorPrice(
             tenantId,
@@ -1152,6 +1306,8 @@ public class PricingService {
     List<BasketLine> basket = new java.util.ArrayList<>();
     List<UUID> lineMarkdowns = new java.util.ArrayList<>();
     List<String> vatCodes = new java.util.ArrayList<>();
+    List<Boolean> lineInclusive = new java.util.ArrayList<>();
+    Map<UUID, Optional<PriceList>> listsSeen = new HashMap<>();
     String currency = null;
     for (var l : req.lines()) {
       UUID variantId = Parsing.uuid(l.variantId(), "variantId");
@@ -1160,10 +1316,12 @@ public class PricingService {
         throw ApiException.badRequest(
             "PRICING_INVALID_QTY", "qty must be greater than zero for variant " + l.variantId());
       UUID markdownId = Parsing.optionalUuid(l.markdownId(), "markdownId");
+      boolean inclusiveLine;
       if (markdownId != null) {
         var md = markdowns.forQuoteLine(tenantId, markdownId, variantId, storeId, qty);
         basket.add(new BasketLine(variantId, qty, md.markdownPrice()));
         if (currency == null) currency = md.currency();
+        inclusiveLine = md.taxInclusive();
       } else {
         var baseItem =
             // SJ-D55: a fraction of a unit is matched against the tiers as one.
@@ -1175,17 +1333,24 @@ public class PricingService {
                             "PRICING_PRICE_NOT_FOUND",
                             "no active price configured for variant " + l.variantId()));
         basket.add(new BasketLine(variantId, qty, baseItem.price()));
-        if (currency == null)
-          currency =
-              repo.findPriceList(tenantId, baseItem.priceListId())
-                  .map(PriceList::currency)
-                  .orElse(null);
+        Optional<PriceList> list =
+            listsSeen.computeIfAbsent(
+                baseItem.priceListId(), id -> repo.findPriceList(tenantId, id));
+        if (currency == null) currency = list.map(PriceList::currency).orElse(null);
+        inclusiveLine = list.map(PriceList::taxInclusive).orElse(false);
       }
       lineMarkdowns.add(markdownId);
-      vatCodes.add(
-          repo.findProductVatCategory(tenantId, variantId)
-              .map(ProductVatCategory::vatCode)
-              .orElse(VatRate.T1));
+      lineInclusive.add(inclusiveLine);
+      vatCodes.add(vatCodeFor(tenantId, variantId, null, inclusiveLine));
+    }
+
+    // A basket is priced in one mode: its prices are either shelf prices or net, never a sum of
+    // both. Mixed lists are refused when they are made, so this is a basket that crossed a switch.
+    boolean inclusive = lineInclusive.contains(Boolean.TRUE);
+    if (inclusive && lineInclusive.contains(Boolean.FALSE)) {
+      throw ApiException.conflict(
+          "PRICING_TAX_MODE_MIXED",
+          "this basket draws on both tax-inclusive and net price lists; a business prices one way");
     }
 
     // The basket's currency, whose minor units every amount below is rounded to: whole yen,
@@ -1258,46 +1423,85 @@ public class PricingService {
             perLineDiscount.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add));
 
     // 4. Per-line VAT, on each line's share of what is left.
-    List<QuoteLineResponse> lineResponses = new java.util.ArrayList<>();
-    BigDecimal vatTotal = BigDecimal.ZERO;
-    BigDecimal apportioned = BigDecimal.ZERO;
-    for (int i = 0; i < basket.size(); i++) {
+    //
+    // A net basket works on net amounts and adds VAT to them. A tax-inclusive basket works on shelf
+    // amounts, and the VAT in what each line finally costs is taken out of it, one division to the
+    // currency's minor units, so a shelf price of 1.29 is 1.29 on the receipt and its VAT is 0.22
+    // (intent/vat-inclusive-pricing.md).
+    int lines = basket.size();
+    BigDecimal[] lineTotals = new BigDecimal[lines];
+    BigDecimal[] lineDiscounts = new BigDecimal[lines];
+    for (int i = 0; i < lines; i++) {
       BasketLine b = basket.get(i);
-      BigDecimal lineTotal = b.unitPrice().multiply(b.qty()).setScale(scale, RoundingMode.HALF_UP);
-      boolean stickered = lineMarkdowns.get(i) != null;
-      BigDecimal lineDisc =
-          stickered
+      lineTotals[i] = b.unitPrice().multiply(b.qty()).setScale(scale, RoundingMode.HALF_UP);
+      lineDiscounts[i] =
+          lineMarkdowns.get(i) != null
               ? BigDecimal.ZERO
               : shareOfVariantDiscount(
                       b.variantId(),
                       i,
-                      lineTotal,
+                      lineTotals[i],
                       perLineDiscount,
                       variantLineValue,
                       lastLineOfVariant,
                       variantDiscountTaken,
                       scale)
-                  .min(lineTotal);
-      BigDecimal net = lineTotal.subtract(lineDisc);
+                  .min(lineTotals[i]);
+    }
+    List<BigDecimal> grossShares =
+        inclusive
+            ? basketSharesByGross(basketDiscount, lineTotals, lineDiscounts, lineMarkdowns, scale)
+            : null;
 
-      // The basket discount is shared by value. The last line takes the rounding remainder, so
-      // the apportioned parts always sum to exactly the discount rather than a penny either side.
-      BigDecimal share;
-      if (stickered || basketDiscount.signum() == 0 || afterLine.signum() <= 0) {
-        share = BigDecimal.ZERO;
-      } else if (i == lastPromotable) {
-        share = basketDiscount.subtract(apportioned);
-      } else {
-        share = basketDiscount.multiply(net).divide(afterLine, scale, RoundingMode.HALF_UP);
-        apportioned = apportioned.add(share);
-      }
-      net = net.subtract(share).max(BigDecimal.ZERO);
-
+    List<QuoteLineResponse> lineResponses = new java.util.ArrayList<>();
+    BigDecimal vatTotal = BigDecimal.ZERO;
+    BigDecimal grossTotal = BigDecimal.ZERO;
+    BigDecimal apportioned = BigDecimal.ZERO;
+    Map<String, BigDecimal[]> byRate = new java.util.LinkedHashMap<>();
+    Map<String, BigDecimal> rateOf = new HashMap<>();
+    for (int i = 0; i < lines; i++) {
+      BasketLine b = basket.get(i);
+      BigDecimal lineTotal = lineTotals[i];
+      BigDecimal lineDisc = lineDiscounts[i];
+      boolean stickered = lineMarkdowns.get(i) != null;
       VatRate rate = vatRateFor(tenantId, vatCodes.get(i));
-      BigDecimal vat = vatOn(net, rate, scale);
+      BigDecimal rateValue = rate.exempt() ? BigDecimal.ZERO : rate.rate();
+      BigDecimal net;
+      BigDecimal vat;
+      BigDecimal gross;
+      if (inclusive) {
+        gross = lineTotal.subtract(lineDisc).subtract(grossShares.get(i)).max(BigDecimal.ZERO);
+        vat = TaxInclusive.vatInside(gross, rateValue, scale);
+        net = gross.subtract(vat);
+      } else {
+        net = lineTotal.subtract(lineDisc);
+        // The basket discount is shared by value. The last line takes the rounding remainder, so
+        // the apportioned parts always sum to exactly the discount rather than a penny either side.
+        BigDecimal share;
+        if (stickered || basketDiscount.signum() == 0 || afterLine.signum() <= 0) {
+          share = BigDecimal.ZERO;
+        } else if (i == lastPromotable) {
+          share = basketDiscount.subtract(apportioned);
+        } else {
+          share = basketDiscount.multiply(net).divide(afterLine, scale, RoundingMode.HALF_UP);
+          apportioned = apportioned.add(share);
+        }
+        net = net.subtract(share).max(BigDecimal.ZERO);
+        vat = vatOn(net, rate, scale);
+        gross = net.add(vat);
+      }
       vatTotal = vatTotal.add(vat);
+      grossTotal = grossTotal.add(gross);
+      BigDecimal[] sums =
+          byRate.computeIfAbsent(
+              vatCodes.get(i),
+              k -> new BigDecimal[] {BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO});
+      sums[0] = sums[0].add(gross);
+      sums[1] = sums[1].add(net);
+      sums[2] = sums[2].add(vat);
+      rateOf.put(vatCodes.get(i), rateValue);
 
-      BigDecimal paidPerOne = net.add(vat).divide(b.qty(), 6, RoundingMode.HALF_UP);
+      BigDecimal paidPerOne = gross.divide(b.qty(), 6, RoundingMode.HALF_UP);
       var unitPricing =
           UnitPricing.of(
               paidPerOne, repo.findMeasure(tenantId, b.variantId()).orElse(null), basketCurrency);
@@ -1311,13 +1515,25 @@ public class PricingService {
               net,
               vat,
               vatCodes.get(i),
-              rate.exempt() ? BigDecimal.ZERO : rate.rate(),
+              rateValue,
               lineMarkdowns.get(i),
-              com.storeql.pricing.mapper.Mappers.toUnitPrice(unitPricing)));
+              com.storeql.pricing.mapper.Mappers.toUnitPrice(unitPricing),
+              gross));
     }
 
     BigDecimal totalDiscount = outcome.totalDiscount();
-    BigDecimal total = subtotal.subtract(totalDiscount).add(vatTotal);
+    BigDecimal total = inclusive ? grossTotal : subtotal.subtract(totalDiscount).add(vatTotal);
+    List<com.storeql.pricing.dto.Dtos.VatRateTotalResponse> vatByRate =
+        byRate.entrySet().stream()
+            .map(
+                e ->
+                    new com.storeql.pricing.dto.Dtos.VatRateTotalResponse(
+                        e.getKey(),
+                        rateOf.get(e.getKey()),
+                        e.getValue()[0],
+                        e.getValue()[1],
+                        e.getValue()[2]))
+            .toList();
 
     List<AppliedPromotionResponse> appliedResponses = new java.util.ArrayList<>();
     for (var d :
@@ -1351,7 +1567,32 @@ public class PricingService {
         basketCurrency,
         appliedResponses,
         outcome.rejectedCoupons(),
-        display);
+        display,
+        inclusive,
+        vatByRate);
+  }
+
+  /**
+   * The basket discount's share of each line of a tax-inclusive basket, by what the line still
+   * costs after its own discount, exact to the minor unit (the shares add up to the discount, and
+   * no line gives more than it costs). A stickered line, already a reduced price, takes none.
+   */
+  private static List<BigDecimal> basketSharesByGross(
+      BigDecimal basketDiscount,
+      BigDecimal[] lineTotals,
+      BigDecimal[] lineDiscounts,
+      List<UUID> lineMarkdowns,
+      int scale) {
+    List<BigDecimal> bases = new java.util.ArrayList<>();
+    BigDecimal held = BigDecimal.ZERO;
+    for (int i = 0; i < lineTotals.length; i++) {
+      BigDecimal base =
+          lineMarkdowns.get(i) != null ? BigDecimal.ZERO : lineTotals[i].subtract(lineDiscounts[i]);
+      bases.add(base);
+      held = held.add(base);
+    }
+    BigDecimal amount = basketDiscount.setScale(scale, RoundingMode.HALF_UP).min(held);
+    return TaxInclusive.shareByGross(amount, bases, scale);
   }
 
   /**

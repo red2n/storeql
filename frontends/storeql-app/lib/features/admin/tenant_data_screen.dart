@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -12,6 +11,7 @@ import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../shared/util/file_download.dart';
+import '../../shared/util/pick_file.dart';
 import '../../shared/util/status_labels.dart';
 import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/error_view.dart';
@@ -33,13 +33,8 @@ import 'tenant_data_providers.dart';
 /// one in.
 final tenantBundlePickerProvider = Provider<Future<String?> Function()>(
   (ref) => () async {
-    final r = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['jsonl'],
-      withData: true,
-    );
-    final bytes = r == null || r.files.isEmpty ? null : r.files.first.bytes;
-    return bytes == null ? null : utf8.decode(bytes);
+    final f = await pickFileWithBytes(const ['jsonl']);
+    return f == null ? null : utf8.decode(f.bytes);
   },
 );
 

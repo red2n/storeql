@@ -10,6 +10,7 @@ import 'package:storeql_app/core/offline/offline_queue.dart';
 import 'package:storeql_app/core/offline/offline_sale.dart';
 import 'package:storeql_app/core/offline/offline_synced.dart';
 import 'package:storeql_app/core/storage/app_storage.dart';
+import 'package:storeql_app/features/pos/cash_providers.dart';
 
 /// A sale's local id: a UUIDv7, as the till mints it, and the base of every key its steps send.
 const _saleId = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d5e';
@@ -123,6 +124,19 @@ class _ScriptedAdapter implements HttpClientAdapter {
       paths.where((p) => p.contains(fragment)).length;
 }
 
+/// The drawer the terminal holds, remembering what the server refused of it.
+class _TellsRefusals extends SaleTillNotifier {
+  _TellsRefusals(this.told);
+
+  final List<String> told;
+
+  @override
+  Future<String?> build() async => null;
+
+  @override
+  void refused(String sessionId) => told.add(sessionId);
+}
+
 OfflineSale _sale({
   String id = _saleId,
   String? orderId,
@@ -140,6 +154,9 @@ OfflineSale _sale({
       itemCount: 1,
       orderId: orderId,
     );
+
+/// A till session (payment-svc's) a sale was rung on.
+const _drawer = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d70';
 
 /// Who was signed in at the till when a sale was made: a UUIDv7, as iam-svc mints them.
 const _cashier = '01a0c830-0e7a-7b3c-9d2e-5f1a2b3c4d60';
@@ -207,6 +224,81 @@ void main() {
     expect(h.container.read(offlineQueueProvider), isEmpty,
         reason: 'a fully accepted sale leaves the queue');
     expect(h.storage.data[StorageKeys.posOfflineSales], '[]');
+  });
+
+  test('a replayed sale names the drawer it was rung on, as it was', () async {
+    // The drawer is part of the stored tender, so a sale that waited for the
+    // network is counted in the drawer it was rung on, not the one open now.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(tenders: const [
+      OfflineTender(
+          body: {'method': 'CASH', 'tillSessionId': _drawer}, amount: 5.0)
+    ]));
+    await notifier.sync();
+
+    final payment = h.adapter.calls.singleWhere((c) => c.path.endsWith('/payments'));
+    expect((payment.data as Map)['tillSessionId'], _drawer);
+    expect(h.container.read(offlineQueueProvider), isEmpty);
+  });
+
+  test(
+      'a replay the server will not count in its drawer is recorded naming '
+      'none, under the same key, and the sale leaves the queue', () async {
+    // The day was closed, or a manager closed the till from another device,
+    // while the sale waited. The cashier has the money: it is recorded.
+    final h = _harness();
+    h.adapter
+      ..rejectWith['/payments'] = 409
+      ..rejectCode = 'TILL_SESSION_NOT_OPEN'
+      ..rejectOnly = ((o) => (o.data as Map)['tillSessionId'] != null);
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(tenders: const [
+      OfflineTender(
+          body: {'method': 'CASH', 'tillSessionId': _drawer}, amount: 5.0)
+    ]));
+    await notifier.sync();
+
+    final payments =
+        h.adapter.calls.where((c) => c.path.endsWith('/payments')).toList();
+    expect(payments, hasLength(2));
+    expect((payments[0].data as Map)['tillSessionId'], _drawer);
+    expect((payments[1].data as Map).containsKey('tillSessionId'), isFalse);
+    expect(payments[1].idempotencyKey, payments[0].idempotencyKey);
+    expect(payments[1].idempotencyKey, derivedId(_saleId, 'pay:0'));
+    expect(h.container.read(offlineQueueProvider), isEmpty,
+        reason: 'recorded, not parked for a manager');
+  });
+
+  test(
+      'a replayed tender the server will not count tells the terminal, so the '
+      'drawer held is read again', () async {
+    final adapter = _ScriptedAdapter()
+      ..rejectWith['/payments'] = 409
+      ..rejectCode = 'TILL_SESSION_NOT_OPEN'
+      ..rejectOnly = ((o) => (o.data as Map)['tillSessionId'] != null);
+    final dio = Dio(BaseOptions(baseUrl: ApiConstants.baseUrl))
+      ..httpClientAdapter = adapter;
+    final storage = _MemStorage();
+    final told = <String>[];
+    final container = ProviderContainer(overrides: [
+      apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
+      saleTillProvider.overrideWith(() => _TellsRefusals(told)),
+      offlineQueueProvider.overrideWith(
+          (ref) => OfflineQueueNotifier(ref, storage: storage, autoSync: false)),
+      offlineSyncedProvider
+          .overrideWith((ref) => SyncedSalesNotifier(ref, storage: storage)),
+    ]);
+    addTearDown(container.dispose);
+    final notifier = container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(tenders: const [
+      OfflineTender(
+          body: {'method': 'CASH', 'tillSessionId': _drawer}, amount: 5.0)
+    ]));
+    await notifier.sync();
+
+    expect(told, [_drawer]);
+    expect(container.read(offlineQueueProvider), isEmpty);
   });
 
   test('a replayed order says when the cashier rang it up', () async {
@@ -338,6 +430,49 @@ void main() {
     expect(redeem.idempotencyKey, derivedId(_saleId, 'gift:0'));
     expect(redeem.data, {'amount': 5.0, 'orderId': 'order-1'});
     expect(h.adapter.countOf('/payments'), 0);
+  });
+
+  test('a replayed gift-card redeem names the drawer the sale was rung on, as it was',
+      () async {
+    // The card is the tender, so the redeem carries the drawer the tender
+    // would: the one stored with the sale, not the one open when it replays.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(tenders: const [
+      OfflineTender(
+          body: {'method': 'GIFT_CARD', 'tillSessionId': _drawer},
+          amount: 5.0,
+          giftCardCode: 'GC-1'),
+      OfflineTender(
+          body: {'method': 'CASH', 'tillSessionId': _drawer}, amount: 2.0),
+    ]));
+    await notifier.sync();
+
+    final redeem = h.adapter.calls.singleWhere((c) => c.path.endsWith('/redeem'));
+    expect(redeem.data,
+        {'amount': 5.0, 'orderId': 'order-1', 'tillSessionId': _drawer});
+    expect(redeem.idempotencyKey, derivedId(_saleId, 'gift:0'));
+    expect(isV7(redeem.idempotencyKey!), isTrue);
+    final payment = h.adapter.calls.singleWhere((c) => c.path.endsWith('/payments'));
+    expect((payment.data as Map)['tillSessionId'], _drawer);
+    expect(h.container.read(offlineQueueProvider), isEmpty);
+  });
+
+  test('a gift-card sale queued with no drawer replays its redeem naming none',
+      () async {
+    // Rung with no till open (or queued by a build that named none): the card
+    // is charged "not at a till", never in whichever drawer is open at replay.
+    final h = _harness();
+    final notifier = h.container.read(offlineQueueProvider.notifier);
+    await notifier.enqueue(_sale(tenders: const [
+      OfflineTender(
+          body: {'method': 'GIFT_CARD'}, amount: 5.0, giftCardCode: 'GC-1'),
+    ]));
+    await notifier.sync();
+
+    final redeem = h.adapter.calls.singleWhere((c) => c.path.endsWith('/redeem'));
+    expect((redeem.data as Map).containsKey('tillSessionId'), isFalse);
+    expect(isV7(redeem.idempotencyKey!), isTrue);
   });
 
   test('a redeemed gift card is not charged again on a later replay', () async {

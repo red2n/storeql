@@ -40,7 +40,12 @@ public final class LineRevenue {
     }
     Map<UUID, BigDecimal> out = new HashMap<>();
     if (subtotal.signum() <= 0) return out;
-    BigDecimal discounts = nz(order.discountAmount()).add(nz(order.promotionDiscount()));
+    // At shelf prices a line's value is already its net after every discount (the order keeps the
+    // discounts only as what was given), so none is taken off again.
+    BigDecimal discounts =
+        order.taxInclusive()
+            ? BigDecimal.ZERO
+            : nz(order.discountAmount()).add(nz(order.promotionDiscount()));
     BigDecimal netOfDiscounts = subtotal.subtract(discounts).max(BigDecimal.ZERO);
     BigDecimal factor = netOfDiscounts.divide(subtotal, 10, RoundingMode.HALF_UP);
     for (var e : value.entrySet()) {

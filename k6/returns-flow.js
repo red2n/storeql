@@ -137,6 +137,10 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
     201,
     'an online sale'
   );
+  // What the shelf reads with the online order standing: one lower where checkout holds are
+  // enforced (the production default), unchanged where they are off (the dev rig). Every shelf
+  // check from here is relative to it, so the suite means the same thing in both settings.
+  const shelf = available();
 
   // ── 1. the policy ───────────────────────────────────────────────────────────────────────────────
   const dflt = data(call('GET', `${O}/admin/return-policy`, { token: manager.token }));
@@ -159,7 +163,7 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
   const refused = giveBack(sale.id, { token: cashier.token, items: [line(1, 'SEALED')] });
   expect(refused, "[-] a cashier's return over the limit needs a manager", 403, 'ORDER_RETURN_NEEDS_MANAGER');
   truthy('[-] ...and says it is the ceiling', reasonsOf(refused).includes('CEILING'), reasonsOf(refused));
-  truthy('[-] ...nothing was refunded or recorded, and the shelf did not move', returnsOf(sale.id).length === 0 && available() === 92, { returns: returnsOf(sale.id).length, available: available() });
+  truthy('[-] ...nothing was refunded or recorded, and the shelf did not move', returnsOf(sale.id).length === 0 && available() === shelf, { returns: returnsOf(sale.id).length, available: available(), shelf });
 
   // Another business, while the limit stands: it finds, returns and voids nothing of ours.
   expect(call('GET', `${O}/orders/by-receipt?number=${encodeURIComponent('NO/0000/000000')}`, { token: manager.token }), '[-] a number nobody was given is not found', 404, 'ORDER_RECEIPT_NOT_FOUND');
@@ -183,13 +187,13 @@ export default function ({ tenant, store, variantId, dear, cheap, cashier, manag
   truthy('[+] ...and the order has one return, not two', returnsOf(sale.id).length === 1, returnsOf(sale.id).length);
 
   // ── 5. the shelf follows the condition ──────────────────────────────────────────────────────────
-  truthy('[+] a sealed item is back on sale: available rises by one, once', poll(60, () => available() === 93) >= 0, available());
+  truthy('[+] a sealed item is back on sale: available rises by one, once', poll(60, () => available() === shelf + 1) >= 0, available());
   expect(policy({ windowDays: 30, cashierCeiling: null, noReceiptAllowed: false }), '[+] the owner takes the limit off', 200);
   const opened = giveBack(sale.id, { token: cashier.token, items: [line(1, 'OPENED')] });
   expect(opened, '[+] inside the policy the cashier takes an opened item back alone', 201);
   truthy('[+] ...with nobody to approve it', !data(opened).approvedBy, data(opened));
   truthy('[+] an opened item waits for a check: a batch in INSPECTION appears', poll(60, () => batches().some((b) => b.materialStatus === 'INSPECTION')) >= 0, batches().map((b) => b.materialStatus));
-  truthy('[+] ...and available is still where the sealed one left it', available() === 93, available());
+  truthy('[+] ...and available is still where the sealed one left it', available() === shelf + 1, available());
 
   // ── 6. store credit ─────────────────────────────────────────────────────────────────────────────
   expect(giveBack(noCustomer.id, { items: [line(1, 'SEALED')], method: 'STORE_CREDIT' }), '[-] store credit on a sale that names no customer is refused', 409, 'ORDER_RETURN_STORE_CREDIT_NEEDS_CUSTOMER');

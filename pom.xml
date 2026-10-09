@@ -7,7 +7,7 @@
     <!--
       StoreQL — parent reactor POM (monorepo).
       Aggregates all modules: shared contracts, platform services, business services.
-      Build with JDK 21:  JAVA_HOME=/usr/lib/jvm/temurin-21-jdk-amd64 mvn clean install
+      Build with JDK 25 (Temurin); the jars still target release 21:  JAVA_HOME=<a JDK 25> mvn clean install
     -->
 
     <!-- Helidon application parent: gives us the Helidon dependency BOM + sane plugin config. -->
@@ -31,17 +31,34 @@
         <graalvm.native.maven.plugin.version>0.9.24</graalvm.native.maven.plugin.version>
 
         <!-- Versions for libraries NOT managed by the Helidon BOM -->
-        <flyway.version>13.7.0</flyway.version>
+        <flyway.version>13.9.0</flyway.version>
         <postgresql.version>42.7.13</postgresql.version>
         <hikaricp.version>7.1.0</hikaricp.version>
-        <!-- Must match the version Helidon's own BOM pins org.testcontainers:testcontainers/jdbc
-             to (checked via `mvn help:effective-pom`) — otherwise postgresql/kafka/database-commons
-             resolve to this property's value while testcontainers-core/jdbc resolve to Helidon's,
-             producing a mixed-version Testcontainers classpath (unsupported; caused flaky
-             GenericContainer port-wait timeouts against containers that were demonstrably up). -->
-        <testcontainers.version>1.21.4</testcontainers.version>
-        <junit.version>5.11.3</junit.version>
-        <lettuce.version>6.5.1.RELEASE</lettuce.version>
+        <!-- Testcontainers 2.x. The modules were renamed in 2.0 (org.testcontainers:postgresql ->
+             testcontainers-postgresql, kafka -> testcontainers-kafka, jdbc -> testcontainers-jdbc,
+             database-commons -> testcontainers-database-commons; core stays `testcontainers`), and
+             PostgreSQLContainer moved to org.testcontainers.postgresql and lost its type parameter.
+             The Helidon 4.5.5 BOM pins org.testcontainers:testcontainers (and the 1.x names jdbc,
+             junit-jupiter, mongodb, mysql, oracle-xe) to its own `version.lib.testcontainers`
+             (1.21.4), and that management wins over the testcontainers-bom imported below. Left
+             alone it would resolve the core to 1.21.4 while testcontainers-postgresql/-kafka
+             resolve to this version: a mixed-version Testcontainers classpath (unsupported; it
+             caused flaky GenericContainer port-wait timeouts against containers that were
+             demonstrably up). So Helidon's property is raised here, once, to this version
+             (Dependabot moves `testcontainers.version`; the Helidon property follows it). Drop the
+             override when a Helidon release pins 2.x itself. Check with
+             `mvn dependency:tree -Dincludes=org.testcontainers`: no 1.x artifact may appear.
+             Helidon's 1.x-named entries (jdbc, junit-jupiter, ...) have no 2.x artifact of that
+             name; that is harmless while nothing here depends on them. -->
+        <testcontainers.version>2.0.5</testcontainers.version>
+        <version.lib.testcontainers>${testcontainers.version}</version.lib.testcontainers>
+        <!-- JUnit 6 (Jupiter + Platform move together; one BOM). The import below wins over the
+             5.12.2 that Helidon's own `version.lib.junit` names — `mvn dependency:tree` shows
+             6.1.3 for every org.junit artifact in every module, none left on 5.x. Surefire (3.1.0,
+             from Helidon's parent) takes junit-platform-launcher at the engine's version, so no
+             launcher is declared here. -->
+        <junit.version>6.1.3</junit.version>
+        <lettuce.version>7.8.0.RELEASE</lettuce.version>
         <pdfbox.version>3.0.8</pdfbox.version>
         <verapdf.version>1.30.2</verapdf.version>
         <storeql.version>0.1.0-SNAPSHOT</storeql.version>
@@ -52,9 +69,15 @@
              the Helidon parent has caught up (the vulnerability scan says when it no longer matters).
              kafka-clients needs no line: Helidon manages 3.9.2 — the modules used to pin 3.7.1
              themselves (GHSA-5qcv-4rpc-jp93) and no longer do. -->
-        <!-- GHSA-c4c3-7fpv-j4q5 (critical), GHSA-3qp7-7mw8-wx86, GHSA-c653-97m9-rcg9,
-             GHSA-x4gw-5cx5-pgmh, GHSA-558v-64gr-wgg4, GHSA-mj4r-2hfc-f8p6 — via lettuce, hivemq -->
-        <version.lib.netty>4.1.137.Final</version.lib.netty>
+        <!-- GHSA-c4c3-7fpv-j4q5 (critical; fixed 4.2.17), GHSA-3qp7-7mw8-wx86, GHSA-c653-97m9-rcg9,
+             GHSA-x4gw-5cx5-pgmh (high; fixed 4.2.15), GHSA-558v-64gr-wgg4 (high; fixed 4.2.16),
+             GHSA-mj4r-2hfc-f8p6 (high; fixed 4.2.13) — via lettuce, hivemq.
+             4.2.17, not 4.1.x: lettuce 7 is built against netty 4.2 and calls 4.2-only classes
+             (MultiThreadIoEventLoopGroup), so a 4.1 override makes every Redis connect fail with
+             NoClassDefFoundError. RedisCacheLiveIT talks to a real Redis and fails on 4.1 by name.
+             hivemq-mqtt-client 1.4.0 (iam-svc, notification-svc) is built against 4.1 and runs on
+             4.2 (MqttAclIT, MqttSessionRevokerIT). -->
+        <version.lib.netty>4.2.17.Final</version.lib.netty>
         <!-- GHSA-r7wm-3cxj-wff9, GHSA-j3rv-43j4-c7qm, GHSA-rmj7-2vxq-3g9f (high; fixed 2.21.4),
              GHSA-5gvw-p9qm-jgwh, GHSA-5jmj-h7xm-6q6v, GHSA-mhm7-754m-9p8w (medium; fixed 2.21.5) and
              GHSA-q4xh-88c3-wmh7 (high), GHSA-gx83-3vf8-gh7j, GHSA-wjgm-6hv5-3cvf (medium; fixed
@@ -65,8 +88,10 @@
         <!-- GHSA-g3pr-3p32-fp23, GHSA-w737-wx49-qj23 — via Helidon metrics -->
         <version.lib.micrometer>1.15.12</version.lib.micrometer>
         <version.lib.micrometer-prometheus>1.15.12</version.lib.micrometer-prometheus>
-        <!-- GHSA-xx22-p4ch-683r — kafka-clients 3.9.2 brings the maintained fork at 1.10.1 -->
-        <lz4-java.version>1.11.3</lz4-java.version>
+        <!-- GHSA-xx22-p4ch-683r — kafka-clients 3.9.2 brings the maintained fork at 1.10.1;
+             GHSA-mcr4-qmvw-px4g (high), GHSA-gm45-99xc-r7wv (medium), GHSA-343h-94h5-c4wr (low) —
+             fixed 1.11.4, which 1.12.0 contains (1.12.0 is 1.11.4 plus stricter input validation) -->
+        <lz4-java.version>1.12.0</lz4-java.version>
         <!-- GHSA-rcgg-9c38-7xpx: unbounded memory from a W3C baggage header, and the gateway reads
              headers from the internet -->
         <version.lib.opentelemetry>1.62.0</version.lib.opentelemetry>
@@ -75,15 +100,18 @@
 
         <!-- Google's phone number metadata (customer-svc reads a phone in the business's own
              country and keeps it in E.164). No advisory; raise it with the metadata releases. -->
-        <libphonenumber.version>9.0.32</libphonenumber.version>
+        <libphonenumber.version>9.0.40</libphonenumber.version>
 
         <!-- Quality tooling versions -->
-        <archunit.version>1.5.0</archunit.version>
+        <archunit.version>1.5.1</archunit.version>
+        <!-- Mockito: the one version every module's unit tests run on (gateway, common-web, order,
+             payment, customer). Raised here once, never in a module (22.11). -->
+        <mockito.version>5.24.0</mockito.version>
         <spotbugs-plugin.version>4.10.4.1</spotbugs-plugin.version>
         <pmd-plugin.version>3.28.0</pmd-plugin.version>
         <fmt-plugin.version>2.29</fmt-plugin.version>
         <checkstyle-plugin.version>3.6.0</checkstyle-plugin.version>
-        <checkstyle.version>14.1.0</checkstyle.version>
+        <checkstyle.version>14.3.0</checkstyle.version>
         <cyclonedx-plugin.version>2.9.3</cyclonedx-plugin.version>
 
         <!-- Quality gate skip flags (override per-module or on CLI with -Dspotbugs.skip=true etc.) -->
@@ -239,6 +267,14 @@
                 <artifactId>archunit-junit5</artifactId>
                 <version>${archunit.version}</version>
                 <scope>compile</scope>
+            </dependency>
+
+            <!-- Quality: Mockito — unit-test doubles; the version is declared once, here -->
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-junit-jupiter</artifactId>
+                <version>${mockito.version}</version>
+                <scope>test</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>

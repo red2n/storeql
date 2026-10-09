@@ -24,7 +24,6 @@ import com.storeql.web.TenantContext;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
@@ -80,8 +79,7 @@ class TillMinorUnitsTest {
                     null,
                     Instant.now(),
                     null)));
-    when(repo.sumTendersByMethod(any(), any(), any(), any())).thenReturn(List.of());
-    when(repo.sumRefundsByMethod(any(), any(), any(), any())).thenReturn(List.of());
+    when(repo.figures(any(), any())).thenReturn(CashManagementRepository.Figures.none());
     return repo;
   }
 
@@ -97,10 +95,16 @@ class TillMinorUnitsTest {
     CashManagementRepository repo = openSessionRepo();
     till("KWD", repo)
         .openTill(
-            tenant, cashier, new OpenTillRequest(store.toString(), new BigDecimal("100.125")), ctx);
+            tenant,
+            cashier,
+            new OpenTillRequest(store.toString(), new BigDecimal("100.125"), null),
+            ctx);
     till("JPY", repo)
         .openTill(
-            tenant, cashier, new OpenTillRequest(store.toString(), new BigDecimal("10000")), ctx);
+            tenant,
+            cashier,
+            new OpenTillRequest(store.toString(), new BigDecimal("10000"), null),
+            ctx);
 
     for (String[] bad :
         new String[][] {{"KWD", "100.1255"}, {"JPY", "10000.5"}, {"GBP", "1.005"}}) {
@@ -112,7 +116,7 @@ class TillMinorUnitsTest {
                   .openTill(
                       tenant,
                       cashier,
-                      new OpenTillRequest(store.toString(), new BigDecimal(bad[1])),
+                      new OpenTillRequest(store.toString(), new BigDecimal(bad[1]), null),
                       ctx));
       verify(none, never()).openTill(any());
     }
@@ -126,7 +130,7 @@ class TillMinorUnitsTest {
         .openTill(
             tenant,
             cashier,
-            new OpenTillRequest(store.toString(), new BigDecimal("100.1255")),
+            new OpenTillRequest(store.toString(), new BigDecimal("100.1255"), null),
             ctx);
     verify(repo).openTill(any());
   }
@@ -161,7 +165,7 @@ class TillMinorUnitsTest {
                       Ids.newId(),
                       new CloseTillRequest(new BigDecimal(bad[1]), null),
                       ctx));
-      verify(repo, never()).closeTill(any(), any(), any(), any(), any(), any(), any(), any());
+      verify(repo, never()).closeTill(any(), any(), any());
     }
   }
 

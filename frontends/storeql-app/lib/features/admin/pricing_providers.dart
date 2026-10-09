@@ -16,6 +16,10 @@ class PriceList {
   final String? effectiveTo;
   final bool active;
 
+  /// EXCLUSIVE (prices are net, VAT is added) or INCLUSIVE (prices are the
+  /// shelf price, VAT inside it). Chosen when the list is made, never changed.
+  final String taxMode;
+
   const PriceList({
     required this.id,
     required this.name,
@@ -24,7 +28,11 @@ class PriceList {
     this.effectiveFrom,
     this.effectiveTo,
     required this.active,
+    this.taxMode = 'EXCLUSIVE',
   });
+
+  /// Whether the list's prices are shelf prices with VAT inside them.
+  bool get includesVat => taxMode == 'INCLUSIVE';
 
   factory PriceList.fromJson(Map<String, dynamic> j) => PriceList(
     id: j['id'] as String? ?? '',
@@ -34,8 +42,66 @@ class PriceList {
     effectiveFrom: j['effectiveFrom'] as String?,
     effectiveTo: j['effectiveTo'] as String?,
     active: j['active'] as bool? ?? false,
+    taxMode: j['taxMode'] as String? ?? 'EXCLUSIVE',
   );
 }
+
+/// A priced item the business has not given a VAT category: it cannot be sold
+/// at a shelf price until it has one.
+class VatGap {
+  final String variantId;
+  final String? priceListName;
+  final double? price;
+  const VatGap({required this.variantId, this.priceListName, this.price});
+
+  factory VatGap.fromJson(Map<String, dynamic> j) => VatGap(
+    variantId: j['variantId'] as String? ?? '',
+    priceListName: j['priceListName'] as String?,
+    price: (j['price'] as num?)?.toDouble(),
+  );
+}
+
+/// What stands between a business and selling at shelf prices
+/// (`GET /admin/pricing/vat-readiness`): priced items with no VAT category, and
+/// VAT codes with no rate.
+class VatReadiness {
+  final String? taxMode;
+  final int variantsWithoutCategory;
+  final List<String> codesWithoutRate;
+  final List<VatGap> gaps;
+  final bool ready;
+  const VatReadiness({
+    required this.taxMode,
+    required this.variantsWithoutCategory,
+    required this.codesWithoutRate,
+    required this.gaps,
+    required this.ready,
+  });
+
+  factory VatReadiness.fromJson(Map<String, dynamic> j) => VatReadiness(
+    taxMode: j['taxMode'] as String?,
+    variantsWithoutCategory: (j['variantsWithoutCategory'] as num?)?.toInt() ?? 0,
+    codesWithoutRate: [
+      for (final c in (j['codesWithoutRate'] as List? ?? const [])) '$c',
+    ],
+    gaps: [
+      for (final g in (j['gaps'] as List? ?? const []))
+        VatGap.fromJson(g as Map<String, dynamic>),
+    ],
+    ready: j['ready'] as bool? ?? true,
+  );
+}
+
+final vatReadinessProvider = FutureProvider.autoDispose<VatReadiness>((ref) async {
+  final resp = await ref
+      .read(apiClientProvider)
+      .dio
+      .get(
+        '/${ApiConstants.pricing}/admin/pricing/vat-readiness',
+        queryParameters: {'limit': 100},
+      );
+  return VatReadiness.fromJson(resp.data['data'] as Map<String, dynamic>);
+});
 
 class PriceListItem {
   final String id;

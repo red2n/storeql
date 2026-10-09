@@ -244,7 +244,11 @@ public class CatalogResource {
     return ApiResponse.ok(
         new ScanResponse(
             Mappers.toVariantScan(variant, result.found().product(), null, container),
-            Mappers.toScannedCode(result.scan())));
+            Mappers.toScannedCode(result.scan()),
+            result.alias() == null
+                ? null
+                : new com.storeql.product.dto.Dtos.AliasMatchResponse(
+                    result.alias().kind(), result.alias().packQty())));
   }
 
   private UUID requireTenant() {

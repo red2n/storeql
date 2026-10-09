@@ -119,7 +119,13 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Mrs Patel'));
     await tester.pumpAndSettle();
-    expect(srv.writes.map((r) => '${r.method} ${r.path}'), ['POST /order-svc/pos/parked-sales/p1/resume']);
+    // A quote of the basket is a question the till asks, not a write.
+    expect(
+      srv.writes
+          .where((r) => !r.path.endsWith('/prices/quote'))
+          .map((r) => '${r.method} ${r.path}'),
+      ['POST /order-svc/pos/parked-sales/p1/resume'],
+    );
     expect(_cart(tester), ['v-1', 'v-2']);
   });
 

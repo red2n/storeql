@@ -343,8 +343,8 @@ public class OrderRepository extends BaseOutboxRepository {
                 + "  delivery_postal_code,delivery_recipient_name,delivery_recipient_phone,contact_phone,"
                 + "  payment_method,promotion_discount,seller_user_id,group_id,group_part,"
                 + "  allow_substitutions,slot_window_id,slot_starts_at,slot_ends_at,slot_time_zone,"
-                + "  contact_phone_e164)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + "  contact_phone_e164,tax_inclusive)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, order.id());
       ps.setObject(2, order.tenantId());
       ps.setObject(3, order.storeId());
@@ -387,6 +387,7 @@ public class OrderRepository extends BaseOutboxRepository {
           33, order.slotEndsAt() != null ? java.sql.Timestamp.from(order.slotEndsAt()) : null);
       ps.setString(34, order.slotTimeZone());
       ps.setString(35, order.contactPhoneE164());
+      ps.setBoolean(36, order.taxInclusive());
       ps.executeUpdate();
     } catch (java.sql.SQLException sqle) {
       if (UNIQUE_VIOLATION.equals(sqle.getSQLState()))
@@ -478,7 +479,7 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " delivery_line1, delivery_line2, delivery_city, delivery_postal_code,"
                 + " delivery_recipient_name, delivery_recipient_phone, contact_phone, payment_method,"
                 + " seller_user_id, allow_substitutions, slot_window_id, slot_starts_at, slot_ends_at,"
-                + " slot_time_zone, contact_phone_e164"
+                + " slot_time_zone, contact_phone_e164, tax_inclusive"
                 + " FROM orders WHERE tenant_id=? AND idempotency_key=?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -593,7 +594,7 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " delivery_line1, delivery_line2, delivery_city, delivery_postal_code,"
                 + " delivery_recipient_name, delivery_recipient_phone, contact_phone, payment_method,"
                 + " seller_user_id, allow_substitutions, slot_window_id, slot_starts_at, slot_ends_at,"
-                + " slot_time_zone, contact_phone_e164"
+                + " slot_time_zone, contact_phone_e164, tax_inclusive"
                 + " FROM orders o WHERE tenant_id=?");
     if (storeId != null) sql.append(" AND store_id=?");
     if (customerId != null) sql.append(" AND customer_id=?");
@@ -683,10 +684,23 @@ public class OrderRepository extends BaseOutboxRepository {
       OrderItem substituteItem,
       java.util.Map<UUID, BigDecimal> outstanding,
       boolean complete,
-      String previousStatus) {
+      String previousStatus,
+      /** The VAT inside what goes back, on an order sold at shelf prices; null on a net order. */
+      BigDecimal refundVat) {
     public Adjusted {
       items = List.copyOf(items);
       outstanding = java.util.Map.copyOf(outstanding);
+    }
+
+    public Adjusted(
+        Order order,
+        List<OrderItem> items,
+        com.storeql.order.domain.LineAdjustment adjustment,
+        OrderItem substituteItem,
+        java.util.Map<UUID, BigDecimal> outstanding,
+        boolean complete,
+        String previousStatus) {
+      this(order, items, adjustment, substituteItem, outstanding, complete, previousStatus, null);
     }
   }
 
@@ -776,17 +790,28 @@ public class OrderRepository extends BaseOutboxRepository {
             BigDecimal vat =
                 com.storeql.order.domain.SubstitutePrice.share(
                     i.vatAmount(), standingAfter, standingBefore, scale);
+            // Shelf prices: what stands of the line is what was paid for those units; the VAT
+            // inside it shrinks with it and the net is what is left, so paid = net + VAT still.
+            BigDecimal paidGross = null;
+            if (before.taxInclusive()) {
+              paidGross =
+                  com.storeql.order.domain.SubstitutePrice.share(
+                      i.paidGross(), standingAfter, standingBefore, scale);
+              vat = vat.min(paidGross);
+              lineTotal = paidGross.subtract(vat);
+            }
             try (PreparedStatement ps =
                 c.prepareStatement(
                     "UPDATE order_items SET short_qty = short_qty + ?, line_total = ?,"
-                        + " vat_amount = ? WHERE tenant_id=? AND id=?"
+                        + " vat_amount = ?, paid_gross = ? WHERE tenant_id=? AND id=?"
                         + " AND fulfilled_qty + short_qty + ? <= qty")) {
               ps.setBigDecimal(1, take);
               ps.setBigDecimal(2, lineTotal);
               ps.setBigDecimal(3, vat);
-              ps.setObject(4, tenantId);
-              ps.setObject(5, i.id());
-              ps.setBigDecimal(6, take);
+              ps.setBigDecimal(4, paidGross);
+              ps.setObject(5, tenantId);
+              ps.setObject(6, i.id());
+              ps.setBigDecimal(7, take);
               if (ps.executeUpdate() == 0) {
                 throw ApiException.conflict(
                     "ORDER_LINE_QTY_EXCEEDS_OUTSTANDING", "line changed under this request");
@@ -815,7 +840,11 @@ public class OrderRepository extends BaseOutboxRepository {
                     substitute.vatCode(),
                     substitute.vatRate(),
                     BigDecimal.ZERO,
-                    firstItem);
+                    firstItem,
+                    before.taxInclusive()
+                        ? substitute.lineNet().add(nz(substitute.lineVat()))
+                        : null,
+                    null);
             insertOrderItem(c, subItem, scale);
           }
           // The totals, as the checkout computed them: lines, their VAT (pro rata to the subtotal
@@ -882,8 +911,13 @@ public class OrderRepository extends BaseOutboxRepository {
           Order now = findOrderInTx(c, tenantId, orderId);
           java.util.Map<UUID, BigDecimal> owed = new java.util.LinkedHashMap<>();
           for (OrderItem i : after) owed.merge(i.variantId(), i.remainingQty(), BigDecimal::add);
+          BigDecimal refundVat =
+              before.taxInclusive()
+                  ? nz(before.taxAmount()).subtract(t.tax()).max(BigDecimal.ZERO)
+                  : null;
           Adjusted done =
-              new Adjusted(now, after, adjustment, subItem, owed, complete, before.status());
+              new Adjusted(
+                  now, after, adjustment, subItem, owed, complete, before.status(), refundVat);
           for (OutboxRow row : events.apply(done)) insertOutbox(c, row);
           return done;
         },
@@ -896,10 +930,12 @@ public class OrderRepository extends BaseOutboxRepository {
       throws SQLException {
     BigDecimal subtotal = BigDecimal.ZERO;
     BigDecimal vat = BigDecimal.ZERO;
+    BigDecimal paid = BigDecimal.ZERO;
     boolean everyLineTaxed = true;
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT COALESCE(SUM(line_total), 0) AS subtotal, COALESCE(SUM(vat_amount), 0) AS vat,"
+                + " COALESCE(SUM(paid_gross), 0) AS paid,"
                 + " BOOL_AND(vat_amount IS NOT NULL) AS taxed"
                 + " FROM order_items WHERE tenant_id=? AND order_id=?")) {
       ps.setObject(1, tenantId);
@@ -908,9 +944,18 @@ public class OrderRepository extends BaseOutboxRepository {
         if (rs.next()) {
           subtotal = rs.getBigDecimal("subtotal");
           vat = rs.getBigDecimal("vat");
+          paid = rs.getBigDecimal("paid");
           everyLineTaxed = rs.getBoolean("taxed");
         }
       }
+    }
+    if (before.taxInclusive()) {
+      // Shelf prices: the lines carry every discount and their VAT, so the total is what they were
+      // paid (plus deposits) and nothing is taken off again.
+      int units = com.storeql.service.Fx.minorUnits(before.currency());
+      BigDecimal taxInside = vat.setScale(units, java.math.RoundingMode.HALF_UP);
+      BigDecimal deposits = DepositRepository.depositTotalTx(c, tenantId, orderId);
+      return new Totals(subtotal, taxInside, paid.add(deposits));
     }
     // The order's own currency decides the precision: whole yen, three-decimal dinars.
     int scale = com.storeql.service.Fx.minorUnits(before.currency());
@@ -952,7 +997,7 @@ public class OrderRepository extends BaseOutboxRepository {
         c.prepareStatement(
             "SELECT id, tenant_id, order_id, variant_id, qty, unit_price, line_total, notes,"
                 + " weighing_instrument_id, fulfilled_qty, vat_amount, markdown_id, vat_code,"
-                + " vat_rate, short_qty, substitutes_item_id"
+                + " vat_rate, short_qty, substitutes_item_id, paid_gross, list_unit_price"
                 + " FROM order_items WHERE tenant_id=? AND order_id=? ORDER BY created_at, id"
                 + " FOR UPDATE")) {
       ps.setObject(1, tenantId);
@@ -1065,7 +1110,7 @@ public class OrderRepository extends BaseOutboxRepository {
             + " delivery_line1, delivery_line2, delivery_city, delivery_postal_code,"
             + " delivery_recipient_name, delivery_recipient_phone, contact_phone, payment_method,"
             + " seller_user_id, allow_substitutions, slot_window_id, slot_starts_at, slot_ends_at,"
-            + " slot_time_zone, contact_phone_e164"
+            + " slot_time_zone, contact_phone_e164, tax_inclusive"
             + " FROM orders WHERE tenant_id=? AND store_id=? AND channel='ONLINE'"
             + " AND fulfilment_type IN ('PICKUP','DELIVERY')"
             + " AND status IN ('CONFIRMED','PARTIALLY_FULFILLED')"
@@ -1086,7 +1131,7 @@ public class OrderRepository extends BaseOutboxRepository {
         query(
             "SELECT id, tenant_id, order_id, variant_id, qty, unit_price, line_total, notes,"
                 + " weighing_instrument_id, fulfilled_qty, vat_amount, markdown_id, vat_code,"
-                + " vat_rate, short_qty, substitutes_item_id"
+                + " vat_rate, short_qty, substitutes_item_id, paid_gross, list_unit_price"
                 + " FROM order_items WHERE tenant_id=? AND order_id = ANY(?)"
                 + " ORDER BY created_at, id",
             ps -> {
@@ -1228,7 +1273,7 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " delivery_line1, delivery_line2, delivery_city, delivery_postal_code,"
                 + " delivery_recipient_name, delivery_recipient_phone, contact_phone, payment_method,"
                 + " seller_user_id, allow_substitutions, slot_window_id, slot_starts_at, slot_ends_at,"
-                + " slot_time_zone, contact_phone_e164"
+                + " slot_time_zone, contact_phone_e164, tax_inclusive"
                 + " FROM orders WHERE tenant_id=? AND id=?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -1964,7 +2009,7 @@ public class OrderRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "SELECT id, tenant_id, order_id, variant_id, qty, unit_price, line_total, notes,"
                       + " weighing_instrument_id, fulfilled_qty, vat_amount, markdown_id, vat_code,"
-                      + " vat_rate, short_qty, substitutes_item_id"
+                      + " vat_rate, short_qty, substitutes_item_id, paid_gross, list_unit_price"
                       + " FROM order_items"
                       + " WHERE tenant_id=? AND order_id=? ORDER BY created_at FOR UPDATE")) {
             ps.setObject(1, tenantId);
@@ -2114,7 +2159,7 @@ public class OrderRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "SELECT id, tenant_id, order_id, variant_id, qty, unit_price, line_total, notes,"
                       + " weighing_instrument_id, fulfilled_qty, vat_amount, markdown_id, vat_code,"
-                      + " vat_rate, short_qty, substitutes_item_id"
+                      + " vat_rate, short_qty, substitutes_item_id, paid_gross, list_unit_price"
                       + " FROM order_items"
                       + " WHERE tenant_id=? AND order_id=? ORDER BY created_at FOR UPDATE")) {
             ps.setObject(1, tenantId);
@@ -2332,7 +2377,7 @@ public class OrderRepository extends BaseOutboxRepository {
             + " delivery_line1, delivery_line2, delivery_city, delivery_postal_code,"
             + " delivery_recipient_name, delivery_recipient_phone, contact_phone, payment_method,"
             + " seller_user_id, allow_substitutions, slot_window_id, slot_starts_at, slot_ends_at,"
-            + " slot_time_zone, contact_phone_e164"
+            + " slot_time_zone, contact_phone_e164, tax_inclusive"
             + " FROM orders WHERE tenant_id=? AND (customer_id=? OR login_id=?)"
             + " ORDER BY created_at DESC, id DESC LIMIT ?",
         ps -> {
@@ -2357,7 +2402,7 @@ public class OrderRepository extends BaseOutboxRepository {
         "SELECT id, tenant_id, order_id, variant_id, qty, unit_price, line_total,"
             + " notes, created_at, discount_amount, discount_reason, weighing_instrument_id,"
             + " fulfilled_qty, vat_amount, markdown_id, vat_code, vat_rate, short_qty,"
-            + " substitutes_item_id"
+            + " substitutes_item_id, paid_gross, list_unit_price"
             + " FROM order_items WHERE tenant_id=? AND order_id=? ORDER BY created_at",
         ps -> {
           ps.setObject(1, tenantId);
@@ -3897,8 +3942,8 @@ public class OrderRepository extends BaseOutboxRepository {
             "INSERT INTO order_items"
                 + " (id,tenant_id,order_id,variant_id,qty,unit_price,line_total,notes,"
                 + "  weighing_instrument_id, vat_amount, markdown_id, vat_code, vat_rate,"
-                + "  fulfilled_qty, short_qty, substitutes_item_id)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                + "  fulfilled_qty, short_qty, substitutes_item_id, paid_gross, list_unit_price)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       for (OrderItem item : items) {
         ps.setObject(1, item.id());
         ps.setObject(2, item.tenantId());
@@ -3917,6 +3962,8 @@ public class OrderRepository extends BaseOutboxRepository {
             14, item.fulfilledQty() == null ? java.math.BigDecimal.ZERO : item.fulfilledQty());
         ps.setBigDecimal(15, item.shortQty() == null ? java.math.BigDecimal.ZERO : item.shortQty());
         ps.setObject(16, item.substitutesItemId());
+        ps.setBigDecimal(17, money(item.paidGross(), scale));
+        ps.setBigDecimal(18, item.listUnitPrice());
         ps.addBatch();
       }
       ps.executeBatch();
@@ -3957,7 +4004,7 @@ public class OrderRepository extends BaseOutboxRepository {
                 + " delivery_line1, delivery_line2, delivery_city, delivery_postal_code,"
                 + " delivery_recipient_name, delivery_recipient_phone, contact_phone, payment_method,"
                 + " seller_user_id, allow_substitutions, slot_window_id, slot_starts_at, slot_ends_at,"
-                + " slot_time_zone, contact_phone_e164"
+                + " slot_time_zone, contact_phone_e164, tax_inclusive"
                 + " FROM orders WHERE tenant_id=? AND id=?")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, orderId);
@@ -4162,7 +4209,8 @@ public class OrderRepository extends BaseOutboxRepository {
         toInstant(rs.getObject("slot_starts_at", OffsetDateTime.class)),
         toInstant(rs.getObject("slot_ends_at", OffsetDateTime.class)),
         rs.getString("slot_time_zone"),
-        rs.getString("contact_phone_e164"));
+        rs.getString("contact_phone_e164"),
+        rs.getBoolean("tax_inclusive"));
   }
 
   /**
@@ -4234,7 +4282,9 @@ public class OrderRepository extends BaseOutboxRepository {
         rs.getString("vat_code"),
         rs.getBigDecimal("vat_rate"),
         rs.getBigDecimal("short_qty"),
-        rs.getObject("substitutes_item_id", UUID.class));
+        rs.getObject("substitutes_item_id", UUID.class),
+        rs.getBigDecimal("paid_gross"),
+        rs.getBigDecimal("list_unit_price"));
   }
 
   private OrderStatusHistory mapHistory(ResultSet rs) throws SQLException {

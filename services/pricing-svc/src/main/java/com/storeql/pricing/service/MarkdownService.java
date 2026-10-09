@@ -209,10 +209,11 @@ public class MarkdownService {
                     ApiException.notFound(
                         "PRICING_MARKDOWN_NO_PRICE",
                         "variant " + variantId + " has no POS price to reduce from"));
+    Optional<PriceList> sourceList = repo.findPriceList(tenantId, base.priceListId());
     String currency =
-        repo.findPriceList(tenantId, base.priceListId())
-            .map(PriceList::currency)
-            .orElseGet(() -> profiles.requireCurrency(tenantId));
+        sourceList.map(PriceList::currency).orElseGet(() -> profiles.requireCurrency(tenantId));
+    // The sticker's prices mean what the list's did: a shelf price on a tax-inclusive list.
+    String taxMode = sourceList.map(PriceList::taxMode).orElse(PriceList.TAX_EXCLUSIVE);
     // Money in the list currency's own minor units; the percentage keeps its two decimals.
     int scale = com.storeql.service.Fx.minorUnits(currency);
     BigDecimal original = base.price().setScale(scale, RoundingMode.HALF_UP);
@@ -270,7 +271,8 @@ public class MarkdownService {
             null,
             null,
             null,
-            BigDecimal.ZERO);
+            BigDecimal.ZERO,
+            taxMode);
     return repo.createMarkdown(draft);
   }
 

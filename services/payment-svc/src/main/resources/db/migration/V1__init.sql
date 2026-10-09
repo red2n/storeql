@@ -21,7 +21,16 @@ CREATE TABLE IF NOT EXISTS payment_tenders (
     -- The store the money was taken at, so Z-reports aggregate by store without joining order-svc
     -- (database-per-service). Null where the payment named no store.
     store_id        UUID,
+    -- How a till CARD tender came to be recorded: TERMINAL (a card machine StoreQL drives approved it)
+    -- or STANDALONE (the cashier recorded what a machine StoreQL does not see took, with that machine's
+    -- receipt reference). Null for every other tender and for a card paid online.
+    entry_mode      VARCHAR(12),
+    -- The till session (the drawer) the money was taken in, named by the till and checked by the
+    -- service: written once, at insert. Null for money taken outside a till (online, back-office,
+    -- every row from before sessions carried their money).
+    till_session_id UUID,
     PRIMARY KEY (tenant_id, id),
+    CONSTRAINT chk_payment_tenders_entry_mode CHECK (entry_mode IS NULL OR entry_mode IN ('TERMINAL', 'STANDALONE')),
     CONSTRAINT chk_payment_tenders_method CHECK (
         method IN ('CASH', 'CARD', 'UPI', 'WALLET', 'GIFT_CARD', 'VOUCHER', 'STORE_CREDIT',
                    'EXCHANGE')
@@ -52,12 +61,20 @@ CREATE TABLE IF NOT EXISTS refund_tenders (
     -- store. A store's reads take it from the refund alone, so every write path sets it wherever the
     -- payment named one.
     store_id        UUID,
+    -- The drawer a cash refund was paid out of: the till session named by the till that gave it.
+    -- Written once, at insert; null for a refund no till gave (an event's, a back-office one).
+    till_session_id UUID,
     PRIMARY KEY (tenant_id, id),
     CONSTRAINT chk_refund_tenders_method CHECK (
         method IN ('CASH', 'CARD', 'UPI', 'WALLET', 'GIFT_CARD', 'VOUCHER', 'STORE_CREDIT',
                    'EXCHANGE')
     )
 );
+
+CREATE INDEX IF NOT EXISTS idx_payment_tenders_till_session
+    ON payment_tenders (tenant_id, till_session_id) WHERE till_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_refund_tenders_till_session
+    ON refund_tenders (tenant_id, till_session_id) WHERE till_session_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS outbox (
     id              UUID        NOT NULL PRIMARY KEY,

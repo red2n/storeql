@@ -83,13 +83,19 @@ class TenderMinorUnitsTest {
     Jurisdictions none = mock(Jurisdictions.class);
     when(none.cashLimit(any(), any(), any(), any())).thenReturn(Optional.empty());
     svc.jurisdictions = none;
+    // A till's card rule: no card machine at the store, no standalone permission, no order to ask.
+    svc.terminalRepo = mock(com.storeql.payment.repo.TerminalRepository.class);
+    svc.cardSettings = mock(com.storeql.payment.repo.CardSettingsRepository.class);
+    svc.orderClient = mock(com.storeql.payment.client.OrderClient.class);
     return svc;
   }
 
   private static PaymentRepository recording() {
     PaymentRepository repo = mock(PaymentRepository.class);
     when(repo.createTender(any(), any())).thenAnswer(inv -> inv.getArgument(0));
-    when(repo.createRefundGuarded(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
+    when(repo.createTender(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
+    when(repo.createRefundGuarded(any(), any(), any(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
     when(repo.findTendersByOrder(any(), any())).thenReturn(List.of());
     return repo;
   }
@@ -101,7 +107,18 @@ class TenderMinorUnitsTest {
   private RecordTenderRequest tender(
       BigDecimal amount, String method, String customerId, String currency) {
     return new RecordTenderRequest(
-        order.toString(), amount, method, null, null, null, null, customerId, currency, null, null);
+        order.toString(),
+        amount,
+        method,
+        "CARD".equals(method) ? "AUTH 1" : null,
+        null,
+        null,
+        null,
+        customerId,
+        currency,
+        null,
+        null,
+        null);
   }
 
   /** What a Dart double is written as on the wire: its shortest round-trip decimal. */
@@ -111,7 +128,7 @@ class TenderMinorUnitsTest {
 
   private RecordRefundRequest refund(String amount) {
     return new RecordRefundRequest(
-        Ids.newId().toString(), new BigDecimal(amount), "CARD", null, null, "faulty");
+        Ids.newId().toString(), new BigDecimal(amount), "CARD", null, null, "faulty", null);
   }
 
   /** Records the tender and answers what was written: the row, and the event's amount. */
@@ -122,7 +139,11 @@ class TenderMinorUnitsTest {
         service(profiles, repo).recordTender(req, staff(tenant), Ids.newId().toString());
     ArgumentCaptor<PaymentTender> row = ArgumentCaptor.forClass(PaymentTender.class);
     ArgumentCaptor<OutboxRow> event = ArgumentCaptor.forClass(OutboxRow.class);
-    verify(repo).createTender(row.capture(), event.capture());
+    if ("CARD".equals(req.method())) {
+      verify(repo).createTender(row.capture(), event.capture(), eq("STANDALONE"));
+    } else {
+      verify(repo).createTender(row.capture(), event.capture());
+    }
     // Exactly the currency's units, scale and all: what is stored, answered and announced agree.
     assertEquals(new BigDecimal(expected), row.getValue().amount(), req.amount().toPlainString());
     assertEquals(new BigDecimal(expected), answered.amount());
@@ -139,7 +160,7 @@ class TenderMinorUnitsTest {
             ApiException.class,
             () ->
                 service(profiles, repo)
-                    .recordTender(tender(amount, "CARD"), staff(tenant), Ids.newId().toString()));
+                    .recordTender(tender(amount, "CASH"), staff(tenant), Ids.newId().toString()));
     assertEquals(400, e.status(), amount);
     assertEquals("PAYMENT_AMOUNT_INVALID", e.code(), amount);
     verify(repo, never()).createTender(any(), any());
@@ -153,7 +174,7 @@ class TenderMinorUnitsTest {
     assertEquals("3.3000000000000003", sent.toPlainString(), "the till's own figure");
     taken(homeIn("GBP"), tender(sent, "CASH", null, null), "3.30", "3.30");
     // The back office's "collect outstanding": 25.99 less 10.00 already paid.
-    taken(homeIn("GBP"), tender(onTheWire(25.99 - 10), "CARD", null, null), "15.99", "15.99");
+    taken(homeIn("GBP"), tender(onTheWire(25.99 - 10), "CASH", null, null), "15.99", "15.99");
     // A weighed line the till never rounds: 0.375 kg at 12.99 is 4.87125, the line order-svc
     // totals half up to 4.87.
     taken(homeIn("GBP"), tender(onTheWire(0.375 * 12.99), "CASH", null, null), "4.87", "4.87");
@@ -221,12 +242,12 @@ class TenderMinorUnitsTest {
   @Test
   @DisplayName("A dinar tender keeps its three places; the till's binary digits round to them")
   void dinars() {
-    taken(homeIn("KWD"), tender("10.125", "CARD"), "10.125", "10.125");
+    taken(homeIn("KWD"), tender("10.125", "CASH"), "10.125", "10.125");
     // Three items at 1.100: 3.3000000000000003 on the wire, 3.300 dinars; a weighed 0.375 kg at
     // 1.299 is 0.487125, the line order-svc totals to 0.487.
     taken(homeIn("KWD"), tender(onTheWire(3 * 1.10), "CASH", null, null), "3.300", "3.300");
     taken(homeIn("KWD"), tender(onTheWire(0.375 * 1.299), "CASH", null, null), "0.487", "0.487");
-    taken(homeIn("KWD"), tender("10.1255", "CARD"), "10.126", "10.126");
+    taken(homeIn("KWD"), tender("10.1255", "CASH"), "10.126", "10.126");
     // Five fils is a tender a dinar has, and is taken.
     taken(homeIn("KWD"), tender("0.005", "CASH"), "0.005", "0.005");
   }
@@ -235,18 +256,18 @@ class TenderMinorUnitsTest {
   @DisplayName("A yen tender is whole: the till's figure rounds to the yen")
   void yen() {
     taken(homeIn("JPY"), tender("1000", "CASH"), "1000", "1000");
-    taken(homeIn("JPY"), tender("1000.00", "CARD"), "1000", "1000");
+    taken(homeIn("JPY"), tender("1000.00", "CASH"), "1000", "1000");
     // A weighed 0.375 kg at 1299 yen is 487.125: the line order-svc totals to 487.
     taken(homeIn("JPY"), tender(onTheWire(0.375 * 1299), "CASH", null, null), "487", "487");
-    taken(homeIn("JPY"), tender("1000.5", "CARD"), "1001", "1001");
+    taken(homeIn("JPY"), tender("1000.5", "CASH"), "1001", "1001");
   }
 
   @Test
   @DisplayName("A pound tender keeps two places; a third rounds half up, as a sale's lines do")
   void pounds() {
-    taken(homeIn("GBP"), tender("10.50", "CARD"), "10.50", "10.50");
-    taken(homeIn("GBP"), tender("10.005", "CARD"), "10.01", "10.01");
-    taken(homeIn("GBP"), tender("10.004", "CARD"), "10.00", "10.00");
+    taken(homeIn("GBP"), tender("10.50", "CASH"), "10.50", "10.50");
+    taken(homeIn("GBP"), tender("10.005", "CASH"), "10.01", "10.01");
+    taken(homeIn("GBP"), tender("10.004", "CASH"), "10.00", "10.00");
   }
 
   @Test
@@ -260,8 +281,8 @@ class TenderMinorUnitsTest {
   @Test
   @DisplayName("A currency the tender names decides its minor units")
   void aNamedCurrencyDecides() {
-    taken(homeIn("GBP"), tender(new BigDecimal("1.125"), "CARD", null, "KWD"), "1.125", "1.125");
-    taken(homeIn("KWD"), tender(new BigDecimal("1.125"), "CARD", null, "GBP"), "1.13", "1.13");
+    taken(homeIn("GBP"), tender(new BigDecimal("1.125"), "CASH", null, "KWD"), "1.125", "1.125");
+    taken(homeIn("KWD"), tender(new BigDecimal("1.125"), "CASH", null, "GBP"), "1.13", "1.13");
   }
 
   @Test
@@ -294,8 +315,8 @@ class TenderMinorUnitsTest {
   @DisplayName(
       "When the business's currency cannot be read, a tender is not stopped: four places are kept")
   void anUnreadableCurrencyFailsOpen() {
-    taken(unreadable(), tender("10.125", "CARD"), "10.1250", "10.1250");
     // (A card: cash asks the business's currency of its own, for the law's cash limit.)
+    taken(unreadable(), tender("10.125", "CARD"), "10.1250", "10.1250");
     taken(unreadable(), tender(onTheWire(3 * 1.10), "CARD", null, null), "3.3000", "3.3000");
   }
 
@@ -304,11 +325,11 @@ class TenderMinorUnitsTest {
   void refunds() {
     PaymentRepository kwd = recording();
     service(homeIn("KWD"), kwd).recordRefund(staff(tenant), order, refund("2.125"), null);
-    verify(kwd).createRefundGuarded(any(), any(), any());
+    verify(kwd).createRefundGuarded(any(), any(), any(), any());
 
     PaymentRepository jpy = recording();
     service(homeIn("JPY"), jpy).recordRefund(staff(tenant), order, refund("500"), null);
-    verify(jpy).createRefundGuarded(any(), any(), any());
+    verify(jpy).createRefundGuarded(any(), any(), any(), any());
 
     for (String[] bad : new String[][] {{"KWD", "2.1255"}, {"JPY", "500.5"}, {"GBP", "2.125"}}) {
       PaymentRepository repo = recording();
@@ -319,7 +340,7 @@ class TenderMinorUnitsTest {
                   service(homeIn(bad[0]), repo)
                       .recordRefund(staff(tenant), order, refund(bad[1]), null));
       assertEquals("PAYMENT_AMOUNT_INVALID", e.code(), bad[0] + " " + bad[1]);
-      verify(repo, never()).createRefundGuarded(any(), any(), any());
+      verify(repo, never()).createRefundGuarded(any(), any(), any(), any());
     }
   }
 

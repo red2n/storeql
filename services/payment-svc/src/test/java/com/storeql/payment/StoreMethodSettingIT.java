@@ -85,7 +85,10 @@ class StoreMethodSettingIT {
             + method
             + "\",\"storeId\":\""
             + store
-            + "\"}",
+            + "\""
+            // a card typed at a till carries the machine's receipt reference
+            + ("CARD".equals(method) ? ",\"reference\":\"AUTH 1\"" : "")
+            + "}",
         Ids.newId().toString());
   }
 

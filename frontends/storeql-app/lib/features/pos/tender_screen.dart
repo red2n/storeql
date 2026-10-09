@@ -22,7 +22,10 @@ import '../../shared/widgets/empty_state.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import 'pos_fiscal_receipt.dart';
+import 'cash_providers.dart';
 import 'pos_providers.dart';
+import 'pos_quote.dart';
+import 'pos_vat.dart';
 import 'pos_terminal.dart';
 import 'pos_receipt.dart';
 import 'pos_receipt_printer.dart';
@@ -63,6 +66,25 @@ String? saleFingerprint(Object? request) {
     return null;
   }
 }
+
+/// A fingerprint of one tender a sale sends: [body] as it goes to payment-svc,
+/// less the drawer, and the card machine it is for.
+///
+/// The drawer (`tillSessionId`) says where the cash is *counted*, not what the
+/// tender *is*. payment-svc replays a tender by its key whatever else the body
+/// says, and answers a drawer it will not count by taking the tender again
+/// naming none ([postTender]), so a drawer opened or closed between two presses
+/// of a held card sale is the same payment. With it in the print, the second
+/// press read as a different sale: the card taken for the first could then only
+/// be put back, because every press named the new drawer. Everything else that
+/// makes a tender what it is - amount, method, reference, store, customer,
+/// currency, the machine - stays in it.
+@visibleForTesting
+String? tenderFingerprint(Map<String, dynamic> body, String? terminalId) =>
+    saleFingerprint([_withoutDrawer(body), terminalId]);
+
+Map<String, dynamic> _withoutDrawer(Map<String, dynamic> body) =>
+    {...body}..remove('tillSessionId');
 
 /// Whether [e] is payment-svc refusing a card machine that is gone from the
 /// sale's store — retired, or moved to another — which it does before it
@@ -437,17 +459,14 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     // An exchange's new order is already priced by the server.
     if (ref.read(posExchangeSettlementProvider) != null) return 0;
     // Off the goods only: a gift card being sold is never discounted.
-    final subtotal = ref.read(posCartProvider.notifier).goodsTotal;
-    return ref.read(posDiscountProvider).clamp(0, subtotal).toDouble();
+    return ref.read(posTotalsProvider).discountOf(ref.read(posDiscountProvider));
   }
 
   /// Goods less the discount, plus the return-scheme deposits on the sale's
   /// containers (09.16): the deposit is due in full whatever the discount.
   double get _due =>
       ref.read(posExchangeSettlementProvider)?.due ??
-      ref.read(posCartProvider.notifier).total -
-      _discount +
-      ref.read(posCartProvider.notifier).deposits;
+      ref.read(posTotalsProvider).due(ref.read(posDiscountProvider));
 
   double get _paid => _tenders.fold(0.0, (s, t) => s + t.amount);
   double get _remaining => (_due - _paid).clamp(0.0, double.infinity);
@@ -490,6 +509,14 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final terminalId = method == 'CARD' ? await _chooseTerminal() : null;
     if (method == 'CARD' && terminalId == _noTerminalChosen) return;
     if (!mounted) return;
+    // A card taken on a machine StoreQL does not drive is typed in, and the
+    // machine's own receipt reference goes with it: it is how that sale is found
+    // in the acquirer's file, and the server refuses a card tender without one.
+    String? reference;
+    if (method == 'CARD' && terminalId == null) {
+      reference = await _askMachineReference();
+      if (reference == null || !mounted) return;
+    }
     setState(
       () => _tenders.add(
         PosTender(
@@ -497,10 +524,19 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           amount: applied,
           cashGiven: method == 'CASH' ? result.given : 0,
           terminalId: terminalId,
+          reference: reference,
         ),
       ),
     );
   }
+
+  /// Asks for the card machine's receipt or authorisation reference; null when
+  /// the cashier backs out. At most [cardReferenceMaxLength] characters, as the
+  /// server holds it.
+  Future<String?> _askMachineReference() => showDialog<String>(
+        context: context,
+        builder: (_) => const _MachineReferenceDialog(),
+      );
 
   /// Sentinel for "the cashier backed out of choosing a terminal", which is not
   /// the same as "this store has no terminal" — one adds no tender, the other
@@ -641,6 +677,19 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   /// [endPress] lets the next press start: called once this one does nothing
   /// more to the hold.
   Future<void> _completeClaimed(void Function() endPress) async {
+    // The drawer this sale is rung on is read before anything else: a read of
+    // the open till that is still in flight, or failed a moment ago, is given
+    // a few seconds first ([SaleTillNotifier.settle]) rather than the sale
+    // going out naming no drawer for the rest of the shift. Nothing is held
+    // for longer than that, and never refused: with no drawer the money is
+    // "not at a till" on the report. The notifier is kept for the refusal
+    // below, because `ref` goes with this screen.
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    if (!tillCtl.settled) {
+      await tillCtl.settle();
+      if (!mounted) return;
+    }
+
     // The till as it is now: the press waited for may have changed it — a sale
     // it finished out of sight empties it.
     final settlement = ref.read(posExchangeSettlementProvider);
@@ -919,7 +968,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           try {
             await dio.post(
               '/${ApiConstants.order}/gift-cards/$giftCode/redeem',
-              data: {'amount': t.amount, 'orderId': orderId},
+              data: giftCardRedeemBody(t, orderId),
               options: Options(
                   headers: {'Idempotency-Key': derivedId(idemBase, 'gift:$i')}),
             );
@@ -1090,10 +1139,11 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           ]);
         }
         try {
-          await dio.post(
-            '/${ApiConstants.payment}/payments',
-            data: {...sale.tenders[i].body, 'orderId': orderId},
-            options: Options(headers: {'Idempotency-Key': derivedId(idemBase, 'pay:$i')}),
+          await postTender(
+            dio,
+            {...sale.tenders[i].body, 'orderId': orderId},
+            idempotencyKey: derivedId(idemBase, 'pay:$i'),
+            onTillSessionRefused: tillCtl.refused,
           );
         } catch (e) {
           // This place's own approval, recorded on this order by somebody
@@ -1159,9 +1209,19 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
         return;
       }
 
+      // A sale at shelf prices is receipted from the server's own document, so
+      // the printed VAT table is the one in the books; asked only then, and
+      // never blocking the receipt (the till makes the table itself if it fails).
+      final vatFromServer = cart.isNotEmpty &&
+              productLines(cart).isNotEmpty &&
+              productLines(cart).every((l) => l.taxInclusive)
+          ? await fetchReceiptVat(dio, orderId)
+          : null;
+
       // Capture everything needed for the receipt before clearing state.
       final receiptData = _buildReceiptData(
         orderId: orderId,
+        vatFromServer: vatFromServer,
         fiscalNumber: fiscalNumber,
         fiscalStamp: fiscalStamp,
         fiscalNumberNote: fiscalNumber == null
@@ -1657,6 +1717,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final settlement = ref.read(posExchangeSettlementProvider);
     final List<PosLine> cart = settlement?.lines ?? ref.read(posCartProvider);
     final storeId = ref.read(posStoreProvider);
+    final tillSession = ref.read(saleTillProvider).drawer;
     final customer = settlement != null ? null : ref.read(posCustomerProvider);
     final walkInPhone = ref.read(posWalkInPhoneProvider);
     final discount = _discount;
@@ -1708,7 +1769,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
             'amount': t.amount,
             'method': t.paymentMethod,
             'storeId': storeId,
+            // The drawer this sale is rung on, so its report counts the money.
+            'tillSessionId': ?tillSession,
             if (t.method == 'GIFT_CARD') 'reference': t.giftCardCode,
+            if (t.method == 'CARD' && t.reference != null) 'reference': t.reference,
             if (t.method == 'STORE_CREDIT') 'reference': 'STORE_CREDIT',
             if (t.method == 'STORE_CREDIT') 'customerId': t.customerId,
             if (t.method == 'STORE_CREDIT') 'currency': currency,
@@ -1718,7 +1782,8 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final signature = saleFingerprint([
       settlement?.orderId,
       orderRequest,
-      [for (final t in owed) t.body],
+      // The drawer is where the cash is counted, not part of the sale itself.
+      [for (final t in owed) _withoutDrawer(t.body)],
       [for (final t in tenders) t.terminalId],
     ]);
     // The order alone, and each tender alone: a press may change a tender the
@@ -1726,7 +1791,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final orderSignature = saleFingerprint([settlement?.orderId, orderRequest]);
     final tenderPrints = [
       for (var i = 0; i < tenders.length; i++)
-        saleFingerprint([owed[i].body, tenders[i].terminalId]),
+        tenderFingerprint(owed[i].body, tenders[i].terminalId),
     ];
     return (
       orderRequest: orderRequest,
@@ -1873,6 +1938,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   /// An exchange's order is not the sale's to cancel: it stands with the
   /// return it settles. An order that cannot be cancelled now is still let
   /// go, and remembered by the till as such.
+  ///
+  /// It names no drawer: an order is let go only when nothing is recorded on
+  /// it ([HeldCardPayment.mayBeRecorded] is empty), so no cash is handed back
+  /// (unlike [_closeHeld], which cancels a sale that has tenders recorded).
   static Future<void> _giveUpOrder(Dio dio, HeldCardPayment held) async {
     final orderId = held.orderId;
     if (orderId == null || orderId.isEmpty || held.sale.settlement != null) {
@@ -2308,11 +2377,21 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     );
     if (reason == null || !mounted) return;
     setState(() => _processing = true);
+    // The cash the earlier sale took is handed back out of the drawer open now,
+    // so the cancel names it: order-svc carries it on OrderCancelled and
+    // payment-svc counts the refund there while it is this business's open
+    // session at the tender's store, else "not at a till". It is settled as a
+    // sale's is ([_completeClaimed]) - a read of the open till still in flight,
+    // or failed a moment ago, is given a few seconds, never longer - and the
+    // cancel is never refused over it, so there is no second try without it. The
+    // notifier is kept before the first await because `ref` goes with the screen.
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    if (!tillCtl.settled) await tillCtl.settle();
     final orderId = held.orderId;
     if (orderId != null && orderId.isNotEmpty) {
       try {
         await dio.post('/${ApiConstants.order}/orders/$orderId/cancel',
-            data: {'reason': reason});
+            data: {'reason': reason, 'tillSessionId': ?tillCtl.drawer});
       } catch (e) {
         // A cancel whose answer was lost, then sent again, finds the order
         // already cancelled: that is the cancel done.
@@ -3263,6 +3342,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     String? fiscalNumber,
     String? fiscalNumberNote,
     FiscalStamp? fiscalStamp,
+    PosReceiptVat? vatFromServer,
   }) {
     final subtotal = cartSnapshot.fold<double>(0, (s, l) => s + l.lineTotal);
     final deposit = cartSnapshot.fold<double>(0, (s, l) => s + l.depositTotal);
@@ -3282,6 +3362,23 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final cashierEmail = authState is AuthAuthenticated
         ? authState.email
         : null;
+    // A sale at shelf prices carries the seller and a VAT table: the server's
+    // when it was asked, else the till's own from what it rang up (so a sale made
+    // offline prints the same table the server would have).
+    final goods = productLines(cartSnapshot);
+    final PosReceiptVat? vat = goods.isNotEmpty && goods.every((l) => l.taxInclusive)
+        ? PosReceiptVat(
+            sellerName: vatFromServer?.sellerName ?? store.businessName,
+            vatNumber: vatFromServer?.vatNumber ?? store.vatNumber,
+            rows: vatFromServer != null && vatFromServer.rows.isNotEmpty
+                ? vatFromServer.rows
+                : offlineVatTable(
+                    cartSnapshot,
+                    discount,
+                    AppFormat.minorUnits(currency),
+                  ),
+          )
+        : null;
     return PosReceiptData(
       orderId: orderId,
       storeName: store.name,
@@ -3300,6 +3397,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
       fiscalNumber: fiscalNumber,
       fiscalNumberNote: fiscalNumberNote,
       fiscalStamp: fiscalStamp,
+      vat: vat,
     );
   }
 
@@ -3778,8 +3876,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final customer = settlement != null ? null : ref.watch(posCustomerProvider);
     final tillPhone = ref.watch(posTillPhoneProvider);
     final currency = _currency;
-    // Recompute reactively (watch so discount/cart edits refresh the figures).
+    // Recompute reactively (watch so discount/cart edits and the server's quote
+    // of the basket refresh the figures).
     ref.watch(posDiscountProvider);
+    ref.watch(posTotalsProvider);
     final due = _due;
     final remaining = _remaining;
     final settled = remaining <= 0.001;
@@ -4248,6 +4348,76 @@ class _TenderButton extends StatelessWidget {
 
 /// Prompts for an amount; for cash the default is the remaining balance but the
 /// cashier may hand over more (to compute change).
+/// The longest card machine reference the server takes.
+const int cardReferenceMaxLength = 64;
+
+/// The card machine's own receipt or authorisation reference, typed from the
+/// slip. Required: without it a card sale taken on a machine StoreQL does not
+/// see could not be found in the acquirer's file.
+class _MachineReferenceDialog extends StatefulWidget {
+  const _MachineReferenceDialog();
+
+  @override
+  State<_MachineReferenceDialog> createState() =>
+      _MachineReferenceDialogState();
+}
+
+class _MachineReferenceDialogState extends State<_MachineReferenceDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
+    Navigator.of(context).pop(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      key: const Key('tender-machine-reference'),
+      title: const Text('Card machine reference'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "Type the reference from the card machine's receipt "
+            '(authorisation code or transaction number).',
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const Key('tender-machine-reference-field'),
+            controller: _controller,
+            autofocus: true,
+            maxLength: cardReferenceMaxLength,
+            textInputAction: TextInputAction.done,
+            decoration: const InputDecoration(labelText: 'Reference'),
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('tender-machine-reference-ok'),
+          onPressed: _controller.text.trim().isEmpty ? null : _submit,
+          child: const Text('Add card payment'),
+        ),
+      ],
+    );
+  }
+}
+
 class _AmountDialog extends StatefulWidget {
   final String title;
   final String currency;

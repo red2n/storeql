@@ -87,6 +87,20 @@ public class TerminalRepository extends BaseOutboxRepository {
         "card terminals");
   }
 
+  /** Whether the store has at least one ACTIVE card machine (a retired one is no machine). */
+  public boolean hasActiveAt(UUID tenantId, UUID storeId) {
+    return !query(
+            "SELECT 1 FROM card_terminals WHERE tenant_id = ? AND store_id = ? AND status = 'ACTIVE'"
+                + " LIMIT 1",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, storeId);
+            },
+            rs -> 1,
+            "store has an active card machine")
+        .isEmpty();
+  }
+
   public Optional<Terminal> find(UUID tenantId, UUID id) {
     return query(
             TERMINAL_COLUMNS + " WHERE tenant_id = ? AND id = ?",
@@ -902,7 +916,7 @@ public class TerminalRepository extends BaseOutboxRepository {
           }
           UUID refundId = null;
           if (book != null && !bookedTx(c, tenantId, book.idempotencyKey())) {
-            insertBookRefundTx(c, book, storeId);
+            insertBookRefundTx(c, book, storeId, null);
             insertOutbox(c, event);
             refundId = book.id();
           }
@@ -972,7 +986,7 @@ public class TerminalRepository extends BaseOutboxRepository {
               // against the tender meanwhile sees this one.
               CardSettlementSql.lockTenderTx(c, tenantId, sale.paymentId());
               if (bookedTx(c, tenantId, booking.row().idempotencyKey())) return null;
-              insertBookRefundTx(c, booking.row(), sale.storeId());
+              insertBookRefundTx(c, booking.row(), sale.storeId(), null);
               insertOutbox(c, booking.event());
               return booking.row();
             },
@@ -1005,6 +1019,23 @@ public class TerminalRepository extends BaseOutboxRepository {
    *     for a key used on another due; 409 with {@link CardSettlement#anotherWayRefusal}'s code
    */
   public Due closeAnotherWay(CardSettlement.Closure k, RefundTender book, OutboxRow event) {
+    return closeAnotherWay(k, book, event, null);
+  }
+
+  /**
+   * As above, for money handed over from a drawer the manager names: the books' refund is that
+   * drawer's, so its expected cash falls by the cash that left it. The drawer is judged here, on
+   * this transaction, after a retry is answered and the due's own refusals are made, and before
+   * anything is written: this business's, open (the row is held shared, so a close waits for this
+   * refund or finds it counted), and at the store the due is at. A refund naming no drawer is as it
+   * always was, counted at none. An approval never recorded on a sale has nothing in the books, so
+   * a drawer named for it is left out.
+   *
+   * @throws ApiException additionally 404 {@code TILL_SESSION_NOT_FOUND}; 409 {@code
+   *     TILL_SESSION_NOT_OPEN} or {@code TILL_SESSION_OTHER_STORE}
+   */
+  public Due closeAnotherWay(
+      CardSettlement.Closure k, RefundTender book, OutboxRow event, UUID tillSessionId) {
     return inTx(
         c -> {
           UUID tenantId = k.tenantId();
@@ -1041,9 +1072,18 @@ public class TerminalRepository extends BaseOutboxRepository {
               throw new IllegalStateException(
                   "money owed back against a tender is given back in the books, against it");
             }
+            if (tillSessionId != null) {
+              UUID drawerStore = TillSessionLocks.requireOpenTx(c, tenantId, tillSessionId);
+              if (!drawerStore.equals(due.storeId())) {
+                throw ApiException.conflict(
+                    "TILL_SESSION_OTHER_STORE",
+                    "that till session is at another store than the one this card payment was"
+                        + " taken at");
+              }
+            }
             CardSettlementSql.lockTenderTx(c, tenantId, due.paymentId());
             if (!bookedTx(c, tenantId, book.idempotencyKey())) {
-              insertBookRefundTx(c, book, due.storeId());
+              insertBookRefundTx(c, book, due.storeId(), tillSessionId);
               insertOutbox(c, event);
               refundId = book.id();
             }
@@ -1084,13 +1124,13 @@ public class TerminalRepository extends BaseOutboxRepository {
     }
   }
 
-  private static void insertBookRefundTx(Connection c, RefundTender r, UUID storeId)
-      throws SQLException {
+  private static void insertBookRefundTx(
+      Connection c, RefundTender r, UUID storeId, UUID tillSessionId) throws SQLException {
     try (PreparedStatement ps =
         c.prepareStatement(
             "INSERT INTO refund_tenders (id, tenant_id, order_id, payment_id, amount, method,"
-                + " reference, idempotency_key, reason, created_at, store_id)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+                + " reference, idempotency_key, reason, created_at, store_id, till_session_id)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, r.id());
       ps.setObject(2, r.tenantId());
       ps.setObject(3, r.orderId());
@@ -1102,6 +1142,7 @@ public class TerminalRepository extends BaseOutboxRepository {
       ps.setString(9, r.reason());
       ps.setObject(10, r.createdAt().atOffset(ZoneOffset.UTC));
       ps.setObject(11, storeId);
+      ps.setObject(12, tillSessionId);
       ps.executeUpdate();
     }
   }

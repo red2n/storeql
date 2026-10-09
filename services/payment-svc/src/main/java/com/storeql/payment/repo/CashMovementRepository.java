@@ -28,6 +28,12 @@ public class CashMovementRepository extends BaseOutboxRepository {
    * Record a pay-in/pay-out. If the same Idempotency-Key was already stored for this tenant, the
    * original movement is returned unchanged (replay) — a retried request must not double-count cash
    * in/out of the till.
+   *
+   * <p>Written to an open till only: the session's row is held shared on this transaction, so a
+   * close waits for the movement (and counts it) or finds the till closed and the movement refused,
+   * after a retry has been answered.
+   *
+   * @throws ApiException 400 {@code TILL_CLOSED} when the till session is closed
    */
   public CashMovementResponse insertMovement(
       UUID tenantId,
@@ -39,6 +45,58 @@ public class CashMovementRepository extends BaseOutboxRepository {
       UUID authorisedBy,
       UUID recordedBy,
       String idempotencyKey) {
+    return insertMovement(
+        tenantId,
+        storeId,
+        tillSessionId,
+        direction,
+        amount,
+        reason,
+        authorisedBy,
+        recordedBy,
+        idempotencyKey,
+        true);
+  }
+
+  /**
+   * As above for a movement an event announces (a deposit refunded at the till): cash that has left
+   * the drawer is recorded whatever became of the drawer meanwhile -- never refused -- though it is
+   * still ordered against the close by the same shared hold on the session's row.
+   */
+  public CashMovementResponse insertMovementFromEvent(
+      UUID tenantId,
+      UUID storeId,
+      UUID tillSessionId,
+      String direction,
+      BigDecimal amount,
+      String reason,
+      UUID authorisedBy,
+      UUID recordedBy,
+      String idempotencyKey) {
+    return insertMovement(
+        tenantId,
+        storeId,
+        tillSessionId,
+        direction,
+        amount,
+        reason,
+        authorisedBy,
+        recordedBy,
+        idempotencyKey,
+        false);
+  }
+
+  private CashMovementResponse insertMovement(
+      UUID tenantId,
+      UUID storeId,
+      UUID tillSessionId,
+      String direction,
+      BigDecimal amount,
+      String reason,
+      UUID authorisedBy,
+      UUID recordedBy,
+      String idempotencyKey,
+      boolean mustBeOpen) {
     return inTx(
         c -> {
           if (idempotencyKey != null) {
@@ -46,6 +104,11 @@ public class CashMovementRepository extends BaseOutboxRepository {
             if (existing != null) {
               return existing;
             }
+          }
+          if (mustBeOpen) {
+            TillSessionLocks.requireOpenForCashTx(c, tenantId, tillSessionId);
+          } else {
+            TillSessionLocks.sharedStatusTx(c, tenantId, tillSessionId);
           }
           UUID id = Ids.newId();
           Instant now = Instant.now();

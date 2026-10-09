@@ -67,6 +67,35 @@ public final class SubstitutePrice {
     return new Charge(cappedNet, cappedVat, unit(cappedNet, qty, scale), true);
   }
 
+  /**
+   * Charges {@code qty} of a substitute at shelf prices (intent/vat-inclusive-pricing.md): the
+   * lower of what its own shelf price comes to and what the original's standing units cost the
+   * shopper, whole; the VAT inside the charge is worked from it at the substitute's own rate, and
+   * the net is what is left. The shopper never pays more than they did.
+   *
+   * @param originalGrossUnit what a standing unit of the original cost the shopper, VAT included
+   * @param quotedGross what the substitute's shelf price comes to for {@code qty}, VAT included
+   * @param vatRate the substitute's rate as a fraction; null or zero when none applies
+   * @param qty how many of the substitute
+   * @param scale the currency's minor units
+   */
+  public static Charge chargeInclusive(
+      BigDecimal originalGrossUnit,
+      BigDecimal quotedGross,
+      BigDecimal vatRate,
+      BigDecimal qty,
+      int scale) {
+    BigDecimal quoted = zero(quotedGross).setScale(scale, RoundingMode.HALF_UP);
+    BigDecimal cap = originalGrossUnit.multiply(qty).setScale(scale, RoundingMode.HALF_UP);
+    boolean capped = quoted.compareTo(cap) > 0;
+    BigDecimal gross = capped ? cap : quoted;
+    BigDecimal vat =
+        com.storeql.money.TaxInclusive.vatInside(
+            gross, vatRate == null ? BigDecimal.ZERO : vatRate, scale);
+    BigDecimal net = gross.subtract(vat);
+    return new Charge(net, vat, unit(net, qty, scale), capped);
+  }
+
   /** A share of an amount for what stands of a line: {@code amount × after / before}, rounded. */
   public static BigDecimal share(
       BigDecimal amount, BigDecimal after, BigDecimal before, int scale) {
