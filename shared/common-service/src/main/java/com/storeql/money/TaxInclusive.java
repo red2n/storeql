@@ -1,4 +1,4 @@
-package com.storeql.service;
+package com.storeql.money;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -17,8 +17,8 @@ import java.util.List;
  *
  * <p>Every method is pure, works in {@link BigDecimal} only, rounds once and half up (ties away
  * from zero, so a refund is the mirror image of the sale), and takes the currency's minor-unit
- * {@code scale} from {@link Fx#minorUnits(String)}: never a literal 2. A rate is a fraction ({@code
- * 0.20} for 20%).
+ * {@code scale} from {@link com.storeql.service.Fx#minorUnits(String)}: never a literal 2. A rate
+ * is a fraction ({@code 0.20} for 20%).
  */
 public final class TaxInclusive {
 

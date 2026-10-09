@@ -1,6 +1,7 @@
 package com.storeql.pricing.service;
 
 import com.storeql.ids.Ids;
+import com.storeql.money.TaxInclusive;
 import com.storeql.pricing.domain.Domain;
 import com.storeql.pricing.domain.Domain.BasketLine;
 import com.storeql.pricing.domain.Domain.CustomerVatStatus;
@@ -40,7 +41,6 @@ import com.storeql.pricing.dto.Dtos.UpsertPriceListItemRequest;
 import com.storeql.pricing.dto.Dtos.UpsertProductVatCategoryRequest;
 import com.storeql.pricing.repo.PricingRepository;
 import com.storeql.pricing.repo.TaxReportRepository;
-import com.storeql.service.TaxInclusive;
 import com.storeql.web.ApiException;
 import com.storeql.web.Cursor;
 import com.storeql.web.Parsing;

@@ -1,4 +1,4 @@
-package com.storeql.service;
+package com.storeql.money;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -181,6 +181,31 @@ class TaxInclusivePropertyTest {
           new BigDecimal(v.getString("vat")), TaxInclusive.vatInside(gross, rate, scale), where);
       assertEquals(
           new BigDecimal(v.getString("net")), TaxInclusive.netOf(gross, rate, scale), where);
+    }
+  }
+
+  @Test
+  @DisplayName("every shared-discount vector made by the independent implementation is reproduced")
+  void shareVectorsAreReproduced() throws Exception {
+    JsonArray cases;
+    try (InputStream in = getClass().getResourceAsStream("/tax-inclusive-share-vectors.json")) {
+      assertTrue(in != null, "tax-inclusive-share-vectors.json is on the test classpath");
+      cases = Json.createReader(in).readObject().getJsonArray("cases");
+    }
+    assertTrue(cases.size() >= 300, "a real set: " + cases.size());
+    for (JsonObject c : cases.getValuesAs(JsonObject.class)) {
+      int scale = c.getInt("scale");
+      BigDecimal amount = BigDecimal.valueOf(c.getJsonNumber("amount").longValue(), scale);
+      List<BigDecimal> grosses =
+          c.getJsonArray("grosses").getValuesAs(jakarta.json.JsonNumber.class).stream()
+              .map(n -> BigDecimal.valueOf(n.longValue(), scale))
+              .toList();
+      List<BigDecimal> want =
+          c.getJsonArray("shares").getValuesAs(jakarta.json.JsonNumber.class).stream()
+              .map(n -> BigDecimal.valueOf(n.longValue(), scale))
+              .toList();
+
+      assertEquals(want, TaxInclusive.shareByGross(amount, grosses, scale), c.toString());
     }
   }
 
