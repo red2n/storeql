@@ -34,12 +34,24 @@
         <flyway.version>13.7.0</flyway.version>
         <postgresql.version>42.7.13</postgresql.version>
         <hikaricp.version>7.1.0</hikaricp.version>
-        <!-- Must match the version Helidon's own BOM pins org.testcontainers:testcontainers/jdbc
-             to (checked via `mvn help:effective-pom`) — otherwise postgresql/kafka/database-commons
-             resolve to this property's value while testcontainers-core/jdbc resolve to Helidon's,
-             producing a mixed-version Testcontainers classpath (unsupported; caused flaky
-             GenericContainer port-wait timeouts against containers that were demonstrably up). -->
+        <!-- Testcontainers 2.x. The modules were renamed in 2.0 (org.testcontainers:postgresql ->
+             testcontainers-postgresql, kafka -> testcontainers-kafka, jdbc -> testcontainers-jdbc,
+             database-commons -> testcontainers-database-commons; core stays `testcontainers`), and
+             PostgreSQLContainer moved to org.testcontainers.postgresql and lost its type parameter.
+             The Helidon 4.5.5 BOM pins org.testcontainers:testcontainers (and the 1.x names jdbc,
+             junit-jupiter, mongodb, mysql, oracle-xe) to its own `version.lib.testcontainers`
+             (1.21.4), and that management wins over the testcontainers-bom imported below. Left
+             alone it would resolve the core to 1.21.4 while testcontainers-postgresql/-kafka
+             resolve to this version: a mixed-version Testcontainers classpath (unsupported; it
+             caused flaky GenericContainer port-wait timeouts against containers that were
+             demonstrably up). So Helidon's property is raised here, once, to this version
+             (Dependabot moves `testcontainers.version`; the Helidon property follows it). Drop the
+             override when a Helidon release pins 2.x itself. Check with
+             `mvn dependency:tree -Dincludes=org.testcontainers`: no 1.x artifact may appear.
+             Helidon's 1.x-named entries (jdbc, junit-jupiter, ...) have no 2.x artifact of that
+             name; that is harmless while nothing here depends on them. -->
         <testcontainers.version>2.0.5</testcontainers.version>
+        <version.lib.testcontainers>${testcontainers.version}</version.lib.testcontainers>
         <!-- JUnit 6 (Jupiter + Platform move together; one BOM). The import below wins over the
              5.12.2 that Helidon's own `version.lib.junit` names — `mvn dependency:tree` shows
              6.1.3 for every org.junit artifact in every module, none left on 5.x. Surefire (3.1.0,
