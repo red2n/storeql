@@ -199,4 +199,80 @@ class PricingClientQuoteParseTest {
                     + "\"vatAmount\":0.500}],\"currency\":\"KWD\"}"));
     assertEquals(new BigDecimal("3.333"), basket.lines().get(0).unitPrice());
   }
+
+  // ── a quote of shelf prices (intent/vat-inclusive-pricing.md) ──────────────
+
+  /**
+   * A shelf-price quote's lines carry what they finally cost, VAT inside: the line gross, the VAT
+   * in it, and the net that is left. Order placement shares the staff discount over those grosses.
+   */
+  @Test
+  @DisplayName(
+      "a shelf-price quote is read as gross: what each line finally costs, and the VAT in it")
+  void aShelfPriceQuoteIsReadAsGross() {
+    var q =
+        PricingClient.parseQuote(
+            json(
+                """
+                {"lines":[{"variantId":"01a090ae-611e-700b-bde4-50df0324c37c","qty":3,
+                           "unitPrice":1.29,"lineTotal":3.87,"discount":0.00,
+                           "netTotal":3.22,"vatAmount":0.65,"vatCode":"T1","vatRate":0.20,
+                           "lineGross":3.87},
+                          {"variantId":"01a090ae-611e-700b-bde4-50df0324c37d","qty":1,
+                           "unitPrice":1.99,"lineTotal":1.99,"discount":0.00,
+                           "netTotal":1.90,"vatAmount":0.09,"vatCode":"T5","vatRate":0.05,
+                           "lineGross":1.99}],
+                 "subtotal":5.86,"totalDiscount":0.00,"basketDiscount":0,
+                 "vatAmount":0.74,"total":5.86,"currency":"GBP","taxInclusive":true,
+                 "appliedPromotions":[],"rejectedCoupons":{}}
+                """));
+
+    assertTrue(q.taxInclusive());
+    assertEquals(0, q.lines().get(0).lineGross().compareTo(new BigDecimal("3.87")));
+    assertEquals(0, q.lines().get(0).lineVat().compareTo(new BigDecimal("0.65")));
+    assertEquals(0, q.lines().get(0).listUnit().compareTo(new BigDecimal("1.29")));
+    assertEquals(0, q.lines().get(1).lineGross().compareTo(new BigDecimal("1.99")));
+    assertEquals(0, q.lines().get(1).vatRate().compareTo(new BigDecimal("0.05")));
+  }
+
+  @Test
+  @DisplayName(
+      "a line promotion and the basket's share are both inside lineGross, never taken twice")
+  void promotionsAreInsideTheGross() {
+    var q =
+        PricingClient.parseQuote(
+            json(
+                """
+                {"lines":[{"variantId":"01a090ae-611e-700b-bde4-50df0324c37c","qty":1,
+                           "unitPrice":2.00,"lineTotal":2.00,"discount":0.20,
+                           "netTotal":1.38,"vatAmount":0.23,"vatCode":"T1","vatRate":0.20,
+                           "lineGross":1.61}],
+                 "subtotal":2.00,"totalDiscount":0.39,"basketDiscount":0.19,
+                 "vatAmount":0.23,"total":1.61,"currency":"GBP","taxInclusive":true,
+                 "appliedPromotions":[],"rejectedCoupons":{}}
+                """));
+
+    var line = q.lines().get(0);
+    assertEquals(0, line.lineGross().compareTo(new BigDecimal("1.61")));
+    // the value after the line's own offer, before the basket's share: 2.00 less 0.20
+    assertEquals(0, line.lineNet().compareTo(new BigDecimal("1.80")));
+    assertEquals(0, q.basketDiscount().compareTo(new BigDecimal("0.19")));
+  }
+
+  @Test
+  @DisplayName("a quote that says nothing of shelf prices is net, as it always was")
+  void aNetQuoteIsUnchanged() {
+    var q =
+        PricingClient.parseQuote(
+            json(
+                """
+                {"lines":[{"variantId":"01a090ae-611e-700b-bde4-50df0324c37c","qty":1,
+                           "unitPrice":10.00,"lineTotal":10.00,"discount":0,
+                           "netTotal":10.00,"vatAmount":2.00,"vatCode":"T1"}],
+                 "basketDiscount":0,"currency":"GBP","appliedPromotions":[],"rejectedCoupons":{}}
+                """));
+
+    assertEquals(false, q.taxInclusive());
+    assertNull(q.lines().get(0).lineGross());
+  }
 }

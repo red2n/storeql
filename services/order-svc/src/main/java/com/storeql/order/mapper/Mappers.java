@@ -69,7 +69,11 @@ public final class Mappers {
         str(i.markdownId()),
         i.shortQty(),
         i.remainingQty(),
-        str(i.substitutesItemId()));
+        str(i.substitutesItemId()),
+        i.paidGross(),
+        i.listUnitPrice(),
+        i.vatCode(),
+        i.vatRate());
   }
 
   /**
@@ -259,7 +263,55 @@ public final class Mappers {
         o.allowSubstitutions(),
         slotOf(o.slotStartsAt(), o.slotEndsAt(), o.slotTimeZone()),
         o.contactPhoneE164(),
-        null);
+        null,
+        o.taxInclusive());
+  }
+
+  /**
+   * The receipt of a shelf-price sale in its wire form.
+   *
+   * @param d the receipt built from the order
+   * @return its API representation
+   */
+  public static Dtos.ReceiptDocumentResponse toDto(com.storeql.order.domain.ReceiptDocument.Doc d) {
+    return new Dtos.ReceiptDocumentResponse(
+        str(d.orderId()),
+        d.reference(),
+        d.status(),
+        d.currency(),
+        ts(d.issuedAt()),
+        d.timeZone(),
+        d.localDate(),
+        d.localTime(),
+        new Dtos.ReceiptSellerResponse(
+            d.seller().legalName(), d.seller().tradingName(), d.seller().vatNumber()),
+        d.lines().stream()
+            .map(
+                l ->
+                    new Dtos.ReceiptLineResponse(
+                        str(l.variantId()),
+                        l.name(),
+                        l.qty(),
+                        l.listUnitPrice(),
+                        l.lineGross(),
+                        l.saved(),
+                        l.vatCode(),
+                        l.vatRate()))
+            .toList(),
+        d.staffDiscount(),
+        d.promotionDiscount(),
+        d.deposit(),
+        d.total(),
+        d.vat().stream()
+            .map(
+                v ->
+                    new Dtos.ReceiptVatRowResponse(
+                        v.vatCode(), v.rate(), v.gross(), v.net(), v.vat()))
+            .toList(),
+        d.vatTotal(),
+        d.tenders().stream()
+            .map(t -> new Dtos.ReceiptTenderResponse(t.method(), t.amount()))
+            .toList());
   }
 
   /**

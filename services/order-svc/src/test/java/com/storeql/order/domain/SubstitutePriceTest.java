@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.comparesEqualTo;
 import static org.hamcrest.Matchers.is;
 
 import java.math.BigDecimal;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -57,5 +58,36 @@ class SubstitutePriceTest {
     assertThat(SubstitutePrice.share(d("2.00"), d("2"), d("3"), 2), comparesEqualTo(d("1.33")));
     assertThat(SubstitutePrice.share(d("10.00"), d("0"), d("3"), 2), comparesEqualTo(d("0.00")));
     assertThat(SubstitutePrice.share(null, d("2"), d("3"), 2), is((BigDecimal) null));
+  }
+
+  @Test
+  @DisplayName("at shelf prices a cheaper substitute is charged its own shelf price, VAT inside")
+  void aCheaperSubstituteAtShelfPrices() {
+    // The original cost 3.00 a unit; the substitute's shelf price is 2.49 at 0%.
+    var c =
+        SubstitutePrice.chargeInclusive(
+            new BigDecimal("3.00"), new BigDecimal("2.49"), BigDecimal.ZERO, BigDecimal.ONE, 2);
+
+    assertThat(c.gross(), comparesEqualTo(d("2.49")));
+    assertThat(c.lineVat(), comparesEqualTo(d("0.00")));
+    assertThat(c.capped(), is(false));
+  }
+
+  @Test
+  @DisplayName("at shelf prices a dearer substitute is held to what the original cost, whole")
+  void aDearerSubstituteAtShelfPricesIsCapped() {
+    // The original cost 1.29 a unit; the substitute is 1.99 at 20%.
+    var c =
+        SubstitutePrice.chargeInclusive(
+            new BigDecimal("1.29"),
+            new BigDecimal("1.99"),
+            new BigDecimal("0.20"),
+            BigDecimal.ONE,
+            2);
+
+    assertThat(c.gross(), comparesEqualTo(d("1.29")));
+    assertThat(c.lineVat(), comparesEqualTo(d("0.22")));
+    assertThat(c.lineNet(), comparesEqualTo(d("1.07")));
+    assertThat(c.capped(), is(true));
   }
 }

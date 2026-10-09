@@ -28,7 +28,9 @@ import com.storeql.order.domain.Domain.SpecialOrder;
 import com.storeql.order.domain.Domain.SpecialOrderItem;
 import com.storeql.order.domain.GiftCardLoads;
 import com.storeql.order.domain.Handover;
+import com.storeql.order.domain.InclusiveOrder;
 import com.storeql.order.domain.OrderSplit;
+import com.storeql.order.domain.ReceiptDocument;
 import com.storeql.order.domain.ReturnValue;
 import com.storeql.order.domain.Routing;
 import com.storeql.order.domain.SpecialOrderReplay;
@@ -642,6 +644,10 @@ public class OrderService {
       }
       resolvedLines = quoted.lines();
     }
+    // A shelf-price basket (intent/vat-inclusive-pricing.md): each line is what it finally costs,
+    // VAT inside, and the order keeps its lines in those terms.
+    boolean inclusive = quoted != null && quoted.taxInclusive();
+    int moneyScale = Fx.minorUnits(currency);
 
     for (int i = 0; i < req.items().size(); i++) {
       var ir = req.items().get(i);
@@ -651,6 +657,8 @@ public class OrderService {
       BigDecimal quotedLineVat = null;
       String quotedVatCode = null;
       BigDecimal quotedVatRate = null;
+      BigDecimal quotedLineGross = null;
+      BigDecimal quotedListUnit = null;
       if (enforcePricing) {
         var resolved = resolvedLines.get(i);
         unitPrice = resolved.unitPrice();
@@ -670,6 +678,19 @@ public class OrderService {
         // amount on a small line cannot say what it was.
         quotedVatCode = resolved.vatCode();
         quotedVatRate = resolved.vatRate();
+        quotedListUnit = resolved.listUnit();
+        if (inclusive) {
+          if (resolved.lineGross() == null) {
+            throw new ApiException(
+                503,
+                "ORDER_PRICING_UNAVAILABLE",
+                "pricing-svc quoted shelf prices without what a line costs",
+                List.of(),
+                null);
+          }
+          quotedLineGross =
+              resolved.lineGross().setScale(moneyScale, java.math.RoundingMode.HALF_UP);
+        }
       } else {
         if (ir.unitPrice() == null)
           throw ApiException.badRequest(
@@ -681,10 +702,21 @@ public class OrderService {
       // One rule for every line (LineMoney): quantity × unit price, rounded half up once at the
       // currency's minor units, and the subtotal the sum of the rounded lines — the quote's lines
       // are rounded by pricing-svc the same way, so holding them to it changes none.
-      BigDecimal line =
-          quotedLineNet != null
-              ? LineMoney.quoted(quotedLineNet, currency)
-              : LineMoney.of(unitPrice, ir.qty(), currency);
+      BigDecimal line;
+      if (quotedLineGross != null) {
+        // Shelf prices: what the line costs less the VAT in it. The order's own figures are worked
+        // again below if a member of staff takes something off.
+        quotedLineVat = quotedLineVat.setScale(moneyScale, java.math.RoundingMode.HALF_UP);
+        line = quotedLineGross.subtract(quotedLineVat);
+        unitPrice =
+            ir.qty().signum() == 0
+                ? line
+                : line.divide(ir.qty(), moneyScale, java.math.RoundingMode.HALF_UP);
+      } else if (quotedLineNet != null) {
+        line = LineMoney.quoted(quotedLineNet, currency);
+      } else {
+        line = LineMoney.of(unitPrice, ir.qty(), currency);
+      }
       subtotal = subtotal.add(line);
       UUID instrumentId = instrumentIds.get(i);
       items.add(
@@ -702,7 +734,11 @@ public class OrderService {
               quotedLineVat,
               Parsing.optionalUuid(ir.markdownId(), "markdownId"),
               quotedVatCode,
-              quotedVatRate));
+              quotedVatRate,
+              BigDecimal.ZERO,
+              null,
+              quotedLineGross,
+              quotedListUnit));
     }
 
     // Order orchestration (intent/order-orchestration-and-split-fulfilment.md): an online delivery
@@ -738,7 +774,8 @@ public class OrderService {
                 splitTax,
                 quoted == null ? List.of() : quoted.applied(),
                 slot,
-                contactPhoneE164),
+                contactPhoneE164,
+                inclusive),
             routed,
             idempotencyKey);
       }
@@ -803,21 +840,79 @@ public class OrderService {
     // half up 1.33, is the whole basket: 1.32. The role's ceiling below is measured on that capped
     // figure, so the cap widens nobody's authority. More than the till's own goods is no rounding
     // of the till's, and is refused below like a discount typed anywhere else.
+    // At shelf prices the goods are what the lines finally cost, VAT inside: the discount comes off
+    // that, is capped by it and is measured against it. Net, they are the subtotal, as ever.
+    BigDecimal goods =
+        inclusive
+            ? items.stream().map(OrderItem::paidGross).reduce(BigDecimal.ZERO, BigDecimal::add)
+            : subtotal;
     if (tillSale
-        && disc.compareTo(subtotal) > 0
+        && disc.compareTo(goods) > 0
         && disc.compareTo(
                 TillAmount.goodsAsRung(
-                    asSent.items(), items.stream().map(OrderItem::lineTotal).toList(), currency))
+                    asSent.items(),
+                    items.stream().map(i -> inclusive ? i.paidGross() : i.lineTotal()).toList(),
+                    currency))
             <= 0) {
-      disc = subtotal;
+      disc = goods;
     }
-    if (disc.compareTo(subtotal) > 0)
+    if (disc.compareTo(goods) > 0)
       throw ApiException.badRequest(
           "ORDER_DISCOUNT_EXCEEDS_SUBTOTAL",
-          "discountAmount " + disc + " exceeds order subtotal " + subtotal);
+          "discountAmount " + disc + " exceeds order subtotal " + goods);
 
     OrderDiscount discountAudit =
-        disc.signum() == 0 ? null : authorizeDiscount(ctx, orderId, storeId, subtotal, disc, req);
+        disc.signum() == 0 ? null : authorizeDiscount(ctx, orderId, storeId, goods, disc, req);
+    if (inclusive && disc.signum() > 0) {
+      // A staff discount at shelf prices is shared across the lines by what they cost and each
+      // line's VAT is worked again from what it finally cost, so the discount lowers the VAT.
+      if (items.stream().anyMatch(i -> i.vatRate() == null)) {
+        throw new ApiException(
+            503,
+            "ORDER_PRICING_UNAVAILABLE",
+            "pricing-svc did not state the VAT rate of a line, so a discount cannot be worked out",
+            List.of(),
+            null);
+      }
+      var priced =
+          InclusiveOrder.price(
+              items.stream()
+                  .map(i -> new InclusiveOrder.LineIn(i.paidGross(), i.vatRate()))
+                  .toList(),
+              disc,
+              scale);
+      List<OrderItem> repriced = new ArrayList<>(items.size());
+      for (int i = 0; i < items.size(); i++) {
+        OrderItem it = items.get(i);
+        InclusiveOrder.LineOut out = priced.lines().get(i);
+        repriced.add(
+            new OrderItem(
+                it.id(),
+                it.tenantId(),
+                it.orderId(),
+                it.variantId(),
+                it.qty(),
+                it.qty().signum() == 0
+                    ? out.net()
+                    : out.net().divide(it.qty(), scale, java.math.RoundingMode.HALF_UP),
+                out.net(),
+                it.notes(),
+                it.weighingInstrumentId(),
+                it.fulfilledQty(),
+                out.vat(),
+                it.markdownId(),
+                it.vatCode(),
+                it.vatRate(),
+                it.shortQty(),
+                it.substitutesItemId(),
+                out.paidGross(),
+                it.listUnitPrice()));
+      }
+      items.clear();
+      items.addAll(repriced);
+      subtotal = priced.subtotal();
+      tax = priced.tax();
+    }
 
     // The promotion engine's whole-basket reduction. Line-level promotions are already inside the
     // resolved unit prices and therefore inside subtotal; this is the part that belongs to no
@@ -826,7 +921,10 @@ public class OrderService {
     BigDecimal promoDiscount =
         quoted == null
             ? BigDecimal.ZERO
-            : quoted.basketDiscount().min(subtotal.subtract(disc).max(BigDecimal.ZERO));
+            : inclusive
+                // Already inside the lines' gross; kept as what was given.
+                ? quoted.basketDiscount()
+                : quoted.basketDiscount().min(subtotal.subtract(disc).max(BigDecimal.ZERO));
     // 09.16: the deposit a return scheme puts on each drink's container, its own line beside the
     // item. It is added to what the customer pays and is no part of the subtotal, the tax or any
     // discount: outside the scope of VAT where the scheme says so, taxed as the drink elsewhere.
@@ -838,8 +936,18 @@ public class OrderService {
             .reduce(BigDecimal.ZERO, BigDecimal::add);
     // Value sold on gift cards is what the customer pays and nothing else: no VAT (it falls due
     // when the card is spent), no discount, no stock, no share of the subtotal.
+    // At shelf prices the lines carry every discount and their VAT: the total is what they were
+    // paid
+    // and nothing is taken off again.
     BigDecimal total =
-        subtotal.add(tax).subtract(disc).subtract(promoDiscount).add(depositAmount).add(cardValue);
+        inclusive
+            ? subtotal.add(tax).add(depositAmount).add(cardValue)
+            : subtotal
+                .add(tax)
+                .subtract(disc)
+                .subtract(promoDiscount)
+                .add(depositAmount)
+                .add(cardValue);
 
     boolean taxExempt = req.taxExempt() != null && req.taxExempt();
     // SJ-D41: a catalog-mode till order is placed without prices and waits for a manager; it is
@@ -893,7 +1001,8 @@ public class OrderService {
             slot == null ? null : slot.startsAt(),
             slot == null ? null : slot.endsAt(),
             slot == null ? null : slot.timeZone(),
-            contactPhoneE164);
+            contactPhoneE164,
+            inclusive);
 
     try {
       Order placed =
@@ -1189,7 +1298,12 @@ public class OrderService {
               a ->
                   List.of(
                       Events.orderLineShortClosed(
-                          a.order(), variantId, name, qty, a.adjustment().refundAmount())))
+                          a.order(),
+                          variantId,
+                          name,
+                          qty,
+                          a.adjustment().refundAmount(),
+                          a.refundVat())))
           .order();
     } catch (ApiException e) {
       if ("ORDER_DUPLICATE_KEY".equals(e.code())) return getOrder(tenantId, orderId);
@@ -1240,14 +1354,17 @@ public class OrderService {
                     ApiException.badRequest(
                         "ORDER_LINE_UNKNOWN", "variant " + variantId + " is not on this order"));
     BigDecimal qty = req.qty() != null ? req.qty() : outstandingOf(tenantId, orderId, variantId);
-    int scale = java.util.Currency.getInstance(order.currency()).getDefaultFractionDigits();
-    // What a unit of the original is worth, gross, as it stands — the most a substitute costs.
+    int scale = Fx.minorUnits(order.currency());
+    // What a unit of the original is worth, gross, as it stands — the most a substitute costs. At
+    // shelf prices that is what the shopper paid for the units that stand.
     BigDecimal standing = original.standingQty();
     BigDecimal originalGrossUnit =
         standing.signum() > 0
-            ? original
-                .lineTotal()
-                .add(original.vatAmount() == null ? BigDecimal.ZERO : original.vatAmount())
+            ? (order.taxInclusive()
+                    ? original.paidGross()
+                    : original
+                        .lineTotal()
+                        .add(original.vatAmount() == null ? BigDecimal.ZERO : original.vatAmount()))
                 .divide(standing, 6, RoundingMode.HALF_UP)
             : original.unitPrice();
     // On the shelf at the order's store, when the shelf can be read; a supplier-shipped product is
@@ -1278,6 +1395,7 @@ public class OrderService {
     BigDecimal vat;
     BigDecimal rate = null;
     String code = null;
+    BigDecimal quotedGross = null;
     if (config.pricingEnforce()) {
       try {
         var quoted =
@@ -1289,10 +1407,18 @@ public class OrderService {
                 order.customerId(),
                 null);
         var line = quoted.lines().get(0);
+        if (quoted.taxInclusive() != order.taxInclusive()) {
+          throw ApiException.conflict(
+              "ORDER_TAX_MODE_CHANGED",
+              "the order was sold at "
+                  + (order.taxInclusive() ? "shelf prices" : "net prices")
+                  + " and the store now prices the other way; close the line short instead");
+        }
         net = line.lineNet();
         vat = line.lineVat();
         rate = line.vatRate();
         code = line.vatCode();
+        quotedGross = line.lineGross();
       } catch (org.eclipse.microprofile.faulttolerance.exceptions.CircuitBreakerOpenException e) {
         throw new ApiException(
             503,
@@ -1316,8 +1442,18 @@ public class OrderService {
       }
       net = req.unitPrice().multiply(qty).setScale(scale, RoundingMode.HALF_UP);
       vat = original.vatAmount() == null ? null : BigDecimal.ZERO.setScale(scale);
+      if (order.taxInclusive()) {
+        // Trusted pricing at shelf prices: the typed price is the shelf price, at the original's
+        // rate.
+        quotedGross = net;
+        rate = original.vatRate();
+        code = original.vatCode();
+      }
     }
-    var charge = SubstitutePrice.charge(originalGrossUnit, net, vat, rate, qty, scale);
+    var charge =
+        order.taxInclusive()
+            ? SubstitutePrice.chargeInclusive(originalGrossUnit, quotedGross, rate, qty, scale)
+            : SubstitutePrice.charge(originalGrossUnit, net, vat, rate, qty, scale);
     var priced =
         new OrderRepository.Substitute(
             sub,
@@ -1366,7 +1502,8 @@ public class OrderService {
                           toName,
                           qty,
                           a.adjustment().chargedAmount(),
-                          a.adjustment().refundAmount())))
+                          a.adjustment().refundAmount(),
+                          a.refundVat())))
           .order();
     } catch (ApiException e) {
       if ("ORDER_DUPLICATE_KEY".equals(e.code())) return getOrder(tenantId, orderId);
@@ -1434,6 +1571,54 @@ public class OrderService {
         .filter(i -> i.variantId().equals(variantId))
         .map(OrderItem::remainingQty)
         .reduce(BigDecimal.ZERO, BigDecimal::add);
+  }
+
+  /**
+   * The receipt of a sale at shelf prices, built from the order itself: lines at the shelf price,
+   * the VAT table, the seller's legal name and VAT number, the store's own clock and how it was
+   * paid. Read by the till, the thermal print and the emailed copy, so the three cannot drift.
+   *
+   * @throws ApiException 404 {@code ORDER_NOT_FOUND} for another business's order, or one the
+   *     calling customer does not own; 403 for staff at another store; 409 {@code
+   *     ORDER_RECEIPT_DOCUMENT_NOT_AVAILABLE} for an order sold at net prices
+   */
+  public ReceiptDocument.Doc receiptDocument(UUID tenantId, UUID orderId, TenantContext ctx) {
+    return receiptDocumentOf(tenantId, getOrder(tenantId, orderId, ctx));
+  }
+
+  private ReceiptDocument.Doc receiptDocumentOf(UUID tenantId, Order order) {
+    if (!order.taxInclusive()) {
+      throw ApiException.conflict(
+          "ORDER_RECEIPT_DOCUMENT_NOT_AVAILABLE",
+          "this order was sold at net prices; its receipt is drawn by the till, not served");
+    }
+    UUID orderId = order.id();
+    List<OrderItem> items = repo.findOrderItems(tenantId, orderId);
+    Map<UUID, String> names = new java.util.HashMap<>();
+    products
+        .namesAsSystem(tenantId, items.stream().map(OrderItem::variantId).distinct().toList())
+        .ifPresent(
+            found ->
+                found.forEach(
+                    (id, n) -> {
+                      if (n.productName() != null) names.put(id, n.productName());
+                    }));
+    var identity = profiles.identity(tenantId);
+    var seller =
+        new ReceiptDocument.Seller(
+            identity.map(com.storeql.service.TenantProfiles.Identity::legalName).orElse(null),
+            profiles.businessName(tenantId).orElse(null),
+            identity.map(com.storeql.service.TenantProfiles.Identity::vatNumber).orElse(null));
+    List<ReceiptDocument.Tender> tenders = new ArrayList<>();
+    for (var t : receiptRepo.tendersOfOrder(tenantId, orderId)) {
+      tenders.add(new ReceiptDocument.Tender(t.method(), t.amount()));
+    }
+    BigDecimal deposit =
+        depositsOf(tenantId, orderId).stream()
+            .map(OrderDeposit::amount)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+    return ReceiptDocument.build(
+        order, items, deposit, names, seller, storeZone(tenantId, order.storeId()), tenders);
   }
 
   /** The product's name for a message, or null when product-svc cannot say. */
@@ -1603,7 +1788,9 @@ public class OrderService {
        */
       FulfilmentWindowService.ResolvedSlot slot,
       /** The contact number in international form (a phone at the till); every part carries it. */
-      String contactPhoneE164) {
+      String contactPhoneE164,
+      /** Whether the lines are shelf prices, VAT inside; every part carries it. */
+      boolean taxInclusive) {
     SplitCheckout {
       items = List.copyOf(items);
       applied = List.copyOf(applied);
@@ -1667,7 +1854,13 @@ public class OrderService {
                   lp.vat(),
                   it.markdownId(),
                   it.vatCode(),
-                  it.vatRate()));
+                  it.vatRate(),
+                  BigDecimal.ZERO,
+                  null,
+                  // What the part paid for its share of the line: the net it takes and its share of
+                  // the VAT, so the parts add up to the line to the penny.
+                  co.taxInclusive() ? lp.lineTotal().add(lp.vat()) : null,
+                  it.listUnitPrice()));
         }
         held.addAll(
             inventory.reserveForOrder(
@@ -1730,7 +1923,8 @@ public class OrderService {
                 co.slot() == null ? null : co.slot().startsAt(),
                 co.slot() == null ? null : co.slot().endsAt(),
                 co.slot() == null ? null : co.slot().timeZone(),
-                co.contactPhoneE164());
+                co.contactPhoneE164(),
+                co.taxInclusive());
         placed.add(
             new OrderRepository.NewOrder(
                 child,
@@ -2984,7 +3178,16 @@ public class OrderService {
       everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
       returnItems.add(
           new ReturnItem(
-              Ids.newId(), tenantId, returnId, variantId, ri.qty(), worth.net(), condition));
+              Ids.newId(),
+              tenantId,
+              returnId,
+              variantId,
+              ri.qty(),
+              worth.net(),
+              condition,
+              null,
+              // The VAT inside what is refunded, kept with the line at shelf prices.
+              order.taxInclusive() ? worth.vat() : null));
     }
 
     // A refund to a gift card goes on a new card or a named one of this business. Read here, so a
@@ -3144,7 +3347,22 @@ public class OrderService {
    */
   private ReturnValue.Worth worthOfReturn(
       Order order, List<OrderItem> lines, ReturnWorths worths, OrderItem matched, BigDecimal qty) {
-    int scale = java.util.Currency.getInstance(order.currency()).getDefaultFractionDigits();
+    int scale = Fx.minorUnits(order.currency());
+    if (order.taxInclusive()) {
+      // Shelf prices: the line comes back for exactly what was paid for it, the VAT it carried
+      // read from the sale and never worked out again, in running totals so the parts of a line
+      // add up to the whole (ReturnValue.inclusiveWorth). No discount is shared at return time:
+      // every discount is already inside what the line was paid.
+      var w =
+          ReturnValue.inclusiveWorth(
+              matched.paidGross(),
+              matched.vatAmount(),
+              matched.qty(),
+              worths.take(matched.variantId(), qty),
+              qty,
+              scale);
+      return new ReturnValue.Worth(w.value(), w.net(), w.vat());
+    }
     // A stable order, because the units a discount cannot divide evenly go to a line by its place.
     List<OrderItem> stable = new ArrayList<>(lines);
     stable.sort(java.util.Comparator.comparing(OrderItem::id));
@@ -3303,7 +3521,16 @@ public class OrderService {
       everyLineFaulty &= ReturnItem.CONDITION_FAULTY.equals(condition);
       returnItems.add(
           new ReturnItem(
-              Ids.newId(), tenantId, returnId, variantId, ri.qty(), worth.net(), condition));
+              Ids.newId(),
+              tenantId,
+              returnId,
+              variantId,
+              ri.qty(),
+              worth.net(),
+              condition,
+              null,
+              // The VAT inside what is refunded, kept with the line at shelf prices.
+              order.taxInclusive() ? worth.vat() : null));
     }
 
     List<String> outside =
@@ -3527,8 +3754,15 @@ public class OrderService {
             e);
       }
       var line =
-          ReturnValue.priceLine(
-              price.unitPrice(), price.vatAmount(), ri.qty(), Fx.minorUnits(currency));
+          price.taxInclusive()
+              // A shelf price is credited whole, the VAT inside it worked from the line's value.
+              ? ReturnValue.priceLineInclusive(
+                  price.unitPrice().add(price.vatAmount()),
+                  price.vatRate(),
+                  ri.qty(),
+                  Fx.minorUnits(currency))
+              : ReturnValue.priceLine(
+                  price.unitPrice(), price.vatAmount(), ri.qty(), Fx.minorUnits(currency));
       total = total.add(line.value());
       tax = tax.add(line.taxAmount());
       returnItems.add(
@@ -5387,7 +5621,11 @@ public class OrderService {
 
     if (OrderReceipt.TYPE_EMAIL.equals(req.receiptType())) {
       List<OrderItem> items = repo.findOrderItems(tenantId, orderId);
-      String body = formatReceiptEmail(order, items);
+      // A sale at shelf prices is receipted from the one document the till prints from.
+      String body =
+          order.taxInclusive()
+              ? ReceiptDocument.toText(receiptDocumentOf(tenantId, order))
+              : formatReceiptEmail(order, items);
       String subject = "Your receipt — order " + shortId(order.id());
       UUID eventId = Ids.newId();
       UUID userId = ctx != null ? ctx.userId() : null;

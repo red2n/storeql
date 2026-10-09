@@ -432,6 +432,10 @@ public final class Events {
             + jsonText(deliveryRecipientName)
             + ",\"deliveryRecipientPhone\":"
             + jsonText(deliveryRecipientPhone)
+            // At shelf prices each line's lineTotal is its net after every discount and grossTotal
+            // what it was paid, VAT included (additive: a consumer that does not know them ignores
+            // them).
+            + (lines.stream().anyMatch(l -> l.paidGross() != null) ? ",\"taxInclusive\":true" : "")
             + ",\"lines\":"
             + confirmedLines(lines)
             + slotFields(slotStartsAt, slotEndsAt, slotTimeZone)
@@ -460,8 +464,17 @@ public final class Events {
         sb.append(",\"unitPrice\":").append(line.unitPrice().toPlainString());
       }
       sb.append(",\"lineTotal\":")
-          .append(line.lineTotal() != null ? line.lineTotal().toPlainString() : "0")
-          .append('}');
+          .append(line.lineTotal() != null ? line.lineTotal().toPlainString() : "0");
+      // The VAT on the line, the code and rate it was taxed at, and (at shelf prices) what the line
+      // was paid: what a ledger, a VAT return and a sales report each need without asking back.
+      if (line.vatAmount() != null)
+        sb.append(",\"vatAmount\":").append(line.vatAmount().toPlainString());
+      if (line.vatCode() != null)
+        sb.append(",\"vatCode\":\"").append(esc(line.vatCode())).append('"');
+      if (line.vatRate() != null) sb.append(",\"vatRate\":").append(line.vatRate().toPlainString());
+      if (line.paidGross() != null)
+        sb.append(",\"grossTotal\":").append(line.paidGross().toPlainString());
+      sb.append('}');
     }
     return sb.append(']').toString();
   }
@@ -542,6 +555,17 @@ public final class Events {
    */
   static OutboxRow orderLineShortClosed(
       Order order, UUID variantId, String variantName, BigDecimal qty, BigDecimal refund) {
+    return orderLineShortClosed(order, variantId, variantName, qty, refund, null);
+  }
+
+  /** As above, saying the VAT inside what goes back when the order was sold at shelf prices. */
+  static OutboxRow orderLineShortClosed(
+      Order order,
+      UUID variantId,
+      String variantName,
+      BigDecimal qty,
+      BigDecimal refund,
+      BigDecimal refundVat) {
     return new OutboxRow(
         "OrderLineShortClosed",
         "storeql.order.order-line-short-closed",
@@ -556,6 +580,7 @@ public final class Events {
             + qty.toPlainString()
             + ",\"refundAmount\":"
             + refund.toPlainString()
+            + (refundVat == null ? "" : ",\"vatAmount\":" + refundVat.toPlainString())
             + "}");
   }
 
@@ -573,6 +598,21 @@ public final class Events {
       BigDecimal qty,
       BigDecimal charged,
       BigDecimal refund) {
+    return orderLineSubstituted(
+        order, fromVariantId, fromName, toVariantId, toName, qty, charged, refund, null);
+  }
+
+  /** As above, saying the VAT inside what goes back when the order was sold at shelf prices. */
+  static OutboxRow orderLineSubstituted(
+      Order order,
+      UUID fromVariantId,
+      String fromName,
+      UUID toVariantId,
+      String toName,
+      BigDecimal qty,
+      BigDecimal charged,
+      BigDecimal refund,
+      BigDecimal refundVat) {
     return new OutboxRow(
         "OrderLineSubstituted",
         "storeql.order.order-line-substituted",
@@ -593,6 +633,7 @@ public final class Events {
             + charged.toPlainString()
             + ",\"refundAmount\":"
             + refund.toPlainString()
+            + (refundVat == null ? "" : ",\"vatAmount\":" + refundVat.toPlainString())
             + "}");
   }
 
@@ -888,6 +929,8 @@ public final class Events {
     // every OrderReturned is dropped as malformed and stock is never restocked. refundAmount +
     // refundMethod let payment-svc reverse the captured payment for ORIGINAL-tender returns.
     JsonArrayBuilder lines = Json.createArrayBuilder();
+    BigDecimal vat = null;
+    boolean everyLineTaxed = true;
     for (ReturnItem item : items) {
       JsonObjectBuilder line =
           Json.createObjectBuilder()
@@ -895,6 +938,14 @@ public final class Events {
               .add("qty", item.qty());
       // A line from before conditions existed has none; the consumer reads its absence as sellable.
       if (item.condition() != null) line.add("condition", item.condition());
+      // At shelf prices the VAT inside what is refunded for the line (additive: older consumers
+      // ignore it).
+      if (item.taxAmount() != null) {
+        line.add("vatAmount", item.taxAmount());
+        vat = vat == null ? item.taxAmount() : vat.add(item.taxAmount());
+      } else {
+        everyLineTaxed = false;
+      }
       lines.add(line);
     }
     JsonObjectBuilder b =
@@ -917,6 +968,7 @@ public final class Events {
       b.add("exchangeOrderId", exchangeOrderId.toString());
       b.add("exchangeAmount", exchangeAmount);
     }
+    if (everyLineTaxed && vat != null) b.add("vatAmount", vat);
     return new OutboxRow(
         "OrderReturned", "storeql.order.order-returned", tenantId, orderId, b.build().toString());
   }

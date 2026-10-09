@@ -349,6 +349,33 @@ public class OrderResource {
   }
 
   /**
+   * The receipt of an order sold at shelf prices, drawn once on the server.
+   *
+   * @param id the order
+   * @return lines at the shelf price, the VAT table, the seller and how it was paid
+   * @throws com.storeql.web.ApiException {@code 404} another business's order, or a shopper's other
+   *     order; {@code 403} staff at another store; {@code 409} an order sold net
+   */
+  @Operation(
+      summary = "Get the receipt document of a shelf-price order",
+      description =
+          "The one document the till's screen, the thermal print and the emailed receipt are drawn"
+              + " from: lines at the shelf price, a VAT table whose gross adds up to what the lines"
+              + " were paid, the seller's legal name and VAT number, the store's own date and time,"
+              + " and the tenders.")
+  @APIResponse(responseCode = "200", description = "The receipt document")
+  @APIResponse(responseCode = "404", description = "Order not found for this caller")
+  @APIResponse(responseCode = "409", description = "The order was sold at net prices")
+  @GET
+  @Path("/{id}/receipt-document")
+  public Response receiptDocument(@PathParam("id") String id) {
+    return Response.ok(
+            ApiResponse.ok(
+                Mappers.toDto(svc.receiptDocument(ctx.tenantId(), Parsing.uuid(id, "id"), ctx))))
+        .build();
+  }
+
+  /**
    * The gift cards this order sold, for the till to show and print once the sale is paid.
    *
    * @param id the order

@@ -159,11 +159,8 @@ public record RegisterSnapshot(
 
   /** The rate a line was taxed at, as a percentage with two decimals. */
   public BigDecimal ratePercentOf(RegisterLine line, FiscalReceipt doc) {
-    BigDecimal vat = vatOf(line, doc);
-    if (line.lineTotal() == null || line.lineTotal().signum() == 0) {
-      return BigDecimal.ZERO.setScale(2);
-    }
-    return vat.multiply(BigDecimal.valueOf(100)).divide(line.lineTotal(), 2, RoundingMode.HALF_UP);
+    return com.storeql.order.domain.LineRate.percent(
+        line.vatRate(), vatOf(line, doc), line.lineTotal());
   }
 
   /** The name a line prints, falling back to the variant id when product-svc knows no name. */

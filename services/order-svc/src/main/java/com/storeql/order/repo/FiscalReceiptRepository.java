@@ -674,7 +674,21 @@ public class FiscalReceiptRepository extends BaseJdbcRepository {
       BigDecimal unitPrice,
       BigDecimal lineTotal,
       /** As the quote priced it; null for a line placed with pricing enforcement off. */
-      BigDecimal vatAmount) {}
+      BigDecimal vatAmount,
+      /** The rate the quote applied, as a fraction; null for a line that did not keep it. */
+      BigDecimal vatRate) {
+
+    /** A line as read before the rate was kept. */
+    public RegisterLine(
+        long number,
+        UUID variantId,
+        BigDecimal qty,
+        BigDecimal unitPrice,
+        BigDecimal lineTotal,
+        BigDecimal vatAmount) {
+      this(number, variantId, qty, unitPrice, lineTotal, vatAmount, null);
+    }
+  }
 
   /**
    * Every order line behind every document in a series, in document order — the same service's
@@ -683,7 +697,8 @@ public class FiscalReceiptRepository extends BaseJdbcRepository {
   public List<RegisterLine> linesInSeries(
       UUID tenantId, UUID storeId, String series, String period) {
     return query(
-        "SELECT fr.number, oi.variant_id, oi.qty, oi.unit_price, oi.line_total, oi.vat_amount"
+        "SELECT fr.number, oi.variant_id, oi.qty, oi.unit_price, oi.line_total, oi.vat_amount,"
+            + " oi.vat_rate"
             + " FROM fiscal_receipts fr"
             + " JOIN order_items oi ON oi.tenant_id = fr.tenant_id AND oi.order_id = fr.order_id"
             + " WHERE fr.tenant_id = ? AND fr.store_id = ? AND fr.series_code = ? AND fr.period = ?"
@@ -701,7 +716,8 @@ public class FiscalReceiptRepository extends BaseJdbcRepository {
                 rs.getBigDecimal(3),
                 rs.getBigDecimal(4),
                 rs.getBigDecimal(5),
-                rs.getBigDecimal(6)),
+                rs.getBigDecimal(6),
+                rs.getBigDecimal(7)),
         "register lines");
   }
 

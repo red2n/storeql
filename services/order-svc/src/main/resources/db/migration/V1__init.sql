@@ -155,6 +155,12 @@ CREATE TABLE orders (
     slot_starts_at        TIMESTAMPTZ,
     slot_ends_at          TIMESTAMPTZ,
     slot_time_zone        TEXT,
+    -- Whether the order was sold at shelf prices, VAT inside (intent/vat-inclusive-pricing.md). Then
+    -- subtotal is the sum of the lines' net after every discount, tax_amount the sum of their VAT, and
+    -- total the sum of what the lines were paid (order_items.paid_gross) plus deposits and gift-card
+    -- value; discount_amount and promotion_discount are what was given, already inside the lines and
+    -- never subtracted again. false: an order priced net, VAT added.
+    tax_inclusive         BOOLEAN NOT NULL DEFAULT false,
     -- Set once, by the sweeper, when an order waiting for a price passes the first limit.
     price_overdue_at      TIMESTAMPTZ,
     -- An exchange names the sale it bought (returns.exchange_order_id) and that sale names the return,
@@ -235,9 +241,18 @@ CREATE TABLE order_items (
     -- rata to what stands.
     short_qty           NUMERIC(18,3) NOT NULL DEFAULT 0,
     substitutes_item_id UUID REFERENCES order_items (id),
+    -- A shelf-price order (orders.tax_inclusive): what the customer paid for the line after every
+    -- discount, VAT included. line_total is what is left once vat_amount is taken out of it, so
+    -- paid_gross = line_total + vat_amount always. Null on an order priced net.
+    paid_gross       NUMERIC,
+    -- The shelf price of one unit before any promotion, in the price list's own terms: what a receipt
+    -- prints beside the quantity. Null when the quote did not say.
+    list_unit_price  NUMERIC,
     notes            TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT chk_order_items_short_within CHECK (fulfilled_qty + short_qty <= qty)
+    CONSTRAINT chk_order_items_short_within CHECK (fulfilled_qty + short_qty <= qty),
+    CONSTRAINT chk_order_items_paid_gross CHECK (
+        paid_gross IS NULL OR (paid_gross >= 0 AND vat_amount IS NOT NULL AND paid_gross = line_total + vat_amount))
 );
 CREATE INDEX idx_order_items_tenant   ON order_items (tenant_id, order_id);
 CREATE INDEX idx_order_items_markdown ON order_items (tenant_id, markdown_id) WHERE markdown_id IS NOT NULL;

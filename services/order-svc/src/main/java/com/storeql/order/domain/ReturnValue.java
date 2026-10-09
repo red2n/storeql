@@ -130,7 +130,13 @@ public final class ReturnValue {
    * @param net the net figure the fiscal and commission reports read: the net price for the
    *     quantity less that same share, which is what the sale recognised as revenue for it
    */
-  public record Worth(BigDecimal value, BigDecimal net) {}
+  public record Worth(BigDecimal value, BigDecimal net, BigDecimal vat) {
+
+    /** A worth whose VAT is what is left of the value once the net is taken out. */
+    public Worth(BigDecimal value, BigDecimal net) {
+      this(value, net, value.subtract(net));
+    }
+  }
 
   /**
    * What returning {@code qty} of a line is worth, given what already came back from it. Every
@@ -177,6 +183,55 @@ public final class ReturnValue {
     return new Worth(value.max(BigDecimal.ZERO), net.max(BigDecimal.ZERO));
   }
 
+  /**
+   * What returning part of a shelf-price line is worth (intent/vat-inclusive-pricing.md): exactly
+   * what the customer paid for those units, the VAT inside it carried from the sale (never worked
+   * out again from a net), and the net what is left. Every amount is read from the line's running
+   * total, {@code amount(k) = round(amount × k / sold)}, and a return is the running total after it
+   * less the one before, so returns in any number of parts add up to the whole line to the penny
+   * and the last part takes the rounding.
+   *
+   * @param paidGross what the customer paid for the whole line, after every discount
+   * @param lineVat the VAT inside {@code paidGross}, as recorded at the sale
+   * @param soldQty the quantity the line was sold with
+   * @param alreadyReturned what has come back from the line before
+   * @param qty what comes back now
+   * @param scale the currency's minor units
+   * @return the value refunded, the VAT in it and the net; none negative
+   */
+  public static InclusiveWorth inclusiveWorth(
+      BigDecimal paidGross,
+      BigDecimal lineVat,
+      BigDecimal soldQty,
+      BigDecimal alreadyReturned,
+      BigDecimal qty,
+      int scale) {
+    if (soldQty == null || soldQty.signum() <= 0) {
+      BigDecimal zero = BigDecimal.ZERO.setScale(scale);
+      return new InclusiveWorth(zero, zero, zero);
+    }
+    BigDecimal before = alreadyReturned.max(BigDecimal.ZERO).min(soldQty);
+    BigDecimal after = before.add(qty).min(soldQty);
+    BigDecimal vatLine = lineVat == null ? BigDecimal.ZERO : lineVat;
+    BigDecimal value =
+        running(paidGross, soldQty, after, scale)
+            .subtract(running(paidGross, soldQty, before, scale));
+    BigDecimal vat =
+        running(vatLine, soldQty, after, scale).subtract(running(vatLine, soldQty, before, scale));
+    vat = vat.max(BigDecimal.ZERO).min(value.max(BigDecimal.ZERO));
+    value = value.max(BigDecimal.ZERO);
+    return new InclusiveWorth(value, vat, value.subtract(vat));
+  }
+
+  /**
+   * What a part of a shelf-price line is worth.
+   *
+   * @param value what the customer is refunded, VAT included
+   * @param vat the VAT inside {@code value}
+   * @param net {@code value} less {@code vat}: what the sale recognised as revenue for it
+   */
+  public record InclusiveWorth(BigDecimal value, BigDecimal vat, BigDecimal net) {}
+
   private static BigDecimal running(
       BigDecimal amount, BigDecimal soldQty, BigDecimal k, int scale) {
     return amount.multiply(k).divide(soldQty, scale, RoundingMode.HALF_UP);
@@ -200,6 +255,25 @@ public final class ReturnValue {
         grossEach.setScale(4, RoundingMode.HALF_UP),
         vatEach.multiply(qty).setScale(scale, RoundingMode.HALF_UP),
         grossEach.multiply(qty).setScale(scale, RoundingMode.HALF_UP));
+  }
+
+  /**
+   * A no-receipt line at the current shelf price (intent/vat-inclusive-pricing.md): the shelf price
+   * is what the customer is credited, whole, and the VAT inside the line is worked from the line's
+   * value, not multiplied up from one unit's.
+   *
+   * @param shelfUnit the price of one, VAT included
+   * @param vatRate the rate as a fraction; null or zero when none applies
+   * @param qty how many come back
+   * @param scale the currency's minor units
+   */
+  public static Line priceLineInclusive(
+      BigDecimal shelfUnit, BigDecimal vatRate, BigDecimal qty, int scale) {
+    BigDecimal value = shelfUnit.multiply(qty).setScale(scale, RoundingMode.HALF_UP);
+    BigDecimal vat =
+        com.storeql.money.TaxInclusive.vatInside(
+            value, vatRate == null ? BigDecimal.ZERO : vatRate, scale);
+    return new Line(shelfUnit.setScale(4, RoundingMode.HALF_UP), vat, value);
   }
 
   /**

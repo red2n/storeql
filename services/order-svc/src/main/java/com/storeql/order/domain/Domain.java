@@ -335,7 +335,90 @@ public final class Domain {
        * store's own country, then the business's, and what a recall text goes to. Null when no
        * number was given or the one given could not be read.
        */
-      String contactPhoneE164) {
+      String contactPhoneE164,
+      /**
+       * Whether the order was sold at shelf prices, VAT inside (intent/vat-inclusive-pricing.md):
+       * then {@code subtotal} is the lines' net after every discount, {@code total} what the lines
+       * were paid plus deposits and gift-card value, and the two discounts are what was given,
+       * already inside the lines.
+       */
+      boolean taxInclusive) {
+
+    /** An order priced net, as every order was before shelf prices. */
+    public Order(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID customerId,
+        UUID loginId,
+        String channel,
+        String fulfilmentType,
+        String status,
+        BigDecimal subtotal,
+        BigDecimal taxAmount,
+        BigDecimal discountAmount,
+        BigDecimal total,
+        String currency,
+        String notes,
+        String idempotencyKey,
+        Instant createdAt,
+        Instant updatedAt,
+        boolean taxExempt,
+        String exemptReason,
+        String deliveryLine1,
+        String deliveryLine2,
+        String deliveryCity,
+        String deliveryPostalCode,
+        String deliveryRecipientName,
+        String deliveryRecipientPhone,
+        String contactPhone,
+        String paymentMethod,
+        BigDecimal promotionDiscount,
+        UUID sellerUserId,
+        boolean allowSubstitutions,
+        UUID slotWindowId,
+        Instant slotStartsAt,
+        Instant slotEndsAt,
+        String slotTimeZone,
+        String contactPhoneE164) {
+      this(
+          id,
+          tenantId,
+          storeId,
+          customerId,
+          loginId,
+          channel,
+          fulfilmentType,
+          status,
+          subtotal,
+          taxAmount,
+          discountAmount,
+          total,
+          currency,
+          notes,
+          idempotencyKey,
+          createdAt,
+          updatedAt,
+          taxExempt,
+          exemptReason,
+          deliveryLine1,
+          deliveryLine2,
+          deliveryCity,
+          deliveryPostalCode,
+          deliveryRecipientName,
+          deliveryRecipientPhone,
+          contactPhone,
+          paymentMethod,
+          promotionDiscount,
+          sellerUserId,
+          allowSubstitutions,
+          slotWindowId,
+          slotStartsAt,
+          slotEndsAt,
+          slotTimeZone,
+          contactPhoneE164,
+          false);
+    }
 
     /** An order as recorded before its contact number was kept in international form. */
     public Order(
@@ -612,7 +695,54 @@ public final class Domain {
        */
       BigDecimal shortQty,
       /** The line this one stands in for, when it is a substitute the store put in the bag. */
-      UUID substitutesItemId) {
+      UUID substitutesItemId,
+      /**
+       * A shelf-price order: what the customer paid for the line after every discount, VAT
+       * included; {@code lineTotal} is what is left once {@code vatAmount} is taken out. Null on an
+       * order priced net.
+       */
+      BigDecimal paidGross,
+      /** The shelf price of one unit before any promotion; null when the quote did not say. */
+      BigDecimal listUnitPrice) {
+
+    /** A line priced net, as every line was before shelf prices. */
+    public OrderItem(
+        UUID id,
+        UUID tenantId,
+        UUID orderId,
+        UUID variantId,
+        BigDecimal qty,
+        BigDecimal unitPrice,
+        BigDecimal lineTotal,
+        String notes,
+        UUID weighingInstrumentId,
+        BigDecimal fulfilledQty,
+        BigDecimal vatAmount,
+        UUID markdownId,
+        String vatCode,
+        BigDecimal vatRate,
+        BigDecimal shortQty,
+        UUID substitutesItemId) {
+      this(
+          id,
+          tenantId,
+          orderId,
+          variantId,
+          qty,
+          unitPrice,
+          lineTotal,
+          notes,
+          weighingInstrumentId,
+          fulfilledQty,
+          vatAmount,
+          markdownId,
+          vatCode,
+          vatRate,
+          shortQty,
+          substitutesItemId,
+          null,
+          null);
+    }
 
     /** A line as recorded before short closes and substitutes existed. */
     public OrderItem(
