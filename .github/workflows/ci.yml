@@ -166,6 +166,18 @@ jobs:
           mvn -q -B -pl shared/common-service -am dependency:build-classpath -Dmdep.outputFile="$RUNNER_TEMP/flyway.cp"
           FLYWAY_CLASSPATH="$(cat "$RUNNER_TEMP/flyway.cp")" scripts/upgrade-selftest.sh
 
+  # The print bridge a browser till uses to reach a thermal printer (docs/HARDWARE-BENCH.md): the bytes
+  # arrive unchanged, only listed origins may print, only a POST of octets to /print is forwarded.
+  print-bridge:
+    name: Print bridge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Test the print bridge against a fake printer
+        run: python3 -m unittest discover -s tools/print-bridge -p 'test_*.py' -v
+
   # ── Alerting ───────────────────────────────────────────────────────────────
   # The alert rules (promtool check and unit tests: a healthy service must not alert, a restart must)
   # and the Prometheus and Alertmanager configs, read by the tools that will read them.
