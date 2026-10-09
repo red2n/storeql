@@ -72,6 +72,7 @@ class TerminalSettlementIT {
           Ids.newId(),
           Ids.newId(),
           Ids.newId(),
+          Ids.newId(),
           Ids.newId());
 
   static {
@@ -2873,5 +2874,94 @@ class TerminalSettlementIT {
                 + loose[0]
                 + "'"),
         is("-"));
+  }
+
+  private Answer recordNaming(
+      Caller who, UUID order, String amount, String attempt, UUID session, String key) {
+    return ItCalls.call(
+        target,
+        "POST",
+        "/payments",
+        who,
+        "{\"orderId\":\""
+            + order
+            + "\",\"amount\":"
+            + amount
+            + ",\"method\":\"CARD\",\"terminalPaymentId\":\""
+            + attempt
+            + "\",\"tillSessionId\":\""
+            + session
+            + "\"}",
+        key);
+  }
+
+  @Test
+  @DisplayName(
+      "A card machine's payment recorded as a tender names its drawer: refused with the machine"
+          + " unsettled when the drawer has closed, the drawer's own when open, and a retry after"
+          + " the close answers the first")
+  void aCardMachinesTenderNamesItsDrawer() {
+    UUID lone = LONE.get(10);
+    Caller manager = managerAt(lone);
+    Terminals.Terminal t = machineAt(lone);
+    UUID closed = drawerAt(lone, manager);
+    UUID open = drawerAt(lone, manager);
+    assertThat(
+        ItCalls.post(
+                target,
+                "/admin/cash/till-sessions/" + closed + "/close",
+                manager,
+                "{\"countedCash\":100}")
+            .status(),
+        is(200));
+    UUID order = Ids.newId();
+    Caller till = cashierAt(lone);
+    Answer sold = sale(till, t.id(), order, "12.00", Ids.newId().toString());
+    assertThat(sold.body().toString(), sold.status(), is(201));
+    String attempt = sold.data().getString("id");
+
+    Answer refused = recordNaming(till, order, "12.00", attempt, closed, Ids.newId().toString());
+    assertThat(refused.status(), is(409));
+    assertThat(refused.code(), is("TILL_SESSION_NOT_OPEN"));
+    assertThat(
+        "nothing was recorded, and the machine is still waiting for its tender",
+        scalar(
+            "SELECT count(*) FROM payment.payment_tenders WHERE tenant_id = '"
+                + BIZ
+                + "' AND order_id = '"
+                + order
+                + "'"),
+        is("0"));
+
+    String key = Ids.newId().toString();
+    Answer taken = recordNaming(till, order, "12.00", attempt, open, key);
+    assertThat(taken.body().toString(), taken.status(), is(201));
+    assertThat(
+        scalar(
+            "SELECT till_session_id FROM payment.payment_tenders WHERE tenant_id = '"
+                + BIZ
+                + "' AND order_id = '"
+                + order
+                + "'"),
+        is(open.toString()));
+    JsonObject x =
+        ItCalls.get(target, "/admin/cash/till-sessions/" + open + "/x-report", manager).data();
+    assertThat(
+        "a card is in the drawer's takings, not in its cash",
+        x.getJsonObject("tenderSummary").getJsonObject("CARD").getJsonNumber("sales").intValue(),
+        is(12));
+    assertThat(x.getJsonNumber("expectedCashInTill").bigDecimalValue().intValue(), is(100));
+
+    assertThat(
+        ItCalls.post(
+                target,
+                "/admin/cash/till-sessions/" + open + "/close",
+                manager,
+                "{\"countedCash\":100}")
+            .status(),
+        is(200));
+    Answer again = recordNaming(till, order, "12.00", attempt, open, key);
+    assertThat(again.body().toString(), again.status(), is(201));
+    assertThat(again.data().getString("id"), is(taken.data().getString("id")));
   }
 }
