@@ -448,7 +448,11 @@ public class OrderResource {
       summary = "Cancel an order",
       description =
           "Cancels a PENDING or CONFIRMED order and releases any stock holds via OrderCancelled."
-              + " An optional reason may be given; if a body is sent it must include one.")
+              + " An optional reason may be given; if a body is sent it must include one. A held"
+              + " sale cancelled at a till may name tillSessionId, the drawer that hands back the"
+              + " cash it took (carried on OrderCancelled; payment-svc counts the refund in that"
+              + " drawer when it is this business's open session at the tender's store, else at no"
+              + " till -- a cancel is never refused over it); a bad id is 400 INVALID_UUID.")
   @APIResponse(responseCode = "200", description = "Order cancelled")
   @APIResponse(responseCode = "404", description = "Order not found (or not the shopper's own)")
   @APIResponse(
@@ -481,7 +485,8 @@ public class OrderResource {
             Parsing.uuid(id, "id"),
             req != null ? req.reason() : null,
             ctx.userId(),
-            ctx);
+            ctx,
+            req != null ? req.tillSessionId() : null);
     var items = svc.getOrderItems(ctx.tenantId(), order.id());
     return Response.ok(
             ApiResponse.ok(
@@ -979,7 +984,11 @@ public class OrderResource {
               + " refundToCustomer goes back to how the customer paid. Each new item carries what"
               + " its pack said as a till sale's line does (batchNo, expiry, markdownId,"
               + " weighingInstrumentId), so the new basket is checked against open recalls,"
-              + " priced at a sticker and its scale judged exactly as a sale's. Requires an"
+              + " priced at a sticker and its scale judged exactly as a sale's. An exchange rung"
+              + " at a till may name tillSessionId, the drawer the cash back leaves (carried on"
+              + " OrderReturned; payment-svc counts it there when it is this business's open"
+              + " session at the sale's store, else at no till -- never refused over it)."
+              + " Requires an"
               + " Idempotency-Key: a retry answers with the first exchange. Refusals come in one"
               + " order: the request (400), the sale (404), the caller's store (403), then the"
               + " key's first answer, the return and the new sale.")
@@ -990,7 +999,7 @@ public class OrderResource {
           "IDEMPOTENCY_KEY_REQUIRED, IDEMPOTENCY_KEY_INVALID, VALIDATION_FAILED (a field of the"
               + " body, e.g. newItems[i].qty finer than a till's reading or under 0.001),"
               + " INVALID_UUID (newItems[i].variantId / markdownId / weighingInstrumentId,"
-              + " returnItems[i].variantId, customerId), ORDER_LINE_EXPIRY_INVALID"
+              + " returnItems[i].variantId, customerId, tillSessionId), ORDER_LINE_EXPIRY_INVALID"
               + " (newItems[i].expiry), ORDER_RETURN_NO_ITEMS, ORDER_EXCHANGE_NO_NEW_ITEMS,"
               + " ORDER_RETURN_CONDITION_REQUIRED, ORDER_RETURN_CONDITION_INVALID")
   @APIResponse(

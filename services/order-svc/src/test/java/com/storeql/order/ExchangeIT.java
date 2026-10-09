@@ -253,6 +253,41 @@ class ExchangeIT {
   }
 
   @Test
+  @DisplayName("An exchange at a till names the drawer on OrderReturned; a bad id is a 400")
+  void anExchangeAtATillNamesTheDrawer() {
+    String order = rig().sale(T, STORE, V_A, 2, null, MANAGER);
+    String drawer = Ids.newId().toString();
+    long before = returnsOf(T);
+
+    Response bad =
+        exchange(
+            order,
+            exchangeBody(
+                lineOf(V_A, 1, "SEALED"), newLine(V_C, 1), ",\"tillSessionId\":\"not-an-id\""),
+            T,
+            "CASHIER",
+            CASHIER,
+            Ids.newId().toString());
+    assertThat(bad.getStatus(), is(400));
+    assertThat("nothing was written", returnsOf(T), is(before));
+
+    data(
+        exchange(
+            order,
+            exchangeBody(
+                lineOf(V_A, 1, "SEALED"), newLine(V_C, 1), ",\"tillSessionId\":\"" + drawer + "\""),
+            T,
+            "CASHIER",
+            CASHIER,
+            Ids.newId().toString()),
+        201);
+
+    JsonObject ev = rig().event(order, "OrderReturned");
+    assertThat(ev.getString("refundMethod"), is("EXCHANGE"));
+    assertThat(ev.getString("tillSessionId"), is(drawer));
+  }
+
+  @Test
   @DisplayName("VAT is part of what comes back: a like-for-like swap of a taxed item is even")
   void vatIsPartOfTheReturnedValue() {
     String order = rig().sale(T, STORE, V_TAX, 2, null, MANAGER);

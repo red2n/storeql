@@ -2851,6 +2851,25 @@ public class OrderService {
    */
   public Order cancelOrder(
       UUID tenantId, UUID orderId, String reason, UUID userId, TenantContext ctx) {
+    return cancelOrder(tenantId, orderId, reason, userId, ctx, null);
+  }
+
+  /**
+   * As above, for a cancel made at a till that names its session (see the parameter below).
+   *
+   * @param tillSessionId the till session a held sale is cancelled at, when the till names one: the
+   *     drawer that hands back the cash it took ({@code OrderCancelled} carries it; payment-svc
+   *     counts the refund there when it is this business's open session at the tender's store)
+   */
+  public Order cancelOrder(
+      UUID tenantId,
+      UUID orderId,
+      String reason,
+      UUID userId,
+      TenantContext ctx,
+      String tillSessionId) {
+    // The drawer named is judged for what it is -- a UUIDv7 -- before anything is read or moved.
+    UUID drawer = tillSession(tillSessionId);
     // PENDING covers pay-later online orders awaiting confirmation; both states must be
     // cancellable so their stock holds get released (inventory-svc reacts to OrderCancelled).
     Order order = getOrder(tenantId, orderId);
@@ -2878,7 +2897,8 @@ public class OrderService {
         Order.STATUS_CANCELLED,
         reason,
         userId,
-        Events.orderCancelled(tenantId, orderId, reason, order.channel(), order.fulfilmentType()),
+        Events.orderCancelled(
+            tenantId, orderId, reason, order.channel(), order.fulfilmentType(), drawer),
         r -> Events.giftCardLoadReversed(r.card(), r.tx()));
   }
 
@@ -3485,6 +3505,9 @@ public class OrderService {
       Parsing.uuid(ri.variantId(), "returnItems[" + i + "].variantId");
     }
     UUID namedCustomer = Parsing.optionalUuid(req.customerId(), "customerId");
+    // The drawer the exchange is rung on is judged for what it is -- a UUIDv7 -- with the rest of
+    // the body; whether it is the right one is payment-svc's, who counts the cash.
+    UUID drawer = tillSession(req.tillSessionId());
 
     Order order =
         repo.findOrder(tenantId, orderId)
@@ -3613,7 +3636,8 @@ public class OrderService {
                   false,
                   approvedBy,
                   placed.id(),
-                  settlement.exchangeAmount()),
+                  settlement.exchangeAmount(),
+                  drawer),
               null);
           repo.linkExchangeTx(c, tenantId, placed.id(), returnId);
           written.set(ret);
@@ -4494,6 +4518,7 @@ public class OrderService {
       String idempotencyKey,
       TenantContext ctx) {
     UUID orderId = Parsing.uuid(req.orderId(), "orderId");
+    UUID drawer = tillSession(req.tillSessionId());
     Order order =
         repo.findOrder(tenantId, orderId)
             .orElseThrow(() -> ApiException.notFound("ORDER_NOT_FOUND", "order not found"));
@@ -4512,7 +4537,7 @@ public class OrderService {
             req.reference(),
             Ids.parse(idempotencyKey),
             Instant.now(),
-            (card, tx) -> Events.giftCardRedeemed(card, tx, order))
+            (card, tx) -> Events.giftCardRedeemed(card, tx, order, drawer))
         .tx();
   }
 

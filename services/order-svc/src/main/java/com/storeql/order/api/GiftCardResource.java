@@ -173,7 +173,10 @@ public class GiftCardResource {
               + " the till worked out (what is left to pay, or the card's balance), so it is"
               + " charged at the order currency's own minor units, rounded half up as payment-svc"
               + " takes the till's tenders: 3.3000000000000003 pounds is 3.30, whole yen, fils"
-              + " for dinars.")
+              + " for dinars. A card charged at a till may name tillSessionId, the drawer it was"
+              + " rung on (carried on GiftCardRedeemed): the GIFT_CARD tender payment-svc records is"
+              + " that drawer's when it is this business's open session at the order's store, else"
+              + " taken at no till -- a charge is never refused over it.")
   @APIResponse(responseCode = "200", description = "Gift card charged (or the first, on a retry)")
   @APIResponse(
       responseCode = "400",

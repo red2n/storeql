@@ -97,4 +97,13 @@ public final class AdditiveFields {
    * storeId} omitted.
    */
   public static final String STAFF_BUSINESS_WIDE = "businessWide";
+
+  /**
+   * {@code OrderReturned} (a return or an exchange), {@code OrderVoided}, {@code OrderCancelled}
+   * and {@code GiftCardRedeemed}: the till session (the drawer) the till said the money moved in, a
+   * UUIDv7. Optional: absent = the sale was rung at no till that named one. payment-svc keeps it
+   * only when it is the business's own OPEN session at the very store the money was taken at, and
+   * otherwise counts the money at no drawer; an event is never refused over it.
+   */
+  public static final String TILL_SESSION_ID = "tillSessionId";
 }

@@ -197,6 +197,47 @@ class GiftCardRedeemIT {
   }
 
   @Test
+  @DisplayName("A redemption at a till names the drawer on GiftCardRedeemed; a bad id is a 400")
+  void aRedemptionAtATillNamesTheDrawer() {
+    String[] gc = card(T, STORE, "50.00");
+    String order = rig().sale(T, STORE, V_A, 2, null, MANAGER);
+    String other = rig().sale(T, STORE, V_A, 1, null, MANAGER);
+    String drawer = Ids.newId().toString();
+
+    Response bad =
+        rig()
+            .post(
+                "/gift-cards/" + gc[1] + "/redeem",
+                "{\"amount\":5.00,\"orderId\":\"" + other + "\",\"tillSessionId\":\"not-an-id\"}",
+                T,
+                "CASHIER",
+                CASHIER,
+                Ids.newId().toString());
+    assertThat(bad.getStatus(), is(400));
+    assertUntouched(gc[0], "50.00");
+
+    data(
+        rig()
+            .post(
+                "/gift-cards/" + gc[1] + "/redeem",
+                "{\"amount\":15.00,\"orderId\":\""
+                    + order
+                    + "\",\"tillSessionId\":\""
+                    + drawer
+                    + "\"}",
+                T,
+                "CASHIER",
+                CASHIER,
+                Ids.newId().toString()),
+        200);
+
+    assertThat(rig().event(gc[0], "GiftCardRedeemed").getString("tillSessionId"), is(drawer));
+    // One that names none says none: the tender is then taken at no till.
+    data(redeem(gc[1], "5.00", other, T, "CASHIER", Ids.newId().toString()), 200);
+    assertThat(rig().events(gc[0], "GiftCardRedeemed"), is(2L));
+  }
+
+  @Test
   @DisplayName("Spending a card to nothing depletes it")
   void spendingItAllDepletesTheCard() {
     String[] gc = card(T, STORE, "10.00");

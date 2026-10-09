@@ -992,7 +992,15 @@ public final class Dtos {
       @Schema(
               description =
                   "The customer the new sale is for; the returned sale's customer when absent.")
-          String customerId) {}
+          String customerId,
+      @Schema(
+              description =
+                  "At a till: the till session the exchange is rung on, so that drawer's report"
+                      + " counts the cash back (and the legs that net against each other). Used by"
+                      + " payment-svc only while it is this business's open session at the sale's"
+                      + " own store; otherwise the exchange is counted at no till. An exchange is"
+                      + " never refused over it. A UUIDv7, else 400 INVALID_UUID.")
+          String tillSessionId) {}
 
   @Schema(name = "ExchangeNewItemRequest")
   public record ExchangeNewItemRequest(
@@ -1198,7 +1206,9 @@ public final class Dtos {
           String reason,
       @Schema(
               description =
-                  "At a till: the till session the cash goes back out of; see CreateReturnRequest.")
+                  "At a till: the till session the cash goes back out of; see CreateReturnRequest. On a"
+                      + " cancel (POST /orders/{id}/cancel) it is the drawer that hands back the"
+                      + " cash a held sale had taken.")
           String tillSessionId) {}
 
   @Schema(name = "VoidResponse")
@@ -1333,7 +1343,15 @@ public final class Dtos {
   public record RedeemGiftCardRequest(
       @NotNull @Positive BigDecimal amount,
       @Schema(description = "UUID of the order this redemption pays for.") @NotBlank String orderId,
-      String reference) {}
+      String reference,
+      @Schema(
+              description =
+                  "At a till: the till session the card is charged on, so the GIFT_CARD tender"
+                      + " payment-svc records is that drawer's. Kept by payment-svc only while it is"
+                      + " this business's open session at the order's store; otherwise the tender is"
+                      + " taken at no till. A charge is never refused over it. A UUIDv7, else 400"
+                      + " INVALID_UUID.")
+          String tillSessionId) {}
 
   @Schema(name = "RedeemGiftCardResponse")
   public record RedeemGiftCardResponse(

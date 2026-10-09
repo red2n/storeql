@@ -2,6 +2,7 @@ package com.storeql.order.service;
 
 import static com.storeql.events.EventPayload.esc;
 
+import com.storeql.events.contract.AdditiveFields;
 import com.storeql.ids.Ids;
 import com.storeql.order.config.Json;
 import com.storeql.order.domain.Domain.GiftCard;
@@ -675,6 +676,21 @@ public final class Events {
    */
   static OutboxRow orderCancelled(
       UUID tenantId, UUID orderId, String reason, String channel, String fulfilmentType) {
+    return orderCancelled(tenantId, orderId, reason, channel, fulfilmentType, null);
+  }
+
+  /**
+   * A held sale cancelled at a till that named its session: the cash it took goes back out of that
+   * drawer, which payment-svc counts when it refunds the order. The member goes last in the payload
+   * and is left out when no drawer is named.
+   */
+  static OutboxRow orderCancelled(
+      UUID tenantId,
+      UUID orderId,
+      String reason,
+      String channel,
+      String fulfilmentType,
+      UUID tillSessionId) {
     // eventId lets payment-svc dedupe the automatic refund of a cancelled (paid) order; existing
     // consumers (inventory-svc hold release) ignore the extra fields.
     return new OutboxRow(
@@ -684,13 +700,16 @@ public final class Events {
         orderId,
         String.format(
             "{\"eventId\":\"%s\",\"eventType\":\"OrderCancelled\",\"occurredAt\":\"%s\","
-                + "\"tenantId\":\"%s\",\"orderId\":\"%s\",\"reason\":\"%s\"%s}",
+                + "\"tenantId\":\"%s\",\"orderId\":\"%s\",\"reason\":\"%s\"%s%s}",
             Ids.newId(),
             Instant.now(),
             tenantId,
             orderId,
             esc(reason),
-            kind(channel, fulfilmentType)));
+            kind(channel, fulfilmentType),
+            tillSessionId == null
+                ? ""
+                : ",\"" + AdditiveFields.TILL_SESSION_ID + "\":\"" + tillSessionId + "\""));
   }
 
   /**
@@ -986,7 +1005,12 @@ public final class Events {
         tillSessionId);
   }
 
-  private static OutboxRow orderReturned(
+  /**
+   * The full form: a return or an exchange ({@code exchangeOrderId}, {@code exchangeAmount}) given
+   * at a till that named its session ({@code tillSessionId}, left out when null). An exchange's
+   * cash back leaves that drawer.
+   */
+  static OutboxRow orderReturned(
       UUID tenantId,
       UUID orderId,
       UUID returnId,
@@ -1045,7 +1069,9 @@ public final class Events {
     nullable(b, "customerId", customerId == null ? null : customerId.toString());
     nullable(b, "giftCardId", giftCardId == null ? null : giftCardId.toString());
     nullable(b, "approvedBy", approvedBy == null ? null : approvedBy.toString());
-    if (tillSessionId != null) b.add("tillSessionId", tillSessionId.toString());
+    if (tillSessionId != null) {
+      b.add(AdditiveFields.TILL_SESSION_ID, tillSessionId.toString());
+    }
     if (exchangeOrderId != null) {
       b.add("exchangeOrderId", exchangeOrderId.toString());
       b.add("exchangeAmount", exchangeAmount);
@@ -1062,6 +1088,17 @@ public final class Events {
    * @param order the order the card pays towards, which names the store and the currency
    */
   static OutboxRow giftCardRedeemed(GiftCard gc, GiftCardTransaction tx, Order order) {
+    return giftCardRedeemed(gc, tx, order, null);
+  }
+
+  /**
+   * As above, for a card charged at a till that named its session: the tender payment-svc records
+   * is that drawer's. The member goes last in the payload and is left out when no drawer is named.
+   *
+   * @param tillSessionId the drawer the till named, or null
+   */
+  static OutboxRow giftCardRedeemed(
+      GiftCard gc, GiftCardTransaction tx, Order order, UUID tillSessionId) {
     JsonObjectBuilder b =
         Json.createObjectBuilder()
             .add("eventId", Ids.newId().toString())
@@ -1073,6 +1110,9 @@ public final class Events {
             .add("storeId", order.storeId().toString())
             .add("amount", tx.amount())
             .add("currency", order.currency());
+    if (tillSessionId != null) {
+      b.add(AdditiveFields.TILL_SESSION_ID, tillSessionId.toString());
+    }
     return new OutboxRow(
         "GiftCardRedeemed", TOPIC_GIFT_CARD_REDEEMED, gc.tenantId(), gc.id(), b.build().toString());
   }
@@ -1160,7 +1200,9 @@ public final class Events {
             .add("storeId", storeId.toString())
             .add("items", lines);
     nullable(b, "customerId", customerId == null ? null : customerId.toString());
-    if (tillSessionId != null) b.add("tillSessionId", tillSessionId.toString());
+    if (tillSessionId != null) {
+      b.add(AdditiveFields.TILL_SESSION_ID, tillSessionId.toString());
+    }
     return new OutboxRow(
         "OrderVoided", "storeql.order.order-voided", tenantId, orderId, b.build().toString());
   }

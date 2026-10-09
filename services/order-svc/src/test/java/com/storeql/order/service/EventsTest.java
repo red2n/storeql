@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
+import com.storeql.events.contract.AdditiveFields;
 import com.storeql.ids.Ids;
 import com.storeql.order.domain.Domain.OrderItem;
 import com.storeql.order.domain.Domain.ReturnItem;
@@ -234,6 +235,100 @@ class EventsTest {
                     Events.orderVoided(TENANT, ORDER, STORE, null, List.of()).payload()))
             .readObject();
     assertFalse(bare.containsKey("tillSessionId"), "no drawer named, none claimed");
+  }
+
+  @Test
+  void theDrawerIsSpeltOnceForEveryEventThatNamesIt() {
+    // payment-svc reads the member by the same constant from shared/events-contract, so a rename
+    // is one edit that both sides see, never a producer that silently stops being understood.
+    assertEquals("tillSessionId", AdditiveFields.TILL_SESSION_ID);
+    UUID drawer = Ids.newId();
+    var line =
+        new ReturnItem(
+            Ids.newId(), TENANT, RETURN, VARIANT, BigDecimal.ONE, BigDecimal.TEN, "SEALED");
+    for (String payload :
+        List.of(
+            Events.orderVoided(TENANT, ORDER, STORE, null, List.of(), drawer).payload(),
+            Events.orderCancelled(TENANT, ORDER, "held", "POS", "INSTORE", drawer).payload(),
+            Events.orderReturned(
+                    TENANT,
+                    ORDER,
+                    RETURN,
+                    STORE,
+                    List.of(line),
+                    BigDecimal.TEN,
+                    "ORIGINAL",
+                    "GBP",
+                    null,
+                    null,
+                    false,
+                    null,
+                    drawer)
+                .payload())) {
+      JsonObject json = Json.createReader(new StringReader(payload)).readObject();
+      assertEquals(drawer.toString(), json.getString(AdditiveFields.TILL_SESSION_ID), payload);
+    }
+  }
+
+  @Test
+  void aCancelAtATillNamesTheDrawerLastAndOneWithoutLeavesItOut() {
+    UUID drawer = Ids.newId();
+    String named =
+        Events.orderCancelled(TENANT, ORDER, "held sale", "POS", "INSTORE", drawer).payload();
+    JsonObject json = Json.createReader(new StringReader(named)).readObject();
+    assertEquals(drawer.toString(), json.getString("tillSessionId"));
+    assertEquals("held sale", json.getString("reason"));
+    assertEquals("POS", json.getString("channel"));
+    assertDoesNotThrow(() -> Ids.parse(json.getString("eventId")));
+    assertEquals(
+        "tillSessionId",
+        json.keySet().stream().reduce((first, second) -> second).orElseThrow(),
+        "an addition goes last, so nothing before it moves");
+
+    assertFalse(
+        Json.createReader(
+                new StringReader(
+                    Events.orderCancelled(TENANT, ORDER, "held sale", "POS", "INSTORE").payload()))
+            .readObject()
+            .containsKey("tillSessionId"),
+        "no drawer named, none claimed");
+  }
+
+  @Test
+  void anExchangeAtATillNamesTheDrawerAndStillSaysWhatItBought() {
+    UUID drawer = Ids.newId();
+    UUID bought = Ids.newId();
+    var line =
+        new ReturnItem(
+            Ids.newId(), TENANT, RETURN, VARIANT, BigDecimal.ONE, BigDecimal.TEN, "SEALED");
+
+    JsonObject json =
+        Json.createReader(
+                new StringReader(
+                    Events.orderReturned(
+                            TENANT,
+                            ORDER,
+                            RETURN,
+                            STORE,
+                            List.of(line),
+                            new BigDecimal("30.00"),
+                            "EXCHANGE",
+                            "GBP",
+                            null,
+                            null,
+                            false,
+                            null,
+                            bought,
+                            new BigDecimal("18.00"),
+                            drawer)
+                        .payload()))
+            .readObject();
+
+    assertEquals(drawer.toString(), json.getString("tillSessionId"));
+    assertEquals(bought.toString(), json.getString("exchangeOrderId"));
+    assertEquals(
+        0,
+        new BigDecimal("18.00").compareTo(json.getJsonNumber("exchangeAmount").bigDecimalValue()));
   }
 
   @Test
