@@ -12,6 +12,14 @@ updates:
     groups:
       maven-minor-and-patch:
         update-types: [minor, patch]
+    # Jersey moves with Helidon, never alone: Helidon 4.x manages Jersey 3.1 (Jakarta EE 10) and
+    # Jersey 4 is Jakarta REST 4 / EE 11. A 4.x json-binding next to the 3.1.11 runtime links by luck,
+    # and a whole 4.x line does not start the services (ServerCdiExtension fails on
+    # org.glassfish.jersey.internal.inject.InstanceBinding). Revisit when a Helidon release manages
+    # Jersey 4 (PR #63 was closed for this).
+    ignore:
+      - dependency-name: 'org.glassfish.jersey.media:jersey-media-json-binding'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: pub
     directory: /frontends/storeql-app
