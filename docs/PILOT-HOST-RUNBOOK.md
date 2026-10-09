@@ -56,6 +56,26 @@ customer says otherwise.
    developer's addresses, through the mail provider's SMTP), and point `ALERTMANAGER_CONFIG_FILE` and
    `ALERTMANAGER_SECRETS_DIR` at it. Send a test alert and confirm it arrives **in a person's inbox**.
 
+## Billing during the pilot: nothing runs by itself
+
+The platform's own billing (subscriptions, invoices, dunning that suspends a business that does not pay) is
+driven only by explicit calls: **no scheduler runs it**. On this host:
+
+- Do **not** set the platform's billing profile and never call `POST /platform/billing/run` or
+  `POST /platform/billing/dunning/run`. With no profile the pilot business is created without a
+  subscription ("created but not subscribed" in the tenant-svc log), so there is nothing to invoice and
+  nothing to chase. If a profile exists and the business was subscribed, void its first invoice
+  (`POST /platform/billing/invoices/{id}/void`) and leave the runs alone.
+- The pay link in a dunning notice settles an invoice **without taking any money** (`DunningService.payByLink`
+  records a card payment against the invoice for whoever opens the link). Until a payment provider is behind
+  it, no dunning notice is sent from this host, and the first real invoices are raised from the accounting
+  package. Putting the link behind a real payment is a task before the platform bills anyone itself.
+- A trial's end, a reminder and a suspension that would stop the tills are all consequences of those runs;
+  without them none can happen.
+- When the pilot becomes paid, decide that on purpose: set the billing profile and the dunning policy, move
+  the business to its plan, and run the first billing on a day you chose. [billing-flow](../k6/billing-flow.js)
+  and [dunning-flow](../k6/dunning-flow.js) show what each step does.
+
 ## Every day (five minutes)
 
 - The gateway answers (`/health`), and every container is `healthy` (`docker compose ps`).
