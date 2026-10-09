@@ -54,3 +54,7 @@ tools/docker-buildx
 
 # Host caches for the no-SDK Flutter build (scripts/lib/flutter-in-docker.sh): the SDK clone and the pub cache
 .cache/
+
+# Python bytecode (the print bridge tests write it next to the sources)
+__pycache__/
+*.pyc
