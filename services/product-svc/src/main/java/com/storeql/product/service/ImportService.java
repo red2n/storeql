@@ -300,21 +300,37 @@ public class ImportService {
     boolean vat = mapping.columns().containsKey("vatCode") || mapping.defaultVatCode() != null;
     Caller caller = Caller.of(ctx);
     UUID listId = priceListId != null ? priceListId : dry.priceListId();
+    // No list named: the business's last import priced into one, and a later file belongs there too
+    // (two live lists for one catalogue would leave a quote to choose between them).
+    boolean implicit = listId == null;
+    if (prices && implicit) {
+      listId = repo.latestPriceList(tenantId).orElse(null);
+    }
     if (prices) {
       if (listId != null) {
-        var info = pricing.priceList(caller, listId.toString());
-        if (!info.taxMode().equals(mapping.priceBasis())) {
-          throw ApiException.conflict(
-              "IMPORT_PRICE_BASIS_MISMATCH",
-              "the file's prices are "
-                  + ("INCLUSIVE".equals(mapping.priceBasis())
-                      ? "shelf prices (VAT included)"
-                      : "net prices")
-                  + " and price list "
-                  + listId
-                  + " is the other kind; a price is never converted");
+        PricingClient.ListInfo info = null;
+        try {
+          info = pricing.priceList(caller, listId.toString());
+        } catch (ApiException e) {
+          if (!implicit || !"IMPORT_PRICE_LIST_NOT_FOUND".equals(e.code())) throw e;
+          listId = null;
         }
-      } else {
+        if (info != null && !info.taxMode().equals(mapping.priceBasis())) {
+          if (!implicit) {
+            throw ApiException.conflict(
+                "IMPORT_PRICE_BASIS_MISMATCH",
+                "the file's prices are "
+                    + ("INCLUSIVE".equals(mapping.priceBasis())
+                        ? "shelf prices (VAT included)"
+                        : "net prices")
+                    + " and price list "
+                    + listId
+                    + " is the other kind; a price is never converted");
+          }
+          listId = null;
+        }
+      }
+      if (listId == null) {
         String currency = profiles.requireCurrency(tenantId);
         listId =
             Ids.parse(

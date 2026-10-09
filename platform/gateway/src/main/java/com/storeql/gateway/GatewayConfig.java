@@ -83,7 +83,9 @@ public class GatewayConfig {
               + "/api/purchase-svc/e-invoices/inbound/peppol=21000000,"
               + "/api/purchase-svc/e-invoices/inbound/fr_pdp=21000000,"
               + "/api/purchase-svc/e-invoices/inbound/simulated=21000000,"
-              + "/api/payment-svc/admin/settlements=6000000")
+              + "/api/payment-svc/admin/settlements=6000000,"
+              // A business's catalogue export (catalogue import): up to 12 MiB, 25,000 rows.
+              + "/api/product-svc/admin/catalogue-imports=12582912")
   String uploadRoutes;
 
   @Inject

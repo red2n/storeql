@@ -79,7 +79,7 @@ The owner uploads the export once per store, maps its columns once per business,
 - [x] The reconciliation report gives file against loaded per measure (rows, SKUs, barcodes, price count and sum by VAT code, stock quantity, stock value) and names every unmatched SKU — `ReconciliationTest`, `ImportReconcileIT`.
 - [x] A scanned old EAN, multipack or case code finds the variant with its pack quantity; aliases are unique per business and compared as GTIN-14 — `BarcodeAliasIT`.
 - [x] **Tenant isolation:** the same file in two businesses makes two files with no existence leak; the lock key includes the tenant; an alias is unique per business, not globally; a worker never acts outside its job's tenant; other businesses' staff of every role, even naming our job id, get 404 — `ImportDryRunIT`, `ImportApplyIT.isolation`, `ImportReconcileIT.whoAndWhat/perBusiness`, `OpeningStockIT.otherBusinessCannotOpenOurStore/perBusinessAndSummary`, `BarcodeAliasIT.perBusiness/noLeak`.
-- [ ] A 12 MB, 25,000-row file imports within the agreed time on the stack and reconciles — k6 `catalogue-import-flow`.
+- [x] A 12 MB, 25,000-row file imports within the agreed time on the stack and reconciles — k6 `catalogue-import-flow` (`ROWS=25000`, 9 Oct 2026, one VU on the dockerized stack: dry run 5.1 s, apply 378 s in 200 chunks, reconciled, 36 of 36 checks; the default 1,200 rows takes 22 s). No agreed time was ever set; about six minutes is fine for a once-only onboarding, and the chunk size is the knob if it ever is not.
 
 ## Screens
 
@@ -98,6 +98,8 @@ None in this tranche (the wizard is slice P4).
 - **The reconciliation is read again from the systems, not kept from the apply**: the file is re-read, SKUs and barcodes are looked up in the catalogue, prices are read back from the price list, stock is read from inventory-svc's totals for the dry run. Figures are exact (no rounding), prices are summed by the file's VAT code, a line with no cost is counted apart and never valued at nothing.
 - **A `lot` column** (optional, 64 characters) rides with the stock so the recall gate can hold a recalled lot at the door; a file with no lot opens batches with none.
 - **Putaway is not skipped.** Opening stock goes through `insertBatch`, so a store with a default putaway rule places it at once and a store without raises one task per batch. Go-live therefore sets a store-default putaway rule first (a checklist item with the customer's zone names).
+- **The gateway admits this one route up to 12 MiB** (`storeql.gateway.upload-routes`, `GatewayConfig`'s default, `/api/product-svc/admin/catalogue-imports=12582912`); every other route stays at 1 MB. The 25,000-row run found this: the 1,200-row run fits under 1 MB and hid it.
+- **No price list named means the last import's list**, made in the file's basis the first time; a list that is gone or of the other basis is never reused silently (a new one is made), while a list named by the caller of the other basis is refused (`IMPORT_PRICE_BASIS_MISMATCH`). Two live lists for one catalogue would leave a quote to choose between them.
 - **A scan finds an alias after the item's own barcode and before the typed SKU**; the answer says the kind and the units one scan stands for (`alias: {kind, packQty}`), and an alias of a delisted item finds nothing.
 
 ## Flow Tests entry

@@ -43,6 +43,8 @@ class ImportApplyIT {
   private static final String OTHER = Ids.newId().toString();
   private static final String STORE = Ids.newId().toString();
   private static final String OTHER_STORE = Ids.newId().toString();
+  private static final String FRESH = Ids.newId().toString();
+  private static final String FRESH_STORE = Ids.newId().toString();
   private static final String SHELF_LIST = Ids.newId().toString();
   private static final String NET_LIST = Ids.newId().toString();
   private static final String MADE_LIST = Ids.newId().toString();
@@ -71,8 +73,10 @@ class ImportApplyIT {
     TenantSvcStub.start()
         .with(T, "GBP", "GB")
         .with(OTHER, "GBP", "GB")
+        .with(FRESH, "GBP", "GB")
         .withStore(T, STORE, "GB")
-        .withStore(OTHER, OTHER_STORE, "GB");
+        .withStore(OTHER, OTHER_STORE, "GB")
+        .withStore(FRESH, FRESH_STORE, "GB");
 
     PRICING = JsonStub.start();
     PRICING.on(
@@ -94,6 +98,13 @@ class ImportApplyIT {
         "{\"data\":{\"id\":\""
             + NET_LIST
             + "\",\"currency\":\"GBP\",\"taxMode\":\"EXCLUSIVE\",\"active\":true}}");
+    PRICING.on(
+        "GET",
+        "/price-lists/" + MADE_LIST,
+        200,
+        "{\"data\":{\"id\":\""
+            + MADE_LIST
+            + "\",\"currency\":\"GBP\",\"taxMode\":\"INCLUSIVE\",\"active\":true}}");
     PRICING.on("POST", "/admin/price-lists", 201, "{\"data\":{\"id\":\"" + MADE_LIST + "\"}}");
     PRICING.on(
         "POST",
@@ -387,19 +398,34 @@ class ImportApplyIT {
   }
 
   @Test
-  @DisplayName("with no price list named one is made, in the file's price basis")
-  void aPriceListIsMade() throws Exception {
-    String m = mapping(OWNER, MAPPING);
-    JsonObject dry = dryRun(OWNER, STORE, m, HEADER + sku() + ",Bread,,,A,1.29,,,,\n");
+  @DisplayName(
+      "with no price list named one is made in the file's basis, and the next file prices into it")
+  void aPriceListIsMadeOnce() throws Exception {
+    Staff fresh = new Staff(FRESH, "OWNER");
+    String m = mapping(fresh, MAPPING);
+    JsonObject dry = dryRun(fresh, FRESH_STORE, m, HEADER + sku() + ",Bread,,,A,1.29,,,,\n");
     PRICING.reset();
 
-    JsonObject queued = apply(OWNER, dry.getString("id"), null);
+    JsonObject queued = apply(fresh, dry.getString("id"), null);
     worker.drain();
 
-    assertThat(job(OWNER, queued.getString("id")).getString("status"), is("DONE"));
-    assertThat(job(OWNER, queued.getString("id")).getString("priceListId"), is(MADE_LIST));
+    assertThat(job(fresh, queued.getString("id")).getString("status"), is("DONE"));
+    assertThat(job(fresh, queued.getString("id")).getString("priceListId"), is(MADE_LIST));
     var made = pricingCalls("POST", "/admin/price-lists");
+    assertThat(made.size(), is(1));
     assertThat(made.get(0).body(), containsString("\"taxMode\":\"INCLUSIVE\""));
+    assertThat(
+        pricingCalls("POST", "/admin/price-lists/" + MADE_LIST + "/items/batch").size(), is(1));
+
+    // A later file names no list either: it prices into the one the last import made, not a second.
+    JsonObject next = dryRun(fresh, FRESH_STORE, m, HEADER + sku() + ",Bun,,,A,0.59,,,,\n");
+    PRICING.reset();
+    JsonObject again = apply(fresh, next.getString("id"), null);
+    worker.drain();
+
+    assertThat(job(fresh, again.getString("id")).getString("status"), is("DONE"));
+    assertThat(job(fresh, again.getString("id")).getString("priceListId"), is(MADE_LIST));
+    assertThat(pricingCalls("POST", "/admin/price-lists").size(), is(0));
     assertThat(
         pricingCalls("POST", "/admin/price-lists/" + MADE_LIST + "/items/batch").size(), is(1));
   }

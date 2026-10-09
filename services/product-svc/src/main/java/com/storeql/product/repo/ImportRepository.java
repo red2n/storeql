@@ -620,6 +620,18 @@ public class ImportRepository extends BaseJdbcRepository {
         "expire stale import jobs");
   }
 
+  /** The price list the business's most recent import priced into, if any. */
+  public Optional<UUID> latestPriceList(UUID tenantId) {
+    return query(
+            "SELECT price_list_id FROM import_jobs WHERE tenant_id = ? AND kind = 'APPLY'"
+                + " AND price_list_id IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1",
+            ps -> ps.setObject(1, tenantId),
+            rs -> rs.getObject(1, UUID.class),
+            "find the last import's price list")
+        .stream()
+        .findFirst();
+  }
+
   /** The lines the dry run neither refused nor skipped, in order: what an apply works over. */
   public List<Integer> applicableLines(UUID tenantId, UUID dryRunId) {
     return query(

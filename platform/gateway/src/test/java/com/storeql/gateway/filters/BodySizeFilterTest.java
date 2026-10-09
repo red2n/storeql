@@ -157,7 +157,8 @@ class BodySizeFilterTest {
             "/api/purchase-svc/e-invoices/inbound/peppol", 21_000_000L,
             "/api/purchase-svc/e-invoices/inbound/fr_pdp", 21_000_000L,
             "/api/purchase-svc/e-invoices/inbound/simulated", 21_000_000L,
-            "/api/payment-svc/admin/settlements", 6_000_000L),
+            "/api/payment-svc/admin/settlements", 6_000_000L,
+            "/api/product-svc/admin/catalogue-imports", 12_582_912L),
         inForce);
     long server = Long.parseLong(packaged.getProperty("server.max-payload-size"));
     assertTrue(
