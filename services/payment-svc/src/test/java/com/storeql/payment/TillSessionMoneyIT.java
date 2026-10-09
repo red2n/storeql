@@ -7,10 +7,16 @@ import static org.hamcrest.Matchers.nullValue;
 import com.storeql.ids.Ids;
 import com.storeql.payment.ItCalls.Answer;
 import com.storeql.payment.ItCalls.Caller;
+import com.storeql.payment.domain.Domain.PaymentTender;
+import com.storeql.payment.domain.Domain.RefundTender;
+import com.storeql.payment.repo.CashManagementRepository;
+import com.storeql.payment.repo.PaymentRepository;
 import com.storeql.payment.service.PaymentService;
+import com.storeql.service.OutboxRow;
 import com.storeql.test.Envelopes;
 import com.storeql.test.PostgresSupport;
 import com.storeql.test.TenantSvcStub;
+import com.storeql.web.ApiException;
 import io.helidon.microprofile.testing.junit5.HelidonTest;
 import jakarta.inject.Inject;
 import jakarta.json.JsonObject;
@@ -47,7 +53,7 @@ class TillSessionMoneyIT {
   static {
     PG = PostgresSupport.start().wire("payment");
     TenantSvcStub stub = TenantSvcStub.start();
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 40; i++) {
       Biz b = new Biz(Ids.newId(), Ids.newId(), Ids.newId(), Ids.newId(), Ids.newId());
       stub.with(b.id().toString(), "GBP", "GB")
           .withStore(b.id().toString(), b.store().toString(), "GB")
@@ -62,6 +68,8 @@ class TillSessionMoneyIT {
 
   @Inject WebTarget target;
   @Inject PaymentService service;
+  @Inject PaymentRepository payments;
+  @Inject CashManagementRepository tills;
 
   @AfterAll
   static void stop() {
@@ -109,6 +117,11 @@ class TillSessionMoneyIT {
 
   private Answer tender(
       Caller who, UUID order, String method, String amount, UUID session, UUID at) {
+    return tenderKeyed(who, order, method, amount, session, at, Ids.newId().toString());
+  }
+
+  private Answer tenderKeyed(
+      Caller who, UUID order, String method, String amount, UUID session, UUID at, String key) {
     return ItCalls.call(
         target,
         "POST",
@@ -125,10 +138,15 @@ class TillSessionMoneyIT {
             + (session == null ? "" : ",\"tillSessionId\":\"" + session + "\"")
             + (method.equals("CARD") ? ",\"reference\":\"AUTH 1\"" : "")
             + "}",
-        Ids.newId().toString());
+        key);
   }
 
   private Answer refund(Caller who, UUID order, String paymentId, String amount, UUID session) {
+    return refundKeyed(who, order, paymentId, amount, session, Ids.newId().toString());
+  }
+
+  private Answer refundKeyed(
+      Caller who, UUID order, String paymentId, String amount, UUID session, String key) {
     return ItCalls.call(
         target,
         "POST",
@@ -141,7 +159,47 @@ class TillSessionMoneyIT {
             + ",\"method\":\"CASH\""
             + (session == null ? "" : ",\"tillSessionId\":\"" + session + "\"")
             + "}",
-        Ids.newId().toString());
+        key);
+  }
+
+  private Answer close(UUID session, String counted) {
+    return ItCalls.post(
+        target, TILLS + "/" + session + "/close", manager(), "{\"countedCash\":" + counted + "}");
+  }
+
+  private static String scalar(String sql) {
+    return Envelopes.scalar(PG, sql);
+  }
+
+  private String countOf(String table, UUID order) {
+    return scalar(
+        "SELECT count(*) FROM payment."
+            + table
+            + " WHERE tenant_id = '"
+            + biz
+            + "' AND order_id = '"
+            + order
+            + "'");
+  }
+
+  private PaymentTender cashTender(UUID order, String amount, UUID at) {
+    return new PaymentTender(
+        Ids.newId(),
+        biz,
+        order,
+        new BigDecimal(amount),
+        "CASH",
+        null,
+        null,
+        PaymentTender.STATUS_CAPTURED,
+        null,
+        java.time.Instant.now(),
+        at);
+  }
+
+  private static OutboxRow captured(PaymentTender t) {
+    return new OutboxRow(
+        "PaymentCaptured", "storeql.payment.payment-captured", t.tenantId(), t.id(), "{}");
   }
 
   private JsonObject x(Caller who, UUID session) {
@@ -392,5 +450,456 @@ class TillSessionMoneyIT {
             .bigDecimalValue()
             .compareTo(new BigDecimal("5.00")),
         is(0));
+  }
+
+  // ── a retry is answered, whatever became of the drawer ────────────────────
+
+  @Test
+  @DisplayName("a retried tender whose drawer has since closed answers the first tender, once")
+  void aReplayAfterTheDrawerClosesAnswersTheFirstTender() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    UUID order = Ids.newId();
+    String key = Ids.newId().toString();
+
+    Answer first = tenderKeyed(who, order, "CASH", "12.00", t, store, key);
+    assertThat(first.body().toString(), first.status(), is(201));
+    assertThat(close(t, "112.00").status(), is(200));
+
+    // the response was lost; the cashier sends it again after the manager closed the drawer
+    Answer again = tenderKeyed(who, order, "CASH", "12.00", t, store, key);
+    assertThat(again.body().toString(), again.status(), is(201));
+    assertThat(again.data().getString("id"), is(first.data().getString("id")));
+    assertThat(countOf("payment_tenders", order), is("1"));
+    assertThat(
+        "one announcement, not two",
+        scalar(
+            "SELECT count(*) FROM payment.outbox WHERE tenant_id = '"
+                + biz
+                + "' AND event_type = 'PaymentCaptured' AND aggregate_id = '"
+                + first.data().getString("id")
+                + "'"),
+        is("1"));
+
+    // a NEW tender naming the closed drawer is still refused
+    Answer fresh = tender(who, Ids.newId(), "CASH", "1.00", t, store);
+    assertThat(fresh.status(), is(409));
+    assertThat(fresh.code(), is("TILL_SESSION_NOT_OPEN"));
+  }
+
+  @Test
+  @DisplayName("a retried refund whose drawer has since closed answers the first refund, once")
+  void aRefundReplayAfterTheDrawerClosesAnswersTheFirstRefund() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    UUID order = Ids.newId();
+    Answer paid = tender(who, order, "CASH", "30.00", t, store);
+    String key = Ids.newId().toString();
+
+    Answer first = refundKeyed(manager(), order, paid.data().getString("id"), "5.00", t, key);
+    assertThat(first.body().toString(), first.status(), is(201));
+    assertThat(close(t, "125.00").status(), is(200));
+
+    Answer again = refundKeyed(manager(), order, paid.data().getString("id"), "5.00", t, key);
+    assertThat(again.body().toString(), again.status(), is(201));
+    assertThat(again.data().getString("id"), is(first.data().getString("id")));
+    assertThat("refunded once", countOf("refund_tenders", order), is("1"));
+
+    Answer fresh = refund(manager(), order, paid.data().getString("id"), "1.00", t);
+    assertThat(fresh.status(), is(409));
+    assertThat(fresh.code(), is("TILL_SESSION_NOT_OPEN"));
+    assertThat("and nothing more was written", countOf("refund_tenders", order), is("1"));
+  }
+
+  // ── a manager's refund naming a drawer is judged as a tender is ───────────
+
+  @Test
+  @DisplayName(
+      "a refund naming a drawer that is closed, at another store, unknown or another business's is"
+          + " refused and nothing is written")
+  void aManualRefundIsJudgedLikeATender() {
+    Caller who = cashier();
+    UUID open = open(who, store, "SESSION");
+    UUID closed = open(who, store, "SESSION");
+    close(closed, "100");
+    UUID atElsewhere =
+        open(new Caller(biz, Ids.newId(), "CASHIER", elsewhere), elsewhere, "SESSION");
+    UUID order = Ids.newId();
+    String paymentId = tender(who, order, "CASH", "30.00", open, store).data().getString("id");
+
+    Answer isClosed = refund(manager(), order, paymentId, "1.00", closed);
+    assertThat(isClosed.status(), is(409));
+    assertThat(isClosed.code(), is("TILL_SESSION_NOT_OPEN"));
+
+    Answer wrongStore = refund(manager(), order, paymentId, "1.00", atElsewhere);
+    assertThat(wrongStore.status(), is(409));
+    assertThat(wrongStore.code(), is("TILL_SESSION_OTHER_STORE"));
+
+    Answer unknown = refund(manager(), order, paymentId, "1.00", Ids.newId());
+    assertThat(unknown.status(), is(404));
+    assertThat(unknown.code(), is("TILL_SESSION_NOT_FOUND"));
+
+    // a manager held to this store cannot pay out of the other store's drawer either
+    Caller held = new Caller(biz, Ids.newId(), "MANAGER", store);
+    Answer notTheirs = refund(held, order, paymentId, "1.00", atElsewhere);
+    assertThat(notTheirs.status(), is(403));
+
+    Caller rival = new Caller(mine.rival(), Ids.newId(), "OWNER");
+    Answer rivals = refund(rival, order, paymentId, "1.00", open);
+    assertThat(rivals.status(), is(404));
+    assertThat(rivals.code(), is("TILL_SESSION_NOT_FOUND"));
+
+    assertThat("nothing was written", countOf("refund_tenders", order), is("0"));
+    eq("the open drawer", x(manager(), open), "expectedCashInTill", "130.00");
+
+    // and the one a manager may name is counted
+    Answer fine = refund(manager(), order, paymentId, "4.00", open);
+    assertThat(fine.body().toString(), fine.status(), is(201));
+    eq("the open drawer after", x(manager(), open), "expectedCashInTill", "126.00");
+  }
+
+  @Test
+  @DisplayName(
+      "a refund naming a drawer is that drawer's store's, even for a tender taken at no store, so"
+          + " the drawer, the store's reports and the day agree")
+  void aRefundOfAStorelessTenderTakesTheDrawersStore() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    UUID order = Ids.newId();
+    // a back-office cash tender recorded with no store at all
+    String paymentId = tender(manager(), order, "CASH", "20.00", null, null).data().getString("id");
+
+    Answer back = refund(manager(), order, paymentId, "10.00", t);
+
+    assertThat(back.body().toString(), back.status(), is(201));
+    assertThat(
+        scalar(
+            "SELECT store_id || ' ' || till_session_id FROM payment.refund_tenders"
+                + " WHERE tenant_id = '"
+                + biz
+                + "' AND order_id = '"
+                + order
+                + "'"),
+        is(store + " " + t));
+    eq("the drawer paid it out", x(manager(), t), "expectedCashInTill", "90.00");
+  }
+
+  // ── an event never moves a closed drawer ──────────────────────────────────
+
+  @Test
+  @DisplayName(
+      "a return or a void naming a drawer that has closed is refunded and counted at no drawer")
+  void aClosedDrawersEventRefundsAreNotAtATill() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    UUID other = open(cashier(), store, "SESSION");
+    UUID order = Ids.newId();
+    UUID voided = Ids.newId();
+    assertThat(tender(who, order, "CASH", "30.00", t, store).status(), is(201));
+    assertThat(tender(who, voided, "CASH", "10.00", t, store).status(), is(201));
+    close(t, "140.00");
+
+    service.refundReturnForOrderEvent(
+        Ids.newId(),
+        "it",
+        biz,
+        order,
+        new BigDecimal("4.00"),
+        "return",
+        new PaymentService.ReturnRefund("ORIGINAL", Ids.newId(), null, "GBP", null, t));
+    service.refundVoidForOrderEvent(Ids.newId(), "it", biz, voided, t);
+
+    assertThat(
+        "the rows hold no drawer",
+        scalar(
+            "SELECT string_agg(amount::numeric(10,2) || ':' || coalesce(till_session_id::text, '-'),"
+                + " ',' ORDER BY amount) FROM payment.refund_tenders WHERE tenant_id = '"
+                + biz
+                + "'"),
+        is("4.00:-,10.00:-"));
+    eq("the closed drawer is as it was counted", x(manager(), t), "expectedCashInTill", "140.00");
+    assertThat(
+        "the open one at the store shows them apart",
+        x(manager(), other)
+            .getJsonObject("notAtTill")
+            .getJsonObject("CASH")
+            .getJsonNumber("refunds")
+            .bigDecimalValue()
+            .compareTo(new BigDecimal("14.00")),
+        is(0));
+  }
+
+  @Test
+  @DisplayName("the cash a void hands back is counted in the drawer that gave it")
+  void aVoidsCashIsCountedInItsDrawer() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    UUID atElsewhere =
+        open(new Caller(biz, Ids.newId(), "CASHIER", elsewhere), elsewhere, "SESSION");
+    UUID order = Ids.newId();
+    UUID stray = Ids.newId();
+    assertThat(tender(who, order, "CASH", "20.00", t, store).status(), is(201));
+    assertThat(tender(who, stray, "CASH", "8.00", t, store).status(), is(201));
+
+    service.refundVoidForOrderEvent(Ids.newId(), "it", biz, order, t);
+    // a void naming a drawer of another store, or none that exists, is still refunded
+    service.refundVoidForOrderEvent(Ids.newId(), "it", biz, stray, atElsewhere);
+
+    assertThat(
+        scalar(
+            "SELECT string_agg(amount::numeric(10,2) || ':' || coalesce(till_session_id::text, '-'),"
+                + " ',' ORDER BY amount) FROM payment.refund_tenders WHERE tenant_id = '"
+                + biz
+                + "'"),
+        is("8.00:-,20.00:" + t));
+    eq("the drawer", x(manager(), t), "expectedCashInTill", "108.00");
+  }
+
+  // ── a write is judged on the transaction that makes it ────────────────────
+
+  @Test
+  @DisplayName("a tender cannot land on a drawer that closed after the check, and writes nothing")
+  void aTenderCannotLandOnADrawerThatClosedAfterTheCheck() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    close(t, "100");
+    UUID order = Ids.newId();
+    PaymentTender late = cashTender(order, "5.00", store);
+
+    ApiException refused =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            ApiException.class, () -> payments.createTender(late, captured(late), null, t));
+
+    assertThat(refused.code(), is("TILL_SESSION_NOT_OPEN"));
+    assertThat(countOf("payment_tenders", order), is("0"));
+    assertThat(
+        "and announced nothing",
+        scalar("SELECT count(*) FROM payment.outbox WHERE aggregate_id = '" + late.id() + "'"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName("a refund cannot be paid out of a drawer that closed after the check")
+  void aRefundCannotLandOnADrawerThatClosedAfterTheCheck() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    UUID order = Ids.newId();
+    PaymentTender paid = cashTender(order, "30.00", store);
+    payments.createTender(paid, captured(paid));
+    close(t, "100");
+    RefundTender back =
+        new RefundTender(
+            Ids.newId(),
+            biz,
+            order,
+            paid.id(),
+            new BigDecimal("5.00"),
+            "CASH",
+            null,
+            null,
+            "late",
+            java.time.Instant.now());
+
+    ApiException refused =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            ApiException.class,
+            () ->
+                payments.createRefundGuarded(
+                    back,
+                    new OutboxRow(
+                        "PaymentRefunded",
+                        "storeql.payment.payment-refunded",
+                        biz,
+                        back.id(),
+                        "{}"),
+                    storeId -> {},
+                    t));
+
+    assertThat(refused.code(), is("TILL_SESSION_NOT_OPEN"));
+    assertThat(countOf("refund_tenders", order), is("0"));
+  }
+
+  @Test
+  @DisplayName("a drop, a pay-in or a pay-out cannot be written against a closed drawer")
+  void dropsAndMovementsAreJudgedOnTheirOwnTransaction() {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    close(t, "100");
+
+    ApiException drop =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            ApiException.class,
+            () ->
+                tills.recordDrop(
+                    new com.storeql.payment.domain.Domain.CashDrop(
+                        Ids.newId(),
+                        biz,
+                        t,
+                        new BigDecimal("5.00"),
+                        Ids.newId(),
+                        null,
+                        java.time.Instant.now())));
+    assertThat(drop.code(), is("TILL_CLOSED"));
+
+    Answer in =
+        ItCalls.post(
+            target,
+            "/admin/cash/movements",
+            manager(),
+            "{\"tillSessionId\":\""
+                + t
+                + "\",\"storeId\":\""
+                + store
+                + "\",\"direction\":\"PAY_IN\",\"amount\":5.00,\"reason\":\"late\"}");
+    assertThat(in.body().toString(), in.status(), is(400));
+    assertThat(in.code(), is("TILL_CLOSED"));
+    assertThat(
+        "nothing was written against the closed drawer",
+        scalar(
+            "SELECT (SELECT count(*) FROM payment.cash_drops WHERE tenant_id = '"
+                + biz
+                + "' AND till_session_id = '"
+                + t
+                + "') + (SELECT count(*) FROM payment.cash_movements WHERE tenant_id = '"
+                + biz
+                + "' AND till_session_id = '"
+                + t
+                + "')"),
+        is("0"));
+  }
+
+  @Test
+  @DisplayName(
+      "a close waits for a tender already being written to its drawer, and counts it: what is"
+          + " stored is what is answered and announced")
+  void aCloseWaitsForATenderAlreadyInFlight() throws Exception {
+    Caller who = cashier();
+    UUID t = open(who, store, "SESSION");
+    UUID order = Ids.newId();
+    try (java.sql.Connection writer =
+            java.sql.DriverManager.getConnection(PG.jdbcUrl(), PG.username(), PG.password());
+        var st = writer.createStatement()) {
+      writer.setAutoCommit(false);
+      // a writer that has passed its check holds the drawer's row shared, and its tender is in
+      // flight: committed after the close would have read the drawer, it would be in no count
+      st.execute(
+          "SELECT status FROM payment.till_sessions WHERE tenant_id = '"
+              + biz
+              + "' AND id = '"
+              + t
+              + "' FOR SHARE");
+      st.executeUpdate(
+          "INSERT INTO payment.payment_tenders (id, tenant_id, order_id, amount, method, status,"
+              + " created_at, store_id, till_session_id) VALUES ('"
+              + Ids.newId()
+              + "', '"
+              + biz
+              + "', '"
+              + order
+              + "', 50.00, 'CASH', 'CAPTURED', now(), '"
+              + store
+              + "', '"
+              + t
+              + "')");
+
+      var closing = java.util.concurrent.CompletableFuture.supplyAsync(() -> close(t, "150.00"));
+      org.junit.jupiter.api.Assertions.assertThrows(
+          java.util.concurrent.TimeoutException.class,
+          () -> closing.get(1500, java.util.concurrent.TimeUnit.MILLISECONDS),
+          "the close must wait for the tender being written to its drawer");
+      writer.commit();
+
+      Answer closed = closing.get(30, java.util.concurrent.TimeUnit.SECONDS);
+      assertThat(closed.body().toString(), closed.status(), is(200));
+      eq("the answer counts the tender", closed.data(), "expectedCashInTill", "150.00");
+      eq("so the count is right", closed.data(), "overShort", "0.00");
+    }
+    assertThat(
+        "stored the same",
+        scalar(
+            "SELECT over_short::numeric(10,2) FROM payment.till_sessions WHERE tenant_id = '"
+                + biz
+                + "' AND id = '"
+                + t
+                + "'"),
+        is("0.00"));
+    assertThat(
+        "announced the same",
+        scalar(
+            "SELECT (payload::jsonb ->> 'expectedCash')::numeric(10,2) || '/' ||"
+                + " (payload::jsonb ->> 'overShort')::numeric(10,2) FROM payment.outbox"
+                + " WHERE tenant_id = '"
+                + biz
+                + "' AND event_type = 'TillSessionClosed' AND aggregate_id = '"
+                + t
+                + "'"),
+        is("150.00/0.00"));
+    eq("and read again", x(manager(), t), "expectedCashInTill", "150.00");
+  }
+
+  // ── what a WINDOW drawer counts, and what the day settles ─────────────────
+
+  @Test
+  @DisplayName(
+      "a drawer on the WINDOW basis counts the store's money in its window, naming a drawer or not")
+  void aWindowDrawerCountsMoneyThatNamesAnotherDrawer() {
+    Caller who = cashier();
+    UUID legacy = open(who, store, null);
+    UUID exact = open(cashier(), store, "SESSION");
+    assertThat(tender(who, Ids.newId(), "CASH", "9.00", null, store).status(), is(201));
+    assertThat(tender(who, Ids.newId(), "CASH", "11.00", exact, store).status(), is(201));
+    assertThat(tender(who, Ids.newId(), "CASH", "6.00", exact, store).status(), is(201));
+
+    JsonObject w = x(manager(), legacy);
+
+    assertThat(w.getString("basis"), is("WINDOW"));
+    // everything the store took while it was open, whichever drawer it named
+    eq("window", w, "cashSales", "26.00");
+    eq("the exact one", x(manager(), exact), "cashSales", "17.00");
+  }
+
+  @Test
+  @DisplayName("the day report settles the store's whole day across SESSION drawers")
+  void theDayReportSettlesTheStoresDayAcrossSessionDrawers() {
+    Caller one = cashier();
+    Caller two = cashier();
+    UUID t1 = open(one, store, "SESSION");
+    UUID t2 = open(two, store, "SESSION");
+    UUID sale1 = Ids.newId();
+    UUID sale2 = Ids.newId();
+    String paid1 = tender(one, sale1, "CASH", "20.00", t1, store).data().getString("id");
+    tender(two, sale2, "CASH", "35.00", t2, store);
+    // money naming no drawer: a back-office cash sale, and a refund an event gave back
+    tender(manager(), Ids.newId(), "CASH", "7.00", null, store);
+    assertThat(refund(manager(), sale1, paid1, "5.00", t2).status(), is(201));
+    service.refundReturnForOrderEvent(
+        Ids.newId(),
+        "it",
+        biz,
+        sale2,
+        new BigDecimal("2.00"),
+        "return",
+        new PaymentService.ReturnRefund("ORIGINAL", Ids.newId(), null, "GBP", null, null));
+    // drawer 1: 100 + 20; drawer 2: 100 + 35 - 5; apart: +7 - 2
+    eq("drawer 1", x(manager(), t1), "expectedCashInTill", "120.00");
+    eq("drawer 2", x(manager(), t2), "expectedCashInTill", "130.00");
+    assertThat(close(t1, "120.00").status(), is(200));
+    assertThat(close(t2, "130.00").status(), is(200));
+
+    Answer day =
+        ItCalls.post(
+            target,
+            "/admin/cash/z-report",
+            manager(),
+            "{\"storeId\":\"" + store + "\",\"countedCash\":255.00}");
+
+    assertThat(day.body().toString(), day.status(), is(201));
+    JsonObject z = day.data();
+    eq("the floats of both drawers", z, "openingFloat", "200.00");
+    eq("all the cash the store took", z, "cashSales", "62.00");
+    eq("all the cash it gave back", z, "cashRefunds", "7.00");
+    // the drawers' expectations added to what was in no drawer
+    eq("the day's cash", z, "expectedCash", "255.00");
+    eq("counted as expected", z, "overShort", "0.00");
   }
 }

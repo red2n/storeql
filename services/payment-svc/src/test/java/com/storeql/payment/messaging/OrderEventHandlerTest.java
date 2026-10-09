@@ -39,6 +39,7 @@ class OrderEventHandlerTest {
     UUID redemption;
     UUID giftCardOrder;
     BigDecimal giftCardAmount;
+    UUID giftCardDrawer;
 
     /** When payment-svc began giving back what a voided sale took, as the migration kept it. */
     java.time.Instant voidsSince = java.time.Instant.EPOCH;
@@ -62,10 +63,12 @@ class OrderEventHandlerTest {
         UUID redemptionId,
         UUID orderId,
         UUID storeId,
-        BigDecimal amount) {
+        BigDecimal amount,
+        UUID tillSessionId) {
       this.redemption = redemptionId;
       this.giftCardOrder = orderId;
       this.giftCardAmount = amount;
+      this.giftCardDrawer = tillSessionId;
       return true;
     }
 
@@ -176,6 +179,36 @@ class OrderEventHandlerTest {
   }
 
   @Test
+  void anExchangeNamesTheDrawerItsCashBackLeaves() {
+    UUID drawer = Ids.newId();
+    UUID newOrder = Ids.newId();
+    handler.handle(
+        returned("EXCHANGE", "25.00")
+            .replace(
+                "\"currency\"",
+                "\"exchangeOrderId\":\""
+                    + newOrder
+                    + "\",\"exchangeAmount\":20.00,\"tillSessionId\":\""
+                    + drawer
+                    + "\",\"currency\""));
+
+    assertEquals(drawer, service.exchange.tillSessionId());
+  }
+
+  @Test
+  void anExchangeThatNamesNoDrawerNamesNone() {
+    handler.handle(
+        returned("EXCHANGE", "25.00")
+            .replace(
+                "\"currency\"",
+                "\"exchangeOrderId\":\""
+                    + Ids.newId()
+                    + "\",\"exchangeAmount\":20.00,\"currency\""));
+
+    assertNull(service.exchange.tillSessionId());
+  }
+
+  @Test
   void exchangeWithoutANewOrderIsSkipped() {
     handler.handle(returned("EXCHANGE", "25.00"));
 
@@ -204,6 +237,44 @@ class OrderEventHandlerTest {
     assertEquals(redemption, service.redemption);
     assertEquals(ORDER, service.giftCardOrder);
     assertEquals(new BigDecimal("12.50"), service.giftCardAmount);
+  }
+
+  private static String giftCardRedeemed(UUID redemption, String drawerMember) {
+    return "{\"eventId\":\""
+        + EVENT
+        + "\",\"eventType\":\"GiftCardRedeemed\",\"tenantId\":\""
+        + TENANT
+        + "\",\"redemptionId\":\""
+        + redemption
+        + "\",\"giftCardId\":\""
+        + Ids.newId()
+        + "\",\"orderId\":\""
+        + ORDER
+        + "\",\"storeId\":\""
+        + Ids.newId()
+        + "\",\"amount\":12.50,\"currency\":\"GBP\""
+        + drawerMember
+        + "}";
+  }
+
+  @Test
+  void aGiftCardChargedAtATillNamesTheDrawerItWasRungOn() {
+    UUID drawer = Ids.newId();
+
+    handler.handle(giftCardRedeemed(Ids.newId(), ",\"tillSessionId\":\"" + drawer + "\""));
+
+    assertEquals(drawer, service.giftCardDrawer);
+  }
+
+  @Test
+  void aGiftCardRedemptionThatNamesNoDrawerOrABadOneIsStillATender() {
+    handler.handle(giftCardRedeemed(Ids.newId(), ""));
+    assertNull(service.giftCardDrawer);
+
+    UUID redemption = Ids.newId();
+    handler.handle(giftCardRedeemed(redemption, ",\"tillSessionId\":\"not-an-id\""));
+    assertEquals(redemption, service.redemption, "the charge is recorded");
+    assertNull(service.giftCardDrawer, "and counted at no drawer");
   }
 
   @Test
@@ -280,6 +351,29 @@ class OrderEventHandlerTest {
     handler.handle(voidedEvent(EVENT, "\"tillSessionId\":\"" + drawer + "\","));
 
     assertEquals(1, service.calls);
+    assertEquals(drawer, service.tillSession);
+  }
+
+  @Test
+  void aCancelNamesTheDrawerTheCashLeft() {
+    // A held sale cancelled at the till: the cash it took goes back out of the drawer that gives
+    // it.
+    UUID drawer = Ids.newId();
+    String cancelled =
+        "{\"eventId\":\""
+            + EVENT
+            + "\",\"eventType\":\"OrderCancelled\",\"tenantId\":\""
+            + TENANT
+            + "\",\"orderId\":\""
+            + ORDER
+            + "\",\"reason\":\"changed mind\",\"tillSessionId\":\""
+            + drawer
+            + "\"}";
+
+    handler.handle(cancelled);
+
+    assertEquals(1, service.calls);
+    assertNull(service.amount, "a whole-order refund");
     assertEquals(drawer, service.tillSession);
   }
 
@@ -442,7 +536,7 @@ class OrderEventHandlerTest {
     final java.util.List<String> recorded = new java.util.ArrayList<>();
 
     @Override
-    public com.storeql.payment.dto.Dtos.CashMovementResponse insertMovement(
+    public com.storeql.payment.dto.Dtos.CashMovementResponse insertMovementFromEvent(
         UUID tenantId,
         UUID storeId,
         UUID tillSessionId,

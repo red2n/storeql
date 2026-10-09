@@ -43,13 +43,18 @@ public class CashManagementResource {
   @Operation(
       summary = "Open a till session",
       description =
-          "Records the opening cash float for the store. Requires CASHIER, MANAGER, or" + " OWNER.")
+          "Records the opening cash float for the store. Requires CASHIER, MANAGER, or OWNER. The"
+              + " drawer opens on a money basis, fixed at the open: SESSION (the POS app's) counts"
+              + " only the tenders, refunds and drops that name the session, and shows what the"
+              + " store took naming none apart as notAtTill; WINDOW (the default) counts the"
+              + " store's money in the window the till was open.")
   @APIResponse(responseCode = "201", description = "Till session opened")
   @APIResponse(
       responseCode = "400",
       description =
           "CASH_AMOUNT_INVALID: the float is finer than the business's currency's minor unit (whole"
-              + " yen, a dinar's three places) — refused, never rounded; VALIDATION_FAILED")
+              + " yen, a dinar's three places) — refused, never rounded; TILL_BASIS_INVALID: the"
+              + " basis is not SESSION or WINDOW; VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller lacks a cashier/manager/owner role")
   @POST
   public Response open(OpenTillRequest req) {
@@ -146,7 +151,11 @@ public class CashManagementResource {
       summary = "Close the till (Z-report)",
       description =
           "End-of-day close: computes totals against the counted cash amount and closes the"
-              + " session. Requires MANAGER or OWNER.")
+              + " session. Requires MANAGER or OWNER. The close is one unit of work: it waits for"
+              + " any tender, refund, drop or pay-in/out already being written to the drawer and"
+              + " counts it, then reads the figures, works the over/short and closes; what is"
+              + " stored, announced (TillSessionClosed) and answered are those same figures, and a"
+              + " write naming the drawer that comes after finds it closed.")
   @APIResponse(responseCode = "200", description = "Till closed, Z-report generated")
   @APIResponse(
       responseCode = "400",
@@ -155,6 +164,9 @@ public class CashManagementResource {
               + " minor unit (the till stays open); VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
   @APIResponse(responseCode = "404", description = "Till session not found")
+  @APIResponse(
+      responseCode = "409",
+      description = "TILL_ALREADY_CLOSED: another close of the same till won the race")
   @POST
   @Path("/{id}/close")
   public Response close(@PathParam("id") UUID id, CloseTillRequest req) {

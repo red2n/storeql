@@ -1,5 +1,6 @@
 package com.storeql.payment.messaging;
 
+import com.storeql.events.contract.AdditiveFields;
 import com.storeql.ids.Ids;
 import com.storeql.payment.config.Jsons;
 import com.storeql.payment.service.PaymentService;
@@ -98,8 +99,10 @@ class OrderEventHandler {
         requestedAmount = obj.getJsonNumber("refundAmount").bigDecimalValue();
         reason = "Return refund";
       } else if ("OrderCancelled".equals(eventType)) {
+        // A held sale cancelled at a till hands back the cash it took: that drawer gives it.
         requestedAmount = null;
         reason = "Order cancelled";
+        tillSession = tillSessionOf(obj);
       } else if ("OrderVoided".equals(eventType)) {
         // A till sale voided after the fact never happened: everything it took goes back, a card
         // a terminal took through that terminal, as for a cancelled order.
@@ -151,7 +154,15 @@ class OrderEventHandler {
       return;
     }
     service.refundForOrderEvent(
-        eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, kind, adjustmentVat);
+        eventId,
+        CONSUMER_NAME,
+        tenantId,
+        orderId,
+        requestedAmount,
+        reason,
+        kind,
+        adjustmentVat,
+        tillSession);
   }
 
   /**
@@ -159,9 +170,10 @@ class OrderEventHandler {
    * convenience to the drawer's report, so an id that is not one is dropped, not the refund.
    */
   private static UUID tillSessionOf(JsonObject obj) {
-    if (!obj.containsKey("tillSessionId") || obj.isNull("tillSessionId")) return null;
+    String member = AdditiveFields.TILL_SESSION_ID;
+    if (!obj.containsKey(member) || obj.isNull(member)) return null;
     try {
-      return Ids.parse(obj.getString("tillSessionId"));
+      return Ids.parse(obj.getString(member));
     } catch (RuntimeException e) {
       return null;
     }
@@ -192,7 +204,8 @@ class OrderEventHandler {
         obj.containsKey("currency") && !obj.isNull("currency") ? obj.getString("currency") : null,
         obj.containsKey("vatAmount") && !obj.isNull("vatAmount")
             ? obj.getJsonNumber("vatAmount").bigDecimalValue()
-            : null);
+            : null,
+        tillSessionOf(obj));
   }
 
   /**
@@ -205,6 +218,7 @@ class OrderEventHandler {
     UUID redemptionId;
     UUID orderId;
     UUID storeId;
+    UUID tillSession;
     BigDecimal amount;
     try (var reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
@@ -218,13 +232,21 @@ class OrderEventHandler {
               ? Ids.parse(obj.getString("storeId"))
               : null;
       amount = obj.getJsonNumber("amount").bigDecimalValue();
+      tillSession = tillSessionOf(obj);
     } catch (RuntimeException e) {
       LOG.log(Level.WARNING, "Malformed gift card event skipped: " + e.getMessage());
       return;
     }
     if (amount.signum() <= 0) return;
     service.recordGiftCardRedemption(
-        eventId, CONSUMER_NAME + "/gift-card", tenantId, redemptionId, orderId, storeId, amount);
+        eventId,
+        CONSUMER_NAME + "/gift-card",
+        tenantId,
+        redemptionId,
+        orderId,
+        storeId,
+        amount,
+        tillSession);
   }
 
   /**
@@ -252,7 +274,7 @@ class OrderEventHandler {
       return;
     }
     if (amount.signum() <= 0) return;
-    cashMovements.insertMovement(
+    cashMovements.insertMovementFromEvent(
         tenantId,
         storeId,
         tillSessionId,

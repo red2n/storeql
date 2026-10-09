@@ -764,6 +764,27 @@ public class TerminalService {
       String reason,
       UUID actorId,
       String idempotencyKey) {
+    return refundedAnotherWay(
+        tenantId, dueId, method, reference, reason, actorId, idempotencyKey, null);
+  }
+
+  /**
+   * As above, for money handed over from a drawer the manager names ({@code tillSessionId}): the
+   * books' refund is that drawer's, so a cash refund lowers its expected cash. Judged with the
+   * refund, on its transaction: this business's, open, and at the due's store (404 {@code
+   * TILL_SESSION_NOT_FOUND}; 409 {@code TILL_SESSION_NOT_OPEN} or {@code
+   * TILL_SESSION_OTHER_STORE}), and nothing is written when it is refused. A retry under the same
+   * key is answered whatever became of the drawer.
+   */
+  public Due refundedAnotherWay(
+      UUID tenantId,
+      UUID dueId,
+      String method,
+      String reference,
+      String reason,
+      UUID actorId,
+      String idempotencyKey,
+      UUID tillSessionId) {
     Due due = due(tenantId, dueId);
     String way = method == null ? "" : method.strip().toUpperCase(Locale.ROOT);
     String ref = blankToNull(reference);
@@ -831,7 +852,10 @@ public class TerminalService {
               due.customerId(),
               due.currency());
     }
-    Due closed = repo.closeAnotherWay(closure, book, announced);
+    Due closed =
+        tillSessionId == null
+            ? repo.closeAnotherWay(closure, book, announced)
+            : repo.closeAnotherWay(closure, book, announced, tillSessionId);
     LOG.info(
         "money owed back to a card "
             + dueId

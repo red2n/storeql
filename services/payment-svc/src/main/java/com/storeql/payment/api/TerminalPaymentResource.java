@@ -372,7 +372,9 @@ public class TerminalPaymentResource {
       description =
           "Not a manager or owner; PERMISSION_DENIED: the caller's role does not hold"
               + " sales.refund; STORE_ACCESS_DENIED: held to other stores")
-  @APIResponse(responseCode = "404", description = "CARD_REFUND_DUE_NOT_FOUND")
+  @APIResponse(
+      responseCode = "404",
+      description = "CARD_REFUND_DUE_NOT_FOUND; TILL_SESSION_NOT_FOUND (the drawer named)")
   @APIResponse(
       responseCode = "409",
       description =
@@ -380,7 +382,9 @@ public class TerminalPaymentResource {
               + " machine has not been asked: POST …/retry first), TERMINAL_REQUEST_IN_FLIGHT or"
               + " TERMINAL_REFUND_UNDECIDED (a refund of it is not accounted for),"
               + " CARD_REFUND_DUE_NOT_IN_BOOKS (an approval never recorded goes back on its card"
-              + " only: method CARD), IDEMPOTENCY_KEY_REUSED; details state=…")
+              + " only: method CARD), IDEMPOTENCY_KEY_REUSED; details state=…; TILL_SESSION_NOT_OPEN"
+              + " or TILL_SESSION_OTHER_STORE (the drawer named is closed, or at another store than"
+              + " the card payment)")
   @POST
   @Path("/refund-dues/{id}/another-way")
   public ApiResponse<TerminalDtos.RefundDueResponse> anotherWay(
@@ -396,7 +400,16 @@ public class TerminalPaymentResource {
     ctx.requireStoreAccess(svc.due(tenantId, id).storeId());
     var due =
         svc.refundedAnotherWay(
-            tenantId, id, req.method(), req.reference(), req.reason(), ctx.requireUserId(), key);
+            tenantId,
+            id,
+            req.method(),
+            req.reference(),
+            req.reason(),
+            ctx.requireUserId(),
+            key,
+            req.tillSessionId() == null || req.tillSessionId().isBlank()
+                ? null
+                : com.storeql.ids.Ids.parse(req.tillSessionId()));
     return ApiResponse.ok(TerminalMappers.toDto(due, svc.closureOf(tenantId, id).orElse(null)));
   }
 

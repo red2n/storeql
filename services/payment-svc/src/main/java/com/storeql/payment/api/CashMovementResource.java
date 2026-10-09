@@ -48,7 +48,9 @@ public class CashMovementResource {
       responseCode = "400",
       description =
           "INVALID_DIRECTION, or CASH_AMOUNT_INVALID: finer than the business's currency's minor"
-              + " unit (whole yen, a dinar's three places); VALIDATION_FAILED")
+              + " unit (whole yen, a dinar's three places); TILL_CLOSED: the till session is"
+              + " closed (a retry under the same Idempotency-Key still answers the first movement);"
+              + " VALIDATION_FAILED")
   @APIResponse(responseCode = "403", description = "Caller lacks a manager/owner role")
   @POST
   @Path("/movements")

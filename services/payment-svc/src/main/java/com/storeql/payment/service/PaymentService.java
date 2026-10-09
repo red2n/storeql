@@ -106,11 +106,14 @@ public class PaymentService {
                       ApiException.notFound(
                           "TERMINAL_ATTEMPT_NOT_FOUND", "No such payment on a terminal"));
     }
-    // The drawer this money is taken in, when the till names one: an open session of this business
-    // at the tender's store. A tender that names a session and no store is that session's store's.
+    // The drawer this money is taken in, when the till names one: a session of this business at the
+    // tender's store that the caller may act at. A tender that names a session and no store is that
+    // session's store's. Whether it is still open is judged by the transaction that writes the
+    // tender, after a retry is answered, so a retry of a tender that was taken is never refused
+    // because its drawer has since closed.
     UUID tillSessionId = null;
     if (req.tillSessionId() != null && !req.tillSessionId().isBlank()) {
-      var session = requireOpenTillSession(tenantId, Ids.parse(req.tillSessionId()), storeId, ctx);
+      var session = namedTillSession(tenantId, Ids.parse(req.tillSessionId()), storeId, ctx);
       tillSessionId = session.id();
       if (storeId == null) storeId = session.storeId();
     }
@@ -144,12 +147,15 @@ public class PaymentService {
 
   /**
    * The till session a till names for the money it takes or gives: this business's (another's is
-   * not found), one the caller may act at, open, and at {@code storeId} when the money names one.
+   * not found), one the caller may act at, and at {@code storeId} when the money names one. Whether
+   * it is open is not asked here: that is judged on the transaction that writes the money (see
+   * {@link PaymentRepository#createTender}), where a close cannot slip in between the check and the
+   * write, and only after a retry has been answered.
    *
    * @throws ApiException 404 {@code TILL_SESSION_NOT_FOUND}; 403 {@code STORE_ACCESS_DENIED}; 409
-   *     {@code TILL_SESSION_NOT_OPEN} or {@code TILL_SESSION_OTHER_STORE}
+   *     {@code TILL_SESSION_OTHER_STORE}
    */
-  private com.storeql.payment.domain.Domain.TillSession requireOpenTillSession(
+  private com.storeql.payment.domain.Domain.TillSession namedTillSession(
       UUID tenantId, UUID sessionId, UUID storeId, TenantContext ctx) {
     var session =
         tillSessions
@@ -157,14 +163,29 @@ public class PaymentService {
             .orElseThrow(
                 () -> ApiException.notFound("TILL_SESSION_NOT_FOUND", "Till session not found"));
     ctx.requireStoreAccess(session.storeId());
-    if (!com.storeql.payment.domain.Domain.TillSession.STATUS_OPEN.equals(session.status())) {
-      throw ApiException.conflict("TILL_SESSION_NOT_OPEN", "That till session is closed");
-    }
     if (storeId != null && !storeId.equals(session.storeId())) {
       throw ApiException.conflict(
           "TILL_SESSION_OTHER_STORE", "That till session is at another store");
     }
     return session;
+  }
+
+  /**
+   * Refuses a drawer that has closed, before anything is spent on money that would be refused on
+   * it. The write judges it again on its own transaction; this is only to refuse early where
+   * something outside the transaction (a customer's store credit) would otherwise have been used.
+   *
+   * @throws ApiException 404 {@code TILL_SESSION_NOT_FOUND}; 409 {@code TILL_SESSION_NOT_OPEN}
+   */
+  private void requireStillOpen(UUID tenantId, UUID sessionId) {
+    var session =
+        tillSessions
+            .findSession(tenantId, sessionId)
+            .orElseThrow(
+                () -> ApiException.notFound("TILL_SESSION_NOT_FOUND", "Till session not found"));
+    if (!com.storeql.payment.domain.Domain.TillSession.STATUS_OPEN.equals(session.status())) {
+      throw ApiException.conflict("TILL_SESSION_NOT_OPEN", "That till session is closed");
+    }
   }
 
   /**
@@ -357,7 +378,8 @@ public class PaymentService {
     }
 
     if (PaymentTender.METHOD_STORE_CREDIT.equals(method)) {
-      return captureStoreCredit(req, tenantId, orderId, storeId);
+      return captureStoreCredit(
+          req, tenantId, orderId, storeId, till == null ? null : till.sessionId());
     }
 
     UUID attemptId = terminalPaymentOf(req, method);
@@ -421,7 +443,7 @@ public class PaymentService {
    * (503) rejects the tender rather than inflating {@code paid_amount}.
    */
   private PaymentTender captureStoreCredit(
-      RecordTenderRequest req, UUID tenantId, UUID orderId, UUID storeId) {
+      RecordTenderRequest req, UUID tenantId, UUID orderId, UUID storeId, UUID tillSessionId) {
     if (req.customerId() == null || req.customerId().isBlank())
       throw ApiException.badRequest(
           "PAYMENT_CUSTOMER_REQUIRED", "customerId is required for a STORE_CREDIT tender");
@@ -434,6 +456,9 @@ public class PaymentService {
     if (existing.isPresent()) {
       return existing.get();
     }
+    // The balance is spent before the tender is written, so a drawer that has closed is refused
+    // first; the write judges it again on its own transaction.
+    if (tillSessionId != null) requireStillOpen(tenantId, tillSessionId);
 
     customerClient.redeemStoreCredit(tenantId, customerId, req.amount(), currency, orderId);
 
@@ -452,10 +477,13 @@ public class PaymentService {
             Instant.now(),
             storeId);
 
-    return repo.createTender(
-        tender,
+    var announced =
         Events.paymentCaptured(
-            tenantId, tenderId, orderId, req.amount(), PaymentTender.METHOD_STORE_CREDIT, storeId));
+            tenantId, tenderId, orderId, req.amount(), PaymentTender.METHOD_STORE_CREDIT, storeId);
+    // Rung at a till, the tender names the drawer like any other: it is that drawer's takings.
+    return tillSessionId == null
+        ? repo.createTender(tender, announced)
+        : repo.createTender(tender, announced, null, tillSessionId);
   }
 
   /**
@@ -657,14 +685,13 @@ public class PaymentService {
     // inside ONE transaction with the payment row locked — checking them here first would be a
     // TOCTOU race letting two concurrent refunds together exceed the original payment.
     Set<UUID> heldTo = Set.copyOf(ctx.storeIds());
-    // The drawer a refund is paid out of, when the till names one (checked against the store the
-    // tender was taken at, inside the transaction that holds the tender).
+    // The drawer a refund is paid out of, when the till names one: this business's, at a store the
+    // caller may act at. That it is open, and at the store the tender was taken at, is judged
+    // inside
+    // the transaction that holds the tender, after a retry is answered.
     UUID tillSessionId = null;
-    UUID tillStoreId = null;
     if (req.tillSessionId() != null && !req.tillSessionId().isBlank()) {
-      var session = requireOpenTillSession(tenantId, Ids.parse(req.tillSessionId()), null, ctx);
-      tillSessionId = session.id();
-      tillStoreId = session.storeId();
+      tillSessionId = namedTillSession(tenantId, Ids.parse(req.tillSessionId()), null, ctx).id();
     }
     return repo.createRefundGuarded(
         refund,
@@ -677,8 +704,7 @@ public class PaymentService {
                 new com.storeql.payment.domain.Domain.RefundAllocation(
                     Ids.parse(req.paymentId()), method, req.amount(), null))),
         storeId -> requireMayRefundAt(heldTo, storeId),
-        tillSessionId,
-        tillStoreId);
+        tillSessionId);
   }
 
   /**
@@ -791,8 +817,9 @@ public class PaymentService {
   }
 
   /**
-   * As above, for a sale voided at a till: {@code tillSessionId} is the drawer the cash went back
-   * out of (used only when it is this business's session at the tender's own store).
+   * As above, for a sale voided or a held sale cancelled at a till: {@code tillSessionId} is the
+   * drawer the cash went back out of (kept only while it is this business's open session at the
+   * tender's own store; else the refund is counted at no drawer, never refused).
    */
   public void refundForOrderEvent(
       UUID eventId,
@@ -1023,6 +1050,24 @@ public class PaymentService {
       UUID orderId,
       UUID storeId,
       BigDecimal amount) {
+    return recordGiftCardRedemption(
+        eventId, consumer, tenantId, redemptionId, orderId, storeId, amount, null);
+  }
+
+  /**
+   * As above, for a card charged at a till that named its drawer: {@code tillSessionId} is kept on
+   * the tender only while it is this business's open session at the store the card was charged at,
+   * else the tender is taken at no till. A charge that has happened is never refused over it.
+   */
+  public boolean recordGiftCardRedemption(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID redemptionId,
+      UUID orderId,
+      UUID storeId,
+      BigDecimal amount,
+      UUID tillSessionId) {
     UUID tenderId = Ids.newId();
     PaymentTender tender =
         new PaymentTender(
@@ -1042,7 +1087,8 @@ public class PaymentService {
         consumer,
         tender,
         Events.paymentCaptured(
-            tenantId, tenderId, orderId, amount, PaymentTender.METHOD_GIFT_CARD, storeId));
+            tenantId, tenderId, orderId, amount, PaymentTender.METHOD_GIFT_CARD, storeId),
+        tillSessionId);
   }
 
   /** What an exchange {@code OrderReturned} says: the new order and how the value splits. */
@@ -1055,7 +1101,33 @@ public class PaymentService {
       UUID customerId,
       String currency,
       /** The VAT inside the whole return, when the sale carried it; null otherwise. */
-      BigDecimal vatAmount) {
+      BigDecimal vatAmount,
+      /**
+       * The till session the exchange was rung on, when the till named one; else null. The cash
+       * back leaves that drawer, and the legs that net against each other are counted in it.
+       */
+      UUID tillSessionId) {
+
+    public ExchangeReturn(
+        UUID exchangeOrderId,
+        UUID storeId,
+        BigDecimal exchangeAmount,
+        BigDecimal refundAmount,
+        UUID returnId,
+        UUID customerId,
+        String currency,
+        BigDecimal vatAmount) {
+      this(
+          exchangeOrderId,
+          storeId,
+          exchangeAmount,
+          refundAmount,
+          returnId,
+          customerId,
+          currency,
+          vatAmount,
+          null);
+    }
 
     public ExchangeReturn(
         UUID exchangeOrderId,
@@ -1073,6 +1145,7 @@ public class PaymentService {
           returnId,
           customerId,
           currency,
+          null,
           null);
     }
 
@@ -1112,6 +1185,7 @@ public class PaymentService {
             extra,
             "Exchange",
             ex.storeId(),
+            ex.tillSessionId(),
             (amt, shares) ->
                 Events.paymentRefunded(
                     tenantId,

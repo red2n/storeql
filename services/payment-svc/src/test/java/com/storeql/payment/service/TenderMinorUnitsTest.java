@@ -94,7 +94,7 @@ class TenderMinorUnitsTest {
     PaymentRepository repo = mock(PaymentRepository.class);
     when(repo.createTender(any(), any())).thenAnswer(inv -> inv.getArgument(0));
     when(repo.createTender(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
-    when(repo.createRefundGuarded(any(), any(), any(), any(), any()))
+    when(repo.createRefundGuarded(any(), any(), any(), any()))
         .thenAnswer(inv -> inv.getArgument(0));
     when(repo.findTendersByOrder(any(), any())).thenReturn(List.of());
     return repo;
@@ -325,11 +325,11 @@ class TenderMinorUnitsTest {
   void refunds() {
     PaymentRepository kwd = recording();
     service(homeIn("KWD"), kwd).recordRefund(staff(tenant), order, refund("2.125"), null);
-    verify(kwd).createRefundGuarded(any(), any(), any(), any(), any());
+    verify(kwd).createRefundGuarded(any(), any(), any(), any());
 
     PaymentRepository jpy = recording();
     service(homeIn("JPY"), jpy).recordRefund(staff(tenant), order, refund("500"), null);
-    verify(jpy).createRefundGuarded(any(), any(), any(), any(), any());
+    verify(jpy).createRefundGuarded(any(), any(), any(), any());
 
     for (String[] bad : new String[][] {{"KWD", "2.1255"}, {"JPY", "500.5"}, {"GBP", "2.125"}}) {
       PaymentRepository repo = recording();
@@ -340,7 +340,7 @@ class TenderMinorUnitsTest {
                   service(homeIn(bad[0]), repo)
                       .recordRefund(staff(tenant), order, refund(bad[1]), null));
       assertEquals("PAYMENT_AMOUNT_INVALID", e.code(), bad[0] + " " + bad[1]);
-      verify(repo, never()).createRefundGuarded(any(), any(), any(), any(), any());
+      verify(repo, never()).createRefundGuarded(any(), any(), any(), any());
     }
   }
 

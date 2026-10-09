@@ -24,7 +24,6 @@ import com.storeql.web.TenantContext;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
@@ -80,8 +79,7 @@ class TillMinorUnitsTest {
                     null,
                     Instant.now(),
                     null)));
-    when(repo.sumTendersByMethod(any(), any(), any(), any())).thenReturn(List.of());
-    when(repo.sumRefundsByMethod(any(), any(), any(), any())).thenReturn(List.of());
+    when(repo.figures(any(), any())).thenReturn(CashManagementRepository.Figures.none());
     return repo;
   }
 
@@ -167,7 +165,7 @@ class TillMinorUnitsTest {
                       Ids.newId(),
                       new CloseTillRequest(new BigDecimal(bad[1]), null),
                       ctx));
-      verify(repo, never()).closeTill(any(), any(), any(), any(), any(), any(), any(), any());
+      verify(repo, never()).closeTill(any(), any(), any());
     }
   }
 

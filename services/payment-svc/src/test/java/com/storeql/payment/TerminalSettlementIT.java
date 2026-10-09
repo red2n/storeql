@@ -70,6 +70,8 @@ class TerminalSettlementIT {
           Ids.newId(),
           Ids.newId(),
           Ids.newId(),
+          Ids.newId(),
+          Ids.newId(),
           Ids.newId());
 
   static {
@@ -2754,5 +2756,122 @@ class TerminalSettlementIT {
       assertThat(cardRefundsOf(sale), is("1/APPROVED"));
       assertThat(announcedRefunds(order), is("1"));
     }
+  }
+
+  /** A drawer on the SESSION basis at {@code store}, opened as its manager. */
+  private UUID drawerAt(UUID store, Caller who) {
+    Answer a =
+        ItCalls.post(
+            target,
+            "/admin/cash/till-sessions",
+            who,
+            "{\"storeId\":\"" + store + "\",\"floatAmount\":100,\"basis\":\"SESSION\"}");
+    assertThat(a.body().toString(), a.status(), is(201));
+    return Ids.parse(a.data().getString("id"));
+  }
+
+  /** A card sale recorded at {@code store} whose machine is gone, owed back: its order and due. */
+  private UUID[] owedAt(UUID store, String amount) {
+    Terminals.Terminal t = machineAt(store);
+    UUID order = Ids.newId();
+    recordedAt(t, order, amount);
+    terminals.retire(BIZ, t.id(), "stolen");
+    payments.refundForOrderEvent(Ids.newId(), CONSUMER, BIZ, order, null, "Order cancelled");
+    return new UUID[] {order, Ids.parse(dueIdOf(order))};
+  }
+
+  private Answer anotherWayAt(Caller who, UUID due, UUID session, String key) {
+    return ItCalls.call(
+        target,
+        "POST",
+        "/payments/terminal/refund-dues/" + due + "/another-way",
+        who,
+        "{\"method\":\"CASH\",\"reason\":\"the machine was stolen\""
+            + (session == null ? "" : ",\"tillSessionId\":\"" + session + "\"")
+            + "}",
+        key);
+  }
+
+  @Test
+  @DisplayName(
+      "Cash given back for a card payment no machine can return leaves the drawer the manager"
+          + " names: refused for a closed or another store's, and counted in none if none is named")
+  void aCardGivenBackInCashLeavesTheDrawerItNames() {
+    UUID lone = LONE.get(8);
+    Caller manager = managerAt(lone);
+    UUID drawer = drawerAt(lone, manager);
+    UUID closed = drawerAt(lone, manager);
+    assertThat(
+        ItCalls.post(
+                target,
+                "/admin/cash/till-sessions/" + closed + "/close",
+                manager,
+                "{\"countedCash\":100}")
+            .status(),
+        is(200));
+    UUID elsewhereDrawer = drawerAt(ELSEWHERE, Caller.owner(BIZ));
+    UUID[] named = owedAt(lone, "16.00");
+    UUID quiet = LONE.get(9);
+    UUID[] loose = owedAt(quiet, "7.00");
+
+    Answer isClosed = anotherWayAt(manager, named[1], closed, Ids.newId().toString());
+    assertThat(isClosed.status(), is(409));
+    assertThat(isClosed.code(), is("TILL_SESSION_NOT_OPEN"));
+    Answer wrongStore = anotherWayAt(owner, named[1], elsewhereDrawer, Ids.newId().toString());
+    assertThat(wrongStore.status(), is(409));
+    assertThat(wrongStore.code(), is("TILL_SESSION_OTHER_STORE"));
+    Answer unknown = anotherWayAt(manager, named[1], Ids.newId(), Ids.newId().toString());
+    assertThat(unknown.status(), is(404));
+    assertThat(unknown.code(), is("TILL_SESSION_NOT_FOUND"));
+    assertThat("nothing moved", dueOf(named[0]), containsString("NEEDS_ATTENTION/16.00/"));
+    assertThat(refundsOf(named[0]), is("0/0.00/-"));
+
+    String key = Ids.newId().toString();
+    Answer given = anotherWayAt(manager, named[1], drawer, key);
+    assertThat(given.body().toString(), given.status(), is(200));
+    assertThat(
+        "the cash is the drawer's",
+        scalar(
+            "SELECT till_session_id || ' ' || store_id FROM payment.refund_tenders"
+                + " WHERE tenant_id = '"
+                + BIZ
+                + "' AND order_id = '"
+                + named[0]
+                + "'"),
+        is(drawer + " " + lone));
+    JsonObject x =
+        ItCalls.get(target, "/admin/cash/till-sessions/" + drawer + "/x-report", manager).data();
+    assertThat(
+        x.getJsonNumber("cashRefunds").bigDecimalValue().compareTo(new BigDecimal("16")), is(0));
+    assertThat(
+        "the drawer expects its float less what it gave",
+        x.getJsonNumber("expectedCashInTill").bigDecimalValue().compareTo(new BigDecimal("84")),
+        is(0));
+
+    // a retry after the drawer has closed is answered, not refused
+    assertThat(
+        ItCalls.post(
+                target,
+                "/admin/cash/till-sessions/" + drawer + "/close",
+                manager,
+                "{\"countedCash\":84}")
+            .status(),
+        is(200));
+    Answer replay = anotherWayAt(manager, named[1], drawer, key);
+    assertThat(replay.body().toString(), replay.status(), is(200));
+    assertThat(refundsOf(named[0]), is("1/16.00/CASH"));
+
+    // naming no drawer is recorded as it always was, in none
+    Answer none = anotherWayAt(managerAt(quiet), loose[1], null, Ids.newId().toString());
+    assertThat(none.body().toString(), none.status(), is(200));
+    assertThat(
+        scalar(
+            "SELECT coalesce(till_session_id::text, '-') FROM payment.refund_tenders"
+                + " WHERE tenant_id = '"
+                + BIZ
+                + "' AND order_id = '"
+                + loose[0]
+                + "'"),
+        is("-"));
   }
 }

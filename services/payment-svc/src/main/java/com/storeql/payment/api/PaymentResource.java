@@ -61,11 +61,19 @@ public class PaymentResource {
               + " its next sale. A CARD naming none records the order's approval at that amount"
               + " that nothing records yet, if there is one. On a sale cancelled or voided, a CARD"
               + " a card machine may have taken for it is refused, named or not: what the machine"
-              + " took goes back to the card.")
+              + " took goes back to the card. The drawer: a till names the session it rang the"
+              + " sale on (tillSessionId, a UUIDv7) and that drawer's report counts the tender. It"
+              + " must be this business's, at the tender's store and open when the tender is"
+              + " written (404 TILL_SESSION_NOT_FOUND, 409 TILL_SESSION_OTHER_STORE or"
+              + " TILL_SESSION_NOT_OPEN, nothing written; a client answers by sending it again"
+              + " naming none). A retry under the same Idempotency-Key answers the first tender"
+              + " whatever became of the drawer since.")
   @APIResponse(responseCode = "201", description = "Tender captured")
   @APIResponse(
       responseCode = "404",
-      description = "TERMINAL_ATTEMPT_NOT_FOUND: no such card machine payment for this business")
+      description =
+          "TERMINAL_ATTEMPT_NOT_FOUND: no such card machine payment for this business;"
+              + " TILL_SESSION_NOT_FOUND: the tillSessionId named is not this business's")
   @APIResponse(
       responseCode = "409",
       description =
@@ -73,7 +81,9 @@ public class PaymentResource {
               + " have taken for; details orderId=). Naming a card machine's payment:"
               + " TERMINAL_ATTEMPT_OTHER_ORDER, TERMINAL_NOT_APPROVED,"
               + " TERMINAL_ATTEMPT_ALREADY_RECORDED, TERMINAL_ATTEMPT_REFUNDED,"
-              + " TERMINAL_AMOUNT_MISMATCH, TERMINAL_WRONG_STORE, TERMINAL_NOT_A_SALE")
+              + " TERMINAL_AMOUNT_MISMATCH, TERMINAL_WRONG_STORE, TERMINAL_NOT_A_SALE. Naming a"
+              + " drawer: TILL_SESSION_NOT_OPEN (it is closed) or TILL_SESSION_OTHER_STORE (it is"
+              + " at another store than the tender)")
   @APIResponse(
       responseCode = "400",
       description =
@@ -243,7 +253,10 @@ public class PaymentResource {
               + " row locked. Requires MANAGER or OWNER holding sales.refund. A refund is the"
               + " store's where its tender was taken (it lowers that store's expected cash and"
               + " reports), so a manager held to stores refunds only a tender taken at one of"
-              + " them; one held to none, any tender of the business.")
+              + " them; one held to none, any tender of the business. Cash may name the drawer it"
+              + " is paid out of (tillSessionId): judged as a tender is, on the transaction that"
+              + " writes the refund, and a retry under the same Idempotency-Key answers the first"
+              + " refund whatever became of the drawer since.")
   @APIResponse(responseCode = "201", description = "Refund recorded")
   @APIResponse(
       responseCode = "400",
@@ -259,11 +272,15 @@ public class PaymentResource {
               + " back or written")
   @APIResponse(
       responseCode = "404",
-      description = "PAYMENT_NOT_FOUND: no such tender for this business (another's included)")
+      description =
+          "PAYMENT_NOT_FOUND: no such tender for this business (another's included);"
+              + " TILL_SESSION_NOT_FOUND: the tillSessionId named is not this business's")
   @APIResponse(
       responseCode = "409",
       description =
-          "REFUND_EXCEEDS_PAYMENT (what is refunded and what is owed back to a card count);"
+          "TILL_SESSION_NOT_OPEN (the drawer named is closed) or TILL_SESSION_OTHER_STORE (it is at"
+              + " another store than the tender was taken at); REFUND_EXCEEDS_PAYMENT (what is"
+              + " refunded and what is owed back to a card count);"
               + " PAYMENT_REFUND_VIA_TERMINAL: a CARD refund of a tender a card machine took goes"
               + " back on that machine (POST /payments/terminal/{attemptId}/refunds, named in the"
               + " details), never in the books alone; PAYMENT_ORDER_MISMATCH;"

@@ -403,9 +403,12 @@ class PaymentServiceTest {
     PaymentService svc = new PaymentService();
     svc.repo =
         new PaymentRepository() {
+          // The method the service really calls, with the drawer a refund may name; the shorter
+          // form
+          // only delegates to it, so overriding that one would guard nothing.
           @Override
           public RefundTender createRefundGuarded(
-              RefundTender r, OutboxRow event, StoreGuard mayActAt) {
+              RefundTender r, OutboxRow event, StoreGuard mayActAt, UUID tillSessionId) {
             throw new AssertionError("nothing may be tried for an unknown method");
           }
         };
@@ -520,6 +523,124 @@ class PaymentServiceTest {
                 svc.recordTender(
                     storeCreditReq(Ids.newId(), null, "15.00"), ctx(Ids.newId(), null), null));
     assertEquals("PAYMENT_CUSTOMER_REQUIRED", ex.code());
+  }
+
+  /** A drawer of this business at {@code store}, open or closed, as the repository finds it. */
+  private static com.storeql.payment.repo.CashManagementRepository drawer(
+      UUID tenantId, UUID sessionId, UUID store, String status) {
+    return new com.storeql.payment.repo.CashManagementRepository() {
+      @Override
+      public Optional<com.storeql.payment.domain.Domain.TillSession> findSession(
+          UUID tenant, UUID id) {
+        return Optional.of(
+                new com.storeql.payment.domain.Domain.TillSession(
+                    sessionId,
+                    tenantId,
+                    store,
+                    Ids.newId(),
+                    new BigDecimal("100.00"),
+                    status,
+                    null,
+                    null,
+                    Instant.now(),
+                    null,
+                    com.storeql.payment.domain.Domain.TillSession.BASIS_SESSION))
+            .filter(d -> d.tenantId().equals(tenant) && d.id().equals(id));
+      }
+    };
+  }
+
+  @Test
+  void storeCreditTender_isRecordedInTheDrawerItWasRungOn() {
+    // The store credit is a tender of the till like any other: it names the drawer it was rung on,
+    // so that drawer's report counts it rather than showing it as taken at no till.
+    PaymentService svc = new PaymentService();
+    UUID tenantId = Ids.newId();
+    UUID store = Ids.newId();
+    UUID session = Ids.newId();
+    UUID[] recordedIn = new UUID[1];
+    svc.repo =
+        new PaymentRepository() {
+          @Override
+          public PaymentTender createTender(PaymentTender t, OutboxRow event) {
+            throw new AssertionError("a tender rung on a drawer names it");
+          }
+
+          @Override
+          public PaymentTender createTender(
+              PaymentTender t, OutboxRow event, String entryMode, UUID tillSessionId) {
+            recordedIn[0] = tillSessionId;
+            return t;
+          }
+
+          @Override
+          public Optional<PaymentTender> findTenderByKey(UUID tenant, String key) {
+            return Optional.empty();
+          }
+        };
+    svc.tillSessions = drawer(tenantId, session, store, "OPEN");
+    svc.customerClient = new RecordingCustomerClient();
+    svc.profiles = namedOrTenantCurrency();
+    var req =
+        new RecordTenderRequest(
+            Ids.newId().toString(),
+            new BigDecimal("15.00"),
+            "STORE_CREDIT",
+            null,
+            null,
+            null,
+            null,
+            Ids.newId().toString(),
+            "GBP",
+            null,
+            null,
+            session.toString());
+
+    var tender = svc.recordTender(req, ctx(tenantId, null), "k1");
+
+    assertEquals("STORE_CREDIT", tender.method());
+    assertEquals(session, recordedIn[0]);
+    assertEquals(store, tender.storeId(), "a tender naming a drawer and no store is its store's");
+  }
+
+  @Test
+  void storeCreditTender_isNotRedeemedForADrawerThatHasClosed() {
+    // The customer's balance is spent before the tender is written, so a closed drawer is refused
+    // before it is spent, and the app sends the tender again naming none.
+    PaymentService svc = new PaymentService();
+    UUID tenantId = Ids.newId();
+    UUID session = Ids.newId();
+    svc.repo =
+        new PaymentRepository() {
+          @Override
+          public Optional<PaymentTender> findTenderByKey(UUID tenant, String key) {
+            return Optional.empty();
+          }
+        };
+    svc.tillSessions = drawer(tenantId, session, Ids.newId(), "CLOSED");
+    var cust = new RecordingCustomerClient();
+    svc.customerClient = cust;
+    svc.profiles = namedOrTenantCurrency();
+    var req =
+        new RecordTenderRequest(
+            Ids.newId().toString(),
+            new BigDecimal("15.00"),
+            "STORE_CREDIT",
+            null,
+            null,
+            null,
+            null,
+            Ids.newId().toString(),
+            "GBP",
+            null,
+            null,
+            session.toString());
+
+    var ex =
+        assertThrows(ApiException.class, () -> svc.recordTender(req, ctx(tenantId, null), null));
+
+    assertEquals("TILL_SESSION_NOT_OPEN", ex.code());
+    assertEquals(0, cust.redeems, "nothing was spent");
   }
 
   @Test
