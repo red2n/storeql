@@ -325,6 +325,53 @@ class OrderInclusiveIT {
 
   @Test
   @DisplayName(
+      "An exchange at shelf prices: the loaf comes back for 1.29 with its 0.22 of VAT, the jam is"
+          + " 1.99, and the customer pays the 0.70 between them")
+  void anExchangeIsTheSameMoneyAsAReturnAndASale() {
+    BASKET_PERCENT.set(BigDecimal.ZERO);
+    JsonObject order = place(T, null, BREAD, "1", JAM, "1");
+    pay(order);
+    String id = order.getString("id");
+
+    JsonObject x =
+        data(
+            rig()
+                .post(
+                    "/orders/" + id + "/exchange",
+                    "{\"reason\":\"wrong item\",\"returnItems\":[{\"variantId\":\""
+                        + BREAD
+                        + "\",\"qty\":1,\"condition\":\"SEALED\"}],\"newItems\":[{\"variantId\":\""
+                        + JAM
+                        + "\",\"qty\":1}]}",
+                    T,
+                    "CASHIER",
+                    CASHIER,
+                    Ids.newId().toString()),
+            201);
+
+    // What came back is what was paid for the loaf, VAT included; the new sale is a shelf price.
+    assertThat(money(x, "exchangeAmount"), comparesEqualTo(new BigDecimal("1.29")));
+    JsonObject bought = x.getJsonObject("order");
+    identities(bought);
+    assertThat(money(bought, "total"), comparesEqualTo(new BigDecimal("1.99")));
+    assertThat(money(x, "dueFromCustomer"), comparesEqualTo(new BigDecimal("0.70")));
+    assertThat(money(x, "refundToCustomer").signum(), is(0));
+    // The return carries the VAT inside the loaf (1.29 at 20% = 0.22), and the event says so.
+    assertThat(
+        money(rig().event(id, "OrderReturned"), "vatAmount"),
+        comparesEqualTo(new BigDecimal("0.22")));
+    assertThat(
+        new BigDecimal(
+            rig()
+                .one(
+                    "SELECT sum(tax_amount) FROM \"order\".return_items WHERE return_id = '"
+                        + x.getJsonObject("return").getString("id")
+                        + "'")),
+        comparesEqualTo(new BigDecimal("0.22")));
+  }
+
+  @Test
+  @DisplayName(
       "After a staff discount each line comes back for what it was paid, not its shelf price")
   void aDiscountedSaleReturnsWhatWasPaid() {
     BASKET_PERCENT.set(BigDecimal.ZERO);
